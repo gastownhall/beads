@@ -29,6 +29,11 @@ The query is passed directly to the database. SELECT queries return results as a
 table (or JSON/CSV with --json/--csv). Non-SELECT queries (INSERT, UPDATE, DELETE)
 report the number of rows affected.
 
+In proxied-server mode, multiple statements separated by ';' run as a single
+committed batch and report "OK", and --database runs the query against a
+different server database (equivalent to a session USE) without changing the
+project's configured database.
+
 WARNING: Direct database access bypasses the storage layer. Use with caution.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,

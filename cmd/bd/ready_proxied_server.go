@@ -9,14 +9,28 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
-	in, err := gatherReadyInput(cmd)
+	// --offset is supported here and nowhere else, so this is where a negative
+	// value is rejected. It stays out of the shared gatherer because the direct
+	// route reaches that gatherer too, and `bd ready --offset -1` has always
+	// been a no-op there rather than an error. HandleError, not the RespectJSON
+	// variant, for the same reason: this message is the proxied route's alone,
+	// and it has always gone to stderr as plain text.
+	if offset, _ := cmd.Flags().GetInt("offset"); offset < 0 {
+		return HandleError("--offset must be >= 0")
+	}
+
+	// No cap resolver: the RunE that routed here has already resolved
+	// --max-rows / BEADS_MAX_ROWS, either to reject a live one or to validate
+	// the value it then ignores for --claim. Resolving it again would repeat
+	// the malformed-value warning and stamp a cap this route cannot enforce.
+	in, err := gatherReadyInput(cmd, nil)
 	if err != nil {
 		return err
 	}
@@ -100,12 +114,25 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		results := page.Items
-		if results == nil {
-			results = []*types.IssueWithCounts{}
+		// The same epilogue issueops.Reader.Ready runs, through the same
+		// function: this seam reports a has-more natively and ready has no
+		// display order, so the trim is a no-op and the verdict is the seam's
+		// — but it is reached the one way, not restated here.
+		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
+		truncated = truncated && in.filter.Limit > 0
+		// Parity with the direct route: the pagination key is emitted only
+		// when truncated. Total is unavailable from this backend's domain
+		// page (no cheap COUNT(*) equivalent on the proxied path), so it is
+		// left unset (0) unlike the direct route's fully-populated meta.
+		var pag *PaginationMeta
+		if truncated {
+			pag = &PaginationMeta{
+				Returned:  len(results),
+				Truncated: true,
+			}
 		}
-		_ = outputJSON(results)
-		if page.HasMore && in.filter.Limit > 0 {
+		_ = outputJSONWithPagination(results, pag)
+		if truncated {
 			fmt.Fprintf(os.Stderr, "Showing %d ready issues; more matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n", len(results))
 		}
 		return nil
@@ -115,8 +142,8 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	issues := page.Items
-	truncated := page.HasMore && in.filter.Limit > 0
+	issues, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
+	truncated = truncated && in.filter.Limit > 0
 
 	maybeShowUpgradeNotification()
 
@@ -214,9 +241,9 @@ func runReadyProxiedClaim(ctx context.Context, _ uow.UnitOfWork, in readyInput) 
 }
 
 func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	filter := types.WorkFilter{
-		Status:     types.StatusOpen,
-		SortPolicy: types.SortPolicyPriority,
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, filter)
 	if err != nil {
@@ -338,7 +365,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 
 func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInput) error {
 	moleculeID := in.molID
-	subgraph, err := proxiedLoadTemplateSubgraph(ctx, uw, moleculeID)
+	subgraph, err := loadTemplateSubgraph(ctx, uowMolReader{uw: uw}, moleculeID)
 	if err != nil {
 		return HandleError("loading molecule: %v", err)
 	}
@@ -420,113 +447,11 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 }
 
 func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	gateType := types.IssueType("gate")
-	closedStatus := types.StatusClosed
-	gatePage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{
-		IssueType: &gateType,
-		Status:    &closedStatus,
-	})
+	molecules, err := findGateReadyMolecules(ctx, uowMolReader{uw: uw})
 	if err != nil {
-		return HandleErrorRespectJSON("error searching for closed gates: %v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
-	if len(gatePage.Items) == 0 {
-		emitGatedEmpty()
-		return nil
-	}
-
-	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, types.WorkFilter{})
-	if err != nil {
-		return HandleErrorRespectJSON("error getting ready work: %v", err)
-	}
-	readySet := make(map[string]*types.Issue, len(readyPage.Items))
-	for _, issue := range readyPage.Items {
-		readySet[issue.ID] = issue
-	}
-
-	hookedStatus := types.StatusHooked
-	hookedPage, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &hookedStatus})
-	if err != nil {
-		return HandleErrorRespectJSON("error searching for hooked issues: %v", err)
-	}
-	hookedSet := make(map[string]*types.Issue, len(hookedPage.Items))
-	for _, issue := range hookedPage.Items {
-		hookedSet[issue.ID] = issue
-	}
-
-	moleculeMap := make(map[string]*GatedMolecule)
-	for _, gate := range gatePage.Items {
-		dependents, err := uw.DependencyUseCase().ListWithIssueMetadata(ctx, gate.ID, domain.DepListFilter{
-			Direction: domain.DepDirectionIn,
-		})
-		if err != nil {
-			continue
-		}
-		for _, dep := range dependents {
-			depIssue := dep.Issue
-			ready, isReady := readySet[depIssue.ID]
-			hooked, isHooked := hookedSet[depIssue.ID]
-			if !isReady && !isHooked {
-				continue
-			}
-			var step *types.Issue
-			if isReady {
-				step = ready
-			} else {
-				step = hooked
-			}
-			moleculeID := proxiedFindParentMolecule(ctx, uw, depIssue.ID)
-			if moleculeID == "" {
-				continue
-			}
-			if _, seen := moleculeMap[moleculeID]; seen {
-				continue
-			}
-			moleculeIssue, err := uw.IssueUseCase().GetIssue(ctx, moleculeID)
-			if err != nil || moleculeIssue == nil {
-				continue
-			}
-			moleculeMap[moleculeID] = &GatedMolecule{
-				MoleculeID:    moleculeID,
-				MoleculeTitle: moleculeIssue.Title,
-				ClosedGate:    gate,
-				ReadyStep:     step,
-			}
-		}
-	}
-
-	molecules := make([]*GatedMolecule, 0, len(moleculeMap))
-	for _, m := range moleculeMap {
-		molecules = append(molecules, m)
-	}
-
-	if jsonOutput {
-		output := GatedReadyOutput{Molecules: molecules, Count: len(molecules)}
-		if output.Molecules == nil {
-			output.Molecules = []*GatedMolecule{}
-		}
-		_ = outputJSON(output)
-		return nil
-	}
-	if len(molecules) == 0 {
-		fmt.Printf("\n%s No molecules ready for gate-resume dispatch\n\n", ui.RenderPass("✨"))
-		return nil
-	}
-	fmt.Printf("\n%s Molecules ready for gate-resume dispatch (%d):\n\n", ui.RenderAccent("🚪"), len(molecules))
-	for _, m := range molecules {
-		fmt.Printf("  %s: %s\n", ui.RenderID(m.MoleculeID), m.MoleculeTitle)
-		fmt.Printf("    Closed gate: %s (%s)\n", ui.RenderID(m.ClosedGate.ID), m.ClosedGate.Title)
-		fmt.Printf("    Ready step:  %s (%s)\n", ui.RenderID(m.ReadyStep.ID), m.ReadyStep.Title)
-		fmt.Println()
-	}
-	return nil
-}
-
-func emitGatedEmpty() {
-	if jsonOutput {
-		_ = outputJSON(GatedReadyOutput{Molecules: []*GatedMolecule{}})
-		return
-	}
-	fmt.Printf("\n%s No closed gates found — nothing to dispatch\n\n", ui.RenderPass("✨"))
+	return renderGatedReadyMolecules(molecules)
 }
 
 func buildReadyIssueOutputProxied(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue) []*types.IssueWithCounts {

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -217,6 +218,40 @@ func applyHooks(drifted bool, dryRun bool) ApplyResult {
 }
 
 // applyRemote ensures the Dolt origin remote matches federation.remote config.
+// originRemoteEvidence is the store surface currentOriginRemoteURL needs:
+// the SQL-visible remotes plus the on-disk persisted enumeration. The
+// concrete *dolt.DoltStore that applyRemote opens satisfies both directly —
+// no decorator peel needed here (unlike cmd paths holding the wired store).
+type originRemoteEvidence interface {
+	ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error)
+	PersistedRemoteInfos() []storage.RemoteInfo
+}
+
+// currentOriginRemoteURL resolves the origin remote's URL from evidence, not
+// from the SQL listing alone: a freshly (auto-)started sql-server can report
+// an empty dolt_remotes while the remote is persisted on disk in
+// .dolt/repo_state.json (GH#2118, wy-6k7f7). Recovering the persisted URL
+// routes `bd config apply` into the same consistent/update legs it would
+// take after the window, instead of blind-adding over an invisible remote.
+// A failed listing returns the error — it is never evidence of "no remote".
+func currentOriginRemoteURL(ctx context.Context, st originRemoteEvidence) (string, error) {
+	remotes, err := st.ListRemotes(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range remotes {
+		if r.Name == "origin" {
+			return r.URL, nil
+		}
+	}
+	for _, r := range st.PersistedRemoteInfos() {
+		if r.Name == "origin" {
+			return r.URL, nil
+		}
+	}
+	return "", nil
+}
+
 func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	if !drifted {
 		return ApplyResult{
@@ -260,7 +295,7 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 	defer func() { _ = st.Close() }()
 
-	remotes, err := st.ListRemotes(ctx)
+	currentURL, err := currentOriginRemoteURL(ctx, st)
 	if err != nil {
 		return ApplyResult{
 			Check:   "remote",
@@ -268,13 +303,6 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 			Status:  applyStatusError,
 			Message: "Failed to list Dolt remotes",
 			Error:   err.Error(),
-		}
-	}
-	var currentURL string
-	for _, r := range remotes {
-		if r.Name == "origin" {
-			currentURL = r.URL
-			break
 		}
 	}
 
@@ -391,6 +419,18 @@ func applyServer(drifted bool, dryRun bool) ApplyResult {
 			Action:  "none",
 			Status:  applyStatusSkipped,
 			Message: "Server is running but dolt.shared-server is not enabled; not stopping (use 'bd dolt stop' manually)",
+		}
+	}
+
+	// Reconciliation must honor the same auto-start policy as implicit storage
+	// opens. A disabled auto-start means the server is externally managed; keep
+	// Action="start" to describe the skipped reconciliation action consistently.
+	if doltserver.IsAutoStartDisabled() {
+		return ApplyResult{
+			Check:   "server",
+			Action:  "start",
+			Status:  applyStatusSkipped,
+			Message: "Dolt shared server not started because auto-start is disabled; the server is externally managed",
 		}
 	}
 

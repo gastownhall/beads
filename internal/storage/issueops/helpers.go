@@ -14,25 +14,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
-
-// NewEventID mints the app-side primary key for an events/wisp_events row.
-// Events have no natural identity (the same logical event can legitimately
-// occur twice), so the id is random — but minted app-side, once, at creation.
-// Insert sites must never fall back to the DB-side DEFAULT (UUID()): that is
-// the 0043-era pattern that let bulk/import paths silently mint clone-random
-// keys for logically identical rows, the same failure class as #4259 on
-// dependencies (bd-6dnrw.18). UUIDv7 matches the comments-table convention
-// and keeps ids time-sortable.
-func NewEventID() string {
-	return uuid.Must(uuid.NewV7()).String()
-}
 
 // IsWisp returns true if the issue should be routed to the wisps table.
 // Routes based on flags only — not the ID pattern. The "-wisp-" ID prefix is
@@ -69,7 +56,7 @@ var issueUpsertColumns = []string{
 	"content_hash", "title", "description", "design", "acceptance_criteria",
 	"notes", "status", "priority", "issue_type", "assignee",
 	"estimated_minutes", "started_at", "closed_at", "external_ref",
-	"source_repo", "close_reason", "metadata",
+	"source_repo", "close_reason", "closed_by_session", "metadata",
 	"row_lock", "updated_at",
 }
 
@@ -103,12 +90,22 @@ func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 
 // InsertIssueIntoTable inserts an issue into the specified table ("issues" or "wisps"),
 // using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully.
-func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
+func InsertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *types.Issue) error {
 	return insertIssueIntoTable(ctx, tx, table, issue, false)
 }
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
-func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue, rejectStaleUpdate bool) error {
+func insertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *types.Issue, rejectStaleUpdate bool) error {
+	return executeIssueInsert(ctx, tx, table, issue, "ON DUPLICATE KEY UPDATE\n\t\t\t"+issueUpsertAssignments(table, rejectStaleUpdate))
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func insertIssueCreateOnly(ctx context.Context, tx DBTX, table string, issue *types.Issue) error {
+	return executeIssueInsert(ctx, tx, table, issue, "")
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -116,14 +113,14 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
 			compaction_level, compacted_at, compacted_at_commit, original_size,
 			sender, ephemeral, no_history, wisp_type, pinned, is_template,
-			mol_type, work_type, source_system, source_repo, close_reason,
+			mol_type, work_type, source_system, source_repo, close_reason, closed_by_session,
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock
+			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
-			?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?, ?, ?, ?,
@@ -131,21 +128,20 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?
+			?, ?
 		)
-		ON DUPLICATE KEY UPDATE
-			%s
-	`, table, issueUpsertAssignments(table, rejectStaleUpdate)),
+		%s
+	`, table, suffix),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,
 		issue.CompactionLevel, issue.CompactedAt, NullStringPtr(issue.CompactedAtCommit), NullIntVal(issue.OriginalSize),
 		issue.Sender, issue.Ephemeral, issue.NoHistory, issue.WispType, issue.Pinned, issue.IsTemplate,
-		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason,
+		issue.MolType, issue.WorkType, issue.SourceSystem, issue.SourceRepo, issue.CloseReason, issue.ClosedBySession,
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
-		freshRowLock(),
+		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
@@ -154,17 +150,14 @@ func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *
 }
 
 // RecordEventInTable records an event in the specified events table.
-//
-//nolint:gosec // G201: table is a hardcoded constant ("events" or "wisp_events")
 func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eventType types.EventType, actor, newValue string) error {
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, table), NewEventID(), issueID, eventType, actor, "", newValue)
-	if err != nil {
-		return fmt.Errorf("record event in %s: %w", table, err)
-	}
-	return nil
+	return InsertDerivedEvent(ctx, tx, table, AuxEvent{
+		IssueID:   issueID,
+		EventType: eventType,
+		Actor:     actor,
+		OldValue:  str(""),
+		NewValue:  str(newValue),
+	})
 }
 
 // GenerateIssueIDInTable generates a unique ID, checking for collisions

@@ -1,6 +1,6 @@
 ---
 description: Close a completed issue
-argument-hint: [issue-id] [reason]
+argument-hint: "[issue-id] [reason]"
 ---
 
 Close a beads issue that's been completed.

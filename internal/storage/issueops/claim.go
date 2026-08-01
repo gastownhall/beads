@@ -203,7 +203,30 @@ func ClaimReadyIssueInTx(
 	claimFilter.Status = types.StatusOpen
 	claimFilter.Unassigned = true
 	claimFilter.Assignee = nil
+	// Claim only ever delivers the one issue it successfully claims below —
+	// the breaker's job is to bound delivered payloads, and a claim's
+	// payload is always exactly one row regardless of how large the ready
+	// pool it scanned was. So a rig-wide BEADS_MAX_ROWS/--max-rows cap
+	// (sized for bulk list/ready reads) must not fire here, and the scan
+	// itself must stay unbounded (Limit=0): the loop below walks
+	// readyIssues in order and continues past any that are transiently
+	// unclaimable (already claimed by a racing agent, etc), so bounding
+	// the scan to Limit=MaxRows (e.g. BEADS_MAX_ROWS=1 → scan only the
+	// single top-of-queue row) would make claim spuriously return "nothing
+	// to claim" whenever that narrow window is unclaimable, even with
+	// plenty of other ready work available. Clear the cap fields so
+	// GetReadyWorkInTx never returns ErrTooManyRows either.
+	//
+	// This is parity with pre-PR main (which never bounded the claim scan)
+	// and correctness-first: an unbounded scan preserves claim's existing
+	// fairness/ordering guarantee across the whole ready set. A paged scan
+	// that stays bounded while still walking past unclaimable rows is a
+	// reasonable follow-up, but it's a genuine behavior change (not a
+	// MaxRows-cap fix) and is deliberately deferred rather than folded in
+	// here.
 	claimFilter.Limit = 0
+	claimFilter.MaxRows = 0
+	claimFilter.MaxRowsSource = ""
 
 	readyIssues, err := GetReadyWorkInTx(ctx, tx, claimFilter)
 	if err != nil {
@@ -237,13 +260,22 @@ func ClaimPoolAliasesInTx(ctx context.Context, tx DBTX) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	return ParseClaimPools(raw), nil
+}
+
+// ParseClaimPools parses a raw claim.pools config value (comma-separated,
+// whitespace-trimmed) into the pool alias list. Shared by the claim CAS
+// (ClaimPoolAliasesInTx, and its domain/db dual) and the cmd-layer reassign
+// fence (bd-98s5c), so the alias set can never drift between --claim and
+// -a/--assignee — the two verbs must agree on which holders are pools.
+func ParseClaimPools(raw string) []string {
 	var pools []string
 	for _, p := range strings.Split(raw, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			pools = append(pools, p)
 		}
 	}
-	return pools, nil
+	return pools
 }
 
 // ClaimableSourceStatusesInTx returns the set of statuses an issue may be

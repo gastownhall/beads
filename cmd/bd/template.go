@@ -67,7 +67,7 @@ var bondedIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]+$`)
 // =============================================================================
 
 // loadTemplateSubgraph loads a template epic and all its descendants
-func loadTemplateSubgraph(ctx context.Context, s storage.DoltStorage, templateID string) (*TemplateSubgraph, error) {
+func loadTemplateSubgraph(ctx context.Context, s molReader, templateID string) (*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -117,7 +117,7 @@ func loadTemplateSubgraph(ctx context.Context, s storage.DoltStorage, templateID
 //
 // The visited set tracks IDs already expanded to detect cycles (GH#2719).
 // Without this, cyclic parent-child dependencies cause unbounded recursion leading to OOM.
-func loadDescendants(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph, parentID string, visited map[string]bool) error {
+func loadDescendants(ctx context.Context, s molReader, subgraph *TemplateSubgraph, parentID string, visited map[string]bool) error {
 	// Track children we've already added to avoid duplicates
 	addedChildren := make(map[string]bool)
 
@@ -212,7 +212,7 @@ func loadDescendants(ctx context.Context, s storage.DoltStorage, subgraph *Templ
 
 // findHierarchicalChildren finds issues with IDs that match the pattern parentID.N
 // This catches hierarchical children that may be missing parent-child dependencies.
-func findHierarchicalChildren(ctx context.Context, s storage.DoltStorage, parentID string) ([]*types.Issue, error) {
+func findHierarchicalChildren(ctx context.Context, s molReader, parentID string) ([]*types.Issue, error) {
 	pattern := parentID + "."
 	candidates, err := s.SearchIssues(ctx, "", types.IssueFilter{IDPrefix: pattern})
 	if err != nil {
@@ -238,7 +238,7 @@ func findHierarchicalChildren(ctx context.Context, s storage.DoltStorage, parent
 // It first tries to resolve as an ID (via ResolvePartialID).
 // If that fails, it searches for protos with matching titles.
 // Returns the proto ID if found, or an error if not found or ambiguous.
-func resolveProtoIDOrTitle(ctx context.Context, s storage.DoltStorage, input string) (string, error) {
+func resolveProtoIDOrTitle(ctx context.Context, s molReader, input string) (string, error) {
 	// Strategy 1: Try to resolve as an ID
 	protoID, err := utils.ResolvePartialID(ctx, s, input)
 	if err == nil {
@@ -484,7 +484,7 @@ func getRelativeID(oldID, rootID string) string {
 // issues with types like "gate" (for async coordination beads) that are
 // not in the default type whitelist. Without this, cloneSubgraph fails
 // with "invalid issue type" on the first non-built-in bead. (GH#3213)
-func ensureSubgraphCustomTypes(ctx context.Context, s storage.DoltStorage, subgraph *TemplateSubgraph) error {
+func ensureSubgraphCustomTypes(ctx context.Context, s molConfigWriter, subgraph *TemplateSubgraph) error {
 	// Collect non-built-in types used by the subgraph.
 	needed := make(map[string]bool)
 	for _, issue := range subgraph.Issues {
@@ -556,107 +556,110 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 		return nil, fmt.Errorf("no database connection")
 	}
 
-	// Auto-register any non-built-in issue types used by the subgraph
-	// so that formula-generated beads (e.g., type "gate" for async
-	// coordination) pass type validation without requiring the operator
-	// to run `bd config set types.custom` manually first. See GH#3213.
-	if err := ensureSubgraphCustomTypes(ctx, s, subgraph); err != nil {
+	var result *InstantiateResult
+	err := transact(ctx, s, "bd: clone template subgraph", func(tx storage.Transaction) error {
+		r, err := cloneSubgraphInto(ctx, storeMolWriter{DoltStorage: s, tx: tx}, subgraph, opts)
+		if err != nil {
+			return err
+		}
+		result = r
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
+	if err := ensureSubgraphCustomTypes(ctx, w, subgraph); err != nil {
 		return nil, fmt.Errorf("registering custom types for subgraph: %w", err)
 	}
 
-	// Generate new IDs and create mapping
 	idMapping := make(map[string]string)
 
-	// Use transaction for atomicity
-	err := transact(ctx, s, "bd: clone template subgraph", func(tx storage.Transaction) error {
-		// First pass: create all issues with new IDs
-		for _, oldIssue := range subgraph.Issues {
-			// RootOnly: skip child issues, only create the root
-			if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
-				continue
-			}
-			// Determine assignee: use override for root epic, otherwise keep template's
-			issueAssignee := oldIssue.Assignee
-			if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
-				issueAssignee = opts.Assignee
-			}
-
-			newIssue := &types.Issue{
-				// ID will be set below based on bonding options
-				Title:              substituteVariables(oldIssue.Title, opts.Vars),
-				Description:        substituteVariables(oldIssue.Description, opts.Vars),
-				Design:             substituteVariables(oldIssue.Design, opts.Vars),
-				AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
-				Notes:              substituteVariables(oldIssue.Notes, opts.Vars),
-				Status:             types.StatusOpen, // Always start fresh
-				Priority:           oldIssue.Priority,
-				IssueType:          oldIssue.IssueType,
-				Assignee:           issueAssignee,
-				EstimatedMinutes:   oldIssue.EstimatedMinutes,
-				Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
-				IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
-				// Gate fields (for async coordination)
-				AwaitType: oldIssue.AwaitType,
-				AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
-				Timeout:   oldIssue.Timeout,
-				Labels:    oldIssue.Labels,
-				Metadata:  oldIssue.Metadata,
-				CreatedAt: time.Now(),
-				UpdatedAt: time.Now(),
-			}
-
-			// Generate custom ID for dynamic bonding if ParentID is set
-			if opts.ParentID != "" {
-				bondedID, err := generateBondedID(oldIssue.ID, subgraph.Root.ID, opts)
-				if err != nil {
-					return fmt.Errorf("failed to generate bonded ID for %s: %w", oldIssue.ID, err)
-				}
-				newIssue.ID = bondedID
-			}
-
-			if err := tx.CreateIssue(ctx, newIssue, opts.Actor); err != nil {
-				return fmt.Errorf("failed to create issue from %s: %w", oldIssue.ID, err)
-			}
-
-			idMapping[oldIssue.ID] = newIssue.ID
+	// First pass: create all issues with new IDs
+	for _, oldIssue := range subgraph.Issues {
+		// RootOnly: skip child issues, only create the root
+		if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
+			continue
+		}
+		// Determine assignee: use override for root epic, otherwise keep template's
+		issueAssignee := oldIssue.Assignee
+		if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
+			issueAssignee = opts.Assignee
 		}
 
-		// Second pass: recreate dependencies with new IDs
-		for _, dep := range subgraph.Dependencies {
-			newFromID, ok1 := idMapping[dep.IssueID]
-			newToID, ok2 := idMapping[dep.DependsOnID]
-			if !ok1 || !ok2 {
-				continue // Skip if either end is outside the subgraph
-			}
-
-			newDep := &types.Dependency{
-				IssueID:     newFromID,
-				DependsOnID: newToID,
-				Type:        dep.Type,
-			}
-			if err := tx.AddDependency(ctx, newDep, opts.Actor); err != nil {
-				return fmt.Errorf("failed to create dependency: %w", err)
-			}
+		newIssue := &types.Issue{
+			// ID will be set below based on bonding options
+			Title:              substituteVariables(oldIssue.Title, opts.Vars),
+			Description:        substituteVariables(oldIssue.Description, opts.Vars),
+			Design:             substituteVariables(oldIssue.Design, opts.Vars),
+			AcceptanceCriteria: substituteVariables(oldIssue.AcceptanceCriteria, opts.Vars),
+			Notes:              substituteVariables(oldIssue.Notes, opts.Vars),
+			Status:             types.StatusOpen, // Always start fresh
+			Priority:           oldIssue.Priority,
+			IssueType:          oldIssue.IssueType,
+			Assignee:           issueAssignee,
+			EstimatedMinutes:   oldIssue.EstimatedMinutes,
+			Ephemeral:          opts.Ephemeral, // mark for cleanup when closed
+			IDPrefix:           opts.Prefix,    // distinct prefixes for mols/wisps
+			// Gate fields (for async coordination)
+			AwaitType: oldIssue.AwaitType,
+			AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
+			Timeout:   oldIssue.Timeout,
+			Labels:    oldIssue.Labels,
+			Metadata:  oldIssue.Metadata,
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 
-		// Atomic attachment: link spawned root to target molecule within
-		// the same transaction (bd-wvplu: prevents orphaned spawns)
-		if opts.AttachToID != "" {
-			attachDep := &types.Dependency{
-				IssueID:     idMapping[subgraph.Root.ID],
-				DependsOnID: opts.AttachToID,
-				Type:        opts.AttachDepType,
+		// Generate custom ID for dynamic bonding if ParentID is set
+		if opts.ParentID != "" {
+			bondedID, err := generateBondedID(oldIssue.ID, subgraph.Root.ID, opts)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate bonded ID for %s: %w", oldIssue.ID, err)
 			}
-			if err := tx.AddDependency(ctx, attachDep, opts.Actor); err != nil {
-				return fmt.Errorf("attaching to molecule: %w", err)
-			}
+			newIssue.ID = bondedID
 		}
 
-		return nil
-	})
+		if err := w.CreateIssue(ctx, newIssue, opts.Actor); err != nil {
+			return nil, fmt.Errorf("failed to create issue from %s: %w", oldIssue.ID, err)
+		}
 
-	if err != nil {
-		return nil, err
+		idMapping[oldIssue.ID] = newIssue.ID
+	}
+
+	// Second pass: recreate dependencies with new IDs
+	for _, dep := range subgraph.Dependencies {
+		newFromID, ok1 := idMapping[dep.IssueID]
+		newToID, ok2 := idMapping[dep.DependsOnID]
+		if !ok1 || !ok2 {
+			continue // Skip if either end is outside the subgraph
+		}
+
+		newDep := &types.Dependency{
+			IssueID:     newFromID,
+			DependsOnID: newToID,
+			Type:        dep.Type,
+			Metadata:    dep.Metadata,
+		}
+		if err := w.AddDependency(ctx, newDep, opts.Actor); err != nil {
+			return nil, fmt.Errorf("failed to create dependency: %w", err)
+		}
+	}
+
+	// Atomic attachment: link spawned root to target molecule within
+	// the same transaction (bd-wvplu: prevents orphaned spawns)
+	if opts.AttachToID != "" {
+		attachDep := &types.Dependency{
+			IssueID:     idMapping[subgraph.Root.ID],
+			DependsOnID: opts.AttachToID,
+			Type:        opts.AttachDepType,
+		}
+		if err := w.AddDependency(ctx, attachDep, opts.Actor); err != nil {
+			return nil, fmt.Errorf("attaching to molecule: %w", err)
+		}
 	}
 
 	return &InstantiateResult{

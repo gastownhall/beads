@@ -243,10 +243,17 @@ $env:CGO_ENABLED="0"; go install github.com/steveyegge/beads/cmd/bd@latest
 
 This produces a server-mode-only binary with no C compiler requirement — the fastest path to a working `bd` on Windows.
 
-**Via go install** (embedded-capable, needs MinGW-w64 gcc on your PATH):
+**Via go install** (embedded-capable, needs a Windows CGO toolchain):
 ```pwsh
 $env:CGO_ENABLED="1"; $env:GOFLAGS="-tags=gms_pure_go"; go install github.com/steveyegge/beads/cmd/bd@latest
 ```
+
+Requires a GCC-compatible Windows CGO compiler on your PATH, such as
+MinGW-w64/MSYS2 `gcc` or MSYS2 LLVM `clang` targeting `windows-gnu`
+(`clang64`/`clangarm64`). ICU is **not** required — `gms_pure_go` selects
+Go's stdlib `regexp`. Visual Studio `cl.exe` by itself is not enough because
+Go passes GCC-style CGO flags; use a MinGW/MSYS2 toolchain, set `CC`, or set
+`WINDOWS_CGO_BINS` when building from source.
 
 **From source**:
 ```pwsh

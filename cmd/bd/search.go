@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var searchCmd = &cobra.Command{
@@ -108,8 +109,13 @@ Examples:
 		}
 
 		if status != "" && status != "all" {
-			s := types.Status(status)
-			filter.Status = &s
+			cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
+			if err != nil {
+				return HandleError("loading status configuration: %v", err)
+			}
+			if err := workapi.ApplyStatusFilter(&filter, status, cfg.CustomStatusNames()); err != nil {
+				return HandleError("%v", err)
+			}
 		} else if status != "all" {
 			// Default: exclude closed issues to reduce scan scope (hq-319).
 			// With 12K+ issues, ~60-70% are closed — excluding them lets the
@@ -246,7 +252,7 @@ Examples:
 		}
 
 		// Apply sorting
-		sortIssues(issues, sortBy, reverse)
+		workapi.SortIssues(issues, sortBy, reverse)
 
 		if jsonOutput {
 			// Get labels and dependency counts
@@ -349,7 +355,7 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
-	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
+	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")

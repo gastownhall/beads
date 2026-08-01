@@ -283,6 +283,16 @@ func requireBootstrapDoltBackend(cfg *configfile.Config) error {
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return err
 	}
+	// A registered extension backend passes validateConfiguredBackend so its
+	// existing workspaces can be opened, but every bd bootstrap action
+	// (sync, restore, jsonl-import, init) provisions or imports Dolt. Registered
+	// backends are open/discover-only, so reject them here — before
+	// detectBootstrapAction or executeBootstrapPlan — mirroring bd init's
+	// fail-closed gate. Downstream registrants supply their own workspace
+	// provisioning path.
+	if cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
+		return fmt.Errorf("backend %q cannot be bootstrapped by bd bootstrap; it can only open an existing workspace (bd bootstrap provisions %q, the default)", cfg.GetBackend(), configfile.BackendDolt)
+	}
 	return nil
 }
 
@@ -309,6 +319,21 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	isSharedServer := bootstrapSharedServerMode(beadsDir)
 	isServer := cfg.IsDoltServerMode() || isSharedServer
 
+	// Prefer an existing local database over re-clone (GH#5037). Previously
+	// sync.remote returned Action=sync unconditionally, so a second
+	// `bd bootstrap` on an already-cloned workspace ran DOLT_CLONE into the
+	// existing dir and failed with Error 1007 (database exists) — contradicting
+	// help text ("If database already exists: validates and reports status")
+	// and the multi-clone upgrade guide. If the local beadsDir does not exist
+	// yet, still prefer sync recovery first for Action=="none" so a default
+	// shared-server "beads" DB from another project cannot mask a real clone.
+	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
+		if beadsDirExists || dbAction.Action != "none" {
+			return dbAction
+		}
+		plan = dbAction
+	}
+
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
 	if syncRemote != "" {
@@ -333,20 +358,6 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 				return plan
 			}
 		}
-	}
-
-	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
-		// If the local beadsDir does not exist yet, prefer recovering via sync
-		// first. This avoids false "nothing to do" results when the default
-		// shared-server database name happens to exist for another project.
-		if beadsDirExists || dbAction.Action != "none" {
-			return dbAction
-		}
-		// For synthesized paths with no local workspace directory yet, defer the
-		// existing-db no-op until we've ruled out all other recovery paths.
-		// This preserves the sync-precedence fix without downgrading the
-		// legitimate "database already exists" case into a fresh init.
-		plan = dbAction
 	}
 
 	// Check for backup JSONL files (must be non-empty to be useful)
@@ -538,6 +549,29 @@ func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInterac
 	}
 
 	ctx := context.Background()
+
+	// Workspace operation gate: every bootstrap action below replaces or
+	// creates workspace state (sync/restore/jsonl-import/init), and
+	// bootstrap is a skip-store command that the PersistentPreRunE
+	// chokepoint never gates. This is the single point where the target
+	// workspace is known and no state has been touched yet, so acquire the
+	// workspace + physical-root gates EXCLUSIVELY here for the rest of the
+	// plan execution. Exclusive failures are hard errors: bootstrap
+	// refuses to run over live bd activity rather than pretend.
+	//
+	// The resolved PhysicalRoots for plan.BeadsDir do not necessarily cover
+	// the directory the actions below actually open — executeInitAction,
+	// executeRestoreAction, and executeJSONLImportAction all open
+	// doltserver.ResolveDoltDir(plan.BeadsDir) directly (e.g. .beads/dolt
+	// for an embedded-metadata workspace). Pass it as an extraRoot,
+	// mirroring how bd init passes its own resolved db path, so the
+	// physical directory bootstrap writes is actually gated.
+	gateHandle, gateErr := acquireExclusiveWorkspaceGates(ctx, plan.BeadsDir, "bd bootstrap "+plan.Action,
+		doltserver.ResolveDoltDir(plan.BeadsDir))
+	if gateErr != nil {
+		return fmt.Errorf("bd bootstrap refuses to run over live bd activity on this workspace: %w", gateErr)
+	}
+	defer func() { _ = gateHandle.Release() }()
 
 	switch plan.Action {
 	case "sync":

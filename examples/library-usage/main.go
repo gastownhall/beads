@@ -113,10 +113,18 @@ func main() {
 		log.Fatalf("Failed to get statistics: %v", err)
 	}
 
+	blockedCount := 0
+	if stats.BlockedIssues != nil {
+		blockedCount = *stats.BlockedIssues
+	}
+	readyCount := 0
+	if stats.ReadyIssues != nil {
+		readyCount = *stats.ReadyIssues
+	}
 	fmt.Printf("Total issues: %d\n", stats.TotalIssues)
 	fmt.Printf("Open: %d | In Progress: %d | Closed: %d | Blocked: %d | Ready: %d\n",
 		stats.OpenIssues, stats.InProgressIssues, stats.ClosedIssues,
-		stats.BlockedIssues, stats.ReadyIssues)
+		blockedCount, readyCount)
 
 	// Example 8: Close the issue
 	fmt.Println("\n=== Closing Issue ===")

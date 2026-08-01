@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -64,10 +65,7 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		Limit: limit,
 	}
 
-	if status != "" && status != "all" {
-		s := types.Status(status)
-		filter.Status = &s
-	} else if status != "all" {
+	if status == "" {
 		filter.ExcludeStatus = []types.Status{types.StatusClosed}
 	}
 
@@ -194,13 +192,23 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	}
 	defer uw.Close(ctx)
 
+	if status != "" && status != "all" {
+		cfg, err := workapi.LoadUOWListConfig(ctx, uw)
+		if err != nil {
+			return HandleErrorRespectJSON("loading status configuration: %v", err)
+		}
+		if err := workapi.ApplyStatusFilter(&filter, status, cfg.CustomStatusNames()); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+	}
+
 	if jsonOutput {
 		page, err := uw.IssueUseCase().SearchIssuesWithCounts(ctx, query, filter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 		items := page.Items
-		sortIssuesWithCounts(items, sortBy, reverse)
+		workapi.SortIssuesWithCounts(items, sortBy, reverse)
 		if items == nil {
 			items = []*types.IssueWithCounts{}
 		}
@@ -212,7 +220,7 @@ func runSearchProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return HandleErrorRespectJSON("%v", err)
 	}
 	issues := page.Items
-	sortIssues(issues, sortBy, reverse)
+	workapi.SortIssues(issues, sortBy, reverse)
 	outputSearchResults(issues, query, longFormat)
 	return nil
 }

@@ -28,10 +28,14 @@ func GetAllDependencyRecordsInTx(ctx context.Context, tx DBTX) (map[string][]*ty
 
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by caller).
 func getAllDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable string, result map[string][]*types.Dependency) error {
+	// Total order: issue_id alone is only a grouping key; without a tiebreaker the
+	// intra-issue dependency slice is plan-dependent (export churn, unstable --json).
+	// Mirrors labels bulk-load (issue_id, label). The separate typed-target unique
+	// keys don't make (issue_id, depends_on_id, type) total, so `id` closes it.
 	rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 			FROM %s
-			ORDER BY issue_id
+			ORDER BY issue_id, depends_on_id, type, id
 		`, DepTargetExpr, depTable))
 	if err != nil {
 		return fmt.Errorf("get all dependency records from %s: %w", depTable, err)
@@ -110,7 +114,7 @@ func getDependencyRecordsIntoFromTable(ctx context.Context, tx DBTX, depTable st
 		}
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 			`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
-			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
+			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, depends_on_id, type, id`,
 			DepTargetExpr, depTable, strings.Join(placeholders, ",")), args...)
 		if err != nil {
 			return fmt.Errorf("get dependency records from %s: %w", depTable, err)

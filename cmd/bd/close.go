@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var closeCmd = &cobra.Command{
@@ -81,6 +82,10 @@ the flags appear in the command line.`,
 		}
 
 		ctx := rootCtx
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		if continueFlag && len(args) > 1 {
 			return HandleErrorRespectJSON("--continue only works when closing a single issue")
@@ -117,9 +122,25 @@ the flags appear in the command line.`,
 			// Get issue for checks (nil issue is handled by validateIssueClosable)
 			issue := result.Issue
 
-			if err := validateIssueClosable(id, issue, actor, force); err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", err)
-				continue
+			// Close validation guards a state change; a row already at literal
+			// StatusClosed has none to guard, so skip it and let the re-close reach
+			// the engine as the idempotent no-op it has always been (ga-ktn9pe.4.8).
+			// Without this, a forced close of a boolean-pinned bead leaves
+			// pinned=true (closeIssueInTx never touches the column — deliberately,
+			// it is the deletion-protection flag bd gc/purge/cleanup honor) and the
+			// plain retry hits NotPinned and exits nonzero, which strands the
+			// molecule auto-close re-drive documented on the !res.Changed branch
+			// below. Only a literal closed status qualifies: reaching a configured
+			// done status is still a real close, mirroring the engine's isClosedInTx.
+			// The snapshot only decides whether validation runs, never what is
+			// written — the engine's in-transaction `status != closed` guard remains
+			// the authority on whether the close is a no-op, so a concurrent close
+			// still converges. Mirrored in closeProxiedOne.
+			if issue == nil || issue.Status != types.StatusClosed {
+				if err := validateIssueClosable(id, issue, actor, force); err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					continue
+				}
 			}
 
 			// Open-children close guard: prevent closing any issue with open
@@ -145,11 +166,18 @@ the flags appear in the command line.`,
 				}
 			}
 
-			// Delegate the is_blocked guard to the engine (GH#962). CloseIssueChecked
-			// runs the guard and the close in ONE transaction, so there is no
-			// read-then-write TOCTOU window between the check and the close. --force
-			// bypasses the guard; ExpectedVersion is unused on this path.
-			res, err := activeStore.CloseIssueChecked(ctx, id, actor, storage.CloseIssueOptions{
+			// Delegate the is_blocked guard to the engine (GH#962). The close
+			// operation runs the guard and the close in ONE transaction, so there is
+			// no read-then-write TOCTOU window between the check and the close.
+			// --force bypasses the guard; ExpectedVersion is unused on this path.
+			ops, err := writeOps(activeStore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error closing %s: %v\n", id, err)
+				continue
+			}
+			res, err := ops.Close(opsCtx, issueops.CloseRequest{
+				Actor:   actor,
+				IssueID: id,
 				Reason:  reason,
 				Session: session,
 				Force:   force,
@@ -164,7 +192,7 @@ the flags appear in the command line.`,
 				}
 				continue
 			}
-			if res.Unchanged {
+			if !res.Changed {
 				// Already closed: an idempotent no-op on the step's stored state. The
 				// old CloseIssue path also returned nil here and still reported the
 				// (already-closed) issue, so keep OUTPUT parity via the shared display
@@ -217,9 +245,15 @@ the flags appear in the command line.`,
 				firstSettledID = id
 			}
 
-			// Re-fetch for display. A real close and an idempotent no-op both report
-			// the closed issue here, matching the historical output shape.
-			closedIssue, _ := activeStore.GetIssue(ctx, id)
+			// The operation's own post-state snapshot is what gets reported. A
+			// real close and an idempotent no-op both report the closed issue
+			// here, matching the historical output shape. Dependency records are
+			// dropped from it because `bd close` has never printed them: the
+			// re-read this replaced did not hydrate them either.
+			closedIssue := res.Issue
+			if closedIssue != nil {
+				closedIssue.Dependencies = nil
+			}
 
 			if jsonOutput {
 				if closedIssue != nil {
@@ -279,7 +313,7 @@ the flags appear in the command line.`,
 
 		if continueFlag && len(resolvedIDs) == 1 && closedForCommand {
 			autoClaim := !noAuto
-			result, err := AdvanceToNextStep(ctx, postCloseStore, resolvedIDs[0], autoClaim, actor)
+			result, err := AdvanceToNextStep(ctx, newStandaloneStoreMolWriter(postCloseStore), resolvedIDs[0], autoClaim, actor)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "Warning: could not advance to next step: %v\n", err)
 			} else if result != nil {
@@ -548,7 +582,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 
 	switch {
 	case strings.HasPrefix(issue.AwaitType, "gh:run"):
-		resolved, escalated, reason, err = checkGHRun(issue, true)
+		resolved, escalated, reason, err = checkGHRun(issue, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	case strings.HasPrefix(issue.AwaitType, "gh:pr"):
 		resolved, escalated, reason, err = checkGHPR(issue)
 	case issue.AwaitType == "timer":
@@ -704,7 +738,7 @@ func resolveCloseTargets(ctx context.Context, localStore storage.DoltStorage, id
 			return nil, fmt.Errorf("no auto-routed store available")
 		}
 		sharedRoutedTried = true
-		rs, routed, err := openRoutedReadStore(ctx, localStore)
+		rs, routed, _, err := openRoutedReadStore(ctx, localStore)
 		if err != nil {
 			return nil, err
 		}

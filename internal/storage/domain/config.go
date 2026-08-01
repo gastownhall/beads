@@ -62,6 +62,11 @@ type CreateContext struct {
 	IssuePrefix     string
 	AllowedPrefixes string
 	CustomTypes     []string
+	CustomStatuses  []types.CustomStatus
+	// InfraTypes is the resolved infrastructure-type set. A create whose type
+	// is in this set is routed to the wisp tables, the same routing the
+	// embedded and direct stores apply from IsInfraTypeCtx.
+	InfraTypes map[string]bool
 }
 
 type Issue struct{}
@@ -292,9 +297,19 @@ func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContex
 	if err != nil {
 		return CreateContext{}, fmt.Errorf("LoadCreateContext: read custom types: %w", err)
 	}
+	customStatuses, err := u.cfgRepo.GetCustomStatuses(ctx)
+	if err != nil {
+		return CreateContext{}, fmt.Errorf("LoadCreateContext: read custom statuses: %w", err)
+	}
+	infraTypes, err := u.GetInfraTypes(ctx)
+	if err != nil {
+		return CreateContext{}, fmt.Errorf("LoadCreateContext: read infra types: %w", err)
+	}
 	return CreateContext{
 		IssuePrefix:     prefix,
 		AllowedPrefixes: allowed,
 		CustomTypes:     customTypes,
+		CustomStatuses:  customStatuses,
+		InfraTypes:      infraTypes,
 	}, nil
 }

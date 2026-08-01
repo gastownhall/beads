@@ -10,6 +10,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
@@ -42,7 +43,11 @@ func testTempDir(pattern string) (string, error) {
 // This is the suite most likely to leak — most e2e tests here run a real
 // `bd` binary against a `.beads` dir under testTempRoot with auto-start
 // enabled. See gastownhall/beads mybd-q6cz.
-func runTestsAndSweep(m *testing.M) int {
+type testRunner interface {
+	Run() int
+}
+
+func runTestsAndSweep(m testRunner) int {
 	code := m.Run()
 	doltserver.SweepOrphanedTestServers(testTempRoot)
 	return code
@@ -100,6 +105,32 @@ func testMainInner(m *testing.M) int {
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))
 	_ = os.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 
+	// Keep telemetry out of the test suite entirely (wy-12x1p).
+	//
+	// Every `bd` run with metrics enabled ends in metrics.CloseAndFlush, which
+	// (a) writes an eventkit queue under $HOME/.beads/eventsData and (b) spawns
+	// a DETACHED `bd send-metrics` child (cmd.Process.Release — no Wait) that
+	// outlives its parent. The e2e tests here run the bd binary with
+	// HOME=t.TempDir(), so those orphans keep creating/removing .evtq files and
+	// holding eventkit.lock under a temp dir the test is about to delete. Go's
+	// t.TempDir cleanup then fails with
+	//
+	//   TempDir RemoveAll cleanup: unlinkat .../NNN: directory not empty
+	//
+	// which reddens the whole cmd/bd package with no assertion failure in
+	// sight. It is load-dependent, so it flaked intermittently on a busy
+	// machine (TestPrime_HookJSON_{Local,Redirected}PrimeOverride were the
+	// observed victims, but every subprocess test here was exposed).
+	//
+	// Both vars are set: EnvDisableEventFlush alone would stop the detached
+	// child, and EnvDisableMetrics additionally keeps the queue files out of
+	// the isolated HOME — and a test suite should never upload telemetry.
+	// Subprocess envs in this package are built with append(os.Environ(), ...),
+	// so setting it here covers all of them. Tests that specifically exercise
+	// metrics resolution already unset these per-test and restore them.
+	_ = os.Setenv(metrics.EnvDisableMetrics, "1")
+	_ = os.Setenv(metrics.EnvDisableEventFlush, "1")
+
 	// Also reset viper state that was loaded by main.go's init().
 	config.ResetForTesting()
 
@@ -111,6 +142,12 @@ func testMainInner(m *testing.M) int {
 	// Previously each test set/unset this env var via ensureTestMode(),
 	// which raced under t.Parallel().
 	_ = os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): opt the cmd/bd test process into the dedicated
+	// test-server lane so dolt.New's database-name firewall allows
+	// testdb_*, benchdb_*, etc. on the spawned test container.
+	_ = os.Setenv("BEADS_TEST_SERVER", "1")
+	_ = os.Setenv("BEADS_TEST_CIRCUIT_DIR", filepath.Join(tmp, "circuit"))
+	defer os.Unsetenv("BEADS_TEST_CIRCUIT_DIR")
 
 	// Clear BEADS_DIR to prevent tests from accidentally picking up the project's
 	// .beads directory via git repo detection when there's a redirect file.
@@ -120,6 +157,26 @@ func testMainInner(m *testing.M) int {
 	defer func() {
 		if origBeadsDir != "" {
 			os.Setenv("BEADS_DIR", origBeadsDir)
+		}
+	}()
+
+	// Clear BD_BACKUP_ENABLED / BEADS_BACKUP_ENABLED (legacy alias) so tests
+	// asserting on backup.enabled's auto-detected default aren't overridden by
+	// whatever the invoking shell happens to export for real bd usage
+	// (be-yjp4z). Tests that need a specific value set it explicitly via
+	// t.Setenv.
+	origBackupEnabled := os.Getenv("BD_BACKUP_ENABLED")
+	os.Unsetenv("BD_BACKUP_ENABLED")
+	defer func() {
+		if origBackupEnabled != "" {
+			os.Setenv("BD_BACKUP_ENABLED", origBackupEnabled)
+		}
+	}()
+	origBeadsBackupEnabled := os.Getenv("BEADS_BACKUP_ENABLED")
+	os.Unsetenv("BEADS_BACKUP_ENABLED")
+	defer func() {
+		if origBeadsBackupEnabled != "" {
+			os.Setenv("BEADS_BACKUP_ENABLED", origBeadsBackupEnabled)
 		}
 	}()
 

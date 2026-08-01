@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,10 +11,12 @@ import (
 
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/hooks"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type reopenProxiedOutcome struct {
@@ -100,14 +103,18 @@ func runReopenProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	return nil
 }
 
-func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, errors *[]string) (reopenProxiedOutcome, bool) {
-	current, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-	if current == nil {
-		*errors = append(*errors, fmt.Sprintf("Issue %s not found", id))
+func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, errs *[]string) (reopenProxiedOutcome, bool) {
+	current, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+	if errors.Is(rerr, storage.ErrNotFound) {
+		*errs = append(*errs, fmt.Sprintf("Issue %s not found", id))
+		return reopenProxiedOutcome{}, false
+	}
+	if rerr != nil {
+		*errs = append(*errs, fmt.Sprintf("Error resolving %s: %v", id, rerr))
 		return reopenProxiedOutcome{}, false
 	}
 	if current.Status != types.StatusClosed {
-		*errors = append(*errors, fmt.Sprintf("%s is already %s", id, current.Status))
+		*errs = append(*errs, fmt.Sprintf("%s is already %s", id, current.Status))
 		return reopenProxiedOutcome{id: id, before: current, after: current, reopened: false}, true
 	}
 
@@ -122,7 +129,7 @@ func reopenProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string,
 		res, err = uw.IssueUseCase().ReopenIssue(ctx, id, params, actor)
 	}
 	if err != nil {
-		*errors = append(*errors, fmt.Sprintf("Error reopening %s: %v", id, err))
+		*errs = append(*errs, fmt.Sprintf("Error reopening %s: %v", id, err))
 		return reopenProxiedOutcome{}, false
 	}
 

@@ -302,7 +302,8 @@ Examples:
   bd gate create --blocks bd-abc
   bd gate create --type=human --blocks bd-abc --reason="Need design review"
   bd gate create --type=timer --blocks bd-abc --timeout=2h
-  bd gate create --type=gh:pr --blocks bd-abc --await-id=42`,
+  bd gate create --type=gh:pr --blocks bd-abc --await-id=42
+  bd gate create --blocks bd-abc --title="Gate: awaiting owner sign-off"`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -323,6 +324,7 @@ Examples:
 		reason, _ := cmd.Flags().GetString("reason")
 		awaitID, _ := cmd.Flags().GetString("await-id")
 		timeoutStr, _ := cmd.Flags().GetString("timeout")
+		titleFlag, _ := cmd.Flags().GetString("title")
 
 		ctx := rootCtx
 
@@ -343,6 +345,9 @@ Examples:
 		title := fmt.Sprintf("Gate: %s", gateType)
 		if awaitID != "" {
 			title = fmt.Sprintf("Gate: %s %s", gateType, awaitID)
+		}
+		if titleFlag != "" {
+			title = titleFlag
 		}
 
 		desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetIssue.ID)
@@ -561,7 +566,7 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("gate check is not supported in proxied-server mode")
+			return runGateCheckProxiedServer(cmd, rootCtx)
 		}
 		CheckReadonly("gate check")
 
@@ -585,128 +590,145 @@ Examples:
 		}
 
 		ctx := rootCtx
-		var gates []*types.Issue
-		var err error
 
-		gates, err = store.SearchIssues(ctx, "", filter)
+		gates, err := store.SearchIssues(ctx, "", filter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		var filteredGates []*types.Issue
-		for _, gate := range gates {
-			if shouldCheckGate(gate, gateTypeFilter) {
-				filteredGates = append(filteredGates, gate)
-			}
-		}
-
+		filteredGates := filterCheckableGates(gates, gateTypeFilter)
 		if len(filteredGates) == 0 {
-			if gateTypeFilter != "" {
-				fmt.Printf("No open gates of type '%s' found.\n", gateTypeFilter)
-			} else {
-				fmt.Println("No open gates found.")
-			}
+			printNoOpenGates(gateTypeFilter)
 			return nil
 		}
 
-		// Results tracking
-		type checkResult struct {
-			gate      *types.Issue
-			resolved  bool
-			escalated bool
-			reason    string
-			err       error
-		}
-		results := make([]checkResult, 0, len(filteredGates))
-
-		// Check each gate
-		now := time.Now()
-		for _, gate := range filteredGates {
-			result := checkResult{gate: gate}
-
-			switch {
-			case strings.HasPrefix(gate.AwaitType, "gh:run"):
-				result.resolved, result.escalated, result.reason, result.err = checkGHRun(gate, !dryRun)
-			case strings.HasPrefix(gate.AwaitType, "gh:pr"):
-				result.resolved, result.escalated, result.reason, result.err = checkGHPR(gate)
-			case gate.AwaitType == "timer":
-				result.resolved, result.escalated, result.reason, result.err = checkTimer(gate, now)
-			case gate.AwaitType == "bead":
-				result.resolved, result.reason = checkBeadGate(ctx, store, gate.AwaitID)
-			default:
-				// Skip unsupported gate types (human gates need manual resolution)
-				continue
-			}
-
-			results = append(results, result)
-		}
-
-		// Process results
-		resolvedCount := 0
-		escalatedCount := 0
-		errorCount := 0
-
-		for _, r := range results {
-			if r.err != nil {
-				errorCount++
-				fmt.Fprintf(os.Stderr, "%s %s: error checking - %v\n",
-					ui.RenderFail("✗"), r.gate.ID, r.err)
-				continue
-			}
-
-			if r.resolved {
-				resolvedCount++
-				if dryRun {
-					fmt.Printf("%s %s: would resolve - %s\n",
-						ui.RenderPass("✓"), r.gate.ID, r.reason)
-				} else {
-					// Close the gate
-					closeErr := closeGate(ctx, r.gate.ID, r.reason)
-					if closeErr != nil {
-						fmt.Fprintf(os.Stderr, "%s %s: error closing - %v\n",
-							ui.RenderFail("✗"), r.gate.ID, closeErr)
-						errorCount++
-					} else {
-						fmt.Printf("%s %s: resolved - %s\n",
-							ui.RenderPass("✓"), r.gate.ID, r.reason)
-					}
-				}
-			} else if r.escalated {
-				escalatedCount++
-				if dryRun {
-					fmt.Printf("%s %s: would escalate - %s\n",
-						ui.RenderWarn("⚠"), r.gate.ID, r.reason)
-				} else {
-					fmt.Printf("%s %s: ESCALATE - %s\n",
-						ui.RenderWarn("⚠"), r.gate.ID, r.reason)
-					// Actually escalate if flag is set
-					if escalateFlag {
-						escalateGate(r.gate, r.reason)
-					}
-				}
-			} else {
-				// Still pending
-				fmt.Printf("%s %s: pending - %s\n",
-					ui.RenderAccent("○"), r.gate.ID, r.reason)
+		var persistAwaitID func(gateID, runID string) error
+		if !dryRun {
+			persistAwaitID = func(gateID, runID string) error {
+				return updateGateAwaitIDFunc(nil, gateID, runID)
 			}
 		}
 
-		// Summary
-		fmt.Println()
-		fmt.Printf("Checked %d gates: %d resolved, %d escalated, %d errors\n",
-			len(results), resolvedCount, escalatedCount, errorCount)
+		results := evaluateGates(ctx, filteredGates, time.Now(), store, persistAwaitID)
 
-		if jsonOutput {
-			return outputJSON(map[string]interface{}{
-				"checked":   len(results),
-				"resolved":  resolvedCount,
-				"escalated": escalatedCount,
-				"errors":    errorCount,
-				"dry_run":   dryRun,
-			})
-		}
-		return nil
+		resolvedCount, escalatedCount, errorCount := applyGateCheckResults(
+			results, dryRun, escalateFlag,
+			func(gate *types.Issue, reason string) error {
+				return closeGate(ctx, gate.ID, reason)
+			},
+		)
+
+		return printGateCheckSummary(len(results), resolvedCount, escalatedCount, errorCount, dryRun)
 	},
+}
+
+type gateCheckResult struct {
+	gate      *types.Issue
+	resolved  bool
+	escalated bool
+	reason    string
+	err       error
+}
+
+func filterCheckableGates(gates []*types.Issue, typeFilter string) []*types.Issue {
+	var out []*types.Issue
+	for _, gate := range gates {
+		if shouldCheckGate(gate, typeFilter) {
+			out = append(out, gate)
+		}
+	}
+	return out
+}
+
+func printNoOpenGates(typeFilter string) {
+	if typeFilter != "" {
+		fmt.Printf("No open gates of type '%s' found.\n", typeFilter)
+	} else {
+		fmt.Println("No open gates found.")
+	}
+}
+
+func evaluateGates(ctx context.Context, gates []*types.Issue, now time.Time, getter issueGetter, persistAwaitID func(gateID, runID string) error) []gateCheckResult {
+	results := make([]gateCheckResult, 0, len(gates))
+	for _, gate := range gates {
+		r := gateCheckResult{gate: gate}
+		switch {
+		case strings.HasPrefix(gate.AwaitType, "gh:run"):
+			r.resolved, r.escalated, r.reason, r.err = checkGHRun(gate, persistAwaitID)
+		case strings.HasPrefix(gate.AwaitType, "gh:pr"):
+			r.resolved, r.escalated, r.reason, r.err = checkGHPR(gate)
+		case gate.AwaitType == "timer":
+			r.resolved, r.escalated, r.reason, r.err = checkTimer(gate, now)
+		case gate.AwaitType == "bead":
+			r.resolved, r.reason = checkBeadGate(ctx, getter, gate.AwaitID)
+		default:
+			continue
+		}
+		results = append(results, r)
+	}
+	return results
+}
+
+func applyGateCheckResults(results []gateCheckResult, dryRun, escalate bool, closeResolved func(gate *types.Issue, reason string) error) (resolvedCount, escalatedCount, errorCount int) {
+	for _, r := range results {
+		if r.err != nil {
+			errorCount++
+			fmt.Fprintf(os.Stderr, "%s %s: error checking - %v\n",
+				ui.RenderFail("✗"), r.gate.ID, r.err)
+			continue
+		}
+
+		switch {
+		case r.resolved:
+			resolvedCount++
+			if dryRun {
+				fmt.Printf("%s %s: would resolve - %s\n",
+					ui.RenderPass("✓"), r.gate.ID, r.reason)
+				continue
+			}
+			if closeErr := closeResolved(r.gate, r.reason); closeErr != nil {
+				fmt.Fprintf(os.Stderr, "%s %s: error closing - %v\n",
+					ui.RenderFail("✗"), r.gate.ID, closeErr)
+				errorCount++
+			} else {
+				fmt.Printf("%s %s: resolved - %s\n",
+					ui.RenderPass("✓"), r.gate.ID, r.reason)
+			}
+		case r.escalated:
+			escalatedCount++
+			if dryRun {
+				fmt.Printf("%s %s: would escalate - %s\n",
+					ui.RenderWarn("⚠"), r.gate.ID, r.reason)
+				continue
+			}
+			fmt.Printf("%s %s: ESCALATE - %s\n",
+				ui.RenderWarn("⚠"), r.gate.ID, r.reason)
+			if escalate {
+				escalateGate(r.gate, r.reason)
+			}
+		default:
+			fmt.Printf("%s %s: pending - %s\n",
+				ui.RenderAccent("○"), r.gate.ID, r.reason)
+		}
+	}
+	return resolvedCount, escalatedCount, errorCount
+}
+
+func printGateCheckSummary(checked, resolvedCount, escalatedCount, errorCount int, dryRun bool) error {
+	fmt.Println()
+	fmt.Printf("Checked %d gates: %d resolved, %d escalated, %d errors\n",
+		checked, resolvedCount, escalatedCount, errorCount)
+
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"checked":   checked,
+			"resolved":  resolvedCount,
+			"escalated": escalatedCount,
+			"errors":    errorCount,
+			"dry_run":   dryRun,
+		})
+	}
+	return nil
 }
 
 // shouldCheckGate returns true if the gate matches the type filter
@@ -801,9 +823,7 @@ func discoverRunIDByWorkflowName(workflowHint string) (string, error) {
 	return fmt.Sprintf("%d", runs[0].DatabaseID), nil
 }
 
-// checkGHRun checks a GitHub Actions workflow run gate.
-// When persistDiscoveredRunID is false, workflow-name discovery stays in-memory only.
-func checkGHRun(gate *types.Issue, persistDiscoveredRunID bool) (resolved, escalated bool, reason string, err error) {
+func checkGHRun(gate *types.Issue, persistAwaitID func(gateID, runID string) error) (resolved, escalated bool, reason string, err error) {
 	if gate.AwaitID == "" {
 		return false, false, "no run ID specified - set await_id or use workflow name hint", nil
 	}
@@ -817,9 +837,9 @@ func checkGHRun(gate *types.Issue, persistDiscoveredRunID bool) (resolved, escal
 			return false, false, fmt.Sprintf("workflow hint '%s': %v", gate.AwaitID, discoverErr), nil
 		}
 
-		if persistDiscoveredRunID {
+		if persistAwaitID != nil {
 			// Non-dry-run flows persist the numeric run ID for future checks.
-			if updateErr := updateGateAwaitIDFunc(nil, gate.ID, discoveredID); updateErr != nil {
+			if updateErr := persistAwaitID(gate.ID, discoveredID); updateErr != nil {
 				return false, false, "", fmt.Errorf("failed to update gate with discovered run ID: %w", updateErr)
 			}
 		}
@@ -1023,6 +1043,7 @@ func init() {
 	gateCreateCmd.Flags().StringP("reason", "r", "", "Reason for the gate")
 	gateCreateCmd.Flags().String("await-id", "", "Condition identifier (run ID, PR number, etc.)")
 	gateCreateCmd.Flags().String("timeout", "", "Timeout duration (e.g., 2h, 30m)")
+	gateCreateCmd.Flags().String("title", "", "Custom gate title (default: \"Gate: <type>\")")
 	_ = gateCreateCmd.MarkFlagRequired("blocks")
 
 	// Issue ID completions

@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -74,7 +75,14 @@ Examples:
   bd graph --html issue-id > graph.html  # Interactive browser view
   bd graph --all --html > all.html       # All issues, interactive
   bd graph --open issue-id       # Open issues only, layered by blocking order
-  bd graph --all --open          # All open issues, compact layers`,
+  bd graph --all --open          # All open issues, compact layers
+
+--max-rows / BEADS_MAX_ROWS caveat: the cap is checked differently per mode.
+Single-issue graphs (no --all) check the connected-component node count
+after the BFS traversal completes — the whole subgraph is always walked
+first, then rejected if it's over cap. --all checks each status
+(open/in_progress/blocked) independently, so up to 3x the cap can be loaded
+in total before any individual status trips it.`,
 	Args:          cobra.RangeArgs(0, 1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -94,6 +102,9 @@ Examples:
 		}
 
 		if usesProxiedServer() {
+			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+				return err
+			}
 			return runGraphProxiedServer(rootCtx, args)
 		}
 
@@ -103,8 +114,15 @@ Examples:
 		}
 
 		if graphAll {
-			subgraphs, err := loadAllGraphSubgraphs(ctx, store)
+			maxRows, maxRowsSource, err := resolveMaxRows(cmd)
 			if err != nil {
+				return err
+			}
+			subgraphs, err := loadAllGraphSubgraphs(ctx, store, maxRows, maxRowsSource)
+			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("loading all issues: %v", err)
 			}
 			return renderGraphAllSubgraphs(subgraphs)
@@ -119,6 +137,26 @@ Examples:
 		if err != nil {
 			return HandleErrorRespectJSON("loading graph: %v", err)
 		}
+
+		// Apply the defensive row cap (be-x42v) on the connected-component
+		// node count. loadGraphSubgraph is a BFS over GetDependents/
+		// GetDependencies (per-ID lookups, no IssueFilter to thread MaxRows
+		// through), so — like `bd dep tree` — the cap is checked post-hoc
+		// against the final node set rather than during traversal.
+		graphMaxRows, graphMaxRowsSource, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if graphMaxRows > 0 && len(subgraph.Issues) > graphMaxRows {
+			if capErr := handleMaxRowsError(&issueops.ErrTooManyRows{
+				Found:  len(subgraph.Issues),
+				Cap:    graphMaxRows,
+				Source: graphMaxRowsSource,
+			}); capErr != nil {
+				return capErr
+			}
+		}
+
 		return renderGraphSingleSubgraph(subgraph)
 	},
 }
@@ -311,6 +349,8 @@ func init() {
 	graphCmd.Flags().BoolVar(&graphDOT, "dot", false, "Output Graphviz DOT format (pipe to: dot -Tsvg > graph.svg)")
 	graphCmd.Flags().BoolVar(&graphHTML, "html", false, "Output self-contained interactive HTML (redirect to file)")
 	graphCmd.Flags().BoolVar(&graphOpen, "open", false, "Show only open issues (filters out closed/deferred), forces compact layer format")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(graphCmd)
 	graphCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(graphCmd)
 	graphCmd.AddCommand(graphCheckCmd)
@@ -418,8 +458,10 @@ func loadGraphSubgraph(ctx context.Context, s storage.DoltStorage, issueID strin
 }
 
 // loadAllGraphSubgraphs loads all open issues and groups them by connected component
-// Each component is a subgraph of issues that share dependencies
-func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*TemplateSubgraph, error) {
+// Each component is a subgraph of issues that share dependencies. The defensive
+// row cap (be-x42v) is propagated to each per-status SearchIssues call so any
+// single status that exceeds the cap returns the typed error directly.
+func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage, maxRows int, maxRowsSource string) ([]*TemplateSubgraph, error) {
 	if s == nil {
 		return nil, fmt.Errorf("no database connection")
 	}
@@ -430,7 +472,9 @@ func loadAllGraphSubgraphs(ctx context.Context, s storage.DoltStorage) ([]*Templ
 	for _, status := range []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusBlocked} {
 		statusCopy := status
 		issues, err := s.SearchIssues(ctx, "", types.IssueFilter{
-			Status: &statusCopy,
+			Status:        &statusCopy,
+			MaxRows:       maxRows,
+			MaxRowsSource: maxRowsSource,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to search issues: %w", err)

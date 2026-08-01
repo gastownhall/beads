@@ -41,6 +41,7 @@ type initProxiedServerInput struct {
 	reinitLocal            bool
 	contributor            bool
 	team                   bool
+	teamServer             bool
 	fromJSONL              bool
 	nonInteractive         bool
 }
@@ -97,6 +98,12 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	beadsDirIsLocal := proxiedInit.IsLocal
 	useLocalBeads := !hasExplicitBeadsDir || beadsDirIsLocal
 
+	if in.teamServer && proxiedInit.DBNameDerived {
+		return fmt.Errorf(
+			"--team-server requires --database (or an existing .beads/metadata.json naming the database): bd cannot guess the name of the bts-provisioned database (guessed %q from the prefix)",
+			dbName)
+	}
+
 	if strings.Contains(filepath.Clean(cwd), string(filepath.Separator)+".beads"+string(filepath.Separator)) ||
 		strings.HasSuffix(filepath.Clean(cwd), string(filepath.Separator)+".beads") {
 		return fmt.Errorf("cannot initialize bd inside a .beads directory\nCurrent directory: %s", cwd)
@@ -113,8 +120,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	}
 
 	metadataBody, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
-		dbName:    dbName,
-		projectID: projectID,
+		dbName:     dbName,
+		projectID:  projectID,
+		teamServer: in.teamServer,
 	})
 	if err != nil {
 		return fmt.Errorf("composing metadata.json: %v", err)
@@ -148,7 +156,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	initUOWProvider, err := newProxiedServerUOWProvider(ctx, beadsDir)
+	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}
@@ -168,7 +176,22 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: could not compute clone ID: %v\n", err)
 	}
 
+	adoptedPrefix, adoptedProjectID := prefix, projectID
 	err = uow.RunTx(ctx, initUOWProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
+		if in.teamServer {
+			// bts owns the shared database: adopt identity and write nothing —
+			// no identity, no tracking metadata (repo_id/clone_id are per-clone
+			// fingerprints; last-init-wins overwrites feed false cross-project
+			// mismatch diagnostics), no Dolt remote. Empty message skips the
+			// Dolt commit.
+			p, id, err := adoptTeamServerIdentity(ctx, uw.ConfigUseCase(), dbName, prefix, in.prefix != "", projectID)
+			if err != nil {
+				return "", err
+			}
+			adoptedPrefix, adoptedProjectID = p, id
+			return "", nil
+		}
+
 		bootstrapParams := domain.BootstrapProjectParams{
 			Prefix:         prefix,
 			ProjectID:      projectID,
@@ -192,9 +215,23 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		return HandleError("%v", err)
 	}
 
+	// metadata.json was written with a locally-minted project id before any
+	// DB connection existed; the adopted id must replace it before the tail
+	// git-commits .beads/.
+	if in.teamServer && adoptedProjectID != projectID {
+		fileCfg, err := configfile.Load(beadsDir)
+		if err != nil || fileCfg == nil {
+			return HandleError("failed to reload %s to adopt the provisioned project identity: %v", configfile.ConfigFileName, err)
+		}
+		fileCfg.ProjectID = adoptedProjectID
+		if err := fileCfg.Save(beadsDir); err != nil {
+			return HandleError("failed to save the provisioned project identity to %s: %v", configfile.ConfigFileName, err)
+		}
+	}
+
 	return runInitProxiedServerTail(cmd, ctx, in, runInitTailContext{
 		beadsDir:      beadsDir,
-		prefix:        prefix,
+		prefix:        adoptedPrefix,
 		dbName:        dbName,
 		useLocalBeads: useLocalBeads,
 		remoteURL:     remoteURL,
@@ -240,9 +277,49 @@ func resolveProxiedInitRemoteURL(ctx context.Context, gitUC domain.GitUseCase, i
 	return ""
 }
 
+type teamServerIdentityReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+	GetMetadata(ctx context.Context, key string) (string, error)
+}
+
+// adoptTeamServerIdentity reads the bts-provisioned identity out of the shared
+// database, following the gateway contract: adopt if present, hard error if
+// absent — bd never writes identity in team-server mode.
+func adoptTeamServerIdentity(ctx context.Context, reader teamServerIdentityReader, dbName, localPrefix string, prefixIsExplicit bool, localProjectID string) (prefix, projectID string, err error) {
+	dbPrefix, prefixReadErr := reader.GetConfig(ctx, "issue_prefix")
+	if _, _, err := resolveInitIssuePrefix(true, dbPrefix, dbName, localPrefix, prefixReadErr); err != nil {
+		if prefixReadErr == nil {
+			return "", "", fmt.Errorf(
+				"database %q has no project identity (config.issue_prefix) — provision it with 'bts init' (or heal an older bts database with 'bts migrate')",
+				dbName)
+		}
+		return "", "", err
+	}
+	// An explicit --prefix that disagrees must not be silently ignored; a
+	// merely derived prefix adopts silently.
+	if prefixIsExplicit && dbPrefix != localPrefix {
+		return "", "", fmt.Errorf(
+			"--prefix %q conflicts with issue_prefix %q provisioned in database %q; omit --prefix to adopt the provisioned one",
+			localPrefix, dbPrefix, dbName)
+	}
+
+	dbProjectID, idReadErr := reader.GetMetadata(ctx, "_project_id")
+	adoptedID, _, err := resolveInitProjectID(true, localProjectID, dbProjectID, dbName, idReadErr)
+	if err != nil {
+		if idReadErr == nil {
+			return "", "", fmt.Errorf(
+				"database %q has no project identity (metadata._project_id) — provision it with 'bts init' (or heal an older bts database with 'bts migrate')",
+				dbName)
+		}
+		return "", "", err
+	}
+	return dbPrefix, adoptedID, nil
+}
+
 type proxiedMetadataInputs struct {
-	dbName    string
-	projectID string
+	dbName     string
+	projectID  string
+	teamServer bool
 }
 
 func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) {
@@ -252,6 +329,7 @@ func composeProxiedServerMetadataJSON(in proxiedMetadataInputs) ([]byte, error) 
 	cfg.DoltDatabase = in.dbName
 	cfg.DoltMode = configfile.DoltModeProxiedServer
 	cfg.ProjectID = in.projectID
+	cfg.DoltTeamServer = in.teamServer
 
 	if filepath.IsAbs(cfg.DoltDataDir) {
 		cfg.DoltDataDir = ""

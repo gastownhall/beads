@@ -1,0 +1,101 @@
+# Embedded storage test shard manifest.
+#
+# Format: <total_shards> <shard_number> <top_level_test_name>
+#
+# There is no committed recent per-test duration artifact for these tests
+# (engdocs/CI_CLEANUP_PLAN.md records only whole-job wall clock for the
+# unsharded storage job, and engdocs/CI_TEST_SURFACE_AUDIT.md does not track
+# per-test timing here either). This manifest assigns tests round-robin over
+# the alphabetically sorted discovered-test list for the 5-shard CI matrix,
+# which spreads adjacent same-prefix families (e.g. the seven
+# TestEmbeddedMergeAndSettle* tests, the TestEmbeddedMigration* tests, and the
+# four TestSearchIssues_MaxRows_* tests) across different shards instead of
+# clustering them in one, as a balance heuristic in the absence of timing
+# data. embedded-storage-test-shard.sh continues to hash-distribute
+# newly-added tests that are not listed here. TestConformance is deliberately
+# excluded — it runs in the separate test-embedded-conformance job, which
+# shards by sub-test path (core/audit), not by top-level function name, and
+# is a different mechanism from this manifest.
+5 1 TestActiveDatabaseSizeFailsForMissingEmbeddedDatabase
+5 2 TestActiveDatabaseSizeScopesToActiveEmbeddedDatabase
+5 3 TestAddDependency
+5 4 TestAddLabel
+5 5 TestBuildDSN_NoDatabase
+5 1 TestBuildDSN_SpacesInPath
+5 2 TestBuildDSN_WithDatabase
+5 3 TestCleanGitRemoteCacheGarbage
+5 4 TestCleanGitRemoteCacheGarbage_NoCacheDir
+5 5 TestCleanGitRemoteCacheGarbage_Throttled
+5 1 TestConcurrencyMultiProcess
+5 2 TestConcurrentOpenReturnsCached
+5 3 TestCountsIncludeWispDependencies
+5 4 TestCreateIssue
+5 5 TestCreateIssues
+5 1 TestCreateIssuesRejectStaleUpserts
+5 2 TestCreateRejectsCrossTableIDCollision
+5 3 TestEmbeddedCloseIssueChecked
+5 4 TestEmbeddedCloseIssueCheckedTransitiveBlockedCloses
+5 5 TestEmbeddedCloseIssueCheckedVersionCAS
+5 1 TestEmbeddedConfigCommitStagesConfig
+5 2 TestEmbeddedDirtyTablesGate_BlocksReopenThenWorkingSetReconcileRecovers
+5 3 TestEmbeddedGetMergeBlockersOnAQuietStore
+5 4 TestEmbeddedMergeAndSettleDirtyWorkingSetSurvivesRefusedMerge
+5 5 TestEmbeddedMergeAndSettleFKCascadeRepair
+5 1 TestEmbeddedMergeAndSettleMemoryConfigConflict
+5 2 TestEmbeddedMergeAndSettleMetadataConflict
+5 3 TestEmbeddedMergeAndSettleRefusesUnknownTable
+5 4 TestEmbeddedMergeAndSettleReportsOperatorConflicts
+5 5 TestEmbeddedMergeAndSettleSkipsNonMemoryConfigConflict
+5 1 TestEmbeddedMigrateConvergesUnderConcurrentInterruptedRetries_4566
+5 2 TestEmbeddedMigrateRepairedDependenciesIDColumnCommitsAtomicallyWithVersion53_4690
+5 3 TestEmbeddedMigrateSelfHealsAfterMidPassFault_4566
+5 4 TestEmbeddedMigrateStepCommitLeavesUntouchedUserDirt_4566
+5 5 TestEmbeddedMigration0047DelegatesToSplitTargetRepairAndConvergesThroughIgnoredChain
+5 1 TestEmbeddedMigration0057ConvertsTextEventsColumnsToLongtext
+5 2 TestEmbeddedMigration0058AddsOnlyMissingConstraintInMixedPopulation
+5 3 TestEmbeddedMigration0058CleansOrphanedAndInvalidWispDependenciesRowsBeforeAddingConstraints
+5 4 TestEmbeddedMigration0058HealsAlreadyAffectedDatabase
+5 5 TestEmbeddedOpenForReadOnlyCommand_LenientGate
+5 1 TestEmbeddedOpenReadOnly_FreshDatabaseNoWrites
+5 2 TestEmbeddedOpenReadOnly_SkipsGateAndMigrations
+5 3 TestEmbeddedRecomputeAllBlockedDirtyGraphIsTyped
+5 4 TestEmbeddedRecomputeAllBlockedWiring
+5 5 TestEmbeddedRemoteMigrateGate_BlocksReopen
+5 1 TestEmbeddedSyncCommitsConfigBeforeMerge
+5 2 TestEmbeddedUpdateIssueCheckedFieldGuards
+5 3 TestEmbeddedUpdateIssueCheckedVersionCAS
+5 4 TestEventsSinceEmbedded
+5 5 TestGetDependentRecordsEmbedded
+5 1 TestGetDependentRecordsForIssuesEmbedded
+5 2 TestGetIssue
+5 3 TestGetIssueCommentsPageEmbedded
+5 4 TestGetLabels
+5 5 TestGetNextChildID
+5 1 TestGetReadyWorkIncludeEphemeralAppliesWispFilters
+5 2 TestGetReadyWorkIncludeEphemeralExcludesNonReadyWisps
+5 3 TestGetReadyWorkMoleculeFilter
+5 4 TestHeartbeatRejectsWispEmbedded
+5 5 TestHelperProcess
+5 1 TestHistory_NullTextColumns
+5 2 TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore
+5 3 TestIsBlockedBatchEmbedded
+5 4 TestLeaseLifecycleEmbedded
+5 5 TestListWisps
+5 1 TestOpenAfterCloseCreatesNewStore
+5 2 TestOpenDifferentDirsReturnsDifferentStores
+5 3 TestOpenReturnsCachedStore
+5 4 TestPromoteStillWorksWithCollisionGuard
+5 5 TestReclaimAnyReplicaOverride
+5 1 TestReclaimExpiredLeaseSurvivesRestartEmbedded
+5 2 TestReclaimRefusesForeignReplicaLease
+5 3 TestReopenIssue
+5 4 TestSchemaAfterInit
+5 5 TestSearchIssuesKeysetEmbedded
+5 1 TestSearchIssues_MaxRows_Exceeded_ReturnsErrTooManyRows
+5 2 TestSearchIssues_MaxRows_NotExceeded
+5 3 TestSearchIssues_MaxRows_WithLimit
+5 4 TestSearchIssues_MaxRows_Zero_NoCap
+5 5 TestUnknownProvenanceLeaseStaysReclaimable
+5 1 TestUpdateIssueType
+5 2 TestUpdateMergeOps_DoltEngine
+5 3 TestUpdateMergeOps_DoltEngine_TwoIssues

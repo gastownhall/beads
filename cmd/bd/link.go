@@ -62,11 +62,11 @@ Examples:
 		}
 		defer toCleanup()
 
-		if isChildOf(fromID, toID) {
+		dt := types.DependencyType(depType)
+		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		dt := types.DependencyType(depType)
 		if !dt.IsValid() {
 			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
 		}

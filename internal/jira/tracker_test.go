@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestRegistered(t *testing.T) {
@@ -629,6 +630,12 @@ func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error)
 }
 
 // Storage interface stubs — not exercised by Init().
+func (s *configStore) IssueLifecycle() (issueops.Lifecycle, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueLifecycle", Backend: "jira-config-stub"}
+}
+func (s *configStore) IssueReader() (issueops.Reader, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueReader", Backend: "jira-config-stub"}
+}
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {

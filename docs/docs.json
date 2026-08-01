@@ -302,6 +302,7 @@
           "integrations/gemini",
           "integrations/junie",
           "integrations/kilocode",
+          "integrations/kiro",
           "integrations/mux",
           "integrations/opencode",
           "integrations/windsurf",

@@ -13,27 +13,36 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// ErrAlreadyClaimed is returned when attempting to claim an issue that is already
-// claimed by another user. The error message contains the current assignee.
-var ErrAlreadyClaimed = errors.New("issue already claimed")
+// The guarded issue-operation error vocabulary is declared and documented by
+// the public contract package, github.com/steveyegge/beads/issueops. These are
+// the same values, so every storage.ErrX reference and every errors.Is site
+// keeps matching the identical error.
+var (
+	ErrAlreadyClaimed    = issueops.ErrAlreadyClaimed
+	ErrNotClaimable      = issueops.ErrNotClaimable
+	ErrAssigneeMismatch  = issueops.ErrAssigneeMismatch
+	ErrNotFound          = issueops.ErrNotFound
+	ErrValidation        = issueops.ErrValidation
+	ErrNotInitialized    = issueops.ErrNotInitialized
+	ErrPrefixMismatch    = issueops.ErrPrefixMismatch
+	ErrCloseBlocked      = issueops.ErrCloseBlocked
+	ErrCloseOpenChildren = issueops.ErrCloseOpenChildren
+	ErrAlreadyExists     = issueops.ErrAlreadyExists
+	ErrVersionMismatch   = issueops.ErrVersionMismatch
+	ErrStatusMismatch    = issueops.ErrStatusMismatch
+)
 
-// ErrNotClaimable is returned when attempting to claim an issue that is not in a
-// claimable state, such as closed, deferred, or already in progress without the
-// same actor owning the claim.
-var ErrNotClaimable = errors.New("issue not claimable")
+// CloseOpenChildrenError reports the issue and open-child count that refused a
+// guarded close. See issueops.CloseOpenChildrenError.
+type CloseOpenChildrenError = issueops.CloseOpenChildrenError
 
 // ErrNotOwner is returned when an actor tries to unclaim an issue that is claimed
 // by a different actor. Releasing another actor's claim requires the force
 // escape hatch (bd unclaim --force), reserved for admin/reaper use.
 var ErrNotOwner = errors.New("issue claimed by a different actor")
-
-// ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
-// current assignee does not match the expected assignee (including when the
-// issue is no longer assigned at all). The caller's view of the claim was
-// stale; the issue is left untouched.
-var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
 // ClaimedByFragment and NotClaimableStatusFragment are the exact message
 // fragments the claim path (issueops/claim.go) appends after the sentinel to
@@ -47,27 +56,6 @@ const (
 	ClaimedByFragment          = " by "
 	NotClaimableStatusFragment = ": status "
 )
-
-// ErrNotFound is returned when a requested entity does not exist in the database.
-var ErrNotFound = errors.New("not found")
-
-// ErrNotInitialized is returned when the database has not been initialized
-// (e.g., issue_prefix config is missing).
-var ErrNotInitialized = errors.New("database not initialized")
-
-// ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
-var ErrPrefixMismatch = errors.New("prefix mismatch")
-
-// ErrCloseBlocked is returned by CloseIssueChecked when an issue cannot be
-// closed because it is still blocked (is_blocked=1: an open blocking dependency
-// or an open blocking gate). Bypass with CloseIssueOptions.Force.
-var ErrCloseBlocked = errors.New("cannot close blocked issue")
-
-// ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
-// no longer matches the row's current version (row_lock) — an optimistic
-// concurrency failure. Callers errors.Is it to distinguish a lost-update
-// precondition from other errors.
-var ErrVersionMismatch = errors.New("version mismatch")
 
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
@@ -91,6 +79,27 @@ type CommentPageCursor struct {
 // implementations; such additions are called out in CHANGELOG.md and the
 // examples/library-usage guide so implementers have a migration path.
 type Storage interface {
+	// IssueLifecycle returns the guarded issue-lifecycle surface for this
+	// store. Every decorator in a store's chain answers for itself and layers
+	// its own behavior onto the inner result, so the returned Lifecycle carries
+	// the same hook and telemetry layers the store itself carries.
+	//
+	// A capability the lifecycle role does not cover gets its own role
+	// interface and its own accessor here; it does not get appended to
+	// issueops.Lifecycle.
+	IssueLifecycle() (issueops.Lifecycle, error)
+
+	// IssueReader returns the guarded issue-query surface for this store: the
+	// read counterpart of IssueLifecycle, and its own role rather than four
+	// more methods on that one. Like the lifecycle accessor, every decorator
+	// in a store's chain answers for itself, so the returned Reader carries the
+	// same layers the store itself carries.
+	//
+	// Reads fire no hooks, so the hook decorator's answer is its inner store's
+	// unchanged. The accessor exists on it anyway: a seam a caller has to
+	// reason about decorator-by-decorator is not a seam.
+	IssueReader() (issueops.Reader, error)
+
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
@@ -111,8 +120,9 @@ type Storage interface {
 	UnclaimIssueIfAssignee(ctx context.Context, id string, actor string, expectedAssignee string) error
 	UpdateIssueType(ctx context.Context, id string, issueType string, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
-	// CloseIssueChecked closes an issue, but refuses with ErrCloseBlocked when
-	// the issue has a live direct blocker (an open blocks/waits-for/
+	// CloseIssueChecked closes an issue, but refuses with ErrCloseOpenChildren
+	// when it has open parent-child dependents, or ErrCloseBlocked when it has a
+	// live direct blocker (an open blocks/waits-for/
 	// conditional-blocks edge) unless opts.Force is set — the historical
 	// `bd close` guard. A bare is_blocked=1 with no live direct blocker (a purely
 	// transitive parent-child block, or a stale column) is not refused. The
@@ -303,7 +313,7 @@ type CloseIssueOptions struct {
 	// ErrVersionMismatch atomically (the version read and the close share one
 	// transaction). nil disables the check, leaving behavior unchanged. It is a
 	// pointer, not an int64, so nil ("no check") is distinct from a caller that
-	// requires version 0. Force bypasses only the is_blocked guard, not this
+	// requires version 0. Force bypasses child and blocker policy, not this
 	// version check.
 	//
 	// RowVersion tracks lifecycle/ownership writes only — it is rewritten by
@@ -318,7 +328,8 @@ type CloseIssueOptions struct {
 
 // CloseIssueResult reports the outcome of CloseIssueChecked.
 type CloseIssueResult struct {
-	Unchanged bool // true when the issue was ALREADY closed (idempotent no-op)
+	Unchanged    bool // true when the issue was ALREADY closed (idempotent no-op)
+	OpenChildren int  // nonzero when Force encountered open children, including idempotent re-closes
 }
 
 // UpdateIssueOptions carries the optional inputs to UpdateIssueChecked.
@@ -329,6 +340,21 @@ type UpdateIssueOptions struct {
 	// nil disables the check. A pointer so nil is distinct from requiring a
 	// legacy version of 0.
 	ExpectedVersion *int64
+
+	// ExpectedAssignee and ExpectedStatus are semantic-field compare-and-swap
+	// guards (bd-wsqvw, `bd update --if-assignee/--if-status`): when non-nil,
+	// the update proceeds only if the issue's current assignee/status equals
+	// the expected value, else it refuses atomically with
+	// ErrAssigneeMismatch/ErrStatusMismatch naming the actual state. A non-nil
+	// pointer to "" is a real guard meaning "expected unassigned" — nil, not
+	// the empty string, disables a check. Guards present together must ALL
+	// hold (conjunction), and compose with ExpectedVersion. The guard read and
+	// the update share one transaction, so there is no internal TOCTOU; a
+	// concurrent writer that commits mid-transaction collides on the row_lock
+	// cell rewrite and is replayed by the store's retry loop, which re-reads
+	// and refuses (the same invariant as ExpectedVersion).
+	ExpectedAssignee *string
+	ExpectedStatus   *string
 }
 
 // MergeSlotStatus is returned by MergeSlotCheck and describes the current
@@ -356,11 +382,20 @@ type MergeSlotResult struct {
 	Position int
 }
 
+// FastStatisticsStore provides a statistics method that skips the blocked-count
+// traversal for callers that don't need it (e.g. bd stats --no-blocked).
+type FastStatisticsStore interface {
+	// GetStatisticsNoBlocked returns aggregate counts without the blocked-set
+	// computation (computeBlockedIDs). BlockedIssues is nil in the result.
+	GetStatisticsNoBlocked(ctx context.Context) (*types.Statistics, error)
+}
+
 // DoltStorage is the full interface for Dolt-backed stores, composing the core
 // Storage interface with all capability sub-interfaces. Both DoltStore and
 // EmbeddedDoltStore satisfy this interface.
 type DoltStorage interface {
 	Storage
+	IssueLifecycleStore
 	VersionControl
 	HistoryViewer
 	RemoteStore
@@ -373,6 +408,7 @@ type DoltStorage interface {
 	ConfigMetadataStore
 	CompactionStore
 	AdvancedQueryStore
+	FastStatisticsStore
 }
 
 // RawDBAccessor provides raw *sql.DB access for diagnostics and migrations.
@@ -387,6 +423,14 @@ type RawDBAccessor interface {
 type StoreLocator interface {
 	Path() string
 	CLIDir() string
+}
+
+// ActiveDatabaseSizer reports the approximate on-disk size of the active
+// database when the current store instance has authoritative local filesystem
+// access. Implementations return *ErrUnsupported when that particular instance
+// is backed by storage that is not locally measurable.
+type ActiveDatabaseSizer interface {
+	ActiveDatabaseSize(ctx context.Context) (int64, error)
 }
 
 // GarbageCollector provides Dolt garbage collection capability.
@@ -456,6 +500,16 @@ type LifecycleManager interface {
 // Used by auto-commit and auto-push flows.
 type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
+}
+
+// PendingChangeDetector reports whether the working set holds changes a
+// commit would capture. Unlike VersionControl.Status, this excludes
+// dolt_ignore'd tables (wisp and lease tables appear in dolt_status but
+// cannot be staged), so it answers "would CommitPending mint a commit?"
+// without committing. Callers that must refuse to act on a dirty working
+// set (bd dolt remote reset-data) should type-assert to this interface.
+type PendingChangeDetector interface {
+	HasCommittablePending(ctx context.Context) (bool, error)
 }
 
 // BackupStore provides Dolt backup operations (CALL DOLT_BACKUP) for
@@ -645,6 +699,22 @@ type Transaction interface {
 	// (created_at ASC, id ASC) and bounded by limit; issueID scopes the feed to
 	// one issue's history ("" = all issues). Durable events table only.
 	EventsSince(ctx context.Context, cursor EventCursor, issueID string, limit int) ([]*types.Event, error)
+}
+
+// IssueLifecycleTransaction is the internal transaction lane for lifecycle
+// transitions that must retain the backend's durable publication semantics.
+// It deliberately extends neither Storage nor Transaction: ordinary callers
+// continue to use the stable generic transaction contract.
+type IssueLifecycleTransaction interface {
+	Transaction
+	ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error)
+}
+
+// IssueLifecycleStore runs a lifecycle-aware transaction. It is an internal
+// companion to Storage for code that must close or reopen within one durable
+// operation and observe the result before committing.
+type IssueLifecycleStore interface {
+	RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error
 }
 
 // DependencyAddOptions controls dependency insertion for both the store-level

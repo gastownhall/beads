@@ -54,7 +54,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 | BUG-25 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-26 | **DECISION** | OPEN (not PR'd yet) | — |
 | BUG-27 | **BUG** | OPEN (not PR'd yet) | — |
-| BUG-28 | **BUG** | OPEN (not PR'd yet) | — |
+| BUG-28 | **FIX PR** | **PR OPEN** | PR #3971 |
 | BUG-29 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-30 | **BUG** | OPEN (not PR'd yet) | — |
 | BUG-31 | **BUG** | OPEN (not PR'd yet) | — |
@@ -127,7 +127,7 @@ actionable — some are by-design tradeoffs. The audit column tracks triage.
 17. **BUG-25**: conditional-blocks cycle undetected
 18. **BUG-26**: reopen superseded = semantic corruption (DECISION)
 19. **BUG-27**: defer with past date creates invisible issue
-20. **BUG-28**: --label-pattern filter is dead code (HIGH)
+20. ~~**BUG-28**: --label-pattern filter is dead code (HIGH)~~ — fixed, PR #3971
 21. **BUG-29**: --claim + --status overwrite conflict
 22. **BUG-30**: --ready silently overrides --status
 23. **BUG-31**: --assignee "" becomes no-filter
@@ -706,6 +706,7 @@ Note: `bd update --defer` warns about past dates but `bd defer` does NOT.
 ### BUG-28: `--label-pattern` and `--label-regex` filters are dead code (NEW — session 5)
 
 **Severity: HIGH** — Complete silent filter failure
+**Status: FIXED — PR #3971**
 **Discovered:** Session 5 deep discovery, code review + test
 **File:** `cmd/bd/list.go:436-441` (sets filter) vs `internal/storage/dolt/queries.go` (never reads it)
 **Test:** `TestDiscovery_LabelPatternFilterDeadCode`
@@ -714,6 +715,16 @@ Note: `bd update --defer` warns about past dates but `bd defer` does NOT.
 struct, but `SearchIssues()` in queries.go NEVER reads or processes `LabelPattern`
 or `LabelRegex`. The SQL query builder completely ignores these fields. The user
 gets unfiltered results while believing they filtered by label glob/regex.
+
+**Fix:** `BuildIssueFilterClauses` in `internal/storage/sqlbuild/filter.go` now
+consumes both fields — `LabelPattern` is converted to a SQL `LIKE` pattern
+(glob `*`/`?`, with literal `%`/`_`/escape-char escaping) and AND-joined as an
+`id IN (SELECT issue_id FROM <labels> WHERE label LIKE ? ESCAPE '|')`
+subquery; `LabelRegex` passes through to a `label REGEXP ?` subquery.
+`TestDiscovery_LabelPatternFilterDeadCode`'s assertions already encoded the
+correct (filtered) behavior, so no assertion changes were needed — the test
+now passes against the candidate binary where it previously failed and
+documented the live bug.
 
 ---
 

@@ -89,7 +89,7 @@ Do not require these existing check names directly:
 - `Test (macos-latest)`
 - `Test (storage domain + uow)`
 - `Build (Embedded Dolt)`
-- `Test (Embedded Dolt Storage)`
+- `Test (Embedded Dolt Storage 1/5)` through `Test (Embedded Dolt Storage 5/5)`
 - `Test (Embedded Dolt Cmd 1/20)` through `Test (Embedded Dolt Cmd 20/20)`
 - `Test (Windows - smoke)`
 - `Check formatting`

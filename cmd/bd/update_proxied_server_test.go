@@ -113,25 +113,32 @@ type fakeUOW struct {
 	commit  func() error
 }
 
-func (f *fakeUOW) Close(ctx context.Context)                        {}
-func (f *fakeUOW) Commit(ctx context.Context, message string) error { return f.commit() }
-func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase              { return nil }
-func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase      { return nil }
-func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase        { return nil }
-func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                { return f.issueUC }
-func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase      { return nil }
-func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                { return nil }
-func (f *fakeUOW) CommentUseCase() domain.CommentUseCase            { return nil }
-func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase              { return nil }
+func (f *fakeUOW) Close(ctx context.Context)                                 {}
+func (f *fakeUOW) Commit(ctx context.Context, message string) error          { return f.commit() }
+func (f *fakeUOW) SwitchDatabase(ctx context.Context, database string) error { return nil }
+func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase                       { return nil }
+func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase               { return nil }
+func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase                 { return nil }
+func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                         { return f.issueUC }
+func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase               { return nil }
+func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                         { return nil }
+func (f *fakeUOW) CommentUseCase() domain.CommentUseCase                     { return nil }
+func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase                       { return nil }
 
 type fakeUOWProvider struct {
 	uows   atomic.Int64
+	newUOW func(attempt int64) error
 	commit func(attempt int64) error
 	issue  *types.Issue
 }
 
 func (p *fakeUOWProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	n := p.uows.Add(1)
+	if p.newUOW != nil {
+		if err := p.newUOW(n); err != nil {
+			return nil, err
+		}
+	}
 	return &fakeUOW{
 		issueUC: &fakeUpdateIssueUC{issue: p.issue},
 		commit:  func() error { return p.commit(n) },
@@ -197,12 +204,12 @@ func TestApplyUpdateProxiedOne_RetriesWholeAttemptOnConflict(t *testing.T) {
 	withFakeProxiedUpdateEnv(t, provider)
 
 	in := &updateInput{fields: map[string]any{"title": "renamed"}}
-	got, failReason, err := applyUpdateProxiedOne(context.Background(), "bd-retry-1", in)
+	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-1", in)
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne: %v", err)
 	}
-	if failReason != "" {
-		t.Fatalf("expected update to succeed after conflict retries, got failure: %s", failReason)
+	if fail != nil {
+		t.Fatalf("expected update to succeed after conflict retries, got failure: %s", fail.Error)
 	}
 	if got == nil || got.ID != "bd-retry-1" {
 		t.Fatalf("updated issue = %v, want bd-retry-1", got)
@@ -230,17 +237,20 @@ func TestApplyUpdateProxiedOne_ExhaustedConflictsFailLoudly(t *testing.T) {
 	withFakeProxiedUpdateEnv(t, provider)
 
 	var got *types.Issue
-	var failReason string
+	var fail *updateIDFailure
 	var err error
 	stderr := captureStderrDuring(t, func() {
 		in := &updateInput{fields: map[string]any{"title": "never lands"}}
-		got, failReason, err = applyUpdateProxiedOne(context.Background(), "bd-retry-2", in)
+		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-retry-2", in)
 	})
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne returned hard error: %v", err)
 	}
-	if failReason == "" || got != nil {
-		t.Fatalf("failReason=%q issue=%v: a write that never landed must be reported as a failure", failReason, got)
+	if fail == nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: a write that never landed must be reported as a failure", fail, got)
+	}
+	if fail.GuardMismatch {
+		t.Errorf("exhausted conflicts must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
 	}
 	if !strings.Contains(stderr, "retries exhausted") {
 		t.Errorf("stderr = %q, want a loud retries-exhausted failure", stderr)
@@ -264,14 +274,152 @@ func TestApplyUpdateProxiedOne_NothingToCommitWithoutConflictSucceeds(t *testing
 	withFakeProxiedUpdateEnv(t, provider)
 
 	in := &updateInput{fields: map[string]any{"title": "wisp-shaped"}}
-	got, failReason, err := applyUpdateProxiedOne(context.Background(), "bd-retry-3", in)
+	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-3", in)
 	if err != nil {
 		t.Fatalf("applyUpdateProxiedOne: %v", err)
 	}
-	if failReason != "" || got == nil {
-		t.Fatalf("failReason=%q issue=%v: empty-working-set commit on an unconflicted attempt is a success", failReason, got)
+	if fail != nil || got == nil {
+		t.Fatalf("fail=%v issue=%v: empty-working-set commit on an unconflicted attempt is a success", fail, got)
 	}
 	if n := provider.uows.Load(); n != 1 {
 		t.Errorf("unit-of-work attempts = %d, want 1 (nothing-to-commit must not trigger retries)", n)
+	}
+}
+
+// TestApplyUpdateProxiedOne_NewUOWFailureIsPerIDFailure pins the stage the
+// error came from when the provider cannot hand out a unit of work at all:
+// the attempt never ran, so the ID fails with an "opening unit of work"
+// verdict and NO hard error — a multi-ID batch keeps going and still exits
+// non-zero through reportUpdateFailures. Returning a hard error here instead
+// would abort the batch and drop the failures already collected.
+func TestApplyUpdateProxiedOne_NewUOWFailureIsPerIDFailure(t *testing.T) {
+	provider := &fakeUOWProvider{
+		issue:  &types.Issue{ID: "bd-uow-1", Status: types.StatusOpen},
+		newUOW: func(int64) error { return errors.New("dial dolt: connection refused") },
+	}
+	withFakeProxiedUpdateEnv(t, provider)
+
+	var got *types.Issue
+	var fail *updateIDFailure
+	var err error
+	stderr := captureStderrDuring(t, func() {
+		in := &updateInput{fields: map[string]any{"title": "no session"}}
+		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-uow-1", in)
+	})
+	if err != nil {
+		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a provider failure is a per-ID verdict, not a batch abort", err)
+	}
+	if fail == nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: an update that never opened a unit of work must be reported as a failure", fail, got)
+	}
+	if !strings.Contains(fail.Error, "opening unit of work") {
+		t.Errorf("fail.Error = %q, want it attributed to opening the unit of work", fail.Error)
+	}
+	if fail.GuardMismatch {
+		t.Error("a provider failure must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
+	}
+	if !strings.Contains(stderr, "Error opening unit of work for bd-uow-1") {
+		t.Errorf("stderr = %q, want the provider failure named on stderr", stderr)
+	}
+	if n := provider.uows.Load(); n != 1 {
+		t.Errorf("unit-of-work attempts = %d, want 1 (a permanent provider failure must not be retried)", n)
+	}
+}
+
+// TestApplyUpdateProxiedOne_CommitFailureIsPerIDFailure pins the other
+// terminal stage: a commit that fails for a reason that is neither a
+// serialization conflict nor an empty working set. The write did not land, so
+// the ID fails with a "committing" verdict, once — no retry, no batch abort.
+func TestApplyUpdateProxiedOne_CommitFailureIsPerIDFailure(t *testing.T) {
+	provider := &fakeUOWProvider{
+		issue:  &types.Issue{ID: "bd-commit-1", Status: types.StatusOpen},
+		commit: func(int64) error { return errors.New("dolt: disk full") },
+	}
+	withFakeProxiedUpdateEnv(t, provider)
+
+	var got *types.Issue
+	var fail *updateIDFailure
+	var err error
+	stderr := captureStderrDuring(t, func() {
+		in := &updateInput{fields: map[string]any{"title": "never commits"}}
+		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-commit-1", in)
+	})
+	if err != nil {
+		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a commit failure is a per-ID verdict, not a batch abort", err)
+	}
+	if fail == nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: a write whose commit failed must be reported as a failure", fail, got)
+	}
+	if !strings.Contains(fail.Error, "committing:") {
+		t.Errorf("fail.Error = %q, want it attributed to the commit", fail.Error)
+	}
+	if !strings.Contains(stderr, "Error committing bd-commit-1") {
+		t.Errorf("stderr = %q, want the commit failure named on stderr", stderr)
+	}
+	if n := provider.uows.Load(); n != 1 {
+		t.Errorf("unit-of-work attempts = %d, want 1 (a permanent commit failure must not be retried)", n)
+	}
+}
+
+// TestApplyUpdateProxiedOne_CommitCanceledStaysPerIDFailure guards the seam
+// between "the commit failed" and "the retry loop was cut short". Both surface
+// as a context error, but they are different verdicts: a commit that fails
+// while the process is tearing down on SIGINT is still one ID's commit
+// failure, and must be recorded as one so reportUpdateFailures still runs for
+// the whole batch — including any earlier guard mismatch, whose exit 13 tells
+// scripts not to retry. Only cancellation BETWEEN attempts aborts the batch.
+func TestApplyUpdateProxiedOne_CommitCanceledStaysPerIDFailure(t *testing.T) {
+	provider := &fakeUOWProvider{
+		issue:  &types.Issue{ID: "bd-commit-2", Status: types.StatusOpen},
+		commit: func(int64) error { return context.Canceled },
+	}
+	withFakeProxiedUpdateEnv(t, provider)
+
+	var got *types.Issue
+	var fail *updateIDFailure
+	var err error
+	stderr := captureStderrDuring(t, func() {
+		in := &updateInput{fields: map[string]any{"title": "commit interrupted"}}
+		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-commit-2", in)
+	})
+	if err != nil {
+		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a commit that failed with a context error is still a per-ID verdict", err)
+	}
+	if fail == nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: a write whose commit failed must be reported as a failure", fail, got)
+	}
+	if !strings.Contains(fail.Error, "committing:") {
+		t.Errorf("fail.Error = %q, want it attributed to the commit", fail.Error)
+	}
+	if !strings.Contains(stderr, "Error committing bd-commit-2") {
+		t.Errorf("stderr = %q, want the commit failure named on stderr", stderr)
+	}
+}
+
+// TestApplyUpdateProxiedOne_CanceledBetweenAttemptsAbortsBatch is the other
+// side of that seam: when cancellation lands between two conflict retries the
+// retry loop reports the context's own error, no stage failed, and no verdict
+// was reached for this ID. Abort the batch rather than inventing a per-ID
+// failure for a write whose outcome nobody observed.
+func TestApplyUpdateProxiedOne_CanceledBetweenAttemptsAbortsBatch(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+
+	provider := &fakeUOWProvider{
+		issue: &types.Issue{ID: "bd-cancel-1", Status: types.StatusOpen},
+		commit: func(int64) error {
+			cancel() // SIGINT lands while this attempt is losing Dolt's merge
+			return serializationFailure()
+		},
+	}
+	withFakeProxiedUpdateEnv(t, provider)
+
+	in := &updateInput{fields: map[string]any{"title": "interrupted"}}
+	got, fail, err := applyUpdateProxiedOne(ctx, "bd-cancel-1", in)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want the context error so the batch aborts", err)
+	}
+	if fail != nil || got != nil {
+		t.Fatalf("fail=%v issue=%v: an unobserved outcome is not a per-ID verdict", fail, got)
 	}
 }

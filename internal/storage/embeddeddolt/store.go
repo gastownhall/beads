@@ -25,6 +25,7 @@ import (
 // Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*EmbeddedDoltStore)(nil)
 var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
@@ -772,6 +773,24 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 	return filepath.Join(s.dataDir, s.database)
 }
 
+// ActiveDatabaseSize returns the approximate size of this store's active
+// database directory. Sibling databases under the embedded data root are not
+// part of the result.
+func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.closed.Load() {
+		return 0, errClosed
+	}
+	activeDir := s.CLIDir()
+	if activeDir == "" {
+		return 0, fmt.Errorf("embeddeddolt: active database directory is empty")
+	}
+	size, err := storage.MeasureDirectorySize(ctx, activeDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", activeDir, err)
+	}
+	return size, nil
+}
+
 // ---------------------------------------------------------------------------
 // storage.VersionControl
 // ---------------------------------------------------------------------------
@@ -779,15 +798,17 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 // Branch, Checkout, CurrentBranch, DeleteBranch, ListBranches are
 // implemented in version_control.go via versioncontrolops.
 
+// CommitPending commits all working set changes and reports whether a commit
+// actually landed. It gets that from commitAll's returned bool rather than
+// inspecting Commit's error or reading HEAD before and after: as of GH#3886,
+// Commit itself tolerates Dolt's "nothing to commit" response (matching the
+// server store) and returns nil for it, so an error-based check here would
+// report every clean-store call as "committed", and a HEAD-before/HEAD-after
+// comparison would cost two extra engine opens on every call (this runs on
+// every embedded pull/sync) and race against any concurrent HEAD movement.
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
-	if err := s.Commit(ctx, msg); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return s.commitAll(ctx, msg, true)
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.

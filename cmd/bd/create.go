@@ -24,14 +24,30 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
 
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateCreateArgs),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -65,6 +81,9 @@ var createCmd = &cobra.Command{
 			if dryRun {
 				return HandleError("--dry-run is not supported with --file flag")
 			}
+			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromMarkdown(cmd, file)
 		}
 
@@ -73,35 +92,20 @@ var createCmd = &cobra.Command{
 				return HandleError("cannot specify both title and --graph flag")
 			}
 			graphDryRun, _ := cmd.Flags().GetBool("dry-run")
-			wisp, _ := cmd.Flags().GetBool("ephemeral")
-			noHistory, _ := cmd.Flags().GetBool("no-history")
-			graphOpts := GraphApplyOptions{
-				Ephemeral: wisp,
-				NoHistory: noHistory,
-			}
+			graphOpts := graphApplyOptionsFromFlags(cmd)
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
+			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
 			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag
@@ -121,9 +125,12 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		description, _, err := getDescriptionFlag(cmd)
+		description, descriptionChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
 			return err
+		}
+		if err := validateDescriptionUpdate(cmd, description, descriptionChanged); err != nil {
+			return HandleError("%v", err)
 		}
 
 		skills, _ := cmd.Flags().GetString("skills")
@@ -166,15 +173,7 @@ var createCmd = &cobra.Command{
 		assignee, _ := cmd.Flags().GetString("assignee")
 		statusFlag, _ := cmd.Flags().GetString("status")
 		if statusFlag != "" {
-			var customStatuses []string
-			// store is nil for `create --repo=<remote URL>` with no local
-			// .beads/; fall back to built-in statuses only.
-			if store != nil {
-				if cs, err := store.GetCustomStatuses(rootCtx); err == nil {
-					customStatuses = cs
-				}
-			}
-			if !types.Status(statusFlag).IsValidWithCustom(customStatuses) {
+			if !types.Status(statusFlag).IsValidWithCustom(loadEmbeddedCustomStatuses()) {
 				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", statusFlag)
 			}
 		}
@@ -197,6 +196,22 @@ var createCmd = &cobra.Command{
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
 			return HandleError("--ephemeral and --no-history are mutually exclusive")
+		}
+		storageClassFlag, _ := cmd.Flags().GetString("storage-class")
+		storageClass, err := resolveStorageClass(storageClassFlag, types.IssueType(issueType).Normalize())
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		// --storage-class ephemeral is the spelled-out spelling of --ephemeral
+		// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
+		// implementation). It routes to the wisp path exactly like the flag;
+		// the --no-history mutual exclusion above still applies.
+		if storageClass == types.StorageClassEphemeral {
+			if noHistory {
+				return HandleError("--storage-class ephemeral and --no-history are mutually exclusive")
+			}
+			wisp = true
+			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -355,6 +370,7 @@ var createCmd = &cobra.Command{
 				EstimatedMinutes:   estimatedMinutes,
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
+				StorageClass:       storageClass,
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				Labels:             labels,
@@ -465,6 +481,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -481,15 +509,10 @@ var createCmd = &cobra.Command{
 				return HandleError("%v", err)
 			}
 
-			ctx := createCtx
-
-			var dbPrefix, allowedPrefixes string
-			if yamlPrefix := config.GetString("issue-prefix"); yamlPrefix != "" {
-				dbPrefix = yamlPrefix
-			} else {
-				dbPrefix, _ = store.GetConfig(ctx, "issue_prefix")
-			}
-			allowedPrefixes, _ = store.GetConfig(ctx, "allowed_prefixes")
+			// Validate prefix matches database prefix (YAML config takes
+			// precedence over DB, except under --global — see
+			// loadEmbeddedIDPrefixes).
+			dbPrefix, allowedPrefixes := loadEmbeddedIDPrefixes()
 
 			if err := validation.ValidateIDPrefixAllowed(explicitID, dbPrefix, allowedPrefixes, forceCreate); err != nil {
 				return HandleError("%v", err)
@@ -511,6 +534,7 @@ var createCmd = &cobra.Command{
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
+			StorageClass:       storageClass,
 			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			Labels:             labels,
@@ -528,20 +552,20 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Parse every requested dependency edge BEFORE creating anything so
-		// a malformed spec aborts with no orphan issue behind it.
-		depSpecs, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
+		// Resolve partial --deps targets the way `bd dep add` does, so a bare
+		// slug becomes a qualified id rather than a dangling edge, and an
+		// unknown target fails closed here instead of reaching the write.
+		resolvedDepSpecs, resolveErr := resolveDepSpecTargets(ctx, store, depSpecs)
+		if resolveErr != nil {
+			return HandleErrorRespectJSON("%v", resolveErr)
 		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
-		if err != nil {
-			return HandleError("%v", err)
-		}
+		depSpecs = resolvedDepSpecs
 
 		// If a discovered-from dependency is present, inherit source_repo
-		// from the referenced parent issue.
-		if dfParent := discoveredFromParent(deps); dfParent != "" {
+		// from the referenced parent issue. Reuse the already-parsed specs
+		// (not the raw --deps strings) so this can't drift from parseDepSpec's
+		// normalization rules.
+		if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo
@@ -549,20 +573,52 @@ var createCmd = &cobra.Command{
 			// If error getting parent or parent has no source_repo, continue with default
 		}
 
-		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
-		if err := createIssueWithDeps(ctx, store, issue, actor, edges); err != nil {
+		ops, err := writeOps(store)
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Label inheritance stays CLI-side (mergeCreateLabels above) because the
+		// dry-run preview needs it too; asking the facade to inherit as well
+		// would append the parent's labels a second time.
+		result, err := ops.Create(opsCtx, issueops.CreateRequest{
+			Actor:         actor,
+			Issue:         issue,
+			ParentID:      parentID,
+			Dependencies:  createDependencyRequests(depSpecs),
+			WaitsFor:      waitsForRequest(waitsForSpec),
+			ForceIDPrefix: forceCreate,
+		})
+		if err != nil {
+			// RULING R1: an occupied --id is a refusal, not a silent full-row
+			// upsert reported as success.
+			if errors.Is(err, storage.ErrAlreadyExists) && explicitID != "" {
+				return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", explicitID)
+			}
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Every post-write read comes from the facade's result snapshot, never
+		// from the local struct: the facade clones its request, so the local
+		// struct still has no ID for an auto-minted create and no persisted
+		// timestamps. Dependencies and comments are dropped because `bd create`
+		// has never printed them.
+		created := result.Issue
+		created.Dependencies = nil
+		created.Comments = nil
 
+		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
 		if edges.empty() {
 			// Bare create: preserve the embedded-mode follow-up Dolt commit.
 			// The deps path commits inside its transaction instead.
-			shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
+			shouldCommit, err := shouldCommitCreatePostWrites(created, false)
 			if err != nil {
 				return HandleError("dolt auto-commit failed: %v", err)
 			}
 			if shouldCommit {
-				commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+				commitMsg := fmt.Sprintf("bd: create %s", created.ID)
 				if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 					WarnError("failed to commit: %v", err)
 				}
@@ -572,7 +628,7 @@ var createCmd = &cobra.Command{
 		if repoPath != "." && targetStore != nil {
 			if err := commitPendingIfEmbedded(ctx, targetStore, actor, doltAutoCommitParams{
 				Command:  "create",
-				IssueIDs: []string{issue.ID},
+				IssueIDs: []string{created.ID},
 			}); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}
@@ -585,20 +641,20 @@ var createCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			if err := outputJSON(issue); err != nil {
+			if err := outputJSON(created); err != nil {
 				return err
 			}
 		} else if silent {
-			fmt.Println(issue.ID)
+			fmt.Println(created.ID)
 		} else {
-			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
-			debug.PrintNormal("  Priority: P%d\n", issue.Priority)
-			debug.PrintNormal("  Status: %s\n", issue.Status)
+			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(created.ID, created.Title))
+			debug.PrintNormal("  Priority: P%d\n", created.Priority)
+			debug.PrintNormal("  Status: %s\n", created.Status)
 
 			maybeShowTip(store)
 		}
 
-		SetLastTouchedID(issue.ID)
+		SetLastTouchedID(created.ID)
 		return nil
 	},
 }
@@ -618,6 +674,7 @@ type createIssueParams struct {
 	EstimatedMinutes   *int
 	Ephemeral          bool
 	NoHistory          bool
+	StorageClass       types.StorageClass
 	CreatedBy          string
 	Owner              string
 	Labels             []string
@@ -631,6 +688,34 @@ type createIssueParams struct {
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
+}
+
+// resolveStorageClass resolves the effective storage class at create time
+// (Protocol v0.1 C1.3): the explicit --storage-class flag wins; otherwise the
+// per-type config default storage-class.<type> applies; otherwise unset.
+// Versioned normalizes to unset — the class marker is omitted when versioned
+// (C2.4), and both spell identical semantics (C1.2). Values are validated
+// wherever they came from: a bad flag is a usage error, a bad config value is
+// a config bug and fails just as loudly.
+func resolveStorageClass(explicit string, issueType types.IssueType) (types.StorageClass, error) {
+	raw := explicit
+	if raw == "" {
+		raw = config.GetString("storage-class." + string(issueType))
+		if raw == "" {
+			return "", nil
+		}
+	}
+	class, err := types.ParseStorageClass(raw)
+	if err != nil {
+		if explicit == "" {
+			return "", fmt.Errorf("config storage-class.%s: %w", issueType, err)
+		}
+		return "", err
+	}
+	if class == types.StorageClassVersioned {
+		return "", nil
+	}
+	return class, nil
 }
 
 func buildCreateIssue(params createIssueParams) *types.Issue {
@@ -662,6 +747,7 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		EstimatedMinutes:   params.EstimatedMinutes,
 		Ephemeral:          params.Ephemeral,
 		NoHistory:          params.NoHistory,
+		StorageClass:       params.StorageClass,
 		CreatedBy:          params.CreatedBy,
 		Owner:              params.Owner,
 		Labels:             append([]string(nil), params.Labels...),
@@ -700,6 +786,16 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 	return merged
 }
 
+func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
+	if global {
+		return storePrefix
+	}
+	if yamlPrefix != "" {
+		return yamlPrefix
+	}
+	return storePrefix
+}
+
 func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 	idDisplay := issue.ID
 	if idDisplay == "" {
@@ -729,17 +825,7 @@ func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 }
 
 func shouldCommitCreatePostWrites(_ *types.Issue, _ bool) (bool, error) {
-	if isEmbeddedMode() {
-		if strings.TrimSpace(doltAutoCommit) == "" {
-			return true, nil
-		}
-		mode, err := getDoltAutoCommitMode()
-		if err != nil {
-			return false, err
-		}
-		return mode == doltAutoCommitOn, nil
-	}
-	return false, nil
+	return embeddedWritesCommitNow()
 }
 
 func createDepsAcceptedTypeList() string {
@@ -770,7 +856,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
-	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
@@ -778,9 +864,11 @@ func init() {
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
+	createCmd.Flags().String("storage-class", "", "Storage class: versioned, unversioned, or ephemeral (default: storage-class.<type> config, else versioned)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
+	createCmd.Flags().Bool("allow-empty-description", false, "Allow empty description input from stdin or file")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")

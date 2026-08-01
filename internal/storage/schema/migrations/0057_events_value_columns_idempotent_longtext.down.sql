@@ -1,0 +1,5 @@
+-- Reverse of 0057: not reversible without potential data loss, same rationale
+-- as 0049's down. Shrinking LONGTEXT back to TEXT would silently truncate any
+-- content longer than 65535 bytes stored after the widening. Intentional
+-- no-op; 0048's down already narrows these columns back to TEXT for a full
+-- rollback of the original widening.

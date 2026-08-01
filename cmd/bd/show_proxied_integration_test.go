@@ -46,12 +46,48 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
-	t.Run("show_nonexistent_id_exits_nonzero", func(t *testing.T) {
+	// bd-hc1: proxied `bd show <missing>` answered with the domain seam's raw
+	// "Error fetching x: get x: sql: no rows in result set" - the only visible
+	// difference between a typo and a broken database was the wording of a
+	// driver sentinel. This is the user-facing half of the normalization, so it
+	// asserts both streams rather than only the exit code.
+	t.Run("show_nonexistent_id_reports_not_found", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sne")
+
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, "sne-nonexistent999")
-		_ = stdout
-		_ = stderr
+		if want := "Issue sne-nonexistent999 not found"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+		if strings.Contains(stderr, "sql: no rows in result set") {
+			t.Errorf("stderr leaks the raw driver sentinel: %q", stderr)
+		}
+		if strings.Contains(stdout, "not found") {
+			t.Errorf("the diagnostic belongs on stderr, not stdout: %q", stdout)
+		}
+
+		// --json takes the same lookup and must report it the same way, with
+		// the machine-readable envelope still alone on stdout.
+		jsonStdout, jsonStderr := bdProxiedShowFail(t, bd, p.dir, "--json", "sne-nonexistent999")
+		if want := "Issue sne-nonexistent999 not found"; !strings.Contains(jsonStderr, want) {
+			t.Errorf("--json stderr = %q, want it to contain %q", jsonStderr, want)
+		}
+		if strings.Contains(jsonStderr, "sql: no rows in result set") {
+			t.Errorf("--json stderr leaks the raw driver sentinel: %q", jsonStderr)
+		}
+		start := strings.Index(jsonStdout, "{")
+		if start < 0 {
+			t.Fatalf("--json stdout carries no JSON object: %q", jsonStdout)
+		}
+		var envelope map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStdout[start:]), &envelope); err != nil {
+			t.Fatalf("--json stdout is not a JSON object: %v\nraw: %s", err, jsonStdout)
+		}
+		// The key sits at the top level or under "data" depending on the
+		// envelope setting; either way it has to be there.
+		if !strings.Contains(jsonStdout, `"error"`) {
+			t.Errorf("--json stdout carries no error key: %s", jsonStdout)
+		}
 	})
 
 	t.Run("show_no_args_errors", func(t *testing.T) {
@@ -179,6 +215,74 @@ func TestProxiedServerShow(t *testing.T) {
 		comments, _ := m["comments"].([]interface{})
 		if len(comments) == 0 {
 			t.Errorf("expected comments with --include-comments: %v", m)
+		}
+	})
+
+	// ga-clgh: proxied path mirror of the direct-path fix (a2a69f5e9). The
+	// proxied handler used to leave comments_omitted unset entirely, so a
+	// caller reading only `.comments` couldn't tell "none" from "left out".
+	t.Run("show_json_comments_omitted_flag_set", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco1")
+		issue := bdProxiedCreate(t, bd, p.dir, "Omitted flag", "--type", "task")
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), issue.ID, "tester", "Hidden"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
+		if _, ok := m["comments"]; ok {
+			t.Errorf("comments slice should be absent by default: %v", m)
+		}
+		omitted, present := m["comments_omitted"]
+		if !present {
+			t.Fatalf("expected comments_omitted present when comment_count>0 without --include-comments: %v", m)
+		}
+		if omitted != true {
+			t.Errorf("comments_omitted: got %v, want true", omitted)
+		}
+	})
+
+	t.Run("show_json_comments_omitted_flag_absent_when_included", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco2")
+		issue := bdProxiedCreate(t, bd, p.dir, "Included flag", "--type", "task")
+
+		db := openProxiedDB(t, p)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := db.ExecContext(ctx,
+			"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (?, ?, ?, ?, NOW())",
+			fmt.Sprintf("cmt-%d", time.Now().UnixNano()), issue.ID, "tester", "Visible"); err != nil {
+			t.Fatalf("insert comment: %v", err)
+		}
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID, "--include-comments")
+		comments, _ := m["comments"].([]interface{})
+		if len(comments) == 0 {
+			t.Errorf("expected comments with --include-comments: %v", m)
+		}
+		if v, present := m["comments_omitted"]; present {
+			t.Errorf("comments_omitted should be absent under --include-comments, got %v", v)
+		}
+	})
+
+	t.Run("show_json_comments_omitted_flag_absent_when_zero", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "sjco3")
+		issue := bdProxiedCreate(t, bd, p.dir, "No comments", "--type", "task")
+
+		m := bdProxiedShowDetailsFirst(t, bd, p.dir, issue.ID)
+		if got, _ := m["comment_count"].(float64); got != 0 {
+			t.Errorf("comment_count: got %v, want 0", m["comment_count"])
+		}
+		if v, present := m["comments_omitted"]; present {
+			t.Errorf("comments_omitted should be absent when comment_count=0, got %v", v)
 		}
 	})
 

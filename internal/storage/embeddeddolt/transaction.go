@@ -18,6 +18,16 @@ import (
 // After the SQL transaction commits, dirty tables are selectively staged
 // and a Dolt version commit is created with the given message.
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
+	return s.runTransaction(ctx, commitMsg, func(tx *embeddedTransaction) error { return fn(tx) })
+}
+
+// RunInIssueLifecycleTransaction keeps lifecycle work on the embedded store's
+// one transaction and stages only durable rows changed by that work.
+func (s *EmbeddedDoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
+	return s.runTransaction(ctx, commitMsg, func(tx *embeddedTransaction) error { return fn(tx) })
+}
+
+func (s *EmbeddedDoltStore) runTransaction(ctx context.Context, commitMsg string, fn func(tx *embeddedTransaction) error) error {
 	var tracker versioncontrolops.DirtyTableTracker
 
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
@@ -70,25 +80,58 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 }
 
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
-	return err
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
+	if err != nil {
+		return err
+	}
+	if !result.Changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("events")
-	_, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
-	return err
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
+	if err != nil || result.AlreadyClosed {
+		return err
+	}
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return nil
+}
+
+// ReopenIssueWithResult lets transaction-scoped callers preserve lifecycle
+// semantics when an update crosses the done boundary.
+func (t *embeddedTransaction) ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error) {
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
+	result, err := issueops.ReopenIssueInTx(ctx, t.tx, id, reason, actor)
+	if err != nil {
+		return false, err
+	}
+	if result.Changed {
+		t.dirty.MarkDirty(issueTable)
+		t.dirty.MarkDirty(eventTable)
+		if result.IssueRowsChanged {
+			t.dirty.MarkDirty("issues")
+		}
+	}
+	return result.Changed, nil
 }
 
 func (t *embeddedTransaction) DeleteIssue(ctx context.Context, id string) error {
-	t.dirty.MarkDirty("issues")
-	t.dirty.MarkDirty("dependencies")
-	t.dirty.MarkDirty("labels")
-	t.dirty.MarkDirty("comments")
-	t.dirty.MarkDirty("events")
+	// Shared with the dolt path so the two cannot drift again; the hand-listed
+	// set here previously omitted child_counters and the snapshot tables, which
+	// the cascade also empties.
+	for _, cascaded := range issueops.DeleteCascadeTables(issueops.IsActiveWispInTx(ctx, t.tx, id)) {
+		t.dirty.MarkDirty(cascaded)
+	}
 	return issueops.DeleteIssueInTx(ctx, t.tx, id)
 }
 
@@ -172,13 +215,23 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 }
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
-	t.dirty.MarkDirty("labels")
-	return issueops.AddLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
+	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	if err := issueops.AddLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(labelTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
-	t.dirty.MarkDirty("labels")
-	return issueops.RemoveLabelInTx(ctx, t.tx, "", "", issueID, label, actor)
+	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	if err := issueops.RemoveLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+		return err
+	}
+	t.dirty.MarkDirty(labelTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
 }
 
 func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {

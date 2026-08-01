@@ -155,6 +155,7 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("HeartbeatWisp", func(t *testing.T) { testHeartbeatWisp(t, factory) })
 	t.Run("ReclaimExpiredLease", func(t *testing.T) { testReclaimExpiredLease(t, factory) })
 	t.Run("ReclaimSkipsFreshLease", func(t *testing.T) { testReclaimSkipsFreshLease(t, factory) })
+	t.Run("ReclaimScoped", func(t *testing.T) { testReclaimScoped(t, factory) })
 	t.Run("UnclaimIfAssigneeMatch", func(t *testing.T) { testUnclaimIfAssigneeMatch(t, factory) })
 	t.Run("UnclaimIfAssigneeStale", func(t *testing.T) { testUnclaimIfAssigneeStale(t, factory) })
 

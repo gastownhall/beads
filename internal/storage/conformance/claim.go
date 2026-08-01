@@ -217,7 +217,7 @@ func testReclaimExpiredLease(t *testing.T, f Factory) {
 	// cutoff (now - olderThan) into the future, so even the fresh lease counts as
 	// expired. This exercises the revert path deterministically with no wall-clock
 	// wait; ReclaimSkipsFreshLease (olderThan 0) pins the other side of the cutoff.
-	reclaimed, err := s.ReclaimExpiredLeases(ctx(), -time.Hour, "reaper")
+	reclaimed, err := s.ReclaimExpiredLeases(ctx(), -time.Hour, types.ReclaimFilter{}, "reaper")
 	must(t, err)
 	found := false
 	for _, r := range reclaimed {
@@ -254,7 +254,7 @@ func testReclaimSkipsFreshLease(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rc-2", Title: "T"}), "a"))
 	must(t, s.ClaimIssue(ctx(), "rc-2", "liveworker")) // fresh default-TTL lease
 
-	reclaimed, err := s.ReclaimExpiredLeases(ctx(), 0, "reaper")
+	reclaimed, err := s.ReclaimExpiredLeases(ctx(), 0, types.ReclaimFilter{}, "reaper")
 	must(t, err)
 	for _, r := range reclaimed {
 		if r.ID == "rc-2" {

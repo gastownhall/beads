@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -110,8 +111,13 @@ func TestProxiedServerComment(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "mo")
 		issue := bdProxiedCreate(t, bd, p.dir, "Multi comment")
 
+		// created_at is second-resolution and ids are content digests, so
+		// same-second comments have no defined relative order (bd-vuulx);
+		// give each comment its own second to keep the assertion meaningful.
 		bdProxiedComment(t, bd, p.dir, issue.ID, "one")
+		time.Sleep(1100 * time.Millisecond)
 		bdProxiedComment(t, bd, p.dir, issue.ID, "two")
+		time.Sleep(1100 * time.Millisecond)
 		bdProxiedComment(t, bd, p.dir, issue.ID, "three")
 
 		comments := bdProxiedCommentsJSON(t, bd, p.dir, issue.ID)
@@ -187,7 +193,7 @@ func TestProxiedServerComment(t *testing.T) {
 		p := newSharedProxiedProject(t, bd, "aj")
 		issue := bdProxiedCreate(t, bd, p.dir, "Add JSON")
 
-		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add json body", "--json")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add", "json", "body", "--json")
 		if err != nil {
 			t.Fatalf("comments add --json failed: %v\nstderr:\n%s", err, stderr)
 		}

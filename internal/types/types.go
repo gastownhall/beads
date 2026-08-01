@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -55,6 +56,15 @@ type Issue struct {
 	// below (json:"-", never serialized).
 	LeaseExpiresAt *time.Time `json:"lease_expires_at,omitempty"` // When the current claim's lease expires
 	HeartbeatAt    *time.Time `json:"heartbeat_at,omitempty"`     // Last heartbeat from the lease owner
+	// LeaseGrantedNode names the replica that granted the lease
+	// (config.NodeID() at claim time). A lease is only enforceable there: on
+	// any other replica the liveness view is stale by up to one sync interval,
+	// so reclaim refuses a positively-foreign lease unless explicitly
+	// overridden. Empty means "provenance unknown" (a pre-0016 lease row, or a
+	// deployment that cannot name its replicas), which is treated as local.
+	// It rides the JSONL interchange so an imported lease keeps its true
+	// granting replica.
+	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
 	// ===== Concurrency (Go-only; never serialized) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
@@ -112,6 +122,14 @@ type Issue struct {
 	Ephemeral bool     `json:"ephemeral,omitempty"`  // If true, not synced via git
 	NoHistory bool     `json:"no_history,omitempty"` // If true, stored in wisps table but NOT GC-eligible
 	WispType  WispType `json:"wisp_type,omitempty"`  // Classification for TTL-based compaction (gt-9br)
+
+	// StorageClass is the create-selected marker for the record's history and
+	// replication contract. Persistence plane transitions preserve it except
+	// where coherence requires normalizing explicit versioned to empty on
+	// demotion or explicit ephemeral to empty on promotion. When the marker is
+	// empty, the effective class follows the plane: ephemeral for Ephemeral or
+	// NoHistory rows and versioned otherwise.
+	StorageClass StorageClass `json:"storage_class,omitempty"`
 	// NOTE: RepliesTo, RelatesTo, DuplicateOf, SupersededBy moved to dependencies table
 	// per Decision 004 (Edge Schema Consolidation). Use dependency API instead.
 
@@ -143,6 +161,14 @@ type Issue struct {
 	Actor     string `json:"actor,omitempty"`      // Entity URI who caused this event
 	Target    string `json:"target,omitempty"`     // Entity URI or bead ID affected
 	Payload   string `json:"payload,omitempty"`    // Event-specific JSON data
+
+	// ===== Internal Hydration Flags (not serialized) =====
+	// IsLitePartial is set to true when this Issue was produced by a lite SELECT
+	// (see issueops.ScanIssueLiteFrom). When true, the heavy text columns
+	// (Description, Design, AcceptanceCriteria, Notes, Payload, Waiters) were not
+	// hydrated and remain zero-valued. Callers that need the full body must call
+	// store.GetIssue(ctx, id) to refetch. Internal-only — never on the wire.
+	IsLitePartial bool `json:"-"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
@@ -238,13 +264,13 @@ func (w hashFieldWriter) flag(b bool, label string) {
 	w.h.Write([]byte{0})
 }
 
-// MaxFieldLen is the maximum length (in characters) of the assignee, owner, and
-// label fields, matching their VARCHAR(255) columns.
+// MaxFieldLen is the maximum length (in characters) of common bounded text
+// fields, matching their VARCHAR(255) columns.
 const MaxFieldLen = 255
 
-// ErrFieldTooLong is returned when assignee, owner, or a label exceeds
-// MaxFieldLen characters. Callers can errors.Is it instead of matching a raw
-// backend "data too long" string.
+// ErrFieldTooLong is returned when a bounded text field exceeds MaxFieldLen
+// characters. Callers can errors.Is it instead of matching a raw backend "data
+// too long" string.
 var ErrFieldTooLong = errors.New("field exceeds maximum length")
 
 // CheckFieldLen returns ErrFieldTooLong (wrapped with context) when val exceeds
@@ -254,6 +280,35 @@ var ErrFieldTooLong = errors.New("field exceeds maximum length")
 func CheckFieldLen(name, val string) error {
 	if n := utf8.RuneCountInString(val); n > MaxFieldLen {
 		return fmt.Errorf("%w: %s is %d characters (max %d)", ErrFieldTooLong, name, n, MaxFieldLen)
+	}
+	return nil
+}
+
+// ValidateIssueTitle checks the canonical issue-title requirements. The title
+// must be nonempty and at most 500 bytes.
+func ValidateIssueTitle(title string) error {
+	if len(title) == 0 {
+		return fmt.Errorf("title is required")
+	}
+	if len(title) > 500 {
+		return fmt.Errorf("title must be 500 characters or less (got %d)", len(title))
+	}
+	return nil
+}
+
+// ValidateIssuePriority checks that priority is in the canonical P0-P4 range.
+func ValidateIssuePriority(priority int) error {
+	if priority < 0 || priority > 4 {
+		return fmt.Errorf("priority must be between 0 and 4 (got %d)", priority)
+	}
+	return nil
+}
+
+// ValidateIssueEstimatedMinutes checks that a supplied estimate is
+// nonnegative. A nil estimate is valid.
+func ValidateIssueEstimatedMinutes(estimatedMinutes *int) error {
+	if estimatedMinutes != nil && *estimatedMinutes < 0 {
+		return fmt.Errorf("estimated_minutes cannot be negative")
 	}
 	return nil
 }
@@ -272,14 +327,11 @@ func (i *Issue) ValidateWithCustomStatuses(customStatuses []string) error {
 // ValidateWithCustom checks if the issue has valid field values,
 // allowing custom statuses and types in addition to built-in ones.
 func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
-	if len(i.Title) == 0 {
-		return fmt.Errorf("title is required")
+	if err := ValidateIssueTitle(i.Title); err != nil {
+		return err
 	}
-	if len(i.Title) > 500 {
-		return fmt.Errorf("title must be 500 characters or less (got %d)", len(i.Title))
-	}
-	if i.Priority < 0 || i.Priority > 4 {
-		return fmt.Errorf("priority must be between 0 and 4 (got %d)", i.Priority)
+	if err := ValidateIssuePriority(i.Priority); err != nil {
+		return err
 	}
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
@@ -287,8 +339,8 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if !i.IssueType.IsValidWithCustom(customTypes) {
 		return fmt.Errorf("invalid issue type: %s", i.IssueType)
 	}
-	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
-		return fmt.Errorf("estimated_minutes cannot be negative")
+	if err := ValidateIssueEstimatedMinutes(i.EstimatedMinutes); err != nil {
+		return err
 	}
 	// Enforce closed_at invariant: closed_at should be set if and only if status is closed
 	if i.Status == StatusClosed && i.ClosedAt == nil {
@@ -307,6 +359,22 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 	if i.Ephemeral && i.NoHistory {
 		return fmt.Errorf("ephemeral and no_history are mutually exclusive")
 	}
+	// Storage class must be a known value, and a declared class must agree
+	// with the wisp-plane flags: wisp-plane records are ephemeral-class by
+	// construction, and a durable class on one (or ephemeral class off one)
+	// would silently promise semantics the row's plane does not deliver.
+	if !i.StorageClass.IsValid() {
+		return fmt.Errorf("invalid storage class %q (must be %s)", i.StorageClass, ValidStorageClassNames())
+	}
+	if i.StorageClass != "" {
+		wispPlane := i.Ephemeral || i.NoHistory
+		if wispPlane && i.StorageClass != StorageClassEphemeral {
+			return fmt.Errorf("storage class %q conflicts with ephemeral/no_history (wisp-plane records are storage class ephemeral)", i.StorageClass)
+		}
+		if !wispPlane && i.StorageClass == StorageClassEphemeral {
+			return fmt.Errorf("storage class ephemeral requires the ephemeral flag (create with --ephemeral)")
+		}
+	}
 	// Bound the VARCHAR(255) assignment columns up front so callers get a typed
 	// ErrFieldTooLong rejection instead of a raw backend "data too long" error.
 	if err := CheckFieldLen("assignee", i.Assignee); err != nil {
@@ -323,14 +391,11 @@ func (i *Issue) ValidateWithCustom(customStatuses, customTypes []string) error {
 // since the source repo already validated them when the issue was created.
 // This implements "trust the chain below you" from the HOP federation model.
 func (i *Issue) ValidateForImport(customStatuses []string) error {
-	if len(i.Title) == 0 {
-		return fmt.Errorf("title is required")
+	if err := ValidateIssueTitle(i.Title); err != nil {
+		return err
 	}
-	if len(i.Title) > 500 {
-		return fmt.Errorf("title must be 500 characters or less (got %d)", len(i.Title))
-	}
-	if i.Priority < 0 || i.Priority > 4 {
-		return fmt.Errorf("priority must be between 0 and 4 (got %d)", i.Priority)
+	if err := ValidateIssuePriority(i.Priority); err != nil {
+		return err
 	}
 	if !i.Status.IsValidWithCustom(customStatuses) {
 		return fmt.Errorf("invalid status: %s", i.Status)
@@ -343,8 +408,8 @@ func (i *Issue) ValidateForImport(customStatuses []string) error {
 	} else if i.IssueType != "" && !i.IssueType.IsValid() {
 		// Non-built-in type - trust it (child repo already validated)
 	}
-	if i.EstimatedMinutes != nil && *i.EstimatedMinutes < 0 {
-		return fmt.Errorf("estimated_minutes cannot be negative")
+	if err := ValidateIssueEstimatedMinutes(i.EstimatedMinutes); err != nil {
+		return err
 	}
 	// Enforce closed_at invariant
 	if i.Status == StatusClosed && i.ClosedAt == nil {
@@ -402,13 +467,17 @@ const (
 	StatusHooked     Status = "hooked" // Work actively claimed by a worker
 )
 
+// AllStatuses lists the built-in issue statuses (excludes custom statuses). It
+// is the single source consulted by Status.IsValid and the `bd schema` enum, so
+// adding a status here surfaces it in both validation and the published schema.
+var AllStatuses = []Status{
+	StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred,
+	StatusClosed, StatusPinned, StatusHooked,
+}
+
 // IsValid checks if the status value is valid (built-in statuses only)
 func (s Status) IsValid() bool {
-	switch s {
-	case StatusOpen, StatusInProgress, StatusBlocked, StatusDeferred, StatusClosed, StatusPinned, StatusHooked:
-		return true
-	}
-	return false
+	return slices.Contains(AllStatuses, s)
 }
 
 // IsValidWithCustom checks if the status is valid, including custom statuses.
@@ -619,16 +688,19 @@ const TypeEvent IssueType = "event"
 //   - event: set-state audit trail beads (GH#1356)
 // (message was re-promoted to built-in for inter-agent communication — GH#1347.)
 
+// AllIssueTypes lists the built-in issue types (excludes TypeEvent and custom
+// types, matching IssueType.IsValid). Single source for IsValid and the
+// `bd schema` enum.
+var AllIssueTypes = []IssueType{
+	TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision,
+	TypeMessage, TypeMolecule, TypeGate, TypeSpike, TypeStory, TypeMilestone,
+}
+
 // IsValid checks if the issue type is a core work type.
 // Core work types (bug, feature, task, epic, chore, decision, message, spike, story, milestone)
 // and internal types (molecule, gate) are built-in. Other types require types.custom configuration.
 func (t IssueType) IsValid() bool {
-	switch t {
-	case TypeBug, TypeFeature, TypeTask, TypeEpic, TypeChore, TypeDecision, TypeMessage, TypeMolecule,
-		TypeGate, TypeSpike, TypeStory, TypeMilestone:
-		return true
-	}
-	return false
+	return slices.Contains(AllIssueTypes, t)
 }
 
 // IsBuiltIn returns true for core work types and system-internal types
@@ -725,13 +797,21 @@ const (
 	MolTypeWork   MolType = "work"   // Work molecule: regular assigned work (default)
 )
 
+// validMolTypes is the canonical value list; IsValid and ValidMolTypeNames
+// both derive from it so the two cannot drift.
+var validMolTypes = []MolType{MolTypeSwarm, MolTypePatrol, MolTypeWork}
+
 // IsValid checks if the mol type value is valid
 func (m MolType) IsValid() bool {
-	switch m {
-	case MolTypeSwarm, MolTypePatrol, MolTypeWork, "":
+	if m == "" {
 		return true // empty is valid (defaults to work)
 	}
-	return false
+	return slices.Contains(validMolTypes, m)
+}
+
+// ValidMolTypeNames enumerates the accepted mol-type values for error messages.
+func ValidMolTypeNames() string {
+	return joinNamesWithOr(validMolTypes)
 }
 
 // WispType categorizes ephemeral wisps for TTL-based compaction (gt-9br)
@@ -753,14 +833,203 @@ const (
 	WispTypeEscalation WispType = "escalation" // Human escalations
 )
 
+// validWispTypes is the canonical value list; IsValid and ValidWispTypeNames
+// both derive from it so the two cannot drift.
+var validWispTypes = []WispType{
+	WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
+	WispTypeRecovery, WispTypeError, WispTypeEscalation,
+}
+
 // IsValid checks if the wisp type value is valid
 func (w WispType) IsValid() bool {
-	switch w {
-	case WispTypeHeartbeat, WispTypePing, WispTypePatrol, WispTypeGCReport,
-		WispTypeRecovery, WispTypeError, WispTypeEscalation, "":
+	if w == "" {
 		return true // empty is valid (uses default TTL)
 	}
-	return false
+	return slices.Contains(validWispTypes, w)
+}
+
+// ValidWispTypeNames enumerates the accepted wisp-type values for error messages.
+func ValidWispTypeNames() string {
+	return joinNamesWithOr(validWispTypes)
+}
+
+// StorageClass is the create-selected marker for a record's history and
+// replication contract. Persistence plane transitions preserve the marker
+// except for normalization required by demotion or promotion. The effective
+// class can change with the plane when the marker is empty.
+type StorageClass string
+
+const (
+	// StorageClassVersioned is the default durable, replicated-with-history
+	// class. It serializes as the empty storage_class value.
+	StorageClassVersioned StorageClass = "versioned"
+	// StorageClassUnversioned is durable and interchanged with no revision-
+	// history promise: only current state is retained and replicated.
+	StorageClassUnversioned StorageClass = "unversioned"
+	// StorageClassEphemeral is operational state that is never exported and
+	// never replicated — typically TTL-bounded, though not always:
+	// no-history rows are class-ephemeral yet TTL-exempt. The existing
+	// wisp/lease planes have this character.
+	StorageClassEphemeral StorageClass = "ephemeral"
+)
+
+// PersistenceMode selects an issue's storage plane and retention behavior.
+// Unlike StorageClass, it has no unset value; callers represent omission
+// separately from an explicit requested mode.
+type PersistenceMode string
+
+const (
+	// PersistenceModePersistent selects persistent storage. Existing
+	// unversioned records remain unversioned when this mode is selected.
+	PersistenceModePersistent PersistenceMode = "persistent"
+	// PersistenceModeEphemeral selects ephemeral storage.
+	PersistenceModeEphemeral PersistenceMode = "ephemeral"
+	// PersistenceModeNoHistory selects ephemeral storage without history.
+	PersistenceModeNoHistory PersistenceMode = "no_history"
+)
+
+var validPersistenceModes = []PersistenceMode{
+	PersistenceModePersistent,
+	PersistenceModeEphemeral,
+	PersistenceModeNoHistory,
+}
+
+// IsValid reports whether a persistence mode is a known explicit value.
+// Empty is invalid because it would be indistinguishable from an omitted mode.
+func (m PersistenceMode) IsValid() bool {
+	return slices.Contains(validPersistenceModes, m)
+}
+
+// NormalizePersistenceMode maps a requested mode from current to its exact
+// persistence fields without mutating an issue. The returned values are
+// Ephemeral, NoHistory, and StorageClass, respectively. Plane and retention
+// changes preserve the create-selected class. Promotion clears an explicit
+// ephemeral class marker to select normalized versioned storage. An
+// unversioned record may remain persistent but cannot move to a wisp mode.
+func NormalizePersistenceMode(current Issue, mode PersistenceMode) (bool, bool, StorageClass, error) {
+	if !mode.IsValid() {
+		return false, false, "", fmt.Errorf("invalid persistence mode %q", mode)
+	}
+	if current.Ephemeral && current.NoHistory {
+		return false, false, "", fmt.Errorf("ephemeral and no_history are mutually exclusive")
+	}
+	if !current.StorageClass.IsValid() {
+		return false, false, "", fmt.Errorf("invalid storage class %q", current.StorageClass)
+	}
+	wispPlane := current.Ephemeral || current.NoHistory
+	if wispPlane && current.StorageClass != "" && current.StorageClass != StorageClassEphemeral {
+		return false, false, "", fmt.Errorf("storage class %q conflicts with ephemeral/no_history", current.StorageClass)
+	}
+	if !wispPlane && current.StorageClass == StorageClassEphemeral {
+		return false, false, "", fmt.Errorf("storage class ephemeral requires ephemeral or no_history")
+	}
+	if current.StorageClass == StorageClassUnversioned && mode != PersistenceModePersistent {
+		return false, false, "", fmt.Errorf("cannot move unversioned record to persistence mode %q", mode)
+	}
+	if persistenceMode(current) == mode {
+		return current.Ephemeral, current.NoHistory, current.StorageClass, nil
+	}
+
+	switch mode {
+	case PersistenceModePersistent:
+		storageClass := current.StorageClass
+		if storageClass == StorageClassEphemeral {
+			storageClass = ""
+		}
+		return false, false, storageClass, nil
+	case PersistenceModeEphemeral:
+		storageClass := current.StorageClass
+		if storageClass == StorageClassVersioned {
+			storageClass = ""
+		}
+		return true, false, storageClass, nil
+	case PersistenceModeNoHistory:
+		storageClass := current.StorageClass
+		if storageClass == StorageClassVersioned {
+			storageClass = ""
+		}
+		return false, true, storageClass, nil
+	default:
+		return false, false, "", fmt.Errorf("invalid persistence mode %q", mode)
+	}
+}
+
+// validStorageClasses is the canonical value list; IsValid,
+// ParseStorageClass, and ValidStorageClassNames all derive from it.
+var validStorageClasses = []StorageClass{
+	StorageClassVersioned, StorageClassUnversioned, StorageClassEphemeral,
+}
+
+// IsValid reports whether the storage class value is valid. Empty is valid:
+// its effective class is ephemeral for Ephemeral or NoHistory rows and
+// versioned otherwise.
+func (s StorageClass) IsValid() bool {
+	if s == "" {
+		return true
+	}
+	return slices.Contains(validStorageClasses, s)
+}
+
+// ValidStorageClassNames enumerates the accepted values for error messages.
+func ValidStorageClassNames() string {
+	return joinNamesWithOr(validStorageClasses)
+}
+
+// ParseStorageClass validates a user-supplied storage-class value (flag or
+// config). Empty is rejected here — callers that allow "unset" check for
+// empty before parsing.
+func ParseStorageClass(v string) (StorageClass, error) {
+	s := StorageClass(v)
+	if s == "" || !s.IsValid() {
+		return "", fmt.Errorf("invalid storage class %q (must be %s)", v, ValidStorageClassNames())
+	}
+	return s, nil
+}
+
+// Normalize maps the explicit versioned spelling to unset: the two are
+// semantically identical and the marker is omitted when versioned in storage
+// cells and serialized records alike. Both insert stacks call this so
+// the database never persists the literal "versioned".
+func (s StorageClass) Normalize() StorageClass {
+	if s == StorageClassVersioned {
+		return ""
+	}
+	return s
+}
+
+// EffectiveStorageClass resolves the record's class: an explicit declaration
+// wins; otherwise wisp-plane records (Ephemeral or NoHistory) are ephemeral
+// and everything else is versioned.
+func (i *Issue) EffectiveStorageClass() StorageClass {
+	if i.StorageClass != "" {
+		return i.StorageClass
+	}
+	if i.Ephemeral || i.NoHistory {
+		return StorageClassEphemeral
+	}
+	return StorageClassVersioned
+}
+
+func persistenceMode(i Issue) PersistenceMode {
+	if i.NoHistory {
+		return PersistenceModeNoHistory
+	}
+	if i.Ephemeral {
+		return PersistenceModeEphemeral
+	}
+	return PersistenceModePersistent
+}
+
+// joinNamesWithOr formats a value list as "a, b, or c" for error messages.
+func joinNamesWithOr[T ~string](names []T) string {
+	strs := make([]string, len(names))
+	for i, n := range names {
+		strs[i] = string(n)
+	}
+	if len(strs) == 1 {
+		return strs[0]
+	}
+	return strings.Join(strs[:len(strs)-1], ", ") + ", or " + strs[len(strs)-1]
 }
 
 // WorkType categorizes how work assignment operates for a bead (Decision 006)
@@ -841,6 +1110,14 @@ type IssueDetails struct {
 	DependencyCount *int64 `json:"dependency_count,omitempty"`
 	CommentCount    *int64 `json:"comment_count,omitempty"`
 
+	// CommentsOmitted is set true only when CommentCount is nonzero AND
+	// Comments was left nil (count-only mode, no --include-comments). Without
+	// it, a positive CommentCount with no Comments key reads as a client bug,
+	// and a caller checking only `.comments` sees `null`/absent and concludes
+	// "no comments" — both wrong (ga-clgh). Never set alongside a populated
+	// Comments slice or a zero count: a true empty stays plain omission.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
+
 	// Epic progress fields (populated only for issue_type=epic with children)
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
@@ -885,6 +1162,19 @@ const (
 	// Delegation types (work delegation chains)
 	DepDelegatedFrom DependencyType = "delegated-from" // Work delegated from parent; completion cascades up
 )
+
+// AllDependencyTypes lists the built-in dependency types, in declaration order.
+// Single source for the `bd schema` enum so the published schema enumerates
+// exactly the types bd recognizes.
+var AllDependencyTypes = []DependencyType{
+	DepBlocks, DepParentChild, DepConditionalBlocks, DepWaitsFor,
+	DepRelated, DepDiscoveredFrom,
+	DepRepliesTo, DepRelatesTo, DepDuplicates, DepSupersedes,
+	DepAuthoredBy, DepAssignedTo, DepApprovedBy, DepAttests,
+	DepTracks,
+	DepUntil, DepCausedBy, DepValidates,
+	DepDelegatedFrom,
+}
 
 // IsValid checks if the dependency type value is valid.
 // Accepts any non-empty string up to 50 characters.
@@ -936,6 +1226,16 @@ type WaitsForMeta struct {
 	// SpawnerID identifies which step/issue spawns the children to wait for.
 	// If empty, waits for all direct children of the depends_on_id issue.
 	SpawnerID string `json:"spawner_id,omitempty"`
+	// AlsoBlocks marks a waits-for edge that was collapsed from a redundant
+	// depends_on/needs blocks edge onto the same spawner (GH#3783): the
+	// caller skipped emitting a separate DepBlocks edge because it collided
+	// with this DepWaitsFor edge, so this edge must additionally carry
+	// classic blocking semantics — it blocks while the spawner itself is
+	// open, not only while the spawner has an open child. Omitted (and thus
+	// COALESCEd to false by readers) for a plain waits_for with no matching
+	// needs/depends_on entry, which must retain the original fanout-only
+	// semantics.
+	AlsoBlocks bool `json:"also_blocks,omitempty"`
 }
 
 // WaitsForGate constants
@@ -943,6 +1243,128 @@ const (
 	WaitsForAllChildren = "all-children" // Wait for all dynamic children to complete
 	WaitsForAnyChildren = "any-children" // Proceed when first child completes (future)
 )
+
+// IsValidWaitsForGate reports whether gate names a known waits-for fanout gate.
+func IsValidWaitsForGate(gate string) bool {
+	return gate == WaitsForAllChildren || gate == WaitsForAnyChildren
+}
+
+// NewGraphEdgeDependency builds the dependency record for a graph plan edge,
+// shared by the embedded and domain apply paths so they cannot drift. Every
+// waits-for edge gets gate metadata (empty gate defaults to all-children):
+// stored rows stay self-describing rather than depending on every reader
+// defaulting a missing gate (the runtime SQL predicate COALESCEs to
+// all-children, but readers before migration 0059 did not, so '{}' or empty
+// metadata must never be stored for graph-created waits-for dependencies).
+// A plan-local spawnerKey resolves through keyToID; the spawner is recorded
+// for compatibility only — gate evaluation reads the spawner from
+// dependencies.depends_on_id (see ParseWaitsForGateMetadata).
+func NewGraphEdgeDependency(fromID, toID string, depType DependencyType, gate, spawnerKey, spawnerID, threadID string, keyToID map[string]string) (*Dependency, error) {
+	dep := &Dependency{
+		IssueID:     fromID,
+		DependsOnID: toID,
+		Type:        depType,
+		ThreadID:    threadID,
+	}
+	if depType == DepWaitsFor {
+		if spawnerKey != "" {
+			resolved, ok := keyToID[spawnerKey]
+			if !ok {
+				return nil, fmt.Errorf("serializing waits-for metadata: unresolved spawner key %q", spawnerKey)
+			}
+			spawnerID = resolved
+		}
+		if gate == "" {
+			gate = WaitsForAllChildren
+		}
+		raw, err := json.Marshal(WaitsForMeta{Gate: gate, SpawnerID: spawnerID})
+		if err != nil {
+			return nil, fmt.Errorf("serializing waits-for metadata: %w", err)
+		}
+		dep.Metadata = string(raw)
+	}
+	return dep, nil
+}
+
+// NewWaitsForDependency builds the waits-for dependency record for a single
+// issue outside a graph plan: the spawner is the depends_on target and the
+// metadata carries the gate (defaulted to all-children). Shares
+// NewGraphEdgeDependency so single-issue and graph-created waits-for rows
+// cannot drift.
+func NewWaitsForDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	return NewGraphEdgeDependency(issueID, spawnerID, DepWaitsFor, gate, "", "", "", nil)
+}
+
+// NewWaitsForBlockingDependency builds a waits-for dependency that also
+// carries classic blocking semantics (GH#3783): set also_blocks in the
+// metadata so waitsForGateBlockedSQL additionally blocks while the spawner
+// itself is open, not only while it has an open parent-child child. Use this
+// instead of NewWaitsForDependency exactly when the caller is collapsing a
+// would-be DepBlocks edge (from needs/depends_on) into this waits-for edge
+// because the two would otherwise collide on the same (source, target) pair
+// — never for a plain waits_for with no matching needs/depends_on entry.
+func NewWaitsForBlockingDependency(issueID, spawnerID, gate string) (*Dependency, error) {
+	dep, err := NewWaitsForDependency(issueID, spawnerID, gate)
+	if err != nil {
+		return nil, err
+	}
+	var meta WaitsForMeta
+	if err := json.Unmarshal([]byte(dep.Metadata), &meta); err != nil {
+		return nil, fmt.Errorf("parsing waits-for metadata to set also_blocks: %w", err)
+	}
+	meta.AlsoBlocks = true
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("serializing waits-for also_blocks metadata: %w", err)
+	}
+	dep.Metadata = string(raw)
+	return dep, nil
+}
+
+// NewGraphNodeDependency builds the dependency record for a graph-plan node's
+// inline dep, shared by the embedded and domain apply paths so their
+// resolution semantics cannot drift: an empty type defaults to blocks, and
+// the target resolves as a plan-local key first, then as a literal issue ID.
+// Waits-for deps carry gate metadata like waits-for edges (all-children
+// default, no explicit spawner).
+func NewGraphNodeDependency(issueID string, depType DependencyType, target string, keyToID map[string]string) (*Dependency, error) {
+	if depType == "" {
+		depType = DepBlocks
+	}
+	targetID := keyToID[target]
+	if targetID == "" {
+		targetID = target
+	}
+	if targetID == "" {
+		return nil, fmt.Errorf("dep target %q not found", target)
+	}
+	return NewGraphEdgeDependency(issueID, targetID, depType, "", "", "", "", nil)
+}
+
+// MergeMetadataRefs merges resolved metadata_refs into an issue's existing
+// metadata JSON: each refs entry maps a metadata key to a plan-local node
+// key, which is replaced with its minted ID from keyToID. Shared by the
+// embedded and domain graph-apply paths.
+func MergeMetadataRefs(existing json.RawMessage, refs map[string]string, keyToID map[string]string) (json.RawMessage, error) {
+	merged := make(map[string]json.RawMessage, len(refs))
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &merged); err != nil {
+			return nil, fmt.Errorf("re-parsing metadata: %w", err)
+		}
+	}
+	for metaKey, refKey := range refs {
+		resolvedID, ok := keyToID[refKey]
+		if !ok {
+			return nil, fmt.Errorf("metadata_ref %q references unknown key %q", metaKey, refKey)
+		}
+		idJSON, err := json.Marshal(resolvedID)
+		if err != nil {
+			return nil, fmt.Errorf("marshaling metadata ref %q: %w", metaKey, err)
+		}
+		merged[metaKey] = idJSON
+	}
+	return json.Marshal(merged)
+}
 
 // ParseWaitsForGateMetadata extracts the waits-for gate type from dependency metadata.
 // Note: spawner identity comes from dependencies.depends_on_id in storage/query paths;
@@ -1262,10 +1684,10 @@ type Statistics struct {
 	OpenIssues              int     `json:"open_issues"`
 	InProgressIssues        int     `json:"in_progress_issues"`
 	ClosedIssues            int     `json:"closed_issues"`
-	BlockedIssues           int     `json:"blocked_issues"`
+	BlockedIssues           *int    `json:"blocked_issues"`  // nil when --no-blocked skips computation
 	DeferredIssues          int     `json:"deferred_issues"` // Issues on ice
-	ReadyIssues             int     `json:"ready_issues"`
-	PinnedIssues            int     `json:"pinned_issues"` // Persistent issues
+	ReadyIssues             *int    `json:"ready_issues"`    // nil when --no-blocked skips computation (readiness needs the blocked set)
+	PinnedIssues            int     `json:"pinned_issues"`   // Persistent issues
 	EpicsEligibleForClosure int     `json:"epics_eligible_for_closure"`
 	AverageLeadTime         float64 `json:"average_lead_time_hours"`
 }
@@ -1393,6 +1815,36 @@ type IssueFilter struct {
 	Offset   int
 	SortBy   string
 	SortDesc bool
+
+	// MaxRows is a defensive cap on the number of rows a search may return.
+	// 0 (the default) disables the cap. When >0, the storage layer issues
+	// LIMIT MaxRows+1 (to detect overage) and returns *issueops.ErrTooManyRows
+	// if the scan yielded more than MaxRows rows. MaxRows is independent of
+	// Limit: Limit=0 still means "unlimited" at the contract level; MaxRows is
+	// a safety knob layered on top. When both are set, the effective SQL LIMIT
+	// is min(Limit, MaxRows+1). Library users may set MaxRows directly; the
+	// CLI layer resolves it from --max-rows / BEADS_MAX_ROWS.
+	MaxRows int
+
+	// MaxRowsSource attributes which knob set MaxRows, used in error messages.
+	// Expected values: "--max-rows", "BEADS_MAX_ROWS", or "" (library users
+	// who set MaxRows directly without source attribution).
+	MaxRowsSource string
+
+	// Lite, when true, switches the SELECT shape to issueops.IssueSelectColumnsLite,
+	// which omits heavy TEXT columns (description, design, acceptance_criteria, notes,
+	// payload, waiters). Returned issues carry IsLitePartial=true; their heavy fields
+	// are zero-valued. WHERE-clause filters that reference heavy columns
+	// (DescriptionContains, NotesContains, EmptyDescription) keep working — they
+	// reference columns in WHERE regardless of SELECT shape. Default false preserves
+	// today's behavior at every call site.
+	//
+	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
+	// Dolt). The proxied-server (domain/db) path does not check this field yet
+	// and always returns fully-hydrated issues with IsLitePartial=false —
+	// correct results, no lite optimization. Wiring Lite through domain/db is
+	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	Lite bool
 }
 
 // SortPolicy determines how ready work is ordered
@@ -1432,9 +1884,50 @@ type ReclaimedLease struct {
 	PreviousOwner string `json:"previous_owner"`
 }
 
+// ReclaimFilter scopes which stale-lease issues bd reclaim may revert. The
+// zero value reclaims every stale lease (the historical global behavior);
+// every populated field narrows the set further (fields AND-combine).
+//
+// Scoping matters on a federated deployment: each replica's view of another
+// machine's liveness is stale by up to one sync interval, so an unscoped
+// reaper can revert a unit that is very much alive on the machine that granted
+// its lease. Partitioning reclaim by the same label surface the claim side is
+// partitioned by (--label/--label-any/--exclude-label, plus --assignee/--id)
+// turns after-the-fact revert auditing into prevention.
+type ReclaimFilter struct {
+	IDs           []string // Only these issue IDs are eligible
+	Assignees     []string // Only leases held by one of these owners
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
+
+	// AnyReplica is the one field here that WIDENS rather than narrows: it
+	// disarms the granting-replica guard, letting this reaper revert a lease
+	// another replica granted (see issueops.ReclaimExpiredLeasesInTx). It is
+	// an operator escape hatch for a permanently-departed replica or a
+	// renamed node, never a normal setting — the machine that granted a lease
+	// is the only one with a first-hand view of whether its holder is alive.
+	// It does NOT widen past staleness or past the scope fields above.
+	AnyReplica bool
+}
+
+// IsEmpty reports whether the filter constrains nothing, i.e. reclaim runs in
+// its global, unscoped form. AnyReplica is deliberately excluded: it is an
+// override, not a scope, so a reaper reporting "scoped" still means "narrowed
+// to a partition".
+func (f ReclaimFilter) IsEmpty() bool {
+	return len(f.IDs) == 0 && len(f.Assignees) == 0 &&
+		len(f.Labels) == 0 && len(f.LabelsAny) == 0 && len(f.ExcludeLabels) == 0
+}
+
 // WorkFilter is used to filter ready work queries
 type WorkFilter struct {
-	Status        Status
+	Status Status
+	// Statuses filters to any of the given statuses (OR semantics) in a
+	// single query, so multi-status callers avoid one GetReadyWork round
+	// trip per status. Ignored when Status is set; when both are empty the
+	// legacy default of ('open', 'in_progress') applies.
+	Statuses      []Status
 	Type          string // Filter by issue type (task, bug, feature, epic, merge-request, etc.)
 	Priority      *int
 	Assignee      *string
@@ -1478,6 +1971,15 @@ type WorkFilter struct {
 	HasMetadataKey string            // Existence check: issue has this top-level key set (non-null)
 
 	Offset int
+
+	// MaxRows enforces a hard upper bound on the row count returned. Mirrors
+	// IssueFilter.MaxRows so bd ready honors --max-rows / BEADS_MAX_ROWS
+	// symmetrically with bd list. 0 (the default) disables the cap.
+	MaxRows int
+
+	// MaxRowsSource attributes which knob set MaxRows. Expected values:
+	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
+	MaxRowsSource string
 }
 
 // StaleFilter is used to filter stale issue queries

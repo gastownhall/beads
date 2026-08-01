@@ -1,6 +1,10 @@
 package doltutil
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestShellQuote(t *testing.T) {
 	tests := []struct {
@@ -121,4 +125,42 @@ func TestRemoteURLsMatchNormalizesGitURLs(t *testing.T) {
 			}
 		})
 	}
+}
+
+// listCLIRemotesTimeout must pick the aggressive 2s cap only for a directory
+// that lacks .dolt/repo_state.json (the known broken multi-DB server-root
+// case) and a generous 30s cap for anything that looks like a real Dolt
+// repo, so a slow-but-valid `dolt remote -v` is never SIGKILLed and
+// misread as "remote absent" by callers like FindCLIRemote (review
+// should-fix, 2026-07-24).
+func TestListCLIRemotesTimeout(t *testing.T) {
+	t.Run("missing .dolt directory entirely uses the broken-root cap", func(t *testing.T) {
+		if got := listCLIRemotesTimeout(t.TempDir()); got != listCLIRemotesTimeoutBroken {
+			t.Errorf("listCLIRemotesTimeout = %v, want %v", got, listCLIRemotesTimeoutBroken)
+		}
+	})
+
+	t.Run("has .dolt but no repo_state.json uses the broken-root cap", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.MkdirAll(filepath.Join(dir, ".dolt"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if got := listCLIRemotesTimeout(dir); got != listCLIRemotesTimeoutBroken {
+			t.Errorf("listCLIRemotesTimeout = %v, want %v", got, listCLIRemotesTimeoutBroken)
+		}
+	})
+
+	t.Run("has repo_state.json uses the generous healthy-repo cap", func(t *testing.T) {
+		dir := t.TempDir()
+		doltDir := filepath.Join(dir, ".dolt")
+		if err := os.MkdirAll(doltDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(doltDir, "repo_state.json"), []byte(`{}`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := listCLIRemotesTimeout(dir); got != listCLIRemotesTimeoutHealthy {
+			t.Errorf("listCLIRemotesTimeout = %v, want %v", got, listCLIRemotesTimeoutHealthy)
+		}
+	})
 }

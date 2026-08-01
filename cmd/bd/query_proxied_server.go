@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/query"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runQueryProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -105,7 +106,7 @@ func runQueryProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 				iwc = iwc[:limit]
 			}
 		}
-		sortIssuesWithCounts(iwc, sortBy, reverse)
+		workapi.SortIssuesWithCounts(iwc, sortBy, reverse)
 		if iwc == nil {
 			iwc = []*types.IssueWithCounts{}
 		}
@@ -137,7 +138,7 @@ func runQueryProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 		}
 	}
 
-	sortIssues(issues, sortBy, reverse)
+	workapi.SortIssues(issues, sortBy, reverse)
 
 	outputQueryResults(issues, queryStr, longFormat)
 	printTruncationHint(truncated, limit)

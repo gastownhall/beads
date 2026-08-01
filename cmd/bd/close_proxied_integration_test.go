@@ -386,6 +386,47 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+	// ga-ktn9pe.4.8: twin of TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent.
+	// Both close paths must agree — a fix on one only is the divergence class #5217
+	// just closed.
+	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbpr")
+		plan := `{"nodes": [{"key": "p", "title": "Boolean pinned", "type": "task", "pinned": true}]}`
+		planFile := filepath.Join(p.dir, "boolean-pinned-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--graph", planFile, "--json")
+		if err != nil {
+			t.Fatalf("bd create --graph failed: %v\n%s", err, out)
+		}
+		var created GraphApplyResult
+		if err := json.Unmarshal(out, &created); err != nil {
+			t.Fatalf("parse graph result: %v\nstdout:\n%s", err, out)
+		}
+		id := created.IDs["p"]
+		if id == "" {
+			t.Fatalf("expected an ID for key p, got %#v", created.IDs)
+		}
+		if seeded := bdProxiedShow(t, bd, p.dir, id); !seeded.Pinned {
+			t.Fatalf("precondition: expected pinned=true on the seeded bead, got %+v", seeded)
+		}
+
+		bdProxiedClose(t, bd, p.dir, id, "--force")
+		// No --force on the retry. Pre-fix this exited nonzero with the pinned
+		// refusal, so bdProxiedClose's t.Fatalf is the red assertion.
+		bdProxiedClose(t, bd, p.dir, id)
+
+		got := bdProxiedShow(t, bd, p.dir, id)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if !got.Pinned {
+			t.Error("expected the pin to survive the close: it is what protects the row from bd gc/purge/cleanup")
+		}
+	})
+
 	t.Run("close_epic_open_children_refuses", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ceor")

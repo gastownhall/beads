@@ -13,6 +13,7 @@ func (s *testSuite) TestDependencySQLRepository() {
 		s.Run("RejectsEmptyIDs", s.depInsertEmptyIDs)
 		s.Run("SameTypeIsIdempotentMetadataRefresh", s.depInsertIdempotentSameType)
 		s.Run("UsesDeterministicID", s.depInsertUsesDeterministicID)
+		s.Run("ParentChildTouchesCoordinationOnlyForNewEdge", s.depInsertParentChildTouchesCoordinationOnlyForNewEdge)
 		s.Run("DifferentTypeIsRejected", s.depInsertConflictingType)
 		s.Run("MissingTargetIssueFailsFK", s.depInsertFKViolation)
 		s.Run("ThreadIDPersists", s.depInsertThreadID)
@@ -92,6 +93,39 @@ func (s *testSuite) depInsertUsesDeterministicID() {
 		"SELECT id FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
 		"bd-dep-det-a", "bd-dep-det-b").Scan(&gotID))
 	s.Equal(depid.New("bd-dep-det-a", "bd-dep-det-b"), gotID)
+}
+
+func (s *testSuite) depInsertParentChildTouchesCoordinationOnlyForNewEdge() {
+	const keyPattern = "dependency-coordination/v1/dependencies/%"
+	parent, child, blocker, blocked := "bd-dep-coord-parent", "bd-dep-coord-child", "bd-dep-coord-blocker", "bd-dep-coord-blocked"
+	_, err := s.Runner().ExecContext(s.Ctx(), "DELETE FROM local_metadata WHERE `key` LIKE ?", keyPattern)
+	s.Require().NoError(err)
+	for _, id := range []string{parent, child, blocker, blocked} {
+		s.seedIssueRow(id)
+	}
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(), newDep(child, parent, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	var value string
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` LIKE ?", keyPattern).Scan(&value))
+	s.NotEmpty(value, "new parent-child edge must touch its coordination row")
+	_, err = s.Runner().ExecContext(s.Ctx(),
+		"UPDATE local_metadata SET value = 'sentinel' WHERE `key` LIKE ?", keyPattern)
+	s.Require().NoError(err)
+
+	// Same-type re-add refreshes metadata only, so it must not rewrite the
+	// coordination token.
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(), newDep(child, parent, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT value FROM local_metadata WHERE `key` LIKE ?", keyPattern).Scan(&value))
+	s.Equal("sentinel", value)
+
+	// A non-parent-child edge must not create a second coordination row.
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(), newDep(blocker, blocked, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM local_metadata WHERE `key` LIKE ?", keyPattern).Scan(&count))
+	s.Equal(1, count)
 }
 
 func (s *testSuite) depInsertRoundTrip() {

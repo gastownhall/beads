@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -35,6 +36,7 @@ func RunAudit_dependencies_readiness(t *testing.T, f Factory) {
 	t.Run("DependencyTree", func(t *testing.T) { testAuditDependencyTree(t, f) })
 	t.Run("ReadyTypeAndPinnedExclusions", func(t *testing.T) { testAuditReadyTypeAndPinnedExclusions(t, f) })
 	t.Run("ReadyDeferredExclusion", func(t *testing.T) { testAuditReadyDeferredExclusion(t, f) })
+	t.Run("ReadyMultiStatusFilter", func(t *testing.T) { testAuditReadyMultiStatusFilter(t, f) })
 	t.Run("ReadyHybridSortAndOldest", func(t *testing.T) { testAuditReadyHybridSortAndOldest(t, f) })
 	t.Run("ReadyParentTransitiveDescendants", func(t *testing.T) { testAuditReadyParentTransitiveDescendants(t, f) })
 	t.Run("BlockedInheritedParent", func(t *testing.T) { testAuditBlockedInheritedParent(t, f) })
@@ -416,6 +418,59 @@ func testAuditReadyDeferredExclusion(t *testing.T, f Factory) {
 	withDeferred, _ := s.GetReadyWork(ctx(), types.WorkFilter{IncludeDeferred: true})
 	if got := issueIDs(withDeferred); !slices.Equal(got, []string{"df1", "df2"}) {
 		t.Errorf("ready(IncludeDeferred) = %v, want [df1 df2]", got)
+	}
+}
+
+// testAuditReadyMultiStatusFilter pins WorkFilter.Statuses at the result level
+// through the full ready-work stack, with real issues and wisps: OR semantics
+// across the given statuses in one call, singular-Status precedence over
+// Statuses, the legacy open/in_progress default when both are empty, and a
+// custom (non-built-in) status flowing through the same IN clause.
+func testAuditReadyMultiStatusFilter(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	// "soaking" is a custom status; registering it up front lets the create
+	// path validate msf-soak directly into it.
+	must(t, s.SetConfig(c, "status.custom", "soaking"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "msf-open", Title: "open", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "msf-prog", Title: "in progress", Status: types.StatusInProgress}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "msf-block", Title: "status blocked", Status: types.StatusBlocked}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "msf-soak", Title: "custom status", Status: types.Status("soaking")}), "a"))
+	// One wisp on each side of the multi-status filter, so the wisp arm of
+	// the ready union is asserted alongside the issues arm. Wisps are
+	// ephemeral, so they only surface under IncludeEphemeral.
+	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
+		withDefaults(&types.Issue{ID: "msf-w-block", Title: "wisp blocked", Status: types.StatusBlocked, Ephemeral: true}),
+		withDefaults(&types.Issue{ID: "msf-w-prog", Title: "wisp in progress", Status: types.StatusInProgress, Ephemeral: true}),
+	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+
+	// Statuses ORs across issues and wisps in a single call.
+	multi, err := s.GetReadyWork(c, types.WorkFilter{Statuses: []types.Status{types.StatusOpen, types.StatusBlocked}, IncludeEphemeral: true})
+	must(t, err)
+	if got := issueIDs(multi); !slices.Equal(got, []string{"msf-block", "msf-open", "msf-w-block"}) {
+		t.Errorf("ready(Statuses open+blocked, IncludeEphemeral) = %v, want [msf-block msf-open msf-w-block]", got)
+	}
+
+	// A custom status participates in the OR like any built-in.
+	custom, err := s.GetReadyWork(c, types.WorkFilter{Statuses: []types.Status{"soaking", types.StatusInProgress}, IncludeEphemeral: true})
+	must(t, err)
+	if got := issueIDs(custom); !slices.Equal(got, []string{"msf-prog", "msf-soak", "msf-w-prog"}) {
+		t.Errorf("ready(Statuses soaking+in_progress, IncludeEphemeral) = %v, want [msf-prog msf-soak msf-w-prog]", got)
+	}
+
+	// Singular Status takes precedence: Statuses is ignored when both are set.
+	single, err := s.GetReadyWork(c, types.WorkFilter{Status: types.StatusOpen, Statuses: []types.Status{types.StatusBlocked}})
+	must(t, err)
+	if got := issueIDs(single); !slices.Equal(got, []string{"msf-open"}) {
+		t.Errorf("ready(Status=open, Statuses=[blocked]) = %v, want [msf-open] (Status must win)", got)
+	}
+
+	// Both empty: the legacy open/in_progress default — and without
+	// IncludeEphemeral the matching wisp stays excluded.
+	def, err := s.GetReadyWork(c, types.WorkFilter{})
+	must(t, err)
+	if got := issueIDs(def); !slices.Equal(got, []string{"msf-open", "msf-prog"}) {
+		t.Errorf("ready(empty filter) = %v, want [msf-open msf-prog] (open/in_progress default, ephemeral excluded)", got)
 	}
 }
 

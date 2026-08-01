@@ -2,14 +2,17 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type unclaimProxiedResult struct {
@@ -26,9 +29,13 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (unclaimProxiedResult, string, error) {
 		var r unclaimProxiedResult
 		for _, id := range args {
-			issue, _ := proxiedResolveIssueOrWisp(ctx, uw, id)
-			if issue == nil {
+			issue, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+			if errors.Is(rerr, storage.ErrNotFound) {
 				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: not found", id))
+				continue
+			}
+			if rerr != nil {
+				r.errs = append(r.errs, fmt.Sprintf("Error resolving %s: %v", id, rerr))
 				continue
 			}
 			fullID := issue.ID
@@ -90,13 +97,13 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 	return nil
 }
 
-func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration) error {
+func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
 
 	reclaimed, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) ([]types.ReclaimedLease, string, error) {
-		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, actor)
+		out, rerr := uw.IssueUseCase().ReclaimExpiredLeases(ctx, olderThan, filter, actor)
 		if rerr != nil {
 			return nil, "", rerr
 		}
@@ -117,5 +124,5 @@ func runReclaimProxiedServer(ctx context.Context, olderThan time.Duration) error
 		commandDidWrite.Store(true)
 	}
 
-	return renderReclaim(reclaimed)
+	return renderReclaim(reclaimed, !filter.IsEmpty())
 }

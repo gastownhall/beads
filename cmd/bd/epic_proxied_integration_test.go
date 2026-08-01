@@ -178,4 +178,36 @@ func TestProxiedServerEpic(t *testing.T) {
 			t.Errorf("epic %s should be closed after close-eligible, got %s", epic.ID, show.Status)
 		}
 	})
+
+	t.Run("write_closes_with_reason", func(t *testing.T) {
+		p2 := newSharedProxiedProject(t, bd, "epr")
+		e2 := bdProxiedCreate(t, bd, p2.dir, "Reason epic", "--type", "epic")
+		c2a := bdProxiedCreate(t, bd, p2.dir, "Reason child", "--type", "task", "--parent", e2.ID)
+		if out, err := bdProxiedRun(t, bd, p2.dir, "close", c2a.ID); err != nil {
+			t.Fatalf("close child: %v\n%s", err, out)
+		}
+
+		out, err := bdProxiedRun(t, bd, p2.dir, "epic", "close-eligible", "--reason", "Sprint goal met", "--json")
+		if err != nil {
+			t.Fatalf("close-eligible --reason: %v\n%s", err, out)
+		}
+		var res struct {
+			Closed []string `json:"closed"`
+			Count  int      `json:"count"`
+			Reason string   `json:"reason"`
+		}
+		if err := json.Unmarshal(out, &res); err != nil {
+			t.Fatalf("unmarshal: %v\n%s", err, out)
+		}
+		if res.Reason != "Sprint goal met" {
+			t.Errorf("reason = %q, want %q", res.Reason, "Sprint goal met")
+		}
+		show := bdProxiedShow(t, bd, p2.dir, e2.ID)
+		if show.Status != types.StatusClosed {
+			t.Errorf("epic should be closed, got %s", show.Status)
+		}
+		if show.CloseReason != "Sprint goal met" {
+			t.Errorf("persisted close_reason = %q, want %q", show.CloseReason, "Sprint goal met")
+		}
+	})
 }

@@ -226,6 +226,80 @@ func TestEnginePullUpdatesLabelsOnExistingIssue(t *testing.T) {
 	}
 }
 
+func TestEnginePullClosesExistingIssueAndSyncsLabels(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	defer store.Close()
+
+	extRef := "https://test.test/EXT-closed"
+	issue := &types.Issue{
+		ID:          "bd-closed-boundary",
+		Title:       "Local title",
+		Status:      types.StatusOpen,
+		IssueType:   types.TypeTask,
+		Priority:    2,
+		Labels:      []string{"old-label"},
+		ExternalRef: &extRef,
+		UpdatedAt:   time.Now().UTC().Add(-time.Hour),
+	}
+	if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
+		t.Fatalf("CreateIssue() error: %v", err)
+	}
+
+	tracker := newMockTracker("test")
+	tracker.issues = []TrackerIssue{{
+		ID:         "EXT-closed",
+		Identifier: "EXT-closed",
+		URL:        extRef,
+		Title:      "Remote done title",
+		Labels:     []string{"remote-a", "remote-b"},
+		UpdatedAt:  time.Now().UTC(),
+	}}
+	tracker.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+		return &IssueConversion{Issue: &types.Issue{
+			ID:        "bd-closed-boundary",
+			Title:     ti.Title,
+			Status:    types.StatusClosed,
+			IssueType: types.TypeTask,
+			Priority:  2,
+			Labels:    append([]string(nil), ti.Labels...),
+		}}
+	}}
+
+	result, err := NewEngine(tracker, store, "test-actor").Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() error: %v", err)
+	}
+	if result.PullStats.Updated != 1 || result.PullStats.Errors != 0 {
+		t.Fatalf("PullStats = %+v, want one successful update", result.PullStats)
+	}
+
+	updated, err := store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssue() error: %v", err)
+	}
+	if updated.Status != types.StatusClosed || updated.ClosedAt == nil || updated.Title != "Remote done title" {
+		t.Fatalf("updated issue = %+v, want closed issue with remote title", updated)
+	}
+	labels, err := store.GetLabels(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetLabels() error: %v", err)
+	}
+	if !equalNormalizedStrings(labels, []string{"remote-a", "remote-b"}) {
+		t.Fatalf("labels = %v, want [remote-a remote-b]", labels)
+	}
+	events, err := store.GetEvents(ctx, issue.ID, 20)
+	if err != nil {
+		t.Fatalf("GetEvents() error: %v", err)
+	}
+	for _, event := range events {
+		if event.EventType == types.EventClosed {
+			return
+		}
+	}
+	t.Fatalf("events = %+v, want closed lifecycle event", events)
+}
+
 func TestEnginePullDryRunTreatsLabelOnlyChangeAsUpdate(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)

@@ -18,6 +18,9 @@ const (
 // BatchCreateOptions contains options for batch issue creation.
 // This is a backend-agnostic type that can be used by any storage implementation.
 type BatchCreateOptions struct {
+	// CreateOnly uses strict insert semantics after the caller has reserved the
+	// issue ID. It is for guarded public creates; import behavior is unchanged.
+	CreateOnly bool
 	// OrphanHandling specifies how to handle issues with missing parent references
 	OrphanHandling OrphanHandling
 	// SkipPrefixValidation skips prefix validation for existing IDs (used during import)

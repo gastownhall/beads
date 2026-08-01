@@ -7,13 +7,14 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var readyCmd = &cobra.Command{
@@ -46,15 +47,35 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 		}()
 
+		claimReady, _ := cmd.Flags().GetBool("claim")
+
 		if usesProxiedServer() {
+			// --claim consumes exactly one row, same reasoning as the
+			// direct-path fix in issueops/claim.go: a rig-wide cap sized
+			// for bulk list/ready reads must not block a single-row claim.
+			// Only the bulk (non-claim) proxied ready listing rejects an
+			// active cap.
+			if !claimReady {
+				if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
+					return err
+				}
+			} else {
+				// Still validate --max-rows/BEADS_MAX_ROWS here even though
+				// the resolved cap is ignored below: resolveMaxRows is also
+				// where a malformed value (e.g. --max-rows -1) is rejected
+				// with exit 1, and skipping it entirely for the claim-exempt
+				// branch would silently accept a usage error that every
+				// other command (direct or proxied) rejects.
+				if _, _, err := resolveMaxRows(cmd); err != nil {
+					return err
+				}
+			}
 			return runReadyProxiedServer(cmd, rootCtx)
 		}
 
 		if offset, _ := cmd.Flags().GetInt("offset"); offset > 0 {
 			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
 		}
-
-		claimReady, _ := cmd.Flags().GetBool("claim")
 
 		gated, _ := cmd.Flags().GetBool("gated")
 		if gated {
@@ -82,122 +103,28 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			return runReadyExplain(cmd)
 		}
 
-		limit, _ := cmd.Flags().GetInt("limit")
-		assignee, _ := cmd.Flags().GetString("assignee")
-		unassigned, _ := cmd.Flags().GetBool("unassigned")
-		sortPolicy, _ := cmd.Flags().GetString("sort")
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
-		issueType, _ := cmd.Flags().GetString("type")
-		issueType = utils.NormalizeIssueType(issueType) // Expand aliases (mr→merge-request, etc.)
-		parentID, _ := cmd.Flags().GetString("parent")
-		molTypeStr, _ := cmd.Flags().GetString("mol-type")
-		prettyFormat, _ := cmd.Flags().GetBool("pretty")
-		plainFormat, _ := cmd.Flags().GetBool("plain")
-		includeDeferred, _ := cmd.Flags().GetBool("include-deferred")
-		includeEphemeral, _ := cmd.Flags().GetBool("include-ephemeral")
-		excludeTypeStrs, _ := cmd.Flags().GetStringSlice("exclude-type")
-		var molType *types.MolType
-		if molTypeStr != "" {
-			mt := types.MolType(molTypeStr)
-			if !mt.IsValid() {
-				return HandleErrorRespectJSON("invalid mol-type %q (must be swarm, patrol, or work)", molTypeStr)
-			}
-			molType = &mt
+		// The row cap is meaningful on this route alone - the proxied one
+		// rejects a live cap outright - so this is the only caller that hands
+		// the gatherer a resolver for it.
+		in, err := gatherReadyInput(cmd, resolveMaxRows)
+		if err != nil {
+			return err
 		}
-		if claimReady && assignee != "" {
-			return HandleErrorRespectJSON("--claim cannot be combined with --assignee")
-		}
+		filter := in.filter
 
-		// Normalize labels: trim, dedupe, remove empty
-		labels = utils.NormalizeLabels(labels)
-		labelsAny = utils.NormalizeLabels(labelsAny)
-		excludeLabels = utils.NormalizeLabels(excludeLabels)
-
-		// Apply directory-aware label scoping if no labels explicitly provided (GH#541)
-		if len(labels) == 0 && len(labelsAny) == 0 {
-			if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
-				labelsAny = dirLabels
-			}
-		}
-
-		// Normalize --exclude-type values.
-		var excludeTypes []types.IssueType
-		for _, raw := range excludeTypeStrs {
-			for _, t := range strings.Split(raw, ",") {
-				t = strings.TrimSpace(t)
-				if t != "" {
-					excludeTypes = append(excludeTypes, types.IssueType(utils.NormalizeIssueType(t)))
-				}
-			}
-		}
-		filter := types.WorkFilter{
-			Status:           "open", // Only show open issues, not in_progress (matches bd list --ready)
-			Type:             issueType,
-			Limit:            limit,
-			Unassigned:       unassigned,
-			SortPolicy:       types.SortPolicy(sortPolicy),
-			Labels:           labels,
-			LabelsAny:        labelsAny,
-			ExcludeLabels:    excludeLabels,
-			IncludeDeferred:  includeDeferred,  // GH#820: respect --include-deferred flag
-			IncludeEphemeral: includeEphemeral, // bd-i5k5x: allow ephemeral issues (e.g., merge-requests)
-			ExcludeTypes:     excludeTypes,
-		}
-		// Use Changed() to properly handle P0 (priority=0)
-		if cmd.Flags().Changed("priority") {
-			priority, _ := cmd.Flags().GetInt("priority")
-			filter.Priority = &priority
-		}
-		if assignee != "" && !unassigned {
-			filter.Assignee = &assignee
-		}
-		if parentID != "" {
-			filter.ParentID = &parentID
-		}
-		if molType != nil {
-			filter.MolType = molType
-		}
-
-		// Metadata filters (GH#1406)
-		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
-		if len(metadataFieldFlags) > 0 {
-			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
-			for _, mf := range metadataFieldFlags {
-				k, v, ok := strings.Cut(mf, "=")
-				if !ok || k == "" {
-					return HandleErrorRespectJSON("invalid --metadata-field: expected key=value, got %q", mf)
-				}
-				if err := storage.ValidateMetadataKey(k); err != nil {
-					return HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
-				}
-				filter.MetadataFields[k] = v
-			}
-		}
-		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
-		if hasMetadataKey != "" {
-			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				return HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
-			}
-			filter.HasMetadataKey = hasMetadataKey
-		}
-
-		if !filter.SortPolicy.IsValid() {
-			return HandleErrorRespectJSON("invalid sort policy '%s'. Valid values: hybrid, priority, oldest", sortPolicy)
-		}
 		ctx := rootCtx
 
 		activeStore := store
 		if claimReady {
 			CheckReadonly("ready --claim")
 		} else {
-			routedStore, routed, err := openRoutedReadStore(ctx, activeStore)
+			routedStore, routed, routingRule, err := openRoutedReadStore(ctx, activeStore)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if routed {
 				defer func() { _ = routedStore.Close() }()
+				printContributorRoutingNotice(ctx, activeStore, routingRule)
 				activeStore = routedStore
 			}
 		}
@@ -205,6 +132,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if claimReady {
 			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			if claimed == nil {
@@ -231,6 +161,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if jsonOutput {
 			results, err := activeStore.GetReadyWorkWithCounts(ctx, filter)
 			if err != nil {
+				if capErr := handleMaxRowsError(err); capErr != nil {
+					return capErr
+				}
 				return HandleErrorRespectJSON("%v", err)
 			}
 			totalReady := len(results)
@@ -261,7 +194,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if results == nil {
 				results = []*types.IssueWithCounts{}
 			}
-			if jerr := outputJSON(results); jerr != nil {
+			var pag *PaginationMeta
+			if truncated {
+				pag = &PaginationMeta{
+					Returned:  len(results),
+					Total:     totalReady,
+					Truncated: true,
+				}
+			}
+			if jerr := outputJSONWithPagination(results, pag); jerr != nil {
 				return jerr
 			}
 			if truncated {
@@ -272,6 +213,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		issues, err := activeStore.GetReadyWork(ctx, filter)
 		if err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -304,7 +248,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 		parentEpicMap := buildParentEpicMap(ctx, activeStore, issues)
 
-		usePlain := plainFormat || !prettyFormat
+		usePlain := in.plainFormat || !in.prettyFormat
 		if usePlain {
 			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
 			for i, issue := range issues {
@@ -499,14 +443,30 @@ func buildReadyIssueOutput(ctx context.Context, s storage.DoltStorage, issues []
 	return issuesWithCounts
 }
 
+// readyExplainFilter is the filter both --explain routes run, derived from the
+// same builder the listing uses so the set `bd ready --explain` explains cannot
+// drift from the set `bd ready` shows (bd-3fs.3).
+//
+// --explain takes no listing flags: it is a whole-graph diagnostic, and the
+// direct route reaches it before the flags are even gathered. The limit is
+// therefore pinned to unlimited rather than left to workapi.DefaultReadyLimit,
+// which would silently truncate the explanation at 100 rows.
+func readyExplainFilter() (types.WorkFilter, error) {
+	unlimited := 0
+	return workapi.BuildReadyFilter(issueops.ReadyRequest{
+		Sort:  string(types.SortPolicyPriority),
+		Limit: &unlimited,
+	})
+}
+
 func runReadyExplain(_ *cobra.Command) error {
 	ctx := rootCtx
 
 	activeStore := store
 
-	filter := types.WorkFilter{
-		Status:     types.StatusOpen,
-		SortPolicy: types.SortPolicyPriority,
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyIssues, err := activeStore.GetReadyWork(ctx, filter)
 	if err != nil {
@@ -745,7 +705,7 @@ type MoleculeReadyOutput struct {
 }
 
 func init() {
-	readyCmd.Flags().IntP("limit", "n", 100, "Maximum issues to show (use 0 for unlimited)")
+	readyCmd.Flags().IntP("limit", "n", workapi.DefaultReadyLimit, "Maximum issues to show (use 0 for unlimited)")
 	readyCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	readyCmd.Flags().IntP("priority", "p", 0, "Filter by priority")
 	readyCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
@@ -754,6 +714,8 @@ func init() {
 	readyCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	readyCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	readyCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
+	readyCmd.Flags().String("label-pattern", "", "Filter by label glob pattern (e.g., 'tech-*' matches tech-debt, tech-legacy)")
+	readyCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	readyCmd.Flags().StringP("type", "t", "", "Filter by issue type (task, bug, feature, epic, decision, merge-request). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	readyCmd.Flags().String("mol", "", "Filter to steps within a specific molecule")
 	readyCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
@@ -769,6 +731,8 @@ func init() {
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
 	rootCmd.AddCommand(blockedCmd)

@@ -67,6 +67,26 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("notes_overwrite_warns_on_stderr", func(t *testing.T) {
+		p := bdProxiedInit(t, bd, "unw")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes overwrite", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", "--json", issue.ID, "--notes", "replacement notes")
+		if err != nil {
+			t.Fatalf("overwrite notes: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		warning := fmt.Sprintf("warning: %s: --notes replaced existing notes (use --append-notes to preserve history)", issue.ID)
+		if !strings.Contains(stderr, warning) {
+			t.Errorf("expected stderr to contain %q, got: %s", warning, stderr)
+		}
+		if strings.Contains(stdout, "warning:") {
+			t.Errorf("warning must not appear on stdout, got: %s", stdout)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "replacement notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "replacement notes")
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")

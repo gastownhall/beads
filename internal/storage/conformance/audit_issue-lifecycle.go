@@ -32,7 +32,7 @@ func auditCountEventType(events []*types.Event, want types.EventType) int {
 func RunAudit_issue_lifecycle(t *testing.T, f Factory) {
 	t.Helper()
 	t.Run("CloseIdempotentKeepsFirstReason", func(t *testing.T) { testAuditCloseIdempotentKeepsFirstReason(t, f) })
-	t.Run("ReopenOnOpenMintsEvent", func(t *testing.T) { testAuditReopenOnOpenMintsEvent(t, f) })
+	t.Run("ReopenEventSemantics", func(t *testing.T) { testAuditReopenEventSemantics(t, f) })
 	t.Run("ReopenNotFoundIsSentinel", func(t *testing.T) { testAuditReopenNotFoundIsSentinel(t, f) })
 	t.Run("DeleteIssuesBatchModes", func(t *testing.T) { testAuditDeleteIssuesBatchModes(t, f) })
 	t.Run("DeleteIssuesDryRunCounts", func(t *testing.T) { testAuditDeleteIssuesDryRunCounts(t, f) })
@@ -80,22 +80,29 @@ func testAuditCloseIdempotentKeepsFirstReason(t *testing.T, f Factory) {
 	}
 }
 
-// Reopening an already-open issue mints a status_changed event on the reference
-// (ReopenIssue -> UpdateIssue always records an event).
-func testAuditReopenOnOpenMintsEvent(t *testing.T, f Factory) {
+// Reopening an already-open issue is a strict no-op. Reopening the same issue
+// after a genuine close mints exactly one reopened event.
+func testAuditReopenEventSemantics(t *testing.T, f Factory) {
 	s := f(t)
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ro-1", Title: "T", Status: types.StatusOpen}), "a"))
 
 	before, err := s.GetEvents(ctx(), "ro-1", 0)
 	must(t, err)
 
-	// reason="" so no comment is added; only the status update event should appear.
 	must(t, s.ReopenIssue(ctx(), "ro-1", "", "a"))
 
 	after, err := s.GetEvents(ctx(), "ro-1", 0)
 	must(t, err)
-	if len(after) != len(before)+1 {
-		t.Errorf("events after reopen-on-open = %d, want %d (one new event)", len(after), len(before)+1)
+	if len(after) != len(before) {
+		t.Errorf("events after reopen-on-open = %d, want %d (strict no-op)", len(after), len(before))
+	}
+
+	must(t, s.CloseIssue(ctx(), "ro-1", "done", "a", "session"))
+	must(t, s.ReopenIssue(ctx(), "ro-1", "", "a"))
+	afterClosedReopen, err := s.GetEvents(ctx(), "ro-1", 0)
+	must(t, err)
+	if n := auditCountEventType(afterClosedReopen, types.EventReopened); n != 1 {
+		t.Errorf("EventReopened count after closed reopen = %d, want 1", n)
 	}
 }
 

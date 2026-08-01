@@ -221,6 +221,7 @@ func (m *mockMapper) IssueToBeads(ti *TrackerIssue) *IssueConversion {
 
 type pureTestStore struct {
 	storage.Storage
+	storage.IssueLifecycleStore
 	issues        []*types.Issue
 	localMetadata map[string]string
 }

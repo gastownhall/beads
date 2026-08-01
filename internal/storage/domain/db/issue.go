@@ -37,7 +37,7 @@ var _ domain.IssueSQLRepository = (*issueSQLRepositoryImpl)(nil)
 const issueSelectColumns = sqlbuild.IssueSelectColumns
 
 var allowedUpdateFields = map[string]struct{}{
-	"status": {}, "priority": {}, "title": {}, "assignee": {},
+	"status": {}, "priority": {}, "title": {}, "assignee": {}, "owner": {},
 	"description": {}, "design": {}, "acceptance_criteria": {}, "notes": {},
 	"issue_type": {}, "estimated_minutes": {}, "external_ref": {}, "spec_id": {},
 	"started_at": {}, "closed_at": {}, "close_reason": {}, "closed_by_session": {},
@@ -66,6 +66,19 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}
 
 	table := pickIssueTable(opts.UseWispsTable)
+	if opts.CreateOnly {
+		if err := issueops.EnsureIssueIDAvailableInTx(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
+		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
+			return err
+		}
+		return r.events.Record(ctx, domain.Event{
+			IssueID: issue.ID,
+			Type:    types.EventCreated,
+			Actor:   actor,
+		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
@@ -85,6 +98,18 @@ func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*type
 	return nil
 }
 
+func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (bool, error) {
+	issue, err := issueops.GetIssueInTx(ctx, r.runner, id)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: get issue: %w", id, err)
+	}
+	result, err := issueops.MoveIssuePersistenceInTx(ctx, r.runner, issue, mode)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: %w", id, err)
+	}
+	return result.Changed, nil
+}
+
 func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts) error {
 	if id == "" {
 		return errors.New("db: Update: id must not be empty")
@@ -92,6 +117,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if len(updates) == 0 {
 		return nil
 	}
+	updates = cloneUpdateFields(updates)
+	// Pop the close-policy override before anything reads the map as a set of
+	// columns, mirroring issueops.updateIssueInTx. The no-op filter below keeps
+	// unrecognized keys, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	forceClosePolicy := issueops.PopForceClosePolicy(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -108,27 +139,17 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	table := pickIssueTable(opts.UseWispsTable)
 
-	_, statusChanging := updates["status"]
 	mergeOps := issueops.HasMergeOps(updates)
 
-	// When the status changes we need the prior row to reproduce the embedded
-	// lifecycle side effects (issueops.updateIssueInTx): closed_at is set on
-	// close and cleared on reopen, started_at is set on the in_progress
-	// transition, the audit event type is derived from the transition, and
-	// is_blocked is recomputed for neighbors. Read the full old issue once so
-	// all four use the same snapshot; the ErrNoRows contract is preserved.
-	// Merge operations (metadata edits, note appends) need the same read: they
-	// are resolved against the row as seen by THIS unit-of-work transaction.
-	var oldIssue *types.Issue
-	if statusChanging || mergeOps {
-		var err error
-		oldIssue, err = r.Get(ctx, id, opts)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
-			}
-			return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
+	// Read the prior row once. Status and merge updates need it for their
+	// transaction-local resolution, and every update uses it to suppress true
+	// no-ops before changing row_lock or recording an event.
+	oldIssue, err := r.Get(ctx, id, opts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 		}
+		return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
 	}
 
 	// Resolve read-merge-write operation keys (issueops.OpMergeMetadata,
@@ -149,6 +170,35 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		updates = resolved
 	}
 
+	filteredUpdates, err := issueops.DiscardNoopIssueUpdates(oldIssue, updates)
+	if err != nil {
+		return fmt.Errorf("db: Update %s: compare updates: %w", id, err)
+	}
+	updates = filteredUpdates
+	if len(updates) == 0 {
+		return nil
+	}
+	// A status that matched the row was already dropped as a no-op, so the
+	// lifecycle side effects below only fire on a real transition.
+	_, statusChanging := updates["status"]
+
+	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
+	// into the done category is a close by another name and answers to close
+	// policy. A refusal returns before any write and aborts the caller's unit of
+	// work. The wrap keeps the sentinels matchable, so a caller distinguishes
+	// these refusals here exactly as it does on the close path.
+	if statusChanging {
+		crossing, err := issueops.CrossesIntoDoneCategoryInTx(ctx, r.runner, oldIssue.Status, updates)
+		if err != nil {
+			return fmt.Errorf("db: Update %s: %w", id, err)
+		}
+		if crossing {
+			if _, err := issueops.EnforceClosePolicyInTx(ctx, r.runner, id, forceClosePolicy); err != nil {
+				return fmt.Errorf("db: Update %s: %w", id, err)
+			}
+		}
+	}
+
 	setClauses := make([]string, 0, len(updates)+3)
 	args := make([]any, 0, len(updates)+4)
 	for key, value := range updates {
@@ -167,11 +217,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	// Lifecycle parity with issueops.updateIssueInTx: auto-manage closed_at and
 	// started_at from the status transition unless the caller set them
-	// explicitly. Both helpers no-op when the status is unchanged.
+	// explicitly.
 	if statusChanging {
 		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
+	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)
 
 	// Rewrite row_lock on every generic update, mirroring the classic
 	// issueops.updateIssueInTx invariant (update.go): a concurrent
@@ -197,6 +248,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	}
 	if rows == 0 {
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
+	}
+	if clearLease && !opts.UseWispsTable {
+		if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
+			return fmt.Errorf("db: Update %s: clear lease: %w", id, err)
+		}
 	}
 
 	// Event-type parity: embedded records EventClosed / EventReopened /
@@ -237,6 +293,14 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		}
 	}
 	return nil
+}
+
+func cloneUpdateFields(updates map[string]any) map[string]any {
+	cloned := make(map[string]any, len(updates))
+	for key, value := range updates {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func coerceStatus(v any) types.Status {
@@ -614,7 +678,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock
+			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -625,7 +689,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?
+			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			content_hash = VALUES(content_hash),
@@ -657,7 +721,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-		issueops.FreshRowLock(),
+		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)
@@ -770,6 +834,10 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx contex
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
 }
 
+func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
+}
+
 func (r *issueSQLRepositoryImpl) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
 	return r.getReadyWorkUnion(ctx, filter)
 }
@@ -864,6 +932,10 @@ func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []st
 	return out, nil
 }
 
+func (r *issueSQLRepositoryImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
+	return issueops.FindWispDependentsRecursiveInTx(ctx, r.runner, ids)
+}
+
 func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) ([]string, []string, error) {
 	return issueops.AffectedByDeletionInTx(ctx, r.runner, issueIDs, wispIDs)
 }
@@ -888,13 +960,26 @@ func (r *issueSQLRepositoryImpl) Close(ctx context.Context, id string, params do
 	}, nil
 }
 
+func (r *issueSQLRepositoryImpl) CloseChecked(ctx context.Context, id string, params domain.CloseRowParams, actor string, force bool) (domain.CloseRowResult, error) {
+	res, err := issueops.CloseIssueCheckedInTx(ctx, r.runner, id, params.Reason, actor, params.Session, force, nil)
+	if err != nil {
+		return domain.CloseRowResult{}, fmt.Errorf("db: IssueSQLRepository.CloseChecked %s: %w", id, err)
+	}
+	return domain.CloseRowResult{
+		Updated:       !res.AlreadyClosed,
+		AlreadyClosed: res.AlreadyClosed,
+		IsWisp:        res.IsWisp,
+		OpenChildren:  res.OpenChildren,
+	}, nil
+}
+
 func (r *issueSQLRepositoryImpl) Reopen(ctx context.Context, id string, params domain.ReopenRowParams, actor string, opts domain.IssueTableOpts) (domain.ReopenRowResult, error) {
 	res, err := issueops.ReopenIssueInTx(ctx, r.runner, id, params.Reason, actor)
 	if err != nil {
 		return domain.ReopenRowResult{}, fmt.Errorf("db: IssueSQLRepository.Reopen %s: %w", id, err)
 	}
 	return domain.ReopenRowResult{
-		Updated:     !res.AlreadyOpen,
+		Updated:     res.Changed,
 		AlreadyOpen: res.AlreadyOpen,
 		IsWisp:      res.IsWisp,
 	}, nil
@@ -944,11 +1029,12 @@ func (r *issueSQLRepositoryImpl) GetStatistics(ctx context.Context) (*types.Stat
 	`).Scan(&blocked); err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.GetStatistics: count blocked: %w", err)
 	}
-	stats.BlockedIssues = blocked
-	stats.ReadyIssues = stats.OpenIssues - blocked
-	if stats.ReadyIssues < 0 {
-		stats.ReadyIssues = 0
+	stats.BlockedIssues = &blocked
+	ready := stats.OpenIssues - blocked
+	if ready < 0 {
+		ready = 0
 	}
+	stats.ReadyIssues = &ready
 	return stats, nil
 }
 
@@ -1007,9 +1093,9 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 	return nil
 }
 
-func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, actor string) ([]types.ReclaimedLease, error) {
+func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
-	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, actor)
+	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, filter, actor)
 	if err != nil {
 		return nil, fmt.Errorf("db: IssueSQLRepository.ReclaimExpiredLeases: %w", err)
 	}

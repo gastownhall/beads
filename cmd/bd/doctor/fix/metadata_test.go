@@ -501,11 +501,14 @@ func TestIsExpectedProbeError(t *testing.T) {
 		{"table not exist (1146)", &mysql.MySQLError{Number: 1146, Message: "Table doesn't exist"}, true},
 		{"unknown database (1049)", &mysql.MySQLError{Number: 1049, Message: "Unknown database"}, true},
 		{"unknown column (1054)", &mysql.MySQLError{Number: 1054, Message: "Unknown column"}, true},
-		{"access denied (1045)", &mysql.MySQLError{Number: 1045, Message: "Access denied"}, false},
-		{"access denied for db (1044)", &mysql.MySQLError{Number: 1044, Message: "Access denied for user"}, false},
+		// GH#4931: unreadable peer DBs on a shared server must not abort bootstrap
+		{"access denied table (1142)", &mysql.MySQLError{Number: 1142, Message: "Access denied for user to table"}, true},
+		{"access denied for db (1044)", &mysql.MySQLError{Number: 1044, Message: "Access denied for user"}, true},
+		{"dolt HY000 access denied (1105)", &mysql.MySQLError{Number: 1105, Message: "Access denied for user 'beads_rw'@'%' to table 'issues'"}, true},
+		{"access denied string", errors.New("Error 1105 (HY000): Access denied for user 'beads_rw'@'%' to table 'issues'"), true},
 		{"generic error", errors.New("connection reset"), false},
 		{"wrapped ErrNoRows", fmt.Errorf("wrapped: %w", sql.ErrNoRows), true},
-		{"wrapped access denied", fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1045}), false},
+		{"wrapped access denied 1044", fmt.Errorf("wrapped: %w", &mysql.MySQLError{Number: 1044, Message: "Access denied"}), true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

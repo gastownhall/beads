@@ -23,10 +23,17 @@
 #      exists on the base branch. New files only. Fix-forward with a new
 #      migration instead: applied migration content is content-hashed
 #      (PR 4270), so editing history creates cross-clone hash skew.
+#   D. A new main-plane migration whose DDL touches a clone-local
+#      (dolt_ignored) table must ship an ignored-series twin in the same
+#      change. Clone-local tables are materialized on fresh clones by the
+#      ignored series alone — the main cursor arrives at-latest, so a
+#      main-plane ALTER silently never reaches them (bd-hs7fa: 0060's
+#      wisps.storage_class missed every fresh clone; wy-pt82l before it:
+#      0054's wisps.row_lock, healed after the fact by ignored/0013).
 #
-# Check C compares against $BASE_SHA if set (CI passes the PR base), else
-# origin/main, else main; it is skipped with a warning when no base is
-# resolvable (e.g. shallow clone without the base commit).
+# Checks C and D compare against $BASE_SHA if set (CI passes the PR base),
+# else origin/main, else main; they are skipped with a warning when no base
+# is resolvable (e.g. shallow clone without the base commit).
 
 set -euo pipefail
 
@@ -150,6 +157,56 @@ else
   Write a NEW migration with the next version number instead.
 EOF
   fi
+fi
+
+# --- Check D: main-plane DDL on clone-local tables needs an ignored twin -----
+# Fresh clones materialize the clone-local (dolt_ignored) tables from the
+# ignored series with the MAIN cursor already at-latest, so a main-plane
+# migration's DDL against one of them never executes there. The main-plane
+# migration is still required (it upgrades in-place workspaces, whose ignored
+# cursor is likewise at-latest); the twin is what carries the change through
+# the fresh-clone door. Data-only statements (UPDATE/INSERT/DELETE) don't
+# trigger this: clone-local data is clone-local by design.
+#
+# The table list mirrors internal/storage/schema/schema.go's
+# doltIgnorePatterns + versionGatedDoltIgnorePatterns. The engine-level
+# backstop for the same invariant is
+# internal/storage/embeddeddolt/migrate_ignored_plane_shape_test.go.
+if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
+  echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
+else
+  ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|ignored_schema_migrations'
+  ddl_re="(alter|create|rename|drop)[[:space:]]+table([[:space:]]+if[[:space:]]+(not[[:space:]]+)?exists)?[[:space:]]+[\`']?(${ignored_tables})\b"
+  # Untracked files count as added too (mirrors check C's working-tree scope:
+  # in CI the tree is clean so this equals the PR diff).
+  added_all=$(
+    {
+      git diff --name-only --diff-filter=A "$merge_base" -- "$MIG_DIR/*.sql" "$MIG_DIR/ignored/*.sql"
+      git ls-files --others --exclude-standard -- "$MIG_DIR"
+    } | grep '\.sql$' | sort -u || true
+  )
+  added_main=$(grep -v '/ignored/' <<<"$added_all" || true)
+  added_ignored=$(grep '/ignored/' <<<"$added_all" || true)
+  for f in $added_main; do
+    [ -f "$f" ] || continue
+    stripped=$(sed 's/--.*$//' "$f" | tr '[:upper:]' '[:lower:]')
+    hits=$(grep -n -E "$ddl_re" <<<"$stripped" || true)
+    if [ -n "$hits" ] && [ -z "$added_ignored" ]; then
+      fail=1
+      echo "FAIL (ignored twin missing) $f contains DDL against a clone-local table:"
+      echo "$hits" | sed 's/^/  line /'
+      cat <<'EOF'
+  This table is dolt_ignored (clone-local): fresh clones build it from the
+  ignored migration series with the main cursor already at-latest, so this
+  DDL will silently never run there (bd-hs7fa). Ship a guarded twin under
+  internal/storage/schema/migrations/ignored/ in the same PR (precedent:
+  ignored/0013 for main 0054, ignored/0020 for main 0060). If the change is
+  genuinely main-plane-only (e.g. the table is being flipped ONTO the
+  ignored plane by this very migration), the twin is the migration that
+  materializes the table for clones (precedent: 0062 + ignored/0019).
+EOF
+    fi
+  done
 fi
 
 if [ "$fail" -ne 0 ]; then

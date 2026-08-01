@@ -253,11 +253,13 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 		return fmt.Errorf("rename lease row: %w", err)
 	}
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, 'renamed', ?, ?, ?)
-	`, NewEventID(), newID, actor, oldID, newID)
-	return err
+	return InsertDerivedEvent(ctx, tx, "events", AuxEvent{
+		IssueID:   newID,
+		EventType: "renamed",
+		Actor:     actor,
+		OldValue:  str(oldID),
+		NewValue:  str(newID),
+	})
 }
 
 func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issue *types.Issue, actor string) error {
@@ -274,10 +276,13 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 		return fmt.Errorf("wisp not found: %s", oldID)
 	}
 
-	if _, err = tx.ExecContext(ctx, `
-		INSERT INTO wisp_events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, 'renamed', ?, ?, ?)
-	`, NewEventID(), newID, actor, oldID, newID); err != nil {
+	if err = InsertDerivedEvent(ctx, tx, "wisp_events", AuxEvent{
+		IssueID:   newID,
+		EventType: "renamed",
+		Actor:     actor,
+		OldValue:  str(oldID),
+		NewValue:  str(newID),
+	}); err != nil {
 		return err
 	}
 
@@ -286,7 +291,7 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 
 // FindWispDependentsRecursiveInTx walks wisp_dependencies to find all transitive
 // dependents of the given IDs.
-func FindWispDependentsRecursiveInTx(ctx context.Context, tx *sql.Tx, ids []string) (map[string]bool, error) {
+func FindWispDependentsRecursiveInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
