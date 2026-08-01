@@ -1118,55 +1118,57 @@ A new feature
 	})
 }
 
-func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
-	bd := buildEmbeddedBD(t)
-	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dnm")
-	bdCreate(t, bd, dir, "Existing issue")
+// embeddedStoreSnapshot is the "did anything write to this database?"
+// tripwire the preview regression tests compare across a command run.
+type embeddedStoreSnapshot struct {
+	schemaVersion int
+	head          string
+	issueCount    int
+}
 
-	type snapshot struct {
-		schemaVersion int
-		head          string
-		issueCount    int
-	}
-	readSnapshot := func() snapshot {
-		t.Helper()
-		db, cleanup, err := embeddeddolt.OpenSQL(
-			t.Context(),
-			filepath.Join(beadsDir, "embeddeddolt"),
-			"dnm",
-			"main",
-		)
-		if err != nil {
-			t.Fatalf("OpenSQL: %v", err)
-		}
-		defer func() {
-			if err := cleanup(); err != nil {
-				t.Errorf("cleanup OpenSQL: %v", err)
-			}
-		}()
-
-		var got snapshot
-		if err := db.QueryRowContext(t.Context(),
-			"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&got.schemaVersion); err != nil {
-			t.Fatalf("read schema version: %v", err)
-		}
-		if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&got.head); err != nil {
-			t.Fatalf("read HEAD: %v", err)
-		}
-		if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&got.issueCount); err != nil {
-			t.Fatalf("read issue count: %v", err)
-		}
-		return got
-	}
-
-	// Regress only the migration cursor. The latest migration is idempotent, so
-	// a writable open would reapply it, restore the cursor, and commit a new
-	// HEAD. Keeping the physical schema intact lets create --dry-run execute
-	// its read-only validation against the older recorded schema version.
+func readEmbeddedStoreSnapshot(t *testing.T, beadsDir, database string) embeddedStoreSnapshot {
+	t.Helper()
 	db, cleanup, err := embeddeddolt.OpenSQL(
 		t.Context(),
 		filepath.Join(beadsDir, "embeddeddolt"),
-		"dnm",
+		database,
+		"main",
+	)
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer func() {
+		if err := cleanup(); err != nil {
+			t.Errorf("cleanup OpenSQL: %v", err)
+		}
+	}()
+
+	var got embeddedStoreSnapshot
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&got.schemaVersion); err != nil {
+		t.Fatalf("read schema version: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT HASHOF('HEAD')").Scan(&got.head); err != nil {
+		t.Fatalf("read HEAD: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM issues").Scan(&got.issueCount); err != nil {
+		t.Fatalf("read issue count: %v", err)
+	}
+	return got
+}
+
+// regressEmbeddedSchemaCursor rolls the recorded migration cursor back one
+// version WITHOUT touching the physical schema. The latest migration is
+// idempotent, so a writable open reapplies it, restores the cursor, and
+// commits a new HEAD — which is exactly what makes the cursor a usable
+// tripwire. Keeping the physical schema intact lets the preview's own reads
+// still work against the older recorded version.
+func regressEmbeddedSchemaCursor(t *testing.T, beadsDir, database string) {
+	t.Helper()
+	db, cleanup, err := embeddeddolt.OpenSQL(
+		t.Context(),
+		filepath.Join(beadsDir, "embeddeddolt"),
+		database,
 		"main",
 	)
 	if err != nil {
@@ -1185,6 +1187,18 @@ func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
 	if err := cleanup(); err != nil {
 		t.Fatalf("cleanup regression fixture: %v", err)
 	}
+}
+
+func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dnm")
+	bdCreate(t, bd, dir, "Existing issue")
+
+	readSnapshot := func() embeddedStoreSnapshot {
+		return readEmbeddedStoreSnapshot(t, beadsDir, "dnm")
+	}
+
+	regressEmbeddedSchemaCursor(t, beadsDir, "dnm")
 
 	// Force the version-bump path that previously opened a second writable
 	// store and migrated before create.RunE reached --dry-run handling.
@@ -1214,6 +1228,58 @@ func TestEmbeddedCreateDryRunDoesNotMigrate(t *testing.T) {
 	}
 	if after.issueCount != before.issueCount {
 		t.Errorf("issue count changed during dry-run: before=%d after=%d", before.issueCount, after.issueCount)
+	}
+}
+
+// TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget covers the second
+// store a dry-run can reach: `create --dry-run --parent X --repo <other>`
+// resolves the parent against the OTHER repo, and openDryRunTargetStore used
+// to open it with the writable factory. The command's own store being opened
+// read-only says nothing about that one — the mutation lands in a repository
+// the user only named as a lookup target.
+func TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	targetDir, targetBeadsDir, _ := bdInit(t, bd, "--prefix", "xtgt")
+	parent := bdCreate(t, bd, targetDir, "Parent in the target repo")
+	if parent.ID == "" {
+		t.Fatal("parent issue has no ID")
+	}
+
+	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "xsrc")
+
+	// The tripwire goes in the TARGET repo: only a writable open of that repo
+	// restores its cursor and commits.
+	regressEmbeddedSchemaCursor(t, targetBeadsDir, "xtgt")
+
+	// Force the version-bump path in the caller repo too, so this exercises
+	// the same post-upgrade window as the single-repo test.
+	if err := os.WriteFile(filepath.Join(callerBeadsDir, localVersionFile), []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	before := readEmbeddedStoreSnapshot(t, targetBeadsDir, "xtgt")
+	if before.schemaVersion != schema.LatestVersion()-1 {
+		t.Fatalf("fixture schema version = %d, want %d", before.schemaVersion, schema.LatestVersion()-1)
+	}
+
+	cmd := exec.Command(bd, "create", "--dry-run",
+		"--parent", parent.ID, "--repo", targetDir, "Preview only", "--json")
+	cmd.Dir = callerDir
+	cmd.Env = bdEnv(callerDir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd create --dry-run --parent --repo failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	after := readEmbeddedStoreSnapshot(t, targetBeadsDir, "xtgt")
+	if after.schemaVersion != before.schemaVersion {
+		t.Errorf("target repo schema version changed during cross-repo dry-run: before=%d after=%d", before.schemaVersion, after.schemaVersion)
+	}
+	if after.head != before.head {
+		t.Errorf("target repo Dolt HEAD changed during cross-repo dry-run: before=%s after=%s", before.head, after.head)
+	}
+	if after.issueCount != before.issueCount {
+		t.Errorf("target repo issue count changed during cross-repo dry-run: before=%d after=%d", before.issueCount, after.issueCount)
 	}
 }
 
