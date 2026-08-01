@@ -311,7 +311,11 @@ fi
 # already red - that already explains per-PR redness, and avoids reporting
 # "the base branch shows green" right after a red-base line above - and stay
 # silent on an empty, unreadable, or mixed-health sample.
-if [[ "$base_red_count" -eq 0 ]]; then
+if [[ "$base_red_count" -eq 0 && "$base_green_count" -gt 0 ]]; then
+  # Only diagnose the PR gate against a base branch known to be green: on a red
+  # base the red-base message already explains PR redness, and on an
+  # undetermined base the "while the base branch shows green" explanation
+  # would contradict the warn printed just above.
   pr_gate_runs=$(gh run list --repo "$repo" --event pull_request --status completed \
     --limit 60 --json conclusion,headBranch,workflowName,createdAt,url 2>/dev/null) || pr_gate_runs=""
   # gh can exit 0 with non-JSON (or empty) output; treat anything that is not
