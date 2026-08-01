@@ -1470,14 +1470,27 @@ var rootCmd = &cobra.Command{
 
 		// In proxied mode the CLI short-circuits to the uowProvider path and
 		// dispatches through the *_proxied_server.go duals.
+		//
+		// Preview commands take the same policy here as they do on the
+		// embedded and server paths, and for the same reason: the provider
+		// open runs CREATE DATABASE and schema.MigrateUpWithLock, and
+		// reconcileVersionProxiedServer writes version metadata — all during
+		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
+		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride)
+			var providerOpts []uow.ProviderOption
+			if previewMode {
+				providerOpts = append(providerOpts, uow.WithPreview())
+			}
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, providerOpts...)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
 			uowProvider = p
 
-			reconcileVersionProxiedServer(rootCtx)
+			if !previewMode {
+				reconcileVersionProxiedServer(rootCtx)
+			}
 
 			syncCommandContext()
 			return nil
