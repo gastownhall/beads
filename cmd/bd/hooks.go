@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -1290,11 +1291,11 @@ func resetHooksPathIfBeadsManaged() error {
 	cmd.Dir = repoRoot
 	if out, err := cmd.Output(); err == nil {
 		hooksPath := strings.TrimSpace(string(out))
-		// Match both relative (legacy) and absolute (GH#2414) beads hooks paths
-		absBeadsHooks := filepath.Join(repoRoot, ".beads", "hooks")
-		absSharedHooks := filepath.Join(repoRoot, ".beads-hooks")
-		if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" ||
-			hooksPath == absBeadsHooks || hooksPath == absSharedHooks {
+		// Matches both relative (legacy) and absolute (GH#2414) beads hooks
+		// paths, symlink-resolving the absolute forms. Shared with
+		// doctor.CheckHooksPath/FixHooksPath so uninstall and `bd doctor --fix`
+		// cannot disagree about what "beads-managed" means.
+		if doctor.IsBeadsManagedHooksPath(repoRoot, hooksPath) {
 			unsetCmd := exec.Command("git", "config", "--unset", "core.hooksPath")
 			unsetCmd.Dir = repoRoot
 			if output, err := unsetCmd.CombinedOutput(); err != nil {

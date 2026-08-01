@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -199,5 +200,85 @@ func TestFixHooksPath_NoOpWhenTargetExists(t *testing.T) {
 
 	if got := getGitConfig(t, dir, "core.hooksPath"); got != ".beads/hooks" {
 		t.Errorf("expected core.hooksPath to remain %q when target exists, got %q", ".beads/hooks", got)
+	}
+}
+
+// TestCheckHooksPath_SymlinkedRepoRoot pins the fix for the macOS-red build at
+// 868dd077a: git canonicalizes the repo root it reports, but the configured
+// core.hooksPath is whatever string was written, so an absolute beads-managed
+// path reached through a symlink used to string-compare unequal and be
+// misreported as third-party — leaving FixHooksPath refusing to unset it.
+//
+// macOS hits this on every temp dir (/var is a symlink to /private/var), which
+// is how CI caught it, but nothing about it is macOS-specific: an explicit
+// symlink reproduces it anywhere git resolves the root.
+func TestCheckHooksPath_SymlinkedRepoRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("creating symlinks requires elevated privileges on Windows")
+	}
+
+	base := t.TempDir()
+	realDir := filepath.Join(base, "real")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("failed to create real repo dir: %v", err)
+	}
+	linkDir := filepath.Join(base, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatalf("failed to symlink %s -> %s: %v", linkDir, realDir, err)
+	}
+	setupGitRepoInDir(t, realDir)
+
+	// The value a user (or an older bd) wrote: absolute, and carrying the
+	// unresolved symlink prefix. Its target does not exist, so it is dangling.
+	hooksPath := filepath.Join(linkDir, ".beads", "hooks")
+	setGitConfig(t, realDir, "core.hooksPath", hooksPath)
+
+	runInDir(t, realDir, func() {
+		check := CheckHooksPath()
+		if check.Status != StatusWarning {
+			t.Fatalf("expected StatusWarning, got %q: %s", check.Status, check.Message)
+		}
+		if !strings.Contains(check.Fix, "bd doctor --fix") {
+			t.Errorf("expected beads-managed fix hint for a symlinked repo root, got %q", check.Fix)
+		}
+		if err := FixHooksPath(); err != nil {
+			t.Fatalf("FixHooksPath failed: %v", err)
+		}
+	})
+
+	if got := getGitConfig(t, realDir, "core.hooksPath"); got != "" {
+		t.Errorf("expected core.hooksPath to be unset after FixHooksPath, got %q", got)
+	}
+}
+
+// TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone guards the widened
+// symlink-resolving match against over-reach: resolving paths must not make
+// an unrelated hooks directory look beads-managed, since a false positive here
+// means bd unsets a hooksPath it does not own (husky, lefthook).
+func TestIsBeadsManagedHooksPath_LeavesThirdPartyAlone(t *testing.T) {
+	root := t.TempDir()
+	cases := []struct {
+		name      string
+		hooksPath string
+		want      bool
+	}{
+		{"relative beads hooks", ".beads/hooks", true},
+		{"relative shared beads hooks", ".beads-hooks", true},
+		{"absolute beads hooks", filepath.Join(root, ".beads", "hooks"), true},
+		{"absolute shared beads hooks", filepath.Join(root, ".beads-hooks"), true},
+		{"relative husky", ".husky/_", false},
+		{"relative githooks", ".githooks", false},
+		{"absolute husky", filepath.Join(root, ".husky", "_"), false},
+		{"beads hooks under a different repo", filepath.Join(t.TempDir(), ".beads", "hooks"), false},
+		{"deeper path below beads hooks", filepath.Join(root, ".beads", "hooks", "pre-commit"), false},
+		{"empty", "", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsBeadsManagedHooksPath(root, tc.hooksPath); got != tc.want {
+				t.Errorf("IsBeadsManagedHooksPath(%q, %q) = %v, want %v", root, tc.hooksPath, got, tc.want)
+			}
+		})
 	}
 }

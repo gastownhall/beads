@@ -639,7 +639,7 @@ func CheckHooksPath() DoctorCheck {
 		}
 	}
 
-	managed := isBeadsManagedHooksPath(repoRoot, hooksPath)
+	managed := IsBeadsManagedHooksPath(repoRoot, hooksPath)
 	var fix string
 	if managed {
 		fix = "Run 'bd doctor --fix' to unset core.hooksPath, or: git config --unset core.hooksPath"
@@ -675,7 +675,7 @@ func FixHooksPath() error {
 		return nil // nothing set
 	}
 
-	if !isBeadsManagedHooksPath(repoRoot, hooksPath) {
+	if !IsBeadsManagedHooksPath(repoRoot, hooksPath) {
 		return nil // never touch a third-party hooksPath
 	}
 
@@ -707,15 +707,61 @@ func getConfiguredHooksPath(repoRoot string) (string, bool) {
 	return strings.TrimSpace(string(out)), true
 }
 
-// isBeadsManagedHooksPath reports whether hooksPath is one of the values bd
+// IsBeadsManagedHooksPath reports whether hooksPath is one of the values bd
 // itself writes to core.hooksPath (.beads/hooks or .beads-hooks, relative or
-// absolute under repoRoot). Mirrors the matching in
-// resetHooksPathIfBeadsManaged (cmd/bd/hooks.go) — keep the two in sync.
-func isBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
-	absBeadsHooks := filepath.Join(repoRoot, ".beads", "hooks")
-	absSharedHooks := filepath.Join(repoRoot, ".beads-hooks")
-	return hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" ||
-		hooksPath == absBeadsHooks || hooksPath == absSharedHooks
+// absolute under repoRoot). It is the single matcher for that question;
+// resetHooksPathIfBeadsManaged (cmd/bd/hooks.go) calls it too, so the two
+// paths cannot drift apart.
+//
+// Absolute values are compared after symlink resolution. repoRoot comes from
+// git.GetMainRepoRoot, which canonicalizes the path, while the configured
+// core.hooksPath is whatever string the user or an older bd wrote. A raw
+// string compare therefore misses a genuinely beads-managed path any time the
+// repo is reached through a symlink — on macOS every repo under /var (which
+// is a symlink to /private/var, including all of t.TempDir()) hits this. The
+// false negative is not cosmetic: CheckHooksPath then reports the dangling
+// path as third-party and FixHooksPath deliberately refuses to unset it.
+func IsBeadsManagedHooksPath(repoRoot, hooksPath string) bool {
+	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" {
+		return true
+	}
+	if !filepath.IsAbs(hooksPath) {
+		return false
+	}
+	root := resolveExistingPrefix(repoRoot)
+	candidate := resolveExistingPrefix(hooksPath)
+	return candidate == filepath.Join(root, ".beads", "hooks") ||
+		candidate == filepath.Join(root, ".beads-hooks")
+}
+
+// resolveExistingPrefix returns path with its longest existing ancestor
+// replaced by that ancestor's symlink-resolved form, leaving any missing
+// trailing components untouched.
+//
+// filepath.EvalSymlinks alone is not enough here: the whole point of the
+// dangling-hooksPath check is that the leaf does not exist, so EvalSymlinks
+// on the full path fails and returns nothing usable. Walking up to the
+// deepest component that does exist still canonicalizes the symlinked prefix
+// (/var -> /private/var), which is where the divergence lives.
+func resolveExistingPrefix(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return path
+	}
+	current := filepath.Clean(path)
+	var trailing string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, trailing)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// Reached the filesystem root without finding an existing
+			// component; nothing to canonicalize against.
+			return filepath.Clean(path)
+		}
+		trailing = filepath.Join(filepath.Base(current), trailing)
+		current = parent
+	}
 }
 
 // CheckGitHooksDoltCompatibility checks if installed git hooks are compatible with Dolt backend.
