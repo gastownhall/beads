@@ -18,6 +18,36 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
 
+// sunPathLimit is the shortest sockaddr_un.sun_path any runner here imposes:
+// Linux allows 108 bytes including the NUL, macOS 104. Tests bind against the
+// smaller number so a path that works locally works on every runner.
+const sunPathLimit = 104
+
+// shortTempDir returns a temp directory whose name does not carry the test's
+// name, for paths that live under a hard length limit.
+//
+// t.TempDir() spends its budget on the test name, and on macOS $TMPDIR is
+// already ~48 bytes of /var/folders/<hash>/T before anything else, so a
+// descriptive test name alone can push a socket path past sun_path and turn
+// bind(2) into a bare "invalid argument". That is exactly how
+// TestResolveServerModeUOWTopology_KeepsALiveSocket failed on macOS and only
+// macOS, at 120 bytes (Main run 30686406361).
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bd")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
+// Pin the property that matters: reverting shortTempDir to t.TempDir() would
+// reintroduce the macOS failure, and no Linux runner would notice.
+func TestShortTempDirOmitsTheTestName(t *testing.T) {
+	dir := shortTempDir(t)
+	require.NotContains(t, dir, t.Name(),
+		"shortTempDir must not spend sun_path budget on the test name")
+}
+
 // serverModeBeadsDir writes a server-mode metadata.json into a fresh beads dir
 // and returns it. Nothing here starts a server: every assertion below is about
 // the topology resolution, which happens before anything is dialed.
@@ -139,7 +169,13 @@ func TestResolveServerModeUOWTopology_FallsBackToTCPWhenTheSocketIsDead(t *testi
 // TCP. Without this the previous test could be satisfied by deleting socket
 // support outright.
 func TestResolveServerModeUOWTopology_KeepsALiveSocket(t *testing.T) {
-	socket := filepath.Join(t.TempDir(), "dolt.sock")
+	socket := filepath.Join(shortTempDir(t), "dolt.sock")
+	// Belt and braces: shortTempDir keeps us well inside the limit on every
+	// runner we have, but a caller with an unusually deep $TMPDIR should read a
+	// skip rather than a bare "bind: invalid argument".
+	if len(socket) >= sunPathLimit {
+		t.Skipf("socket path too long (%d bytes): %s", len(socket), socket)
+	}
 	ln, err := net.Listen("unix", socket)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ln.Close() })
