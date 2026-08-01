@@ -292,6 +292,29 @@ else
   warn "Could not determine CI health of base branch ${base_ref}; check it manually before merging."
 fi
 
+# PR-gate health sample. The base-branch check above cannot see a job that
+# exists only in the PR workflow (pr.yml) - such a job never runs on the base
+# branch, so the check above can report green while every fresh PR is red in
+# that job. Sample recent completed pull_request-event runs across PRs and
+# look for a gate that is uniformly failing regardless of branch. This is a
+# supplemental detector: it only ever adds a warn/block, and stays silent
+# (including on an empty or unreadable sample) rather than asserting health.
+pr_gate_runs=$(gh run list --repo "$repo" --event pull_request --status completed \
+  --limit 12 --json conclusion,headBranch,workflowName,createdAt,url 2>/dev/null) || pr_gate_runs=""
+pr_gate_decisive=$(jq '[.[] | select((.conclusion // "") == "success" or ((.conclusion // "") | test("^(failure|timed_out|action_required)$")))]' <<<"${pr_gate_runs:-[]}")
+pr_gate_decisive_count=$(jq 'length' <<<"$pr_gate_decisive")
+pr_gate_distinct_heads=$(jq '[.[].headBranch] | unique | length' <<<"$pr_gate_decisive")
+pr_gate_red_count=$(jq '[.[] | select((.conclusion // "") | test("^(failure|timed_out|action_required)$"))] | length' <<<"$pr_gate_decisive")
+if [[ "$pr_gate_decisive_count" -ge 6 && "$pr_gate_distinct_heads" -ge 3 && "$pr_gate_red_count" -eq "$pr_gate_decisive_count" ]]; then
+  pr_gate_newest=$(jq -r 'sort_by(.createdAt) | last | "\(.workflowName) at \(.createdAt) \(.url)"' <<<"$pr_gate_decisive")
+  pr_gate_msg="PR gate appears broken: last ${pr_gate_decisive_count} completed pull_request runs across ${pr_gate_distinct_heads} distinct branches all failed (newest: ${pr_gate_newest}). A job that exists only in the PR workflow may be red for every PR while the base branch shows green. Investigate the PR workflow before trusting per-PR check verdicts."
+  if [[ "${PR_PREFLIGHT_BLOCK_RED_BASE:-0}" == "1" ]]; then
+    block "$pr_gate_msg"
+  else
+    warn "$pr_gate_msg"
+  fi
+fi
+
 # statusCheckRollup keeps every check run on the head SHA, including runs
 # from cancelled or superseded check suites. A head whose earlier suite was
 # cancelled mid-flight carries stale CANCELLED/FAILURE entries forever, next
