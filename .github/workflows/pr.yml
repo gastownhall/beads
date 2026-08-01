@@ -65,6 +65,34 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # examples/ holds separate Go modules that reach the parent through a
+  # `replace` directive, so their go.mod/go.sum record the parent's whole
+  # dependency graph and go stale whenever the root module's does. Nothing in
+  # CI compiled them, so that drift was invisible: on 2026-08-01 BOTH example
+  # modules failed a plain `go build` on main with "updates to go.mod needed".
+  # Examples are the first code a new user copies; this keeps them buildable.
+  #
+  # Deliberately NOT in ci-gate's required list yet. Because of the `replace`
+  # directive, any root go.mod change that is not mirrored into the examples
+  # fails this job, so making it blocking imposes a "tidy the examples too"
+  # step on every dependency bump. That is a maintainer call about contributor
+  # friction, not something to decide in the PR that adds the check — the job
+  # is visible on the checks list either way. Promote it by adding
+  # `build-examples` to ci-gate's `needs`, `CI_GATE_REQUIRED`, and its env map.
+  build-examples:
+    name: Build example modules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build every module under examples/
+        run: ./scripts/build-examples.sh
+
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
   # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
