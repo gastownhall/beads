@@ -240,6 +240,37 @@ func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixt
 	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
 	events.assert(t, "refused crossing", 0, nil)
 
+	// A claim rides the same atomic update. An open-child refusal must leave
+	// every part of that compound request inert, including the would-be claim.
+	var beforeAssignee string
+	var beforeRowVersion, beforeClosedAt string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &beforeAssignee, &beforeRowVersion, &beforeClosedAt); err != nil {
+		t.Fatalf("read compound-refusal state for %s: %v", parentID, err)
+	}
+	claimAndClose := closePolicyStatusRequest(parentID, false)
+	claimAndClose.Claim = true
+	_, err = fixture.Operations.Update(ctx, claimAndClose)
+	openChildrenErr = nil
+	if !errors.As(err, &openChildrenErr) {
+		t.Fatalf("claiming update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
+	}
+	var afterAssignee string
+	var afterRowVersion, afterClosedAt string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &afterAssignee, &afterRowVersion, &afterClosedAt); err != nil {
+		t.Fatalf("read compound-refusal state after %s: %v", parentID, err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+	if afterAssignee != beforeAssignee {
+		t.Errorf("compound refusal assignee = %q, want unchanged %q", afterAssignee, beforeAssignee)
+	}
+	if afterRowVersion != beforeRowVersion {
+		t.Errorf("compound refusal row version = %q, want unchanged %q", afterRowVersion, beforeRowVersion)
+	}
+	if afterClosedAt != beforeClosedAt {
+		t.Errorf("compound refusal closed_at = %v, want unchanged %v", afterClosedAt, beforeClosedAt)
+	}
+	events.assert(t, "refused claiming crossing", 0, nil)
+
 	// A live direct blocker refuses too.
 	_, err = fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID, false))
 	if !errors.Is(err, publicops.ErrCloseBlocked) {

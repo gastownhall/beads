@@ -204,15 +204,15 @@ func (r Result) WithIssueStatus(status string) Result {
 	return r
 }
 
-// WithRequestID attaches the `request_id` extension member, the correlation id
-// echoed in the request log line. It is what makes a 5xx actionable: the body
-// carries a fixed static detail by design, so the id is the client's only
-// handle on the one log line that has the real error.
+// WithRequestID sets the `request_id` member, the correlation id echoed in the
+// request log line. It is what makes a 5xx actionable: the body carries a fixed
+// static detail by design, so the id is the client's only handle on the one log
+// line that has the real error. The document requires it on every problem
+// response, which is why this sets it unconditionally — an id this server
+// failed to mint travels as an empty string rather than as a missing required
+// member.
 func (r Result) WithRequestID(id string) Result {
-	if id == "" {
-		return r
-	}
-	r.Problem.RequestId = &id
+	r.Problem.RequestId = id
 	return r
 }
 

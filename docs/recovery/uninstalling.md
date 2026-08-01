@@ -68,24 +68,46 @@ unrelated user hook content outside its managed hook markers.
 Use manual cleanup only if `bd admin reset` is unavailable or cannot run in
 the repository.
 
+Start by stopping a local Dolt server, if one is running:
+
 ```bash
-# Stop a local Dolt server if one is running.
 bd dolt stop 2>/dev/null || true
+```
 
-# Remove beads-managed hooks when bd hooks uninstall is unavailable.
-#
-# Check each file before deleting it. These are the standard git hook names,
-# not names beads reserves, so any of them may be a hook you wrote. Delete
-# only the ones whose entire content beads generated — they carry a
-# "# bd-hooks-version:", "# bd-shim", or "# bd (beads)" line. A hook of yours
-# with a "# --- BEGIN BEADS INTEGRATION ... ---" block in it should be edited,
-# removing the block between the BEGIN and END markers and keeping the rest.
-rm -f .git/hooks/pre-commit
-rm -f .git/hooks/prepare-commit-msg
-rm -f .git/hooks/post-merge
-rm -f .git/hooks/pre-push
-rm -f .git/hooks/post-checkout
+### Hooks: look before you delete
 
+There is no batch command for this step, deliberately. `pre-commit`,
+`prepare-commit-msg`, `post-merge`, `pre-push` and `post-checkout` are the
+standard git hook names, not names beads reserves, so any of them may be a hook
+you wrote — and if you are reading this section, `bd hooks uninstall` was not
+available to tell the difference for you.
+
+List which of them exist and what beads left in them:
+
+```bash
+grep -l -e 'bd-hooks-version:' -e 'bd-shim' -e 'bd (beads)' -e 'BEGIN BEADS INTEGRATION' \
+  .git/hooks/pre-commit .git/hooks/prepare-commit-msg .git/hooks/post-merge \
+  .git/hooks/pre-push .git/hooks/post-checkout 2>/dev/null
+```
+
+Open each file that matched and decide from what is in it:
+
+- A file whose **whole content** beads generated carries a
+  `# bd-hooks-version:`, `# bd-shim`, or `# bd (beads)` line and has nothing
+  else in it but the shebang. Delete that one: `rm -f .git/hooks/<name>`.
+- A file of yours with a `# --- BEGIN BEADS INTEGRATION ... ---` block in it is
+  **your** file. Edit it: remove the lines from the `BEGIN` marker to the `END`
+  marker, keep the rest, and leave the file in place. Comments of yours around
+  the block count — a hook that is a header comment plus beads' block is still
+  yours to edit rather than delete.
+
+Hooks the command did not list are yours regardless of what they mention.
+Naming beads in a comment, or calling `bd` from a hook you composed, does not
+make the file beads'.
+
+### The rest
+
+```bash
 # Remove the local beads database and config.
 rm -rf .beads
 

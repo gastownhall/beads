@@ -214,9 +214,16 @@ func closeProxiedOne(ctx context.Context, uw uow.UnitOfWork, id, reason string, 
 		return closeProxiedOutcome{}, false
 	}
 
-	if err := validateIssueClosable(id, current, actor, in.force); err != nil {
-		*errs = append(*errs, err.Error())
-		return closeProxiedOutcome{}, false
+	// Mirrors the ordering in cmd/bd/close.go (ga-ktn9pe.4.8): a row already at
+	// literal StatusClosed has no state change for close validation to guard, so
+	// the re-close skips it and reaches the engine as the idempotent no-op it has
+	// always been. Both close paths must agree here — diverging is the defect
+	// class #5217 closed.
+	if current.Status != types.StatusClosed {
+		if err := validateIssueClosable(id, current, actor, in.force); err != nil {
+			*errs = append(*errs, err.Error())
+			return closeProxiedOutcome{}, false
+		}
 	}
 
 	if !in.force && current.IssueType == types.TypeEpic {

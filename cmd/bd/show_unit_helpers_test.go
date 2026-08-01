@@ -46,6 +46,21 @@ func TestValidateIssueClosable(t *testing.T) {
 		t.Fatalf("expected boolean-pinned close to succeed with force, got %v", err)
 	}
 
+	// ga-ktn9pe.4.8: a closed row carrying pinned=true is the residue left by a
+	// forced close, and this guard still refuses it — closed status earns no
+	// exemption from the boolean trigger. Idempotent re-close was restored by
+	// ORDERING instead: cmd/bd/close.go and close_proxied_server.go skip close
+	// validation entirely for a row already closed at resolve time, so this guard
+	// is never reached on the no-op retry. Do not "simplify" it by exempting
+	// closed here — that would also disarm the guard on live status transitions.
+	closedPinnedResidue := &types.Issue{Status: types.StatusClosed, Pinned: true}
+	if err := validateIssueClosable("bd-7", closedPinnedResidue, "alice", false); err == nil {
+		t.Fatalf("expected closed+pinned residue to refuse a plain close")
+	}
+	if err := validateIssueClosable("bd-7", closedPinnedResidue, "alice", true); err != nil {
+		t.Fatalf("expected closed+pinned residue close to succeed with force, got %v", err)
+	}
+
 	// be-035: actor != assignee must be refused without --force.
 	mismatched := &types.Issue{Assignee: "bob"}
 	if err := validateIssueClosable("bd-3", mismatched, "alice", false); err == nil {

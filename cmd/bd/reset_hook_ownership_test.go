@@ -64,6 +64,27 @@ func TestClassifyResetHook(t *testing.T) {
 			want:    hookUserOwnedWithBdSection,
 		},
 		{
+			// The user's own file: a header they wrote and a note to whoever
+			// edits it next, with bd's block injected below. Stripping the block
+			// leaves only comments, which shouldPreserveHookContent is entitled
+			// to call nothing — it is deciding whether to COPY the file forward.
+			// Reset is deciding whether to DELETE it, and has no backup to
+			// restore, so comments are content here.
+			name: "user hook whose own content is only comments",
+			content: "#!/bin/sh\n" +
+				"# pre-commit — team hook.\n" +
+				"# TODO(ana): re-enable the lint step once CI stops flaking.\n" +
+				"# ./scripts/lint\n\n" + section,
+			want: hookUserOwnedWithBdSection,
+		},
+		{
+			// Same shape, but the comment sits below bd's section rather than
+			// above it: position must not decide whether the file is the user's.
+			name:    "user comment below bd's section",
+			content: "#!/bin/sh\n" + section + "\n# leave this hook alone, see docs/hooks.md\n",
+			want:    hookUserOwnedWithBdSection,
+		},
+		{
 			// The regression. No bd marker anywhere; "beads" appears only in a
 			// comment and in a call to bd, both of which the old first-ten-lines
 			// substring match treated as bd's signature.
@@ -104,17 +125,24 @@ func TestClassifyResetHook_MissingFileIsNotOurs(t *testing.T) {
 
 // Two functions decide, separately, whether a hook file holds anything of the
 // user's: shouldPreserveHookContent when bd migrates hooks into .beads/hooks,
-// and classifyResetHook when bd is about to delete them. They have to give the
-// same answer. If preservation would carry content forward, that content is the
-// user's and reset must not remove the file; if preservation discards the file
-// as wholly bd-managed, reset may.
+// and classifyResetHook when bd is about to delete them. They must not drift
+// into disagreement, but the agreement they owe each other is one-way, because
+// the cost of being wrong is not symmetric:
 //
-// Drift between them is not a tidiness problem — it is deletion without a
-// restore path, since performReset only renames <hook>.backup back into place
-// and a backup exists only for hooks bd itself displaced.
+//   - Preservation copying too little loses a comment out of a file that still
+//     exists on disk.
+//   - Reset deleting too much destroys the user's hook with no way back —
+//     performReset only renames <hook>.backup into place, and a backup exists
+//     only for hooks bd itself displaced.
+//
+// So the invariant is: whatever preservation treats as the user's, reset must
+// keep; and reset may additionally keep files preservation was willing to drop
+// (a hook whose own content is only comments is the case that differs). What
+// reset may never do is call a marker-carrying file none of bd's business —
+// that would leave a hook bd wrote installed after a reset claimed to remove it.
 //
 // This runs over the repository's own tracked .githooks rather than fixtures,
-// so the inputs are hooks a person actually composed. It asserts the agreement,
+// so the inputs are hooks a person actually composed. It asserts the invariant,
 // not a hardcoded verdict per file, so editing those hooks cannot make it lie.
 func TestClassifyResetHook_AgreesWithHookPreservation(t *testing.T) {
 	for _, name := range managedHookNames {
@@ -131,9 +159,46 @@ func TestClassifyResetHook_AgreesWithHookPreservation(t *testing.T) {
 				t.Errorf("classifyResetHook(%s) = hookBdOwned, but shouldPreserveHookContent keeps this file: "+
 					"reset would delete content bd itself considers the user's, with no backup to restore", path)
 			}
-			if !wouldPreserve && got != hookBdOwned {
-				t.Errorf("classifyResetHook(%s) = %v, but shouldPreserveHookContent discards this file as wholly "+
-					"bd-managed: reset would leave behind a hook bd wrote", path, got)
+			if !wouldPreserve && got == hookNotOurs {
+				t.Errorf("classifyResetHook(%s) = hookNotOurs, but shouldPreserveHookContent discards this file as "+
+					"wholly bd-managed: a hook bd wrote would survive a reset unremoved and unreported", path)
+			}
+		})
+	}
+}
+
+// The divergence between the two emptiness predicates is the fix, so pin it.
+// A later cleanup that notices they answer "the same" question and collapses
+// them into one has to fail here rather than quietly restore the deletion.
+func TestResetEmptinessPredicateIsStricterThanPreservation(t *testing.T) {
+	tests := []struct {
+		name             string
+		content          string
+		preservationSees bool // isOnlyShebangOrEmpty: comments are nothing
+		resetSees        bool // isOnlyShebangOrBlank: comments are content
+	}{
+		{"empty", "", true, true},
+		{"shebang only", "#!/bin/sh\n", true, true},
+		{"shebang and blank lines", "#!/bin/sh\n\n\n", true, true},
+		{"shebang and a comment", "#!/bin/sh\n# team hook, see docs/hooks.md\n", true, false},
+		{"comment with no shebang", "# nothing here yet\n", true, false},
+		{"commented-out logic", "#!/bin/sh\n# ./scripts/lint\n", true, false},
+		{"real logic", "#!/bin/sh\n./scripts/lint\n", false, false},
+		{"shebang below a blank line", "\n#!/bin/sh\n", true, true},
+		{"second #! is a comment, not a shebang", "#!/bin/sh\n#!/bin/false\n", true, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isOnlyShebangOrEmpty(tt.content); got != tt.preservationSees {
+				t.Errorf("isOnlyShebangOrEmpty(%q) = %v, want %v", tt.content, got, tt.preservationSees)
+			}
+			if got := isOnlyShebangOrBlank(tt.content); got != tt.resetSees {
+				t.Errorf("isOnlyShebangOrBlank(%q) = %v, want %v", tt.content, got, tt.resetSees)
+			}
+			if tt.resetSees && !tt.preservationSees {
+				t.Errorf("%q: reset's predicate must never call empty what preservation calls content — "+
+					"that is the direction that deletes", tt.content)
 			}
 		})
 	}
@@ -147,6 +212,7 @@ func TestCollectResetItems_OnlyRemovesHooksBdOwns(t *testing.T) {
 	bdOwned := writeHook(t, hooksDir, "post-merge", "#!/bin/sh\n# bd-hooks-version: 0.40.0\n# bd (beads) post-merge hook\nbd import\n")
 	sectioned := writeHook(t, hooksDir, "pre-commit", "#!/bin/sh\nset -e\n./scripts/lint\n\n"+generateHookSection("pre-commit"))
 	foreign := writeHook(t, hooksDir, "pre-push", composedForeignHook)
+	commentOnly := writeHook(t, hooksDir, "post-checkout", "#!/bin/sh\n# post-checkout — ours; bd's block was added below.\n\n"+generateHookSection("post-checkout"))
 
 	items, preserved := collectResetItems(gitCommonDir, beadsDir)
 
@@ -170,6 +236,13 @@ func TestCollectResetItems_OnlyRemovesHooksBdOwns(t *testing.T) {
 	}
 	if inItems[foreign] || inPreserved[foreign] {
 		t.Errorf("hook %s carries no bd marker; it is neither ours to remove nor ours to mention", foreign)
+	}
+	if inItems[commentOnly] {
+		t.Errorf("hook %s is the user's file — everything outside bd's section is a comment they wrote, "+
+			"and reset has no backup to restore it from", commentOnly)
+	}
+	if !inPreserved[commentOnly] {
+		t.Errorf("hook %s should be reported as left in place, not silently ignored", commentOnly)
 	}
 
 	// The .beads directory is always in the removal list — that is the point of

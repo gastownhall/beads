@@ -190,9 +190,10 @@ func classifyResetHook(hookPath string) hookOwnership {
 
 	// Order matters, and matches shouldPreserveHookContent: a sectioned file is
 	// user-owned unless stripping bd's block leaves nothing but a shebang, in
-	// which case bd effectively wrote all of it.
+	// which case bd effectively wrote all of it. What counts as "nothing" is
+	// where the two part company — see isOnlyShebangOrBlank.
 	if strings.Contains(content, hookSectionBeginPrefix) {
-		if stripped, _ := removeHookSection(content); isOnlyShebangOrEmpty(stripped) {
+		if stripped, _ := removeHookSection(content); isOnlyShebangOrBlank(stripped) {
 			return hookBdOwned
 		}
 		return hookUserOwnedWithBdSection
@@ -203,6 +204,47 @@ func classifyResetHook(hookPath string) hookOwnership {
 		return hookBdOwned
 	}
 	return hookNotOurs
+}
+
+// isOnlyShebangOrBlank reports whether what is left of a hook after bd's
+// section is stripped is nothing but an optional shebang and blank lines.
+// Comments count as content.
+//
+// This is deliberately stricter than isOnlyShebangOrEmpty (hooks.go), which
+// answers the same shape of question for shouldPreserveHookContent and treats
+// comments as nothing (GH#3536). The two callers are not symmetric and must not
+// share a predicate:
+//
+//   - Preservation copies a hook forward into .beads/hooks. Declining to copy a
+//     comment-only file loses a comment; the original is still on disk.
+//   - Reset deletes. Getting it wrong destroys the user's file, and
+//     performReset cannot undo it — its restore path renames <hook>.backup back
+//     into place, and a backup exists only for hooks bd itself displaced, which
+//     is never the case for a hook bd only injected a section into.
+//
+// So a hook of the user's whose own content is a shebang and comments — a
+// header they wrote, a note to whoever edits it next, hook logic they commented
+// out for now — is theirs. Reset leaves it and says so. Sharing the looser
+// predicate meant a comment was once again enough to make a hook bd's to
+// delete, which is the failure classifyResetHook exists to close.
+func isOnlyShebangOrBlank(content string) bool {
+	seenContent := false
+	for _, line := range strings.Split(content, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		// Only the leading line can be a shebang; `#!` below it is a comment,
+		// and comments are content here. Anchoring on the first non-blank line
+		// rather than index 0 keeps this from depending on whether stripping
+		// bd's section left a blank line above the shebang.
+		if !seenContent && strings.HasPrefix(trimmed, "#!") {
+			seenContent = true
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func showResetPreview(items, preserved []resetItem) error {

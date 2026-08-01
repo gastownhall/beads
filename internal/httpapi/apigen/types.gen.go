@@ -133,7 +133,7 @@ type IssuesPage struct {
 	NextCursor *string `json:"next_cursor,omitempty"`
 }
 
-// Problem RFC 9457 problem detail. This is the only error shape on this surface. `type` is omitted throughout, so `about:blank` is implied.
+// Problem RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type Problem struct {
 	// Assignee With `already_claimed`: the actor currently holding the issue.
 	Assignee *string `json:"assignee,omitempty"`
@@ -153,14 +153,17 @@ type Problem struct {
 	// Reason With `invalid_argument`: `unknown_parameter` (this server does not know that parameter — version skew; degrade or fall back) or `invalid_value` (the value is not one this server will act on: malformed, out of vocabulary, or — for `limit=0` under `--allow-non-loopback` — legal but refused in this server's configuration; `detail` says which). Either way `invalid_value` means send something different, never retry the same request. The set may grow; default-branch on unknown values.
 	Reason *string `json:"reason,omitempty"`
 
-	// RequestId Correlation id for this request, echoed in the server's request log line. Present on every problem response from every route, including the ones the middleware answers before a handler runs. Opaque and per-process: it identifies a log line, nothing else, so it is never a retry key and never survives a restart. Quote it in a bug report and the operator can find the one line that explains the failure.
-	RequestId *string `json:"request_id,omitempty"`
+	// RequestId Opaque correlation id for this request, echoed in the server's request log line. Never a dispatch key and never a retry key. (This server mints per-process ids that do not survive a restart; a deployment may substitute any identifier with the same log-correlation property, such as an edge trace id.)
+	RequestId string `json:"request_id"`
 
 	// Status The HTTP status code, repeated in the body.
 	Status int `json:"status"`
 
 	// Title The status phrase. Human-facing; never dispatch on it.
 	Title string `json:"title"`
+
+	// Type RFC 9457 problem type. This server never emits it, so `about:blank` is implied. A deployment that hosts problem documentation MAY supply it: one stable URI per status+code pair, dereferencing to documentation for that pair. It restates identity that `code` already carries, so a client MUST NOT dispatch on it and a server MUST NOT use it to subdivide a code.
+	Type *string `json:"type,omitempty"`
 }
 
 // ReadyPage defines model for ReadyPage.
@@ -175,16 +178,16 @@ type ReadyPage struct {
 // IssueID defines model for IssueID.
 type IssueID = string
 
-// InternalError RFC 9457 problem detail. This is the only error shape on this surface. `type` is omitted throughout, so `about:blank` is implied.
+// InternalError RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type InternalError = Problem
 
-// InvalidArgument RFC 9457 problem detail. This is the only error shape on this surface. `type` is omitted throughout, so `about:blank` is implied.
+// InvalidArgument RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type InvalidArgument = Problem
 
-// NotFound RFC 9457 problem detail. This is the only error shape on this surface. `type` is omitted throughout, so `about:blank` is implied.
+// NotFound RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type NotFound = Problem
 
-// Unavailable RFC 9457 problem detail. This is the only error shape on this surface. `type` is omitted throughout, so `about:blank` is implied.
+// Unavailable RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type Unavailable = Problem
 
 // ListIssuesParams defines parameters for ListIssues.

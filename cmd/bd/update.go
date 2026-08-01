@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,39 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// directIssueUpdater is the lifecycle capability the direct update command
+// needs. issueops.Lifecycle satisfies it without an adapter.
+type directIssueUpdater interface {
+	Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error)
+}
+
+// directUpdateMutation contains the command-derived values for one direct
+// lifecycle update.
+type directUpdateMutation struct {
+	actor            string
+	issueID          string
+	patch            issueops.IssuePatch
+	claim            bool
+	force            bool
+	expectedAssignee *string
+	expectedStatus   *issueops.Status
+}
+
+// runDirectUpdateMutation maps a direct command update into its lifecycle
+// request and returns the lifecycle result unchanged.
+func runDirectUpdateMutation(ctx context.Context, updater directIssueUpdater, mutation directUpdateMutation) (issueops.UpdateResult, error) {
+	return updater.Update(ctx, issueops.UpdateRequest{
+		Actor:                 mutation.actor,
+		IssueID:               mutation.issueID,
+		Patch:                 mutation.patch,
+		Claim:                 mutation.claim,
+		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set,
+		ForceClosePolicy:      mutation.force,
+		ExpectedAssignee:      mutation.expectedAssignee,
+		ExpectedStatus:        mutation.expectedStatus,
+	})
+}
 
 var updateCmd = &cobra.Command{
 	Use:     "update [id...]",
@@ -472,15 +506,14 @@ pointless).`,
 			// which is why it is conditioned here rather than passed straight
 			// through: `--force -s closed` is now a legitimate way to ask for
 			// the close-policy half alone.
-			updateResult, updateErr := ops.Update(opsCtx, issueops.UpdateRequest{
-				Actor:                 actor,
-				IssueID:               result.ResolvedID,
-				Patch:                 patch,
-				Claim:                 claimFlag,
-				ForceAssigneeTransfer: forceFlag && patch.Assignee.Set,
-				ForceClosePolicy:      forceFlag,
-				ExpectedAssignee:      ifAssignee,
-				ExpectedStatus:        expectedStatus,
+			updateResult, updateErr := runDirectUpdateMutation(opsCtx, ops, directUpdateMutation{
+				actor:            actor,
+				issueID:          result.ResolvedID,
+				patch:            patch,
+				claim:            claimFlag,
+				force:            forceFlag,
+				expectedAssignee: ifAssignee,
+				expectedStatus:   expectedStatus,
 			})
 			if updateErr != nil {
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
