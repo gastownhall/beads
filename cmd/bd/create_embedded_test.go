@@ -1283,6 +1283,69 @@ func TestEmbeddedCreateDryRunCrossRepoDoesNotMigrateTarget(t *testing.T) {
 	}
 }
 
+// TestEmbeddedPreviewDoesNotConsumeVersionMarker is the two-invocation
+// regression for the one-shot upgrade signal: a preview run first after an
+// upgrade correctly skips the version-bump reconciliation, so it must also
+// leave .beads/.local_version alone. Burning the marker there would mean the
+// next ordinary command sees a matching version and never reconciles —
+// whichever command happened to run first would silently decide whether the
+// upgrade was finished.
+func TestEmbeddedPreviewDoesNotConsumeVersionMarker(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "pvm")
+	bdCreate(t, bd, dir, "Existing issue")
+
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	if err := os.WriteFile(localVersionPath, []byte("0.9.0\n"), 0o600); err != nil {
+		t.Fatalf("write old local version: %v", err)
+	}
+
+	// Invocation 1: preview.
+	preview := exec.Command(bd, "create", "--dry-run", "Preview only", "--json")
+	preview.Dir = dir
+	preview.Env = bdEnv(dir)
+	stdout, stderr, err := runCommandBuffers(t, preview)
+	if err != nil {
+		t.Fatalf("bd create --dry-run failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	raw, err := os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after preview: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got != "0.9.0" {
+		t.Fatalf("preview consumed the version marker: .local_version = %q, want %q", got, "0.9.0")
+	}
+
+	// Invocation 2: an ordinary command, which must still see the upgrade.
+	status := exec.Command(bd, "upgrade", "status", "--json")
+	status.Dir = dir
+	status.Env = bdEnv(dir)
+	stdout, stderr, err = runCommandBuffers(t, status)
+	if err != nil {
+		t.Fatalf("bd upgrade status failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+	var upgradeStatus struct {
+		Upgraded        bool   `json:"upgraded"`
+		PreviousVersion string `json:"previous_version"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &upgradeStatus); err != nil {
+		t.Fatalf("parse upgrade status: %v\nstdout:\n%s", err, stdout.String())
+	}
+	if !upgradeStatus.Upgraded || upgradeStatus.PreviousVersion != "0.9.0" {
+		t.Errorf("ordinary command after a preview no longer sees the upgrade: upgraded=%v previous=%q; stdout:\n%s",
+			upgradeStatus.Upgraded, upgradeStatus.PreviousVersion, stdout.String())
+	}
+
+	raw, err = os.ReadFile(localVersionPath)
+	if err != nil {
+		t.Fatalf("read local version after ordinary command: %v", err)
+	}
+	if got := strings.TrimSpace(string(raw)); got == "0.9.0" {
+		t.Errorf("ordinary command left .local_version at %q; the marker should have been updated", got)
+	}
+}
+
 func TestEmbeddedChangeDirOverridesInheritedBeadsDir(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	callerDir, callerBeadsDir, _ := bdInit(t, bd, "--prefix", "caller")

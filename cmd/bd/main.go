@@ -1310,20 +1310,29 @@ var rootCmd = &cobra.Command{
 			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
 		}
 
-		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
-
-		// Track bd version changes unless strict readonly forbids repository mutation.
-		// Best-effort tracking - failures are silent.
-		if policy.runMaintenance {
-			trackBdVersion()
-		}
-
 		// Check if this is a read-only command (GH#804) or an explicitly
 		// non-mutating preview. Both must open the store read-only: otherwise
 		// schema initialization runs before the command's RunE can honor
-		// --dry-run/--inspect or reject invalid arguments.
+		// --dry-run/--inspect or reject invalid arguments. Resolved here,
+		// ahead of version tracking, because that is the first step a preview
+		// has to change.
 		previewMode := isPreviewCommand(cmd)
+		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
+
+		// Track bd version changes unless strict readonly forbids repository mutation.
+		// Best-effort tracking - failures are silent.
+		//
+		// A preview detects the change but must not consume it: .local_version
+		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
+		// skips that reconciliation (see below). See trackBdVersionPreview.
+		if policy.runMaintenance {
+			if previewMode {
+				trackBdVersionPreview()
+			} else {
+				trackBdVersion()
+			}
+		}
 
 		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
 		// set the programmatic gate override before both autoMigrateOnVersionBump
