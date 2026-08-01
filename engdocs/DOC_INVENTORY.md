@@ -58,9 +58,9 @@ Follow-up automation should replace marker-only checks with generated or
 | `CLAUDE_INTEGRATION.md` | Keep | Design/user guide for Claude setup; paired with `SETUP.md`. |
 | `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
-| `CI_CLEANUP_PLAN.md` | Keep with freshness | Accepted CI tier decisions, package gate policy, measurement plan, and implementation order. |
+| `CI_CLEANUP_PLAN.md` | Keep as maintainer context | Dated CI policy, measurements, and implementation roadmap; current commands live in workflows and the `Makefile`. |
 | `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep | Design note for the required-check aggregate gate topology; explicitly flags pre-rollout status and gates branch-protection changes on the new checks passing first. |
-| `CI_TEST_SURFACE_AUDIT.md` | Keep with freshness | Snapshot of local validation commands, GitHub Actions coverage, gaps, and CI cleanup roadmap. |
+| `CI_TEST_SURFACE_AUDIT.md` | Keep as historical snapshot | Dated test-surface inventory; current commands live in workflows and the `Makefile`. |
 | `plugins/beads/skills/beads/resources/CLI_REFERENCE.md` | Keep pointer | Plugin skill resource intentionally points at live CLI sources to avoid duplicate generated command snapshots. |
 | `CODEX_INTEGRATION.md` | Keep | User-facing Codex integration guide. |
 | `COLLISION_MATH.md` | Keep | Mathematical background; low product drift. |
@@ -101,7 +101,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `PROJECT_CHARTER.md` | Keep | Canonical product scope and boundary policy. |
 | `PROTECTED_BRANCHES.md` | Keep | User-facing protected-branch workflow. |
 | `QUICKSTART.md` | Keep pointer | Short pointer to website quickstart; low drift. |
-| `README_TESTING.md` | Consolidated pointer | Old duplicate staged; active path points to `TESTING.md` and `TESTING_PHILOSOPHY.md`. |
+| `README_TESTING.md` | Compatibility pointer | Points to the sole canonical testing guide, `TESTING.md`. |
 | `RECOVERY.md` | Keep with freshness | Runtime recovery playbooks; marker tied to init safety constants/tests. |
 | `RELATED_PROJECTS.md` | Keep | Curated list of adjacent, non-integration projects; companion to `COMMUNITY_TOOLS.md`. |
 | `RELEASE-STABILITY-GATE.md` | Keep | Maintainer release gate policy. |
@@ -116,8 +116,8 @@ Follow-up automation should replace marker-only checks with generated or
 | `superpowers/specs/2026-05-03-unclaim-command-design.md` | Removed | PR-passenger design-spec artifact paired with the plans file above; same removal rationale, content stays in git history. |
 | `SYNC_CONCEPTS.md` | Keep/canonical | Sanctioned website-mirror source for the sync conceptual model (Dolt source of truth, wire format, JSONL export, anti-patterns); listed in `deploy-docs.yml` and linked from `AGENTS.md`, `README.md`, `ARCHITECTURE.md`, `DOLT.md`, `GIT_INTEGRATION.md`, and `FAQ.md`. |
 | `SYNC_SETUP.md` | Revise | Links now point at canonical `DOLT.md`. |
-| `TESTING.md` | Revise/canonical | Canonical test-running guide; stale line/test-count and stale skip entry removed. |
-| `TESTING_PHILOSOPHY.md` | Keep | Canonical test-design guidance; duplicate/historical links removed. |
+| `TESTING.md` | Keep/canonical | Sole authority for test commands, test design, and PR-readiness guidance. |
+| `TESTING_PHILOSOPHY.md` | Compatibility pointer | Points to the sole canonical testing guide, `TESTING.md`. |
 | `TODO.md` | Keep | Behaviour/user guide for `bd todo`. |
 | `TROUBLESHOOTING.md` | Keep | User-facing recovery guide; debug/env tables need freshness review when edited. |
 | `UI_PHILOSOPHY.md` | Keep | Design philosophy. |
