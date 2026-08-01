@@ -136,6 +136,8 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 // call on the same workspace.
 const serverModeSocketProbeTimeout = 500 * time.Millisecond
 
+type socketTransportResolver func(socket, host string, port int, timeout time.Duration) string
+
 // errServeGatewayCredential refuses a workspace that authenticates to Dolt with
 // a minted credential.
 //
@@ -178,6 +180,10 @@ func errServeGatewayCredential() error {
 // workspace's database: it is the one place --global is applied, and the
 // handshake must not name a database the provider did not open.
 func resolveServerModeUOWTopology(ctx context.Context, beadsDir string) (sqlServerUOWTopology, error) {
+	return resolveServerModeUOWTopologyWithTransportResolver(ctx, beadsDir, dolt.ResolveSocketTransport)
+}
+
+func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, beadsDir string, resolveTransport socketTransportResolver) (sqlServerUOWTopology, error) {
 	if beadsDir == "" {
 		return sqlServerUOWTopology{}, fmt.Errorf("resolveServerModeUOWTopology: beadsDir must be set")
 	}
@@ -233,7 +239,7 @@ func resolveServerModeUOWTopology(ctx context.Context, beadsDir string) (sqlServ
 	// currently connectable must not block a workspace whose server answers over
 	// TCP. Without this, serve fails to construct in a workspace where every CLI
 	// command succeeds.
-	socket := dolt.ResolveSocketTransport(conn.ServerSocket, conn.ServerHost, conn.ServerPort, serverModeSocketProbeTimeout)
+	socket := resolveTransport(conn.ServerSocket, conn.ServerHost, conn.ServerPort, serverModeSocketProbeTimeout)
 	switch {
 	case socket != "":
 		external.Socket = socket

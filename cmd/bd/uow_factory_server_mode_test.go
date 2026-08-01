@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -17,36 +18,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 )
-
-// sunPathLimit is the shortest sockaddr_un.sun_path any runner here imposes:
-// Linux allows 108 bytes including the NUL, macOS 104. Tests bind against the
-// smaller number so a path that works locally works on every runner.
-const sunPathLimit = 104
-
-// shortTempDir returns a temp directory whose name does not carry the test's
-// name, for paths that live under a hard length limit.
-//
-// t.TempDir() spends its budget on the test name, and on macOS $TMPDIR is
-// already ~48 bytes of /var/folders/<hash>/T before anything else, so a
-// descriptive test name alone can push a socket path past sun_path and turn
-// bind(2) into a bare "invalid argument". That is exactly how
-// TestResolveServerModeUOWTopology_KeepsALiveSocket failed on macOS and only
-// macOS, at 120 bytes (Main run 30686406361).
-func shortTempDir(t *testing.T) string {
-	t.Helper()
-	dir, err := os.MkdirTemp("", "bd")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
-	return dir
-}
-
-// Pin the property that matters: reverting shortTempDir to t.TempDir() would
-// reintroduce the macOS failure, and no Linux runner would notice.
-func TestShortTempDirOmitsTheTestName(t *testing.T) {
-	dir := shortTempDir(t)
-	require.NotContains(t, dir, t.Name(),
-		"shortTempDir must not spend sun_path budget on the test name")
-}
 
 // serverModeBeadsDir writes a server-mode metadata.json into a fresh beads dir
 // and returns it. Nothing here starts a server: every assertion below is about
@@ -165,21 +136,11 @@ func TestResolveServerModeUOWTopology_FallsBackToTCPWhenTheSocketIsDead(t *testi
 	assert.Equal(t, "127.0.0.1", topology.external.Host)
 }
 
-// A live socket still wins: the fallback is a fallback, not a preference for
-// TCP. Without this the previous test could be satisfied by deleting socket
-// support outright.
-func TestResolveServerModeUOWTopology_KeepsALiveSocket(t *testing.T) {
-	socket := filepath.Join(shortTempDir(t), "dolt.sock")
-	// Belt and braces: shortTempDir keeps us well inside the limit on every
-	// runner we have, but a caller with an unusually deep $TMPDIR should read a
-	// skip rather than a bare "bind: invalid argument".
-	if len(socket) >= sunPathLimit {
-		t.Skipf("socket path too long (%d bytes): %s", len(socket), socket)
-	}
-	ln, err := net.Listen("unix", socket)
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = ln.Close() })
-
+// Socket selection belongs to the Dolt transport policy. The UOW topology
+// must preserve the policy's answer, even when that answer is a socket that
+// cannot be probed by this test.
+func TestResolveServerModeUOWTopology_KeepsSocketSelectedByTransportPolicy(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "not-a-live-socket.sock")
 	beadsDir := serverModeBeadsDir(t, &configfile.Config{
 		DoltServerHost:   "127.0.0.1",
 		DoltServerPort:   3521,
@@ -187,10 +148,21 @@ func TestResolveServerModeUOWTopology_KeepsALiveSocket(t *testing.T) {
 		DoltDatabase:     "beads_serve",
 	})
 
-	topology, err := resolveServerModeUOWTopology(context.Background(), beadsDir)
+	resolverCalls := 0
+	topology, err := resolveServerModeUOWTopologyWithTransportResolver(context.Background(), beadsDir,
+		func(gotSocket, gotHost string, gotPort int, gotTimeout time.Duration) string {
+			resolverCalls++
+			assert.Equal(t, socket, gotSocket)
+			assert.Equal(t, "127.0.0.1", gotHost)
+			assert.Equal(t, 3521, gotPort)
+			assert.Equal(t, serverModeSocketProbeTimeout, gotTimeout)
+			return socket
+		})
 	require.NoError(t, err)
+	require.Equal(t, 1, resolverCalls, "transport policy must be invoked exactly once")
 	assert.Equal(t, socket, topology.external.Socket)
-	assert.Zero(t, topology.external.Port, "a live socket is the transport; host/port must stay unset")
+	assert.Zero(t, topology.external.Host, "a selected socket is the transport; host must stay unset")
+	assert.Zero(t, topology.external.Port, "a selected socket is the transport; port must stay unset")
 }
 
 // The gateway refusal must be decided from the CONFIGURATION, never from the
