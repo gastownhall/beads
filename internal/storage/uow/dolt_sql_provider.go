@@ -24,6 +24,10 @@ const (
 type doltSQLProvider struct {
 	defaultBranch string
 	db            *sql.DB
+	// serverEndpoint is the exact transport endpoint used by the migration
+	// connection. Fresh-bootstrap reset authority is bound to it together with
+	// the Dolt server UUID, database name, and initial HEAD.
+	serverEndpoint string
 	// teamServer: schema is owned by beads-team-server (bts) — bd never
 	// creates the database or migrates, only verifies the schema version.
 	teamServer bool
@@ -81,17 +85,22 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 	// DATABASE (no IF NOT EXISTS), so the server arbitrates creation
 	// atomically — success proves THIS init created the database, and an
 	// already-exists refusal (1007) proves it did not. Only the proven
-	// creator passes WithFreshBootstrapHeal: on a database this init
+	// creator captures and passes a one-shot FreshBootstrapHealCapability: on
+	// a database this init
 	// created, a retry attempt that finds dirty tables can only be seeing a
 	// previous attempt's own half-applied migration step (a session that
 	// died between a step's SQL and its per-step Dolt commit — the "busy
 	// buffer" shape on a loaded shared server), never pre-existing user
 	// data, so the migrate call may discard that debris and converge instead
-	// of failing the init permanently. A concurrent initializer that loses
-	// the create race keeps the guard's refusal unchanged. `created` is
-	// sticky across retry attempts: it is set exactly when this init's
-	// CREATE succeeded, which no later attempt can re-learn from probing.
+	// of failing the init permanently. The capability also binds that proof to
+	// the endpoint, server UUID, database, and initial HEAD, preventing a stale
+	// creator from resetting a drop/recreated name. A concurrent initializer
+	// that loses the create race keeps the guard's refusal unchanged. `created`
+	// is sticky across retry attempts for availability re-creation; reset
+	// authority is captured only in the exact CREATE-winning attempt and is
+	// never inferred again from probing or CREATE IF NOT EXISTS.
 	created := false
+	var bootstrapHeal *schema.FreshBootstrapHealCapability
 	return backoff.Retry(func() error {
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
@@ -128,6 +137,7 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 			}
 			return nil
 		}
+		justCreated := false
 		if created {
 			// Re-assert on retries so a database dropped between attempts
 			// (e.g. a concurrent clean-databases) is recreated rather than
@@ -139,6 +149,7 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 			switch err := ddl.CreateDatabase(ctx, database); {
 			case err == nil:
 				created = true
+				justCreated = true
 			case isDatabaseExistsError(err):
 				// Pre-existing (or a concurrent initializer won the create
 				// race): not ours, heal stays off.
@@ -151,10 +162,22 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 		if err := ddl.UseDatabase(ctx, database); err != nil {
 			return backoff.Permanent(fmt.Errorf("uow: switching to database: %w", err))
 		}
+		if justCreated {
+			// Capture authority only in the same attempt that won the exact bare
+			// CREATE. A later retry may re-create a missing database for
+			// availability, but it must never infer ownership of a replacement
+			// incarnation from CREATE IF NOT EXISTS.
+			bootstrapHeal, err = schema.CaptureFreshBootstrapHealCapability(
+				ctx, conn, p.serverEndpoint, database,
+			)
+			if err != nil {
+				return backoff.Permanent(fmt.Errorf("uow: capture fresh database identity: %w", err))
+			}
+		}
 
 		var migrateOpts []schema.MigrateLockOption
-		if created {
-			migrateOpts = append(migrateOpts, schema.WithFreshBootstrapHeal())
+		if bootstrapHeal != nil {
+			migrateOpts = append(migrateOpts, schema.WithFreshBootstrapHeal(bootstrapHeal, p.serverEndpoint))
 		}
 		if _, err := schema.MigrateUpWithLock(ctx, conn, database, migrateOpts...); err != nil {
 			if isSerializationError(err) || schema.IsMigrationLockError(err) {
@@ -198,6 +221,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	initProvider := &doltSQLProvider{
 		defaultBranch:     defaultBranch,
 		db:                initDB,
+		serverEndpoint:    "tcp:" + ep.Address(),
 		teamServer:        teamServer,
 		expectedProjectID: expectedProjectID,
 	}
@@ -219,6 +243,7 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 	return &doltSQLProvider{
 		defaultBranch:     defaultBranch,
 		db:                dbConn,
+		serverEndpoint:    "tcp:" + ep.Address(),
 		teamServer:        teamServer,
 		expectedProjectID: expectedProjectID,
 	}, nil
