@@ -86,9 +86,6 @@ const (
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
 
-// errReadOnly is returned when a write is attempted on a read-only store.
-var errReadOnly = errors.New("embeddeddolt: store is read-only")
-
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
 // skip operations on a closed store without triggering errClosed.
@@ -219,7 +216,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	if commit && s.readOnly {
-		err = errReadOnly
+		err = ErrReadOnly
 		return
 	}
 
@@ -263,7 +260,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 		return 0, errClosed
 	}
 	if s.readOnly {
-		return 0, errReadOnly
+		return 0, ErrReadOnly
 	}
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
