@@ -3,9 +3,57 @@
 package embeddeddolt
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestConfiguredEmbeddedOpenTimeoutFromEnv(t *testing.T) {
+	tests := []struct {
+		name string
+		env  string
+		want time.Duration
+	}{
+		{name: "empty", env: "", want: defaultEmbeddedOpenTimeout},
+		{name: "whitespace", env: " \t", want: defaultEmbeddedOpenTimeout},
+		{name: "valid", env: "75ms", want: 75 * time.Millisecond},
+		{name: "invalid", env: "not-a-duration", want: defaultEmbeddedOpenTimeout},
+		{name: "zero", env: "0s", want: defaultEmbeddedOpenTimeout},
+		{name: "negative", env: "-1s", want: defaultEmbeddedOpenTimeout},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", tt.env)
+			t.Setenv("BEADS_EMBEDDED_LOCK_TIMEOUT", "")
+			if got := configuredEmbeddedOpenTimeout(); got != tt.want {
+				t.Fatalf("configuredEmbeddedOpenTimeout() = %s, want %s", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestConfiguredEmbeddedOpenTimeoutLegacyEnv(t *testing.T) {
+	t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "")
+	t.Setenv("BEADS_EMBEDDED_LOCK_TIMEOUT", "90ms")
+
+	if got := configuredEmbeddedOpenTimeout(); got != 90*time.Millisecond {
+		t.Fatalf("configuredEmbeddedOpenTimeout() = %s, want 90ms", got)
+	}
+}
+
+func TestEmbeddedOpenTimeoutUsesSoonerParentDeadline(t *testing.T) {
+	t.Setenv("BEADS_EMBEDDED_OPEN_TIMEOUT", "5s")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	got := embeddedOpenTimeout(ctx)
+	if got <= 0 || got > time.Second {
+		t.Fatalf("embeddedOpenTimeout() = %s, want positive duration below 1s", got)
+	}
+}
 
 func TestBuildDSN_SpacesInPath(t *testing.T) {
 	// Regression test for #2920: paths with spaces must not be

@@ -23,13 +23,21 @@ import (
 var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 const (
-	commitName  = "beads"
-	commitEmail = "beads@local"
+	commitName                 = "beads"
+	commitEmail                = "beads@local"
+	defaultEmbeddedOpenTimeout = 30 * time.Second
 )
 
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	openTimeout := embeddedOpenTimeout(ctx)
+	openCtx, cancel := context.WithTimeout(ctx, openTimeout)
+	defer cancel()
+
 	dsn := buildDSN(dir, database)
 
 	cfg, err := doltembed.ParseDSN(dsn)
@@ -38,7 +46,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	}
 
 	bo := backoff.NewExponentialBackOff()
-	bo.MaxElapsedTime = 0 // wait until ctx cancellation
+	bo.MaxElapsedTime = openTimeout
 	bo.MaxInterval = 5 * time.Second
 	cfg.BackOff = bo
 
@@ -70,7 +78,7 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 		return errors.Join(dbErr, connErr)
 	}
 
-	if err := db.PingContext(ctx); err != nil {
+	if err := db.PingContext(openCtx); err != nil {
 		return nil, nil, errors.Join(err, cleanup())
 	}
 
@@ -82,17 +90,46 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 			}
 			return nil, nil, errors.Join(errors.New(msg), cleanup())
 		}
-		if _, err := db.ExecContext(ctx, "USE `"+database+"`"); err != nil {
+		if _, err := db.ExecContext(openCtx, "USE `"+database+"`"); err != nil {
 			return nil, nil, errors.Join(err, cleanup())
 		}
 		if strings.TrimSpace(branch) != "" {
-			if _, err := db.ExecContext(ctx, fmt.Sprintf("SET @@%s_head_ref = %s", database, sqlStringLiteral(branch))); err != nil {
+			if _, err := db.ExecContext(openCtx, fmt.Sprintf("SET @@%s_head_ref = %s", database, sqlStringLiteral(branch))); err != nil {
 				return nil, nil, errors.Join(err, cleanup())
 			}
 		}
 	}
 
 	return db, cleanup, nil
+}
+
+func embeddedOpenTimeout(parent context.Context) time.Duration {
+	timeout := configuredEmbeddedOpenTimeout()
+	if deadline, ok := parent.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return time.Nanosecond
+		}
+		if remaining < timeout {
+			return remaining
+		}
+	}
+	return timeout
+}
+
+func configuredEmbeddedOpenTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("BEADS_EMBEDDED_OPEN_TIMEOUT"))
+	if raw == "" {
+		raw = strings.TrimSpace(os.Getenv("BEADS_EMBEDDED_LOCK_TIMEOUT"))
+	}
+	if raw == "" {
+		return defaultEmbeddedOpenTimeout
+	}
+	timeout, err := time.ParseDuration(raw)
+	if err != nil || timeout <= 0 {
+		return defaultEmbeddedOpenTimeout
+	}
+	return timeout
 }
 
 func buildDSN(dir, database string) string {
