@@ -1561,9 +1561,10 @@ var doltRemoteCmd = &cobra.Command{
 	Long: `Manage Dolt remotes for push/pull replication.
 
 Subcommands:
-  add <name> <url>   Add a new remote
-  list               List all configured remotes
-  remove <name>      Remove a remote`,
+  add <name> <url>     Add a new remote
+  list                 List all configured remotes
+  remove <name>        Remove a remote
+  reset-data <name>    Replace a remote's data plane after a history squash`,
 }
 
 var doltRemoteAddCmd = &cobra.Command{
@@ -1777,9 +1778,11 @@ func init() {
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
 	doltRemoteAddCmd.Flags().Bool("allow-git-origin", false, "Allow adding a Dolt remote whose URL matches the git origin (proceed with a warning instead of aborting)")
+	doltRemoteResetDataCmd.Flags().BoolVarP(&doltRemoteResetDataYes, "yes", "y", false, "Skip the confirmation prompt (required in non-interactive use)")
 	doltRemoteCmd.AddCommand(doltRemoteAddCmd)
 	doltRemoteCmd.AddCommand(doltRemoteListCmd)
 	doltRemoteCmd.AddCommand(doltRemoteRemoveCmd)
+	doltRemoteCmd.AddCommand(doltRemoteResetDataCmd)
 	doltCmd.AddCommand(doltShowCmd)
 	doltCmd.AddCommand(doltSetCmd)
 	doltCmd.AddCommand(doltTestCmd)
