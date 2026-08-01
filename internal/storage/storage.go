@@ -502,6 +502,16 @@ type PendingCommitter interface {
 	CommitPending(ctx context.Context, actor string) (bool, error)
 }
 
+// PendingChangeDetector reports whether the working set holds changes a
+// commit would capture. Unlike VersionControl.Status, this excludes
+// dolt_ignore'd tables (wisp and lease tables appear in dolt_status but
+// cannot be staged), so it answers "would CommitPending mint a commit?"
+// without committing. Callers that must refuse to act on a dirty working
+// set (bd dolt remote reset-data) should type-assert to this interface.
+type PendingChangeDetector interface {
+	HasCommittablePending(ctx context.Context) (bool, error)
+}
+
 // BackupStore provides Dolt backup operations (CALL DOLT_BACKUP) for
 // disaster recovery.
 // Callers that need backup functionality should type-assert to this interface.

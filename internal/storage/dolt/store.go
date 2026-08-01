@@ -2924,16 +2924,10 @@ func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commi
 	return nil
 }
 
-// CommitPending creates a single Dolt commit for all uncommitted changes in the working set.
-// Returns (true, nil) if changes were committed, (false, nil) if there was nothing to commit,
-// or (false, err) on failure. The commit message summarizes the accumulated changes by
-// querying dolt_diff to count issue-level operations.
-//
-// This is the primary commit mechanism for batch mode, where multiple bd commands
-// accumulate changes in the working set before committing at a logical boundary.
-func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
-	// Check if there are any committable changes (excluding dolt_ignore'd tables
-	// like wisp tables, which appear in dolt_status but can't be staged).
+// HasCommittablePending reports whether the working set holds committable
+// changes, excluding dolt_ignore'd tables (wisp and lease tables appear in
+// dolt_status but can't be staged). Implements storage.PendingChangeDetector.
+func (s *DoltStore) HasCommittablePending(ctx context.Context) (bool, error) {
 	var count int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM dolt_status s
@@ -2945,7 +2939,22 @@ func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, erro
 	if err != nil {
 		return false, fmt.Errorf("failed to check status: %w", err)
 	}
-	if count == 0 {
+	return count > 0, nil
+}
+
+// CommitPending creates a single Dolt commit for all uncommitted changes in the working set.
+// Returns (true, nil) if changes were committed, (false, nil) if there was nothing to commit,
+// or (false, err) on failure. The commit message summarizes the accumulated changes by
+// querying dolt_diff to count issue-level operations.
+//
+// This is the primary commit mechanism for batch mode, where multiple bd commands
+// accumulate changes in the working set before committing at a logical boundary.
+func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
+	dirty, err := s.HasCommittablePending(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !dirty {
 		return false, nil // Nothing to commit
 	}
 
