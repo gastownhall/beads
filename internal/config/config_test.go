@@ -2114,3 +2114,50 @@ func TestInitialize_IgnoreRepoConfigStillHonorsTempBeadsDir(t *testing.T) {
 		t.Errorf("GetBool(json) = %v, want false — the ignored repo config leaked underneath", got)
 	}
 }
+
+// The same asymmetry with the sides swapped: cwd resolved, BEADS_DIR reached
+// through the alias. macOS produces the other order, so only that one is
+// load-bearing today — but a normalization applied to one side and not the
+// other would pass the test above and still leak here, and nothing in the code
+// makes the direction obvious. Pin the symmetry rather than the instance.
+func TestInitialize_IgnoreRepoConfigMatchesASymlinkedBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+	repoDir := filepath.Dir(beadsDir)
+
+	linkedRepo := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(repoDir, linkedRepo); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	// newIgnoredRepoConfigFixture already chdir'd into repoDir; make sure the
+	// name os.Getwd reports is the resolved one, so the alias is on the
+	// BEADS_DIR side only.
+	resolvedRepoDir, err := filepath.EvalSymlinks(repoDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", repoDir, err)
+	}
+	t.Chdir(resolvedRepoDir)
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", filepath.Join(linkedRepo, ".beads"))
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "" {
+		t.Errorf("GetString(issue-prefix) = %q, want empty: the ignore set missed the aliased BEADS_DIR", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
+	}
+}
