@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -1925,6 +1926,120 @@ func TestInitialize_IgnoreRepoConfigAppliesToBeadsDirEnv(t *testing.T) {
 	// still write into the repo config the flag exists to protect.
 	if got := ConfigFileUsed(); got != "" {
 		t.Errorf("ConfigFileUsed() = %q, want empty when repo config is ignored via BEADS_DIR", got)
+	}
+}
+
+// The two sides of the ignore-set comparison are produced by different code with
+// different opinions about symlinks, and they have to agree anyway.
+//
+// The set is keyed off os.Getwd(), which honors $PWD and so reports the name the
+// process was handed. The BEADS_DIR checked against it is written by the CLI's own
+// dispatch from beads.FindBeadsDir, which canonicalizes through
+// filepath.EvalSymlinks. Compare those as raw strings and the lookup misses for any
+// workspace reached through a symlink: the ignore silently does not apply and the
+// repo config is merged after all.
+//
+// This is not hypothetical on macOS — it is unconditional there. $TMPDIR is
+// /var/folders/... and /var is a symlink to /private/var, so every t.TempDir() has
+// two names and the two sides pick different ones. It took the Main workflow's
+// macos-latest job red on cmd/bd TestDispatchDoesNotPolluteViperIssuePrefix.
+//
+// Constructing the symlink explicitly reproduces it on every platform rather than
+// only where $TMPDIR happens to be one.
+func TestInitialize_IgnoreRepoConfigMatchesThroughASymlinkedRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	beadsDir := newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\nissue-prefix: zzleak\n")
+	repoDir := filepath.Dir(beadsDir)
+
+	// An alias for the same repo root. Chdir through it so $PWD — and therefore
+	// os.Getwd, and therefore the ignore set — holds the unresolved name.
+	linkedRepo := filepath.Join(t.TempDir(), "linked-repo")
+	if err := os.Symlink(repoDir, linkedRepo); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	t.Chdir(linkedRepo)
+
+	// Stand in for FindBeadsDir, which hands dispatch a canonicalized path.
+	resolvedBeadsDir, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", beadsDir, err)
+	}
+	if resolvedBeadsDir == filepath.Join(linkedRepo, ".beads") {
+		t.Fatalf("fixture did not produce two distinct names for the same .beads dir: %s", resolvedBeadsDir)
+	}
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", resolvedBeadsDir)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("issue-prefix"); got != "" {
+		t.Errorf("GetString(issue-prefix) = %q, want empty: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := GetString("actor"); got != "" {
+		t.Errorf("GetString(actor) = %q, want empty: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false: the ignore set missed the symlink-resolved BEADS_DIR", got)
+	}
+	if got := ConfigFileUsed(); got != "" {
+		t.Errorf("ConfigFileUsed() = %q, want empty when the repo config is ignored", got)
+	}
+}
+
+// The mirror of the case above: the alias must not become a way to over-ignore.
+// A genuinely different temp workspace still loads even when it is reached
+// through a symlink, so the normalization cannot be collapsing distinct paths.
+func TestInitialize_IgnoreRepoConfigStillHonorsSymlinkedTempBeadsDir(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation requires elevation on Windows")
+	}
+	restore := envSnapshot(t)
+	defer restore()
+
+	newIgnoredRepoConfigFixture(t, "json: true\nactor: repo-user\n")
+
+	workspace := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatalf("failed to create workspace: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "config.yaml"), []byte("actor: workspace-user\nissue-prefix: wksp\n"), 0o644); err != nil {
+		t.Fatalf("failed to write workspace config.yaml: %v", err)
+	}
+
+	linkedWorkspace := filepath.Join(t.TempDir(), "linked-beads")
+	if err := os.Symlink(workspace, linkedWorkspace); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DIR", linkedWorkspace)
+
+	ResetForTesting()
+	defer ResetForTesting()
+
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() error = %v", err)
+	}
+
+	if got := GetString("actor"); got != "workspace-user" {
+		t.Errorf("GetString(actor) = %q, want %q from the symlinked temp workspace", got, "workspace-user")
+	}
+	if got := GetString("issue-prefix"); got != "wksp" {
+		t.Errorf("GetString(issue-prefix) = %q, want %q from the symlinked temp workspace", got, "wksp")
+	}
+	if got := GetBool("json"); got {
+		t.Errorf("GetBool(json) = %v, want false — the ignored repo config leaked underneath", got)
 	}
 }
 
