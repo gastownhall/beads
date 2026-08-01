@@ -40,6 +40,19 @@ type sqlServerUOWTopology struct {
 	rootPassword      string
 }
 
+// previewProviderOptions is the CLI-side half of the preview policy: it turns
+// the root pre-run's previewMode bool into the uow.ProviderOption slice the
+// proxied-server provider is opened with. Extracted (rather than inlined at
+// the call site) so the wiring — preview=true must produce uow.WithPreview(),
+// preview=false must produce nothing — has something to unit test; the
+// previous inline form had no test that would fail if a refactor dropped it.
+func previewProviderOptions(preview bool) []uow.ProviderOption {
+	if !preview {
+		return nil
+	}
+	return []uow.ProviderOption{uow.WithPreview()}
+}
+
 // newProxiedServerUOWProvider opens the proxied-server provider and, in
 // team-server mode, asserts that the shared bts-managed database is serving
 // THIS workspace's project (gastownhall/beads: the proxied-path sibling of the

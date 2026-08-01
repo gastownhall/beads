@@ -1488,11 +1488,7 @@ var rootCmd = &cobra.Command{
 		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			var providerOpts []uow.ProviderOption
-			if previewMode {
-				providerOpts = append(providerOpts, uow.WithPreview())
-			}
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, providerOpts...)
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, previewProviderOptions(previewMode)...)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
