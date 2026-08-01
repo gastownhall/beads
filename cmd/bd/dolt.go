@@ -732,6 +732,7 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if msg == "" {
 			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
 		}
+		beforeHash, beforeErr := st.GetCurrentCommit(ctx)
 		if err := st.Commit(ctx, msg); err != nil {
 			if isDoltNothingToCommit(err) {
 				fmt.Println("Nothing to commit.")
@@ -740,6 +741,16 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 			return HandleError("%v", err)
 		}
 		commandDidExplicitDoltCommit = true
+
+		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
+		// store) returns a nil error even when HEAD did not move. Detect that
+		// case here instead of relying on the error, so both backends report
+		// the same "nothing to commit" outcome.
+		if afterHash, afterErr := st.GetCurrentCommit(ctx); beforeErr == nil && afterErr == nil && afterHash == beforeHash {
+			fmt.Println("Nothing to commit.")
+			return nil
+		}
+
 		fmt.Println("Committed.")
 		return nil
 	},
