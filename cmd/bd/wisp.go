@@ -880,6 +880,10 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 				if isProtectedWisp(child, blockedSet, protectedStatuses) {
 					continue
 				}
+				// Children are held to the same --age contract as parents.
+				if now.Sub(child.UpdatedAt) <= ageThreshold {
+					continue
+				}
 				abandoned = append(abandoned, child)
 			}
 		}
