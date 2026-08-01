@@ -84,7 +84,7 @@ func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db ver
 // interface and must refuse them here instead (bd-578h9.12).
 func (s *EmbeddedDoltStore) withMutatingDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) error {
 	if s.readOnly {
-		return errReadOnly
+		return ErrReadOnly
 	}
 	return s.withDBConn(ctx, fn)
 }
@@ -93,7 +93,7 @@ func (s *EmbeddedDoltStore) withMutatingDBConn(ctx context.Context, fn func(db v
 // refusal as withMutatingDBConn (bd-578h9.12).
 func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) error {
 	if s.readOnly {
-		return errReadOnly
+		return ErrReadOnly
 	}
 	return s.withPinnedDBConn(ctx, fn)
 }

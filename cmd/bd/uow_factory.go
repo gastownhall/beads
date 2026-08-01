@@ -12,7 +12,17 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.UnitOfWorkProvider, error) {
+// previewProviderOptions is the CLI-side half of the preview policy: it turns
+// the root pre-run's previewMode bool into the uow.ProviderOption slice the
+// proxied-server provider is opened with.
+func previewProviderOptions(preview bool) []uow.ProviderOption {
+	if !preview {
+		return nil
+	}
+	return []uow.ProviderOption{uow.WithPreview()}
+}
+
+func newProxiedServerUOWProvider(ctx context.Context, beadsDir string, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	if beadsDir == "" {
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: beadsDir must be set")
 	}
@@ -25,16 +35,17 @@ func newProxiedServerUOWProvider(ctx context.Context, beadsDir string) (uow.Unit
 
 	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)
 	if info != nil && info.External != nil {
-		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External)
+		return newExternalProxiedServerUOWProvider(ctx, beadsDir, database, info.External, opts...)
 	}
 
-	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database)
+	return newManagedProxiedServerUOWProvider(ctx, beadsDir, database, opts...)
 }
 
 func newExternalProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
 	external *configfile.ExternalDoltConfig,
+	opts ...uow.ProviderOption,
 ) (uow.UnitOfWorkProvider, error) {
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
@@ -66,12 +77,14 @@ func newExternalProxiedServerUOWProvider(
 		*external,
 		external.ResolvedUser(),
 		os.Getenv(configfile.ExternalDoltPasswordEnvVar),
+		opts...,
 	)
 }
 
 func newManagedProxiedServerUOWProvider(
 	ctx context.Context,
 	beadsDir, database string,
+	opts ...uow.ProviderOption,
 ) (uow.UnitOfWorkProvider, error) {
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
@@ -111,5 +124,6 @@ func newManagedProxiedServerUOWProvider(
 		"root",
 		"", // proxy is loopback-only, no auth
 		doltBin,
+		opts...,
 	)
 }

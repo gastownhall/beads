@@ -10,6 +10,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestPreviewProviderOptions pins the CLI-side wiring the reviewer flagged as
+// untested: the root pre-run turns previewMode into providerOpts by calling
+// this function, and a refactor that dropped or inverted that could not fail
+// any existing test. uow.providerOptions is unexported, so this cannot poke
+// inside the returned uow.ProviderOption values (see
+// internal/storage/uow/preview_provider_test.go's TestApplyProviderOptions for
+// the same-package introspection); it instead pins the one thing an external
+// caller can observe — that preview=true yields exactly one option and
+// preview=false yields none — which is what the CLI wiring is responsible for.
+func TestPreviewProviderOptions(t *testing.T) {
+	if got := previewProviderOptions(false); got != nil {
+		t.Fatalf("previewProviderOptions(false) = %#v, want nil", got)
+	}
+
+	opts := previewProviderOptions(true)
+	if len(opts) != 1 {
+		t.Fatalf("previewProviderOptions(true) len = %d, want 1", len(opts))
+	}
+	if opts[0] == nil {
+		t.Fatal("previewProviderOptions(true)[0] is nil, want uow.WithPreview()")
+	}
+}
+
 func TestNewProxiedServerUOWProvider_RoutesExternalConfigToExternalProvider(t *testing.T) {
 	beadsDir := t.TempDir()
 	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{
