@@ -45,6 +45,13 @@ func TestEmbeddedIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
 	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "xferfence"))
 }
 
+func TestEmbeddedIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "closedfields")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateClosedFieldsMatchClose(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "closedfields"))
+}
+
 func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *testEnv, prefix string) conformance.IssueOperationsStagingFixture {
 	t.Helper()
 	operations, err := embeddeddolt.NewIssueOperations(te.store)
@@ -56,6 +63,7 @@ func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *te
 		Operations:  operations,
 		CreateIssue: te.store.CreateIssue,
 		SetConfig:   te.store.SetConfig,
+		UpdateRaw:   te.store.UpdateIssue,
 		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
 			te.queryScalar(t, ctx, query, args, dest...)
 			return nil
