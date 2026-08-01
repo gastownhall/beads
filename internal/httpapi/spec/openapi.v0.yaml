@@ -120,7 +120,7 @@ info:
     its own surface. Conformance to this core is a checkable relation over
     wire-observable JSON — the profile's value model is subsumed by this one,
     plus the deviations the profile DECLARES — not a claim of shared
-    vocabulary. Four rules make it checkable.
+    vocabulary. Five rules make it checkable.
 
 
     * **Verbatim or absent.** A property emitted under a core name carries the
@@ -130,12 +130,36 @@ info:
       under a core name, is non-conformant — and omitting the member is always
       the conformant alternative.
 
-    * **Tightening is bounds-only.** A profile MAY omit optional properties, and
-      MAY tighten `maxLength`, `maxItems` and `maxProperties` or close an open
-      vocabulary, provided every instance it emits is still valid against this
-      document once explicit `null` is read as absence. Widening a bound,
-      re-typing a member, or extending a vocabulary this document closes is not
-      tightening.
+    * **An omission is not a licence to re-spell.** A profile that omits a core
+      member MUST NOT publish that member's value under any other name.
+      Omission means the value is not on the wire; an extension that carries
+      it is a re-spelling of a core member, and is non-conformant however
+      carefully the extension itself is declared.
+
+    * **Tightening is bounds-only.** A profile MAY omit optional properties,
+      and MAY tighten `maxLength`, `maxItems` and `maxProperties` or close an
+      open vocabulary, provided every instance it emits is still valid against
+      this document once explicit `null` is read as absence. That list is
+      exhaustive and the proviso is a floor, not a grant: a change the list
+      does not name is not made a tightening by the fact that its instances
+      still validate. Widening a bound, re-typing a member, or extending a
+      vocabulary this document closes is not tightening.
+
+      **A narrowed value schema is a declared deviation.** Constraining what a
+      member's VALUES may be — admitting only short strings, say, where this
+      document admits any JSON value — is a third thing, and it is how a
+      profile caps the size of a response without transforming anything: not
+      one of the bounds above, and not the re-typing this rule excludes,
+      because every value that does go on the wire is still the canonical
+      value. It is a DEVIATION, conformant only where the profile DECLARES it,
+      by the same machinery that declares an embedded-relation omission, and
+      only on these terms. A value that does not satisfy the narrower schema is
+      OMITTED ENTIRELY rather than coerced to fit; stringifying a typed value
+      in place is a transformation, and "verbatim or absent" already forbids
+      it. And the declaration states that the member MAY BE INCOMPLETE, because
+      a consumer of the profile cannot distinguish an entry dropped for failing
+      the narrower schema from one that was never set: that consequence must be
+      visible in the declaration, not left to be discovered.
 
     * **Required members are retained.** A profile keeps the required members of
       every top-level resource. Dropping a required member of an EMBEDDED
@@ -889,7 +913,10 @@ components:
             typed values enter through the explicit JSON metadata path and
             persist in older rows. Clients MUST NOT decode this into a
             string-to-string map; a strict decode fails on the first typed
-            value and takes the whole response with it.
+            value and takes the whole response with it. That prohibition is on
+            assuming a narrower type when reading THIS document: a profile MAY
+            declare a narrower value schema under the rules in **Profiles**,
+            and a client of that profile may rely on the profile's declaration.
 
 
             The object-at-top-level shape is the contract every producer and
