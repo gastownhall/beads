@@ -694,3 +694,68 @@ A new feature
 		}
 	})
 }
+
+// TestProxiedServerCreateInfraTypeRoutesToWisps pins end-to-end that a
+// configured infra type lands in the wisps tables against a real proxied
+// server, matching the embedded path. Before ga-2kkue the proxied path routed
+// on the --ephemeral/--no-history flags alone, so `bd create -t message` wrote
+// a durable row into issues.
+func TestProxiedServerCreateInfraTypeRoutesToWisps(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+
+	// countRows reports how many rows the given table holds for an ID. Issues
+	// and wisps share one ID space, so both sides must be asserted: a routing
+	// bug shows up as the row existing in the wrong table, not as a missing row.
+	countRows := func(t *testing.T, p proxiedProject, table, id string) int {
+		t.Helper()
+		db := openProxiedDB(t, p)
+		var count int
+		query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE id = ?", table)
+		if err := db.QueryRowContext(context.Background(), query, id).Scan(&count); err != nil {
+			t.Fatalf("query %s: %v", table, err)
+		}
+		return count
+	}
+
+	t.Run("infra type routes to wisps", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "iw")
+		issue := bdProxiedCreate(t, bd, p.dir, "Infra message", "-t", "message")
+		if !issue.Ephemeral {
+			t.Errorf("Ephemeral = false, want true for an infra type")
+		}
+		if got := countRows(t, p, "wisps", issue.ID); got != 1 {
+			t.Errorf("wisps rows for %s = %d, want 1", issue.ID, got)
+		}
+		if got := countRows(t, p, "issues", issue.ID); got != 0 {
+			t.Errorf("issues rows for %s = %d, want 0", issue.ID, got)
+		}
+	})
+
+	t.Run("non-infra type stays durable", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "id")
+		issue := bdProxiedCreate(t, bd, p.dir, "Plain task", "-t", "task")
+		if got := countRows(t, p, "issues", issue.ID); got != 1 {
+			t.Errorf("issues rows for %s = %d, want 1", issue.ID, got)
+		}
+		if got := countRows(t, p, "wisps", issue.ID); got != 0 {
+			t.Errorf("wisps rows for %s = %d, want 0 — infra routing must not wisp everything", issue.ID, got)
+		}
+	})
+
+	t.Run("no-history infra type keeps its retention mode", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "ih")
+		issue := bdProxiedCreate(t, bd, p.dir, "Infra message", "-t", "message", "--no-history")
+		if issue.Ephemeral {
+			t.Errorf("Ephemeral = true, want false — --no-history keeps its own retention mode")
+		}
+		if got := countRows(t, p, "wisps", issue.ID); got != 1 {
+			t.Errorf("wisps rows for %s = %d, want 1", issue.ID, got)
+		}
+	})
+}

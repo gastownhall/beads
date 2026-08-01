@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput) error {
@@ -24,7 +25,7 @@ func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput)
 	switch {
 	case in.watchMode:
 		return runListProxiedWatch(cmd, ctx, in)
-	case in.readyFlag:
+	case in.ReadyFlag:
 		return runListProxiedReady(cmd, ctx, in)
 	default:
 		return runListProxiedSearch(cmd, ctx, in)
@@ -42,24 +43,6 @@ func openProxiedListUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	return uw, nil
 }
 
-func openAndPrepare(ctx context.Context, in listInput) (uow.UnitOfWork, types.IssueFilter, error) {
-	uw, err := openProxiedListUOW(ctx)
-	if err != nil {
-		return nil, types.IssueFilter{}, err
-	}
-	cfg, err := loadProxiedListFilterConfig(ctx, uw)
-	if err != nil {
-		uw.Close(ctx)
-		return nil, types.IssueFilter{}, err
-	}
-	filter, err := buildListFilter(in, cfg)
-	if err != nil {
-		uw.Close(ctx)
-		return nil, types.IssueFilter{}, err
-	}
-	return uw, filter, nil
-}
-
 func runListProxiedSearch(_ *cobra.Command, ctx context.Context, in listInput) error {
 	uw, filter, err := openAndPrepare(ctx, in)
 	if err != nil {
@@ -67,8 +50,8 @@ func runListProxiedSearch(_ *cobra.Command, ctx context.Context, in listInput) e
 	}
 	defer uw.Close(ctx)
 
-	if in.prettyFormat && in.parentID != "" {
-		if in.offset > 0 {
+	if in.prettyFormat && in.ParentID != "" {
+		if in.Offset > 0 {
 			return fmt.Errorf("--offset is not supported with hierarchical --parent + pretty/tree")
 		}
 		return runListProxiedHierarchicalParent(ctx, uw, in, filter)
@@ -87,52 +70,9 @@ func runListProxiedSearch(_ *cobra.Command, ctx context.Context, in listInput) e
 		return err
 	}
 
-	sortIssues(page.Items, in.sortBy, in.reverse)
+	issues, hasMore := workapi.FinishPage(page.Items, in.SortBy, in.Reverse, in.effectiveLimit, page.HasMore)
 
-	return renderProxiedListText(ctx, uw, page.Items, in, page.HasMore)
-}
-
-func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in listInput, filter types.IssueFilter) error {
-	treeIssues, err := gatherProxiedHierarchical(ctx, uw, in.parentID, filter)
-	if err != nil {
-		return err
-	}
-	if len(treeIssues) == 0 {
-		fmt.Printf("Issue '%s' has no children\n", in.parentID)
-		return nil
-	}
-
-	depsByIssueID, err := loadDepsForIssues(ctx, uw, treeIssues)
-	if err != nil {
-		return err
-	}
-
-	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode)
-	printSkipLabelsFooter(in.skipLabels)
-	return nil
-}
-
-func gatherProxiedHierarchical(ctx context.Context, uw uow.UnitOfWork, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
-	parent, err := uw.IssueUseCase().GetIssue(ctx, parentID)
-	if err != nil {
-		return nil, fmt.Errorf("error checking parent issue: %w", err)
-	}
-	if parent == nil {
-		return nil, fmt.Errorf("parent issue %q not found", parentID)
-	}
-
-	descendants, err := uw.IssueUseCase().GetDescendants(ctx, parentID, baseFilter)
-	if err != nil {
-		return nil, fmt.Errorf("error finding descendants: %w", err)
-	}
-	if len(descendants) == 0 {
-		return nil, nil
-	}
-
-	out := make([]*types.Issue, 0, len(descendants)+1)
-	out = append(out, parent)
-	out = append(out, descendants...)
-	return out, nil
+	return renderProxiedListText(ctx, uw, issues, in, hasMore)
 }
 
 func runListProxiedReady(_ *cobra.Command, ctx context.Context, in listInput) error {
@@ -142,7 +82,7 @@ func runListProxiedReady(_ *cobra.Command, ctx context.Context, in listInput) er
 	}
 	defer uw.Close(ctx)
 
-	wf := readyWorkFilterFromIssueFilter(filter)
+	wf := workapi.ReadyFilterFromIssueFilter(filter)
 
 	if jsonOutput {
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, wf)
@@ -157,9 +97,9 @@ func runListProxiedReady(_ *cobra.Command, ctx context.Context, in listInput) er
 		return err
 	}
 
-	sortIssues(page.Items, in.sortBy, in.reverse)
+	issues, hasMore := workapi.FinishPage(page.Items, in.SortBy, in.Reverse, in.effectiveLimit, page.HasMore)
 
-	return renderProxiedListText(ctx, uw, page.Items, in, page.HasMore)
+	return renderProxiedListText(ctx, uw, issues, in, hasMore)
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
@@ -183,27 +123,28 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 		var issues []*types.Issue
 		var hasMore bool
 		switch {
-		case in.readyFlag:
-			wf := readyWorkFilterFromIssueFilter(filter)
+		case in.ReadyFlag:
+			wf := workapi.ReadyFilterFromIssueFilter(filter)
 			page, perr := uw.IssueUseCase().GetReadyWork(ctx, wf)
 			if perr != nil {
 				return nil, false, nil, perr
 			}
-			issues, hasMore = page.Items, page.HasMore
-			sortIssues(issues, in.sortBy, in.reverse)
-		case in.parentID != "":
-			issues, err = gatherProxiedHierarchical(ctx, uw, in.parentID, filter)
+			issues, hasMore = workapi.FinishPage(page.Items, in.SortBy, in.Reverse, in.effectiveLimit, page.HasMore)
+		case in.ParentID != "":
+			issues, err = gatherProxiedHierarchical(ctx, uw, in.ParentID, filter)
 			if err != nil {
 				return nil, false, nil, err
 			}
-			sortIssues(issues, "id", false)
+			// The tree is gathered, not queried, so no seam reported a
+			// has-more: the cut is the only thing that can say the limit hid
+			// a descendant. Its order is the tree's own, not --sort's.
+			issues, hasMore = workapi.FinishPage(issues, "id", false, in.effectiveLimit, false)
 		default:
 			page, perr := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 			if perr != nil {
 				return nil, false, nil, perr
 			}
-			issues, hasMore = page.Items, page.HasMore
-			sortIssues(issues, in.sortBy, in.reverse)
+			issues, hasMore = workapi.FinishPage(page.Items, in.SortBy, in.Reverse, in.effectiveLimit, page.HasMore)
 		}
 
 		deps, err := loadDepsForIssues(ctx, uw, issues)
@@ -253,12 +194,9 @@ func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) er
 }
 
 func emitProxiedListJSONResult(iwc []*types.IssueWithCounts, in listInput, hasMore bool) error {
-	sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
-	if iwc == nil {
-		iwc = []*types.IssueWithCounts{}
-	}
+	iwc, hasMore = workapi.FinishPage(iwc, in.SortBy, in.Reverse, in.effectiveLimit, hasMore)
 	var err error
-	if in.skipLabels {
+	if in.SkipLabels {
 		err = outputJSON(newSkipLabelsListJSONResponse(iwc))
 	} else {
 		err = outputJSON(iwc)
@@ -298,7 +236,7 @@ func renderProxiedListText(ctx context.Context, uw uow.UnitOfWork, issues []*typ
 		}
 		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode)
 		printTruncationHint(truncated, in.effectiveLimit)
-		printSkipLabelsFooter(in.skipLabels)
+		printSkipLabelsFooter(in.SkipLabels)
 		return nil
 	}
 
@@ -331,7 +269,7 @@ func renderProxiedListText(ctx context.Context, uw uow.UnitOfWork, issues []*typ
 	case in.longFormat:
 		buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
 		for _, issue := range issues {
-			formatIssueLong(&buf, issue, labelsMap[issue.ID], in.skipLabels)
+			formatIssueLong(&buf, issue, labelsMap[issue.ID], in.SkipLabels)
 		}
 	default:
 		for _, issue := range issues {
@@ -339,7 +277,7 @@ func renderProxiedListText(ctx context.Context, uw uow.UnitOfWork, issues []*typ
 		}
 	}
 
-	if in.skipLabels && !isQuiet() {
+	if in.SkipLabels && !isQuiet() {
 		buf.WriteString(skipLabelsFooterText())
 	}
 

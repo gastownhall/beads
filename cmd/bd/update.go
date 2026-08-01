@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -21,6 +22,39 @@ import (
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
+
+// directIssueUpdater is the lifecycle capability the direct update command
+// needs. issueops.Lifecycle satisfies it without an adapter.
+type directIssueUpdater interface {
+	Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error)
+}
+
+// directUpdateMutation contains the command-derived values for one direct
+// lifecycle update.
+type directUpdateMutation struct {
+	actor            string
+	issueID          string
+	patch            issueops.IssuePatch
+	claim            bool
+	force            bool
+	expectedAssignee *string
+	expectedStatus   *issueops.Status
+}
+
+// runDirectUpdateMutation maps a direct command update into its lifecycle
+// request and returns the lifecycle result unchanged.
+func runDirectUpdateMutation(ctx context.Context, updater directIssueUpdater, mutation directUpdateMutation) (issueops.UpdateResult, error) {
+	return updater.Update(ctx, issueops.UpdateRequest{
+		Actor:                 mutation.actor,
+		IssueID:               mutation.issueID,
+		Patch:                 mutation.patch,
+		Claim:                 mutation.claim,
+		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set,
+		ForceClosePolicy:      mutation.force,
+		ExpectedAssignee:      mutation.expectedAssignee,
+		ExpectedStatus:        mutation.expectedStatus,
+	})
+}
 
 var updateCmd = &cobra.Command{
 	Use:     "update [id...]",
@@ -467,14 +501,19 @@ pointless).`,
 			// Guards ride the operation itself: a stale assignee/status refuses
 			// atomically with a typed mismatch error and MUST surface as a
 			// non-zero exit — never collapse it to success (finding #10).
-			updateResult, updateErr := ops.Update(opsCtx, issueops.UpdateRequest{
-				Actor:                 actor,
-				IssueID:               result.ResolvedID,
-				Patch:                 patch,
-				Claim:                 claimFlag,
-				ForceAssigneeTransfer: forceFlag,
-				ExpectedAssignee:      ifAssignee,
-				ExpectedStatus:        expectedStatus,
+			// One --force, two overrides. The assignee half only applies to an
+			// assignee edit — asserting it without one is an invalid request,
+			// which is why it is conditioned here rather than passed straight
+			// through: `--force -s closed` is now a legitimate way to ask for
+			// the close-policy half alone.
+			updateResult, updateErr := runDirectUpdateMutation(opsCtx, ops, directUpdateMutation{
+				actor:            actor,
+				issueID:          result.ResolvedID,
+				patch:            patch,
+				claim:            claimFlag,
+				force:            forceFlag,
+				expectedAssignee: ifAssignee,
+				expectedStatus:   expectedStatus,
 			})
 			if updateErr != nil {
 				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
@@ -901,8 +940,8 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
-	// Live-claim reassign fence override (bd-98s5c)
-	updateCmd.Flags().Bool("force", false, "Allow -a/--assignee to overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
+	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
+	updateCmd.Flags().Bool("force", false, "Override two refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), and let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")

@@ -186,7 +186,10 @@ func acquireMigrateGates(beadsDir string, shared bool, reason string) (func(), e
 	if err != nil {
 		return nil, HandleError("failed to resolve migration destination root: %v", err)
 	}
-	h, err := acquireExclusiveWorkspaceGates(rootCtx, beadsDir, reason, destRoot)
+	// getRootContext(), not the rootCtx global: it honors the per-command
+	// context when globals are disabled, and normalizes the not-yet-set case
+	// to context.Background().
+	h, err := acquireExclusiveWorkspaceGates(getRootContext(), beadsDir, reason, destRoot)
 	if err != nil {
 		return nil, HandleErrorWithHint(
 			fmt.Sprintf("cannot migrate while other bd activity holds this workspace: %v", err),

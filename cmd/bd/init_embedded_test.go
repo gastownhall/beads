@@ -1920,8 +1920,26 @@ func TestEmbeddedInit(t *testing.T) {
 // before the embedded Dolt flock is ever attempted, so contention here
 // normally surfaces as gate-busy output rather than a flock error; either is
 // classified by isEmbeddedLockOutput as the same "another process holds the
-// lock" outcome. At least one process must succeed and at least one must
-// see a lock/gate-busy outcome; unexpected errors still fail the test.
+// lock" outcome. At least one process must succeed; unexpected errors still
+// fail the test.
+//
+// It deliberately does NOT require that any racer *observed* contention.
+// Whether a waiter blocks and then succeeds or gives up and reports the gate
+// busy depends on how long the winner holds the gate versus the waiter's wait
+// budget — a property of the machine, not of the lock. On a runner fast enough
+// that all ten inits serialize inside that budget, zero lock errors is the
+// correct outcome: it means serialization worked and nobody had to give up.
+// Requiring one made this test fail on exactly the hardware where the gate was
+// working best (GH#4914), and the EXCLUSIVE gate added in #5093 — acquired
+// before the embedded flock is ever attempted — makes the serialize-and-succeed
+// outcome more likely, not less. Every other concurrency test in this package
+// already treats contention as tolerated rather than required; this one was the
+// outlier.
+//
+// The contention path itself is not left uncovered:
+// TestInitGateBusyClassifiedAsLockContention (added alongside the gate in
+// #5093) exercises it deterministically by holding the gate in-process, which
+// is what this test was approximating by racing.
 func TestEmbeddedInitConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt init tests")
@@ -1980,9 +1998,7 @@ func TestEmbeddedInitConcurrent(t *testing.T) {
 	if successes < 1 {
 		t.Errorf("expected at least 1 success, got %d", successes)
 	}
-	if lockErrors < 1 {
-		t.Errorf("expected at least 1 lock error, got %d", lockErrors)
-	}
+	// No assertion on lockErrors: see the doc comment. 0 is a valid outcome.
 	// timeoutKills > 2 (i.e. > N/5) indicates a systemic runner problem, not normal load variance.
 	if timeoutKills > 2 {
 		t.Errorf("too many timeout-killed processes: %d/%d (cap is 2)", timeoutKills, N)

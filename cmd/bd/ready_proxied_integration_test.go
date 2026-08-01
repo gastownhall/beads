@@ -317,6 +317,19 @@ func TestProxiedServerReady(t *testing.T) {
 		}
 	})
 
+	// The rejection lives on this route only: outside proxied mode a negative
+	// --offset is ignored (see TestEmbeddedReady's
+	// negative_offset_ignored_outside_proxied), because --offset is not
+	// supported there at all.
+	t.Run("negative_offset_rejected", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdoffneg")
+		out := bdProxiedReadyFail(t, bd, p, "--offset", "-1")
+		if !strings.Contains(out, "--offset must be >= 0") {
+			t.Errorf("expected '--offset must be >= 0' error, got: %s", out)
+		}
+	})
+
 	t.Run("offset_skips_leading_results", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rdoff")
@@ -802,6 +815,50 @@ func TestProxiedServerReady2(t *testing.T) {
 		out := bdProxiedReadyFail(t, bd, p, "--mol-type", "garbage")
 		if !strings.Contains(out, "invalid mol-type") {
 			t.Errorf("expected 'invalid mol-type' error, got: %s", out)
+		}
+	})
+
+	// Since bd-ehi both routes share one flag gatherer, and it reports usage
+	// errors the way the direct route always has: as a JSON error object on
+	// stdout when the caller asked for --json. This route used to print
+	// "Error: ..." to stderr for these three, so a script that parses proxied
+	// `bd ready --json` failures sees the change - which is why it is pinned
+	// end to end here as well as at the gatherer
+	// (TestGatherReadyInputUsageErrorsRespectJSON).
+	t.Run("json_usage_errors_are_json_on_stdout", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rdjue")
+		cases := []struct {
+			name string
+			args []string
+			want string
+		}{
+			{"sort_policy", []string{"--sort", "bogus"}, "invalid sort policy"},
+			{"mol_type", []string{"--mol-type", "garbage"}, "invalid mol-type"},
+			{"metadata_field", []string{"--metadata-field", "bad$key=x"}, "invalid --metadata-field key"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				args := append([]string{"ready", "--json"}, c.args...)
+				stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
+				if err == nil {
+					t.Fatalf("bd ready --json %s should have failed; stdout:\n%s", strings.Join(c.args, " "), stdout)
+				}
+				var payload map[string]any
+				if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &payload); jsonErr != nil {
+					t.Fatalf("stdout is not a JSON error object: %v\nstdout:\n%s\nstderr:\n%s", jsonErr, stdout, stderr)
+				}
+				if data, ok := payload["data"].(map[string]any); ok {
+					payload = data
+				}
+				msg, _ := payload["error"].(string)
+				if !strings.Contains(msg, c.want) {
+					t.Errorf("JSON error = %q, want it to contain %q", msg, c.want)
+				}
+				if strings.Contains(stderr, "Error:") {
+					t.Errorf("under --json the error must not also go to stderr, got:\n%s", stderr)
+				}
+			})
 		}
 	})
 

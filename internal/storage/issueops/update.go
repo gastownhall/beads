@@ -171,6 +171,51 @@ func DetermineEventType(oldIssue *types.Issue, updates map[string]interface{}) t
 	return types.EventStatusChanged
 }
 
+// CrossesIntoDoneCategoryInTx reports whether updates move oldStatus from
+// outside the done category into it. The categories are resolved from the same
+// transaction that will perform the write, so a custom status configured as
+// done counts exactly as the built-in closed status does.
+//
+// It is false without a status update, and for a move that starts in the done
+// category — a done-to-done restatement is not a crossing, and reopening is the
+// operation that leaves.
+//
+// A status value whose Go type cannot carry a status is a validation error, not
+// a false. Both write funnels ask this question to decide whether close policy
+// applies, so answering "no crossing" for a value nobody can read would let an
+// in-process caller that got the transport wrong land status='closed' with the
+// policy gate skipped — on an issue with open children, no less. Refusing here
+// gives a mis-typed status the same fail-loud handling the mis-typed override
+// key already gets (see PopForceClosePolicy).
+func CrossesIntoDoneCategoryInTx(ctx context.Context, tx DBTX, oldStatus types.Status, updates map[string]interface{}) (bool, error) {
+	rawStatus, hasStatus := updates["status"]
+	if !hasStatus {
+		return false, nil
+	}
+	var newStatus types.Status
+	switch value := rawStatus.(type) {
+	case string:
+		newStatus = types.Status(value)
+	case types.Status:
+		newStatus = value
+	default:
+		return false, fmt.Errorf("%w: status value of type %T is neither a string nor a types.Status", storage.ErrValidation, rawStatus)
+	}
+
+	newCategory, err := ReopenCategoryInTx(ctx, tx, newStatus)
+	if err != nil {
+		return false, err
+	}
+	if newCategory != types.CategoryDone {
+		return false, nil
+	}
+	oldCategory, err := ReopenCategoryInTx(ctx, tx, oldStatus)
+	if err != nil {
+		return false, err
+	}
+	return oldCategory != types.CategoryDone, nil
+}
+
 // UpdateResult holds the result of an UpdateIssueInTx call.
 type UpdateResult struct {
 	OldIssue         *types.Issue
@@ -198,6 +243,11 @@ func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, update
 
 func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
 	updates = cloneUpdateFields(updates)
+	// Pop the override before anything reads the map as a set of columns. It
+	// has to come out ahead of the no-op filter too: the filter keeps every key
+	// it does not recognize, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	forceClosePolicy := PopForceClosePolicy(updates)
 
 	// Route to correct table.
 	isWisp := IsActiveWispInTx(ctx, tx, id)
@@ -223,6 +273,23 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	}
 	if len(updates) == 0 {
 		return &UpdateResult{OldIssue: oldIssue, IsWisp: isWisp, Changed: false}, nil
+	}
+
+	// A status update that crosses into the done category is a close by another
+	// name, so it answers to close policy. Running after the no-op filter keeps
+	// a done-to-done restatement policy-free, and running after the callers'
+	// version and assignee preconditions keeps force away from those: it
+	// bypasses the two close refusals and nothing else, exactly as it does for
+	// `bd close`. A refusal returns here, before any write, and aborts the
+	// caller's transaction.
+	crossing, err := CrossesIntoDoneCategoryInTx(ctx, tx, oldIssue.Status, updates)
+	if err != nil {
+		return nil, err
+	}
+	if crossing {
+		if _, err := EnforceClosePolicyInTx(ctx, tx, id, forceClosePolicy); err != nil {
+			return nil, err
+		}
 	}
 
 	if err := ValidateScalarUpdates(ctx, tx, updates); err != nil {
@@ -377,6 +444,36 @@ const (
 	// (bd update --append-notes). Value: string.
 	OpAppendNotes = "append_notes"
 )
+
+// OpForceClosePolicy carries a close-policy override into a generic update
+// (bd update --force). Value: bool. It is not a merge operation and not a
+// column — the write funnels pop it before validating fields, so it never
+// reaches SQL.
+//
+// It rides the update map, like the merge operations, so adding the override
+// breaks no interface. That choice has a deliberate failure mode: the field
+// allowlists do not name this key, so an occurrence that reaches field
+// validation unpopped is refused by name. A caller that misspells the override,
+// or a write path that forgets to pop it, fails loudly instead of quietly
+// running the update with force read as off.
+const OpForceClosePolicy = "_force_close_policy"
+
+// PopForceClosePolicy removes the close-policy override from updates and
+// reports whether it asked for force. A value that is not a bool is left in
+// place on purpose: it cannot be read as an intent, and leaving it lets the
+// field allowlist refuse it by name.
+func PopForceClosePolicy(updates map[string]interface{}) bool {
+	raw, present := updates[OpForceClosePolicy]
+	if !present {
+		return false
+	}
+	force, isBool := raw.(bool)
+	if !isBool {
+		return false
+	}
+	delete(updates, OpForceClosePolicy)
+	return force
+}
 
 // HasMergeOps reports whether the update map carries any read-merge-write
 // operation key. Updates with merge ops must resolve those ops against the row

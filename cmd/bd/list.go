@@ -1,22 +1,17 @@
 package main
 
 import (
-	"cmp"
 	"context"
 	"fmt"
 	"os"
-	"os/signal"
-	"slices"
 	"strings"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // storageExecutor handles operations that need a store connection
@@ -39,255 +34,6 @@ func withStorage(ctx context.Context, store storage.DoltStorage, dbPath string, 
 	return fmt.Errorf("no storage available")
 }
 
-// withFetchOneExtra bumps Limit by one so the caller can detect "more
-// results than the limit" (GH#3212) by comparing len(results) against the
-// original limit.
-//
-// `--limit N --max-rows N` (equal) needs special handling so this bump
-// doesn't collide with the MaxRows cap check: EffectiveSearchLimit treats
-// Limit==MaxRows as "no overage sniff" (returns Limit verbatim, no +1 — see
-// EffectiveSearchLimit's doc and the WithLimit_LimitAtCap_NoError storage
-// test), but bumping Limit to N+1 alone flips that to Limit>MaxRows, which
-// *does* sniff for overage — so the probe row itself would trip
-// EnforceMaxRowsCap(N+1, N, ...) even though the delivered set is always
-// trimmed back to N. Bumping MaxRows by one in lockstep, only in this exact
-// N==M case, keeps the probe row inside the (temporarily N+1) cap so
-// EnforceMaxRowsCap never fires on it while still fetching N+1 rows for the
-// truncation check below. This can't false-negative a real violation: the
-// query's own LIMIT is capped at N+1 either way, so "more than N+1 matches
-// exist" was already undetectable at Limit==MaxRows before this bump ever
-// existed (same "no overage detection above the equal cap" contract
-// EffectiveSearchLimit documents for the unbumped case).
-//
-// This does not change the Limit>MaxRows (tighter-cap) or Limit<MaxRows
-// cases: EffectiveSearchLimit's branch selection there is unaffected by a
-// one-row bump to Limit, and MaxRows is left untouched, so a genuine
-// tighter-cap violation still fires with the correct (unbumped) Cap value
-// in the error message.
-func withFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
-	if filter.Limit > 0 {
-		if filter.MaxRows > 0 && filter.Limit == filter.MaxRows {
-			filter.MaxRows++
-		}
-		filter.Limit++
-	}
-	return filter
-}
-
-func readyWorkFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
-	wf := types.WorkFilter{
-		Status:         types.StatusOpen,
-		Limit:          filter.Limit,
-		Offset:         filter.Offset,
-		Labels:         filter.Labels,
-		LabelsAny:      filter.LabelsAny,
-		ExcludeLabels:  filter.ExcludeLabels,
-		LabelPattern:   filter.LabelPattern,
-		LabelRegex:     filter.LabelRegex,
-		ParentID:       filter.ParentID,
-		MolType:        filter.MolType,
-		WispType:       filter.WispType,
-		ExcludeTypes:   filter.ExcludeTypes,
-		MetadataFields: filter.MetadataFields,
-		HasMetadataKey: filter.HasMetadataKey,
-		MaxRows:        filter.MaxRows,
-		MaxRowsSource:  filter.MaxRowsSource,
-	}
-	if filter.IssueType != nil {
-		wf.Type = string(*filter.IssueType)
-	}
-	if filter.Priority != nil {
-		wf.Priority = filter.Priority
-	}
-	if filter.Assignee != nil {
-		wf.Assignee = filter.Assignee
-	}
-	if filter.NoAssignee {
-		wf.Unassigned = true
-	}
-	if filter.Ephemeral != nil && *filter.Ephemeral {
-		wf.IncludeEphemeral = true
-	}
-	return wf
-}
-
-// getHierarchicalChildren handles the --tree --parent combination logic.
-// baseFilter carries CLI filters (--type, --status, etc.) through the recursive walk.
-func getHierarchicalChildren(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter) ([]*types.Issue, error) {
-	// First verify that the parent issue exists
-	var parentIssue *types.Issue
-	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		var err error
-		parentIssue, err = s.GetIssue(ctx, parentID)
-		return err
-	})
-	if err != nil {
-		return nil, fmt.Errorf("error checking parent issue: %v", err)
-	}
-	if parentIssue == nil {
-		return nil, fmt.Errorf("parent issue '%s' not found", parentID)
-	}
-
-	// Use recursive search to find all descendants using the same logic as --parent filter.
-	// The parent itself is NOT included in the result set — only actual children and
-	// their descendants. This matches the behavior of --json and --flat (GH#3349).
-	allDescendants := make(map[string]*types.Issue)
-
-	err = findAllDescendants(ctx, store, dbPath, parentID, baseFilter, allDescendants)
-	if err != nil {
-		return nil, fmt.Errorf("error finding descendants: %v", err)
-	}
-
-	if len(allDescendants) == 0 {
-		return nil, nil
-	}
-
-	// Include the parent as the tree root only when descendants exist,
-	// so the tree renderer can draw the hierarchy with the parent at the top.
-	allDescendants[parentID] = parentIssue
-
-	treeIssues := make([]*types.Issue, 0, len(allDescendants))
-	for _, issue := range allDescendants {
-		treeIssues = append(treeIssues, issue)
-	}
-
-	return treeIssues, nil
-}
-
-// findAllDescendants recursively finds all descendants using parent filtering.
-// baseFilter carries CLI filters (--type, --status, etc.) so the tree respects them.
-func findAllDescendants(ctx context.Context, store storage.DoltStorage, dbPath string, parentID string, baseFilter types.IssueFilter, result map[string]*types.Issue) error {
-	var children []*types.Issue
-	err := withStorage(ctx, store, dbPath, func(s storage.DoltStorage) error {
-		filter := baseFilter
-		filter.ParentID = &parentID
-		filter.Limit = 0 // unlimited per level to avoid truncating the tree walk
-		var err error
-		children, err = s.SearchIssues(ctx, "", filter)
-		return err
-	})
-	if err != nil {
-		return err
-	}
-
-	for _, child := range children {
-		if _, exists := result[child.ID]; !exists {
-			result[child.ID] = child
-			err = findAllDescendants(ctx, store, dbPath, child.ID, baseFilter, result)
-			if err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-// watchIssues polls for changes and re-displays (GH#654)
-// Uses polling instead of fsnotify because Dolt stores data in a server-side
-// database, not files — file watchers never fire.
-type watchListDependencyStore interface {
-	GetAllDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
-}
-
-func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool) ([]*types.Issue, error) {
-	if ready {
-		issues, err := store.GetReadyWork(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
-		if err != nil {
-			return nil, err
-		}
-		sortIssues(issues, sortBy, reverse)
-		return issues, nil
-	}
-
-	if parentID != "" {
-		issues, err := getHierarchicalChildren(ctx, store, "", parentID, filter)
-		if err != nil {
-			return nil, err
-		}
-		// getHierarchicalChildren builds its result from a map, so normalize the
-		// slice before snapshot comparison to avoid spurious redraws.
-		sortIssues(issues, "id", false)
-		return issues, nil
-	}
-
-	issues, err := store.SearchIssues(ctx, "", withFetchOneExtra(filter))
-	if err != nil {
-		return nil, err
-	}
-	sortIssues(issues, sortBy, reverse)
-	return issues, nil
-}
-
-func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue) {
-	var allDeps map[string][]*types.Dependency
-	if store != nil {
-		deps, err := store.GetAllDependencyRecords(ctx)
-		if err == nil {
-			allDeps = deps
-		}
-	}
-	displayPrettyListWithDeps(issues, true, allDeps)
-}
-
-// watchIssues returns an error only for the initial query — a failure there
-// means bd list --watch never displayed anything, so (unlike a mid-poll
-// refresh failure, which just logs and keeps the last good snapshot on
-// screen) it must propagate to the caller. In particular this lets
-// runListCore route a MaxRows cap violation through handleMaxRowsError for
-// exit-code-2 semantics instead of watchIssues swallowing it and exiting 0
-// (be-x42v.4 follow-up, review MUST-FIX 5).
-func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.IssueFilter, ready bool, parentID string, sortBy string, reverse bool, effectiveLimit int) error {
-	// Initial display
-	issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
-	if err != nil {
-		return err
-	}
-	truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
-	if truncated {
-		issues = issues[:effectiveLimit]
-	}
-	displayWatchedIssueList(ctx, store, issues)
-	printTruncationHint(truncated, effectiveLimit)
-	lastSnapshot := issueSnapshot(issues)
-
-	fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
-
-	// Handle Ctrl+C — deferred Stop prevents signal handler leak
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
-	defer signal.Stop(sigChan)
-
-	pollInterval := 2 * time.Second
-	ticker := time.NewTicker(pollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-sigChan:
-			fmt.Fprintf(os.Stderr, "\nStopped watching.\n")
-			return nil
-		case <-ticker.C:
-			issues, err := loadWatchedIssues(ctx, store, filter, ready, parentID, sortBy, reverse)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error refreshing issues: %v\n", err)
-				continue
-			}
-			truncated := effectiveLimit > 0 && len(issues) > effectiveLimit
-			if truncated {
-				issues = issues[:effectiveLimit]
-			}
-			snap := issueSnapshot(issues)
-			if snap != lastSnapshot {
-				lastSnapshot = snap
-				displayWatchedIssueList(ctx, store, issues)
-				printTruncationHint(truncated, effectiveLimit)
-				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
-			}
-		}
-	}
-}
-
 // issueSnapshot builds a comparable string from issue IDs, statuses, and
 // update times so we can detect when the result set has changed.
 func issueSnapshot(issues []*types.Issue) string {
@@ -296,80 +42,6 @@ func issueSnapshot(issues []*types.Issue) string {
 		fmt.Fprintf(&b, "%s:%s:%d;", issue.ID, issue.Status, issue.UpdatedAt.UnixNano())
 	}
 	return b.String()
-}
-
-func compareIssuesBy(a, b *types.Issue, sortBy string) int {
-	switch sortBy {
-	case "priority":
-		return cmp.Compare(a.Priority, b.Priority)
-	case "created":
-		return b.CreatedAt.Compare(a.CreatedAt)
-	case "updated":
-		return b.UpdatedAt.Compare(a.UpdatedAt)
-	case "closed":
-		if a.ClosedAt == nil && b.ClosedAt == nil {
-			return 0
-		} else if a.ClosedAt == nil {
-			return 1
-		} else if b.ClosedAt == nil {
-			return -1
-		}
-		return b.ClosedAt.Compare(*a.ClosedAt)
-	case "status":
-		return cmp.Compare(a.Status, b.Status)
-	case "id":
-		return utils.NaturalCompareIDs(a.ID, b.ID)
-	case "title":
-		return cmp.Compare(strings.ToLower(a.Title), strings.ToLower(b.Title))
-	case "type":
-		return cmp.Compare(a.IssueType, b.IssueType)
-	case "assignee":
-		return cmp.Compare(a.Assignee, b.Assignee)
-	}
-	return 0
-}
-
-func sortIssues(issues []*types.Issue, sortBy string, reverse bool) {
-	if sortBy == "" {
-		return
-	}
-	slices.SortFunc(issues, func(a, b *types.Issue) int {
-		r := compareIssuesBy(a, b, sortBy)
-		if reverse {
-			return -r
-		}
-		return r
-	})
-}
-
-func sortIssuesWithCounts(items []*types.IssueWithCounts, sortBy string, reverse bool) {
-	if sortBy == "" {
-		return
-	}
-	slices.SortFunc(items, func(a, b *types.IssueWithCounts) int {
-		ai, bi := issueOrNil(a), issueOrNil(b)
-		if ai == nil {
-			if bi == nil {
-				return 0
-			}
-			return 1
-		}
-		if bi == nil {
-			return -1
-		}
-		r := compareIssuesBy(ai, bi, sortBy)
-		if reverse {
-			return -r
-		}
-		return r
-	})
-}
-
-func issueOrNil(iwc *types.IssueWithCounts) *types.Issue {
-	if iwc == nil {
-		return nil
-	}
-	return iwc.Issue
 }
 
 // skipLabelsIssueView wraps IssueWithCounts so the JSON encoder always emits
@@ -528,15 +200,33 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	if in.offset > 0 {
+	if in.Offset > 0 {
 		return HandleError("--offset is only supported under --proxied-server")
 	}
 
-	cfg, err := loadDirectListFilterConfig(rootCtx, store)
+	// `bd list` builds the filter rather than calling IssueReader(), because
+	// this filter feeds --watch, the hierarchical --parent tree, the text
+	// renderings that want []*types.Issue rather than a counted page, and the
+	// --max-rows cap stamped on below — none of which the Reader role
+	// expresses, and routing only the JSON path through it would fork the
+	// command in two.
+	//
+	// It shares CONSTRUCTION with the role unconditionally: the same
+	// issueops.ListRequest through the same builder, pinned by the builder's
+	// golden file.
+	//
+	// It shares EXECUTION — the same workapi.FinishPage, same sort, same trim,
+	// same has-more verdict — in every mode but one. The exception is the
+	// hierarchical --parent tree under pretty output below: it renders the
+	// recursive walk's own result and never reaches the epilogue, on this
+	// route or the proxied one. For the modes that do reach it (JSON, plain
+	// text, --watch, --ready) what differs from the HTTP listing is
+	// presentation and the --max-rows cap. See issueops.Reader's doc comment.
+	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	filter, err := buildListFilter(in, cfg)
+	filter, err := workapi.BuildListFilter(in.ListRequest, cfg)
 	if err != nil {
 		return HandleError("%v", err)
 	}
@@ -561,7 +251,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.readyFlag, in.parentID, in.sortBy, in.reverse, in.effectiveLimit); err != nil {
+		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -573,10 +263,10 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		var iwc []*types.IssueWithCounts
 		var err error
-		if in.readyFlag {
-			iwc, err = activeStore.GetReadyWorkWithCounts(ctx, readyWorkFilterFromIssueFilter(withFetchOneExtra(filter)))
+		if in.ReadyFlag {
+			iwc, err = activeStore.GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter)))
 		} else {
-			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", withFetchOneExtra(filter))
+			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", workapi.WithFetchOneExtra(filter))
 		}
 		if err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
@@ -584,15 +274,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			}
 			return HandleError("%v", err)
 		}
-		sortIssuesWithCounts(iwc, in.sortBy, in.reverse)
-		truncated := in.effectiveLimit > 0 && len(iwc) > in.effectiveLimit
-		if truncated {
-			iwc = iwc[:in.effectiveLimit]
-		}
-		if iwc == nil {
-			iwc = []*types.IssueWithCounts{}
-		}
-		if in.skipLabels {
+		iwc, truncated := workapi.FinishPage(iwc, in.SortBy, in.Reverse, in.effectiveLimit, false)
+		if in.SkipLabels {
 			if err := outputJSON(newSkipLabelsListJSONResponse(iwc)); err != nil {
 				return err
 			}
@@ -607,8 +290,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	var issues []*types.Issue
-	if in.readyFlag {
-		wf := readyWorkFilterFromIssueFilter(withFetchOneExtra(filter))
+	if in.ReadyFlag {
+		wf := workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter))
 		var err error
 		issues, err = activeStore.GetReadyWork(ctx, wf)
 		if err != nil {
@@ -619,7 +302,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 	} else {
 		var err error
-		issues, err = activeStore.SearchIssues(ctx, "", withFetchOneExtra(filter))
+		issues, err = activeStore.SearchIssues(ctx, "", workapi.WithFetchOneExtra(filter))
 		if err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
@@ -628,22 +311,17 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	sortIssues(issues, in.sortBy, in.reverse)
-
-	truncated := in.effectiveLimit > 0 && len(issues) > in.effectiveLimit
-	if truncated {
-		issues = issues[:in.effectiveLimit]
-	}
+	issues, truncated := workapi.FinishPage(issues, in.SortBy, in.Reverse, in.effectiveLimit, false)
 
 	if in.prettyFormat && !jsonOutput {
-		if in.parentID != "" && !in.readyFlag {
-			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.parentID, filter)
+		if in.ParentID != "" && !in.ReadyFlag {
+			treeIssues, err := getHierarchicalChildren(ctx, activeStore, "", in.ParentID, filter)
 			if err != nil {
 				return HandleError("%v", err)
 			}
 
 			if len(treeIssues) == 0 {
-				fmt.Printf("Issue '%s' has no children\n", in.parentID)
+				fmt.Printf("Issue '%s' has no children\n", in.ParentID)
 				return nil
 			}
 
@@ -652,7 +330,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
 			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode)
-			printSkipLabelsFooter(in.skipLabels)
+			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
 
@@ -662,7 +340,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode)
 		printTruncationHint(truncated, in.effectiveLimit)
-		printSkipLabelsFooter(in.skipLabels)
+		printSkipLabelsFooter(in.SkipLabels)
 		return nil
 	}
 
@@ -700,7 +378,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		buf.WriteString(fmt.Sprintf("\nFound %d issues:\n\n", len(issues)))
 		for _, issue := range issues {
 			labels := labelsMap[issue.ID]
-			formatIssueLong(&buf, issue, labels, in.skipLabels)
+			formatIssueLong(&buf, issue, labels, in.SkipLabels)
 		}
 	} else {
 		for _, issue := range issues {
@@ -709,7 +387,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	if in.skipLabels && !isQuiet() {
+	if in.SkipLabels && !isQuiet() {
 		buf.WriteString(skipLabelsFooterText())
 	}
 
@@ -740,7 +418,7 @@ func init() {
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
 	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
-	listCmd.Flags().IntP("limit", "n", 50, "Limit results (default 50, use 0 for unlimited)")
+	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (default 50, use 0 for unlimited)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
 	listCmd.Flags().Bool("all", false, "Show all issues including closed (overrides default filter)")

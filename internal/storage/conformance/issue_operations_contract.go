@@ -205,6 +205,297 @@ func RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T, ctx context
 	events.assert(t, "no-op metadata update", 0, nil)
 }
 
+// RunIssueOperationsUpdateClosePolicy pins what a generic status update does
+// when it crosses from a non-done status into the done category: it answers to
+// the same policy `bd close` does — the open-children refusal and the
+// live-direct-blocker refusal — and ForceClosePolicy is how a caller overrides
+// them. Until now the contract had no boundary-crossing case at all, and that
+// gap is exactly how two earlier attempts at a shared policy check reached a
+// backend that could not satisfy them without any test noticing.
+func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	parentID := fixture.IssuePrefix + "-closepolicy-parent"
+	seedClosePolicyIssue(t, ctx, fixture, parentID, publicops.CreateRequest{})
+	seedClosePolicyIssue(t, ctx, fixture, fixture.IssuePrefix+"-closepolicy-child", publicops.CreateRequest{ParentID: parentID})
+
+	blockerID := fixture.IssuePrefix + "-closepolicy-blocker"
+	blockedID := fixture.IssuePrefix + "-closepolicy-blocked"
+	seedClosePolicyIssue(t, ctx, fixture, blockerID, publicops.CreateRequest{})
+	seedClosePolicyIssue(t, ctx, fixture, blockedID, publicops.CreateRequest{
+		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
+	})
+
+	// An open child refuses, with the typed error and its count, and writes
+	// nothing — not the row, not an event.
+	events := newIssueOperationsEventCounter(t, ctx, fixture, parentID)
+	var openChildrenErr *publicops.CloseOpenChildrenError
+	_, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
+	if !errors.As(err, &openChildrenErr) {
+		t.Fatalf("update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
+	}
+	if openChildrenErr.OpenChildren != 1 {
+		t.Errorf("refusal reported %d open children, want 1", openChildrenErr.OpenChildren)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+	events.assert(t, "refused crossing", 0, nil)
+
+	// A claim rides the same atomic update. An open-child refusal must leave
+	// every part of that compound request inert, including the would-be claim.
+	var beforeAssignee string
+	var beforeRowVersion, beforeClosedAt string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &beforeAssignee, &beforeRowVersion, &beforeClosedAt); err != nil {
+		t.Fatalf("read compound-refusal state for %s: %v", parentID, err)
+	}
+	claimAndClose := closePolicyStatusRequest(parentID, false)
+	claimAndClose.Claim = true
+	_, err = fixture.Operations.Update(ctx, claimAndClose)
+	openChildrenErr = nil
+	if !errors.As(err, &openChildrenErr) {
+		t.Fatalf("claiming update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
+	}
+	var afterAssignee string
+	var afterRowVersion, afterClosedAt string
+	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &afterAssignee, &afterRowVersion, &afterClosedAt); err != nil {
+		t.Fatalf("read compound-refusal state after %s: %v", parentID, err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+	if afterAssignee != beforeAssignee {
+		t.Errorf("compound refusal assignee = %q, want unchanged %q", afterAssignee, beforeAssignee)
+	}
+	if afterRowVersion != beforeRowVersion {
+		t.Errorf("compound refusal row version = %q, want unchanged %q", afterRowVersion, beforeRowVersion)
+	}
+	if afterClosedAt != beforeClosedAt {
+		t.Errorf("compound refusal closed_at = %v, want unchanged %v", afterClosedAt, beforeClosedAt)
+	}
+	events.assert(t, "refused claiming crossing", 0, nil)
+
+	// A live direct blocker refuses too.
+	_, err = fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID, false))
+	if !errors.Is(err, publicops.ErrCloseBlocked) {
+		t.Fatalf("update %s into done with a live blocker: err = %v, want ErrCloseBlocked", blockedID, err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, blockedID, types.StatusOpen)
+
+	// Force bypasses close policy and nothing else. A stale ExpectedVersion is
+	// an orthogonal precondition, checked ahead of the policy and never waived
+	// by it — the same ordering a checked close applies.
+	stale := int64(-1)
+	staleRequest := closePolicyStatusRequest(parentID, true)
+	staleRequest.ExpectedVersion = &stale
+	if _, err := fixture.Operations.Update(ctx, staleRequest); !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Fatalf("forced crossing with a stale version: err = %v, want ErrVersionMismatch", err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
+
+	// ForceClosePolicy bypasses both, and only those.
+	for _, id := range []string{parentID, blockedID} {
+		forced, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(id, true))
+		if err != nil {
+			t.Fatalf("forced update %s into done: %v", id, err)
+		}
+		if !forced.Changed || forced.Issue.Status != types.StatusClosed {
+			t.Fatalf("forced update %s into done = %#v, want a committed close", id, forced)
+		}
+	}
+
+	// A done-to-done restatement is filtered out as a no-op before any policy
+	// could observe it, so it needs no force even though the child is still open.
+	reclose, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
+	if err != nil {
+		t.Fatalf("restate %s as done: %v", parentID, err)
+	}
+	if reclose.Changed {
+		t.Errorf("restating %s as done reported Changed = true, want a no-op", parentID)
+	}
+
+	// A status change that does not reach the done category is untouched by any
+	// of this, open child or not.
+	nonCrossing := closePolicyStatusRequest(parentID, false)
+	nonCrossing.Patch.Status.Value = types.StatusInProgress
+	if _, err := fixture.Operations.Update(ctx, nonCrossing); err != nil {
+		t.Fatalf("non-crossing status update on %s: %v", parentID, err)
+	}
+	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusInProgress)
+}
+
+// RunIssueOperationsUpdateAssigneeTransferFence pins what an assignee edit does
+// when it takes an issue away from a live foreign holder: it is refused with
+// ErrAlreadyClaimed, and ForceAssigneeTransfer, an ExpectedAssignee
+// compare-and-set, or a configured claim.pools alias are the only ways past it.
+// The contract had no assignee-transfer case at all, and that gap is exactly how
+// one backend came to permit a transfer the other two refuse.
+func RunIssueOperationsUpdateAssigneeTransferFence(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	heldID := fixture.IssuePrefix + "-xferfence-held"
+	seedClosePolicyIssue(t, ctx, fixture, heldID, publicops.CreateRequest{})
+	claimed, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true})
+	if err != nil {
+		t.Fatalf("claim %s for holder: %v", heldID, err)
+	}
+	if !claimed.Changed {
+		t.Fatalf("claiming %s reported Changed = false, want a committed claim", heldID)
+	}
+	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
+
+	// The fence itself: an unforced transfer away from the live holder is
+	// refused, and the refusal writes nothing — not the row, not an event.
+	events := newIssueOperationsEventCounter(t, ctx, fixture, heldID)
+	if _, err := fixture.Operations.Update(ctx, assigneeTransferRequest(heldID, "rival", "rival")); !errors.Is(err, publicops.ErrAlreadyClaimed) {
+		t.Fatalf("unforced transfer of %s away from its holder: err = %v, want ErrAlreadyClaimed", heldID, err)
+	}
+	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
+	events.assert(t, "refused transfer", 0, nil)
+
+	// A stale precondition is orthogonal to the fence and is checked ahead of
+	// it, so a request that fails both reports the precondition — the same
+	// ordering a forced close-policy crossing gets.
+	staleVersion := int64(-1)
+	staleVersionRequest := assigneeTransferRequest(heldID, "rival", "rival")
+	staleVersionRequest.ExpectedVersion = &staleVersion
+	if _, err := fixture.Operations.Update(ctx, staleVersionRequest); !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Fatalf("fenced transfer of %s with a stale version: err = %v, want ErrVersionMismatch", heldID, err)
+	}
+	staleStatus := types.StatusOpen
+	staleStatusRequest := assigneeTransferRequest(heldID, "rival", "rival")
+	staleStatusRequest.ExpectedStatus = &staleStatus
+	if _, err := fixture.Operations.Update(ctx, staleStatusRequest); !errors.Is(err, publicops.ErrStatusMismatch) {
+		t.Fatalf("fenced transfer of %s with a stale status: err = %v, want ErrStatusMismatch", heldID, err)
+	}
+	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
+
+	// Restating the holder's own name is not a transfer, so a third party may
+	// do it unforced — and it changes nothing.
+	reassert, err := fixture.Operations.Update(ctx, assigneeTransferRequest(heldID, "bystander", "holder"))
+	if err != nil {
+		t.Fatalf("reassert %s's current assignee: %v", heldID, err)
+	}
+	if reassert.Changed {
+		t.Errorf("reasserting %s's current assignee reported Changed = true, want a no-op", heldID)
+	}
+
+	// An ExpectedAssignee compare-and-set naming the holder replaces the fence:
+	// the caller proved its view of the claim is current.
+	casRequest := assigneeTransferRequest(heldID, "rival", "rival")
+	holder := "holder"
+	casRequest.ExpectedAssignee = &holder
+	cas, err := fixture.Operations.Update(ctx, casRequest)
+	if err != nil {
+		t.Fatalf("compare-and-set transfer of %s: %v", heldID, err)
+	}
+	if !cas.Changed || cas.Issue.Assignee != "rival" {
+		t.Fatalf("compare-and-set transfer of %s = %#v, want a committed transfer to rival", heldID, cas.Issue)
+	}
+	assertLiveAssignee(t, ctx, fixture, heldID, "rival")
+
+	// ForceAssigneeTransfer is the unconditional override.
+	forcedRequest := assigneeTransferRequest(heldID, "usurper", "usurper")
+	forcedRequest.ForceAssigneeTransfer = true
+	forced, err := fixture.Operations.Update(ctx, forcedRequest)
+	if err != nil {
+		t.Fatalf("forced transfer of %s: %v", heldID, err)
+	}
+	if !forced.Changed || forced.Issue.Assignee != "usurper" {
+		t.Fatalf("forced transfer of %s = %#v, want a committed transfer to usurper", heldID, forced.Issue)
+	}
+	assertLiveAssignee(t, ctx, fixture, heldID, "usurper")
+
+	// A holder that is a configured claim.pools alias is a group placeholder,
+	// not an owner, so taking work from the pool needs no force.
+	if err := fixture.SetConfig(ctx, "claim.pools", "pool-crew"); err != nil {
+		t.Fatalf("SetConfig(claim.pools): %v", err)
+	}
+	pooledID := fixture.IssuePrefix + "-xferfence-pooled"
+	seedClosePolicyIssue(t, ctx, fixture, pooledID, publicops.CreateRequest{})
+	pooledRequest := assigneeTransferRequest(pooledID, "seed", "pool-crew")
+	pooledRequest.Claim = true
+	if _, err := fixture.Operations.Update(ctx, pooledRequest); err != nil {
+		t.Fatalf("assign %s to the pool: %v", pooledID, err)
+	}
+	assertLiveAssignee(t, ctx, fixture, pooledID, "pool-crew")
+	taken, err := fixture.Operations.Update(ctx, assigneeTransferRequest(pooledID, "member", "member"))
+	if err != nil {
+		t.Fatalf("unforced transfer of pooled %s: %v", pooledID, err)
+	}
+	if !taken.Changed || taken.Issue.Assignee != "member" {
+		t.Fatalf("unforced transfer of pooled %s = %#v, want a committed transfer to member", pooledID, taken.Issue)
+	}
+	assertLiveAssignee(t, ctx, fixture, pooledID, "member")
+
+	// The alias set is the only carve-out: a real holder is still fenced while
+	// pools are configured.
+	if _, err := fixture.Operations.Update(ctx, assigneeTransferRequest(pooledID, "rival", "rival")); !errors.Is(err, publicops.ErrAlreadyClaimed) {
+		t.Fatalf("unforced transfer of %s away from a non-pool holder: err = %v, want ErrAlreadyClaimed", pooledID, err)
+	}
+	assertLiveAssignee(t, ctx, fixture, pooledID, "member")
+}
+
+// assigneeTransferRequest builds the bare assignee edit whose fencing this case
+// pins: actor asks for the issue to be assigned to newAssignee.
+func assigneeTransferRequest(id, actor, newAssignee string) publicops.UpdateRequest {
+	return publicops.UpdateRequest{
+		Actor:   actor,
+		IssueID: id,
+		Patch:   publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: newAssignee}},
+	}
+}
+
+// assertLiveAssignee checks the stored holder of an in-progress issue. Every
+// state this case asserts is a live claim — the fence only speaks over one — so
+// the expected status is fixed, and reading it back proves an assignee edit
+// leaves the claim's status alone.
+func assertLiveAssignee(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, wantAssignee string) {
+	t.Helper()
+	var assignee, status string
+	if err := fixture.QueryScalar(ctx, "SELECT assignee, status FROM issues WHERE id = ?", []any{id}, &assignee, &status); err != nil {
+		t.Fatalf("read assignee and status for %s: %v", id, err)
+	}
+	if assignee != wantAssignee {
+		t.Errorf("%s assignee = %q, want %q", id, assignee, wantAssignee)
+	}
+	if types.Status(status) != types.StatusInProgress {
+		t.Errorf("%s status = %q, want %q", id, status, types.StatusInProgress)
+	}
+}
+
+// closePolicyStatusRequest builds the generic status update that crosses into
+// the done category — the operation whose policy this case pins.
+func closePolicyStatusRequest(id string, force bool) publicops.UpdateRequest {
+	return publicops.UpdateRequest{
+		Actor:            "writer",
+		IssueID:          id,
+		ForceClosePolicy: force,
+		Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
+	}
+}
+
+func assertClosePolicyStatus(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, want types.Status) {
+	t.Helper()
+	var got string
+	if err := fixture.QueryScalar(ctx, "SELECT status FROM issues WHERE id = ?", []any{id}, &got); err != nil {
+		t.Fatalf("read status for %s: %v", id, err)
+	}
+	if types.Status(got) != want {
+		t.Errorf("%s status = %q, want %q", id, got, want)
+	}
+}
+
+// seedClosePolicyIssue creates one open task at an explicit ID, carrying any
+// relationships the close-policy case needs. It goes through Create rather than
+// the fixture's raw seed hook so the edges recompute is_blocked exactly as a
+// real create would.
+func seedClosePolicyIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, request publicops.CreateRequest) {
+	t.Helper()
+	request.Actor = "seed"
+	request.ForceIDPrefix = true
+	request.Issue = &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if _, err := fixture.Operations.Create(ctx, request); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+}
+
 func assertIssueOperationsRowCount(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, table, id string, want int) {
 	t.Helper()
 	var got int

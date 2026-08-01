@@ -48,14 +48,22 @@ func NotTemplate() IssueValidator {
 	}
 }
 
-// NotPinned validates that an issue is not pinned.
-// Returns an error if the issue is pinned, unless force is true.
+// NotPinned validates that an issue is not pinned, by either of the two ways
+// bd expresses a pin: the Pinned boolean column or the pinned status. Returns
+// an error if either trigger fires, unless force is true.
+//
+// Both triggers are load-bearing because consumers disagree on which one they
+// write and read (ga-z3vht). Gas Town pins by status — it enumerates pins with
+// List(ListOptions{Status: StatusPinned}) across 21 sites (hook_check.go,
+// prime_output.go, molecule_step.go, up.go) — while Gas City reads the boolean
+// (compute_awake_set.go). Checking only one strips the other consumer's
+// protection outright, so do not "simplify" either clause away.
 func NotPinned(force bool) IssueValidator {
 	return func(id string, issue *types.Issue) error {
 		if issue == nil {
 			return nil // Let Exists() handle nil check if needed
 		}
-		if !force && issue.Status == types.StatusPinned {
+		if !force && (issue.Pinned || issue.Status == types.StatusPinned) {
 			return fmt.Errorf("cannot modify pinned issue %s (use --force to override)", id)
 		}
 		return nil

@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var countCmd = &cobra.Command{
@@ -54,7 +55,7 @@ Examples:
 
 		ctx := rootCtx
 		if includeInfra {
-			cfg, err := loadDirectListFilterConfig(ctx, store)
+			cfg, err := workapi.LoadStoreListConfig(ctx, store)
 			if err != nil {
 				return HandleError("%v", err)
 			}
@@ -299,7 +300,7 @@ func executeCount(ctx context.Context, backend countBackend, filter types.IssueF
 }
 
 // applyCountIncludeInfra switches the count filter to the wisps-inclusive
-// mode of `bd list --include-infra` (GH#4387). It mirrors the buildListFilter
+// mode of `bd list --include-infra` (GH#4387). It mirrors the BuildListFilter
 // defaults that determine list's cardinality so that, for any filter set,
 // `bd count --include-infra <filters>` returns exactly the number of rows
 // `bd list --include-infra <filters> --all` materializes:
@@ -316,7 +317,7 @@ func executeCount(ctx context.Context, backend countBackend, filter types.IssueF
 //
 // The non-flag path never calls this function: bd count without
 // --include-infra keeps its historical durable-only semantics.
-func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg listFilterConfig) {
+func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg workapi.ListConfig) {
 	filter.SkipWisps = false
 
 	isTemplate := false
@@ -326,7 +327,7 @@ func applyCountIncludeInfra(filter *types.IssueFilter, issueType string, cfg lis
 		filter.ExcludeTypes = append(filter.ExcludeTypes, "gate")
 	}
 
-	if issueType != "" && cfg.isInfra(issueType) {
+	if issueType != "" && cfg.IsInfra(issueType) {
 		ephemeral := true
 		filter.Ephemeral = &ephemeral
 	}

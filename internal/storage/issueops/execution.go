@@ -166,6 +166,12 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if metadataChanged {
 		updates["metadata"] = metadata
 	}
+	// The override only means anything alongside a status change, so it is spelled
+	// only then: an update that carries it with no status would be handing the
+	// funnel a key it has no question to answer.
+	if attempt.ForceClosePolicy && attempt.Patch.Status.Set {
+		updates[OpForceClosePolicy] = true
+	}
 	if len(updates) > 0 {
 		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
 		if err != nil {

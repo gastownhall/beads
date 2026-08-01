@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -11,9 +12,11 @@ import (
 	"github.com/steveyegge/beads/internal/audit"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type proxiedGateClose struct {
@@ -207,9 +210,12 @@ func runGateListProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 	defer uw.Close(ctx)
 
 	if len(args) == 1 {
-		target, isWisp, err := proxiedGetIssueOrWisp(ctx, uw, args[0])
-		if err != nil || target == nil {
+		target, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
+		if errors.Is(err, storage.ErrNotFound) {
 			return HandleErrorRespectJSON("issue not found: %s", args[0])
+		}
+		if err != nil {
+			return HandleErrorRespectJSON("resolving %s: %v", args[0], err)
 		}
 		var metas []*types.IssueWithDependencyMetadata
 		if isWisp {

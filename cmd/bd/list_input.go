@@ -13,71 +13,17 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
+// listInput is everything `bd list` parsed off the command line: the
+// frontend-independent query knobs (issueops.ListRequest, the request the
+// reader role takes and the filter is built from) plus the presentation
+// choices that never leave the CLI.
 type listInput struct {
-	status      string
-	issueType   string
-	assignee    string
-	titleSearch string
-	specPrefix  string
-	idFilter    string
+	issueops.ListRequest
 
-	labels        []string
-	labelsAny     []string
-	excludeLabels []string
-	labelPattern  string
-	labelRegex    string
-
-	titleContains    string
-	descContains     string
-	notesContains    string
-	externalContains string
-	externalRef      string
-
-	createdBefore *time.Time
-	createdAfter  *time.Time
-	updatedAfter  *time.Time
-	updatedBefore *time.Time
-	closedAfter   *time.Time
-	closedBefore  *time.Time
-	deferAfter    *time.Time
-	deferBefore   *time.Time
-	dueAfter      *time.Time
-	dueBefore     *time.Time
-
-	emptyDesc  bool
-	noAssignee bool
-	noLabels   bool
-	skipLabels bool
-
-	priority       int
-	prioritySet    bool
-	priorityMin    int
-	priorityMinSet bool
-	priorityMax    int
-	priorityMaxSet bool
-
-	pinnedFlag       bool
-	noPinnedFlag     bool
-	includeTemplates bool
-	includeGates     bool
-	includeInfra     bool
-	excludeTypeStrs  []string
-
-	parentID string
-	noParent bool
-	molType  *types.MolType
-	wispType *types.WispType
-
-	deferredFlag bool
-	overdueFlag  bool
-
-	metadataFields map[string]string
-	hasMetadataKey string
-
-	allFlag      bool
-	readyFlag    bool
 	longFormat   bool
 	prettyFormat bool
 	flatFormat   bool
@@ -86,14 +32,9 @@ type listInput struct {
 	noPager      bool
 	formatStr    string
 	jsonOutput   bool
-	sortBy       string
-	reverse      bool
 
 	limitChanged   bool
 	effectiveLimit int
-	sqlLimit       int
-
-	offset int // 0-based starting offset; honored under --proxied-server only.
 
 	repoOverride    string
 	repoOverrideSet bool
@@ -102,14 +43,14 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
-	in.status, _ = cmd.Flags().GetString("status")
-	if in.status == "" {
-		in.status, _ = cmd.Flags().GetString("state")
+	in.Status, _ = cmd.Flags().GetString("status")
+	if in.Status == "" {
+		in.Status, _ = cmd.Flags().GetString("state")
 	}
 
-	in.assignee, _ = cmd.Flags().GetString("assignee")
+	in.Assignee, _ = cmd.Flags().GetString("assignee")
 	rawType, _ := cmd.Flags().GetString("type")
-	in.issueType = utils.NormalizeIssueType(rawType)
+	in.IssueType = utils.NormalizeIssueType(rawType)
 
 	limit, _ := cmd.Flags().GetInt("limit")
 	in.limitChanged = cmd.Flags().Changed("limit")
@@ -118,7 +59,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		listLimitConfigured = config.GetValueSource("list.limit") != config.SourceDefault
 		limit = config.GetInt("list.limit")
 	}
-	in.allFlag, _ = cmd.Flags().GetBool("all")
+	in.AllFlag, _ = cmd.Flags().GetBool("all")
 
 	in.formatStr, _ = cmd.Flags().GetString("format")
 	if strings.EqualFold(in.formatStr, "json") {
@@ -127,31 +68,31 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	}
 	in.jsonOutput = jsonOutput
 
-	in.labels, _ = cmd.Flags().GetStringSlice("label")
-	in.labelsAny, _ = cmd.Flags().GetStringSlice("label-any")
-	in.excludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
-	in.labelPattern, _ = cmd.Flags().GetString("label-pattern")
-	in.labelRegex, _ = cmd.Flags().GetString("label-regex")
-	in.titleSearch, _ = cmd.Flags().GetString("title")
-	in.specPrefix, _ = cmd.Flags().GetString("spec")
-	in.idFilter, _ = cmd.Flags().GetString("id")
+	in.Labels, _ = cmd.Flags().GetStringSlice("label")
+	in.LabelsAny, _ = cmd.Flags().GetStringSlice("label-any")
+	in.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
+	in.LabelPattern, _ = cmd.Flags().GetString("label-pattern")
+	in.LabelRegex, _ = cmd.Flags().GetString("label-regex")
+	in.TitleSearch, _ = cmd.Flags().GetString("title")
+	in.SpecPrefix, _ = cmd.Flags().GetString("spec")
+	in.IDFilter, _ = cmd.Flags().GetString("id")
 	in.longFormat, _ = cmd.Flags().GetBool("long")
-	in.sortBy, _ = cmd.Flags().GetString("sort")
-	in.reverse, _ = cmd.Flags().GetBool("reverse")
+	in.SortBy, _ = cmd.Flags().GetString("sort")
+	in.Reverse, _ = cmd.Flags().GetBool("reverse")
 
-	in.titleContains, _ = cmd.Flags().GetString("title-contains")
-	in.descContains, _ = cmd.Flags().GetString("desc-contains")
-	in.notesContains, _ = cmd.Flags().GetString("notes-contains")
-	in.externalContains, _ = cmd.Flags().GetString("external-contains")
-	in.externalRef, _ = cmd.Flags().GetString("external-ref")
+	in.TitleContains, _ = cmd.Flags().GetString("title-contains")
+	in.DescContains, _ = cmd.Flags().GetString("desc-contains")
+	in.NotesContains, _ = cmd.Flags().GetString("notes-contains")
+	in.ExternalContains, _ = cmd.Flags().GetString("external-contains")
+	in.ExternalRef, _ = cmd.Flags().GetString("external-ref")
 
-	in.emptyDesc, _ = cmd.Flags().GetBool("empty-description")
-	in.noAssignee, _ = cmd.Flags().GetBool("no-assignee")
-	in.noLabels, _ = cmd.Flags().GetBool("no-labels")
+	in.EmptyDesc, _ = cmd.Flags().GetBool("empty-description")
+	in.NoAssignee, _ = cmd.Flags().GetBool("no-assignee")
+	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
-	in.skipLabels, _ = cmd.Flags().GetBool("skip-labels")
-	if in.skipLabels {
-		conflicts := skipLabelsConflicts(in.labels, in.labelsAny, in.labelPattern, in.labelRegex, in.excludeLabels, in.noLabels)
+	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
+	if in.SkipLabels {
+		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
 		if len(conflicts) > 0 {
 			fmt.Fprint(os.Stderr, formatSkipLabelsConflictError(conflicts))
 			return in, &exitError{Code: 2}
@@ -164,8 +105,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		if err != nil {
 			return in, HandleError("%v", err)
 		}
-		in.priority = p
-		in.prioritySet = true
+		in.Priority = &p
 	}
 	if cmd.Flags().Changed("priority-min") {
 		s, _ := cmd.Flags().GetString("priority-min")
@@ -173,8 +113,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		if err != nil {
 			return in, HandleError("parsing --priority-min: %v", err)
 		}
-		in.priorityMin = p
-		in.priorityMinSet = true
+		in.PriorityMin = &p
 	}
 	if cmd.Flags().Changed("priority-max") {
 		s, _ := cmd.Flags().GetString("priority-max")
@@ -182,27 +121,26 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		if err != nil {
 			return in, HandleError("parsing --priority-max: %v", err)
 		}
-		in.priorityMax = p
-		in.priorityMaxSet = true
+		in.PriorityMax = &p
 	}
 
-	in.pinnedFlag, _ = cmd.Flags().GetBool("pinned")
-	in.noPinnedFlag, _ = cmd.Flags().GetBool("no-pinned")
-	if in.pinnedFlag && in.noPinnedFlag {
+	in.PinnedFlag, _ = cmd.Flags().GetBool("pinned")
+	in.NoPinnedFlag, _ = cmd.Flags().GetBool("no-pinned")
+	if in.PinnedFlag && in.NoPinnedFlag {
 		return in, HandleError("--pinned and --no-pinned are mutually exclusive")
 	}
 
-	in.includeTemplates, _ = cmd.Flags().GetBool("include-templates")
-	in.includeGates, _ = cmd.Flags().GetBool("include-gates")
-	in.includeInfra, _ = cmd.Flags().GetBool("include-infra")
-	in.excludeTypeStrs, _ = cmd.Flags().GetStringSlice("exclude-type")
+	in.IncludeTemplates, _ = cmd.Flags().GetBool("include-templates")
+	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
+	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
+	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
-	in.parentID, _ = cmd.Flags().GetString("parent")
-	if in.parentID == "" {
-		in.parentID, _ = cmd.Flags().GetString("filter-parent")
+	in.ParentID, _ = cmd.Flags().GetString("parent")
+	if in.ParentID == "" {
+		in.ParentID, _ = cmd.Flags().GetString("filter-parent")
 	}
-	in.noParent, _ = cmd.Flags().GetBool("no-parent")
-	if in.parentID != "" && in.noParent {
+	in.NoParent, _ = cmd.Flags().GetBool("no-parent")
+	if in.ParentID != "" && in.NoParent {
 		return in, HandleError("--parent and --no-parent are mutually exclusive")
 	}
 
@@ -211,54 +149,54 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		if !mt.IsValid() {
 			return in, HandleError("invalid mol-type %q (must be %s)", s, types.ValidMolTypeNames())
 		}
-		in.molType = &mt
+		in.MolType = &mt
 	}
 	if s, _ := cmd.Flags().GetString("wisp-type"); s != "" {
 		wt := types.WispType(s)
 		if !wt.IsValid() {
 			return in, HandleError("invalid wisp-type %q (must be %s)", s, types.ValidWispTypeNames())
 		}
-		in.wispType = &wt
+		in.WispType = &wt
 	}
 
-	in.deferredFlag, _ = cmd.Flags().GetBool("deferred")
-	in.overdueFlag, _ = cmd.Flags().GetBool("overdue")
+	in.DeferredFlag, _ = cmd.Flags().GetBool("deferred")
+	in.OverdueFlag, _ = cmd.Flags().GetBool("overdue")
 
 	var err error
-	if in.createdAfter, err = parseListTimeFlag(cmd, "created-after"); err != nil {
+	if in.CreatedAfter, err = parseListTimeFlag(cmd, "created-after"); err != nil {
 		return in, err
 	}
-	if in.createdBefore, err = parseListTimeFlag(cmd, "created-before"); err != nil {
+	if in.CreatedBefore, err = parseListTimeFlag(cmd, "created-before"); err != nil {
 		return in, err
 	}
-	if in.updatedAfter, err = parseListTimeFlag(cmd, "updated-after"); err != nil {
+	if in.UpdatedAfter, err = parseListTimeFlag(cmd, "updated-after"); err != nil {
 		return in, err
 	}
-	if in.updatedBefore, err = parseListTimeFlag(cmd, "updated-before"); err != nil {
+	if in.UpdatedBefore, err = parseListTimeFlag(cmd, "updated-before"); err != nil {
 		return in, err
 	}
-	if in.closedAfter, err = parseListTimeFlag(cmd, "closed-after"); err != nil {
+	if in.ClosedAfter, err = parseListTimeFlag(cmd, "closed-after"); err != nil {
 		return in, err
 	}
-	if in.closedBefore, err = parseListTimeFlag(cmd, "closed-before"); err != nil {
+	if in.ClosedBefore, err = parseListTimeFlag(cmd, "closed-before"); err != nil {
 		return in, err
 	}
-	if in.deferAfter, err = parseListTimeFlag(cmd, "defer-after"); err != nil {
+	if in.DeferAfter, err = parseListTimeFlag(cmd, "defer-after"); err != nil {
 		return in, err
 	}
-	if in.deferBefore, err = parseListTimeFlag(cmd, "defer-before"); err != nil {
+	if in.DeferBefore, err = parseListTimeFlag(cmd, "defer-before"); err != nil {
 		return in, err
 	}
-	if in.dueAfter, err = parseListTimeFlag(cmd, "due-after"); err != nil {
+	if in.DueAfter, err = parseListTimeFlag(cmd, "due-after"); err != nil {
 		return in, err
 	}
-	if in.dueBefore, err = parseListTimeFlag(cmd, "due-before"); err != nil {
+	if in.DueBefore, err = parseListTimeFlag(cmd, "due-before"); err != nil {
 		return in, err
 	}
 
 	metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
 	if len(metadataFieldFlags) > 0 {
-		in.metadataFields = make(map[string]string, len(metadataFieldFlags))
+		in.MetadataFields = make(map[string]string, len(metadataFieldFlags))
 		for _, mf := range metadataFieldFlags {
 			k, v, ok := strings.Cut(mf, "=")
 			if !ok || k == "" {
@@ -267,14 +205,14 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 			if err := storage.ValidateMetadataKey(k); err != nil {
 				return in, HandleErrorRespectJSON("invalid --metadata-field key: %v", err)
 			}
-			in.metadataFields[k] = v
+			in.MetadataFields[k] = v
 		}
 	}
 	if k, _ := cmd.Flags().GetString("has-metadata-key"); k != "" {
 		if err := storage.ValidateMetadataKey(k); err != nil {
 			return in, HandleErrorRespectJSON("invalid --has-metadata-key: %v", err)
 		}
-		in.hasMetadataKey = k
+		in.HasMetadataKey = k
 	}
 
 	prettyFormat, _ := cmd.Flags().GetBool("pretty")
@@ -289,7 +227,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.prettyFormat = true
 	}
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")
-	in.readyFlag, _ = cmd.Flags().GetBool("ready")
+	in.ReadyFlag, _ = cmd.Flags().GetBool("ready")
 
 	in.depsMode, _ = cmd.Flags().GetString("deps")
 	if in.depsMode != "" {
@@ -313,23 +251,23 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.prettyFormat = true
 	}
 
-	if in.sortBy != "" {
+	if in.SortBy != "" {
 		validSortFields := map[string]bool{
 			"priority": true, "created": true, "updated": true, "closed": true,
 			"status": true, "id": true, "title": true, "type": true, "assignee": true,
 		}
-		if !validSortFields[in.sortBy] {
-			return in, HandleError("invalid sort field %q (valid: priority, created, updated, closed, status, id, title, type, assignee)", in.sortBy)
+		if !validSortFields[in.SortBy] {
+			return in, HandleError("invalid sort field %q (valid: priority, created, updated, closed, status, id, title, type, assignee)", in.SortBy)
 		}
 	}
 
-	in.labels = utils.NormalizeLabels(in.labels)
-	in.labelsAny = utils.NormalizeLabels(in.labelsAny)
-	in.excludeLabels = utils.NormalizeLabels(in.excludeLabels)
+	in.Labels = utils.NormalizeLabels(in.Labels)
+	in.LabelsAny = utils.NormalizeLabels(in.LabelsAny)
+	in.ExcludeLabels = utils.NormalizeLabels(in.ExcludeLabels)
 
-	if !in.skipLabels && len(in.labels) == 0 && len(in.labelsAny) == 0 {
+	if !in.SkipLabels && len(in.Labels) == 0 && len(in.LabelsAny) == 0 {
 		if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
-			in.labelsAny = dirLabels
+			in.LabelsAny = dirLabels
 		}
 	}
 
@@ -337,7 +275,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	switch {
 	case in.limitChanged:
 		in.effectiveLimit = limit
-	case in.allFlag:
+	case in.AllFlag:
 		in.effectiveLimit = 0
 	case listLimitConfigured:
 		in.effectiveLimit = limit
@@ -346,14 +284,12 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	case ui.IsAgentMode():
 		in.effectiveLimit = 20
 	}
-	in.sqlLimit = in.effectiveLimit
-	// --sort id requires natural-numeric comparison (bd-9 < bd-10) that
-	// SQL can't express without a schema-side sort column. Fall back to
-	// fetching everything and sorting client-side. Other sorts (including
-	// title via LOWER()) are pushed into SQL ORDER BY.
-	if in.sortBy == "id" {
-		in.sqlLimit = 0
-	}
+	// The request carries the limit the caller receives. Which row limit that
+	// implies for the query - a sort SQL cannot express fetches everything and
+	// trims client-side - is workapi.SQLLimit's decision, made once, inside the
+	// builder, for every frontend.
+	pageLimit := in.effectiveLimit
+	in.Limit = &pageLimit
 
 	if cmd.Flags().Changed("offset") {
 		offset, _ := cmd.Flags().GetInt("offset")
@@ -365,10 +301,10 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		// regardless, so combining them with --offset is misleading — the
 		// caller would think they're paging when they're really pulling
 		// the whole result set.
-		if offset > 0 && in.sqlLimit == 0 && in.sortBy == "id" {
-			return in, HandleError("--offset is not supported with --sort %s (sort requires fetching the full result set)", in.sortBy)
+		if offset > 0 && workapi.SQLLimit(in.ListRequest) == 0 && in.SortBy == "id" {
+			return in, HandleError("--offset is not supported with --sort %s (sort requires fetching the full result set)", in.SortBy)
 		}
-		in.offset = offset
+		in.Offset = offset
 	}
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")

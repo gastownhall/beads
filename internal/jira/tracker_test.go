@@ -633,6 +633,9 @@ func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error)
 func (s *configStore) IssueLifecycle() (issueops.Lifecycle, error) {
 	return nil, &storage.ErrUnsupported{Op: "IssueLifecycle", Backend: "jira-config-stub"}
 }
+func (s *configStore) IssueReader() (issueops.Reader, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueReader", Backend: "jira-config-stub"}
+}
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {

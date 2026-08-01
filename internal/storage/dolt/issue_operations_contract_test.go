@@ -25,6 +25,18 @@ func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, fixture)
 }
 
+func TestIssueOperationsUpdateClosePolicy(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateClosePolicy(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, fixture)
+}
+
 func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsStagingFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)

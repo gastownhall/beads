@@ -115,28 +115,9 @@ func closeCheckedSavepointEligible(tx DBTX) bool {
 }
 
 func closeIssueCheckedAfterSavepoint(ctx context.Context, tx DBTX, id, reason, actor, session string, force, closed bool, targetColumn string) (*CloseResult, error) {
-	// This write precedes every child-count policy branch, including Force and
-	// idempotent closes. A concurrent new parent-child edge writes its own tier
-	// cell, while a close writes both tiers, so Dolt cannot merge a stale count
-	// with a new edge.
-	if err := touchDependencyCoordinationInTx(ctx, tx, id); err != nil {
-		return nil, err
-	}
-	openChildren, err := countOpenChildrenForTargetInTx(ctx, tx, id, targetColumn)
+	openChildren, err := enforceClosePolicyForTargetInTx(ctx, tx, id, targetColumn, force, closed)
 	if err != nil {
 		return nil, err
-	}
-	if !force && openChildren > 0 {
-		return nil, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
-	}
-	if !force && !closed {
-		blocked, blockers, err := IsBlockedInTx(ctx, tx, id)
-		if err != nil {
-			return nil, err
-		}
-		if blocked && len(blockers) > 0 {
-			return nil, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-		}
 	}
 	result, err := CloseIssueInTx(ctx, tx, id, reason, actor, session)
 	if err != nil {
@@ -144,6 +125,61 @@ func closeIssueCheckedAfterSavepoint(ctx context.Context, tx DBTX, id, reason, a
 	}
 	result.OpenChildren = openChildren
 	return result, nil
+}
+
+// enforceClosePolicyForTargetInTx applies the close policy — the open-children
+// refusal and the live-direct-blocker refusal — to an already-routed target,
+// and reports the open-child count it observed. It is the whole policy half of
+// a checked close, split out so a status change that reaches done through
+// another route can run the identical gate rather than a second copy of it.
+//
+// closed is the target's pre-write closed state and targetColumn its dependency
+// routing, both read by the caller from the same transaction.
+func enforceClosePolicyForTargetInTx(ctx context.Context, tx DBTX, id, targetColumn string, force, closed bool) (int, error) {
+	// This write precedes every child-count policy branch, including Force and
+	// idempotent closes. A concurrent new parent-child edge writes its own tier
+	// cell, while a close writes both tiers, so Dolt cannot merge a stale count
+	// with a new edge.
+	if err := touchDependencyCoordinationInTx(ctx, tx, id); err != nil {
+		return 0, err
+	}
+	openChildren, err := countOpenChildrenForTargetInTx(ctx, tx, id, targetColumn)
+	if err != nil {
+		return 0, err
+	}
+	if !force && openChildren > 0 {
+		return 0, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
+	}
+	if !force && !closed {
+		blocked, blockers, err := IsBlockedInTx(ctx, tx, id)
+		if err != nil {
+			return 0, err
+		}
+		if blocked && len(blockers) > 0 {
+			return 0, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+		}
+	}
+	return openChildren, nil
+}
+
+// EnforceClosePolicyInTx applies the close policy to id without closing it, for
+// a caller that reaches a done status by some other write. It routes the target
+// exactly as a checked close does — probing issues then wisps by ID, preferring
+// the durable row when both hold it — rather than deriving the table from an
+// is-wisp flag, so a dual-resident ID counts children against the same row the
+// close guard would.
+//
+// It returns the observed open-child count. force bypasses both refusals and
+// nothing else; the coordination-cell touch happens either way.
+func EnforceClosePolicyInTx(ctx context.Context, tx DBTX, id string, force bool) (int, error) {
+	closed, targetColumn, found, err := isClosedInTx(ctx, tx, id)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	return enforceClosePolicyForTargetInTx(ctx, tx, id, targetColumn, force, closed)
 }
 
 func countOpenChildrenInTx(ctx context.Context, tx DBTX, id string) (int, error) {

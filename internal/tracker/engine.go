@@ -15,6 +15,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -566,7 +567,15 @@ func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransact
 
 // applyPullIssueFields applies a pulled issue's fields while preserving the
 // caller's control over related collections such as labels.
+//
+// A pull always forces close policy. The remote tracker is authoritative for
+// the status it reports, and it knows nothing about local-only children or
+// local-only blockers — refusing an upstream close because of them would wedge
+// sync on state the remote cannot see and the operator did not create. Both the
+// pull and the conflict reimport route through here, so this is the one place
+// that decision lives.
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
+	updates[issueops.OpForceClosePolicy] = true
 	return tx.UpdateIssue(ctx, id, updates, actor)
 }
 

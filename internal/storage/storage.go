@@ -89,6 +89,17 @@ type Storage interface {
 	// issueops.Lifecycle.
 	IssueLifecycle() (issueops.Lifecycle, error)
 
+	// IssueReader returns the guarded issue-query surface for this store: the
+	// read counterpart of IssueLifecycle, and its own role rather than four
+	// more methods on that one. Like the lifecycle accessor, every decorator
+	// in a store's chain answers for itself, so the returned Reader carries the
+	// same layers the store itself carries.
+	//
+	// Reads fire no hooks, so the hook decorator's answer is its inner store's
+	// unchanged. The accessor exists on it anyway: a seam a caller has to
+	// reason about decorator-by-decorator is not a seam.
+	IssueReader() (issueops.Reader, error)
+
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error

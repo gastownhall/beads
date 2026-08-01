@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -389,6 +390,50 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// ga-ktn9pe.4.8: a forced close of a boolean-pinned bead leaves the pin set —
+	// the close write never touches the column, deliberately, because Pinned is
+	// the deletion-protection flag bd gc, bd purge and bd cleanup honor. The plain
+	// retry must therefore still exit 0 as an idempotent already-closed no-op:
+	// that branch is the only thing that re-drives a stranded molecule auto-close.
+	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
+		plan := `{"nodes": [{"key": "p", "title": "Boolean pinned", "type": "task", "pinned": true}]}`
+		planFile := filepath.Join(dir, "boolean-pinned-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+		id := bdCreateGraph(t, bd, dir, planFile).IDs["p"]
+		if id == "" {
+			t.Fatal("graph create returned no ID for key p")
+		}
+		if seeded := bdShow(t, bd, dir, id); !seeded.Pinned {
+			t.Fatalf("precondition: expected pinned=true on the seeded bead, got %+v", seeded)
+		}
+
+		bdClose(t, bd, dir, id, "--force")
+		// The retry carries no --force. Pre-fix it exited nonzero with the pinned
+		// refusal, so bdClose's t.Fatalf is the red assertion.
+		bdClose(t, bd, dir, id)
+
+		got := bdShow(t, bd, dir, id)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if !got.Pinned {
+			t.Error("expected the pin to survive the close: it is what protects the row from bd gc/purge/cleanup")
+		}
+
+		// The protection the ruling turns on: a pinned closed row is still skipped
+		// by the filter all six destructive call sites run.
+		cutoff := time.Now().UTC().Add(24 * time.Hour)
+		candidates, stats := filterClosedDeletionCandidates([]*types.Issue{got}, &cutoff)
+		if len(candidates) != 0 {
+			t.Errorf("expected the pinned closed row to be excluded from deletion candidates, got %d", len(candidates))
+		}
+		if stats.PinnedSkipped != 1 {
+			t.Errorf("PinnedSkipped: got %d, want 1", stats.PinnedSkipped)
+		}
+	})
+
 	// be-035: silent-data-loss bug. Without an authority check, actor A could
 	// close a bead claimed by actor B and bd would print "✓ Closed" with no
 	// indication the actor mismatched. The fix refuses the close (non-zero
@@ -423,6 +468,37 @@ func TestEmbeddedClose(t *testing.T) {
 		got := bdShow(t, bd, dir, issue.ID)
 		if got.Status != types.StatusClosed {
 			t.Errorf("expected closed with --force despite mismatch, got %s", got.Status)
+		}
+	})
+
+	// ga-ktn9pe.4.8 collateral, owner-accepted 2026-08-01. Skipping close
+	// validation on an already-closed row skips the whole chain, not just the
+	// pinned guard, so a foreign actor's re-close now exits 0 where it used to
+	// refuse. Nothing is written either way — the engine's `status != closed`
+	// guard makes a re-close a pure no-op — so the be-035 authority check has no
+	// state change left to protect. The guard itself is untouched:
+	// close_assignee_mismatch_refuses_without_force above still pins the refusal
+	// on an OPEN bead, which is the case be-035 was filed for.
+	//
+	// The chain's third validator, NotTemplate, has no equivalent case here
+	// because a closed template is unreachable from the CLI: both
+	// validateIssueClosable and validateIssueUpdatable refuse templates, so
+	// neither `bd close` nor `bd update --status closed` can produce one.
+	t.Run("reclose_by_foreign_actor_is_idempotent", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Foreign reclose", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "bob", "--claim")
+		bdClose(t, bd, dir, issue.ID, "--actor", "bob")
+
+		// Alice re-closes a bead she never held. bdClose t.Fatalf's on a nonzero
+		// exit, so this line is the assertion.
+		bdClose(t, bd, dir, issue.ID, "--actor", "alice")
+
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if got.Assignee != "bob" {
+			t.Errorf("assignee: got %q, want bob — a re-close must not rewrite the holder", got.Assignee)
 		}
 	})
 

@@ -12,10 +12,25 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
-	in, err := gatherReadyInput(cmd)
+	// --offset is supported here and nowhere else, so this is where a negative
+	// value is rejected. It stays out of the shared gatherer because the direct
+	// route reaches that gatherer too, and `bd ready --offset -1` has always
+	// been a no-op there rather than an error. HandleError, not the RespectJSON
+	// variant, for the same reason: this message is the proxied route's alone,
+	// and it has always gone to stderr as plain text.
+	if offset, _ := cmd.Flags().GetInt("offset"); offset < 0 {
+		return HandleError("--offset must be >= 0")
+	}
+
+	// No cap resolver: the RunE that routed here has already resolved
+	// --max-rows / BEADS_MAX_ROWS, either to reject a live one or to validate
+	// the value it then ignores for --claim. Resolving it again would repeat
+	// the malformed-value warning and stamp a cap this route cannot enforce.
+	in, err := gatherReadyInput(cmd, nil)
 	if err != nil {
 		return err
 	}
@@ -99,11 +114,12 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if err != nil {
 			return HandleError("%v", err)
 		}
-		results := page.Items
-		if results == nil {
-			results = []*types.IssueWithCounts{}
-		}
-		truncated := page.HasMore && in.filter.Limit > 0
+		// The same epilogue issueops.Reader.Ready runs, through the same
+		// function: this seam reports a has-more natively and ready has no
+		// display order, so the trim is a no-op and the verdict is the seam's
+		// — but it is reached the one way, not restated here.
+		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
+		truncated = truncated && in.filter.Limit > 0
 		// Parity with the direct route: the pagination key is emitted only
 		// when truncated. Total is unavailable from this backend's domain
 		// page (no cheap COUNT(*) equivalent on the proxied path), so it is
@@ -126,8 +142,8 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	issues := page.Items
-	truncated := page.HasMore && in.filter.Limit > 0
+	issues, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
+	truncated = truncated && in.filter.Limit > 0
 
 	maybeShowUpgradeNotification()
 
@@ -225,9 +241,9 @@ func runReadyProxiedClaim(ctx context.Context, _ uow.UnitOfWork, in readyInput) 
 }
 
 func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
-	filter := types.WorkFilter{
-		Status:     types.StatusOpen,
-		SortPolicy: types.SortPolicyPriority,
+	filter, err := readyExplainFilter()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
 	readyPage, err := uw.IssueUseCase().GetReadyWork(ctx, filter)
 	if err != nil {

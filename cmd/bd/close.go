@@ -122,9 +122,25 @@ the flags appear in the command line.`,
 			// Get issue for checks (nil issue is handled by validateIssueClosable)
 			issue := result.Issue
 
-			if err := validateIssueClosable(id, issue, actor, force); err != nil {
-				fmt.Fprintf(os.Stderr, "%s\n", err)
-				continue
+			// Close validation guards a state change; a row already at literal
+			// StatusClosed has none to guard, so skip it and let the re-close reach
+			// the engine as the idempotent no-op it has always been (ga-ktn9pe.4.8).
+			// Without this, a forced close of a boolean-pinned bead leaves
+			// pinned=true (closeIssueInTx never touches the column — deliberately,
+			// it is the deletion-protection flag bd gc/purge/cleanup honor) and the
+			// plain retry hits NotPinned and exits nonzero, which strands the
+			// molecule auto-close re-drive documented on the !res.Changed branch
+			// below. Only a literal closed status qualifies: reaching a configured
+			// done status is still a real close, mirroring the engine's isClosedInTx.
+			// The snapshot only decides whether validation runs, never what is
+			// written — the engine's in-transaction `status != closed` guard remains
+			// the authority on whether the close is a no-op, so a concurrent close
+			// still converges. Mirrored in closeProxiedOne.
+			if issue == nil || issue.Status != types.StatusClosed {
+				if err := validateIssueClosable(id, issue, actor, force); err != nil {
+					fmt.Fprintf(os.Stderr, "%s\n", err)
+					continue
+				}
 			}
 
 			// Open-children close guard: prevent closing any issue with open

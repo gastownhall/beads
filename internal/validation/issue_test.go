@@ -99,6 +99,39 @@ func TestNotPinned(t *testing.T) {
 			force:   true,
 			wantErr: false,
 		},
+		// ga-z3vht: the pinned boolean is a second, independent trigger — an
+		// issue carrying pinned=true is protected whatever its status.
+		{
+			name:    "boolean-pinned issue without force fails",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Pinned: true},
+			force:   false,
+			wantErr: true,
+		},
+		{
+			name:    "boolean-pinned issue with force passes",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Pinned: true},
+			force:   true,
+			wantErr: false,
+		},
+		// ga-ktn9pe.4.8: closed status is deliberately NOT exempted from the
+		// boolean trigger — this guard stays strict on closed rows. Idempotent
+		// re-close (and the stranded-molecule auto-close re-drive it carries) was
+		// restored one layer up instead: the close commands short-circuit before
+		// calling this guard when the row is already closed at resolve time.
+		// Anyone adding a closed exemption HERE is simplifying the wrong layer,
+		// and must change these two cases deliberately rather than silently.
+		{
+			name:    "boolean-pinned closed issue without force fails",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusClosed, Pinned: true},
+			force:   false,
+			wantErr: true,
+		},
+		{
+			name:    "boolean-pinned closed issue with force passes",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusClosed, Pinned: true},
+			force:   true,
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -594,6 +627,14 @@ func TestForClose(t *testing.T) {
 			issue:   &types.Issue{ID: "bd-test", Status: types.StatusPinned},
 			force:   true,
 			wantErr: false,
+		},
+		// ga-z3vht: the chain inherits both pinned triggers, so a boolean-pinned
+		// issue is refused even though its status is open.
+		{
+			name:    "boolean-pinned without force fails",
+			issue:   &types.Issue{ID: "bd-test", Status: types.StatusOpen, Pinned: true},
+			force:   false,
+			wantErr: true,
 		},
 		{
 			name:    "regular open issue passes",

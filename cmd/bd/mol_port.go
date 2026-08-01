@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type molReader interface {
@@ -114,9 +115,12 @@ type uowMolReader struct {
 }
 
 func (r uowMolReader) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	issue, isWisp := proxiedResolveIssueOrWisp(ctx, r.uw, id)
-	if issue == nil {
+	issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(r.uw), id)
+	if errors.Is(rerr, storage.ErrNotFound) {
 		return nil, fmt.Errorf("issue %s not found", id)
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("resolving %s: %w", id, rerr)
 	}
 	var labels []string
 	var err error

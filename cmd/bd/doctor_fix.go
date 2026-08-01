@@ -290,6 +290,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = doctor.FixTrackedRuntimeFiles(path)
 		case "Git Hooks":
 			err = fix.GitHooks(path)
+		case "Hooks Path":
+			err = doctor.FixHooksPath()
 		case "Sync Divergence":
 			fmt.Printf("  ⚠ Sync divergence fix removed (Dolt-native sync)\n")
 			continue

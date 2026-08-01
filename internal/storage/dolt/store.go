@@ -1475,7 +1475,7 @@ var dialProbe = func(network, addr string, timeout time.Duration) error {
 	return nil
 }
 
-// resolveSocketTransport applies a socket-first / TCP-fallback policy and
+// ResolveSocketTransport applies a socket-first / TCP-fallback policy and
 // returns the effective unix socket path to use ("" means use TCP).
 //
 // A configured unix socket is a preference, not a hard requirement. Dolt's
@@ -1490,7 +1490,12 @@ var dialProbe = func(network, addr string, timeout time.Duration) error {
 // connectable, or neither the socket nor TCP is reachable (the latter is left
 // to the normal error path so its socket-specific hint still surfaces a true
 // outage rather than masking it behind a TCP error).
-func resolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
+//
+// Exported because the store is no longer the only consumer: `bd serve` builds
+// a unit-of-work provider against the same server from the same connection
+// settings, and a transport policy that only one of them applies is a workspace
+// where CLI commands work and the HTTP server cannot connect.
+func ResolveSocketTransport(socket, host string, port int, timeout time.Duration) string {
 	if socket == "" {
 		return ""
 	}
@@ -1541,7 +1546,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// isn't currently connectable must not block operations when the server is
 	// reachable over TCP. Normalizing here means the fail-fast dial below and
 	// the DSN built in openServerConnection agree on the transport.
-	cfg.ServerSocket = resolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
+	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
 	// Fail-fast connectivity check before MySQL protocol initialization.
 	// This gives an immediate, clear error if the Dolt server isn't running,

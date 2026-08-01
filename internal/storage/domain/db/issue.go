@@ -118,6 +118,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		return nil
 	}
 	updates = cloneUpdateFields(updates)
+	// Pop the close-policy override before anything reads the map as a set of
+	// columns, mirroring issueops.updateIssueInTx. The no-op filter below keeps
+	// unrecognized keys, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	forceClosePolicy := issueops.PopForceClosePolicy(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -176,6 +181,23 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	// A status that matched the row was already dropped as a no-op, so the
 	// lifecycle side effects below only fire on a real transition.
 	_, statusChanging := updates["status"]
+
+	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
+	// into the done category is a close by another name and answers to close
+	// policy. A refusal returns before any write and aborts the caller's unit of
+	// work. The wrap keeps the sentinels matchable, so a caller distinguishes
+	// these refusals here exactly as it does on the close path.
+	if statusChanging {
+		crossing, err := issueops.CrossesIntoDoneCategoryInTx(ctx, r.runner, oldIssue.Status, updates)
+		if err != nil {
+			return fmt.Errorf("db: Update %s: %w", id, err)
+		}
+		if crossing {
+			if _, err := issueops.EnforceClosePolicyInTx(ctx, r.runner, id, forceClosePolicy); err != nil {
+				return fmt.Errorf("db: Update %s: %w", id, err)
+			}
+		}
+	}
 
 	setClauses := make([]string, 0, len(updates)+3)
 	args := make([]any, 0, len(updates)+4)

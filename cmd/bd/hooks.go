@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
@@ -1257,16 +1258,24 @@ func uninstallHooks() error {
 		// Not a bd hook at all — leave it alone
 	}
 
-	// Reset core.hooksPath if it was set to a beads-managed directory
+	// Reset beads-managed git config (core.hooksPath, beads.role) now that the
+	// hook files themselves are removed. A failure here must not be a
+	// scrolling stderr warning — bd hooks uninstall must not report success
+	// while beads-managed config is still left behind (GH#4440).
 	if err := resetHooksPathIfBeadsManaged(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to reset core.hooksPath: %v\n", err)
+		return fmt.Errorf("hook files removed, but failed to reset beads-managed git config: %w", err)
 	}
 
 	return nil
 }
 
 // resetHooksPathIfBeadsManaged unsets core.hooksPath if it points to a
-// beads-managed hooks directory (.beads/hooks or .beads-hooks).
+// beads-managed hooks directory (.beads/hooks or .beads-hooks), and unsets
+// beads.role. beads.role marks a repo as beads-managed independent of
+// core.hooksPath, so it is cleared unconditionally here rather than gated on
+// the hooksPath match — otherwise an uninstall that runs after core.hooksPath
+// was already cleared (e.g. by `bd doctor --fix`) would leave a stale
+// beads.role behind. A key that is already absent is not an error.
 func resetHooksPathIfBeadsManaged() error {
 	repoRoot, _ := git.GetMainRepoRoot()
 	if repoRoot == "" {
@@ -1276,24 +1285,44 @@ func resetHooksPathIfBeadsManaged() error {
 		return nil // not in a git repo
 	}
 
+	var failures []string
+
 	cmd := exec.Command("git", "config", "--get", "core.hooksPath")
 	cmd.Dir = repoRoot
-	out, err := cmd.Output()
-	if err != nil {
-		return nil // core.hooksPath not set — nothing to reset
+	if out, err := cmd.Output(); err == nil {
+		hooksPath := strings.TrimSpace(string(out))
+		// Matches both relative (legacy) and absolute (GH#2414) beads hooks
+		// paths, symlink-resolving the absolute forms. Shared with
+		// doctor.CheckHooksPath/FixHooksPath so uninstall and `bd doctor --fix`
+		// cannot disagree about what "beads-managed" means.
+		if doctor.IsBeadsManagedHooksPath(repoRoot, hooksPath) {
+			unsetCmd := exec.Command("git", "config", "--unset", "core.hooksPath")
+			unsetCmd.Dir = repoRoot
+			if output, err := unsetCmd.CombinedOutput(); err != nil {
+				failures = append(failures, fmt.Sprintf("core.hooksPath: %v (output: %s)", err, strings.TrimSpace(string(output))))
+			}
+		}
+	}
+	// core.hooksPath not set at all — nothing to reset there; still fall
+	// through to beads.role below.
+
+	// Read before unsetting rather than treating git's exit 5 as "already
+	// absent". Exit 5 also means "the key has multiple values, refusing an
+	// ambiguous unset" — a repo with a duplicated beads.role (bad merge, hand
+	// edit) would then report a clean uninstall while leaving the key set,
+	// which is the exact failure this is supposed to stop.
+	getRoleCmd := exec.Command("git", "config", "--get", "beads.role")
+	getRoleCmd.Dir = repoRoot
+	if _, err := getRoleCmd.Output(); err == nil {
+		roleCmd := exec.Command("git", "config", "--unset", "beads.role")
+		roleCmd.Dir = repoRoot
+		if output, err := roleCmd.CombinedOutput(); err != nil {
+			failures = append(failures, fmt.Sprintf("beads.role: %v (output: %s)", err, strings.TrimSpace(string(output))))
+		}
 	}
 
-	hooksPath := strings.TrimSpace(string(out))
-	// Match both relative (legacy) and absolute (GH#2414) beads hooks paths
-	absBeadsHooks := filepath.Join(repoRoot, ".beads", "hooks")
-	absSharedHooks := filepath.Join(repoRoot, ".beads-hooks")
-	if hooksPath == ".beads/hooks" || hooksPath == ".beads-hooks" ||
-		hooksPath == absBeadsHooks || hooksPath == absSharedHooks {
-		cmd = exec.Command("git", "config", "--unset", "core.hooksPath")
-		cmd.Dir = repoRoot
-		if output, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git config --unset core.hooksPath failed: %w (output: %s)", err, string(output))
-		}
+	if len(failures) > 0 {
+		return fmt.Errorf("%s", strings.Join(failures, "; "))
 	}
 
 	return nil

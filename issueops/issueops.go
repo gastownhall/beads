@@ -94,9 +94,13 @@ type IssuePatch struct {
 	AppendNotes Field[string]
 	SpecID      Field[string]
 	AwaitID     Field[string]
-	// Status sets the issue's status, including across the configured
-	// done/non-done category boundary. Close and Reopen remain the operations
-	// that carry the full lifecycle policy.
+	// Status sets the issue's status. A status that crosses from outside the
+	// configured done category into it answers to close policy: the update
+	// refuses with CloseOpenChildrenError or ErrCloseBlocked unless
+	// UpdateRequest.ForceClosePolicy is set. A done-to-done change and a move
+	// out of the done category are unaffected. Close and Reopen remain the
+	// operations that carry the full lifecycle policy — a crossing update
+	// applies the close policy, not the close semantics.
 	Status           Field[Status]
 	Priority         Field[int]
 	IssueType        Field[IssueType]
@@ -198,8 +202,20 @@ type UpdateRequest struct {
 	// idempotent and needs no force. Assignees configured as claim.pools aliases
 	// are transferable without force. The zero value enforces the fence. It has
 	// no effect with Claim or an omitted Patch.Assignee and must be false with
-	// ExpectedAssignee. It never bypasses other guards.
+	// ExpectedAssignee. It never bypasses other guards — in particular it is
+	// independent of ForceClosePolicy, and a request that sets it without
+	// Patch.Assignee is invalid. A command adapter with a single --force flag
+	// therefore maps that flag to both fields, conditioning this one on an
+	// assignee edit.
 	ForceAssigneeTransfer bool
+	// ForceClosePolicy bypasses only close policy — the open-children refusal
+	// and the live-direct-blocker refusal — for a Patch.Status that crosses into
+	// the done category. The zero value enforces the policy. It has no effect
+	// without such a status change, and never bypasses validation,
+	// ExpectedVersion, ExpectedAssignee, ExpectedStatus, or the assignee fence.
+	// It is the update-side spelling of CloseRequest.Force; a command adapter
+	// that maps one flag to both spells both.
+	ForceClosePolicy bool
 	// ExpectedVersion requires the current row version to match before the claim
 	// and patch. It is an independent precondition and may be combined with Claim.
 	ExpectedVersion *int64
@@ -305,7 +321,12 @@ type Lifecycle interface {
 	// validation error also leaves no partial persistent state.
 	Create(context.Context, CreateRequest) (CreateResult, error)
 	// Update validates guards and commits the complete request as one atomic
-	// mutation. A refusal or validation error leaves persistent state unchanged.
+	// mutation. A Patch.Status that crosses from outside the configured done
+	// category into it answers to close policy: an unforced crossing with open
+	// children returns CloseOpenChildrenError and one with a live direct blocker
+	// returns ErrCloseBlocked, both without mutation. ForceClosePolicy bypasses
+	// those two refusals and nothing else. A refusal or validation error leaves
+	// persistent state unchanged.
 	Update(context.Context, UpdateRequest) (UpdateResult, error)
 	// Close validates guards and commits the complete request as one atomic
 	// mutation. It moves the issue to literal StatusClosed, including from a

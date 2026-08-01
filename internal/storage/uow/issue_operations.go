@@ -209,6 +209,18 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 		if err != nil {
 			return publicops.UpdateResult{}, "", err
 		}
+		// The assignee fence belongs here, over the same-transaction row the
+		// update is about to mutate, and not in ApplyUpdate: callers build their
+		// own UpdateSpec, which carries no override, so a fence down there
+		// silently ignores a caller's --force. A stale compare-and-set
+		// precondition outranks the fence on the other backends, which check
+		// version and status before authorizing, so when one is stale the fence
+		// stands down and ApplyUpdate reports the mismatch instead.
+		if updatePreconditionsHold(attempt, before) {
+			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
+				return publicops.UpdateResult{}, "", err
+			}
+		}
 		claimChanged := attempt.Claim && (before.Status != types.StatusInProgress || before.Assignee != attempt.Actor)
 		updated, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, spec, attempt.Actor)
 		if err != nil {
@@ -220,6 +232,41 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 		}
 		return publicops.UpdateResult{Issue: issue, Changed: claimChanged || !semanticIssueEqual(before, issue)}, "update issue", nil
 	})
+}
+
+// updatePreconditionsHold reports whether request's compare-and-set
+// preconditions match before — that is, whether ApplyUpdate would get past its
+// own guards, leaving the assignee fence as the operative refusal.
+// ExpectedAssignee needs no entry here: the fence already stands down whenever
+// a caller supplies one.
+func updatePreconditionsHold(request publicops.UpdateRequest, before *types.Issue) bool {
+	if request.ExpectedVersion != nil && *request.ExpectedVersion != before.RowVersion {
+		return false
+	}
+	if request.ExpectedStatus != nil && *request.ExpectedStatus != before.Status {
+		return false
+	}
+	return true
+}
+
+// authorizeAssigneeTransfer applies the shared assignee-transfer fence to an
+// update running in this unit of work. It is the sibling of the
+// issueops.AuthorizeAssigneeTransfer call in ExecuteUpdate — the same predicate
+// and the same refusal — reached through the config use case because a unit of
+// work has no transaction handle to read claim.pools from. The read only
+// happens once the transfer is otherwise fenced, and its failure propagates
+// rather than being read as "no pools configured": treating an unreadable
+// config as an empty alias set would refuse pool work the fence was never meant
+// to touch.
+func authorizeAssigneeTransfer(ctx context.Context, uw UnitOfWork, before *types.Issue, request publicops.UpdateRequest) error {
+	if err := storageissueops.AuthorizeAssigneeTransferWithPools(before, request, nil); err == nil {
+		return nil
+	}
+	raw, err := uw.ConfigUseCase().GetConfig(ctx, "claim.pools")
+	if err != nil {
+		return fmt.Errorf("authorize assignee transfer %s: read claim pools: %w", request.IssueID, err)
+	}
+	return storageissueops.AuthorizeAssigneeTransferWithPools(before, request, storageissueops.ParseClaimPools(raw))
 }
 
 func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
@@ -272,6 +319,11 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 		if len(patch.Metadata.Unset) > 0 {
 			fields[storageissueops.OpUnsetMetadata] = patch.Metadata.Unset
 		}
+	}
+	// Spelled only alongside a status change, matching the embedded backend:
+	// without one the funnel has no crossing to judge.
+	if request.ForceClosePolicy && patch.Status.Set {
+		fields[storageissueops.OpForceClosePolicy] = true
 	}
 	var persistence *types.PersistenceMode
 	if patch.Persistence.Set {

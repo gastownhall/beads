@@ -448,6 +448,11 @@ func runDiagnostics(path string) doctorResult {
 	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, legacyCheck)
 
+	// Check for a dangling core.hooksPath pointing at a missing directory (GH#4440)
+	hooksPathCheck := convertWithCategory(doctor.CheckHooksPath(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, hooksPathCheck)
+	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.
+
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
 	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
 	result.Checks = append(result.Checks, doltHooksCheck)

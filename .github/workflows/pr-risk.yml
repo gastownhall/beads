@@ -80,7 +80,7 @@ jobs:
         # The shared proxied harness requires the image cached locally
         # (isDoltImageCached); without it every proxied test self-skips. Keep the
         # tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
         env:
@@ -259,7 +259,7 @@ jobs:
         # Presence of this image flips isDoltImageCached() true, so the suite
         # exercises server Dolt instead of self-skipping. Keep the tag in sync
         # with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test
         # Server twin of test-embedded-conformance: same conformance.RunAll, but

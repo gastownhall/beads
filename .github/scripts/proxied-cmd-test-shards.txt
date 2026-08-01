@@ -7,6 +7,13 @@
 # Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
 # splitting, or reweighting TestProxiedServer* functions. Newly-added
 # tests not listed here hash-distribute via proxied-test-shard.sh.
+#
+# `bd serve`'s two suites are listed at the shard the hash fallback was
+# already giving them, so this records the assignment without reshuffling
+# the other 100. TestProxiedServerServeReadParity is the CLI/HTTP read parity
+# oracle — the behavioural half of the anti-drift claim — so it being IN this
+# lane, and this lane being required by PR Risk's CI gate, is the thing that
+# makes that claim enforced on PRs rather than asserted in a doc comment.
 
 15 1 TestProxiedServerCount
 15 1 TestProxiedServerDelete
@@ -68,6 +75,8 @@
 15 8 TestProxiedServerMolLastActivity
 15 8 TestProxiedServerQuick
 15 8 TestProxiedServerReopenConcurrent
+15 8 TestProxiedServerServeClaim
+15 8 TestProxiedServerServeReadParity
 
 15 9 TestProxiedServerDep2
 15 9 TestProxiedServerGraph
@@ -94,6 +103,8 @@
 
 15 12 TestProxiedServerDep
 15 12 TestProxiedServerLint
+15 12 TestProxiedServerServeLifecycle
+15 12 TestProxiedServerServeModeGate
 15 12 TestProxiedServerShow3
 15 12 TestProxiedServerStale
 15 12 TestProxiedServerTag
