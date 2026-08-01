@@ -361,6 +361,7 @@ type Config struct {
 	Remote         string // Default remote name (e.g., "origin")
 	Database       string // Database name within Dolt (default: "beads")
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
+	Preview        bool   // Non-mutating preview: embedded opens skip schema init and refuse writes
 
 	// LenientOpen opens the store leniently: embedded mode only. A migration
 	// gate refusal (#4259) or a dirty-working-set refusal (#4566) skips the
