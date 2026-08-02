@@ -898,6 +898,16 @@ func formatTimeForRPC(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+// openDryRunTargetStore opens the store a `create --dry-run --repo <other>`
+// resolves --parent against. It is read-only on BOTH paths and must stay that
+// way: newDoltStoreFromConfig runs schema initialization on whatever it opens
+// and can rename a legacy hyphenated database and rewrite the target's
+// metadata.json on the way (GH#3231), so using it here would have a dry-run
+// mutate a repository the user only named as a lookup target — the same
+// migrate-at-open trap this preview policy exists to close, one repo over.
+// newPreviewStoreFromConfig is the non-mutating factory for a foreign
+// project (bd-6dnrw.32), relaxed for previews exactly as the root pre-run
+// relaxes the command's own store.
 func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltStorage, error) {
 	if remotecache.IsRemoteURL(repoPath) {
 		cache, err := remotecache.DefaultCache()
@@ -906,7 +916,7 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		}
 		// The dry-run parent lookup only reads from this cached remote store.
 		// Do not add writes here; dry-runs must not mutate cached remotes.
-		store, err := cache.OpenStore(ctx, repoPath, newDoltStoreFromConfig)
+		store, err := cache.OpenStore(ctx, repoPath, newPreviewStoreFromConfig)
 		if err != nil {
 			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", repoPath, err)
 		}
@@ -923,7 +933,7 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		return nil, fmt.Errorf("failed to inspect target repo %s: %w", targetPath, err)
 	}
 
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open target store for dry-run: %w", err)
 	}

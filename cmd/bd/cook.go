@@ -698,6 +698,21 @@ func resolveAndCookFormulaWithVars(formulaName string, searchPaths []string, con
 		return nil, fmt.Errorf("resolving formula %q: %w", formulaName, err)
 	}
 
+	// Validate any caller-provided variable values against enum/pattern/
+	// required-empty constraints. This is deliberately presence-agnostic:
+	// a var missing entirely is left to the caller's own UX (e.g. bd mol
+	// pour/wisp's missing-var hint), but a var explicitly provided with a
+	// value that violates its constraints must error here so it reaches
+	// every caller of this shared path (pour, wisp, mol bond, mol seed) —
+	// runCook does not go through this helper; it validates separately via
+	// its own formula.ValidateVars call under --mode=runtime. Previously
+	// only that `bd cook --mode=runtime` path enforced these (mybd-u2r6).
+	if conditionVars != nil {
+		if err := formula.ValidateProvidedVars(resolved, conditionVars); err != nil {
+			return nil, fmt.Errorf("formula %q: %w", formulaName, err)
+		}
+	}
+
 	// Apply control flow operators - loops, branches, gates
 	controlFlowSteps, err := formula.ApplyControlFlow(resolved.Steps, resolved.Compose)
 	if err != nil {

@@ -30,8 +30,58 @@
 #      main-plane ALTER silently never reaches them (bd-hs7fa: 0060's
 #      wisps.storage_class missed every fresh clone; wy-pt82l before it:
 #      0054's wisps.row_lock, healed after the fact by ignored/0013).
+#   E. A new main-plane migration must not PREPARE/EXECUTE a DML statement
+#      (UPDATE/INSERT/DELETE built into a `SET @sql = '...'` string). The
+#      Dolt CLI batch path (`dolt sql -q`/`-f`, the AllMigrationsSQL()/
+#      fresh-bundle route) silently no-ops a prepared write there while
+#      EXECUTE reports success (dolthub/dolt#11345, mybd-p8i3). Prepared
+#      ALTER TABLE is the same underlying limitation but a separate, accepted
+#      idiom for idempotent DDL re-runs (see cli_migrations.go), so it is not
+#      flagged. Neither is a prepared `INSERT INTO __<standin>`: that IS the
+#      recommended pattern (0059, gastownhall/beads#4877), where a silent
+#      no-op degrades gracefully instead of corrupting state. The exemption
+#      stops there on purpose -- a prepared UPDATE or DELETE is never
+#      exempted, because their multi-table forms put the modified table after
+#      a JOIN (`UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes
+#      to issues) and the real target cannot be identified reliably by
+#      pattern-matching. INSERT INTO's target always is. The write verb is
+#      matched as a token ANYWHERE in the prepared text, not just at its
+#      start, since '/* c */ UPDATE ...' and 'WITH t AS (...) UPDATE ...' are
+#      both valid; ON UPDATE / ON DUPLICATE KEY UPDATE are masked first so a
+#      column attribute is not read as a write. Both `=` and `:=` assignment
+#      forms are recognised. Only .up.sql is scanned, since only
+#      migrations/*.up.sql is embedded into the bundle.
 #
-# Checks C and D compare against $BASE_SHA if set (CI passes the PR base),
+#      KNOWN LIMITS — this is a best-effort heuristic, not a SQL parser, and
+#      says so rather than implying coverage it does not have. Six rounds of
+#      cross-vendor review each found another shape the previous fix missed;
+#      the pattern of the misses (position-anchored matching) was addressed,
+#      but the correlation between a `SET @var` and its later
+#      `PREPARE ... FROM @var` is still line-oriented, so these bypass it.
+#      `PREPARE ... FROM '<literal>'`, with no variable at all, IS covered,
+#      so do not read this list as broader than it is:
+#        - multi-variable assignment: `SET @guard = 1, @sql = 'UPDATE ...';`
+#          (only the first variable is tracked)
+#        - a PREPARE split across lines: `PREPARE stmt` / `FROM @sql;`
+#        - a literal `;` inside the prepared string (ends buffering early)
+#      None of these forms occurs anywhere in the current migration tree, and
+#      the check is advisory hygiene on new files that a human reviews anyway,
+#      so the gap is a follow-up (mybd-q8hy2) rather than a
+#      reason to withhold the guard. A reviewer who sees any of these three
+#      shapes in a new migration should not trust a green check here.
+#      This is a going-forward guard, and deliberately new-files-only: seven
+#      shipped main-plane migrations (0035, 0037, 0041, 0047, 0053, 0055,
+#      0058) already PREPARE writes to real tables. They are not a live bug
+#      and are not retrofits waiting to happen — a shipped migration is
+#      frozen, and on the one path this check is about (the fresh-schema
+#      bundle, i.e. an empty database) a data backfill is a no-op whether or
+#      not the prepared write lands. cliCompatibleMigrationSQL overrides only
+#      the subset whose prepared statements change the committed schema
+#      SHAPE, which is what the bundle's contract actually promises. The
+#      point of the check is that the idiom stops spreading into migrations
+#      where the write does matter.
+#
+# Checks C, D, and E compare against $BASE_SHA if set (CI passes the PR base),
 # else origin/main, else main; they are skipped with a warning when no base
 # is resolvable (e.g. shallow clone without the base commit).
 
@@ -204,6 +254,181 @@ else
   genuinely main-plane-only (e.g. the table is being flipped ONTO the
   ignored plane by this very migration), the twin is the migration that
   materializes the table for clones (precedent: 0062 + ignored/0019).
+EOF
+    fi
+  done
+fi
+
+# --- Check E: no PREPARE'd DML in new main-plane migrations -----------------
+# AllMigrationsSQL() (schema.go) only walks the main-plane migration series
+# to build the CLI fresh-bundle route, so this check is scoped to added_main
+# the same as check D; migrations/ignored/ never goes through `dolt sql -q/-f`
+# and is not scanned here.
+#
+# A PREPARE'd write is: `SET @var = '...'` (or `SET @var = IF(cond, '...',
+# '...')`) followed by `PREPARE <name> FROM @var; EXECUTE <name>`, where the
+# quoted text's first keyword is insert/update/delete. Statements are
+# correlated by variable name and buffered across lines so a multi-line
+# `SET @sql = IF(...)` (the common form here) is read as one statement; each
+# statement is expected to be self-contained between `=` and its terminating
+# `;` (true for every migration in this tree — none embed a literal `;`
+# inside the prepared-text string). Prepared ALTER TABLE uses the identical
+# @sql/PREPARE stmt/EXECUTE stmt shape and is deliberately not flagged: only
+# the leading keyword inside the quoted text decides.
+# prepared_target_is_standin STMT — true when the prepared DML writes to a
+# migration-local stand-in table rather than a real one. That is the pattern
+# this check RECOMMENDS (0059, gastownhall/beads#4877): copy into a throwaway
+# table with PREPARE, then have a direct statement read it, so a silent no-op
+# degrades gracefully instead of corrupting state. Flagging it would reject the
+# very remedy the failure message hands out.
+#
+# The convention in this tree is a double-underscore prefix — __bd_0059_* and
+# __temp__* are the existing instances — and a real beads table never starts
+# with one. STMT is already lowercased by the caller.
+# neutralize_sql_clauses TEXT — mask the UPDATE keywords that are column/insert
+# clauses rather than write verbs, so the scans below cannot mistake them for
+# one. `ON UPDATE CURRENT_TIMESTAMP` is a column attribute; `ON DUPLICATE KEY
+# UPDATE` belongs to an INSERT.
+neutralize_sql_clauses() {
+  local t="$1"
+  t=${t//on duplicate key update/on duplicate key __updclause}
+  t=${t//on update/on __updclause}
+  printf '%s' "$t"
+}
+
+# prepared_has_dml STMT — does the statement carry a write verb ANYWHERE?
+#
+# Deliberately not "does the quoted text START with one". A prepared string may
+# legitimately open with a comment or a CTE —
+#   '/* conditional */ UPDATE issues ...'      'WITH t AS (...) UPDATE issues ...'
+# — and a position-anchored test waves both through, which is the same mistake
+# as trying to locate a write target by position. Matching the verb as a whole
+# token anywhere is strictly more conservative: the cost is over-flagging a
+# statement that merely mentions one, and the exemption below is what rescues
+# the legitimate stand-in forms.
+prepared_has_dml() {
+  local scan
+  scan="$(neutralize_sql_clauses "$1")"
+  printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(insert|update|delete|replace)([^a-z0-9_]|$)"
+}
+
+prepared_target_is_standin() {
+  local stmt="$1" scan targets t
+  scan=$(printf '%s' "$stmt")
+
+  scan="$(neutralize_sql_clauses "$scan")"
+
+  # UPDATE, DELETE and REPLACE are never exempted, even when the first table after the
+  # verb is a stand-in. Their multi-table forms put the modified table after a
+  # JOIN — `UPDATE __stage s JOIN issues i ... SET i.priority = 0` writes to
+  # issues, not to __stage — so the write target cannot be identified reliably
+  # by pattern-matching. Three review rounds were spent trying; the honest
+  # conclusion is that the exemption belongs only on a form whose target is
+  # unambiguous. An author who genuinely needs a conditional UPDATE should
+  # restructure it the way 0059 does rather than have this check guess.
+  # Boundary matches prepared_has_dml's (any non-word char, not whitespace):
+  # Dolt takes a comment as a token separator, so `UPDATE/*x*/ issues ...` is a
+  # real write and a whitespace-anchored test walked straight past it.
+  if printf '%s' "$scan" | grep -qE "(^|[^a-z0-9_])(update|delete|replace)([^a-z0-9_]|$)"; then
+    return 1
+  fi
+
+  # INSERT INTO <tbl> is unambiguous: the target is always the token after
+  # INTO, whatever the SELECT source does. Every one of them must be a
+  # stand-in. (A mixed `SET @sql = IF(cond, '<stand-in>', '<real>')` carries
+  # two branches and only one executes, so "the first match was a stand-in" is
+  # not good enough.)
+  targets=$(
+    printf '%s\n' "$scan" \
+      | grep -oE "insert[[:space:]]+(ignore[[:space:]]+)?into[[:space:]]+\`?[a-z0-9_]+" \
+      | grep -oE "[a-z0-9_]+$"
+  ) || true
+  [ -n "$targets" ] || return 1
+
+  # Every INSERT must be one we could classify. MySQL/Dolt accept `INSERT
+  # issues ...` with INTO omitted, so a conditional carrying
+  # `IF(c, 'INSERT INTO __stage ...', 'INSERT issues ...')` would otherwise
+  # yield one stand-in target, look unanimous, and exempt the real-table write
+  # in the other branch. Count the verbs and refuse to exempt unless every one
+  # of them produced a target.
+  local n_verbs n_targets
+  n_verbs=$(printf '%s\n' "$scan" | grep -oE "(^|[^a-z0-9_])insert([^a-z0-9_])" | wc -l)
+  n_targets=$(printf '%s\n' "$targets" | grep -c .)
+  [ "$n_verbs" -eq "$n_targets" ] || return 1
+  while IFS= read -r t; do
+    [ -n "$t" ] || continue
+    case "$t" in
+      __*) ;;
+      *) return 1 ;;
+    esac
+  done <<EOF
+$targets
+EOF
+  return 0
+}
+
+if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
+  echo "WARN (prepared DML) no usable base ref; skipping check E." >&2
+else
+  # Only *.up.sql is embedded into the CLI fresh bundle (`//go:embed
+  # migrations/*.up.sql`, schema.go:218), so a .down.sql can never meet the bug
+  # this check is about. Scanning it would reject valid work for no reason.
+  for f in $(grep '\.up\.sql$' <<<"$added_main" || true); do
+    [ -f "$f" ] || continue
+    stripped=$(sed 's/--.*$//' "$f" | tr '[:upper:]' '[:lower:]')
+    declare -A dml_flagged=()
+    dml_var=""
+    stmt_buf=""
+    lineno=0
+    hits=""
+    while IFS= read -r line; do
+      lineno=$((lineno + 1))
+      if [ -n "$dml_var" ]; then
+        stmt_buf="$stmt_buf $line"
+      elif [[ "$line" =~ set[[:space:]]+@([a-z0-9_]+)[[:space:]]*:?= ]]; then
+        dml_var="${BASH_REMATCH[1]}"
+        stmt_buf="$line"
+      fi
+      if [ -n "$dml_var" ] && [[ "$stmt_buf" == *";"* ]]; then
+        if prepared_has_dml "$stmt_buf" && ! prepared_target_is_standin "$stmt_buf"; then
+          dml_flagged["$dml_var"]=1
+        else
+          unset "dml_flagged[$dml_var]"
+        fi
+        dml_var=""
+        stmt_buf=""
+      fi
+      if [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+@([a-z0-9_]+) ]]; then
+        pvar="${BASH_REMATCH[1]}"
+        if [ "${dml_flagged[$pvar]:-0}" = "1" ]; then
+          hits="${hits}${lineno}: ${line}"$'\n'
+        fi
+      elif [[ "$line" =~ prepare[[:space:]]+[a-z0-9_]+[[:space:]]+from[[:space:]]+[\'\"] ]]; then
+        # `PREPARE stmt FROM 'UPDATE issues ...'` — the literal form, with no
+        # user variable in play at all. This is the most direct spelling of the
+        # hazard, not an exotic one, so it is checked in place rather than
+        # through the assignment bookkeeping above.
+        if prepared_has_dml "$line" && ! prepared_target_is_standin "$line"; then
+          hits="${hits}${lineno}: ${line}"$'\n'
+        fi
+      fi
+    done <<<"$stripped"
+    unset dml_flagged
+    if [ -n "$hits" ]; then
+      fail=1
+      echo "FAIL (prepared DML) $f contains a PREPARE'd INSERT/UPDATE/DELETE:"
+      echo "$hits" | sed '/^$/d; s/^/  line /'
+      cat <<EOF
+  A PREPARE'd UPDATE/INSERT/DELETE silently no-ops under the Dolt CLI batch
+  path used to build the fresh-schema bundle (dolthub/dolt#11345): EXECUTE
+  reports success and changes nothing. Write the real-table mutation as
+  direct SQL; if it needs to be conditional, gate it on a stand-in table that
+  the direct statement reads instead of PREPARE'ing the write itself
+  (precedent: 0059, gastownhall/beads#4877 -- a prepared INSERT INTO a
+  __-prefixed stand-in is recognised and not flagged; a prepared UPDATE or
+  DELETE is never exempted, since a JOIN can move its real target out of
+  reach of this check). Prepared ALTER TABLE is a separate, accepted idiom
+  and is not what this check flags either.
 EOF
     fi
   done

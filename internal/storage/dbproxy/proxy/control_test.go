@@ -133,29 +133,57 @@ func TestControl_CapsConcurrentHandshakes(t *testing.T) {
 // control server: the data path may still be healthy, and losing control only
 // degrades adoption to the caller's poll/retry path.
 func TestControl_AcceptLoopSurvivesPersistentErrors(t *testing.T) {
-	listener := &failingListener{err: errors.New("transient accept failure"), failures: 5}
+	listener := &failingListener{err: errors.New("transient accept failure"), failures: 11}
 	control := &controlServer{
 		listener: listener,
 		done:     make(chan struct{}),
 		closing:  make(chan struct{}),
 		slots:    make(chan struct{}, maxConcurrentIdentRequests),
 	}
-	go control.acceptLoop()
+	immediately := make(chan time.Time)
+	close(immediately)
+	recorder := &acceptRetryRecorder{afterResult: immediately}
+	go control.acceptLoopWithAfter(recorder.after)
 
 	select {
 	case <-control.done:
-	case <-time.After(10 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("control accept loop did not exit after the listener closed")
 	}
 	assert.Equal(t, listener.failures+1, listener.accepts,
 		"loop must retry through every transient failure until the listener reports closed")
+	assert.ErrorIs(t, listener.finalErr, net.ErrClosed)
 	assert.False(t, listener.closed, "accept failures must not close the control listener")
+	assert.Equal(t, []time.Duration{
+		10 * time.Millisecond,
+		20 * time.Millisecond,
+		40 * time.Millisecond,
+		80 * time.Millisecond,
+		160 * time.Millisecond,
+		320 * time.Millisecond,
+		640 * time.Millisecond,
+		1280 * time.Millisecond,
+		2560 * time.Millisecond,
+		5 * time.Second,
+		5 * time.Second,
+	}, recorder.delays)
+}
+
+type acceptRetryRecorder struct {
+	afterResult <-chan time.Time
+	delays      []time.Duration
+}
+
+func (r *acceptRetryRecorder) after(delay time.Duration) <-chan time.Time {
+	r.delays = append(r.delays, delay)
+	return r.afterResult
 }
 
 type failingListener struct {
 	err      error
 	failures int
 	accepts  int
+	finalErr error
 	closed   bool
 }
 
@@ -164,7 +192,8 @@ func (l *failingListener) Accept() (net.Conn, error) {
 	if l.accepts <= l.failures {
 		return nil, l.err
 	}
-	return nil, net.ErrClosed
+	l.finalErr = net.ErrClosed
+	return nil, l.finalErr
 }
 
 func (l *failingListener) Close() error {

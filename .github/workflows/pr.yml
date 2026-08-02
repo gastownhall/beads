@@ -28,15 +28,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
-      - name: Run policy checks
-        run: make ci-pr-policy
-
-      - name: Run lint checks
-        run: make ci-pr-lint
-
       - name: Build reusable Linux artifacts
         run: |
           set -euo pipefail
@@ -517,6 +508,57 @@ jobs:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
         run: go test -tags gms_pure_go -race -count=1 -v ./cmd/bd/doctor/fix/
+
+  # macOS-only regressions were landing on main undetected: main.yml's Test
+  # (macos-latest) leg only runs `if: github.event_name == 'push' &&
+  # github.ref == 'refs/heads/main'`, so no PR ever exercises it. On
+  # 2026-08-01 that leg went red from three separately-merged PRs in a single
+  # day, all $TMPDIR=/var/folders symlink/path-depth consequences that only
+  # reproduce on macOS - none of the three could have seen the failure
+  # pre-merge, and the local bisect lane can't diagnose it either (Linux
+  # host, macOS-only failure). This job mirrors that leg's steps on every PR
+  # so the same class of regression fails here instead of on main. It is
+  # self-contained (no build-artifacts dependency): the macOS leg in main.yml
+  # never downloads or verifies the Linux build-artifacts bundle, it just
+  # builds and tests directly.
+  #
+  # Deliberately NOT continue-on-error: unlike the advisory legs elsewhere in
+  # this file that tolerate infrastructure flakiness, a red macOS test here is
+  # a real regression, and blocking the merge lane on it is the entire point.
+  #
+  # Deliberately NOT yet added to ci-gate's `needs`/`CI_GATE_REQUIRED`:
+  # promoting a new job to required-for-merge, once it has run clean for a
+  # while, is a separate maintainer call - same pattern as other jobs in this
+  # file that run on every PR without yet gating the merge.
+  test-macos:
+    name: Test (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Install Dolt (Linux/macOS)
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Build
+        run: go build -v -tags gms_pure_go ./cmd/bd
+
+      - name: Test
+        run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's

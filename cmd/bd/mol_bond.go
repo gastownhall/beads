@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -109,11 +110,11 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 	}
 
 	if in.dryRun {
-		issueA, formulaA, err := resolveOrDescribe(ctx, store, in.argA)
+		issueA, formulaA, err := resolveOrDescribe(ctx, store, in.argA, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, store, in.argB)
+		issueB, formulaB, err := resolveOrDescribe(ctx, store, in.argB, in.vars)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
@@ -605,7 +606,7 @@ func minPriority(a, b int) int {
 // resolveOrDescribe checks if an operand is an issue or formula without cooking.
 // Used for dry-run mode. Returns (issue, formulaName, error).
 // If it's an issue, issue is set. If it's a formula, formulaName is set.
-func resolveOrDescribe(ctx context.Context, s molReader, operand string) (*types.Issue, string, error) {
+func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars map[string]string) (*types.Issue, string, error) {
 	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {
@@ -623,6 +624,13 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string) (*types
 	f, err := parser.LoadByName(operand)
 	if err != nil {
 		return nil, "", fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
+	}
+
+	// A dry-run must fail the same way the real bond would: an enum/pattern/
+	// provided-empty violation in --var values fails resolveOrCookToSubgraph,
+	// so reporting "will be cooked" here would be a false preview.
+	if err := formula.ValidateProvidedVars(f, vars); err != nil {
+		return nil, "", err
 	}
 
 	return nil, f.Formula, nil
@@ -662,6 +670,12 @@ func resolveOrCookToSubgraph(ctx context.Context, s molReader, operand string, v
 	// condition filtering (bd-7zka.1).
 	subgraph, err := resolveAndCookFormulaWithVars(operand, nil, vars)
 	if err != nil {
+		if errors.Is(err, formula.ErrVarValidation) {
+			// Don't double-wrap: operand IS a formula, and the --var values
+			// it was given fail enum/pattern/required-empty constraints,
+			// which is a distinct condition from "not found".
+			return nil, false, err
+		}
 		return nil, false, fmt.Errorf("'%s' not found as issue or formula: %w", operand, err)
 	}
 

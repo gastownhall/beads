@@ -272,44 +272,38 @@ func gatherProxiedHierarchical(ctx context.Context, uw uow.UnitOfWork, parentID 
 	return out, nil
 }
 
+type currentIssueSearcher interface {
+	SearchIssues(context.Context, string, types.IssueFilter) ([]*types.Issue, error)
+}
+
 // resolveCurrentIssueID determines the current active issue for the agent.
 // Priority: in-progress assigned to actor > hooked > last touched.
 func resolveCurrentIssueID(ctx context.Context) string {
-	if store == nil {
-		// No store — fall back to last touched
-		return GetLastTouchedID()
+	return resolveCurrentIssueIDFrom(ctx, store, getActorWithGit, GetLastTouchedID)
+}
+
+func resolveCurrentIssueIDFrom(ctx context.Context, searcher currentIssueSearcher, currentActor func() string, fallback func() string) string {
+	if searcher == nil {
+		return fallback()
+	}
+	actor := currentActor()
+	if actor == "" {
+		return fallback()
 	}
 
-	currentActor := getActorWithGit()
-
-	// 1. In-progress issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusInProgress
+	for _, status := range []types.Status{types.StatusInProgress, types.StatusHooked} {
+		status := status
 		filter := types.IssueFilter{
 			Status:   &status,
-			Assignee: &currentActor,
+			Assignee: &actor,
 		}
-		issues, err := store.SearchIssues(ctx, "", filter)
+		issues, err := searcher.SearchIssues(ctx, "", filter)
 		if err == nil && len(issues) > 0 {
 			return issues[0].ID
 		}
 	}
 
-	// 2. Hooked issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusHooked
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 3. Last touched issue (fallback)
-	return GetLastTouchedID()
+	return fallback()
 }
 
 func resolveCurrentIssueIDProxied(ctx context.Context, uw uow.UnitOfWork) string {

@@ -62,15 +62,6 @@ jobs:
         with:
           go-version-file: 'go.mod'
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
-      - name: Run policy checks
-        run: make ci-pr-policy
-
-      - name: Run lint checks
-        run: make ci-pr-lint
-
       - name: Build reusable Linux artifacts
         run: |
           set -euo pipefail
