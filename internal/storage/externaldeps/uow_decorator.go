@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"slices"
-	"sort"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -118,7 +117,7 @@ func (u *issueUseCase) ClaimReadyIssue(ctx context.Context, filter types.WorkFil
 }
 
 func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
-	base, err := u.IssueUseCase.GetBlockedIssues(ctx, filter)
+	base, err := u.IssueUseCase.GetBlockedIssues(ctx, unpagedBlockedFilter(filter))
 	if err != nil {
 		return nil, err
 	}
@@ -170,13 +169,7 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 		refs := slices.Clone(state.refsByIssue[issue.ID])
 		result = append(result, &types.BlockedIssue{Issue: *issue, BlockedByCount: len(refs), BlockedBy: refs})
 	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Priority != result[j].Priority {
-			return result[i].Priority < result[j].Priority
-		}
-		return result[i].CreatedAt.After(result[j].CreatedAt)
-	})
-	return result, nil
+	return finishBlockedIssues(result, filter)
 }
 
 func (u *issueUseCase) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {

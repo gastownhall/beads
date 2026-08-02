@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -167,5 +168,46 @@ func TestWrapUOWProviderFiltersExternalBlockedWorkByParent(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != child.ID {
 		t.Fatalf("blocked issues = %v, want [%s]", got, child.ID)
+	}
+}
+
+func TestWrapUOWProviderPaginatesCombinedExternalBlockedWork(t *testing.T) {
+	local, external := issue("be-local"), issue("be-external")
+	local.Priority = 1
+	external.Priority = 0
+	inner := &fakeUOW{
+		issues: &fakeIssueUseCase{
+			ready:   []*types.Issue{external},
+			blocked: []*types.BlockedIssue{{Issue: *local, BlockedBy: []string{"be-local-blocker"}, BlockedByCount: 1}},
+		},
+		deps: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+			external.ID: {externalDep(external.ID, "external:remote:payments", types.DepBlocks)},
+		}},
+	}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) {
+		return "", false
+	}, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+	first, err := uw.IssueUseCase().GetBlockedIssues(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues first page: %v", err)
+	}
+	if ids := blockedIssueIDs(first); !slices.Equal(ids, []string{external.ID}) {
+		t.Fatalf("first page IDs = %v, want [%s]", ids, external.ID)
+	}
+	second, err := uw.IssueUseCase().GetBlockedIssues(t.Context(), types.WorkFilter{Offset: 1, Limit: 1})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues second page: %v", err)
+	}
+	if ids := blockedIssueIDs(second); !slices.Equal(ids, []string{local.ID}) {
+		t.Fatalf("second page IDs = %v, want [%s]", ids, local.ID)
+	}
+	_, err = uw.IssueUseCase().GetBlockedIssues(t.Context(), types.WorkFilter{MaxRows: 1, MaxRowsSource: "--max-rows"})
+	var capErr *issueops.ErrTooManyRows
+	if !errors.As(err, &capErr) {
+		t.Fatalf("GetBlockedIssues MaxRows error = %v, want ErrTooManyRows", err)
 	}
 }

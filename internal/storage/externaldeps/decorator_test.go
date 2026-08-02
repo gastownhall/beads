@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -178,6 +179,16 @@ func page[T any](items []*T, offset, limit int) []*T {
 
 func issue(id string) *types.Issue {
 	return &types.Issue{ID: id, Title: id, Status: types.StatusOpen, IssueType: types.TypeTask}
+}
+
+func blockedIssueIDs(items []*types.BlockedIssue) []string {
+	ids := make([]string, 0, len(items))
+	for _, item := range items {
+		if item != nil {
+			ids = append(ids, item.ID)
+		}
+	}
+	return ids
 }
 
 func externalDep(source, ref string, depType types.DependencyType) *types.Dependency {
@@ -377,6 +388,40 @@ func TestGetBlockedIssuesAddsUnsatisfiedExternalRefs(t *testing.T) {
 	}
 	if !slices.Equal(byID[c.ID].BlockedBy, []string{"be-local", "external:remote:identity"}) {
 		t.Fatalf("%s blockers = %v", c.ID, byID[c.ID].BlockedBy)
+	}
+}
+
+func TestGetBlockedIssuesPaginatesCombinedExternalResults(t *testing.T) {
+	local, external := issue("be-local"), issue("be-external")
+	local.Priority = 1
+	external.Priority = 0
+	raw := &fakeStore{
+		ready:   []*types.Issue{external},
+		blocked: []*types.BlockedIssue{{Issue: *local, BlockedBy: []string{"be-local-blocker"}, BlockedByCount: 1}},
+		deps: map[string][]*types.Dependency{
+			external.ID: {externalDep(external.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, false)
+
+	first, err := store.GetBlockedIssues(t.Context(), types.WorkFilter{Limit: 1})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues first page: %v", err)
+	}
+	if ids := blockedIssueIDs(first); !slices.Equal(ids, []string{external.ID}) {
+		t.Fatalf("first page IDs = %v, want [%s]", ids, external.ID)
+	}
+	second, err := store.GetBlockedIssues(t.Context(), types.WorkFilter{Offset: 1, Limit: 1})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues second page: %v", err)
+	}
+	if ids := blockedIssueIDs(second); !slices.Equal(ids, []string{local.ID}) {
+		t.Fatalf("second page IDs = %v, want [%s]", ids, local.ID)
+	}
+	_, err = store.GetBlockedIssues(t.Context(), types.WorkFilter{MaxRows: 1, MaxRowsSource: "--max-rows"})
+	var capErr *issueops.ErrTooManyRows
+	if !errors.As(err, &capErr) {
+		t.Fatalf("GetBlockedIssues MaxRows error = %v, want ErrTooManyRows", err)
 	}
 }
 

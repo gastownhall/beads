@@ -9,6 +9,7 @@ import (
 	"sync"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -173,7 +174,7 @@ func (s *Store) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, ac
 // GetBlockedIssues adds unsatisfied external refs to local blocker details and
 // includes sources whose only blockers are external.
 func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
-	base, err := s.inner.GetBlockedIssues(ctx, filter)
+	base, err := s.inner.GetBlockedIssues(ctx, unpagedBlockedFilter(filter))
 	if err != nil {
 		return nil, err
 	}
@@ -234,13 +235,40 @@ func (s *Store) GetBlockedIssues(ctx context.Context, filter types.WorkFilter) (
 		result = append(result, blocked)
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Priority != result[j].Priority {
-			return result[i].Priority < result[j].Priority
+	return finishBlockedIssues(result, filter)
+}
+
+// unpagedBlockedFilter lets the external policy combine local and external
+// blockers before applying the caller's page and row cap.
+func unpagedBlockedFilter(filter types.WorkFilter) types.WorkFilter {
+	filter.Offset = 0
+	filter.Limit = 0
+	filter.MaxRows = 0
+	filter.MaxRowsSource = ""
+	return filter
+}
+
+func finishBlockedIssues(items []*types.BlockedIssue, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].Priority != items[j].Priority {
+			return items[i].Priority < items[j].Priority
 		}
-		return result[i].CreatedAt.After(result[j].CreatedAt)
+		return items[i].CreatedAt.After(items[j].CreatedAt)
 	})
-	return result, nil
+	if filter.Offset > 0 {
+		if filter.Offset >= len(items) {
+			items = nil
+		} else {
+			items = items[filter.Offset:]
+		}
+	}
+	if filter.Limit > 0 && len(items) > filter.Limit {
+		items = items[:filter.Limit]
+	}
+	if err := issueops.EnforceMaxRowsCap(len(items), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func matchesParentFilter(issueID string, parentID *string, allDeps map[string][]*types.Dependency) bool {
