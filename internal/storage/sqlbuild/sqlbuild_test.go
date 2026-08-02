@@ -1,6 +1,8 @@
 package sqlbuild
 
 import (
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -109,6 +111,102 @@ func TestLessSummaryMirrorsOrderBy(t *testing.T) {
 	d := &types.IssueSummary{ID: "d", Priority: 1, CreatedAt: now}
 	if !LessSummary(a, d, "", false) || LessSummary(d, a, "", false) {
 		t.Error("full tie must break by id ASC")
+	}
+}
+
+// TestLessSummaryMatchesLessAcrossSortKeys is TestLessSummaryMirrorsOrderBy's
+// broader sibling: instead of spot-checking only the default tie-break chain,
+// it sorts a parallel Issue/IssueSummary fixture with Less and LessSummary
+// for every SortDefs key (plus "id") in both directions and asserts the two
+// produce identical ID order. Less and LessSummary already share the
+// lessFields core, so this mainly guards summarySortFields: if a future field
+// is added to sortFields without updating summarySortFields, the two
+// adapters silently diverge and this is what would catch it.
+func TestLessSummaryMatchesLessAcrossSortKeys(t *testing.T) {
+	t.Parallel()
+
+	day := func(d int) time.Time { return time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC) }
+	closedOn := func(d int) *time.Time { c := day(d); return &c }
+
+	type row struct {
+		id        string
+		priority  int
+		createdAt time.Time
+		updatedAt time.Time
+		closedAt  *time.Time
+		status    types.Status
+		issueType types.IssueType
+		assignee  string
+		title     string
+	}
+	// Distinct (and, for priority, partially tied) values on every field so
+	// each sort key — including the tie-break chain the "" and "priority"
+	// keys share — produces a non-trivial, checkable order.
+	rows := []row{
+		{"p1", 3, day(1), day(5), nil, types.StatusOpen, types.TypeBug, "alice", "Zebra"},
+		{"p2", 1, day(3), day(2), closedOn(10), types.StatusBlocked, types.TypeEpic, "bob", "apple"},
+		{"p3", 2, day(5), day(4), closedOn(8), types.StatusClosed, types.TypeTask, "carol", "Mango"},
+		{"p4", 1, day(2), day(1), nil, types.StatusInProgress, types.TypeChore, "dave", "banana"},
+		{"p5", 4, day(4), day(3), closedOn(6), types.StatusOpen, types.TypeBug, "eve", "Orange"},
+	}
+
+	issues := make([]*types.Issue, len(rows))
+	summaries := make([]*types.IssueSummary, len(rows))
+	for i, r := range rows {
+		issues[i] = &types.Issue{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+		summaries[i] = &types.IssueSummary{
+			ID: r.id, Priority: r.priority, CreatedAt: r.createdAt, UpdatedAt: r.updatedAt,
+			ClosedAt: r.closedAt, Status: r.status, IssueType: r.issueType, Assignee: r.assignee, Title: r.title,
+		}
+	}
+
+	keys := make([]string, 0, len(SortDefs)+1)
+	for key := range SortDefs {
+		keys = append(keys, key)
+	}
+	keys = append(keys, "id")
+
+	for _, key := range keys {
+		for _, desc := range []bool{false, true} {
+			name := key
+			if name == "" {
+				name = "default"
+			}
+			if desc {
+				name += "/desc"
+			} else {
+				name += "/asc"
+			}
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+
+				sortedIssues := append([]*types.Issue(nil), issues...)
+				sort.Slice(sortedIssues, func(i, j int) bool {
+					return Less(sortedIssues[i], sortedIssues[j], key, desc)
+				})
+				sortedSummaries := append([]*types.IssueSummary(nil), summaries...)
+				sort.Slice(sortedSummaries, func(i, j int) bool {
+					return LessSummary(sortedSummaries[i], sortedSummaries[j], key, desc)
+				})
+
+				gotIssues := make([]string, len(sortedIssues))
+				for i, is := range sortedIssues {
+					gotIssues[i] = is.ID
+				}
+				gotSummaries := make([]string, len(sortedSummaries))
+				for i, s := range sortedSummaries {
+					gotSummaries[i] = s.ID
+				}
+
+				if !slices.Equal(gotIssues, gotSummaries) {
+					t.Errorf("Less vs LessSummary order diverge for sortBy=%q sortDesc=%v:\n  Less:        %v\n  LessSummary: %v",
+						key, desc, gotIssues, gotSummaries)
+				}
+			})
+		}
 	}
 }
 
