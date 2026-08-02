@@ -804,7 +804,7 @@ func TestSecretKeyEnvVarHint(t *testing.T) {
 	}{
 		{"linear.api_key", "LINEAR_API_KEY"},
 		{"github.token", "GITHUB_TOKEN"},
-		{"ai.api_key", "ANTHROPIC_API_KEY or MINIMAX_API_KEY"},
+		{"ai.api_key", "ANTHROPIC_API_KEY"},
 		{"custom.secret-token", "BD_CUSTOM_SECRET_TOKEN"},
 	}
 

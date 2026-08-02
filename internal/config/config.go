@@ -759,6 +759,24 @@ func DefaultAIModel() string {
 	return GetString("ai.model")
 }
 
+// DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
+// accounting for which provider the resolved key selects: an explicitly
+// configured ai.model always wins; otherwise a MiniMax-selected key gets a
+// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
+// MiniMax does not serve the Claude default model.
+func DefaultAIModelFor(keySource AIAPIKeySource) string {
+	if GetValueSource("ai.model") != SourceDefault {
+		return GetString("ai.model")
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if m := os.Getenv("MINIMAX_MODEL"); m != "" {
+			return m
+		}
+		return MiniMaxDefaultModel
+	}
+	return GetString("ai.model")
+}
+
 // AIAPIKeySource identifies where the active Anthropic-compatible API key came from.
 type AIAPIKeySource string
 
@@ -770,6 +788,13 @@ const (
 	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
 
 	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
+
+	// MiniMaxDefaultModel is used when MINIMAX_API_KEY selected the key and
+	// the user did not configure ai.model: MiniMax's Anthropic-compatible
+	// endpoint does not serve the Claude default model, so key-only setup
+	// must route to a model MiniMax actually hosts. Override with
+	// MINIMAX_MODEL or ai.model.
+	MiniMaxDefaultModel = "MiniMax-M2"
 )
 
 // ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.

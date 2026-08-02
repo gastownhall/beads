@@ -68,7 +68,7 @@ func newHaikuClient(apiKey string) (*haikuClient, error) {
 
 	return &haikuClient{
 		client:         client,
-		model:          config.DefaultAIModel(),
+		model:          config.DefaultAIModelFor(keySource),
 		apiKeySource:   keySource,
 		baseURL:        baseURL,
 		tier1Template:  tier1Tmpl,

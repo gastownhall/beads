@@ -93,7 +93,8 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
-		model = config.DefaultAIModel()
+		_, keySource := config.ResolveAIAPIKey("")
+		model = config.DefaultAIModelFor(keySource)
 	}
 
 	if method != "mechanical" && method != "ai" {
