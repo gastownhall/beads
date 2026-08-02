@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"slices"
 	"sort"
 	"testing"
 
@@ -118,7 +119,10 @@ func TestSearchIssuesAndSearchIssueSummaries_Parity(t *testing.T) {
 				fromSummaries[i] = s.ID
 			}
 
-			if !equalStringSlices(fromIssues, fromSummaries) {
+			// Order-sensitive: both paths share the same ORDER BY, so unlike
+			// equalStringSlices (which sorts before comparing and only proves
+			// the same ID set), this must also catch drift in relative row order.
+			if !slices.Equal(fromIssues, fromSummaries) {
 				t.Errorf("SearchIssues vs SearchIssueSummaries disagree:\n  SearchIssues:         %v\n  SearchIssueSummaries: %v",
 					fromIssues, fromSummaries)
 			}
