@@ -1655,6 +1655,10 @@ type TreeNode struct {
 	ParentID       string         `json:"parent_id"`
 	EdgeFromParent DependencyType `json:"edge_from_parent,omitempty"`
 	Truncated      bool           `json:"truncated"`
+	// Deduped marks a repeated occurrence of a node already expanded elsewhere
+	// in the tree (diamond dependency). The edge to its parent is real, but its
+	// subtree is rendered at the first occurrence only.
+	Deduped bool `json:"deduped,omitempty"`
 }
 
 // MoleculeProgressStats provides efficient progress info for large molecules.

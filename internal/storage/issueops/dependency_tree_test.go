@@ -182,3 +182,87 @@ func treeIDs(tree []*types.TreeNode) []string {
 	}
 	return ids
 }
+
+// TestGetDependencyTreeInTxEmitsDedupedDirectBlocker reproduces the diamond
+// omission behind gastownhall/beads sys-7yjr8: root depends on mid and shared,
+// mid also depends on shared. When traversal reaches shared through mid first,
+// the direct root->shared blocker used to be dropped entirely, so `bd dep tree`
+// and `bd dep list` disagreed on the direct-blocker set (and a bounded reader
+// concluded the graph was stale). The visited node must be re-emitted as a
+// Deduped stub so every direct edge is visible.
+func TestGetDependencyTreeInTxEmitsDedupedDirectBlocker(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	defer db.Close()
+
+	mock.ExpectBegin()
+	expectIssue(mock, "root", "Root")
+	expectDependencies(mock, "root", []dependencyRow{
+		{id: "mid", depType: string(types.DepBlocks)},
+		{id: "shared", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatch(mock, []string{"mid", "shared"})
+
+	// First child: mid, which expands shared beneath it.
+	expectIssue(mock, "mid", "Mid")
+	expectDependencies(mock, "mid", []dependencyRow{
+		{id: "shared", depType: string(types.DepBlocks)},
+	})
+	expectIssueBatchOne(mock, "shared")
+	expectIssue(mock, "shared", "Shared")
+	expectDependencies(mock, "shared", nil)
+
+	// Second direct child: shared again — already visited. The fix fetches it
+	// once more and emits a Deduped stub instead of dropping the edge.
+	expectIssue(mock, "shared", "Shared")
+
+	tx, err := db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("BeginTx: %v", err)
+	}
+	tree, err := GetDependencyTreeInTx(context.Background(), tx, "root", 5, false, false)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("GetDependencyTreeInTx: %v", err)
+	}
+	mock.ExpectRollback()
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet sql expectations: %v", err)
+	}
+
+	if len(tree) != 4 {
+		t.Fatalf("len(tree) = %d, want 4 nodes [root mid shared shared-stub]: %v", len(tree), treeIDs(tree))
+	}
+	stub := tree[3]
+	if stub.ID != "shared" || stub.Depth != 1 || stub.ParentID != "root" {
+		t.Fatalf("stub = id %q depth %d parent %q, want shared/1/root", stub.ID, stub.Depth, stub.ParentID)
+	}
+	if stub.EdgeFromParent != types.DepBlocks {
+		t.Fatalf("stub edge = %q, want %q", stub.EdgeFromParent, types.DepBlocks)
+	}
+	if !stub.Deduped {
+		t.Fatalf("stub.Deduped = false, want true")
+	}
+	full := tree[2]
+	if full.ID != "shared" || full.Depth != 2 || full.ParentID != "mid" || full.Deduped {
+		t.Fatalf("first occurrence = id %q depth %d parent %q deduped %v, want shared/2/mid/false", full.ID, full.Depth, full.ParentID, full.Deduped)
+	}
+}
+
+func expectIssueBatchOne(mock sqlmock.Sqlmock, id string) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps LIMIT 1")).
+		WillReturnError(sql.ErrNoRows)
+	rows := issueRows()
+	rows.AddRow(issueRowValues(id, id)...)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id IN (?)")).
+		WithArgs(id).
+		WillReturnRows(rows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT issue_id, label FROM labels WHERE issue_id IN (?) ORDER BY issue_id, label")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"issue_id", "label"}))
+}
