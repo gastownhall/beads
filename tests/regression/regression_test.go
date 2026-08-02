@@ -59,6 +59,8 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Setenv("BEADS_TEST_MODE", "1")
+	// AD-01 (be-c5p): allow regression tests to connect to the test container.
+	os.Setenv("BEADS_TEST_SERVER", "1")
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
@@ -330,6 +332,8 @@ func (w *workspace) runEnv() []string {
 		// up front so it cannot race t.TempDir cleanup by writing .beads files.
 		"BD_NO_DAEMON=1",
 		"BEADS_NO_DAEMON=1",
+		"BD_DISABLE_METRICS=1",
+		"BD_DISABLE_EVENT_FLUSH=1",
 		"GIT_CONFIG_NOSYSTEM=1",
 	}
 	if testDoltServerPort != 0 {

@@ -4,6 +4,7 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -13,10 +14,11 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 	// Cannot be parallel: modifies global primeHasGitRemote and env vars.
 
 	tests := []struct {
-		name       string
-		envVal     string // "\x00" = not set, "" = set to empty, "true"/"false"/"0" = explicit
-		hasRemote  bool
-		wantResult bool
+		name         string
+		envVal       string // "\x00" = not set, "" = set to empty, "true"/"false"/"0" = explicit
+		hasRemote    bool
+		sharedServer bool // BEADS_DOLT_SHARED_SERVER=1 → usesSQLServer() true
+		wantResult   bool
 	}{
 		{
 			name:       "default + git remote → enabled",
@@ -54,14 +56,50 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 			hasRemote:  true,
 			wantResult: false,
 		},
+		{
+			// wy-zrmqr: unset default must NOT auto-enable in sql-server
+			// mode even with a git remote — N clients racing one backup
+			// name was the storm amplifier in the 2026-07 CPU-pin incident.
+			name:         "default + git remote + sql-server mode → disabled",
+			envVal:       "\x00",
+			hasRemote:    true,
+			sharedServer: true,
+			wantResult:   false,
+		},
+		{
+			// Explicit opt-in still honored in sql-server mode: operators
+			// who coordinate destinations themselves may turn it on.
+			name:         "explicit true + sql-server mode → enabled",
+			envVal:       "true",
+			hasRemote:    false,
+			sharedServer: true,
+			wantResult:   true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Isolate CWD and BEADS_DIR before config.Initialize() below.
+			// Without this, a leaked BEADS_DIR (or cwd left inside the repo
+			// tree by an earlier no-DB command in the same test binary) lets
+			// Initialize() load a real ambient config.yaml with an explicit
+			// backup.enabled value, which wins over the computed default
+			// these cases assert on (be-yjp4z).
+			t.Chdir(t.TempDir())
+			t.Setenv("BEADS_DIR", "")
+			t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
 			// Stub primeHasGitRemote
 			orig := primeHasGitRemote
 			primeHasGitRemote = func() bool { return tt.hasRemote }
 			t.Cleanup(func() { primeHasGitRemote = orig })
+
+			if tt.sharedServer {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			} else {
+				os.Unsetenv("BEADS_DOLT_SHARED_SERVER")
+				t.Cleanup(func() { os.Unsetenv("BEADS_DOLT_SHARED_SERVER") })
+			}
 
 			// Set env var: "\x00" = unset, anything else = set to that value
 			if tt.envVal == "\x00" {
@@ -80,6 +118,101 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 			got := isBackupAutoEnabled()
 			if got != tt.wantResult {
 				t.Errorf("isBackupAutoEnabled() = %v, want %v", got, tt.wantResult)
+			}
+		})
+	}
+}
+
+// TestClientServerShareFilesystem_GH3523 pins the gating logic that
+// suppresses auto-backup's file:// register when the Dolt server
+// runs on a different filesystem from the client. Pre-fix every
+// command emitted "auto-backup failed: register backup remote: ...
+// failed to create directory ..." for operators with an external
+// (non-localhost) Dolt server.
+func TestClientServerShareFilesystem_GH3523(t *testing.T) {
+	tests := []struct {
+		name      string
+		envHost   string // "\x00" = unset
+		yamlHost  string // "\x00" = unset
+		wantShare bool
+	}{
+		{
+			name:      "no env, no yaml → embedded/local, share=true",
+			envHost:   "\x00",
+			yamlHost:  "\x00",
+			wantShare: true,
+		},
+		{
+			name:      "env=localhost → local, share=true",
+			envHost:   "localhost",
+			yamlHost:  "\x00",
+			wantShare: true,
+		},
+		{
+			name:      "env=127.0.0.1 → local, share=true",
+			envHost:   "127.0.0.1",
+			yamlHost:  "\x00",
+			wantShare: true,
+		},
+		{
+			name:      "env=non-localhost IP → external, share=false",
+			envHost:   "192.0.2.10",
+			yamlHost:  "\x00",
+			wantShare: false,
+		},
+		{
+			name:      "env=non-localhost FQDN → external, share=false",
+			envHost:   "dolt-primary.tailnet.example.com",
+			yamlHost:  "\x00",
+			wantShare: false,
+		},
+		{
+			name:      "yaml dolt.host=non-localhost → external, share=false",
+			envHost:   "\x00",
+			yamlHost:  "10.0.0.5",
+			wantShare: false,
+		},
+		{
+			name:      "env=empty (set to empty), yaml=non-localhost → external, share=false",
+			envHost:   "",
+			yamlHost:  "10.0.0.5",
+			wantShare: false,
+		},
+		{
+			name:      "env=localhost overrides yaml=non-localhost → share=true",
+			envHost:   "localhost",
+			yamlHost:  "10.0.0.5",
+			wantShare: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envHost == "\x00" {
+				os.Unsetenv("BEADS_DOLT_SERVER_HOST")
+			} else {
+				t.Setenv("BEADS_DOLT_SERVER_HOST", tt.envHost)
+			}
+
+			// Construct a fresh config.yaml for the dolt.host case.
+			configDir := t.TempDir()
+			if tt.yamlHost != "\x00" {
+				yamlPath := filepath.Join(configDir, "config.yaml")
+				content := "dolt:\n  host: " + tt.yamlHost + "\n"
+				if err := os.WriteFile(yamlPath, []byte(content), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv("BEADS_DIR", configDir)
+			config.ResetForTesting()
+			t.Cleanup(config.ResetForTesting)
+			if err := config.Initialize(); err != nil {
+				t.Fatalf("config.Initialize: %v", err)
+			}
+
+			got := clientServerShareFilesystem()
+			if got != tt.wantShare {
+				t.Errorf("clientServerShareFilesystem() = %v, want %v", got, tt.wantShare)
 			}
 		})
 	}

@@ -1,12 +1,13 @@
 package main
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // mailCmd delegates to an external mail provider.
@@ -35,38 +36,39 @@ Examples:
   bd mail inbox                    # Lists inbox
   bd mail send mayor/ -s "Hi"      # Sends mail
   bd mail read msg-123             # Reads a message`,
-	DisableFlagParsing: true, // Pass all args through to delegate
-	Run: func(cmd *cobra.Command, args []string) {
-		// Handle --help and -h ourselves since flag parsing is disabled
+	DisableFlagParsing: true,
+	SilenceUsage:       true,
+	SilenceErrors:      true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("mail")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		for _, arg := range args {
 			if arg == "--help" || arg == "-h" {
-				_ = cmd.Help() // Help() always returns nil for cobra commands
-				return
+				_ = cmd.Help()
+				return nil
 			}
 		}
 
-		// Find the mail delegate command
 		delegate := findMailDelegate()
 		if delegate == "" {
-			fmt.Fprintf(os.Stderr, "Error: no mail delegate configured\n\n")
-			fmt.Fprintf(os.Stderr, "bd mail delegates to an external mail provider.\n")
-			fmt.Fprintf(os.Stderr, "Configure one of:\n")
-			fmt.Fprintf(os.Stderr, "  export BEADS_MAIL_DELEGATE=\"gt mail\"   # Environment variable\n")
-			fmt.Fprintf(os.Stderr, "  bd config set mail.delegate \"gt mail\"  # Per-project config\n")
-			os.Exit(1)
+			return HandleErrorWithHint(
+				"no mail delegate configured",
+				"Set BEADS_MAIL_DELEGATE=\"gt mail\" or run: bd config set mail.delegate \"gt mail\"")
 		}
 
-		// Parse the delegate command (e.g., "gt mail" -> ["gt", "mail"])
 		parts := strings.Fields(delegate)
 		if len(parts) == 0 {
-			FatalError("invalid mail delegate: %q", delegate)
+			return HandleError("invalid mail delegate: %q", delegate)
 		}
 
-		// Build the full command with our args appended
 		cmdName := parts[0]
 		cmdArgs := append(parts[1:], args...)
 
-		// Execute the delegate command
 		// #nosec G204 - cmdName comes from user configuration (mail_delegate setting)
 		execCmd := exec.Command(cmdName, cmdArgs...)
 		execCmd.Stdin = os.Stdin
@@ -74,12 +76,12 @@ Examples:
 		execCmd.Stderr = os.Stderr
 
 		if err := execCmd.Run(); err != nil {
-			// Try to preserve the exit code
 			if exitErr, ok := err.(*exec.ExitError); ok {
-				os.Exit(exitErr.ExitCode())
+				return &exitError{Code: exitErr.ExitCode()}
 			}
-			FatalError("running %s: %v", delegate, err)
+			return HandleError("running %s: %v", delegate, err)
 		}
+		return nil
 	},
 }
 

@@ -39,22 +39,19 @@ func (m *countingMockTracker) CreateIssue(ctx context.Context, issue *types.Issu
 // rather than re-running the same doomed request for every remaining issue.
 func TestEnginePushAbortsLoopOnRateLimit(t *testing.T) {
 	ctx := context.Background()
-	store := newTestStore(t)
-	defer store.Close()
 
 	const numIssues = 5
+	issues := make([]*types.Issue, 0, numIssues)
 	for i := 0; i < numIssues; i++ {
-		issue := &types.Issue{
+		issues = append(issues, &types.Issue{
 			ID:        fmt.Sprintf("bd-rl%d", i),
 			Title:     fmt.Sprintf("Rate-limit issue %d", i),
 			Status:    types.StatusOpen,
 			IssueType: types.TypeTask,
 			Priority:  2,
-		}
-		if err := store.CreateIssue(ctx, issue, "test-actor"); err != nil {
-			t.Fatalf("seed CreateIssue: %v", err)
-		}
+		})
 	}
+	store := newPureTestStore(issues...)
 
 	tracker := &countingMockTracker{
 		mockTracker: newMockTracker("test"),

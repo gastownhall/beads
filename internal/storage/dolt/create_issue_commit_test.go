@@ -59,21 +59,32 @@ func TestCreateIssueCommitsInitialRelationalData(t *testing.T) {
 		t.Fatalf("committed comment count = %d, want 1", commentCount)
 	}
 
+	// events is dolt_ignored since migration 0062 (bd-red8u): the audit rows
+	// must be durable in the working set but never part of committed history.
 	var labelEventCount int
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		issue.ID, types.EventLabelAdded,
 	).Scan(&labelEventCount); err != nil {
-		t.Fatalf("count committed label events: %v", err)
+		t.Fatalf("count label events: %v", err)
 	}
 	if labelEventCount != 2 {
-		t.Fatalf("committed label_added event count = %d, want 2", labelEventCount)
+		t.Fatalf("label_added event count = %d, want 2", labelEventCount)
+	}
+	var committedEventCount int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events AS OF 'HEAD'",
+	).Scan(&committedEventCount); err == nil && committedEventCount != 0 {
+		t.Fatalf("events has %d rows at HEAD; want none in committed history (dolt_ignored, 0062)", committedEventCount)
 	}
 
+	// events is excluded: it is permanently working-set-resident since 0062,
+	// and on the shared branch-per-test database (events materialized at HEAD)
+	// its audit rows legitimately show in dolt_status as a modification.
 	var dirtyRelationalTables int
 	if err := store.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM dolt_status
-		WHERE table_name IN ('labels', 'comments', 'events')
+		WHERE table_name IN ('labels', 'comments')
 	`).Scan(&dirtyRelationalTables); err != nil {
 		t.Fatalf("count dirty relational tables: %v", err)
 	}
@@ -107,7 +118,7 @@ func TestCreateIssueWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t *
 		t.Fatalf("dirty label insert: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (UUID(), ?, ?, ?, ?)",
 		dirtyOwner.ID, "tester", "uncommitted comment", time.Now().UTC(),
 	); err != nil {
 		t.Fatalf("dirty comment insert: %v", err)
@@ -288,7 +299,7 @@ func TestCreateIssuesWithoutInitialRelationalDataDoesNotCommitDirtySideTables(t 
 		t.Fatalf("dirty label insert: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (UUID(), ?, ?, ?, ?)",
 		dirtyOwner.ID, "tester", "batch uncommitted comment", time.Now().UTC(),
 	); err != nil {
 		t.Fatalf("dirty comment insert: %v", err)
@@ -593,13 +604,13 @@ func TestCreateIssuesDuplicateSideTableInputsDoNotCommitDirtySideTables(t *testi
 		t.Fatalf("dirty label insert: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO comments (issue_id, author, text, created_at) VALUES (?, ?, ?, ?)",
+		"INSERT INTO comments (id, issue_id, author, text, created_at) VALUES (UUID(), ?, ?, ?, ?)",
 		dirtyOwner.ID, "tester", "uncommitted comment", createdAt.Add(time.Minute),
 	); err != nil {
 		t.Fatalf("dirty comment insert: %v", err)
 	}
 	if _, err := store.db.ExecContext(ctx,
-		"INSERT INTO dependencies (issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)",
+		"INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, ?, ?)",
 		dirtyOwner.ID, dirtyTarget.ID, types.DepBlocks, createdAt.Add(2*time.Minute), "tester",
 	); err != nil {
 		t.Fatalf("dirty dependency insert: %v", err)

@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,7 +11,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -22,8 +25,8 @@ import (
 // and dispatches directly against a shared storage.Transaction so the entire
 // batch executes as a single dolt transaction (one DOLT_COMMIT).
 //
-// The supported grammar is a documented subset that matches what the gascity
-// shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
+// The supported grammar is a documented subset that matches what a downstream
+// consumer's shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
 // cross-rig-deps.sh) actually call in loops. See the Long help below for the
 // exact list. Unsupported commands error out loudly.
 
@@ -50,8 +53,15 @@ Grammar (one command per line):
   dep remove <from-id> <to-id>
   #comment  (blank lines and '# ...' comments are ignored)
 
-Supported 'update' keys: status, priority, title, assignee
+Supported 'update' keys: status, priority, title, assignee, force
 Supported dependency types: see 'bd dep add --help' (default: blocks)
+
+'force' is not a field. An update whose status moves the issue into closed
+(or a configured done status) is refused when it still has open children or
+a live blocker, the same as 'bd close'; 'force=true' overrides that refusal.
+Because the batch is one transaction, an unforced refusal rolls back EVERY
+operation in the batch, not just the offending line. Note the asymmetry with
+'close <id>', which does not apply that policy at all.
 
 Tokens are whitespace-separated. Double-quoted strings ("like this") may
 contain spaces; use \" to embed a quote and \\ for a backslash.
@@ -76,7 +86,17 @@ normal 'bd' subcommands for interactive/read operations.`,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("batch is not supported in proxied-server mode")
+		}
 		CheckReadonly("batch")
+
+		evt := metrics.NewCommandEvent("batch")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
 		if store == nil {
 			return fmt.Errorf("no database connection available (%s)", diagHint())
@@ -110,10 +130,12 @@ normal 'bd' subcommands for interactive/read operations.`,
 				fmt.Fprintf(cmd.OutOrStdout(), "line %d: %s\n", op.line, op.raw)
 			}
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"dry_run":    true,
 					"operations": len(ops),
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Fprintf(cmd.OutOrStdout(), "%d operations parsed (dry-run, nothing executed)\n", len(ops))
 			}
@@ -124,10 +146,12 @@ normal 'bd' subcommands for interactive/read operations.`,
 			// Empty input is a no-op success, matching 'bd list | bd batch' on
 			// an empty list.
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				if err := outputJSON(map[string]interface{}{
 					"operations": 0,
 					"status":     "ok",
-				})
+				}); err != nil {
+					return err
+				}
 			} else {
 				fmt.Fprintln(cmd.OutOrStdout(), "batch: 0 operations (no-op)")
 			}
@@ -156,7 +180,9 @@ normal 'bd' subcommands for interactive/read operations.`,
 		})
 		if err != nil {
 			if jsonOutput {
-				outputJSONError(err, "batch_error")
+				if jerr := outputJSONError(err, "batch_error"); jerr != nil {
+					return errors.Join(err, jerr)
+				}
 			}
 			return err
 		}
@@ -164,11 +190,13 @@ normal 'bd' subcommands for interactive/read operations.`,
 		commandDidWrite.Store(true)
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			if err := outputJSON(map[string]interface{}{
 				"operations": len(results),
 				"status":     "ok",
 				"results":    results,
-			})
+			}); err != nil {
+				return err
+			}
 		} else {
 			fmt.Fprintf(cmd.OutOrStdout(), "batch: %d operations committed\n", len(results))
 			for _, r := range results {
@@ -455,8 +483,17 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			updates["title"] = value
 		case "assignee":
 			updates["assignee"] = value
+		case "force":
+			// Not a field: the override for close policy on a status that
+			// crosses into done, spelled as a token because a batch script has
+			// no flags. The write funnel pops it before validating fields.
+			force, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("update: invalid force %q: %w", value, err)
+			}
+			updates[issueops.OpForceClosePolicy] = force
 		default:
-			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee)", key)
+			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee, force)", key)
 		}
 	}
 	return updates, nil

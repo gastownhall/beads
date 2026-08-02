@@ -26,6 +26,15 @@ func (s *testSuite) SetupSuite() {
 
 func (s *testSuite) SetupTest() {
 	s.tmpDir = s.T().TempDir()
+	envDir := s.T().TempDir()
+	homeDir := filepath.Join(envDir, "home")
+	s.Require().NoError(os.MkdirAll(homeDir, 0700))
+	globalConfig := filepath.Join(homeDir, "gitconfig")
+	s.Require().NoError(os.WriteFile(globalConfig, nil, 0600))
+	s.T().Setenv("HOME", homeDir)
+	s.T().Setenv("USERPROFILE", homeDir)
+	s.T().Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	s.T().Setenv("GIT_CONFIG_GLOBAL", globalConfig)
 	s.repo = NewGitRepository(s.tmpDir)
 }
 

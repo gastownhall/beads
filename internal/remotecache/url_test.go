@@ -60,13 +60,17 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"https dolthub", "https://doltremoteapi.dolthub.com/org/repo", false, ""},
 		{"http localhost", "http://localhost:50051/mydb", false, ""},
 		{"s3 bucket", "s3://my-bucket/beads", false, ""},
+		{"aws bucket", "aws://my-bucket/beads", false, ""},
 		{"gs bucket", "gs://my-bucket/beads", false, ""},
 		{"az storage", "az://account.blob.core.windows.net/container/beads", false, ""},
+		{"oci storage", "oci://namespace/bucket/path", false, ""},
 		{"file URL", "file:///data/dolt-remote", false, ""},
 		{"ssh URL", "ssh://git@github.com/org/repo", false, ""},
+		{"git protocol URL", "git://github.com/org/repo", false, ""},
 		{"git+ssh URL", "git+ssh://git@github.com/org/repo", false, ""},
 		{"git+https URL", "git+https://github.com/org/repo", false, ""},
 		{"git+http URL", "git+http://example.com/repo.git", false, ""},
+		{"git+file URL", "git+file:///tmp/repo.git", false, ""},
 		{"SCP-style git", "git@github.com:org/repo.git", false, ""},
 		{"SCP-style deploy", "deploy@myserver.com:beads/data", false, ""},
 		{"https with port", "https://example.com:8443/repo", false, ""},
@@ -102,12 +106,15 @@ func TestValidateRemoteURL(t *testing.T) {
 		{"dolthub empty org", "dolthub:///repo", true, "org/repo"},
 		{"https no host", "https:///path", true, "hostname"},
 		{"ssh no host", "ssh:///path", true, "hostname"},
+		{"git no host", "git:///path", true, "hostname"},
 		{"git+ssh no host", "git+ssh:///path", true, "hostname"},
 		{"git+https no host", "git+https:///path", true, "hostname"},
 		{"git+http no host", "git+http:///path", true, "hostname"},
 		{"s3 no bucket", "s3:///path", true, "bucket"},
+		{"aws no bucket", "aws:///path", true, "bucket"},
 		{"gs no bucket", "gs:///path", true, "bucket"},
 		{"az no host", "az:///path", true, "hostname"},
+		{"oci no host", "oci:///path", true, "host"},
 	}
 
 	for _, tt := range tests {
@@ -125,6 +132,19 @@ func TestValidateRemoteURL(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateRemoteURLSchemeErrorListsAcceptedSchemes(t *testing.T) {
+	err := ValidateRemoteURL("ftp://server/path")
+	if err == nil {
+		t.Fatal("expected invalid scheme error")
+	}
+	msg := err.Error()
+	for _, scheme := range []string{"aws", "oci", "git", "git+file"} {
+		if !strings.Contains(msg, scheme) {
+			t.Fatalf("invalid scheme error %q should include accepted scheme %q", msg, scheme)
+		}
 	}
 }
 

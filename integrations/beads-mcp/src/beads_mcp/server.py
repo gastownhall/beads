@@ -17,9 +17,10 @@ import logging
 import os
 import signal
 import sys
+from collections.abc import Awaitable, Callable
 from functools import wraps
 from types import FrameType
-from typing import Any, Awaitable, Callable, TypeVar
+from typing import Any, TypeVar
 
 from fastmcp import FastMCP
 
@@ -27,6 +28,7 @@ from beads_mcp.models import (
     BlockedIssue,
     BriefDep,
     BriefIssue,
+    Comment,
     CompactedResult,
     DependencyType,
     Issue,
@@ -38,7 +40,9 @@ from beads_mcp.models import (
     Stats,
 )
 from beads_mcp.tools import (
+    beads_add_comment,
     beads_add_dependency,
+    beads_add_note,
     beads_blocked,
     beads_claim_issue,
     beads_close_issue,
@@ -47,11 +51,12 @@ from beads_mcp.tools import (
     beads_get_schema_info,
     beads_init,
     beads_inspect_migration,
+    beads_list_comments,
     beads_list_issues,
     beads_quickstart,
     beads_ready_work,
-    beads_repair_deps,
     beads_reopen_issue,
+    beads_repair_deps,
     beads_show_issue,
     beads_stats,
     beads_update_issue,
@@ -219,7 +224,8 @@ def require_context(func: Callable[..., Awaitable[T]]) -> Callable[..., Awaitabl
             workspace = current_workspace.get() or os.environ.get("BEADS_WORKING_DIR")
             if not workspace:
                 raise ValueError(
-                    "Context not set. Either provide workspace_root parameter or call context(workspace_root='...') first."
+                    "Context not set. Either provide workspace_root parameter or call "
+                    "context(workspace_root='...') first."
                 )
         return await func(*args, **kwargs)
 
@@ -343,6 +349,9 @@ _TOOL_CATALOG = {
     "close": "Close/complete an issue",
     "reopen": "Reopen closed issues",
     "dep": "Add dependency between issues",
+    "comment": "Add a comment to an issue (durable, timestamped work record)",
+    "comments": "List all comments on an issue",
+    "note": "Append a note to an issue's notes field",
     "stats": "Get issue statistics",
     "blocked": "Show blocked issues and what blocks them",
     "context": "Manage workspace context (set, show, init)",
@@ -354,7 +363,9 @@ _TOOL_CATALOG = {
 
 @mcp.tool(
     name="discover_tools",
-    description="List available beads tools (names and brief descriptions only). Use get_tool_info() for full details.",
+    description=(
+        "List available beads tools (names and brief descriptions only). Use get_tool_info() for full details."
+    ),
 )
 async def discover_tools() -> dict[str, Any]:
     """Discover available beads tools without loading full schemas.
@@ -391,7 +402,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "parameters": {
                 "limit": "int (1-100, default 10) - Max issues to return",
                 "priority": "int (0-4, optional) - Filter by priority",
-                "issue_type": "str (optional) - Filter by type (task, bug, feature, epic, chore, decision, merge-request, or custom)",
+                "issue_type": (
+                    "str (optional) - Filter by type (task, bug, feature, epic, chore, "
+                    "decision, merge-request, or custom)"
+                ),
                 "assignee": "str (optional) - Filter by assignee",
                 "labels": "list[str] (optional) - AND filter: must have ALL labels",
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
@@ -520,6 +534,38 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "returns": "Confirmation message",
             "example": "dep(issue_id='bd-f1a2', depends_on_id='bd-a1b2', dep_type='blocks')",
         },
+        "comment": {
+            "name": "comment",
+            "description": "Add a durable, timestamped comment to an issue (a record of work/decisions)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "text": "str (required) - human-readable summary of what changed/was decided/verified",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "Confirmation message",
+            "example": "comment(issue_id='bd-a1b2', text='Fixed the race in worker.py; tests pass')",
+        },
+        "comments": {
+            "name": "comments",
+            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "List of Comment {id, issue_id, author, text, created_at}",
+            "example": "comments(issue_id='bd-a1b2')",
+        },
+        "note": {
+            "name": "note",
+            "description": "Append a note to an issue's notes field (for a per-turn trail, prefer comment)",
+            "parameters": {
+                "issue_id": "str (required)",
+                "text": "str (required) - note text to append",
+                "workspace_root": "str (optional)",
+            },
+            "returns": "Confirmation message",
+            "example": "note(issue_id='bd-a1b2', text='Blocked on upstream PR #56954')",
+        },
         "stats": {
             "name": "stats",
             "description": "Get issue statistics",
@@ -556,7 +602,9 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "name": "context",
             "description": "Manage workspace context for beads operations",
             "parameters": {
-                "action": "str (optional) - set|show|init (default: show if no args, set if workspace_root provided)",
+                "action": (
+                    "str (optional) - set|show|init (default: show if no args, set if workspace_root provided)"
+                ),
                 "workspace_root": "str (optional) - Workspace path for set/init actions",
                 "prefix": "str (optional) - Issue ID prefix for init action",
             },
@@ -602,10 +650,7 @@ async def context(
     """
     # Infer action if not explicitly provided
     if action is None:
-        if workspace_root is not None:
-            action = "set"
-        else:
-            action = "show"
+        action = "set" if workspace_root is not None else "show"
 
     action = action.lower()
 
@@ -820,7 +865,10 @@ def _truncate_description(issue: Issue, max_length: int) -> Issue:
 
 @mcp.tool(
     name="ready",
-    description="Find tasks that have no blockers and are ready to be worked on. Returns minimal format for context efficiency.",
+    description=(
+        "Find tasks that have no blockers and are ready to be worked on. "
+        "Returns minimal format for context efficiency."
+    ),
 )
 @with_workspace
 async def ready_work(
@@ -889,7 +937,10 @@ async def ready_work(
             total_count=len(minimal_issues),
             preview=minimal_issues[:PREVIEW_COUNT],
             preview_count=PREVIEW_COUNT,
-            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} ready issues. Use show(issue_id) for full details.",
+            hint=(
+                f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} ready issues. "
+                "Use show(issue_id) for full details."
+            ),
         )
 
     return minimal_issues
@@ -897,7 +948,9 @@ async def ready_work(
 
 @mcp.tool(
     name="list",
-    description="List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info.",
+    description=(
+        "List all issues with optional filters. When status='blocked', returns BlockedIssue with blocked_by info."
+    ),
 )
 @with_workspace
 async def list_issues(
@@ -969,7 +1022,10 @@ async def list_issues(
             total_count=len(minimal_issues),
             preview=minimal_issues[:PREVIEW_COUNT],
             preview_count=PREVIEW_COUNT,
-            hint=f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} issues. Use show(issue_id) for full details or add filters to narrow results.",
+            hint=(
+                f"Showing {PREVIEW_COUNT} of {len(minimal_issues)} issues. "
+                "Use show(issue_id) for full details or add filters to narrow results."
+            ),
         )
 
     return minimal_issues
@@ -1083,8 +1139,6 @@ async def claim_issue(
         brief: If True (default), return minimal OperationResult; if False, return full Issue
     """
     issue = await beads_claim_issue(issue_id=issue_id)
-    if issue is None:
-        return None
     if brief:
         return OperationResult(id=issue.id, action="claimed")
     return issue
@@ -1138,8 +1192,12 @@ async def update_issue(
         external_ref=external_ref,
     )
 
-    if issue is None:
-        return None
+    if isinstance(issue, list):
+        if not issue:
+            return None
+        if brief:
+            return [OperationResult(id=item.id, action="updated") for item in issue]
+        return issue
     if brief:
         return OperationResult(id=issue.id, action="updated")
     return issue
@@ -1215,6 +1273,56 @@ async def add_dependency(
         depends_on_id=depends_on_id,
         dep_type=dep_type,
     )
+
+
+@mcp.tool(
+    name="comment",
+    description=(
+        "Add a human-readable comment to an issue — a durable, timestamped record of what "
+        "changed, was decided, or verified, so nobody has to read the agent transcript. "
+        "Prefer this over overwriting notes; comments accumulate as a per-turn trail."
+    ),
+)
+@with_workspace
+@require_context
+async def comment(
+    issue_id: str,
+    text: str,
+    workspace_root: str | None = None,
+) -> str:
+    """Add a comment to an issue."""
+    return await beads_add_comment(issue_id=issue_id, text=text)
+
+
+@mcp.tool(
+    name="comments",
+    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+)
+@with_workspace
+async def comments(
+    issue_id: str,
+    workspace_root: str | None = None,
+) -> list[Comment]:
+    """List all comments on an issue in chronological order."""
+    return await beads_list_comments(issue_id=issue_id)
+
+
+@mcp.tool(
+    name="note",
+    description=(
+        "Append a note to an issue's notes field. For a per-turn, timestamped trail that "
+        "multiple actors can follow, prefer comment()."
+    ),
+)
+@with_workspace
+@require_context
+async def note(
+    issue_id: str,
+    text: str,
+    workspace_root: str | None = None,
+) -> str:
+    """Append a note to an issue's notes field."""
+    return await beads_add_note(issue_id=issue_id, text=text)
 
 
 @mcp.tool(

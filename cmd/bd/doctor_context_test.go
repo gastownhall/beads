@@ -14,6 +14,13 @@ import (
 func savePersistentPreRunState(t *testing.T) {
 	t.Helper()
 
+	// Track env vars that PersistentPreRun may modify via prepareSelectedCommandContext
+	// or applyChangeDirSelection. Without this, a call to PersistentPreRun leaves
+	// BEADS_DIR set to the project's .beads dir, corrupting subsequent tests.
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+		t.Setenv(key, os.Getenv(key))
+	}
+
 	oldServerMode := serverMode
 	oldCmdCtx := cmdCtx
 	oldDBPath := dbPath
@@ -70,10 +77,12 @@ func TestDoctorPersistentPreRunLoadsServerModeForNoDBCommand(t *testing.T) {
 	t.Cleanup(config.ResetForTesting)
 	savePersistentPreRunState(t)
 
-	if rootCmd.PersistentPreRun == nil {
-		t.Fatal("rootCmd.PersistentPreRun must be set")
+	if rootCmd.PersistentPreRunE == nil {
+		t.Fatal("rootCmd.PersistentPreRunE must be set")
 	}
-	rootCmd.PersistentPreRun(doctorCmd, nil)
+	if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
 
 	if !serverMode {
 		t.Fatal("doctor should load server mode before the no-store early return")
@@ -107,7 +116,9 @@ func TestDoctorPersistentPreRunUsesExplicitDBTarget(t *testing.T) {
 		flag.Changed = true
 	}
 
-	rootCmd.PersistentPreRun(doctorCmd, nil)
+	if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
 
 	if got := os.Getenv("BEADS_DIR"); got != targetBeadsDir {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, targetBeadsDir)
@@ -144,7 +155,9 @@ func TestBootstrapPersistentPreRunUsesExplicitDBTarget(t *testing.T) {
 		flag.Changed = true
 	}
 
-	rootCmd.PersistentPreRun(bootstrapCmd, nil)
+	if err := rootCmd.PersistentPreRunE(bootstrapCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
 
 	if got := os.Getenv("BEADS_DIR"); got != targetBeadsDir {
 		t.Fatalf("BEADS_DIR = %q, want %q", got, targetBeadsDir)
@@ -181,7 +194,6 @@ func TestLoadSelectionEnvironmentUsesAmbientEnvFileForBEADSDB(t *testing.T) {
 		t.Fatalf("FindDatabasePath() = %q, want %q", got, targetDBPath)
 	}
 }
-
 func TestSelectedDoltBeadsDirUsesReboundBEADSDir(t *testing.T) {
 	callerRepo := filepath.Join(t.TempDir(), "caller")
 	callerBeadsDir := filepath.Join(callerRepo, ".beads")

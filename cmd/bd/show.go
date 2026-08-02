@@ -1,25 +1,39 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var showCmd = &cobra.Command{
-	Use:     "show [id...] [--id=<id>...] [--current]",
-	Aliases: []string{"view"},
-	GroupID: "issues",
-	Short:   "Show issue details",
-	Args:    cobra.ArbitraryArgs, // Allow zero positional args when --id is used
-	Run: func(cmd *cobra.Command, args []string) {
+	Use:           "show [id...] [--id=<id>...] [--current]",
+	Aliases:       []string{"view"},
+	GroupID:       "issues",
+	Short:         "Show issue details",
+	Args:          cobra.ArbitraryArgs, // Allow zero positional args when --id is used
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("show")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runShowProxiedServer(cmd, rootCtx, args)
+		}
+
 		showThread, _ := cmd.Flags().GetBool("thread")
 		shortMode, _ := cmd.Flags().GetBool("short")
 		longMode, _ := cmd.Flags().GetBool("long")
@@ -46,69 +60,54 @@ var showCmd = &cobra.Command{
 		// This allows IDs that look like flags (e.g., --xyz or gt--abc) to be passed safely
 		args = append(args, idFlags...)
 
-		// Handle --current: resolve the active issue (GH#2184)
 		if currentMode {
 			if len(args) > 0 {
-				FatalErrorRespectJSON("--current cannot be combined with explicit issue IDs")
+				return HandleErrorRespectJSON("--current cannot be combined with explicit issue IDs")
 			}
 			currentID := resolveCurrentIssueID(ctx)
 			if currentID == "" {
-				FatalErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
+				return HandleErrorRespectJSON("no current issue found (no in-progress, hooked, or recently touched issues)")
 			}
 			args = []string{currentID}
 		}
 
-		// Validate that at least one ID is provided
 		if len(args) == 0 {
-			FatalErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
+			return HandleErrorRespectJSON("at least one issue ID is required (use positional args, --id flag, or --current)")
 		}
 
-		// Handle --as-of flag: show issue at a specific point in history
 		if asOfRef != "" {
-			showIssueAsOf(ctx, args, asOfRef, shortMode)
-			return
+			return showIssueAsOf(ctx, args, asOfRef, shortMode)
 		}
 
-		// Handle --watch mode (GH#654)
-		// Watch mode requires direct store access for file watching
 		if watchMode {
 			if err := ensureDirectMode("watch mode requires direct database access"); err != nil {
-				FatalErrorRespectJSON("%v", err)
+				return HandleErrorRespectJSON("%v", err)
 			}
 			if len(args) != 1 {
-				FatalErrorRespectJSON("watch mode requires exactly one issue ID")
+				return HandleErrorRespectJSON("watch mode requires exactly one issue ID")
 			}
 			watchIssue(ctx, args[0])
-			return
+			return nil
 		}
 
-		// Note: Direct mode uses resolveAndGetIssueWithRouting for prefix-based routing
-
-		// Handle --thread flag: show full conversation thread
 		if showThread {
 			if len(args) > 0 {
-				// Direct mode - resolve first arg with routing
 				result, err := resolveAndGetIssueWithRouting(ctx, store, args[0])
 				if result != nil {
 					defer result.Close()
 				}
 				if err == nil && result != nil && result.ResolvedID != "" {
-					showMessageThread(ctx, result.ResolvedID, jsonOutput)
-					return
+					return showMessageThread(ctx, result.ResolvedID, jsonOutput)
 				}
 			}
 		}
 
-		// Handle --refs flag: show issues that reference this issue
 		if showRefs {
-			showIssueRefs(ctx, args, jsonOutput)
-			return
+			return showIssueRefs(ctx, args, jsonOutput)
 		}
 
-		// Handle --children flag: show only children of this issue
 		if showChildren {
-			showIssueChildren(ctx, args, jsonOutput, shortMode)
-			return
+			return showIssueChildren(ctx, args, jsonOutput, shortMode)
 		}
 
 		// Direct mode - use routed resolution for cross-repo lookups
@@ -143,81 +142,32 @@ var showCmd = &cobra.Command{
 			}
 
 			if jsonOutput {
-				// be-ijck6q: default is count-only (no dependents/comments slice in output).
-				// Use --include-dependents / --include-comments to stream the full lists.
-				details := &types.IssueDetails{Issue: *issue}
-				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
-				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-
-				// Aggregate counts — O(1) queries, no row materialization.
-				depCount, _ := issueStore.CountDependents(ctx, issue.ID)
-				details.DependentCount = &depCount
-				depnCount, _ := issueStore.CountDependencies(ctx, issue.ID)
-				details.DependencyCount = &depnCount
-				cmtCount, _ := issueStore.CountIssueComments(ctx, issue.ID)
-				details.CommentCount = &cmtCount
-
-				// --include-dependents: stream via Iter, shallow-copy each item.
-				// May be slow on hub beads with many dependents.
-				if includeDepends {
-					iter, err := issueStore.IterDependentsWithMetadata(ctx, issue.ID)
-					if err == nil {
-						defer iter.Close() //nolint:errcheck
-						var shallowDeps []*types.IssueWithDependencyMetadata
-						for iter.Next(ctx) {
-							item := iter.Value()
-							shallowDeps = append(shallowDeps, &types.IssueWithDependencyMetadata{
-								Issue: types.Issue{
-									ID:        item.Issue.ID,
-									Status:    item.Issue.Status,
-									IssueType: item.Issue.IssueType,
-									Priority:  item.Issue.Priority,
-									Title:     item.Issue.Title,
-								},
-								DependencyType: item.DependencyType,
-							})
-						}
-						details.Dependents = shallowDeps
-
-						// Epic progress from streamed dependents.
-						if issue.IssueType == types.TypeEpic && len(shallowDeps) > 0 {
-							total, closed := 0, 0
-							for _, dep := range shallowDeps {
-								if dep.DependencyType == types.DepParentChild {
-									total++
-									if dep.Issue.Status == types.StatusClosed {
-										closed++
-									}
-								}
-							}
-							if total > 0 {
-								details.EpicTotalChildren = &total
-								details.EpicClosedChildren = &closed
-								closeable := total == closed
-								details.EpicCloseable = &closeable
-							}
-						}
-					}
+				// Shaping the detail view belongs to the reader role, not the
+				// CLI: the count-only default (be-ijck6q), the
+				// comments-omitted flag (ga-clgh), and the shallow dependent
+				// rows (be-4d36f2) have to read the same from every frontend,
+				// and going through the accessor is what makes that true by
+				// construction rather than by everyone remembering to call the
+				// same helper.
+				//
+				// The id handed over is the CANONICAL one this command already
+				// resolved. Fuzzy and cross-repo resolution stay here on
+				// purpose: an affordance that can answer with a different
+				// issue than the caller named has no place on a contract an
+				// unattended HTTP client also calls.
+				rd, rerr := issueStore.IssueReader()
+				if rerr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", rerr)
 				}
-
-				// --include-comments: stream via Iter.
-				// May be slow on issues with many comments.
-				if includeComments {
-					iter, err := issueStore.IterIssueComments(ctx, issue.ID)
-					if err == nil {
-						defer iter.Close() //nolint:errcheck
-						for iter.Next(ctx) {
-							details.Comments = append(details.Comments, iter.Value())
-						}
-					}
-				}
-
-				// Compute parent from dependencies.
-				for _, dep := range details.Dependencies {
-					if dep.DependencyType == types.DepParentChild {
-						details.Parent = &dep.ID
-						break
-					}
+				details, derr := rd.Get(ctx, issueops.GetRequest{
+					ID:                issue.ID,
+					IncludeDependents: includeDepends,
+					IncludeComments:   includeComments,
+				})
+				if derr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", derr)
 				}
 				allDetails = append(allDetails, details)
 				result.Close()
@@ -411,59 +361,26 @@ var showCmd = &cobra.Command{
 
 		if jsonOutput {
 			if len(allDetails) > 0 {
-				outputJSON(allDetails)
+				if jerr := outputJSON(allDetails); jerr != nil {
+					return jerr
+				}
 			} else {
-				// No issues found - exit non-zero with structured JSON error
-				// so downstream consumers (e.g., gt bd move) get a proper error
-				// instead of empty stdout causing "unexpected end of JSON input"
-				FatalErrorRespectJSON("no issues found matching the provided IDs")
+				return HandleErrorRespectJSON("no issues found matching the provided IDs")
 			}
 		} else if foundCount > 0 {
-			// Show tip after successful show (non-JSON mode)
 			maybeShowTip(store)
 		} else {
-			os.Exit(1)
+			if len(args) > 0 {
+				SetLastTouchedID(args[0])
+			}
+			return SilentExit()
 		}
 
-		// Track first shown issue as last touched
 		if len(args) > 0 {
 			SetLastTouchedID(args[0])
 		}
-	},
-}
-
-// shallowDependentsForJSON returns a copy of raw with each embedded Issue
-// stripped down to identity-and-shape fields (ID, Status, IssueType, Priority,
-// Title). The heavy fields (Description, Design, Notes, AcceptanceCriteria,
-// metadata blobs, etc.) are dropped.
-//
-// be-4d36f2: hub beads with thousands of dependents previously caused
-// `bd show --json <hub>` to allocate 5-13 GB while marshaling full Issue
-// records into JSON. The shallow shape preserves what callers actually
-// consume (counts, status, type) and drops what they don't (free-form
-// text fields). On a 4-dependent hub this trims output ~60%; on a hub
-// with thousands of dependents, savings scale linearly.
-func shallowDependentsForJSON(raw []*types.IssueWithDependencyMetadata) []*types.IssueWithDependencyMetadata {
-	if len(raw) == 0 {
 		return nil
-	}
-	shallow := make([]*types.IssueWithDependencyMetadata, 0, len(raw))
-	for _, dep := range raw {
-		if dep == nil {
-			continue
-		}
-		shallow = append(shallow, &types.IssueWithDependencyMetadata{
-			Issue: types.Issue{
-				ID:        dep.Issue.ID,
-				Status:    dep.Issue.Status,
-				IssueType: dep.Issue.IssueType,
-				Priority:  dep.Issue.Priority,
-				Title:     dep.Issue.Title,
-			},
-			DependencyType: dep.DependencyType,
-		})
-	}
-	return shallow
+	},
 }
 
 func init() {
@@ -481,44 +398,4 @@ func init() {
 	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
-}
-
-// resolveCurrentIssueID determines the current active issue for the agent.
-// Priority: in-progress assigned to actor > hooked > last touched.
-func resolveCurrentIssueID(ctx context.Context) string {
-	if store == nil {
-		// No store — fall back to last touched
-		return GetLastTouchedID()
-	}
-
-	currentActor := getActorWithGit()
-
-	// 1. In-progress issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusInProgress
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 2. Hooked issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusHooked
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 3. Last touched issue (fallback)
-	return GetLastTouchedID()
 }

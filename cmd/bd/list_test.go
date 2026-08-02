@@ -192,36 +192,43 @@ func TestListCommandSuite(t *testing.T) {
 				t.Fatalf("Failed to add dependency: %v", err)
 			}
 
-			err := outputDotFormat(h.ctx, h.store, h.issues)
+			deps, derr := h.store.GetAllDependencyRecords(h.ctx)
+			if derr != nil {
+				t.Fatalf("GetAllDependencyRecords: %v", derr)
+			}
+			err := outputDotFormat(h.issues, deps)
 			if err != nil {
 				t.Errorf("outputDotFormat failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list dot", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "dot")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "dot")
 			if err != nil {
 				t.Errorf("outputFormattedList with dot format failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list digraph preset", func(t *testing.T) {
-			// Dependency already added in previous test, just use it
-			err := outputFormattedList(h.ctx, h.store, h.issues, "digraph")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "digraph")
 			if err != nil {
 				t.Errorf("outputFormattedList with digraph format failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list custom template", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID}} {{.Title}}")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "{{.ID}} {{.Title}}")
 			if err != nil {
 				t.Errorf("outputFormattedList with custom template failed: %v", err)
 			}
 		})
 
 		t.Run("output formatted list invalid template", func(t *testing.T) {
-			err := outputFormattedList(h.ctx, h.store, h.issues, "{{.ID")
+			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
+			err := outputFormattedList(h.issues, deps, "{{.ID")
 			if err == nil {
 				t.Error("Expected error for invalid template")
 			}
@@ -557,6 +564,131 @@ func TestListQueryCapabilitiesSuite(t *testing.T) {
 		}
 		if len(results) != 2 {
 			t.Errorf("Expected 2 results matching combined filters, got %d", len(results))
+		}
+	})
+}
+
+// TestListLabelFiltersAcnquj covers the acceptance criteria for be-acnquj
+// (label/title-contains filters silently ignored). Before the fix, every
+// label filter returned the full open set, breaking factory routing. Each
+// subtest fails if the corresponding filter is not actually applied.
+func TestListLabelFiltersAcnquj(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+
+	mk := func(title string, labels ...string) *types.Issue {
+		issue := &types.Issue{
+			Title:     title,
+			Priority:  2,
+			IssueType: types.TypeTask,
+			Status:    types.StatusOpen,
+		}
+		if err := s.CreateIssue(ctx, issue, "test-user"); err != nil {
+			t.Fatalf("create %q: %v", title, err)
+		}
+		for _, label := range labels {
+			if err := s.AddLabel(ctx, issue.ID, label, "test-user"); err != nil {
+				t.Fatalf("addLabel %s/%s: %v", issue.ID, label, err)
+			}
+		}
+		return issue
+	}
+
+	apple := mk("apple pie", "fruit", "dessert")
+	orange := mk("orange juice", "fruit", "drink")
+	water := mk("water bottle", "drink")
+	rock := mk("rock formation")
+	techDebt := mk("tech debt: refactor cache", "tech-debt")
+	techLegacy := mk("tech legacy: old API", "tech-legacy")
+
+	idsOf := func(issues []*types.Issue) map[string]bool {
+		out := make(map[string]bool, len(issues))
+		for _, i := range issues {
+			out[i.ID] = true
+		}
+		return out
+	}
+
+	// AC#1: -l X returns ONLY beads with label X.
+	t.Run("label_single", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"fruit"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[apple.ID] || !got[orange.ID] {
+			t.Errorf("expected apple+orange, got %v", got)
+		}
+		if got[water.ID] || got[rock.ID] {
+			t.Errorf("water/rock should not match -l fruit, got %v", got)
+		}
+	})
+
+	// AC#1 + AC#6: -l X -l Y (AND semantics).
+	t.Run("label_and_composition", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"fruit", "drink"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if len(got) != 1 || !got[orange.ID] {
+			t.Errorf("expected only orange (fruit AND drink), got %v", got)
+		}
+	})
+
+	// AC#2: --label-any A,B (OR semantics).
+	t.Run("label_any_or_composition", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelsAny: []string{"dessert", "drink"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[apple.ID] || !got[orange.ID] || !got[water.ID] {
+			t.Errorf("expected apple+orange+water (dessert OR drink), got %v", got)
+		}
+		if got[rock.ID] {
+			t.Errorf("rock should not match dessert/drink, got %v", got)
+		}
+	})
+
+	// AC#3: --label-pattern glob matches labels by pattern.
+	t.Run("label_pattern_glob", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{LabelPattern: "tech-*"})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if !got[techDebt.ID] || !got[techLegacy.ID] {
+			t.Errorf("expected tech-* labels to match, got %v", got)
+		}
+		if got[apple.ID] || got[water.ID] {
+			t.Errorf("non-tech labels should not match tech-*, got %v", got)
+		}
+	})
+
+	// AC#4: --title-contains case-insensitive substring.
+	t.Run("title_contains_case_insensitive", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{TitleContains: "PIE"})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		got := idsOf(results)
+		if len(got) != 1 || !got[apple.ID] {
+			t.Errorf("expected only apple (title contains 'pie'), got %v", got)
+		}
+	})
+
+	// AC#5: -l NONEXISTENT returns empty.
+	t.Run("label_nonexistent_empty", func(t *testing.T) {
+		results, err := s.SearchIssues(ctx, "", types.IssueFilter{Labels: []string{"ZZZZZZZZ-no-such-label"}})
+		if err != nil {
+			t.Fatalf("search: %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("expected empty result for nonexistent label, got %d issues", len(results))
 		}
 	})
 }
@@ -1454,14 +1586,15 @@ func TestHierarchicalChildren(t *testing.T) {
 		}
 	})
 
-	// Test leaf node (should return only itself)
+	// Test leaf node: a childless parent is not echoed (GH#3349), so a leaf
+	// has no hierarchical children and the result is empty.
 	t.Run("leaf_node", func(t *testing.T) {
 		issues, err := getHierarchicalChildren(ctx, store, "", grandchild11.ID, types.IssueFilter{})
 		if err != nil {
 			t.Fatalf("getHierarchicalChildren for leaf failed: %v", err)
 		}
-		if len(issues) != 1 || issues[0].ID != grandchild11.ID {
-			t.Errorf("Expected 1 issue (leaf), got %d", len(issues))
+		if len(issues) != 0 {
+			t.Errorf("Expected 0 issues for a leaf node (GH#3349: parent not echoed when childless), got %d", len(issues))
 		}
 	})
 

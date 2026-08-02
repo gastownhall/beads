@@ -13,33 +13,38 @@ import (
 // This integrates the detect-pollution command functionality into doctor.
 //
 //nolint:unparam // path reserved for future use
-func runPollutionCheck(_ string, clean bool, yes bool) {
-	// Ensure we have a store initialized
+func runPollutionCheck(_ string, clean bool, yes bool) error {
 	if err := ensureDirectMode("pollution check requires direct mode"); err != nil {
-		FatalError("%v", err)
+		return HandleError("%v", err)
 	}
 
 	ctx := rootCtx
 
-	// Get all issues
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	// Get all issues (env-only cap via BEADS_MAX_ROWS; designer §4: doctor
+	// family is env opt-in, no operator-facing flag).
+	maxRows, maxRowsSource := resolveMaxRowsEnvOnly()
+	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	})
 	if err != nil {
-		FatalError("fetching issues: %v", err)
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
+		return HandleError("fetching issues: %v", err)
 	}
 
-	// Detect pollution (reuse detectTestPollution from detect_pollution.go)
 	polluted := detectTestPollution(allIssues)
 
 	if len(polluted) == 0 {
-		if !jsonOutput {
-			fmt.Println("No test pollution detected!")
-		} else {
-			outputJSON(map[string]interface{}{
+		if jsonOutput {
+			return outputJSON(map[string]interface{}{
 				"polluted_count": 0,
 				"issues":         []interface{}{},
 			})
 		}
-		return
+		fmt.Println("No test pollution detected!")
+		return nil
 	}
 
 	// Categorize by confidence
@@ -72,8 +77,7 @@ func runPollutionCheck(_ string, clean bool, yes bool) {
 			})
 		}
 
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
 
 	// Human-readable output
@@ -103,28 +107,25 @@ func runPollutionCheck(_ string, clean bool, yes bool) {
 
 	if !clean {
 		fmt.Printf("Run 'bd doctor --check=pollution --clean' to delete these issues (with confirmation).\n")
-		return
+		return nil
 	}
 
-	// Confirmation prompt
 	if !yes {
 		fmt.Printf("\nDelete %d test issues? [y/N] ", len(polluted))
 		var response string
 		_, _ = fmt.Scanln(&response)
 		if strings.ToLower(response) != "y" {
 			fmt.Println("Canceled.")
-			return
+			return nil
 		}
 	}
 
-	// Backup to JSONL before deleting
 	backupPath := ".beads/pollution-backup.jsonl"
 	if err := backupPollutedIssues(polluted, backupPath); err != nil {
-		FatalError("backing up issues: %v", err)
+		return HandleError("backing up issues: %v", err)
 	}
 	fmt.Printf("Backed up %d issues to %s\n", len(polluted), backupPath)
 
-	// Delete issues
 	fmt.Printf("\nDeleting %d issues...\n", len(polluted))
 	deleted := 0
 	for _, p := range polluted {
@@ -137,6 +138,7 @@ func runPollutionCheck(_ string, clean bool, yes bool) {
 
 	fmt.Printf("%s Deleted %d test issues\n", ui.RenderPass("✓"), deleted)
 	fmt.Printf("\nCleanup complete. To restore, run: bd init --from-jsonl %s\n", backupPath)
+	return nil
 }
 
 func init() {

@@ -21,6 +21,10 @@ Before implementing a feature/fix or opening a replacement PR:
 What this checks:
   - whether an existing PR is external/cross-repository contributor work
   - draft, review, mergeability, and check status
+  - CI health of the base branch (red base makes "failures are pre-existing"
+    reasoning unsafe; set PR_PREFLIGHT_BLOCK_RED_BASE=1 to block instead of warn)
+  - a supplemental, warn-only sample for a PR-gate workflow (e.g. pr.yml) that
+    is red for every PR while the base branch itself looks green
   - risky diff signals: .beads data, missing tests for code changes, large diffs
   - contributor-protection next steps and attribution reminders
 
@@ -57,6 +61,60 @@ default_repo() {
     return
   fi
   gh repo view --json nameWithOwner --jq .nameWithOwner
+}
+
+closing_issue_count() {
+  local pr_url="$1"
+  local pr_number="$2"
+  local repo_host repo_owner repo_name response count
+
+  if [[ "$pr_url" =~ ^https://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+)$ ]]; then
+    repo_host="${BASH_REMATCH[1]}"
+    repo_owner="${BASH_REMATCH[2]}"
+    repo_name="${BASH_REMATCH[3]}"
+    if [[ "${BASH_REMATCH[4]}" != "$pr_number" ]]; then
+      die "PR URL number does not match returned PR number: ${pr_url}"
+    fi
+  else
+    die "invalid canonical GitHub PR URL: ${pr_url}"
+  fi
+
+  # GraphQL variables are intentionally literal and are bound by gh -f/-F.
+  # shellcheck disable=SC2016
+  if ! response=$(gh api graphql \
+    --hostname "$repo_host" \
+    -f query='query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          closingIssuesReferences(first: 1) { nodes { id } }
+        }
+      }
+    }' \
+    -f owner="$repo_owner" \
+    -f name="$repo_name" \
+    -F number="$pr_number"); then
+    die "could not query closing issue references for ${repo_owner}/${repo_name}#${pr_number}"
+  fi
+
+  if ! count=$(jq -ser '
+    select(length == 1)
+    | .[0]
+    | select(has("errors") | not)
+    | .data.repository.pullRequest.closingIssuesReferences.nodes
+    | if type != "array" then empty
+      elif length == 0 then "0"
+      elif length == 1
+        and (.[0] | type == "object")
+        and (.[0] | keys == ["id"])
+        and (.[0].id | type == "string" and length > 0)
+      then "1"
+      else empty
+      end
+  ' <<<"$response"); then
+    die "invalid closing issue response for ${repo_owner}/${repo_name}#${pr_number}"
+  fi
+
+  printf '%s\n' "$count"
 }
 
 repo=""
@@ -126,7 +184,7 @@ fi
 
 json=$(gh pr view "$pr" \
   --repo "$repo" \
-  --json number,title,author,url,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,isDraft,maintainerCanModify,mergeStateStatus,mergeable,reviewDecision,changedFiles,additions,deletions,files,statusCheckRollup,closingIssuesReferences,latestReviews)
+  --json number,title,author,url,baseRefName,headRefName,headRepositoryOwner,isCrossRepository,isDraft,maintainerCanModify,mergeStateStatus,mergeable,reviewDecision,changedFiles,additions,deletions,files,statusCheckRollup,latestReviews)
 
 number=$(jq -r .number <<<"$json")
 title=$(jq -r .title <<<"$json")
@@ -207,11 +265,114 @@ if [[ "$mergeable" == "CONFLICTING" ]]; then
   block "GitHub reports merge conflicts."
 fi
 
-failed_checks=$(jq '[.statusCheckRollup[]? | select(
+# Base-branch CI health. Merging onto a red base is how breakage stacks:
+# every open PR inherits the red checks, "failures are pre-existing" becomes
+# the default reasoning, and new failures ride in under that cover. Cancelled
+# runs (superseded by a newer push) carry no signal, so judge by the newest
+# completed run that finished with a decisive green or red conclusion.
+base_ref=$(jq -r .baseRefName <<<"$json")
+base_runs=$(gh run list --repo "$repo" --branch "$base_ref" --status completed \
+  --limit 30 --json conclusion,workflowName,createdAt,url 2>/dev/null) || base_runs=""
+# Latest decisive run per workflow, so a green unrelated workflow that happened
+# to run last cannot mask a red test workflow (and vice versa).
+base_latest_per_wf=$(jq '[group_by(.workflowName)[]
+  | [.[] | select((.conclusion // "") == "success" or ((.conclusion // "") | test("^(failure|timed_out|action_required)$")))][0]
+  | select(. != null)]' <<<"${base_runs:-[]}")
+base_red=$(jq '[.[] | select((.conclusion // "") | test("^(failure|timed_out|action_required)$"))]' <<<"$base_latest_per_wf")
+base_red_count=$(jq 'length' <<<"$base_red")
+base_green_count=$(jq '[.[] | select(.conclusion == "success")] | length' <<<"$base_latest_per_wf")
+if [[ "$base_red_count" -gt 0 ]]; then
+  red_base_msg="Base branch ${base_ref} CI is RED: $(jq -r 'map("\(.workflowName) failed at \(.createdAt) (\(.url))") | join("; ")' <<<"$base_red"). Check failures on this PR may be pre-existing base breakage, and merging onto a red base hides new failures. Merge only the fix for ${base_ref} while it is red; for everything else wait, then update the branch and re-run checks."
+  if [[ "${PR_PREFLIGHT_BLOCK_RED_BASE:-0}" == "1" ]]; then
+    block "$red_base_msg"
+  else
+    warn "$red_base_msg"
+  fi
+elif [[ "$base_green_count" -gt 0 ]]; then
+  pass "Base branch ${base_ref} CI is green (latest completed run of each of ${base_green_count} workflow(s) succeeded)."
+else
+  warn "Could not determine CI health of base branch ${base_ref}; check it manually before merging."
+fi
+
+# PR-gate health sample. The base-branch check above reads runs on the base
+# branch itself, so it cannot see a job that exists only in the PR workflow
+# (pr.yml) - such a job never runs on the base branch, and one broken job
+# there is diluted to invisibility by every other green PR workflow if runs
+# are judged in aggregate. Sample recent completed pull_request-event runs
+# across PRs, group by workflow, and flag any single workflow whose decisive
+# runs are uniformly failing across several distinct branches.
+#
+# This is a supplemental, warn-only detector, deliberately never coupled to
+# PR_PREFLIGHT_BLOCK_RED_BASE: a [block] line here matches neither the
+# red-base nor the transient-block patterns pr-babysit's patrol looks for,
+# so blocking would park every merge lane and silently revoke the red-base
+# merge exception. (Wiring this signal into the patrol is a separate,
+# coordinated change.) Skip the sample entirely when the base branch is
+# already red - that already explains per-PR redness, and avoids reporting
+# "the base branch shows green" right after a red-base line above - and stay
+# silent on an empty, unreadable, or mixed-health sample.
+if [[ "$base_red_count" -eq 0 && "$base_green_count" -gt 0 ]]; then
+  # Only diagnose the PR gate against a base branch known to be green: on a red
+  # base the red-base message already explains PR redness, and on an
+  # undetermined base the "while the base branch shows green" explanation
+  # would contradict the warn printed just above.
+  pr_gate_runs=$(gh run list --repo "$repo" --event pull_request --status completed \
+    --limit 60 --json conclusion,headBranch,workflowName,workflowDatabaseId,createdAt,url 2>/dev/null) || pr_gate_runs=""
+  # gh can exit 0 with non-JSON (or empty) output; treat anything that is not
+  # a JSON array the same as an empty sample rather than let jq abort under -e.
+  jq -e 'type == "array"' >/dev/null 2>&1 <<<"${pr_gate_runs:-}" || pr_gate_runs='[]'
+  # Grouped by workflowDatabaseId (stable identity), not display name: two
+  # workflow files may share a legal name:, and org/ruleset runs can have no
+  # name at all. Known limitation, accepted for a warn-only supplemental
+  # detector: the sample is repo-wide, so runs from PRs targeting other base
+  # branches are mixed in — resolving each run's PR to filter by base would
+  # cost one API call per run.
+  pr_gate_broken=$(jq '
+    [group_by(.workflowDatabaseId)[]
+     | { workflow: (.[0].workflowName // "unknown"),
+         decisive: [.[] | select(
+           (.conclusion // "") == "success" or
+           ((.conclusion // "") | test("^(failure|timed_out|action_required|startup_failure)$"))
+         )] }
+     | select((.decisive | length) >= 5)
+     | select((.decisive | map(.headBranch) | unique | length) >= 3)
+     | select(all(.decisive[]; (.conclusion // "") | test("^(failure|timed_out|action_required|startup_failure)$")))
+    ] | .[0] // empty' <<<"$pr_gate_runs") || pr_gate_broken=""
+  if [[ -n "$pr_gate_broken" ]]; then
+    pr_gate_workflow=$(jq -r '.workflow' <<<"$pr_gate_broken")
+    pr_gate_count=$(jq -r '.decisive | length' <<<"$pr_gate_broken")
+    pr_gate_heads=$(jq -r '.decisive | map(.headBranch) | unique | length' <<<"$pr_gate_broken")
+    pr_gate_newest=$(jq -r '.decisive | sort_by(.createdAt) | last | "\(.createdAt) \(.url)"' <<<"$pr_gate_broken")
+    warn "PR gate workflow '${pr_gate_workflow}' appears broken: all ${pr_gate_count} of its recent completed pull_request runs across ${pr_gate_heads} branches failed (newest: ${pr_gate_newest}). A job that exists only in that workflow may be red for every PR while the base branch shows green. Investigate before trusting per-PR check verdicts."
+  fi
+fi
+
+# statusCheckRollup keeps every check run on the head SHA, including runs
+# from cancelled or superseded check suites. A head whose earlier suite was
+# cancelled mid-flight carries stale CANCELLED/FAILURE entries forever, next
+# to the fresh green re-runs of the same checks — GitHub's own mergeability
+# uses latest-per-name, so counting raw entries permanently blocks PRs that
+# GitHub reports CLEAN (observed on gastownhall/beads#5073–5076: 20 stale
+# CANCELLED runs + 1 stale gate FAILURE alongside 80 green checks). Collapse
+# to the most recent entry per check name/context before classifying.
+# Group key includes __typename and workflowName: a commit status and a
+# check run sharing a name are independent gates (GitHub requires both),
+# and identically named jobs in different workflows must not collapse into
+# one entry where a green run could mask the other workflow's red one.
+# gh exports absent CheckRun times as the zero time (0001-01-01...), so
+# normalize before comparing or the // fallback never fires; "latest" is
+# the max of completed/started/created so a fresh in-progress rerun beats
+# an old completed failure (and is then reported as pending, not failed).
+rollup_latest=$(jq '
+  def nz: (. // "") | if startswith("0001-") then "" else . end;
+  [.statusCheckRollup[]?]
+  | group_by([(.__typename // ""), (.workflowName // ""), (.name // .context // "")])
+  | map(max_by([(.completedAt | nz), (.startedAt | nz), (.createdAt | nz)] | max))' <<<"$json")
+failed_checks=$(jq '[.[] | select(
   ((.conclusion // "") | test("FAILURE|CANCELLED|TIMED_OUT|ACTION_REQUIRED")) or
   ((.state // "") | test("ERROR|FAILURE"))
-)] | length' <<<"$json")
-pending_checks=$(jq '[.statusCheckRollup[]? | select(
+)] | length' <<<"$rollup_latest")
+pending_checks=$(jq '[.[] | select(
   if (.status? // null) != null then
     .status != "COMPLETED"
   elif (.state? // null) != null then
@@ -219,7 +380,7 @@ pending_checks=$(jq '[.statusCheckRollup[]? | select(
   else
     true
   end
-)] | length' <<<"$json")
+)] | length' <<<"$rollup_latest")
 if [[ "$failed_checks" -gt 0 ]]; then
   block "$failed_checks status check(s) failed or require action."
 elif [[ "$pending_checks" -gt 0 ]]; then
@@ -243,11 +404,11 @@ if [[ "$files" -gt 30 || "$additions" -gt 1000 ]]; then
   warn "Large PR; verify scope is one issue and one PR."
 fi
 
-issue_count=$(jq '[.closingIssuesReferences[]?] | length' <<<"$json")
-if [[ "$issue_count" -eq 0 ]]; then
+issue_count=$(closing_issue_count "$url" "$number")
+if [[ "$issue_count" == "0" ]]; then
   warn "No closing issue reference found."
 else
-  pass "PR references $issue_count closing issue(s)."
+  pass "PR references at least one closing issue."
 fi
 
 printf '\nChanged files:\n'

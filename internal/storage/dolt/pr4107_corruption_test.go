@@ -271,6 +271,27 @@ func TestPR4107DeleteRecomputesWispWaitersWhenSpawnerChildIsDeleted(t *testing.T
 	assertIsBlocked(t, ctx, store, "wisps", "pr4107-delete-wisp-waiter", false)
 }
 
+func TestPR4107DeleteRecomputesWispWaitersWhenSpawnerIsDeleted(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createNoHistoryWisp(t, ctx, store, "pr4107-delete-wisp-spawner-waiter")
+	createPerm(t, ctx, store, "pr4107-delete-wisp-spawner-target")
+	createNoHistoryWisp(t, ctx, store, "pr4107-delete-wisp-spawner-child")
+	addDependency(t, ctx, store, "pr4107-delete-wisp-spawner-child", "pr4107-delete-wisp-spawner-target", types.DepParentChild)
+	addDependency(t, ctx, store, "pr4107-delete-wisp-spawner-waiter", "pr4107-delete-wisp-spawner-target", types.DepWaitsFor)
+
+	assertIsBlocked(t, ctx, store, "wisps", "pr4107-delete-wisp-spawner-waiter", true)
+
+	if err := store.DeleteIssue(ctx, "pr4107-delete-wisp-spawner-target"); err != nil {
+		t.Fatalf("DeleteIssue wisp spawner target: %v", err)
+	}
+	assertIsBlocked(t, ctx, store, "wisps", "pr4107-delete-wisp-spawner-waiter", false)
+}
+
 func TestPR4107JSONCountReadPathsTolerateMissingWispTables(t *testing.T) {
 	t.Run("query_counts", func(t *testing.T) {
 		store, cleanup := setupTestStore(t)

@@ -357,6 +357,48 @@ daemon.log
 	}
 }
 
+func TestEnsureGitignoreForBeadsDir_AppendsMissingRuntimePatterns(t *testing.T) {
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.Mkdir(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+
+	var stalePatterns []string
+	for _, pattern := range requiredPatterns {
+		if pattern == ".local_version" || pattern == "backup/" {
+			continue
+		}
+		stalePatterns = append(stalePatterns, pattern)
+	}
+	initialContent := "# Local additions\ncustom-local/\n" + strings.Join(stalePatterns, "\n") + "\n"
+	gitignorePath := filepath.Join(beadsDir, ".gitignore")
+	if err := os.WriteFile(gitignorePath, []byte(initialContent), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := EnsureGitignoreForBeadsDir(beadsDir); err != nil {
+		t.Fatalf("EnsureGitignoreForBeadsDir failed: %v", err)
+	}
+
+	content, err := os.ReadFile(gitignorePath)
+	if err != nil {
+		t.Fatalf("read .beads/.gitignore: %v", err)
+	}
+	contentStr := string(content)
+	if !strings.HasPrefix(contentStr, initialContent) {
+		t.Fatalf("existing .gitignore content was not preserved:\n%s", contentStr)
+	}
+	for _, pattern := range []string{".local_version", "backup/"} {
+		if !containsGitignorePattern(contentStr, pattern) {
+			t.Errorf("expected appended pattern %q in .beads/.gitignore:\n%s", pattern, contentStr)
+		}
+	}
+	if missing := missingGitignorePatterns(contentStr); len(missing) > 0 {
+		t.Fatalf("expected .beads/.gitignore to be complete after ensure, missing: %s", strings.Join(missing, ", "))
+	}
+}
+
 func TestFixGitignore_PartialPatterns(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -1770,7 +1812,7 @@ func TestCheckProjectGitignore_AllPresent(t *testing.T) {
 		}
 	}()
 
-	content := "node_modules/\n.dolt/\n*.db\n.beads-credential-key\n.beads/proxieddb/\n"
+	content := "node_modules/\n.dolt/\n*.db\n.beads-credential-key\n.beads/proxieddb/\n*.gate.lock*\n"
 	if err := os.WriteFile(".gitignore", []byte(content), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -1963,6 +2005,11 @@ func TestFixGitignore_FollowsRedirect(t *testing.T) {
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
 		t.Fatal(err)
 	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 
 	// Create the local redirect-only .beads dir
 	localBeads := filepath.Join(tmpDir, ".beads")
@@ -2020,6 +2067,11 @@ func TestCheckGitignore_FollowsRedirect(t *testing.T) {
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
 		t.Fatal(err)
 	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(rigBeads, ".gitignore"), []byte(GitignoreTemplate), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -2061,6 +2113,11 @@ func TestFixGitignore_RedirectRoundTrip(t *testing.T) {
 	// Set up rig with outdated .gitignore (missing required patterns)
 	rigBeads := filepath.Join(tmpDir, "mayor", "rig", ".beads")
 	if err := os.MkdirAll(rigBeads, 0750); err != nil {
+		t.Fatal(err)
+	}
+	// The redirect target must have a metadata.json or database for
+	// FollowRedirect to honor the redirect (gastownhall/beads#4692 guard).
+	if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(`{"database":"beads.db"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	oldContent := "*.db\ndaemon.log\n"
@@ -2371,7 +2428,8 @@ func TestContainsGitignorePattern(t *testing.T) {
 		{"# .dolt/ is ignored\n", ".dolt/", false}, // comment, not pattern
 		{"  .dolt/  \n", ".dolt/", true},           // whitespace trimmed
 		{"", ".dolt/", false},
-		{".dolt/foo\n", ".dolt/", false}, // not exact match
+		{".dolt/foo\n", ".dolt/", false},    // not exact match
+		{"embeddeddolt/\n", "dolt/", false}, // substring must not satisfy exact pattern
 	}
 
 	for _, tt := range tests {

@@ -47,7 +47,7 @@ var BuiltinRecipes = map[string]Recipe{
 		Name:        "Cursor IDE",
 		Path:        ".cursor/rules/beads.mdc",
 		Type:        TypeFile,
-		Description: "Cursor IDE rules file",
+		Description: "Cursor IDE rules file + agent hooks (prime on session start, restore after compaction)",
 	},
 	"windsurf": {
 		Name:        "Windsurf",
@@ -67,12 +67,18 @@ var BuiltinRecipes = map[string]Recipe{
 		Type:        TypeFile,
 		Description: "Kilo Code rules file",
 	},
+	"kiro": {
+		Name:        "Kiro CLI",
+		Path:        ".kiro/steering/beads.md",
+		Type:        TypeFile,
+		Description: "Kiro steering file",
+	},
 	"claude": {
 		Name:        "Claude Code",
 		Type:        TypeHooks,
 		Description: "Claude Code hooks (SessionStart)",
 		GlobalPath:  "~/.claude/settings.json",
-		ProjectPath: ".claude/settings.local.json",
+		ProjectPath: ".claude/settings.json",
 	},
 	"gemini": {
 		Name:        "Gemini CLI",

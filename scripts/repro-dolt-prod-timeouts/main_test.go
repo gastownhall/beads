@@ -4,17 +4,20 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
@@ -63,10 +66,7 @@ func TestDepFixtureIssueCountIncludesChainTargets(t *testing.T) {
 
 func TestResolveExecutablePathReturnsAbsolutePath(t *testing.T) {
 	tmp := t.TempDir()
-	bd := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bd, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	bd := writeNativeBDTestExecutable(t, tmp)
 	t.Chdir(tmp)
 
 	got, err := resolveExecutablePath("./bd")
@@ -108,24 +108,83 @@ func TestParseFlagsPreservesExplicitExistingWorkspaceSeedMode(t *testing.T) {
 	}
 }
 
-func TestBenchmarkSubprocessesStripDoltEnvOverrides(t *testing.T) {
+func TestBenchmarkCommandBuildersStripDoltEnvOverrides(t *testing.T) {
 	for _, key := range subprocessEnvDenylist {
-		t.Setenv(key, "caller-"+strings.ToLower(key))
+		t.Setenv(key, "ambient-"+strings.ToLower(key))
+	}
+	const allowedAmbient = "BEADS_REPRO_TIMEOUTS_ALLOWED_AMBIENT=present"
+	allowedKey, allowedValue, _ := strings.Cut(allowedAmbient, "=")
+	t.Setenv(allowedKey, allowedValue)
+
+	cfg := config{BDPath: filepath.Join(t.TempDir(), "bd")}
+	ws := &workspace{Dir: t.TempDir()}
+	j := job{
+		Kind: "env",
+		Argv: []string{"status"},
+		Env: []string{
+			"BEADS_REPRO_TIMEOUTS_CONTROLLED=one",
+			"BEADS_REPRO_TIMEOUTS_CONTROLLED_SECOND=two",
+		},
+		Sh: "printf test",
+	}
+	shellPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("find shell: %v", err)
 	}
 
-	tmp := t.TempDir()
-	bd := filepath.Join(tmp, "bd")
-	if err := os.WriteFile(bd, []byte("#!/bin/sh\n"+noDoltOverrideEnvScript()), 0o755); err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name       string
+		build      func(context.Context, config, *workspace, job) *exec.Cmd
+		wantPath   string
+		wantArgs   []string
+		wantSuffix []string
+	}{
+		{
+			name:       "bd",
+			build:      newBDCommand,
+			wantPath:   cfg.BDPath,
+			wantArgs:   []string{cfg.BDPath, "status"},
+			wantSuffix: append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...),
+		},
+		{
+			name:     "shell",
+			build:    newShellCommand,
+			wantPath: shellPath,
+			wantArgs: []string{"sh", "-c", j.Sh},
+			wantSuffix: append([]string{
+				"BD_NON_INTERACTIVE=1",
+				"BD_BIN=" + cfg.BDPath,
+			}, j.Env...),
+		},
 	}
 
-	cfg := config{BDPath: bd, Timeout: time.Second}
-	ws := &workspace{Dir: tmp}
-	if got := runBD(context.Background(), cfg, ws, job{Kind: "env", Argv: []string{"status"}}); got.Err != "" {
-		t.Fatalf("runBD inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
-	}
-	if got := runShell(context.Background(), cfg, ws, job{Kind: "env", Sh: noDoltOverrideEnvScript()}); got.Err != "" {
-		t.Fatalf("runShell inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := tt.build(context.Background(), cfg, ws, j)
+			if cmd.Path != tt.wantPath {
+				t.Fatalf("Path = %q, want %q", cmd.Path, tt.wantPath)
+			}
+			if !slices.Equal(cmd.Args, tt.wantArgs) {
+				t.Fatalf("Args = %q, want %q", cmd.Args, tt.wantArgs)
+			}
+			if cmd.Dir != ws.Dir {
+				t.Fatalf("Dir = %q, want %q", cmd.Dir, ws.Dir)
+			}
+			if len(cmd.Env) < len(tt.wantSuffix) || !slices.Equal(cmd.Env[len(cmd.Env)-len(tt.wantSuffix):], tt.wantSuffix) {
+				t.Fatalf("Env suffix = %q, want %q", cmd.Env, tt.wantSuffix)
+			}
+			if !slices.Contains(cmd.Env, allowedAmbient) {
+				t.Fatalf("Env dropped allowed ambient variable %q", allowedAmbient)
+			}
+			for _, key := range subprocessEnvDenylist {
+				for _, entry := range cmd.Env {
+					gotKey, _, _ := strings.Cut(entry, "=")
+					if gotKey == key {
+						t.Fatalf("Env retained ambient denied override %q", entry)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -147,23 +206,40 @@ func TestControlQueryScriptPreservesReadyProbeFailure(t *testing.T) {
 	}
 }
 
-func noDoltOverrideEnvScript() string {
-	var b strings.Builder
-	b.WriteString("for key in")
-	for _, key := range subprocessEnvDenylist {
-		b.WriteByte(' ')
-		b.WriteString(key)
+func writeNativeBDTestExecutable(t *testing.T, directory string) string {
+	t.Helper()
+
+	sourcePath, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve current test executable: %v", err)
 	}
-	b.WriteString(`; do
-	eval "value=\${$key:-}"
-	if [ -n "$value" ]; then
-		echo "$key inherited: $value" >&2
-		exit 42
-	fi
-done
-exit 0
-`)
-	return b.String()
+	targetPath := filepath.Join(directory, nativeBDExecutableName())
+
+	source, err := os.Open(sourcePath)
+	if err != nil {
+		t.Fatalf("open current test executable: %v", err)
+	}
+	defer source.Close()
+
+	target, err := os.OpenFile(targetPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o755)
+	if err != nil {
+		t.Fatalf("create native test executable: %v", err)
+	}
+	if _, err := io.Copy(target, source); err != nil {
+		_ = target.Close()
+		t.Fatalf("copy native test executable: %v", err)
+	}
+	if err := target.Close(); err != nil {
+		t.Fatalf("close native test executable: %v", err)
+	}
+	return targetPath
+}
+
+func nativeBDExecutableName() string {
+	if runtime.GOOS == "windows" {
+		return "bd.exe"
+	}
+	return "bd"
 }
 
 func TestScenarioNamesAllIncludesEveryAdvertisedScenario(t *testing.T) {
@@ -194,7 +270,7 @@ func TestInsertDependenciesWritesTypedIssueTargetColumn(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := insertDependencies(context.Background(), db, 1, 100000); err != nil {
@@ -212,13 +288,13 @@ func TestInsertDependenciesUsesConfiguredIssueRange(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WithArgs(
-			"perf-000000", "perf-000004", "blocks", "bench", "{}",
-			"perf-000001", "perf-000000", "blocks", "bench", "{}",
-			"perf-000002", "perf-000001", "blocks", "bench", "{}",
-			"perf-000003", "perf-000002", "blocks", "bench", "{}",
-			"perf-000004", "perf-000003", "blocks", "bench", "{}",
+			depid.New("perf-000000", "perf-000004"), "perf-000000", "perf-000004", "blocks", "bench", "{}",
+			depid.New("perf-000001", "perf-000000"), "perf-000001", "perf-000000", "blocks", "bench", "{}",
+			depid.New("perf-000002", "perf-000001"), "perf-000002", "perf-000001", "blocks", "bench", "{}",
+			depid.New("perf-000003", "perf-000002"), "perf-000003", "perf-000002", "blocks", "bench", "{}",
+			depid.New("perf-000004", "perf-000003"), "perf-000004", "perf-000003", "blocks", "bench", "{}",
 		).
 		WillReturnResult(sqlmock.NewResult(0, 5))
 
@@ -253,7 +329,7 @@ func TestInsertDepAddChainsWritesTypedIssueTargetColumn(t *testing.T) {
 	}
 	defer db.Close()
 
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 
 	if err := insertDepAddChains(context.Background(), db, 1, 1); err != nil {
@@ -315,9 +391,9 @@ func TestSeedProductionShapeFullCoversTypedDependencyInserts(t *testing.T) {
 
 	mock.ExpectExec(`INSERT INTO issues\s+\(id, title, description, design, acceptance_criteria, notes,\s+status, priority, issue_type, assignee, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 8))
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`INSERT INTO dependencies\s+\(issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
+	mock.ExpectExec(`INSERT INTO dependencies\s+\(id, issue_id, depends_on_issue_id, type, created_by, metadata\)\s+VALUES`).
 		WillReturnResult(sqlmock.NewResult(0, 1))
 	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('-A')")).
 		WillReturnResult(sqlmock.NewResult(0, 0))

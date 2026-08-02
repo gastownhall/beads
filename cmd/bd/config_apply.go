@@ -1,14 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
 
@@ -47,21 +52,33 @@ Examples:
   bd config apply
   bd config apply --dry-run
   bd config apply --json`,
-	Run: func(cmd *cobra.Command, _ []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, _ []string) error {
+		evt := metrics.NewCommandEvent("config-apply")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		results := runApply(dryRun)
 
 		if jsonOutput {
-			outputJSON(results)
+			if err := outputJSON(results); err != nil {
+				return err
+			}
 		} else {
 			printApplyResults(results)
 		}
 
 		for _, r := range results {
 			if r.Status == applyStatusError {
-				os.Exit(1)
+				return SilentExit()
 			}
 		}
+		return nil
 	},
 }
 
@@ -76,18 +93,80 @@ func runApply(dryRun bool) []ApplyResult {
 
 	// Group drift items by check domain to avoid duplicate actions
 	// (e.g., multiple hook items should trigger only one reinstall).
-	hasDrift := map[string]bool{}
-	for _, item := range driftItems {
-		if item.Status == driftStatusDrift {
-			hasDrift[item.Check] = true
-		}
-	}
+	hasDrift := driftDomains(driftItems)
 
 	var results []ApplyResult
 	results = append(results, applyHooks(hasDrift["hooks"], dryRun))
-	results = append(results, applyRemote(hasDrift["remote"], dryRun))
-	results = append(results, applyServer(hasDrift["server"], dryRun))
+	serverResult := applyServer(hasDrift["server"], dryRun)
+	results = append(results, serverResult)
+	results = append(results, remoteApplyResult(driftItems, serverResult, dryRun, checkRemoteDrift))
 	return results
+}
+
+func shouldRecheckRemoteAfterServerStart(remoteSkipped bool, serverResult ApplyResult) bool {
+	return remoteSkipped && serverResult.Check == "server" && serverResult.Status == applyStatusApplied
+}
+
+func remoteApplyResult(driftItems []DriftItem, serverResult ApplyResult, dryRun bool, recheckRemote func() []DriftItem) ApplyResult {
+	remoteItems := driftItems
+	if shouldRecheckRemoteAfterServerStart(skippedDriftDomain(remoteItems, "remote"), serverResult) {
+		remoteItems = recheckRemote()
+	}
+	if skipped := skippedDriftItem(remoteItems, "remote"); skipped != nil {
+		return skippedRemoteApplyResult(*skipped)
+	}
+	return applyRemote(driftDomains(remoteItems)["remote"], dryRun)
+}
+
+func driftDomains(items []DriftItem) map[string]bool {
+	hasDrift := map[string]bool{}
+	for _, item := range items {
+		if item.Status == driftStatusDrift {
+			hasDrift[driftDomain(item.Check)] = true
+		}
+	}
+	return hasDrift
+}
+
+func skippedDriftDomain(items []DriftItem, domain string) bool {
+	return skippedDriftItem(items, domain) != nil
+}
+
+func skippedDriftItem(items []DriftItem, domain string) *DriftItem {
+	for _, item := range items {
+		if item.Status == driftStatusSkipped && driftDomain(item.Check) == domain {
+			skipped := item
+			return &skipped
+		}
+	}
+	return nil
+}
+
+func driftDomain(check string) string {
+	if before, _, ok := strings.Cut(check, "."); ok {
+		return before
+	}
+	return check
+}
+
+func skippedRemoteApplyResult(item DriftItem) ApplyResult {
+	return ApplyResult{
+		Check:   "remote",
+		Action:  "none",
+		Status:  applyStatusSkipped,
+		Message: item.Message,
+	}
+}
+
+func remoteApplyStoreConfig(dryRun bool) *dolt.Config {
+	return &dolt.Config{
+		ReadOnly:         dryRun,
+		DisableAutoStart: true,
+	}
+}
+
+func remoteURLMatchesConfig(currentURL, configuredURL string) bool {
+	return doltutil.RemoteURLsMatch(currentURL, configuredURL)
 }
 
 // applyHooks reinstalls git hooks if drift was detected.
@@ -139,6 +218,40 @@ func applyHooks(drifted bool, dryRun bool) ApplyResult {
 }
 
 // applyRemote ensures the Dolt origin remote matches federation.remote config.
+// originRemoteEvidence is the store surface currentOriginRemoteURL needs:
+// the SQL-visible remotes plus the on-disk persisted enumeration. The
+// concrete *dolt.DoltStore that applyRemote opens satisfies both directly —
+// no decorator peel needed here (unlike cmd paths holding the wired store).
+type originRemoteEvidence interface {
+	ListRemotes(ctx context.Context) ([]storage.RemoteInfo, error)
+	PersistedRemoteInfos() []storage.RemoteInfo
+}
+
+// currentOriginRemoteURL resolves the origin remote's URL from evidence, not
+// from the SQL listing alone: a freshly (auto-)started sql-server can report
+// an empty dolt_remotes while the remote is persisted on disk in
+// .dolt/repo_state.json (GH#2118, wy-6k7f7). Recovering the persisted URL
+// routes `bd config apply` into the same consistent/update legs it would
+// take after the window, instead of blind-adding over an invisible remote.
+// A failed listing returns the error — it is never evidence of "no remote".
+func currentOriginRemoteURL(ctx context.Context, st originRemoteEvidence) (string, error) {
+	remotes, err := st.ListRemotes(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range remotes {
+		if r.Name == "origin" {
+			return r.URL, nil
+		}
+	}
+	for _, r := range st.PersistedRemoteInfos() {
+		if r.Name == "origin" {
+			return r.URL, nil
+		}
+	}
+	return "", nil
+}
+
 func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	if !drifted {
 		return ApplyResult{
@@ -169,8 +282,29 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		}
 	}
 
-	doltDir := doltserver.ResolveDoltDir(beadsDir)
-	currentURL := doltutil.FindCLIRemote(doltDir, "origin")
+	ctx := context.Background()
+	st, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, remoteApplyStoreConfig(dryRun))
+	if err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusError,
+			Message: "Failed to open Dolt store",
+			Error:   err.Error(),
+		}
+	}
+	defer func() { _ = st.Close() }()
+
+	currentURL, err := currentOriginRemoteURL(ctx, st)
+	if err != nil {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "configure",
+			Status:  applyStatusError,
+			Message: "Failed to list Dolt remotes",
+			Error:   err.Error(),
+		}
+	}
 
 	if dryRun {
 		if currentURL == "" {
@@ -179,6 +313,14 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 				Action:  "add_remote",
 				Status:  applyStatusDryRun,
 				Message: fmt.Sprintf("Would add Dolt origin remote: %s", federationRemote),
+			}
+		}
+		if remoteURLMatchesConfig(currentURL, federationRemote) {
+			return ApplyResult{
+				Check:   "remote",
+				Action:  "none",
+				Status:  applyStatusOK,
+				Message: "Dolt remote configuration is consistent",
 			}
 		}
 		return ApplyResult{
@@ -190,8 +332,7 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 	}
 
 	if currentURL == "" {
-		// No origin exists — add it
-		if err := doltutil.AddCLIRemote(doltDir, "origin", federationRemote); err != nil {
+		if err := st.AddRemote(ctx, "origin", federationRemote); err != nil {
 			return ApplyResult{
 				Check:   "remote",
 				Action:  "add_remote",
@@ -208,10 +349,17 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		}
 	}
 
-	// Origin exists but wrong URL — remove then re-add
-	// Save old URL in case we need to report it
+	if remoteURLMatchesConfig(currentURL, federationRemote) {
+		return ApplyResult{
+			Check:   "remote",
+			Action:  "none",
+			Status:  applyStatusOK,
+			Message: "Dolt remote configuration is consistent",
+		}
+	}
+
 	oldURL := currentURL
-	if err := doltutil.RemoveCLIRemote(doltDir, "origin"); err != nil {
+	if err := st.RemoveRemote(ctx, "origin"); err != nil {
 		return ApplyResult{
 			Check:   "remote",
 			Action:  "update_remote",
@@ -221,9 +369,8 @@ func applyRemote(drifted bool, dryRun bool) ApplyResult {
 		}
 	}
 
-	if err := doltutil.AddCLIRemote(doltDir, "origin", federationRemote); err != nil {
-		// Try to restore the old remote on failure
-		_ = doltutil.AddCLIRemote(doltDir, "origin", oldURL)
+	if err := st.AddRemote(ctx, "origin", federationRemote); err != nil {
+		_ = st.AddRemote(ctx, "origin", oldURL)
 		return ApplyResult{
 			Check:   "remote",
 			Action:  "update_remote",
@@ -272,6 +419,18 @@ func applyServer(drifted bool, dryRun bool) ApplyResult {
 			Action:  "none",
 			Status:  applyStatusSkipped,
 			Message: "Server is running but dolt.shared-server is not enabled; not stopping (use 'bd dolt stop' manually)",
+		}
+	}
+
+	// Reconciliation must honor the same auto-start policy as implicit storage
+	// opens. A disabled auto-start means the server is externally managed; keep
+	// Action="start" to describe the skipped reconciliation action consistently.
+	if doltserver.IsAutoStartDisabled() {
+		return ApplyResult{
+			Check:   "server",
+			Action:  "start",
+			Status:  applyStatusSkipped,
+			Message: "Dolt shared server not started because auto-start is disabled; the server is externally managed",
 		}
 	}
 

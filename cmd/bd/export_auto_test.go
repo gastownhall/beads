@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"os/exec"
@@ -10,6 +11,9 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestGitAddFile_InWorktreeHook_StagesCorrectPath is a regression test for
@@ -189,6 +193,149 @@ func TestShouldRunPostCommandAutoExportSkipsReadOnlyCommands(t *testing.T) {
 	}
 }
 
+// fakeStateHashStore implements the storage.StateHasher optional interface
+// plus the minimal DoltStorage surface maybeAutoExport touches. Any
+// non-overridden method panics via the embedded nil interface.
+type fakeStateHashStore struct {
+	storage.DoltStorage
+	stateHash          string
+	stateHashCalls     int
+	currentCommitCalls int
+	issues             []*types.Issue
+}
+
+func (f *fakeStateHashStore) GetStateHash(_ context.Context) (string, error) {
+	f.stateHashCalls++
+	return f.stateHash, nil
+}
+
+func (f *fakeStateHashStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func (f *fakeStateHashStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
+
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking;
+// this fake has no config store, so every key is unset.
+func (f *fakeStateHashStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return f.issues, nil
+}
+
+// fakeHeadOnlyStore does NOT implement storage.StateHasher, forcing the
+// GetCurrentCommit fallback.
+type fakeHeadOnlyStore struct {
+	storage.DoltStorage
+	currentCommitCalls int
+}
+
+func (f *fakeHeadOnlyStore) GetCurrentCommit(_ context.Context) (string, error) {
+	f.currentCommitCalls++
+	return "head-commit-hash", nil
+}
+
+func autoExportTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"beads","backend":"dolt"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	return dir
+}
+
+// Regression test for wy-4ope: server-mode clients used to skip auto-export
+// entirely, so `git push` published stale JSONL. maybeAutoExport must reach
+// change detection and consult the working-set-aware state hash, not HEAD —
+// server mode runs with dolt auto-commit off, so HEAD does not advance on
+// writes.
+func TestMaybeAutoExportUsesStateHashForChangeDetection(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "working-set-hash"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "working-set-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.stateHashCalls != 1 {
+		t.Fatalf("GetStateHash calls = %d, want 1", fake.stateHashCalls)
+	}
+	if fake.currentCommitCalls != 0 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 0 (StateHasher must take precedence)", fake.currentCommitCalls)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".beads", "issues.jsonl")); !os.IsNotExist(err) {
+		t.Fatalf("unchanged state hash must not export, stat err=%v", err)
+	}
+}
+
+func TestMaybeAutoExportExportsOnStateHashChange(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeStateHashStore{stateHash: "hash-after-write"}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "hash-before-write",
+		Timestamp:      time.Time{}, // zero: throttle window open
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	state := loadExportAutoState(filepath.Join(dir, ".beads"))
+	if state.LastDoltCommit != "hash-after-write" {
+		t.Fatalf("state LastDoltCommit = %q, want %q (export must run when the state hash moves)",
+			state.LastDoltCommit, "hash-after-write")
+	}
+}
+
+func TestMaybeAutoExportFallsBackToHeadCommit(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeHeadOnlyStore{}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "head-commit-hash",
+		Timestamp:      time.Now(),
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	if fake.currentCommitCalls != 1 {
+		t.Fatalf("GetCurrentCommit calls = %d, want 1 (fallback when StateHasher is absent)", fake.currentCommitCalls)
+	}
+}
+
 func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.jsonl")
 	writeJSONLLines(t, path,
@@ -196,11 +343,19 @@ func TestGuardAutoExportOverwriteAllowsViewerScopedJSONL(t *testing.T) {
 		map[string]any{"id": "bd-legacy", "issue_type": "bug", "title": "legacy issue record"},
 	)
 
-	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false); err != nil {
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, nil); err != nil {
 		t.Fatalf("guardAutoExportOverwrite: %v", err)
 	}
 }
 
+// TestGuardAutoExportOverwriteBlocksRicherJSONL is #4069's regression test:
+// infra/template rows that are STILL IN THE STORE must block the shrink
+// guard, or the next auto-export silently overwrites the richer JSONL with
+// the filtered subset (GH#4069 — 89% data loss in the reporter's workspace).
+// bd-wisp is out-of-scope AND absent from the store (a compacted wisp,
+// GH#4988's actual bug) and must NOT count toward the block — see the
+// complement test TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp,
+// which isolates that half of the rule on its own.
 func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "issues.jsonl")
 	writeJSONLLines(t, path,
@@ -211,22 +366,72 @@ func TestGuardAutoExportOverwriteBlocksRicherJSONL(t *testing.T) {
 		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
 		map[string]any{"_type": "event", "id": "bd-event"},
 	)
+	// bd-agent and bd-template are still in the store (the #4069 scenario);
+	// bd-wisp has been compacted out of the store already (the #4988
+	// scenario) and is deliberately absent here.
+	storeIDs := map[string]struct{}{
+		"bd-1":        {},
+		"bd-agent":    {},
+		"bd-template": {},
+	}
 
-	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false)
+	err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, storeIDs)
 	if err == nil {
 		t.Fatal("expected guardAutoExportOverwrite to reject richer JSONL, got nil")
 	}
 	msg := err.Error()
 	for _, want := range []string{
 		"refusing to overwrite",
-		"5 record(s) outside auto-export scope",
+		"4 record(s) outside auto-export scope",
 		"1 memories",
-		"3 infra/template/ephemeral issues",
+		"2 infra/template/ephemeral issues",
 		"1 unknown",
 	} {
 		if !strings.Contains(msg, want) {
 			t.Fatalf("guard error %q does not contain %q", msg, want)
 		}
+	}
+}
+
+// TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp is the complement of
+// TestGuardAutoExportOverwriteBlocksRicherJSONL: an out-of-scope row that is
+// ALSO absent from the store (compacted away — GH#4988) does not block the
+// rewrite, because nothing extra is lost versus what Dolt already lost.
+func TestGuardAutoExportOverwriteAllowsStaleEphemeralWisp(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "title": "kept"},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true, "title": "stale wisp"},
+	)
+	// bd-1 is in the store; bd-wisp has been compacted away — not present.
+	storeIDs := map[string]struct{}{"bd-1": {}}
+
+	if err := guardAutoExportOverwrite(path, map[string]bool{"agent": true}, false, storeIDs); err != nil {
+		t.Fatalf("stale ephemeral-only richer JSONL should be rewritable: %v", err)
+	}
+}
+
+func TestIssueRecordsInJSONL_SkipsTombstoneAndNonIssue(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "issues.jsonl")
+	writeJSONLLines(t, path,
+		map[string]any{"_type": "issue", "id": "bd-1", "issue_type": "task", "ephemeral": false},
+		map[string]any{"_type": "issue", "id": "bd-wisp", "issue_type": "task", "ephemeral": true},
+		map[string]any{"_type": "issue", "id": "bd-gone", "status": "tombstone"},
+		map[string]any{"_type": "memory", "key": "k", "value": "v"},
+	)
+	recs, err := issueRecordsInJSONL(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("got %d records, want 2 (tombstone+memory skipped): %+v", len(recs), recs)
+	}
+	byID := map[string]jsonlIssueRecord{}
+	for _, r := range recs {
+		byID[r.ID] = r
+	}
+	if !byID["bd-wisp"].Ephemeral {
+		t.Fatal("expected bd-wisp ephemeral=true")
 	}
 }
 
@@ -236,7 +441,7 @@ func TestGuardAutoExportOverwriteAllowsMemoriesWhenIncluded(t *testing.T) {
 		map[string]any{"_type": "memory", "key": "keep-me", "value": "private context"},
 	)
 
-	if err := guardAutoExportOverwrite(path, nil, true); err != nil {
+	if err := guardAutoExportOverwrite(path, nil, true, nil); err != nil {
 		t.Fatalf("guardAutoExportOverwrite with memories included: %v", err)
 	}
 }
@@ -434,6 +639,77 @@ func TestGitAddFile_NonHookContext_GuardDoesNotFire(t *testing.T) {
 	}
 	if !strings.Contains(string(data), ".beads/issues.jsonl") {
 		t.Errorf("non-hook path did not stage .beads/issues.jsonl:\n%s", data)
+	}
+}
+
+// TestGitAddFile_RelativePathDoesNotDoubleRoot is a regression test for
+// GH#4351: gitAddFile sets cmd.Dir to filepath.Dir(path). When path is
+// relative (e.g. ".beads/issues.jsonl"), passing that full path as the
+// git-add argument becomes `cd .beads && git add .beads/issues.jsonl`,
+// which looks for a non-existent nested path and exits 128. The fix is
+// to pass filepath.Base(path) so the pathspec is relative to cmd.Dir.
+func TestGitAddFile_RelativePathDoesNotDoubleRoot(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	tmpDir, err := os.MkdirTemp("", "bd-gh4351-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(tmpDir) })
+	tmpDir, err = filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	repo := filepath.Join(tmpDir, "repo")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGit := func(args ...string) {
+		t.Helper()
+		c := exec.Command("git", args...)
+		c.Dir = repo
+		if out, err := c.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("config", "user.email", "t@t")
+	runGit("config", "user.name", "t")
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGit("add", "README.md")
+	runGit("commit", "-qm", "init")
+
+	if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".beads", "issues.jsonl"), []byte(`{"id":"x"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Unsetenv("GIT_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	// Repo-relative path — the double-root trigger. Must stage successfully.
+	t.Chdir(repo)
+	relPath := filepath.Join(".beads", "issues.jsonl")
+	if err := gitAddFile(relPath); err != nil {
+		t.Fatalf("gitAddFile(%q): %v", relPath, err)
+	}
+
+	c := exec.Command("git", "diff", "--cached", "--name-only")
+	c.Dir = repo
+	data, err := c.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git diff --cached: %v\n%s", err, data)
+	}
+	staged := strings.TrimSpace(string(data))
+	if !strings.Contains(staged, ".beads/issues.jsonl") && !strings.Contains(staged, filepath.ToSlash(relPath)) {
+		t.Errorf("expected .beads/issues.jsonl staged, got: %q", staged)
 	}
 }
 
@@ -1006,5 +1282,5 @@ func autoExportDataLossTestEnv(home string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1")
+	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }

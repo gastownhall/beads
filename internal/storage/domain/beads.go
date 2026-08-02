@@ -26,6 +26,8 @@ type BeadsDirFSRepository interface {
 	WriteConfigYAML(ctx context.Context, content []byte) error
 	ReadConfigYAML(ctx context.Context) ([]byte, error)
 	ReadBeadsConfig(ctx context.Context) (*configfile.Config, error)
+	WriteProxiedServerClientInfo(ctx context.Context, info *configfile.ProxiedServerClientInfo) error
+	ReadProxiedServerClientInfo(ctx context.Context) (*configfile.ProxiedServerClientInfo, error)
 }
 
 type BeadsDirFSUseCase interface {
@@ -57,6 +59,9 @@ type ResolveProxiedInitResult struct {
 	IsLocal     bool
 	DBName      string
 	ProjectID   string
+	// DBNameDerived: DBName was guessed (prefix or default) rather than
+	// pinned by the --database flag or an existing metadata.json.
+	DBNameDerived bool
 }
 
 type BeadsDirTemplates struct {
@@ -67,11 +72,12 @@ type BeadsDirTemplates struct {
 }
 
 type InitializeBeadsDirParams struct {
-	MetadataJSONBody      []byte
-	ConfigYAMLBody        []byte
-	WriteProjectGitignore bool
-	SetNoCOW              bool
-	LocalVersion          string
+	MetadataJSONBody        []byte
+	ConfigYAMLBody          []byte
+	ProxiedServerClientInfo *configfile.ProxiedServerClientInfo
+	WriteProjectGitignore   bool
+	SetNoCOW                bool
+	LocalVersion            string
 }
 
 type InitializeBeadsDirResult struct {
@@ -93,6 +99,7 @@ type AgentsFileParams struct {
 	TemplatePath string
 	Profile      string
 	HasRemote    bool
+	NoPush       bool
 }
 
 type BeadsDirFSAdapters struct {
@@ -135,22 +142,22 @@ func (u *beadsDirFSUseCaseImpl) ResolveProxiedInit(ctx context.Context, params R
 		return ResolveProxiedInitResult{}, fmt.Errorf("ResolveProxiedInit: read config: %w", err)
 	}
 
-	result.DBName = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
+	result.DBName, result.DBNameDerived = resolveDoltDatabaseName(cfg, params.Prefix, params.DBFlag)
 	result.ProjectID = resolveProjectID(cfg)
 	return result, nil
 }
 
-func resolveDoltDatabaseName(cfg *configfile.Config, prefix, dbFlag string) string {
+func resolveDoltDatabaseName(cfg *configfile.Config, prefix, dbFlag string) (name string, derived bool) {
 	if dbFlag != "" {
-		return dbFlag
+		return dbFlag, false
 	}
 	if cfg != nil && cfg.DoltDatabase != "" {
-		return cfg.DoltDatabase
+		return cfg.DoltDatabase, false
 	}
 	if prefix != "" {
-		return strings.ReplaceAll(prefix, "-", "_")
+		return strings.ReplaceAll(prefix, "-", "_"), true
 	}
-	return configfile.DefaultDoltDatabase
+	return configfile.DefaultDoltDatabase, true
 }
 
 func resolveProjectID(cfg *configfile.Config) string {
@@ -177,8 +184,10 @@ func (u *beadsDirFSUseCaseImpl) InitializeBeadsDir(ctx context.Context, params I
 			return InitializeBeadsDirResult{}, err
 		}
 	}
-	if err := u.fsRepo.WriteInteractionsLog(ctx); err != nil {
-		return InitializeBeadsDirResult{}, err
+	if params.ProxiedServerClientInfo != nil {
+		if err := u.fsRepo.WriteProxiedServerClientInfo(ctx, params.ProxiedServerClientInfo); err != nil {
+			return InitializeBeadsDirResult{}, err
+		}
 	}
 	if err := u.fsRepo.WriteReadme(ctx); err != nil {
 		return InitializeBeadsDirResult{}, err

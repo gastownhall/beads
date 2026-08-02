@@ -117,6 +117,7 @@ var agentEnrichers = map[string]enricher{
 	"Duplicate Issues":             enrichDuplicateIssues,
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
+	"Clone-Local FKs":              enrichCloneLocalFKs,
 	"Child-Parent Dependencies":    enrichChildParentDeps,
 	"Classic Artifacts":            enrichClassicArtifacts,
 	"Pending Migrations":           enrichPendingMigrations,
@@ -127,6 +128,9 @@ var agentEnrichers = map[string]enricher{
 	"Claude Settings Health":       enrichClaudeSettings,
 	"Claude Hook Completeness":     enrichClaudeHooks,
 	"Claude Plugin":                enrichClaudePlugin,
+	"Cursor Integration":           enrichCursor,
+	"Cursor Settings Health":       enrichCursorSettings,
+	"Cursor Hook Completeness":     enrichCursorHooks,
 	"bd prime Output":              enrichBdPrimeOutput,
 	"CLI Availability":             enrichBdInPath,
 	"Repo Fingerprint":             enrichRepoFingerprint,
@@ -456,6 +460,17 @@ func enrichOrphanedDeps(dc DoctorCheck) agentEnrichment {
 	}
 }
 
+func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "advisory",
+		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset (flatten/compact squash, merge abort, migration error recovery) silently drops foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    "Every FK on clone-local tables (events, wisp_dependencies, wisp_labels, wisp_comments, wisp_events, wisp_child_counters) present and enforcing",
+		commands:    []string{"bd doctor --fix"},
+		sourceFiles: []string{"cmd/bd/doctor/clone_local_fks.go:CheckCloneLocalFKs"},
+	}
+}
+
 func enrichChildParentDeps(dc DoctorCheck) agentEnrichment {
 	return agentEnrichment{
 		severity:    "advisory",
@@ -563,6 +578,39 @@ func enrichClaudePlugin(dc DoctorCheck) agentEnrichment {
 		expected:    "Claude plugin version matches CLI version",
 		commands:    []string{"bd hooks install"},
 		sourceFiles: []string{"cmd/bd/doctor/claude.go:CheckClaudePlugin"},
+	}
+}
+
+func enrichCursor(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "advisory",
+		explanation: fmt.Sprintf("Cursor integration: %s. Beads integrates with Cursor via agent hooks in .cursor/hooks.json (or ~/.cursor/hooks.json) that run 'bd cursor-hook' to inject bd prime on sessionStart and recover context after compaction.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    "Cursor hooks configured for beads (bd cursor-hook on sessionStart/preCompact/postToolUse)",
+		commands:    []string{"bd setup cursor"},
+		sourceFiles: []string{"cmd/bd/doctor/cursor.go:CheckCursor"},
+	}
+}
+
+func enrichCursorSettings(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "blocking",
+		explanation: fmt.Sprintf("Cursor hooks file is malformed: %s. A corrupted .cursor/hooks.json prevents Cursor from loading any hooks, which silently breaks beads context injection and post-compaction recovery.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    ".cursor/hooks.json (and ~/.cursor/hooks.json) are valid JSON",
+		commands:    []string{"cat .cursor/hooks.json | python3 -m json.tool", "bd setup cursor"},
+		sourceFiles: []string{"cmd/bd/doctor/cursor.go:CheckCursorSettingsHealth"},
+	}
+}
+
+func enrichCursorHooks(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "advisory",
+		explanation: fmt.Sprintf("Cursor hook completeness: %s. Beads recovers context across compaction in Cursor using three hooks: sessionStart, preCompact, and postToolUse. A partial install degrades recovery.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    "sessionStart, preCompact, and postToolUse hooks all configured for beads",
+		commands:    []string{"bd setup cursor"},
+		sourceFiles: []string{"cmd/bd/doctor/cursor.go:CheckCursorHookCompleteness"},
 	}
 }
 

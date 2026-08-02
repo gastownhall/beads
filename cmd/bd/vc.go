@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -25,6 +28,36 @@ This subcommand provides additional operations like merge and commit.`,
 
 var vcMergeStrategy string
 
+// blockedAfterMergeRecomputer is the narrow store surface that repairs the
+// denormalized is_blocked column for the rows a merge brought in
+// (bd-578h9.11). Only the concrete stores implement it
+// (internal/storage/dolt/store.go, internal/storage/embeddeddolt/version_control.go);
+// it is NOT part of storage.DoltStorage.
+type blockedAfterMergeRecomputer interface {
+	RecomputeBlockedAfterMerge(ctx context.Context, fromCommit string) error
+}
+
+// blockedAfterMergeRecomputerFor peels the storage decorator chain before
+// asserting, so the optional interface is looked up on the concrete store.
+//
+// getStore() hands back the wireStorageDecorators chain — caller →
+// HookFiringStore → InstrumentedStorage → concrete store
+// (cmd/bd/storage_chain.go) — and both decorators embed the storage.DoltStorage
+// INTERFACE, so their promoted method sets are exactly DoltStorage's.
+// RecomputeBlockedAfterMerge is not in that set, so asserting on the chain
+// itself always failed and the post-merge recompute was silently skipped on
+// every rig carrying a hook layer, which is essentially all of them
+// (main.go builds a hook runner whenever dbPath != ""; only no-hooks:true /
+// BD_NO_HOOKS=1 leaves it off). Same defect class as wy-xtv17's
+// persistedRemoteProber; wy-163oy.
+func blockedAfterMergeRecomputerFor(st storage.DoltStorage) (blockedAfterMergeRecomputer, bool) {
+	if st == nil {
+		return nil, false
+	}
+	rs, ok := storage.UnwrapStore(st).(blockedAfterMergeRecomputer)
+	return rs, ok
+}
+
 var vcMergeCmd = &cobra.Command{
 	Use:   "merge <branch>",
 	Short: "Merge a branch into the current branch",
@@ -37,50 +70,77 @@ Examples:
   bd vc merge feature-xyz                    # Merge feature-xyz into current branch
   bd vc merge feature-xyz --strategy ours    # Merge, preferring our changes on conflict
   bd vc merge feature-xyz --strategy theirs  # Merge, preferring their changes on conflict`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc merge is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-merge")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 		branchName := args[0]
 
-		// Perform merge
-		conflicts, err := store.Merge(ctx, branchName)
-		if err != nil {
-			FatalErrorRespectJSON("failed to merge branch: %v", err)
-		}
+		if vcMergeStrategy != "" {
+			// #4992: a bare CALL DOLT_MERGE under autocommit rejects any real
+			// conflict before --strategy could ever be applied. MergeWithStrategy
+			// runs the whole merge/resolve/repair/commit sequence on a pinned
+			// session with Dolt's conflict-tolerant flags set, so the strategy
+			// actually reaches DOLT_CONFLICTS_RESOLVE.
+			merger, ok := storage.UnwrapStore(store).(storage.StrategicMerger)
+			if !ok {
+				return HandleErrorRespectJSON("storage backend %T does not support --strategy merges", storage.UnwrapStore(store))
+			}
+			conflicts, err := merger.MergeWithStrategy(ctx, branchName, vcMergeStrategy)
+			if err != nil {
+				return HandleErrorRespectJSON("failed to merge branch: %v", err)
+			}
 
-		// Handle conflicts
-		if len(conflicts) > 0 {
-			if vcMergeStrategy != "" {
-				// Auto-resolve conflicts with specified strategy
-				for _, conflict := range conflicts {
-					table := conflict.Field // Field contains table name from GetConflicts
-					if table == "" {
-						table = "issues" // Default to issues table
-					}
-					if err := store.ResolveConflicts(ctx, table, vcMergeStrategy); err != nil {
-						FatalErrorRespectJSON("failed to resolve conflicts: %v", err)
-					}
-				}
+			if len(conflicts) > 0 {
 				if jsonOutput {
-					outputJSON(map[string]interface{}{
+					return outputJSON(map[string]interface{}{
 						"merged":        branchName,
 						"conflicts":     len(conflicts),
 						"resolved_with": vcMergeStrategy,
 					})
-					return
 				}
 				fmt.Printf("Merged %s with %d conflicts resolved using '%s' strategy\n",
 					ui.RenderAccent(branchName), len(conflicts), vcMergeStrategy)
-				return
+				return nil
 			}
 
-			// Report conflicts without auto-resolution
 			if jsonOutput {
-				outputJSON(map[string]interface{}{
+				return outputJSON(map[string]interface{}{
+					"merged":    branchName,
+					"conflicts": 0,
+				})
+			}
+			fmt.Printf("Successfully merged %s\n", ui.RenderAccent(branchName))
+			return nil
+		}
+
+		// No --strategy: a real conflict makes store.Merge return an error —
+		// it still runs as a bare DOLT_MERGE under autocommit, which Dolt
+		// rejects on conflict (Error 1105), same as plain `dolt merge` with no
+		// further flags. versioncontrolops.Merge appends the --strategy escape
+		// hatch to that error's message.
+		conflicts, err := store.Merge(ctx, branchName)
+		if err != nil {
+			return HandleErrorRespectJSON("failed to merge branch: %v", err)
+		}
+
+		if len(conflicts) > 0 {
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{
 					"merged":    branchName,
 					"conflicts": conflicts,
 				})
-				return
 			}
 
 			fmt.Printf("\n%s Merge completed with conflicts:\n\n", ui.RenderAccent("!!"))
@@ -88,18 +148,18 @@ Examples:
 				fmt.Printf("  - %s\n", conflict.Field)
 			}
 			fmt.Printf("\nResolve conflicts with: bd vc merge %s --strategy [ours|theirs]\n\n", branchName)
-			return
+			return nil
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"merged":    branchName,
 				"conflicts": 0,
 			})
-			return
 		}
 
 		fmt.Printf("Successfully merged %s\n", ui.RenderAccent(branchName))
+		return nil
 	},
 }
 
@@ -115,54 +175,81 @@ Examples:
   bd vc commit -m "Added new feature issues"
   bd vc commit --message "Fixed priority on several issues"
   echo "Multi-line message" | bd vc commit --stdin`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc commit is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-commit")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		if vcCommitStdin {
 			if vcCommitMessage != "" {
-				FatalErrorRespectJSON("cannot specify both --stdin and -m/--message")
+				return HandleErrorRespectJSON("cannot specify both --stdin and -m/--message")
 			}
 			b, err := io.ReadAll(os.Stdin)
 			if err != nil {
-				FatalErrorRespectJSON("failed to read commit message from stdin: %v", err)
+				return HandleErrorRespectJSON("failed to read commit message from stdin: %v", err)
 			}
 			vcCommitMessage = strings.TrimRight(string(b), "\n")
 		}
 
 		if vcCommitMessage == "" {
-			FatalErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
+			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
-		// We are explicitly creating a Dolt commit; avoid redundant auto-commit in PersistentPostRun.
+		beforeHash, beforeErr := store.GetCurrentCommit(ctx)
+
 		commandDidExplicitDoltCommit = true
 		if err := store.Commit(ctx, vcCommitMessage); err != nil {
 			if isDoltNothingToCommit(err) {
 				if jsonOutput {
-					outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-				} else {
-					fmt.Println("Nothing to commit")
+					return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
 				}
-				return
+				fmt.Println("Nothing to commit")
+				return nil
 			}
-			FatalErrorRespectJSON("failed to commit: %v", err)
+			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
-		// Get the new commit hash
 		hash, err := store.GetCurrentCommit(ctx)
 		if err != nil {
 			hash = "(unknown)"
 		}
 
+		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
+		// store) returns a nil error even when HEAD did not move. Detect that
+		// case here instead of relying on the error, so both backends report
+		// the same "nothing to commit" outcome. Known limitation: a concurrent
+		// writer advancing HEAD between the two reads is misattributed to this
+		// command — pre-existing for server mode, and fixing it means threading
+		// an atomic committed-bool through the VersionControl interface
+		// (tracked as bd mybd-z9h7j; CommitPending already has the shape).
+		if beforeErr == nil && err == nil && hash == beforeHash {
+			if jsonOutput {
+				return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
+			}
+			fmt.Println("Nothing to commit")
+			return nil
+		}
+
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"committed": true,
 				"hash":      hash,
 				"message":   vcCommitMessage,
 			})
-			return
 		}
 
 		fmt.Printf("Created commit %s\n", ui.RenderMuted(hash[:8]))
+		return nil
 	},
 }
 
@@ -173,12 +260,24 @@ var vcStatusCmd = &cobra.Command{
 
 Examples:
   bd vc status`,
-	Run: func(cmd *cobra.Command, args []string) {
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("vc status is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("vc-status")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		ctx := rootCtx
 
 		currentBranch, err := store.CurrentBranch(ctx)
 		if err != nil {
-			FatalErrorRespectJSON("failed to get current branch: %v", err)
+			return HandleErrorRespectJSON("failed to get current branch: %v", err)
 		}
 
 		currentCommit, err := store.GetCurrentCommit(ctx)
@@ -187,17 +286,17 @@ Examples:
 		}
 
 		if jsonOutput {
-			outputJSON(map[string]interface{}{
+			return outputJSON(map[string]interface{}{
 				"branch": currentBranch,
 				"commit": currentCommit,
 			})
-			return
 		}
 
 		fmt.Printf("\n%s Version Control Status\n\n", ui.RenderAccent("📊"))
 		fmt.Printf("  Branch: %s\n", ui.StatusInProgressStyle.Render(currentBranch))
 		fmt.Printf("  Commit: %s\n", ui.RenderMuted(currentCommit[:8]))
 		fmt.Println()
+		return nil
 	},
 }
 

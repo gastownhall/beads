@@ -270,8 +270,8 @@ func TestUpdateIssueIDDependencyTargetsIgnoreNonIssueTargets(t *testing.T) {
 	}
 
 	if _, err := store.db.ExecContext(ctx, `
-		INSERT INTO dependencies (issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
-		VALUES (?, ?, ?, NOW(), ?, ?)
+		INSERT INTO dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by, metadata)
+		VALUES (UUID(), ?, ?, ?, NOW(), ?, ?)
 	`, source.ID, wispTarget.ID, types.DepRelated, "test", "{}"); err != nil {
 		t.Fatalf("failed to seed wisp-target dependency: %v", err)
 	}

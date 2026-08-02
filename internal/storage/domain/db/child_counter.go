@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
@@ -21,18 +22,22 @@ type childCounterSQLRepositoryImpl struct {
 
 var _ domain.ChildCounterSQLRepository = (*childCounterSQLRepositoryImpl)(nil)
 
-func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentID string, opts domain.ChildCounterOpts) (string, error) {
+func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentID string, _ domain.ChildCounterOpts) (string, error) {
 	if parentID == "" {
 		return "", errors.New("db: ChildCounterSQLRepository.NextChildID: parentID must not be empty")
 	}
 
 	counterTable, issueTable := "child_counters", "issues"
-	if opts.UseWispsTable {
+	parentIsWisp, err := r.parentIsActiveWisp(ctx, parentID)
+	if err != nil {
+		return "", fmt.Errorf("db: ChildCounterSQLRepository.NextChildID: probe parent table for %s: %w", parentID, err)
+	}
+	if parentIsWisp {
 		counterTable, issueTable = "wisp_child_counters", "wisps"
 	}
 
 	var lastChild int
-	err := r.runner.QueryRowContext(ctx,
+	err = r.runner.QueryRowContext(ctx,
 		//nolint:gosec // G201: counterTable is one of two hardcoded constants
 		fmt.Sprintf("SELECT last_child FROM %s WHERE parent_id = ?", counterTable),
 		parentID,
@@ -77,6 +82,21 @@ func (r *childCounterSQLRepositoryImpl) NextChildID(ctx context.Context, parentI
 	}
 
 	return fmt.Sprintf("%s.%d", parentID, next), nil
+}
+
+func (r *childCounterSQLRepositoryImpl) parentIsActiveWisp(ctx context.Context, parentID string) (bool, error) {
+	var probe int
+	err := r.runner.QueryRowContext(ctx, "SELECT 1 FROM wisps WHERE id = ? LIMIT 1", parentID).Scan(&probe)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	case dberrors.IsTableNotExist(err):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func parseChildSuffix(id string) (int, bool) {

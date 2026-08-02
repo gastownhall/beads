@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -105,10 +106,85 @@ func TestUniqueStrings(t *testing.T) {
 	})
 }
 
-func TestBulkDeleteNoResurrection(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
+func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
+	ensureCleanGlobalState(t)
+	oldQuiet := quietFlag
+	quietFlag = false
+	t.Cleanup(func() { quietFlag = oldQuiet })
+
+	issues := map[string]*types.Issue{
+		"test-delete-1": {
+			ID:          "test-delete-1",
+			Title:       "sensitive title must not appear",
+			Description: "sensitive payload must not appear",
+		},
 	}
+	result := &types.DeleteIssuesResult{DeletedCount: 1, DependenciesCount: 2}
+
+	out := captureStdout(t, func() error {
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, true)
+	})
+
+	for _, secret := range []string{"sensitive title", "sensitive payload"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("JSON preview leaked %q: %s", secret, out)
+		}
+	}
+	for _, required := range []string{"\"issue_ids\"", "\"would_delete\"", "\"dry_run\""} {
+		if !strings.Contains(out, required) {
+			t.Errorf("JSON preview missing %s: %s", required, out)
+		}
+	}
+
+	quietFlag = true
+	quietOut := captureStdout(t, func() error {
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, false)
+	})
+	if quietOut != "" {
+		t.Fatalf("quiet preview produced output: %s", quietOut)
+	}
+}
+
+func TestDeleteBatchDryRunHonorsForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
+
+	parent := &types.Issue{Title: "parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	child := &types.Issue{Title: "child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := s.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	oldStore, oldRootCtx, oldJSON, oldQuiet := store, rootCtx, jsonOutput, quietFlag
+	store, rootCtx, jsonOutput, quietFlag = s, ctx, false, true
+	t.Cleanup(func() { store, rootCtx, jsonOutput, quietFlag = oldStore, oldRootCtx, oldJSON, oldQuiet })
+
+	if err := deleteBatch(nil, []string{parent.ID}, true, true, false, false, false); err != nil {
+		t.Fatalf("forced dry-run rejected a dependent issue: %v", err)
+	}
+	if issue, err := s.GetIssue(ctx, parent.ID); err != nil || issue == nil {
+		t.Fatalf("forced dry-run deleted parent: issue=%v err=%v", issue, err)
+	}
+	if issue, err := s.GetIssue(ctx, child.ID); err != nil || issue == nil {
+		t.Fatalf("forced dry-run deleted child: issue=%v err=%v", issue, err)
+	}
+	deps, err := s.GetDependencies(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("get dependencies after dry-run: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("forced dry-run changed dependencies: got %d, want 1", len(deps))
+	}
+}
+
+func TestBulkDeleteNoResurrection(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -197,9 +273,6 @@ func testGitCmd(t *testing.T, dir string, args ...string) {
 
 // TestDeleteIssueWrapper tests the deleteIssue wrapper function
 func TestDeleteIssueWrapper(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -330,9 +403,6 @@ func TestDeleteIssueWrapper(t *testing.T) {
 }
 
 func TestDeleteIssueUnsupportedStorage(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 	if testDoltServerPort == 0 {
 		t.Skip("skipping: Dolt test container not available")
 	}

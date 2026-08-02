@@ -3,12 +3,25 @@ package utils
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// ErrAmbiguousID is the sentinel wrapped into the error ResolvePartialID
+// returns when a partial ID matches more than one issue. Callers use
+// errors.Is(err, ErrAmbiguousID) to distinguish "ambiguous" from
+// "not found" and surface the candidate list instead of a generic failure.
+var ErrAmbiguousID = errors.New("ambiguous issue ID")
+
+type PartialIDResolverStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	GetConfig(ctx context.Context, key string) (string, error)
+}
 
 // parseIssueID ensures an issue ID has the configured prefix.
 // If the input already has the prefix (e.g., "bd-a3f8e9"), returns it as-is.
@@ -36,7 +49,7 @@ func parseIssueID(input string, prefix string) string {
 // Returns an error if:
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
-func ResolvePartialID(ctx context.Context, store storage.Storage, input string) (string, error) {
+func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
 	}
@@ -116,8 +129,12 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
 
+	// Narrow projection: this loop only reads the .ID field, so use the
+	// SearchIssueIDs path instead of SearchIssues. Avoids hydrating all
+	// 45+ issue columns (including big TEXT fields like description, design,
+	// notes, metadata, payload) only to discard them.
 	filter := types.IssueFilter{}
-	issues, err := store.SearchIssues(ctx, searchPart, filter)
+	ids, err := store.SearchIssueIDs(ctx, searchPart, filter)
 	if err != nil {
 		return "", fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -125,10 +142,10 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	var matches []string
 	var exactMatch string
 
-	for _, issue := range issues {
+	for _, id := range ids {
 		// Check for exact full ID match first (case: user typed full ID with different prefix)
-		if issue.ID == input {
-			exactMatch = issue.ID
+		if id == input {
+			exactMatch = id
 			break
 		}
 
@@ -136,21 +153,21 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		// This correctly handles multi-hyphen prefixes (e.g., "hacker-news-ko4"
 		// yields hash "ko4", not "news-ko4" from naive first-hyphen split).
 		var issueHash string
-		if p := ExtractIssuePrefixKnown(issue.ID, knownPrefixes); p != "" && strings.HasPrefix(issue.ID, p+"-") {
-			issueHash = issue.ID[len(p)+1:]
+		if p := ExtractIssuePrefixKnown(id, knownPrefixes); p != "" && strings.HasPrefix(id, p+"-") {
+			issueHash = id[len(p)+1:]
 		} else {
-			issueHash = issue.ID
+			issueHash = id
 		}
 
 		// Check for exact hash match (excluding hierarchical children)
 		if issueHash == hashPart {
-			exactMatch = issue.ID
+			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
-		}
-
-		// Check if the issue hash contains the input hash as substring
-		if strings.Contains(issueHash, hashPart) {
-			matches = append(matches, issue.ID)
+		} else if strings.HasPrefix(issueHash, hashPart) {
+			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
+			// HasPrefix rather than Contains: reject interior-substring matches
+			// like "kt8" inside "j0kt8" (GH#4234).
+			matches = append(matches, id)
 		}
 	}
 
@@ -166,22 +183,26 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 	if len(matches) == 0 {
 		ephTrue := true
 		wispFilter := types.IssueFilter{Ephemeral: &ephTrue}
-		if wisps, wispErr := store.SearchIssues(ctx, searchPart, wispFilter); wispErr == nil {
-			for _, w := range wisps {
-				if w.ID == input {
-					return w.ID, nil
+		if wispIDs, wispErr := store.SearchIssueIDs(ctx, searchPart, wispFilter); wispErr == nil {
+			for _, wID := range wispIDs {
+				if wID == input {
+					return wID, nil
 				}
 				var wHash string
-				if p := ExtractIssuePrefixKnown(w.ID, knownPrefixes); p != "" && strings.HasPrefix(w.ID, p+"-") {
-					wHash = w.ID[len(p)+1:]
+				if p := ExtractIssuePrefixKnown(wID, knownPrefixes); p != "" && strings.HasPrefix(wID, p+"-") {
+					wHash = wID[len(p)+1:]
 				} else {
-					wHash = w.ID
+					wHash = wID
 				}
-				if wHash == hashPart {
-					exactMatch = w.ID
-				}
-				if strings.Contains(wHash, hashPart) {
-					matches = append(matches, w.ID)
+				// Wisp IDs are shaped "<prefix>-wisp-<hash>", so wHash here is
+				// the composite "wisp-<hash>". Strip the literal "wisp-" infix
+				// before comparing so bare-hash lookups (e.g. "t3st") resolve
+				// against the isolated hash, not the full "wisp-t3st" string.
+				wispHash := strings.TrimPrefix(wHash, "wisp-")
+				if wHash == hashPart || wispHash == hashPart {
+					exactMatch = wID
+				} else if strings.HasPrefix(wispHash, hashPart) {
+					matches = append(matches, wID)
 				}
 			}
 			if exactMatch != "" {
@@ -194,8 +215,13 @@ func ResolvePartialID(ctx context.Context, store storage.Storage, input string) 
 		return "", fmt.Errorf("no issue found matching %q", input)
 	}
 
+	// Sort so the ambiguity error lists IDs deterministically. SearchIssues return
+	// order is not a contract for ambiguous matches, so sorting by ID pins the same
+	// message for every storage implementation.
+	sort.Strings(matches)
+
 	if len(matches) > 1 {
-		return "", fmt.Errorf("ambiguous ID %q matches %d issues: %v\nUse more characters to disambiguate", input, len(matches), matches)
+		return "", fmt.Errorf("%w: %q matches %d issues: %v\nUse more characters to disambiguate", ErrAmbiguousID, input, len(matches), matches)
 	}
 
 	return matches[0], nil
@@ -229,7 +255,7 @@ func looksLikePartialIDHash(input string) bool {
 
 // ResolvePartialIDs resolves multiple potentially partial issue IDs.
 // Returns the resolved IDs and any errors encountered.
-func ResolvePartialIDs(ctx context.Context, store storage.Storage, inputs []string) ([]string, error) {
+func ResolvePartialIDs(ctx context.Context, store PartialIDResolverStore, inputs []string) ([]string, error) {
 	var resolved []string
 	for _, input := range inputs {
 		fullID, err := ResolvePartialID(ctx, store, input)

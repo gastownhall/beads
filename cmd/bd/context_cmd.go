@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
-	"os"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
 // ContextInfo contains the effective backend identity and repository context.
@@ -45,13 +46,32 @@ Examples:
   bd context           # Show context information
   bd context --json    # Output in JSON format
 `,
-	Run: func(cmd *cobra.Command, args []string) {
-		info := ContextInfo{
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("context")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runContextProxiedServer(cmd, rootCtx)
+		}
+
+		// The direct route reads config files itself rather than through the
+		// contextinfo provider — it must answer in degraded states where no
+		// database can be opened — but it assembles the SAME snapshot the
+		// proxied route gets from the provider, and hands it to the same
+		// view. That is what keeps `bd context` one answer across two routes,
+		// and what puts both of them on the projection GET /v0/beads/context
+		// serves.
+		snapshot := domain.ContextInfo{
 			Backend:   configfile.BackendDolt,
 			BdVersion: Version,
 		}
 
-		// Resolve repo context (works without DB open)
 		if selected := selectedNoDBBeadsDir(cmd); selected != "" {
 			prepareSelectedNoDBContext(selected)
 		}
@@ -59,25 +79,24 @@ Examples:
 		rc, err := beads.GetRepoContext()
 		if err != nil {
 			if jsonOutput {
-				outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)})
-			} else {
-				fmt.Fprintf(os.Stderr, "Error: cannot resolve repo context: %v\n", err)
+				if jerr := outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)}); jerr != nil {
+					return jerr
+				}
+				return SilentExit()
 			}
-			os.Exit(1)
+			return HandleError("cannot resolve repo context: %v", err)
 		}
 
-		info.BeadsDir = rc.BeadsDir
-		info.RepoRoot = rc.RepoRoot
-		info.CWDRepoRoot = rc.CWDRepoRoot
-		info.IsRedirected = rc.IsRedirected
-		info.IsWorktree = rc.IsWorktree
+		snapshot.BeadsDir = rc.BeadsDir
+		snapshot.RepoRoot = rc.RepoRoot
+		snapshot.CWDRepoRoot = rc.CWDRepoRoot
+		snapshot.IsRedirected = rc.IsRedirected
+		snapshot.IsWorktree = rc.IsWorktree
 
-		// Read role from repo context
 		if role, ok := rc.Role(); ok {
-			info.Role = string(role)
+			snapshot.Role = string(role)
 		}
 
-		// Load metadata.json config (does not require DB)
 		cfg, err := configfile.Load(rc.BeadsDir)
 		if err != nil {
 			cfg = configfile.DefaultConfig()
@@ -86,37 +105,35 @@ Examples:
 			cfg = configfile.DefaultConfig()
 		}
 
-		info.DoltMode = cfg.GetDoltMode()
-		info.Database = cfg.GetDoltDatabase()
-		info.ProjectID = cfg.ProjectID
+		snapshot.DoltMode = cfg.GetDoltMode()
+		snapshot.Database = cfg.GetDoltDatabase()
+		snapshot.ProjectID = cfg.ProjectID
 
 		if cfg.IsDoltServerMode() {
-			info.ServerHost = cfg.GetDoltServerHost()
-			// Use doltserver.DefaultConfig to resolve the actual runtime port
-			// (from port file, env var, etc.) instead of the static config default.
-			// This matches what "bd dolt show" does (GH#2555).
+			snapshot.ServerHost = cfg.GetDoltServerHost()
 			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
-			info.ServerPort = dsCfg.Port
+			snapshot.ServerPort = dsCfg.Port
 		}
 		if cfg.IsDoltProxiedServerMode() {
-			info.ProxiedDir = resolveProxiedServerRootPath(rc.BeadsDir, cfg)
+			p, err := resolveProxiedServerRootPath(rc.BeadsDir)
+			if err != nil {
+				return HandleError("resolve proxied server root: %v", err)
+			}
+			snapshot.ProxiedDir = p
 		}
 
 		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
-			info.DataDir = dataDir
+			snapshot.DataDir = dataDir
 		}
 
-		// Read sync remote from the selected repo's config.yaml.
-		if remote := resolveSyncRemoteFromDir(rc.BeadsDir); remote != "" {
-			info.SyncRemote = remote
-			info.SyncGitRemote = remote // Deprecated: kept for backwards compat
-		}
+		snapshot.SyncRemote = resolveSyncRemoteFromDir(rc.BeadsDir)
 
+		info := contextInfoView(snapshot)
 		if jsonOutput {
-			outputJSON(info)
-		} else {
-			printContextText(info)
+			return outputJSON(info)
 		}
+		printContextText(info)
+		return nil
 	},
 }
 

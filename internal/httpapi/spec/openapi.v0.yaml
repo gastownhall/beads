@@ -1,0 +1,1569 @@
+openapi: 3.0.3
+
+# Hand-written. This document is the source of truth for the bd serve wire
+# contract: the Go types in internal/httpapi/apigen are generated FROM it
+# (`make api-gen`), never the other way round.
+#
+# CODEGEN TRAP, verified against oapi-codegen v2.6.0 and the reason the pinned
+# schemas below repeat their property lists instead of composing with `allOf`:
+# a component that carries BOTH `allOf` and `x-go-type` silently loses the
+# `x-go-type` — the generator merges the allOf members first and then either
+# inherits the first member's pin (an `IssueWithCounts` composed from `Issue`
+# generated `type IssueWithCounts = types.Issue`, dropping the count fields the
+# ready endpoint exists to carry) or emits a hand-written-struct mirror of the
+# canonical type. Both outcomes are the "second wire struct" this whole design
+# forbids, and both are silent. internal/httpapi/pinning.go holds compile-time
+# assertions that fail the build if either ever happens again.
+x-bd-source: spec-first
+
+info:
+  title: bd serve HTTP API
+  version: 0.1.0
+  license:
+    name: MIT
+  description: >-
+    Loopback HTTP surface over the same work contract the `bd` CLI serves, for
+    automation clients that would otherwise fork a `bd` subprocess per call.
+
+
+    This document is spec-first and vendor-neutral: it names no product, no
+    deployment and no downstream consumer, and the Go types under
+    `internal/httpapi/apigen` are generated from it.
+
+
+    `info.version` is the revision of THIS DOCUMENT. The wire contract version
+    is the `/v0` path prefix, reported as `ContextResponse.api_version`.
+
+
+    ## Media types
+
+
+    Success bodies are `application/json; charset=utf-8`. EVERY non-2xx body,
+    from every route and from the middleware in front of them, is
+    `application/problem+json` carrying the `Problem` schema — there is exactly
+    one error shape on this surface.
+
+
+    ## Two 400s apply to every route, and are documented here once
+
+
+    * **Host header.** A request whose `Host` header is not in the server's
+      allowlist is refused with `400` / `code: invalid_argument` /
+      `param: "Host"` by middleware that runs before any handler.
+
+    * **Unknown query parameter.** Every operation rejects any query parameter
+      outside its own parameter table with `400` / `code: invalid_argument` /
+      `reason: "unknown_parameter"` and `param` naming the offending key.
+      Operations with no parameters at all (`GET /healthz`,
+      `GET /v0/beads/context`, `GET /v0/beads/issues/{id}`,
+      `POST /v0/beads/issues/{id}:claim`) reject every query key the same way.
+
+
+    Both are uniform rules, reachable on EVERY route including `GET /healthz`,
+    and are stated here instead of being repeated on all six operations. The
+    per-operation `responses` below therefore list what an operation produces
+    BEYOND these two: a generated client must treat `400 invalid_argument` as
+    possible everywhere, including on the operations whose documented statuses
+    are only `404`/`500`/`503`.
+
+
+    The unknown-parameter rule is deliberate and load-bearing: silently
+    ignoring an unrecognized FILTER parameter widens the result set, so a
+    client one version ahead of the server would receive — and act on — rows it
+    believed it had filtered out. Strict rejection is also a client's only
+    per-parameter capability probe, since `capabilities` (see
+    `ContextResponse`) is operation-level.
+
+
+    ## Version skew: what a client may gate on
+
+
+    * `capabilities` gates OPERATION presence. It is derived from the server's
+      implemented handlers; check the list, never the version string.
+    * `bd_version` gates BEHAVIORAL changes tied to a release, and is the only
+      field a client may compare as a version.
+    * `api_version` gates the path major, and changes only when `/v1` is cut.
+    * Parameter presence is PROBED, not versioned: a 400 with
+      `reason: "unknown_parameter"` is the machine-attributable answer.
+    * `schema_version` is NOT an HTTP gate. It is shared with the CLI's stdout
+      JSON envelope, so it can move for CLI-only reasons with no HTTP wire
+      change. Report it, log it, never branch on it.
+    * Clients MUST default-branch on unknown `code` and `reason` values within
+      a status class: both vocabularies grow additively, so an exhaustive
+      switch breaks on the first addition.
+
+
+    ## Schema evolution while `/v0` is the newest path version
+
+
+    `Issue`, `IssueWithCounts`, `IssueDetails`,
+    `IssueWithDependencyMetadata`, `Dependency`, `Comment` and `BondRef` are
+    pinned to the canonical Go structs (`x-go-type`), so the CLI's `--json`
+    output and these response bodies are one compatibility domain and cannot
+    drift apart. Changes to them are limited to NEW optional fields, and each
+    addition must land with its entry in this document in the same change — a
+    two-way JSON-tag bijection test, covering all seven, fails CI otherwise. A
+    breaking change to those shapes requires cutting `/v1`, not editing `/v0`.
+
+
+    A member that is absent is not set. When reading a RESPONSE, clients MUST
+    treat an explicit `null` member identically to an absent member. Producers
+    on this surface omit absent members; a profile MAY instead emit `null` for
+    members it declares always-present. Explicit `null` in a REQUEST body is
+    NOT covered by this rule; its meaning is defined per operation.
+
+
+    ## Profiles
+
+
+    A PROFILE is a separate document that re-publishes part of this contract as
+    its own surface. Conformance to this core is a checkable relation over
+    wire-observable JSON — the profile's value model is subsumed by this one,
+    plus the deviations the profile DECLARES — not a claim of shared
+    vocabulary. Five rules make it checkable.
+
+
+    * **Verbatim or absent.** A property emitted under a core name carries the
+      core type, format and semantics, and its value is the canonical value
+      verbatim or is wholly absent. Nothing is transformed in place: a
+      re-spelling, a coercion to another JSON type, or a truncation, published
+      under a core name, is non-conformant — and omitting the member is always
+      the conformant alternative.
+
+    * **An omission is not a licence to re-spell.** A profile that omits a core
+      member MUST NOT publish that member's value under any other name.
+      Omission means the value is not on the wire; an extension that carries
+      it is a re-spelling of a core member, and is non-conformant however
+      carefully the extension itself is declared.
+
+    * **Tightening is bounds-only.** A profile MAY omit optional properties,
+      and MAY tighten `maxLength`, `maxItems` and `maxProperties` or close an
+      open vocabulary, provided every instance it emits is still valid against
+      this document once explicit `null` is read as absence. That list is
+      exhaustive and the proviso is a floor, not a grant: a change the list
+      does not name is not made a tightening by the fact that its instances
+      still validate. Widening a bound, re-typing a member, or extending a
+      vocabulary this document closes is not tightening.
+
+      **A narrowed value schema is a declared deviation.** Constraining what a
+      member's VALUES may be — admitting only short strings, say, where this
+      document admits any JSON value — is a third thing, and it is how a
+      profile caps the size of a response without transforming anything: not
+      one of the bounds above, and not the re-typing this rule excludes,
+      because every value that does go on the wire is still the canonical
+      value. It is a DEVIATION, conformant only where the profile DECLARES it,
+      by the same machinery that declares an embedded-relation omission, and
+      only on these terms. A value that does not satisfy the narrower schema is
+      OMITTED ENTIRELY rather than coerced to fit; stringifying a typed value
+      in place is a transformation, and "verbatim or absent" already forbids
+      it. And the declaration states that the member MAY BE INCOMPLETE, because
+      a consumer of the profile cannot distinguish an entry dropped for failing
+      the narrower schema from one that was never set: that consequence must be
+      visible in the declaration, not left to be discovered.
+
+    * **Required members are retained.** A profile keeps the required members of
+      every top-level resource. Dropping a required member of an EMBEDDED
+      relation — a nested edge or summary carried inside another resource — is
+      legal only where the profile DECLARES that omission and its reason. A
+      silent omission never is.
+
+    * **Extensions are declared, and their names ratchet.** A profile MAY add
+      members of its own, provided each is marked as an extension in the
+      profile's own document and its name is not one this document already
+      defines. Because `/v0` grows by ADDING optional members, a later revision
+      of this document may define a name a profile is already using: that
+      collision is reconciled — the core member adopted, or the extension
+      renamed — as part of adopting the revision, never left to resolve by
+      itself.
+
+paths:
+
+  /healthz:
+    get:
+      operationId: health
+      summary: Process liveness
+      description: >-
+        Liveness only: it answers from the process itself and never touches the
+        database, so it stays green while the database is unreachable. For
+        readiness, probe `GET /v0/beads/ready?limit=1` instead.
+      responses:
+        '200':
+          description: The process is running.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+
+  /v0/beads/context:
+    get:
+      operationId: getContext
+      summary: Workspace and API identity
+      description: >-
+        A startup snapshot of the served workspace plus the API's own identity.
+        Serves a fixed field allowlist; it does not reflect the server's whole
+        configuration, and in particular never carries a sync remote URL (those
+        routinely embed credentials). v0 answers from the snapshot without
+        touching the database, which is why no 503 is documented here.
+      responses:
+        '200':
+          description: Workspace and API identity.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ContextResponse'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /v0/beads/ready:
+    get:
+      operationId: listReadyWork
+      summary: List ready work
+      description: >-
+        Unblocked, open work, ordered by the requested sort policy. Items are
+        `IssueWithCounts` — the same element type `bd ready --json` emits — so
+        dependency, dependent and comment counts are present from v0 onward.
+
+
+        The result set is always restricted to `status=open`; there is no
+        status parameter. There is no cursor either: the sort policies admit no
+        keyset predicate, and the intended usage is snapshot-and-requery.
+
+
+        SOME TYPES ARE EXCLUDED BY DEFAULT, exactly as `bd ready` excludes them:
+        `merge-request`, `gate`, `molecule`, `rig` and the workspace's
+        configured infrastructure types, plus anything named in `exclude_type`.
+        Setting `type` DROPS THAT ENTIRE EXCLUSION SET (also matching the CLI),
+        so `type=molecule` returns records the default view never shows. A
+        client scanning the active set with `limit=0` and no `type` therefore
+        never sees those classes at all.
+      parameters:
+        - name: assignee
+          in: query
+          description: Only issues assigned to this actor.
+          schema:
+            type: string
+        - name: unassigned
+          in: query
+          description: Only issues with no assignee.
+          schema:
+            type: boolean
+        - name: type
+          in: query
+          description: >-
+            Issue type. The only normalization is shorthand ALIAS expansion,
+            exactly what `bd ready --type` does: `mr` → `merge-request`,
+            `feat` → `feature`, `mol` → `molecule`, `enhancement` → `feature`,
+            `dec`/`adr` → `decision`. Every other value is used as written —
+            there is NO plural folding, so `bugs` is not `bug`.
+
+
+            An unrecognized type is not an error here: the type vocabulary is
+            workspace-configurable, and `bd ready` does not validate it either,
+            so it simply matches nothing and `items` comes back empty. (The
+            list operation differs — `bd list` DOES validate the type, so
+            `GET /v0/beads/issues?type=bugs` is a 400.)
+
+
+            When set, `exclude_type` is ignored, and so are the default type
+            exclusions described above.
+          schema:
+            type: string
+        - name: exclude_type
+          in: query
+          description: >-
+            Issue types to exclude. Repeat the parameter, or pass a
+            comma-separated list. Ignored when `type` is set.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label
+          in: query
+          description: Labels that must ALL be present (AND).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label_any
+          in: query
+          description: Labels of which at least one must be present (OR).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: exclude_label
+          in: query
+          description: Labels that must not be present.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label_pattern
+          in: query
+          description: Glob matched against labels.
+          schema:
+            type: string
+        - name: label_regex
+          in: query
+          description: Regular expression matched against labels.
+          schema:
+            type: string
+        - name: priority
+          in: query
+          description: Exact priority (0 is a real value, not "unset").
+          schema:
+            type: integer
+        - name: parent
+          in: query
+          description: Restrict to recursive descendants of this issue.
+          schema:
+            type: string
+        - name: metadata_field
+          in: query
+          description: >-
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: has_metadata_key
+          in: query
+          description: Only issues carrying this top-level metadata key.
+          schema:
+            type: string
+        - name: include_ephemeral
+          in: query
+          description: Include ephemeral (non-synced) rows.
+          schema:
+            type: boolean
+            default: false
+        - name: include_deferred
+          in: query
+          description: Include issues whose `defer_until` is still in the future.
+          schema:
+            type: boolean
+            default: false
+        - name: sort
+          in: query
+          description: >-
+            Ready-work ordering. `priority` is priority-first; `hybrid` orders
+            recent issues by priority and older ones by age; `oldest` is
+            creation order. An unrecognized value is a 400.
+
+
+            The default is the one `bd ready --sort` registers, so a client
+            swapping `bd ready --json` for this operation gets the same items in
+            the same order. The storage layer treats an EMPTY policy as
+            `hybrid`, but that fallback is unreachable from the CLI and is NOT
+            this parameter's default: `hybrid` demotes older high-priority work,
+            so defaulting to it would change the item SET as soon as `limit`
+            truncates — silently, and only for the clients this API exists to
+            migrate.
+          schema:
+            type: string
+            enum: [hybrid, priority, oldest]
+            default: priority
+        - name: limit
+          in: query
+          description: >-
+            Maximum number of items to return. `0` means unlimited, exactly as
+            `bd ready --limit 0` does — the two surfaces read the same shared
+            default and the same zero semantics, so they cannot diverge. A
+            negative value is a 400.
+
+
+            The default below is the shared ready-work limit constant
+            (`workapi.DefaultReadyLimit`, the value `bd ready`'s `--limit` flag
+            registers).
+
+
+            One exception, and it is mode-dependent: when the server was
+            started with `--allow-non-loopback`, `limit=0` is refused with 400
+            `invalid_argument`, `param: "limit"`, `reason: "invalid_value"` and
+            detail "unlimited reads are loopback-only; pass an explicit limit".
+            An unlimited read buffers the whole active set and its JSON encoding
+            inside one shared process, which must not be reachable by arbitrary
+            network peers. The bind mode is deliberately NOT advertised in
+            `ContextResponse` — a client that wants an unlimited read asks for
+            one and, on that 400, re-issues with an explicit limit; it is a
+            client-side fix, never a retry.
+          schema:
+            type: integer
+            minimum: 0
+            default: 100
+      responses:
+        '200':
+          description: A page of ready work.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyPage'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues:
+    get:
+      operationId: listIssues
+      summary: List issues
+      description: >-
+        Issues under the same default exclusions `bd list` applies (closed and
+        custom done/frozen statuses, templates, gates and configured infra
+        types), each carrying dependency, dependent and comment counts.
+
+
+        ORDERING IS FIXED AND DIVERGES FROM `bd list` DELIBERATELY. Every page
+        of this operation — cursored or not — is ordered by
+        `(created_at DESC, id ASC)`, while `bd list`'s default ordering is
+        priority-first. The divergence is the price of a correct cursor: the
+        cursor is a keyset position in the created order, so if the first page
+        fell back to priority ordering the second page would skip and duplicate
+        rows. That is also why v0 exposes no `sort` parameter — the sort order
+        is welded to the cursor contract, and a new order needs new surface.
+
+
+        The item set, and each item's JSON, are identical to `bd list --json`;
+        only the order differs.
+
+
+        EPHEMERAL (WISP) ROWS ARE NOT IN SCOPE for this operation in v0: there
+        is no `include_ephemeral` parameter here, unlike on `ready`. `bd list`
+        cannot emit those rows either, so there is no CLI behavior to diverge
+        from — but it does mean a client whose workload spans the ephemeral
+        tier still needs the CLI for that half. Adding the parameter later is
+        additive.
+      parameters:
+        - name: status
+          in: query
+          description: >-
+            Status filter. Repeat the parameter, or pass a comma-separated
+            list. Custom statuses configured for the workspace are honored.
+
+
+            Setting this REPLACES the default status exclusions rather than
+            fighting with them: `status=closed` on its own returns closed
+            issues, and does NOT also need `all=true`. Leave it unset to get
+            the default view described above.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: type
+          in: query
+          description: >-
+            Issue type. Shorthand aliases are expanded exactly as
+            `bd list --type` expands them (`mr`, `feat`, `mol`, `enhancement`,
+            `dec`, `adr`); there is no plural folding. Unlike on `ready`, an
+            unknown type is a 400 `invalid_argument` with
+            `reason: "invalid_value"`, because `bd list` validates the type
+            against the workspace's configured vocabulary and this operation
+            keeps that behavior.
+          schema:
+            type: string
+        - name: assignee
+          in: query
+          description: Only issues assigned to this actor.
+          schema:
+            type: string
+        - name: label
+          in: query
+          description: Labels that must ALL be present (AND).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label_any
+          in: query
+          description: Labels of which at least one must be present (OR).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: exclude_label
+          in: query
+          description: Labels that must not be present.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: parent
+          in: query
+          description: Restrict to recursive descendants of this issue.
+          schema:
+            type: string
+        - name: all
+          in: query
+          description: >-
+            Drop the default status exclusions (closed plus any custom statuses
+            in the done/frozen categories). Redundant when `status` is set,
+            which drops them already.
+          schema:
+            type: boolean
+            default: false
+        - name: include_templates
+          in: query
+          description: Include template molecules.
+          schema:
+            type: boolean
+            default: false
+        - name: include_gates
+          in: query
+          description: Include gate issues.
+          schema:
+            type: boolean
+            default: false
+        - name: include_infra
+          in: query
+          description: Include the workspace's configured infrastructure issue types.
+          schema:
+            type: boolean
+            default: false
+        - name: created_before
+          in: query
+          description: Only issues created strictly before this instant (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: created_after
+          in: query
+          description: Only issues created strictly after this instant (RFC 3339).
+          schema:
+            type: string
+            format: date-time
+        - name: metadata_field
+          in: query
+          description: >-
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: has_metadata_key
+          in: query
+          description: Only issues carrying this top-level metadata key.
+          schema:
+            type: string
+        - name: cursor
+          in: query
+          description: >-
+            Opaque keyset position, taken verbatim from a previous response's
+            `next_cursor`. Clients MUST NOT construct, parse or mutate it: its
+            encoding is server-private and versioned, and an undecodable or
+            unknown-version value is refused with 400 `invalid_cursor`. The
+            recovery for that refusal is normative: restart paging with no
+            `cursor` at all — the position cannot be salvaged, and re-sending
+            the same value cannot succeed.
+
+
+            LIFETIME: a cursor holds a position and a private encoding version,
+            and nothing else. The server keeps no state for it, so it does not
+            expire, does not become invalid when the server restarts, and is
+            not tied to the connection that issued it; the only thing that
+            invalidates one is a change to the encoding, which surfaces as
+            `invalid_cursor`.
+
+
+            MISUSE IS NOT DETECTABLE, which is why repeating the filters
+            matters. Because the token carries no filters, a page fetched with
+            a cursor minted under DIFFERENT filters is not refused: the server
+            applies the filters of the current request from the position of the
+            old one, silently skipping every row the new filter set would have
+            placed before that position. Repeat every filter verbatim for the
+            whole traversal, and start a new traversal when they change.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: >-
+            Maximum number of items to return. `0` means unlimited, exactly as
+            `bd list --limit 0` does — the two surfaces read the same shared
+            default and the same zero semantics, so they cannot diverge. An
+            unlimited page reports `has_more: false` and carries no
+            `next_cursor`. A negative value is a 400.
+
+
+            The default below is the shared list limit constant
+            (`workapi.DefaultListLimit`, the value `bd list`'s `--limit` flag
+            registers).
+
+
+            One exception, and it is mode-dependent: when the server was
+            started with `--allow-non-loopback`, `limit=0` is refused with 400
+            `invalid_argument`, `param: "limit"`, `reason: "invalid_value"` and
+            detail "unlimited reads are loopback-only; pass an explicit limit".
+            An unlimited read buffers the whole active set and its JSON encoding
+            inside one shared process, which must not be reachable by arbitrary
+            network peers. The bind mode is deliberately NOT advertised in
+            `ContextResponse` — a client that wants an unlimited read asks for
+            one and, on that 400, re-issues with an explicit limit (and pages
+            with `cursor`); it is a client-side fix, never a retry.
+          schema:
+            type: integer
+            minimum: 0
+            default: 50
+      responses:
+        '200':
+          description: A page of issues in `(created_at DESC, id ASC)` order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssuesPage'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, a malformed parameter
+            value, or an undecodable/unknown-version `cursor`.
+          x-bd-codes: [invalid_argument, invalid_cursor]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues/{id}:
+    get:
+      operationId: getIssue
+      summary: Get one issue with its labels, dependencies and counts
+      description: >-
+        Returns a single object, never an array. The id must be the exact
+        canonical issue id: there is no fuzzy, prefix or substring resolution
+        on this surface, so a lookup can never resolve to a different issue
+        than the caller named. Wisp (ephemeral) records are looked up as a
+        fallback when no issue matches.
+
+
+        COMMENT BODIES AND DEPENDENTS ARE NOT REACHABLE OVER v0. This operation
+        takes no query parameters, and every query key is rejected, so there is
+        no way to ask for them: `comments` and `dependents` are always absent,
+        and `comment_count`, `dependent_count` and `comments_omitted` are what
+        this surface reports about them. A workflow that must read comment text
+        keeps using `bd show --json --include-comments` for now. Adding
+        `include_comments` / `include_dependents` parameters later is additive
+        and needs no schema change — the fields are already specified.
+      parameters:
+        - $ref: '#/components/parameters/IssueID'
+      responses:
+        '200':
+          description: The issue.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IssueDetails'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues/{id}:claim:
+    post:
+      operationId: claimIssue
+      summary: Claim an issue for an actor
+      description: >-
+        Compare-and-set claim. The caller always names the actor: the server
+        never infers one, because its own identity is meaningless for remote
+        callers.
+
+
+        A re-claim by the CURRENT holder is idempotent — 200 with
+        `already_claimed: true` — matching CLI semantics. A claim held by a
+        different actor is 409 `already_claimed` and carries the holder in the
+        `assignee` extension member, read inside the same transaction; an issue
+        in a non-claimable state is 409 `not_claimable` and carries
+        `issue_status`. Neither needs the client to parse prose.
+      parameters:
+        - $ref: '#/components/parameters/IssueID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClaimRequest'
+      responses:
+        '200':
+          description: The issue is now held by `actor`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClaimResponse'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, or an `actor` that is empty
+            after trimming, longer than 256 bytes, or carrying control
+            characters.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            The issue is held by another actor (`already_claimed`, with the
+            `assignee` extension member) or is not in a claimable state
+            (`not_claimable`, with the `issue_status` extension member).
+          x-bd-codes: [already_claimed, not_claimable]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+components:
+
+  parameters:
+    IssueID:
+      name: id
+      in: path
+      required: true
+      description: >-
+        Exact canonical issue id. No fuzzy, prefix or substring resolution.
+      schema:
+        type: string
+
+  responses:
+    InvalidArgument:
+      description: >-
+        Invalid request: an unknown query parameter, or a malformed parameter
+        value.
+      x-bd-codes: [invalid_argument]
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: No issue or wisp with that id.
+      x-bd-codes: [not_found]
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    InternalError:
+      description: >-
+        Unexpected server-side failure. `detail` is a fixed string per code:
+        the underlying error goes to the server log only, because driver and
+        dial errors routinely embed the database DSN, user and host:port.
+      x-bd-codes: [internal]
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unavailable:
+      description: >-
+        The request could not be served right now and may be retried:
+        `db_unavailable` (the database is unreachable) or `busy` (write
+        contention exhausted the transaction retry budget, or the in-flight
+        request limit was saturated). `detail` is a fixed string per code, for
+        the same reason as 500.
+      x-bd-codes: [busy, db_unavailable]
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+
+  schemas:
+
+    # ---------------------------------------------------------------------
+    # Pinned schemas.
+    #
+    # Each of the seven below is `x-go-type`-pinned to the canonical Go struct,
+    # so the generator emits a type ALIAS and no mirror struct exists anywhere.
+    # `types.Issue`'s JSON encoding IS this contract; the CLI's `--json`, the
+    # JSONL interchange and these bodies all marshal the same struct.
+    #
+    # They therefore repeat each other's properties rather than composing with
+    # `allOf` — see the codegen trap documented at the top of this file. The
+    # repetition is machine-checked in both directions by
+    # TestWireTagBijection (internal/httpapi/wire_bijection_test.go): a field
+    # added to the Go struct without an entry here fails CI, and an entry here
+    # with no Go field fails CI.
+    # ---------------------------------------------------------------------
+
+    Issue:
+      type: object
+      description: >-
+        A tracked work item. Property semantics documented here apply to every
+        schema that repeats them below.
+      x-go-type: types.Issue
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at]
+      properties:
+        id:
+          type: string
+          description: Canonical issue id, e.g. `bd-abc`.
+        title:
+          type: string
+        description:
+          type: string
+        design:
+          type: string
+        acceptance_criteria:
+          type: string
+        notes:
+          type: string
+        spec_id:
+          type: string
+        status:
+          type: string
+          description: >-
+            `open`, `in_progress`, `blocked`, `closed`, or any custom status
+            configured for the workspace. NOT a closed vocabulary: clients must
+            treat an unrecognized value as "some status I do not know".
+        priority:
+          type: integer
+          description: 0 (most urgent) through 4. Always present; 0 is a real value.
+        issue_type:
+          type: string
+          description: >-
+            `bug`, `feature`, `task`, `epic`, `chore`, `gate`, and workspace
+            configured types. Not a closed vocabulary.
+        assignee:
+          type: string
+          description: The actor currently holding the issue, if any.
+        owner:
+          type: string
+        estimated_minutes:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        created_by:
+          type: string
+        updated_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+        closed_at:
+          type: string
+          format: date-time
+        close_reason:
+          type: string
+        closed_by_session:
+          type: string
+        lease_expires_at:
+          type: string
+          format: date-time
+          description: Expiry of the current claim's lease, when one is active.
+        heartbeat_at:
+          type: string
+          format: date-time
+        lease_granted_node:
+          type: string
+          description: >-
+            The replica that granted the lease. Empty means the provenance is
+            unknown, which is treated as local.
+        due_at:
+          type: string
+          format: date-time
+        defer_until:
+          type: string
+          format: date-time
+        external_ref:
+          type: string
+        source_system:
+          type: string
+        metadata:
+          type: object
+          additionalProperties: true
+          description: >-
+            Arbitrary caller-supplied JSON object. VALUES MAY BE OF ANY JSON
+            TYPE — string, number, boolean, array or nested object — because
+            typed values enter through the explicit JSON metadata path and
+            persist in older rows. Clients MUST NOT decode this into a
+            string-to-string map; a strict decode fails on the first typed
+            value and takes the whole response with it. That prohibition is on
+            assuming a narrower type when reading THIS document: a profile MAY
+            declare a narrower value schema under the rules in **Profiles**,
+            and a client of that profile may rely on the profile's declaration.
+
+
+            The object-at-top-level shape is the contract every producer and
+            every metadata filter (`metadata_field`, `has_metadata_key`)
+            assumes, but be aware the store validates only that the value is
+            WELL-FORMED JSON: a row created with a non-object (e.g.
+            `bd create --metadata '[1,2]'`) can carry an array or a scalar
+            here. That is a storage-side gap, not licence for a producer to
+            emit one — but a tolerant client should skip such a row rather than
+            fail the whole response.
+        compaction_level:
+          type: integer
+        compacted_at:
+          type: string
+          format: date-time
+        compacted_at_commit:
+          type: string
+        original_size:
+          type: integer
+        labels:
+          type: array
+          items:
+            type: string
+        dependencies:
+          type: array
+          description: >-
+            Dependency edges. Populated in export/interchange contexts; the
+            detail endpoint returns richer entries — see `IssueDetails`.
+          items:
+            $ref: '#/components/schemas/Dependency'
+        comments:
+          type: array
+          items:
+            $ref: '#/components/schemas/Comment'
+        sender:
+          type: string
+        ephemeral:
+          type: boolean
+          description: Ephemeral records are not synced.
+        no_history:
+          type: boolean
+        wisp_type:
+          type: string
+        storage_class:
+          type: string
+          description: >-
+            The record's history/replication contract. Empty means unset, which
+            resolves to ephemeral for wisp-plane records and versioned
+            otherwise.
+        pinned:
+          type: boolean
+        is_template:
+          type: boolean
+        bonded_from:
+          type: array
+          items:
+            $ref: '#/components/schemas/BondRef'
+        await_type:
+          type: string
+          description: Gate condition type.
+        await_id:
+          type: string
+        timeout:
+          type: integer
+          format: int64
+          description: >-
+            NANOSECONDS. This is a Go `time.Duration`, which encodes as an
+            int64 nanosecond count — a pre-existing wire fact, not a choice.
+        waiters:
+          type: array
+          items:
+            type: string
+        source_formula:
+          type: string
+        source_location:
+          type: string
+        mol_type:
+          type: string
+        work_type:
+          type: string
+        event_kind:
+          type: string
+        actor:
+          type: string
+          description: >-
+            For event records, the entity that caused the event. Unrelated to
+            the claiming actor in `ClaimRequest`.
+        target:
+          type: string
+        payload:
+          type: string
+
+    IssueWithCounts:
+      type: object
+      description: >-
+        An `Issue` plus relationship cardinalities. This is the element type of
+        both `/v0/beads/ready` and `/v0/beads/issues`, matching what
+        `bd ready --json` and `bd list --json` emit. Property semantics are
+        documented on `Issue`.
+      x-go-type: types.IssueWithCounts
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required:
+        [id, title, priority, created_at, updated_at, dependency_count, dependent_count, comment_count]
+      properties:
+        # --- repeated from Issue (see the pinned-schema note above) ---
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        design: { type: string }
+        acceptance_criteria: { type: string }
+        notes: { type: string }
+        spec_id: { type: string }
+        status: { type: string }
+        priority: { type: integer }
+        issue_type: { type: string }
+        assignee: { type: string }
+        owner: { type: string }
+        estimated_minutes: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time }
+        close_reason: { type: string }
+        closed_by_session: { type: string }
+        lease_expires_at: { type: string, format: date-time }
+        heartbeat_at: { type: string, format: date-time }
+        lease_granted_node: { type: string }
+        due_at: { type: string, format: date-time }
+        defer_until: { type: string, format: date-time }
+        external_ref: { type: string }
+        source_system: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        compaction_level: { type: integer }
+        compacted_at: { type: string, format: date-time }
+        compacted_at_commit: { type: string }
+        original_size: { type: integer }
+        labels: { type: array, items: { type: string } }
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/Dependency' }
+        comments:
+          type: array
+          items: { $ref: '#/components/schemas/Comment' }
+        sender: { type: string }
+        ephemeral: { type: boolean }
+        no_history: { type: boolean }
+        wisp_type: { type: string }
+        storage_class: { type: string }
+        pinned: { type: boolean }
+        is_template: { type: boolean }
+        bonded_from:
+          type: array
+          items: { $ref: '#/components/schemas/BondRef' }
+        await_type: { type: string }
+        await_id: { type: string }
+        timeout: { type: integer, format: int64 }
+        waiters: { type: array, items: { type: string } }
+        source_formula: { type: string }
+        source_location: { type: string }
+        mol_type: { type: string }
+        work_type: { type: string }
+        event_kind: { type: string }
+        actor: { type: string }
+        target: { type: string }
+        payload: { type: string }
+        # --- added by IssueWithCounts ---
+        dependency_count:
+          type: integer
+          description: Number of issues this one depends on.
+        dependent_count:
+          type: integer
+          description: Number of issues that depend on this one.
+        comment_count:
+          type: integer
+        parent:
+          type: string
+          description: Parent issue id, computed from the parent-child edge.
+
+    IssueDetails:
+      type: object
+      description: >-
+        An `Issue` with its labels, dependency edges and cardinalities — the
+        body of `GET /v0/beads/issues/{id}`. `dependencies` and `dependents`
+        carry FULL issue objects plus the edge type, not bare edges. Property
+        semantics are documented on `Issue`.
+      x-go-type: types.IssueDetails
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at]
+      properties:
+        # --- repeated from Issue (see the pinned-schema note above) ---
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        design: { type: string }
+        acceptance_criteria: { type: string }
+        notes: { type: string }
+        spec_id: { type: string }
+        status: { type: string }
+        priority: { type: integer }
+        issue_type: { type: string }
+        assignee: { type: string }
+        owner: { type: string }
+        estimated_minutes: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time }
+        close_reason: { type: string }
+        closed_by_session: { type: string }
+        lease_expires_at: { type: string, format: date-time }
+        heartbeat_at: { type: string, format: date-time }
+        lease_granted_node: { type: string }
+        due_at: { type: string, format: date-time }
+        defer_until: { type: string, format: date-time }
+        external_ref: { type: string }
+        source_system: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        compaction_level: { type: integer }
+        compacted_at: { type: string, format: date-time }
+        compacted_at_commit: { type: string }
+        original_size: { type: integer }
+        sender: { type: string }
+        ephemeral: { type: boolean }
+        no_history: { type: boolean }
+        wisp_type: { type: string }
+        storage_class: { type: string }
+        pinned: { type: boolean }
+        is_template: { type: boolean }
+        bonded_from:
+          type: array
+          items: { $ref: '#/components/schemas/BondRef' }
+        await_type: { type: string }
+        await_id: { type: string }
+        timeout: { type: integer, format: int64 }
+        waiters: { type: array, items: { type: string } }
+        source_formula: { type: string }
+        source_location: { type: string }
+        mol_type: { type: string }
+        work_type: { type: string }
+        event_kind: { type: string }
+        actor: { type: string }
+        target: { type: string }
+        payload: { type: string }
+        # --- shape of these three differs from Issue's ---
+        labels:
+          type: array
+          items: { type: string }
+        dependencies:
+          type: array
+          description: Issues this one depends on, each carrying its edge type.
+          items: { $ref: '#/components/schemas/IssueWithDependencyMetadata' }
+        comments:
+          type: array
+          description: >-
+            NOT POPULATED IN v0 — `getIssue` has no parameter that requests
+            comment bodies and rejects every query key, so this is always
+            absent. Use `comment_count` and `comments_omitted`. Documented
+            because the struct carries the field and a later version may add
+            the parameter that fills it.
+          items: { $ref: '#/components/schemas/Comment' }
+        # --- added by IssueDetails ---
+        dependents:
+          type: array
+          description: >-
+            Issues that depend on this one, each carrying its edge type. NOT
+            POPULATED IN v0, for the same reason as `comments`: use
+            `dependent_count`.
+          items: { $ref: '#/components/schemas/IssueWithDependencyMetadata' }
+        parent:
+          type: string
+          description: Parent issue id, computed from the parent-child edge.
+        dependency_count:
+          type: integer
+          format: int64
+        dependent_count:
+          type: integer
+          format: int64
+        comment_count:
+          type: integer
+          format: int64
+        comments_omitted:
+          type: boolean
+          description: >-
+            True when `comment_count` is nonzero and `comments` was left out —
+            which over v0 HTTP is every such issue, since bodies cannot be
+            requested. Without it, an absent `comments` key is ambiguous
+            between "no comments" and "comments not included in this
+            response".
+        epic_total_children:
+          type: integer
+        epic_closed_children:
+          type: integer
+        epic_closeable:
+          type: boolean
+
+    IssueWithDependencyMetadata:
+      type: object
+      description: >-
+        A full issue plus the type of the dependency edge that led to it.
+        Property semantics are documented on `Issue`.
+      x-go-type: types.IssueWithDependencyMetadata
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at, dependency_type]
+      properties:
+        # --- repeated from Issue (see the pinned-schema note above) ---
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        design: { type: string }
+        acceptance_criteria: { type: string }
+        notes: { type: string }
+        spec_id: { type: string }
+        status: { type: string }
+        priority: { type: integer }
+        issue_type: { type: string }
+        assignee: { type: string }
+        owner: { type: string }
+        estimated_minutes: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time }
+        close_reason: { type: string }
+        closed_by_session: { type: string }
+        lease_expires_at: { type: string, format: date-time }
+        heartbeat_at: { type: string, format: date-time }
+        lease_granted_node: { type: string }
+        due_at: { type: string, format: date-time }
+        defer_until: { type: string, format: date-time }
+        external_ref: { type: string }
+        source_system: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        compaction_level: { type: integer }
+        compacted_at: { type: string, format: date-time }
+        compacted_at_commit: { type: string }
+        original_size: { type: integer }
+        labels: { type: array, items: { type: string } }
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/Dependency' }
+        comments:
+          type: array
+          items: { $ref: '#/components/schemas/Comment' }
+        sender: { type: string }
+        ephemeral: { type: boolean }
+        no_history: { type: boolean }
+        wisp_type: { type: string }
+        storage_class: { type: string }
+        pinned: { type: boolean }
+        is_template: { type: boolean }
+        bonded_from:
+          type: array
+          items: { $ref: '#/components/schemas/BondRef' }
+        await_type: { type: string }
+        await_id: { type: string }
+        timeout: { type: integer, format: int64 }
+        waiters: { type: array, items: { type: string } }
+        source_formula: { type: string }
+        source_location: { type: string }
+        mol_type: { type: string }
+        work_type: { type: string }
+        event_kind: { type: string }
+        actor: { type: string }
+        target: { type: string }
+        payload: { type: string }
+        # --- added by IssueWithDependencyMetadata ---
+        dependency_type:
+          type: string
+          description: >-
+            The edge type, e.g. `blocks`, `parent-child`, `related`,
+            `discovered-from`. Not a closed vocabulary.
+
+    Dependency:
+      type: object
+      description: A dependency edge between two issues.
+      x-go-type: types.Dependency
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [issue_id, depends_on_id, type, created_at]
+      properties:
+        id: { type: string }
+        issue_id: { type: string }
+        depends_on_id: { type: string }
+        type:
+          type: string
+          description: Edge type. Not a closed vocabulary.
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        metadata:
+          type: string
+          description: Free-form edge annotation. A STRING, unlike `Issue.metadata`.
+        thread_id: { type: string }
+
+    Comment:
+      type: object
+      x-go-type: types.Comment
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, issue_id, author, text, created_at]
+      properties:
+        id: { type: string }
+        issue_id: { type: string }
+        author: { type: string }
+        text: { type: string }
+        created_at: { type: string, format: date-time }
+
+    BondRef:
+      type: object
+      description: A constituent of a compound molecule.
+      x-go-type: types.BondRef
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [source_id, bond_type]
+      properties:
+        source_id: { type: string }
+        bond_type: { type: string }
+        bond_point: { type: string }
+
+    # ---------------------------------------------------------------------
+    # Envelope schemas. These have no canonical Go type behind them: they are
+    # new wire surface, generated normally, and the generated type is the only
+    # implementation — so there is nothing for them to drift against.
+    # ---------------------------------------------------------------------
+
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+
+    ContextResponse:
+      type: object
+      description: >-
+        The server's identity handshake. Every member is a deliberate,
+        permanent choice; the field set is an allowlist frozen by a test that
+        checks it against BOTH this document and the generated Go struct, so a
+        field cannot arrive here as a side effect of the server's configuration
+        growing one. In particular the workspace's sync remote is EXCLUDED, in
+        this and every future version, because remote URLs routinely embed
+        credentials — as are the database bind host/port (advertising them
+        invites clients to bypass this API and dial the database directly) and
+        the loopback/non-loopback bind mode.
+      required:
+        [api_version, bd_version, schema_version, backend, dolt_mode, database,
+         beads_dir, repo_root, project_id, capabilities]
+      properties:
+        api_version:
+          type: string
+          description: The path major this server serves. `v0` for this document.
+        bd_version:
+          type: string
+          description: >-
+            The release version of the serving binary. The only field a client
+            may compare as a version, and only for behavioral changes tied to
+            a release.
+        schema_version:
+          type: integer
+          description: >-
+            The shared JSON schema version — the same constant the CLI's stdout
+            JSON envelope reports. Diagnostic only: it can move for CLI-only
+            reasons with no HTTP wire change, so clients MUST NOT branch on it.
+        backend:
+          type: string
+          description: Storage backend name.
+        dolt_mode:
+          type: string
+          description: Which storage mode this workspace is served from.
+        database:
+          type: string
+          description: Logical database name (not a host or a DSN).
+        beads_dir:
+          type: string
+          description: >-
+            Absolute path of the served workspace's `.beads` directory. A host
+            path, kept because it is the single-workspace server's only
+            workspace-identity handshake; disclosing it to network peers is
+            part of what an operator accepts when binding beyond loopback.
+        repo_root:
+          type: string
+          description: Absolute path of the served repository root. See `beads_dir`.
+        project_id:
+          type: string
+          description: Logical project identifier.
+        capabilities:
+          type: array
+          description: >-
+            The operations this server actually implements, derived from its
+            route table. v0's vocabulary is `ready.list`, `issues.list`,
+            `issues.get`, `issues.claim`; it grows additively, and an operation
+            never appears here unless it is fully implemented. This is how a
+            client checks for an operation — never the version string.
+          items:
+            type: string
+
+    ReadyPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: Empty array (never null) when nothing is ready.
+          items:
+            $ref: '#/components/schemas/IssueWithCounts'
+        has_more:
+          type: boolean
+          description: >-
+            True when the limit truncated the result. There is no cursor on
+            this operation; narrow the filters or raise the limit.
+
+    IssuesPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: Empty array (never null) when nothing matches.
+          items:
+            $ref: '#/components/schemas/IssueWithCounts'
+        has_more:
+          type: boolean
+        next_cursor:
+          type: string
+          description: >-
+            Present if and only if `has_more` is true. Pass it back verbatim as
+            `cursor` to fetch the next page. Opaque and server-private.
+
+    ClaimRequest:
+      type: object
+      additionalProperties: false
+      required: [actor]
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+          description: >-
+            Who is claiming the issue. The server trims it, then refuses an
+            empty result, anything longer than 256 BYTES (the `maxLength` above
+            counts characters — the byte limit is the binding one), and any
+            control character including newline. The value is persisted as the
+            assignee and interpolated into the storage commit message, so an
+            unvalidated newline would forge audit-trail lines.
+
+    ClaimResponse:
+      type: object
+      required: [issue, already_claimed]
+      properties:
+        issue:
+          $ref: '#/components/schemas/Issue'
+        already_claimed:
+          type: boolean
+          description: >-
+            True when the caller already held the issue and this call changed
+            nothing — the idempotent re-claim. A claim held by a DIFFERENT
+            actor is a 409, not a 200 with this flag.
+
+    Problem:
+      type: object
+      description: >-
+        RFC 9457 problem detail. This is the only error shape on this surface.
+        The core declares `type`; this server never emits it, so `about:blank`
+        is implied throughout.
+      required: [status, title, code, request_id]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: >-
+            RFC 9457 problem type. This server never emits it, so `about:blank`
+            is implied. A deployment that hosts problem documentation MAY supply
+            it: one stable URI per status+code pair, dereferencing to
+            documentation for that pair. It restates identity that `code`
+            already carries, so a client MUST NOT dispatch on it and a server
+            MUST NOT use it to subdivide a code.
+        status:
+          type: integer
+          description: The HTTP status code, repeated in the body.
+        title:
+          type: string
+          description: The status phrase. Human-facing; never dispatch on it.
+        code:
+          type: string
+          description: >-
+            The stable machine-readable reason, and the ONLY member a client
+            may dispatch on. v0's vocabulary: `invalid_argument` (400, also
+            emitted by the Host-header middleware on any route),
+            `invalid_cursor` (400), `not_found` (404), `already_claimed` (409),
+            `not_claimable` (409), `busy` (503), `db_unavailable` (503),
+            `internal` (500). Renaming or removing a status+code pair is a
+            breaking change; ADDING one is not, so clients MUST default-branch
+            on unknown values and fall back to the status class (unknown 4xx →
+            client bug, fail loud; unknown 503 → retry per `Retry-After`; other
+            unknown 5xx → server fault).
+        detail:
+          type: string
+          description: >-
+            Optional prose, never load-bearing. For 5xx codes it is a FIXED
+            string per code and carries nothing about the underlying failure:
+            driver and dial errors routinely embed the DSN, database user and
+            host:port, and this API supports binding beyond loopback. 4xx
+            details reflect the caller's own input back and are specific.
+        param:
+          type: string
+          description: >-
+            With `invalid_argument`: the offending query parameter, body member
+            or header name. Present on every 400 except a body that fails to
+            parse at all.
+        reason:
+          type: string
+          description: >-
+            With `invalid_argument`: `unknown_parameter` (this server does not
+            know that parameter — version skew; degrade or fall back) or
+            `invalid_value` (the value is not one this server will act on:
+            malformed, out of vocabulary, or — for `limit=0` under
+            `--allow-non-loopback` — legal but refused in this server's
+            configuration; `detail` says which). Either way `invalid_value`
+            means send something different, never retry the same request. The
+            set may grow; default-branch on unknown values.
+        assignee:
+          type: string
+          description: >-
+            With `already_claimed`: the actor currently holding the issue.
+        issue_status:
+          type: string
+          description: >-
+            With `already_claimed` or `not_claimable`: the issue's status at
+            the moment of refusal.
+        request_id:
+          type: string
+          description: >-
+            Opaque correlation id for this request, echoed in the server's
+            request log line. Never a dispatch key and never a retry key.
+            (This server mints per-process ids that do not survive a restart;
+            a deployment may substitute any identifier with the same
+            log-correlation property, such as an edge trace id.)

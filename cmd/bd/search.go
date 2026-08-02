@@ -6,10 +6,12 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var searchCmd = &cobra.Command{
@@ -35,8 +37,20 @@ Examples:
   bd search "task" --sort created --reverse
   bd search "api" --desc-contains "endpoint"
   bd search "cleanup" --no-assignee --no-labels`,
-	Run: func(cmd *cobra.Command, args []string) {
-		// Get query from args or --query flag
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("search")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
+		if usesProxiedServer() {
+			return runSearchProxiedServer(cmd, rootCtx, args)
+		}
+
 		queryFlag, _ := cmd.Flags().GetString("query")
 		var query string
 		if len(args) > 0 {
@@ -45,12 +59,11 @@ Examples:
 			query = queryFlag
 		}
 
-		// If no query provided, show help
 		if query == "" {
 			if err := cmd.Help(); err != nil {
 				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
 			}
-			FatalError("search query is required")
+			return HandleError("search query is required")
 		}
 
 		// Get filter flags
@@ -96,8 +109,13 @@ Examples:
 		}
 
 		if status != "" && status != "all" {
-			s := types.Status(status)
-			filter.Status = &s
+			cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
+			if err != nil {
+				return HandleError("loading status configuration: %v", err)
+			}
+			if err := workapi.ApplyStatusFilter(&filter, status, cfg.CustomStatusNames()); err != nil {
+				return HandleError("%v", err)
+			}
 		} else if status != "all" {
 			// Default: exclude closed issues to reduce scan scope (hq-319).
 			// With 12K+ issues, ~60-70% are closed — excluding them lets the
@@ -149,75 +167,71 @@ Examples:
 		if createdAfter != "" {
 			t, err := parseTimeFlag(createdAfter)
 			if err != nil {
-				FatalError("parsing --created-after: %v", err)
+				return HandleError("parsing --created-after: %v", err)
 			}
 			filter.CreatedAfter = &t
 		}
 		if createdBefore != "" {
 			t, err := parseTimeFlag(createdBefore)
 			if err != nil {
-				FatalError("parsing --created-before: %v", err)
+				return HandleError("parsing --created-before: %v", err)
 			}
 			filter.CreatedBefore = &t
 		}
 		if updatedAfter != "" {
 			t, err := parseTimeFlag(updatedAfter)
 			if err != nil {
-				FatalError("parsing --updated-after: %v", err)
+				return HandleError("parsing --updated-after: %v", err)
 			}
 			filter.UpdatedAfter = &t
 		}
 		if updatedBefore != "" {
 			t, err := parseTimeFlag(updatedBefore)
 			if err != nil {
-				FatalError("parsing --updated-before: %v", err)
+				return HandleError("parsing --updated-before: %v", err)
 			}
 			filter.UpdatedBefore = &t
 		}
 		if closedAfter != "" {
 			t, err := parseTimeFlag(closedAfter)
 			if err != nil {
-				FatalError("parsing --closed-after: %v", err)
+				return HandleError("parsing --closed-after: %v", err)
 			}
 			filter.ClosedAfter = &t
 		}
 		if closedBefore != "" {
 			t, err := parseTimeFlag(closedBefore)
 			if err != nil {
-				FatalError("parsing --closed-before: %v", err)
+				return HandleError("parsing --closed-before: %v", err)
 			}
 			filter.ClosedBefore = &t
 		}
 
-		// Priority ranges
 		if cmd.Flags().Changed("priority-min") {
 			priorityMin, err := validation.ValidatePriority(priorityMinStr)
 			if err != nil {
-				FatalError("parsing --priority-min: %v", err)
+				return HandleError("parsing --priority-min: %v", err)
 			}
 			filter.PriorityMin = &priorityMin
 		}
 		if cmd.Flags().Changed("priority-max") {
 			priorityMax, err := validation.ValidatePriority(priorityMaxStr)
 			if err != nil {
-				FatalError("parsing --priority-max: %v", err)
+				return HandleError("parsing --priority-max: %v", err)
 			}
 			filter.PriorityMax = &priorityMax
 		}
 
-		// Metadata filters (GH#1406)
 		metadataFieldFlags, _ := cmd.Flags().GetStringArray("metadata-field")
 		if len(metadataFieldFlags) > 0 {
 			filter.MetadataFields = make(map[string]string, len(metadataFieldFlags))
 			for _, mf := range metadataFieldFlags {
 				k, v, ok := strings.Cut(mf, "=")
 				if !ok || k == "" {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field: expected key=value, got %q\n", mf)
-					os.Exit(1)
+					return HandleError("invalid --metadata-field: expected key=value, got %q", mf)
 				}
 				if err := storage.ValidateMetadataKey(k); err != nil {
-					fmt.Fprintf(os.Stderr, "Error: invalid --metadata-field key: %v\n", err)
-					os.Exit(1)
+					return HandleError("invalid --metadata-field key: %v", err)
 				}
 				filter.MetadataFields[k] = v
 			}
@@ -225,23 +239,20 @@ Examples:
 		hasMetadataKey, _ := cmd.Flags().GetString("has-metadata-key")
 		if hasMetadataKey != "" {
 			if err := storage.ValidateMetadataKey(hasMetadataKey); err != nil {
-				fmt.Fprintf(os.Stderr, "Error: invalid --has-metadata-key: %v\n", err)
-				os.Exit(1)
+				return HandleError("invalid --has-metadata-key: %v", err)
 			}
 			filter.HasMetadataKey = hasMetadataKey
 		}
 
 		ctx := rootCtx
 
-		// Direct mode - search using store
-		// The query parameter in SearchIssues already searches across title, description, and id
 		issues, err := store.SearchIssues(ctx, query, filter)
 		if err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		// Apply sorting
-		sortIssues(issues, sortBy, reverse)
+		workapi.SortIssues(issues, sortBy, reverse)
 
 		if jsonOutput {
 			// Get labels and dependency counts
@@ -284,8 +295,7 @@ Examples:
 					CommentCount:    commentCounts[issue.ID],
 				}
 			}
-			outputJSON(issuesWithCounts)
-			return
+			return outputJSON(issuesWithCounts)
 		}
 
 		// Load labels for display
@@ -299,6 +309,7 @@ Examples:
 		}
 
 		outputSearchResults(issues, query, longFormat)
+		return nil
 	},
 }
 
@@ -344,7 +355,7 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
-	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
+	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")

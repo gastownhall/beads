@@ -28,12 +28,16 @@ func OrphanedDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Orphaned dependencies fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Orphaned dependencies fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	// Find orphaned dependencies (exclude external: cross-rig tracking refs, #1593)
 	//nolint:gosec // G202: fixDependencyUnionSQL returns a fixed internal SELECT fragment.
@@ -122,12 +126,16 @@ func ChildParentDependencies(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Child-parent dependencies fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Child-parent dependencies fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	// Find child→parent BLOCKING dependencies where issue_id starts with depends_on_id + "."
 	// Only matches blocking types (blocks, conditional-blocks, waits-for) that cause deadlock.
@@ -208,24 +216,127 @@ func ChildParentDependencies(path string, verbose bool) error {
 	return nil
 }
 
+// CrossTableDuplicates removes issues-table rows whose IDs also exist in the
+// wisps table. The wisps copy is canonical (be-iabdi); stale issues rows are
+// deleted along with their child rows (labels, events, dependencies, comments).
+func CrossTableDuplicates(path string, verbose bool) error {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return err
+	}
+
+	db, cfg, err := openDoltDB(beadsDir)
+	if err != nil {
+		fmt.Printf("  Cross-table duplicates fix skipped (%v)\n", err)
+		return nil
+	}
+	defer db.Close()
+
+	if skip, err := guardFixTarget("Cross-table duplicates fix", db, beadsDir, cfg); skip {
+		return err
+	}
+
+	// Find IDs present in both tables — the wisp copy is canonical.
+	rows, err := db.Query(`SELECT id FROM issues WHERE id IN (SELECT id FROM wisps)`)
+	if err != nil {
+		return fmt.Errorf("failed to query cross-table duplicates: %w", err)
+	}
+	var dupIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err == nil {
+			dupIDs = append(dupIDs, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("row iteration error: %w", err)
+	}
+	_ = rows.Close()
+
+	if len(dupIDs) == 0 {
+		fmt.Println("  No cross-table duplicates to fix")
+		return nil
+	}
+
+	showIndividual := verbose || len(dupIDs) < 20
+	tx, txErr := db.Begin()
+	if txErr != nil {
+		return fmt.Errorf("failed to begin transaction: %w", txErr)
+	}
+
+	var removed int
+	for _, id := range dupIDs {
+		// Delete child rows first (FK-safe order), then the issues row.
+		for _, childTable := range []string{"labels", "events", "dependencies", "comments"} {
+			//nolint:gosec // G202: childTable is from a hardcoded list above.
+			if _, err := tx.Exec(fmt.Sprintf("DELETE FROM %s WHERE issue_id = ?", childTable), id); err != nil {
+				fmt.Printf("  Warning: failed to delete %s rows for %s: %v\n", childTable, id, err)
+			}
+		}
+		if _, err := tx.Exec("DELETE FROM issues WHERE id = ?", id); err != nil {
+			fmt.Printf("  Warning: failed to delete issues row for %s: %v\n", id, err)
+		} else {
+			removed++
+			if showIndividual {
+				fmt.Printf("  Removed stale issues-table copy of %s (canonical in wisps)\n", id)
+			}
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit cross-table duplicate removals: %w", err)
+	}
+
+	_, _ = db.Exec("CALL DOLT_COMMIT('-Am', 'doctor: remove stale issues copies of wisps (be-iabdi)')") // Best effort
+
+	fmt.Printf("  Fixed %d cross-table duplicate(s)\n", removed)
+	return nil
+}
+
+// CountCrossTableDuplicates returns the number of IDs present in both the
+// issues and wisps tables. Returns 0 and an error if the database is
+// unreachable. Used by CheckCrossTableDuplicates in the doctor package.
+func CountCrossTableDuplicates(path string) (int, error) {
+	beadsDir, err := resolvedWorkspaceBeadsDir(path)
+	if err != nil {
+		return 0, err
+	}
+
+	db, _, err := openDoltDB(beadsDir)
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM issues WHERE id IN (SELECT id FROM wisps)`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("query cross-table duplicates: %w", err)
+	}
+	return count, nil
+}
+
 // openDoltDB opens a Dolt database connection via MySQL protocol.
 // Delegates to openFixDB for DSN construction (timeout + password support).
-func openDoltDB(beadsDir string) (*sql.DB, error) {
+// Also returns the loaded config so callers that need it afterward (e.g. to
+// verify the connection's target identity) don't have to load it a second
+// time and risk it disagreeing with what was actually dialed.
+func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil || cfg == nil {
-		return nil, fmt.Errorf("no database configuration found")
+		return nil, nil, fmt.Errorf("no database configuration found")
 	}
 
 	db, err := openFixDB(beadsDir, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("dolt server connection failed: %w", err)
+		return nil, nil, fmt.Errorf("dolt server connection failed: %w", err)
 	}
 
 	// Verify the connection actually works
 	if err := db.Ping(); err != nil {
 		_ = db.Close() // Best effort cleanup
-		return nil, fmt.Errorf("dolt server not reachable: %w", err)
+		return nil, nil, fmt.Errorf("dolt server not reachable: %w", err)
 	}
 
-	return db, nil
+	return db, cfg, nil
 }

@@ -125,6 +125,20 @@ func TestEmbeddedDolt(t *testing.T) {
 		_ = out
 	})
 
+	t.Run("commit_clean_reports_nothing", func(t *testing.T) {
+		// bd init leaves the working set clean (bootstrap's own commit
+		// tolerates nothing-to-commit, GH#3886). A second, truly no-op
+		// "bd dolt commit" here must print "Nothing to commit.", not
+		// "Committed." — this is the case EmbeddedDoltStore.Commit's new
+		// nothing-to-commit tolerance made possible to reach with a nil
+		// error.
+		cleanDir, _, _ := bdInit(t, bd, "--prefix", "tdcln")
+		out := bdDolt(t, bd, cleanDir, "commit")
+		if !strings.Contains(out, "Nothing to commit.") {
+			t.Errorf("expected 'Nothing to commit.' on a clean working set, got: %s", out)
+		}
+	})
+
 	// ===== Remote management =====
 
 	t.Run("remote_list_empty", func(t *testing.T) {
@@ -298,9 +312,9 @@ func TestEmbeddedDoltConcurrent(t *testing.T) {
 // error even in server-mode projects. The guard is now inside each subcommand's
 // Run func, after store init. This test ensures embedded mode still correctly
 // rejects admin commands.
-func TestAdminEmbeddedBlocked(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
+func TestEmbeddedAdminBlocked(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 
@@ -337,9 +351,9 @@ func TestAdminEmbeddedBlocked(t *testing.T) {
 
 // TestAdminEmbeddedCompactReadOnlyAllowed verifies read-only compact modes are
 // not blocked by the embedded-mode admin guard.
-func TestAdminEmbeddedCompactReadOnlyAllowed(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
+func TestEmbeddedAdminCompactReadOnlyAllowed(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
 	}
 	t.Parallel()
 

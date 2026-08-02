@@ -5,7 +5,7 @@ import (
 	"fmt"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 )
@@ -29,7 +29,9 @@ Examples:
   bd mol stale --blocking   # Only show those blocking other work
   bd mol stale --unassigned # Only show unassigned molecules
   bd mol stale --all        # Include molecules with 0 children`,
-	Run: runMolStale,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runMolStale,
 }
 
 // StaleMolecule holds info about a stale molecule
@@ -50,36 +52,49 @@ type StaleResult struct {
 	BlockingCount  int              `json:"blocking_count"`
 }
 
-func runMolStale(cmd *cobra.Command, args []string) {
-	ctx := rootCtx
+func runMolStale(cmd *cobra.Command, args []string) error {
+	evt := metrics.NewCommandEvent("mol-stale")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
 
 	blockingOnly, _ := cmd.Flags().GetBool("blocking")
 	unassignedOnly, _ := cmd.Flags().GetBool("unassigned")
 	showAll, _ := cmd.Flags().GetBool("all")
 
+	if usesProxiedServer() {
+		return runMolStaleProxiedServer(rootCtx, blockingOnly, unassignedOnly, showAll)
+	}
+
+	ctx := rootCtx
+
 	var result *StaleResult
 	var err error
 
 	if store == nil {
-		FatalError("no database connection")
+		return HandleErrorRespectJSON("no database connection")
 	}
 
 	result, err = findStaleMolecules(ctx, store, blockingOnly, unassignedOnly, showAll)
 	if err != nil {
-		FatalError("%v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
 
 	if jsonOutput {
-		outputJSON(result)
-		return
+		return outputJSON(result)
 	}
+	renderStaleResult(result, blockingOnly)
+	return nil
+}
 
+func renderStaleResult(result *StaleResult, blockingOnly bool) {
 	if len(result.StaleMolecules) == 0 {
 		fmt.Println("No stale molecules found.")
 		return
 	}
 
-	// Print header
 	if blockingOnly {
 		fmt.Printf("%s Stale molecules (complete but unclosed, blocking work):\n\n",
 			ui.RenderWarnIcon())
@@ -88,7 +103,6 @@ func runMolStale(cmd *cobra.Command, args []string) {
 			ui.RenderInfoIcon())
 	}
 
-	// Print each stale molecule
 	for _, mol := range result.StaleMolecules {
 		progress := fmt.Sprintf("%d/%d", mol.ClosedChildren, mol.TotalChildren)
 
@@ -107,7 +121,6 @@ func runMolStale(cmd *cobra.Command, args []string) {
 		fmt.Println()
 	}
 
-	// Summary
 	fmt.Printf("Total: %d stale", result.TotalCount)
 	if result.BlockingCount > 0 {
 		fmt.Printf(", %d blocking other work", result.BlockingCount)
@@ -116,7 +129,7 @@ func runMolStale(cmd *cobra.Command, args []string) {
 }
 
 // findStaleMolecules queries the database for stale molecules
-func findStaleMolecules(ctx context.Context, s storage.DoltStorage, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
+func findStaleMolecules(ctx context.Context, s molReader, blockingOnly, unassignedOnly, showAll bool) (*StaleResult, error) {
 	// Get all epics eligible for closure (complete but unclosed)
 	epicStatuses, err := s.GetEpicsEligibleForClosure(ctx)
 	if err != nil {

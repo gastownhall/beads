@@ -1,0 +1,13 @@
+{
+  "created_at": "<TS>",
+  "created_by": "protocol-test",
+  "description": "deterministic corpus dependency",
+  "id": "corpus-dep",
+  "issue_type": "task",
+  "owner": "test@protocol.test",
+  "priority": 2,
+  "schema_version": 1,
+  "status": "open",
+  "title": "Corpus dependency issue",
+  "updated_at": "<TS>"
+}

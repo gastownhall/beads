@@ -25,6 +25,11 @@ type fakeHookStore struct {
 	DoltStorage
 	issues           map[string]*types.Issue
 	dropDependencies bool
+	// updateCheckedErr, when non-nil, is returned by UpdateIssueChecked so a test
+	// can simulate an inner refusal (e.g. ErrVersionMismatch). nil = success.
+	updateCheckedErr       error
+	transactionReopenError error
+	transactionAddLabelErr error
 }
 
 func (s fakeHookStore) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -62,14 +67,42 @@ func (s fakeHookStore) GetDependencyRecords(_ context.Context, id string) ([]*ty
 	return cloneDependenciesForHook(issue.Dependencies), nil
 }
 
+func (s fakeHookStore) UpdateIssueChecked(_ context.Context, _ string, _ map[string]interface{}, _ string, _ UpdateIssueOptions) error {
+	return s.updateCheckedErr
+}
+
 func (s fakeHookStore) RunInTransaction(ctx context.Context, _ string, fn func(tx Transaction) error) error {
-	return fn(fakeHookTransaction{issues: s.issues, dropDependencies: s.dropDependencies})
+	return fn(fakeHookTransaction{
+		issues:           s.issues,
+		dropDependencies: s.dropDependencies,
+		reopenError:      s.transactionReopenError,
+		addLabelError:    s.transactionAddLabelErr,
+	})
+}
+
+func (s fakeHookStore) RunInIssueLifecycleTransaction(ctx context.Context, _ string, fn func(tx IssueLifecycleTransaction) error) error {
+	return fn(fakeHookTransaction{
+		issues:           s.issues,
+		dropDependencies: s.dropDependencies,
+		reopenError:      s.transactionReopenError,
+		addLabelError:    s.transactionAddLabelErr,
+	})
 }
 
 type fakeHookTransaction struct {
 	Transaction
 	issues           map[string]*types.Issue
 	dropDependencies bool
+	reopenError      error
+	addLabelError    error
+}
+
+func (tx fakeHookTransaction) ReopenIssueWithResult(_ context.Context, _ string, _ string, _ string) (bool, error) {
+	return tx.reopenError == nil, tx.reopenError
+}
+
+func (tx fakeHookTransaction) AddLabel(_ context.Context, _ string, _ string, _ string) error {
+	return tx.addLabelError
 }
 
 func (tx fakeHookTransaction) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -271,6 +304,8 @@ func TestCloneIssueForHookCoversReferenceFields(t *testing.T) {
 		"ClosedAt":          {},
 		"DueAt":             {},
 		"DeferUntil":        {},
+		"LeaseExpiresAt":    {},
+		"HeartbeatAt":       {},
 		"ExternalRef":       {},
 		"Metadata":          {},
 		"CompactedAt":       {},
@@ -449,4 +484,104 @@ func TestNewHookFiringStoreNilRunnerSkipsCreateHooks(t *testing.T) {
 	if err := store.CreateIssue(context.Background(), issue, "tester"); err != nil {
 		t.Fatalf("CreateIssue: %v", err)
 	}
+}
+
+// TestHookFiringStoreUpdateIssueCheckedFiresOnSuccessOnly locks in the
+// HookFiringStore.UpdateIssueChecked override: it fires exactly one on_update
+// hook when the inner update succeeds, and fires NO hook when the inner update
+// refuses (ErrVersionMismatch). Because HookFiringStore embeds DoltStorage, a
+// deleted override would silently passthrough and skip the hook (the success
+// case would fail) — and a refusal must not look like a successful update to
+// hook consumers (the error case).
+func TestHookFiringStoreUpdateIssueCheckedFiresOnSuccessOnly(t *testing.T) {
+	t.Run("success fires one on_update", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{issues: map[string]*types.Issue{
+			"uc-hook": {ID: "uc-hook", Title: "updated"},
+		}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+		if err := store.UpdateIssueChecked(context.Background(), "uc-hook",
+			map[string]interface{}{"title": "updated"}, "tester", UpdateIssueOptions{}); err != nil {
+			t.Fatalf("UpdateIssueChecked: %v", err)
+		}
+		wantEvents := []string{hooks.EventUpdate}
+		if !reflect.DeepEqual(runner.events, wantEvents) {
+			t.Fatalf("events = %v, want %v", runner.events, wantEvents)
+		}
+	})
+
+	t.Run("version-mismatch refusal fires no hook", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{
+			issues:           map[string]*types.Issue{"uc-hook": {ID: "uc-hook"}},
+			updateCheckedErr: ErrVersionMismatch,
+		}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+
+		v := int64(1)
+		err := store.UpdateIssueChecked(context.Background(), "uc-hook",
+			map[string]interface{}{"title": "nope"}, "tester",
+			UpdateIssueOptions{ExpectedVersion: &v})
+		if !errors.Is(err, ErrVersionMismatch) {
+			t.Fatalf("err = %v, want errors.Is(_, ErrVersionMismatch)", err)
+		}
+		if len(runner.events) != 0 {
+			t.Fatalf("events = %v, want none (a refused update must not fire on_update)", runner.events)
+		}
+	})
+}
+
+func TestHookFiringStoreIssueLifecycleTransactionReopenForwardsCommitOnly(t *testing.T) {
+	t.Run("commit forwards and fires update", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		inner := fakeHookStore{issues: map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+		if err := store.RunInIssueLifecycleTransaction(context.Background(), "reopen", func(tx IssueLifecycleTransaction) error {
+			_, err := tx.ReopenIssueWithResult(context.Background(), "reopen-hook", "", "tester")
+			return err
+		}); err != nil {
+			t.Fatalf("RunInIssueLifecycleTransaction: %v", err)
+		}
+		if !reflect.DeepEqual(runner.events, []string{hooks.EventUpdate}) {
+			t.Fatalf("events = %v, want one on_update after commit", runner.events)
+		}
+	})
+
+	t.Run("later failure fires no hook", func(t *testing.T) {
+		runner := &recordingHookRunner{}
+		labelErr := errors.New("label write failed")
+		inner := fakeHookStore{
+			issues:                 map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}},
+			transactionAddLabelErr: labelErr,
+		}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner, runner: runner}
+		err := store.RunInIssueLifecycleTransaction(context.Background(), "reopen", func(tx IssueLifecycleTransaction) error {
+			if _, err := tx.ReopenIssueWithResult(context.Background(), "reopen-hook", "", "tester"); err != nil {
+				return err
+			}
+			return tx.AddLabel(context.Background(), "reopen-hook", "remote", "tester")
+		})
+		if !errors.Is(err, labelErr) {
+			t.Fatalf("RunInIssueLifecycleTransaction error = %v, want label failure", err)
+		}
+		if len(runner.events) != 0 {
+			t.Fatalf("events = %v, want none after rollback", runner.events)
+		}
+	})
+
+	t.Run("ordinary transaction does not expose lifecycle method", func(t *testing.T) {
+		inner := fakeHookStore{issues: map[string]*types.Issue{"reopen-hook": {ID: "reopen-hook"}}}
+		store := &HookFiringStore{DoltStorage: inner, inner: inner}
+		if err := store.RunInTransaction(context.Background(), "reopen", func(tx Transaction) error {
+			if _, ok := tx.(interface {
+				ReopenIssueWithResult(context.Context, string, string, string) (bool, error)
+			}); ok {
+				t.Fatal("wrapper exposed absent reopener")
+			}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	})
 }

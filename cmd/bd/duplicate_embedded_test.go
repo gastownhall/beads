@@ -75,6 +75,9 @@ func TestEmbeddedDuplicate(t *testing.T) {
 		if issue.Status != "closed" {
 			t.Errorf("expected status=closed, got %s", issue.Status)
 		}
+		if issue.ClosedAt == nil {
+			t.Error("expected duplicate close to set closed_at")
+		}
 	})
 
 	// ===== Creates dependency link =====

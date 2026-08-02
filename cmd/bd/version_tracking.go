@@ -24,6 +24,28 @@ const localVersionFile = ".local_version"
 // This function is best-effort - failures are silent to avoid disrupting commands.
 // Sets global variables versionUpgradeDetected and previousVersion if upgrade detected.
 func trackBdVersion() {
+	trackBdVersionFile(true)
+}
+
+// trackBdVersionPreview does the same detection but leaves .local_version
+// alone.
+//
+// The file is a ONE-SHOT signal: the version-bump reconciliation
+// (autoMigrateOnVersionBump, including the pre-0.56 recovery path) fires only
+// while the recorded version differs from this binary's. A preview command
+// correctly skips that reconciliation — but if it had also rewritten the file,
+// it would have consumed the signal on the way past, and the next ordinary
+// command would see a matching version and never reconcile at all. Whichever
+// command happened to be first after an upgrade would silently decide whether
+// the upgrade was ever finished.
+//
+// Not writing is safe in the other direction too: the marker is advisory and
+// the very next non-preview command writes it.
+func trackBdVersionPreview() {
+	trackBdVersionFile(false)
+}
+
+func trackBdVersionFile(persist bool) {
 	// Find the beads directory
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -46,7 +68,7 @@ func trackBdVersion() {
 
 	// Update local version file (best effort)
 	// Only write if version actually changed to minimize I/O
-	if lastVersion != Version {
+	if persist && lastVersion != Version {
 		_ = writeLocalVersion(localVersionPath, Version) // Best effort: version tracking is advisory
 	}
 
@@ -163,6 +185,15 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
 	}
+	if cfg.GetBackend() != configfile.BackendDolt {
+		debug.Logf("auto-migrate: skipping Dolt migration for backend %q", cfg.GetBackend())
+		return
+	}
+
+	if cfg.IsDoltProxiedServerMode() {
+		debug.Logf("auto-migrate: skipping embedded migration, proxied-server handled after UOW provider init")
+		return
+	}
 
 	// Check if database exists at the backend-appropriate path
 	dbPath := cfg.DatabasePath(beadsDir)
@@ -190,6 +221,21 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	if ctx == nil || ctx.Err() != nil {
 		// rootCtx is nil or canceled - use fresh background context
 		ctx = context.Background()
+	}
+
+	// Read-only probe: if the DB is already at the current version, skip the
+	// writeable open. On current main the writeable-open gate reads remotes
+	// via doltutil.PersistedRemotes, a fast on-disk repo_state.json probe —
+	// not a `dolt remote -v` subprocess — so this doesn't save a 12s hang;
+	// it saves an unnecessary initSchema round-trip when no migration is
+	// needed. (be-1he)
+	if roStore, roErr := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true}); roErr == nil {
+		dbVersion, _ := roStore.GetLocalMetadata(ctx, "bd_version")
+		_ = roStore.Close()
+		if dbVersion == Version {
+			debug.Logf("auto-migrate: database already at version %s (ro probe)", Version)
+			return
+		}
 	}
 
 	store, err := dolt.NewFromConfig(ctx, beadsDir)

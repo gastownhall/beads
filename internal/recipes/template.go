@@ -6,15 +6,16 @@ import "fmt"
 // This content is written to all file-based recipes.
 const Template = `# Beads Issue Tracking
 
-This project uses [Beads (bd)](https://github.com/steveyegge/beads) for issue tracking.
+This project uses [Beads (bd)](https://github.com/gastownhall/beads) for issue tracking.
 
 ## Core Rules
 
 - Track ALL work in bd (never use markdown TODOs or comment-based task lists)
 - Use ` + "`bd ready`" + ` to find available work
 - Use ` + "`bd create`" + ` to track new issues/tasks/bugs
-- Use ` + "`bd dolt push`" + ` at end of session to sync with remote
+- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions
 - Run ` + "`bd prime`" + ` for complete workflow context (SSOT for operational commands)
+- Default to conservative git authority: report status and proposed commands unless the user, orchestrator, or repository profile explicitly authorizes commit/sync/push
 
 ## Quick Reference
 
@@ -24,9 +25,10 @@ bd ready                              # Show issues ready to work (no blockers)
 bd list --status=open                 # List all open issues
 bd create "title" -t task -p 2        # Create new issue
 bd update <id> --claim                # Claim work atomically
+bd unclaim <id>                       # Release stuck issue (agent crashed)
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency
-bd dolt push                          # Sync with remote
+bd dolt push                          # Sync with remote when authorized
 ` + "```" + `
 
 ## Workflow
@@ -35,7 +37,7 @@ bd dolt push                          # Sync with remote
 2. Claim an issue atomically: ` + "`bd update <id> --claim`" + `
 3. Do the work
 4. Mark complete: ` + "`bd close <id>`" + `
-5. Push changes: ` + "`bd dolt push`" + `
+5. Handoff: report changed files, validation, issue status, and any proposed commit/sync/push commands
 
 ## Issue Types
 
@@ -58,7 +60,8 @@ bd dolt push                          # Sync with remote
 Run ` + "`bd prime`" + ` to get complete workflow documentation in AI-optimized format.
 ` + "`bd prime`" + ` is the single source of truth for operational commands and session workflow.
 
-For detailed docs: see AGENTS.md, QUICKSTART.md, or run ` + "`bd --help`" + `
+For detailed docs: see AGENTS.md, the beads quickstart
+(https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md), or run ` + "`bd --help`" + `
 `
 
 // CopilotInstructionsTemplate is the repository instructions file used by the
@@ -73,7 +76,8 @@ This repository uses **Beads (bd)** for issue tracking.
 - Use ` + "`bd create`" + ` to track new work
 - Use ` + "`bd update <id> --claim`" + ` before starting
 - Use ` + "`bd close <id>`" + ` when work is complete
-- Use ` + "`bd dolt push`" + ` at the end of the session
+- Treat commit, push, and Dolt remote sync as policy-controlled handoff actions
+- Do not commit, push, or run Dolt remote sync unless explicitly authorized
 
 ## Context Loading
 

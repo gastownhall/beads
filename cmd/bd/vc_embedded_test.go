@@ -88,6 +88,31 @@ func TestEmbeddedVC(t *testing.T) {
 		}
 	})
 
+	t.Run("commit_clean_reports_nothing", func(t *testing.T) {
+		// bd init leaves the working set clean (bootstrap's own commit
+		// tolerates nothing-to-commit, GH#3886). A second, truly no-op
+		// commit here must be reported as "nothing to commit", not
+		// silently treated as a fresh commit — this is the case
+		// EmbeddedDoltStore.Commit's new nothing-to-commit tolerance made
+		// possible to reach with a nil error.
+		dir, _, _ := bdInit(t, bd, "--prefix", "vccln")
+
+		cmd := exec.Command(bd, "vc", "commit", "-m", "clean working set", "--json")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd vc commit --json failed unexpectedly: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		var result map[string]interface{}
+		if jsonErr := json.Unmarshal(stdout.Bytes(), &result); jsonErr != nil {
+			t.Fatalf("failed to parse JSON: %v\n%s", jsonErr, stdout.String())
+		}
+		if committed, _ := result["committed"].(bool); committed {
+			t.Errorf("expected committed=false on a clean working set, got: %s", stdout.String())
+		}
+	})
+
 	t.Run("commit_json", func(t *testing.T) {
 		dir, _, _ := bdInit(t, bd, "--prefix", "vccj")
 		// bd create auto-commits, so vc commit may see "nothing to commit".

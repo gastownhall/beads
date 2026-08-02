@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -375,6 +376,29 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 		// Safe paths - should be accepted
 		{"user home directory", filepath.Join(homeDir, "projects/.beads"), true},
 		{"temp directory", os.TempDir(), true},
+		// A not-yet-created BEADS_DIR under the temp dir (the common real case --
+		// the directory is created after this check passes) must still validate;
+		// resolveLongestExistingAncestor is what makes this safe despite the
+		// trailing components not existing yet (be-kghzr SEC-003 hardening).
+		{"temp directory not-yet-created subpath", filepath.Join(os.TempDir(), "be-kghzr-nonexistent-subpath", ".beads"), true},
+
+		// Another user's home directory - should be rejected regardless of $HOME
+		{"other user home /home", "/home/some-other-nonexistent-user/.beads", false},
+		{"other user home /Users", "/Users/some-other-nonexistent-user/.beads", false},
+
+		// macOS /Users/Shared is the OS-designated shared directory, not a peer
+		// user's home — it must be accepted (be-vc1 / SEC-003 carve-out).
+		{"macOS shared subdir", "/Users/Shared/portharbour/.beads", true},
+		{"macOS shared root", "/Users/Shared", true},
+
+		// /var/tmp is the FHS-standard secondary temp directory (persists across
+		// reboots, unlike /tmp) and must be accepted despite matching the /var
+		// unsafePrefixes entry above. Go's own test/build tooling can root
+		// GOTMPDIR-influenced temp dirs here even when os.TempDir() itself still
+		// reports /tmp, so the os.TempDir()-based carve-out above doesn't cover it
+		// (be-odye4).
+		{"var/tmp root", "/var/tmp", true},
+		{"var/tmp GOTMPDIR-style subdir", "/var/tmp/gotmp/TestSomething1234/001/.beads", true},
 	}
 
 	for _, tt := range tests {
@@ -384,6 +408,194 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 				t.Errorf("isPathInSafeBoundary(%q) = %v, want %v", tt.path, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestResolvedPathWithinRoot exercises the symlink-escape hardening helper added
+// for be-vc1 — the HIGH finding on the /Users/Shared carve-out. The helper must:
+//
+//	(a) accept a real subdirectory under root,
+//	(b) REJECT a symlink under root whose target resolves outside root (the
+//	    TOCTOU/path-traversal vector on the world-writable /Users/Shared),
+//	(c) accept a not-yet-created subpath under a real root (a BEADS_DIR that has
+//	    not been created yet must still validate, not fail closed).
+//
+// It uses a temp-dir stand-in for root so it runs on every OS — Linux CI thereby
+// proves the escape rejection (the literal /Users/Shared symlink case is darwin-
+// only and lives in TestIsPathInSafeBoundary).
+func TestResolvedPathWithinRoot(t *testing.T) {
+	root := t.TempDir()
+
+	// (a) a real subdirectory under root stays within root.
+	realSub := filepath.Join(root, "real")
+	if err := os.MkdirAll(realSub, 0o755); err != nil {
+		t.Fatalf("mkdir realSub: %v", err)
+	}
+	if !resolvedPathWithinRoot(realSub, root) {
+		t.Errorf("resolvedPathWithinRoot(%q, %q) = false, want true (real subdir under root)", realSub, root)
+	}
+
+	// (b) a symlink under root whose target is outside root must be rejected:
+	// resolving the symlink lands outside the boundary. This is the vector the
+	// security review flagged — /Users/Shared is world-writable, so a co-located
+	// user can plant such a link.
+	outside := t.TempDir() // a distinct temp dir, genuinely outside root
+	escape := filepath.Join(root, "escape")
+	if err := os.Symlink(outside, escape); err != nil {
+		t.Fatalf("symlink escape: %v", err)
+	}
+	if resolvedPathWithinRoot(escape, root) {
+		t.Errorf("resolvedPathWithinRoot(%q -> %q, %q) = true, want false (symlink escapes root)", escape, outside, root)
+	}
+
+	// (c) a not-yet-created subpath under a real root still validates: the helper
+	// resolves the longest existing ancestor and re-appends the missing tail.
+	notYet := filepath.Join(root, "notyet", ".beads")
+	if !resolvedPathWithinRoot(notYet, root) {
+		t.Errorf("resolvedPathWithinRoot(%q, %q) = false, want true (not-yet-created subpath under real root)", notYet, root)
+	}
+}
+
+// TestIsPathInSafeBoundary_SharedSymlinkEscape proves, on macOS where /Users/Shared
+// actually exists and is world-writable, that a symlink planted under it whose
+// target escapes the boundary is REJECTED through isPathInSafeBoundary — the live
+// form of the be-vc1 HIGH finding. Skipped on non-darwin and when /Users/Shared is
+// absent or not writable, so it never fails spuriously on CI runners.
+func TestIsPathInSafeBoundary_SharedSymlinkEscape(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("/Users/Shared is a macOS-specific shared directory")
+	}
+	const shared = "/Users/Shared"
+	if info, err := os.Stat(shared); err != nil || !info.IsDir() {
+		t.Skipf("%s not present as a directory: %v", shared, err)
+	}
+
+	// Plant a symlink under the world-writable /Users/Shared pointing OUTSIDE the
+	// boundary, at /etc (a system dir). Best-effort clear of any stale link from a
+	// crashed run, then register cleanup.
+	link := filepath.Join(shared, fmt.Sprintf(".be-vc1-escape-test-%d", os.Getpid()))
+	_ = os.Remove(link)
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("cannot create symlink in %s (not writable?): %v", shared, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
+	// resolve into /etc, outside /Users/Shared.
+	target := filepath.Join(link, ".beads")
+	if isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping /Users/Shared to /etc)", target)
+	}
+
+	// The escaping symlink itself also resolves outside the boundary.
+	if isPathInSafeBoundary(link) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under /Users/Shared escaping to /etc)", link)
+	}
+}
+
+// TestIsPathInSafeBoundary_VarTmpSymlinkEscape proves the /var/tmp carve-out
+// (be-odye4) applies the same symlink-safe resolution as /Users/Shared: /var/tmp
+// is world-writable (drwxrwxrwt) on Linux/BSD, so a co-located user could plant a
+// symlink under it whose target escapes to a rejected system directory. Skipped
+// when /var/tmp is absent or not writable, so it never fails spuriously.
+func TestIsPathInSafeBoundary_VarTmpSymlinkEscape(t *testing.T) {
+	const varTmp = "/var/tmp"
+	if info, err := os.Stat(varTmp); err != nil || !info.IsDir() {
+		t.Skipf("%s not present as a directory: %v", varTmp, err)
+	}
+
+	link := filepath.Join(varTmp, fmt.Sprintf(".be-odye4-escape-test-%d", os.Getpid()))
+	_ = os.Remove(link)
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("cannot create symlink in %s (not writable?): %v", varTmp, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
+	// resolve into /etc, outside /var/tmp.
+	target := filepath.Join(link, ".beads")
+	if isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping /var/tmp to /etc)", target)
+	}
+
+	// The escaping symlink itself also resolves outside the boundary.
+	if isPathInSafeBoundary(link) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under /var/tmp escaping to /etc)", link)
+	}
+}
+
+// TestIsPathInSafeBoundary_TempDirSymlinkEscape mirrors
+// TestIsPathInSafeBoundary_SharedSymlinkEscape for the os.TempDir() carve-out
+// (be-kghzr SEC-003 hardening). Unlike /Users/Shared, os.TempDir() is
+// cross-platform and always present, so this test is not OS-gated.
+func TestIsPathInSafeBoundary_TempDirSymlinkEscape(t *testing.T) {
+	tempDir := os.TempDir()
+
+	// Plant a symlink under the world-writable OS temp dir pointing OUTSIDE the
+	// boundary, at /etc (a system dir). Best-effort clear of any stale link from a
+	// crashed run, then register cleanup.
+	link := filepath.Join(tempDir, fmt.Sprintf(".be-kghzr-escape-test-%d", os.Getpid()))
+	_ = os.Remove(link)
+	if err := os.Symlink("/etc", link); err != nil {
+		t.Skipf("cannot create symlink in %s (not writable?): %v", tempDir, err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	// A BEADS_DIR routed *through* the escaping symlink must be rejected: its bytes
+	// resolve into /etc, outside the temp dir. The trailing ".beads" component does
+	// NOT exist, so a bare filepath.EvalSymlinks(absPath) fails on the full path --
+	// this is the exact shape that tripped the old unresolved-path fallback.
+	target := filepath.Join(link, ".beads")
+	if isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (path through symlink escaping temp dir to /etc)", target)
+	}
+
+	// The escaping symlink itself also resolves outside the boundary.
+	if isPathInSafeBoundary(link) {
+		t.Errorf("isPathInSafeBoundary(%q) = true, want false (symlink under temp dir escaping to /etc)", link)
+	}
+}
+
+// TestIsPathInSafeBoundary_TempDirPhysicalForm covers the macOS shape where
+// $TMPDIR is itself a symlink (/var/folders/... -> /private/var/...): a
+// caller-supplied path that has already been symlink-resolved arrives in the
+// PHYSICAL form, does not share the unresolved os.TempDir() prefix, and must
+// still be admitted by the temp-dir carve-out. On macOS the physical form
+// falls under the denied /private prefix, so without the carve-out this test
+// fails (the exact TestContext* regression from the be-kghzr hardening); on
+// platforms whose physical temp root is not under a denied prefix the
+// assertion is satisfied either way — the macos-latest CI lane is the
+// distinguishing runner.
+func TestIsPathInSafeBoundary_TempDirPhysicalForm(t *testing.T) {
+	base := t.TempDir()
+	phys := filepath.Join(base, "phys")
+	if err := os.MkdirAll(phys, 0o755); err != nil {
+		t.Fatalf("mkdir phys: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(phys, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	t.Setenv("TMPDIR", link)
+
+	// Physical form of a (not-yet-created) subpath of the temp dir: must be
+	// safe. On macOS the join base itself sits under the symlinked
+	// /var/folders, so resolve it to the true physical spelling first — the
+	// probe must match what a caller supplies after EvalSymlinks, which is
+	// exactly resolveLongestExistingAncestor(TMPDIR)'s form.
+	physResolved, err := filepath.EvalSymlinks(phys)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%s): %v", phys, err)
+	}
+	target := filepath.Join(physResolved, "proj", ".beads")
+	if !isPathInSafeBoundary(target) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (physical form of TMPDIR subpath)", target)
+	}
+
+	// The symlinked form keeps working too.
+	linked := filepath.Join(link, "proj", ".beads")
+	if !isPathInSafeBoundary(linked) {
+		t.Errorf("isPathInSafeBoundary(%q) = false, want true (symlinked form of TMPDIR subpath)", linked)
 	}
 }
 
@@ -971,9 +1183,6 @@ func TestGitOutput(t *testing.T) {
 // TestGitCmd_WorktreeContext tests that GitCmd correctly operates on the main repo
 // even when running from a git worktree context (GH#2538).
 func TestGitCmd_WorktreeContext(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	t.Cleanup(func() {
 		ResetCaches()

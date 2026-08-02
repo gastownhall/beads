@@ -14,7 +14,7 @@ expected and should not be flagged.
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
-- **Project Scope** - Read [docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md) before adding new feature surface area
+- **Project Scope** - Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) before adding new feature surface area
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs
 - **Maintainer PR Guidelines** - Read [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md) before triaging, landing, or closing PRs
@@ -22,7 +22,7 @@ expected and should not be flagged.
 ## Project Scope
 
 Before adding new feature surface area, read
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md). Beads owns issue tracking
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md). Beads owns issue tracking
 primitives and should not encode orchestration-layer policy, become a storage
 engine, or casually expand the database schema when metadata would work.
 
@@ -59,12 +59,17 @@ See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full development guidelin
 ## Storage Boundary
 
 The canonical storage boundary is in
-[docs/PROJECT_CHARTER.md](docs/PROJECT_CHARTER.md#storage-boundary). In short:
+[engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md#storage-boundary). In short:
 Beads talks to storage through a driver interface (`dolthub/driver` for Dolt).
 Do not add beads-side flocks, engine introspection, storage-specific retry or
 crash-recovery logic, or public SDK return types that leak driver internals.
 If the boundary is too narrow, widen the interface or route the issue to the
 driver instead of patching around it in beads.
+
+A live application of this rule: `bd doctor` support for embedded mode is
+enabled one subcommand at a time, each human-vetted (GH#3794). Do not lift the
+embedded-mode gate in `cmd/bd/doctor.go` wholesale, and keep database-layer
+checks and fixes server-gated until the driver interface covers them.
 
 ## Agent Warning: Interactive Commands
 
@@ -83,16 +88,10 @@ echo 'Description with `backticks` and "quotes"' | bd create "Title" --descripti
 echo 'Updated text' | bd update <id> --description=-
 ```
 
-## Testing Commands (No Ambiguity)
+## Testing
 
-- Default local test command: `make test` (or `./scripts/test.sh`).
-- Opt-in ICU regex path: `make test-icu-path` (or `./scripts/test-icu-path.sh ./...`).
-- This ICU path is maintainer-only and not part of normal validation; `make test-full-cgo` and `./scripts/test-cgo.sh` are deprecated aliases.
-- For package- or test-scoped shipped-config CGO runs, prefer:
-```bash
-CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
-CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestName$' ./cmd/bd/...
-```
+Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
+test-design guidance, and PR-readiness gates.
 
 ## Non-Interactive Shell Commands
 
@@ -120,12 +119,17 @@ cp -rf source dest          # NOT: cp -r source dest
 
 ## Landing the Plane (Session Completion)
 
-**When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.
+**When ending a work session** (or when the user says "let's land the
+plane"), you MUST complete ALL steps below. Work is NOT complete until
+`git push` succeeds.
 
 **MANDATORY WORKFLOW:**
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
-2. **Run quality gates** (if code changed) - Tests, linters, builds
+2. **Run quality gates** (if code changed):
+   - `golangci-lint run ./...` (or `pre-commit run --all-files` if pre-commit is installed)
+   - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
+   - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
@@ -133,9 +137,15 @@ cp -rf source dest          # NOT: cp -r source dest
    git push
    git status  # MUST show "up to date with origin"
    ```
-5. **Clean up** - Clear stashes, prune remote branches
-6. **Verify** - All changes committed AND pushed
-7. **Hand off** - Provide context for next session
+5. **Clean up**:
+   ```bash
+   git stash clear                    # Remove old stashes
+   git remote prune origin            # Clean up deleted remote branches
+   ```
+6. **Verify** - All changes committed AND pushed, no untracked files remain
+7. **Hand off** - Choose a follow-up issue and give the user a prompt for
+   the next session, e.g. "Continue work on bd-X: [issue title]. [Brief
+   context about what's been done and what's next]"
 
 **CRITICAL RULES:**
 - Work is NOT complete until `git push` succeeds
@@ -143,7 +153,11 @@ cp -rf source dest          # NOT: cp -r source dest
 - NEVER say "ready to push when you are" - YOU must push
 - If push fails, resolve and retry until it succeeds
 
-<!-- BEGIN BEADS INTEGRATION -->
+Close with a summary for the user: what was completed this session, issues
+filed for follow-up, quality-gate status, confirmation everything is pushed,
+and the recommended prompt for the next session.
+
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:bacef91e -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -168,9 +182,6 @@ bd ready --json
 ```bash
 bd create "Issue title" --description="Detailed context" -t bug|feature|task -p 0-4 --json
 bd create "Issue title" --description="What this issue is about" -p 1 --deps discovered-from:bd-123 --json
-
-# Use stdin for descriptions with special characters (backticks, !, nested quotes)
-echo 'Description with `backticks` and "quotes"' | bd create "Title" --description=- --json
 ```
 
 **Claim and update:**
@@ -205,24 +216,31 @@ bd close bd-42 --reason "Completed" --json
 ### Workflow for AI Agents
 
 1. **Check ready work**: `bd ready` shows unblocked issues
-2. **Read execution metadata first**: before deciding local vs delegated work, model, or reasoning level, inspect structured metadata:
-   ```bash
-   bd show <id> --json | jq '.[0] | {id,title,metadata,description,notes}'
-   ```
-   The execution metadata keys `execution_agent_type`, `execution_suggested_model`, `execution_reasoning_effort`, `execution_mode`, and `execution_parallel_group` are authoritative hints when present. Use description and notes as fallback context.
-3. **Claim your task atomically**: `bd update <id> --claim`
-4. **Work on it**: Implement, test, document
-5. **Discover new work?** Create linked issue:
+2. **Claim your task atomically**: `bd update <id> --claim`
+3. **Work on it**: Implement, test, document
+4. **Discover new work?** Create linked issue:
    - `bd create "Found bug" --description="Details about what was found" -p 1 --deps discovered-from:<parent-id>`
-6. **Complete**: `bd close <id> --reason "Done"`
+5. **Complete**: `bd close <id> --reason "Done"`
 
-### Auto-Sync
+### Quality
+- Use `--acceptance` and `--design` fields when creating issues
+- Use `--validate` to check description completeness
 
-bd automatically syncs via Dolt:
+### Lifecycle
+- `bd defer <id>` / `bd supersede <id>` for issue management
+- `bd stale` / `bd orphans` / `bd lint` for hygiene
+- `bd human <id>` to flag for human decisions
+- `bd formula list` / `bd mol pour <name>` for structured workflows
+
+### Sync
+
+bd stores issue history in Dolt:
 
 - Each write auto-commits to Dolt history
 - Use `bd dolt push`/`bd dolt pull` for remote sync
-- No manual export/import needed!
+- Do not treat `.beads/issues.jsonl` as the sync protocol
+
+**Architecture in one line:** issues live in a local Dolt DB; sync uses `refs/dolt/data` on your git remote; `.beads/issues.jsonl` is a passive export. See https://github.com/gastownhall/beads/blob/main/docs/core-concepts/sync-concepts.md for details and anti-patterns.
 
 ### Important Rules
 
@@ -234,6 +252,39 @@ bd automatically syncs via Dolt:
 - ❌ Do NOT use external issue trackers
 - ❌ Do NOT duplicate tracking systems
 
-For more details, see README.md and docs/QUICKSTART.md.
+For more details, see README.md and https://github.com/gastownhall/beads/blob/main/docs/getting-started/quickstart.md.
+
+## Agent Context Profiles
+
+The managed Beads block is task-tracking guidance, not permission to override repository, user, or orchestrator instructions.
+
+- **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
+- **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
+- **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Session Completion
+
+This protocol applies when ending a Beads implementation workflow. It is subordinate to explicit user, repository, and orchestrator instructions.
+
+1. **File issues for remaining work** - Create beads for anything that needs follow-up
+2. **Run quality gates** (if code changed) - Tests, linters, builds
+3. **Update issue status** - Close finished work, update in-progress items
+4. **Handle git/sync by active profile**:
+   ```bash
+   # Conservative/minimal/default: report status and proposed commands; wait for approval.
+   git status
+
+   # Team-maintainer opt-in only, unless current instructions forbid it:
+   git pull --rebase
+   bd dolt push
+   git push
+   git status
+   ```
+5. **Hand off** - Summarize changes, validation, issue status, and any blocked sync/commit/push step
+
+**Critical rules:**
+- Explicit user or orchestrator instructions override this Beads block.
+- Do not commit or push without clear authority from the active profile or the current user request.
+- If a required sync or push is blocked, stop and report the exact command and error.
 
 <!-- END BEADS INTEGRATION -->

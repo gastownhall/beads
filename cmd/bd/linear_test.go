@@ -10,11 +10,13 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/beads/internal/linear"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -1098,9 +1100,6 @@ func TestFetchIssueByIdentifierSendsNumericFilter(t *testing.T) {
 }
 
 func TestLinearClientFetchIssues(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1209,9 +1208,6 @@ func TestLinearClientFetchIssues(t *testing.T) {
 }
 
 func TestLinearClientCreateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for create mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1262,9 +1258,6 @@ func TestLinearClientCreateIssue(t *testing.T) {
 }
 
 func TestLinearClientUpdateIssue(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for update mutation
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1321,9 +1314,6 @@ func TestLinearClientUpdateIssue(t *testing.T) {
 }
 
 func TestLinearClientGetTeamStates(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for team states query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1378,9 +1368,6 @@ func TestLinearClientGetTeamStates(t *testing.T) {
 }
 
 func TestLinearClientRateLimitHandling(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns 429 then succeeds
 	attempts := 0
@@ -1437,9 +1424,6 @@ func TestLinearClientRateLimitHandling(t *testing.T) {
 }
 
 func TestLinearClientGraphQLError(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock server that returns a GraphQL error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1636,9 +1620,6 @@ func TestBuildLinearToLocalUpdatesWithClosedAt(t *testing.T) {
 }
 
 func TestLinearClientFetchTeams(t *testing.T) {
-	if testing.Short() {
-		t.Skip("Skipping integration test in short mode")
-	}
 
 	// Create a mock GraphQL server for teams query
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1788,4 +1769,90 @@ func TestIsValidUUID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeLinearConfigReader is a test double for linearConfigReader that
+// returns values from an in-memory map. Unset keys return "" with no error
+// (matches storage.Storage's behavior for missing config keys).
+type fakeLinearConfigReader map[string]string
+
+func (f fakeLinearConfigReader) GetConfig(_ context.Context, key string) (string, error) {
+	return f[key], nil
+}
+
+// TestApplyLinearExcludeIDConfig covers the bd-ee0 config-read path that
+// wires linear.exclude_id_prefix / linear.exclude_id_patterns into
+// SyncOptions. The engine-side filter behavior (applying the rules to
+// individual issues) is tested by the TestEngineExcludeID* family in
+// internal/tracker/engine_test.go; this test exercises the cmd/bd surface.
+func TestApplyLinearExcludeIDConfig(t *testing.T) {
+	tests := []struct {
+		name         string
+		cfg          fakeLinearConfigReader
+		wantPrefix   string
+		wantPatterns []string
+	}{
+		{
+			name:         "both keys set",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_prefix": "hw-mol-", "linear.exclude_id_patterns": "-wisp-,sandbox-,scratch-"},
+			wantPrefix:   "hw-mol-",
+			wantPatterns: []string{"-wisp-", "sandbox-", "scratch-"},
+		},
+		{
+			name:         "prefix only",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_prefix": "hw-mol-"},
+			wantPrefix:   "hw-mol-",
+			wantPatterns: nil,
+		},
+		{
+			name:         "patterns only",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_patterns": "wisp-,sandbox-"},
+			wantPrefix:   "",
+			wantPatterns: []string{"wisp-", "sandbox-"},
+		},
+		{
+			name:         "patterns trimmed and empty entries skipped",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_patterns": "  a  , ,  b  ,"},
+			wantPrefix:   "",
+			wantPatterns: []string{"a", "b"},
+		},
+		{
+			name:         "prefix trimmed",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_prefix": "  hw-mol-  "},
+			wantPrefix:   "hw-mol-",
+			wantPatterns: nil,
+		},
+		{
+			name:         "neither key set is no-op",
+			cfg:          fakeLinearConfigReader{},
+			wantPrefix:   "",
+			wantPatterns: nil,
+		},
+		{
+			name:         "empty string values treated as unset",
+			cfg:          fakeLinearConfigReader{"linear.exclude_id_prefix": "", "linear.exclude_id_patterns": ""},
+			wantPrefix:   "",
+			wantPatterns: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var opts tracker.SyncOptions
+			applyLinearExcludeIDConfig(context.Background(), tt.cfg, &opts)
+			if opts.ExcludeIDPrefix != tt.wantPrefix {
+				t.Errorf("ExcludeIDPrefix = %q, want %q", opts.ExcludeIDPrefix, tt.wantPrefix)
+			}
+			if !reflect.DeepEqual(opts.ExcludeIDPatterns, tt.wantPatterns) {
+				t.Errorf("ExcludeIDPatterns = %v, want %v", opts.ExcludeIDPatterns, tt.wantPatterns)
+			}
+		})
+	}
+}
+
+// TestApplyLinearExcludeIDConfig_NilSafe verifies the helper is safe to
+// call with nil reader or nil opts (defensive guards).
+func TestApplyLinearExcludeIDConfig_NilSafe(t *testing.T) {
+	var opts tracker.SyncOptions
+	applyLinearExcludeIDConfig(context.Background(), nil, &opts)                    // must not panic
+	applyLinearExcludeIDConfig(context.Background(), fakeLinearConfigReader{}, nil) // must not panic
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -33,7 +34,6 @@ USE CASES:
 - Migrating to team naming standards
 
 Prefix validation rules:
-- Max length: 8 characters
 - Allowed characters: lowercase letters, numbers, hyphens
 - Must start with a letter
 - Must end with a hyphen (e.g., 'kw-', 'work-')
@@ -50,48 +50,55 @@ EXAMPLES:
   bd rename-prefix team- --dry-run    # Preview changes without applying
 
 NOTE: This is a rare operation. Most users never need this command.`,
-	Args: cobra.ExactArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("rename-prefix is not supported in proxied-server mode")
+		}
+		evt := metrics.NewCommandEvent("rename-prefix")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
+
 		newPrefix := args[0]
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
 		repair, _ := cmd.Flags().GetBool("repair")
 
-		// Block writes in readonly mode
 		if !dryRun {
 			CheckReadonly("rename-prefix")
 		}
 
 		ctx := rootCtx
 
-		// rename-prefix requires direct database access
 		if store == nil {
 			if err := ensureStoreActive(); err != nil {
-				FatalError("%v", err)
+				return HandleError("%v", err)
 			}
 		}
 
 		if err := validatePrefix(newPrefix); err != nil {
-			FatalError("%v", err)
+			return HandleError("%v", err)
 		}
 
 		oldPrefix, err := store.GetConfig(ctx, "issue_prefix")
 		if err != nil || oldPrefix == "" {
-			FatalError("failed to get current prefix: %v", err)
+			return HandleError("failed to get current prefix: %v", err)
 		}
 
 		newPrefix = strings.TrimRight(newPrefix, "-")
 
-		// Check for multiple prefixes first
 		issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
 		if err != nil {
-			FatalError("failed to list issues: %v", err)
+			return HandleError("failed to list issues: %v", err)
 		}
 
 		prefixes := detectPrefixes(issues)
 
 		if len(prefixes) > 1 {
-			// Multiple prefixes detected - requires repair mode
-
 			fmt.Fprintf(os.Stderr, "%s Multiple prefixes detected in database:\n", ui.RenderFail("✗"))
 			for prefix, count := range prefixes {
 				fmt.Fprintf(os.Stderr, "  - %s: %d issues\n", ui.RenderWarn(prefix), count)
@@ -99,74 +106,117 @@ NOTE: This is a rare operation. Most users never need this command.`,
 			fmt.Fprintf(os.Stderr, "\n")
 
 			if !repair {
-				FatalErrorWithHint(
+				return HandleErrorWithHint(
 					"cannot rename with multiple prefixes. Use --repair to consolidate.",
 					fmt.Sprintf("Example: bd rename-prefix %s --repair", newPrefix),
 				)
 			}
 
-			// Repair mode: consolidate all prefixes to newPrefix
 			if err := repairPrefixes(ctx, store, actor, newPrefix, issues, prefixes, dryRun); err != nil {
-				FatalError("failed to repair prefixes: %v", err)
+				return HandleError("failed to repair prefixes: %v", err)
 			}
 			if !dryRun {
 				commandDidWrite.Store(true)
 			}
-			return
+			return nil
 		}
 
-		// Single prefix case - check if trying to rename to same prefix
 		if len(prefixes) == 1 && oldPrefix == newPrefix {
-			FatalError("new prefix is the same as current prefix: %s", oldPrefix)
+			return HandleError("new prefix is the same as current prefix: %s", oldPrefix)
 		}
 
-		// issues already fetched above
 		if len(issues) == 0 {
 			fmt.Printf("No issues to rename. Updating prefix to %s\n", newPrefix)
 			if !dryRun {
 				if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
-					FatalError("failed to update prefix: %v", err)
+					return HandleError("failed to update prefix: %v", err)
 				}
 				commandDidWrite.Store(true)
 			}
-			return
+			return nil
+		}
+
+		// The prefix actually on the rows is the ground truth for ID rewriting,
+		// not the (possibly stale) issue_prefix config cell — see #5135 review.
+		// detectPrefixes already established this is a single, consistent
+		// prefix (the len(prefixes) > 1 case returned above).
+		detected := oldPrefix
+		if len(prefixes) == 1 {
+			for p := range prefixes {
+				detected = p
+			}
+		}
+
+		// detected == newPrefix means every row is already correctly prefixed
+		// and only the config cell is stale (GH#4827 half-migrated database).
+		// Repair the config without touching any IDs.
+		if detected == newPrefix {
+			if dryRun {
+				fmt.Printf("DRY RUN: config prefix disagrees with issue IDs — would repair config only: '%s' -> '%s' (%d issue IDs already correct)\n", oldPrefix, newPrefix, len(issues))
+				return nil
+			}
+			if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
+				return HandleError("failed to update prefix: %v", err)
+			}
+			commandDidWrite.Store(true)
+			fmt.Printf("%s Repaired config prefix: '%s' -> '%s' (%d issue IDs already correct, none rewritten)\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix), len(issues))
+			if jsonOutput {
+				result := map[string]interface{}{
+					"old_prefix":      oldPrefix,
+					"new_prefix":      newPrefix,
+					"issues_count":    0,
+					"config_repaired": true,
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if eerr := enc.Encode(result); eerr != nil {
+					return eerr
+				}
+			}
+			return nil
 		}
 
 		if dryRun {
-			fmt.Printf("DRY RUN: Would rename %d issues from prefix '%s' to '%s'\n\n", len(issues), oldPrefix, newPrefix)
+			fmt.Printf("DRY RUN: Would rename issues from prefix '%s' to '%s'\n\n", detected, newPrefix)
 			fmt.Printf("Sample changes:\n")
-			for i, issue := range issues {
-				if i >= 5 {
-					fmt.Printf("... and %d more issues\n", len(issues)-5)
-					break
+			shown := 0
+			for _, issue := range issues {
+				newID := rewriteIssueID(detected, newPrefix, issue.ID)
+				if shown < 5 {
+					fmt.Printf("  %s -> %s\n", ui.RenderAccent(issue.ID), ui.RenderAccent(newID))
+					shown++
 				}
-				oldID := fmt.Sprintf("%s-%s", oldPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
-				newID := fmt.Sprintf("%s-%s", newPrefix, strings.TrimPrefix(issue.ID, oldPrefix+"-"))
-				fmt.Printf("  %s -> %s\n", ui.RenderAccent(oldID), ui.RenderAccent(newID))
 			}
-			return
+			if remaining := len(issues) - shown; remaining > 0 {
+				fmt.Printf("... and %d more issues\n", remaining)
+			}
+			return nil
 		}
 
-		fmt.Printf("Renaming %d issues from prefix '%s' to '%s'...\n", len(issues), oldPrefix, newPrefix)
+		fmt.Printf("Renaming issues from prefix '%s' to '%s'...\n", detected, newPrefix)
 
-		if err := renamePrefixInDB(ctx, oldPrefix, newPrefix, issues); err != nil {
-			FatalError("failed to rename prefix: %v", err)
+		if err := renamePrefixInDB(ctx, detected, newPrefix, issues); err != nil {
+			return HandleError("failed to rename prefix: %v", err)
 		}
 
-		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(oldPrefix), ui.RenderAccent(newPrefix))
+		commandDidWrite.Store(true)
+
+		fmt.Printf("%s Successfully renamed prefix from %s to %s\n", ui.RenderPass("✓"), ui.RenderAccent(detected), ui.RenderAccent(newPrefix))
 
 		if jsonOutput {
 			result := map[string]interface{}{
-				"old_prefix":   oldPrefix,
+				"old_prefix":   detected,
 				"new_prefix":   newPrefix,
 				"issues_count": len(issues),
 			}
 			enc := json.NewEncoder(os.Stdout)
 			enc.SetIndent("", "  ")
-			_ = enc.Encode(result) // Best effort: JSON encoding of simple struct does not fail in practice
+			if eerr := enc.Encode(result); eerr != nil {
+				return eerr
+			}
 		}
 
-		commandDidWrite.Store(true)
+		return nil
 	},
 }
 
@@ -347,24 +397,45 @@ func repairPrefixes(ctx context.Context, st storage.DoltStorage, actorName strin
 	return nil
 }
 
+// rewriteIssueID maps oldID from oldPrefix to newPrefix. oldPrefix must be
+// the prefix actually detected on the issue rows (see detectPrefixes), not
+// the possibly-stale issue_prefix config cell — see PR #5135 review (maphew,
+// 2026-07-29): using the config cell here made the "already on target
+// prefix" check ambiguous with genuine prefix-shortening renames (e.g.
+// "beads-vscode-" -> "beads-" would leave "beads-vscode-1" unchanged,
+// because it also starts with "beads-"). The GH#4827 half-migrated-config
+// case is now handled by the caller comparing the detected prefix to
+// newPrefix directly and skipping ID rewrites entirely (config-only
+// repair), so this function no longer needs — or has — a newPrefix guard.
+func rewriteIssueID(oldPrefix, newPrefix, oldID string) string {
+	oldP := strings.TrimRight(oldPrefix, "-")
+	newP := strings.TrimRight(newPrefix, "-")
+	if oldP == "" || newP == "" {
+		return oldID
+	}
+	if strings.HasPrefix(oldID, oldP+"-") {
+		return newP + "-" + strings.TrimPrefix(oldID, oldP+"-")
+	}
+	return oldID
+}
+
 func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues []*types.Issue) error {
 	// NOTE: Each issue is updated in its own transaction. A failure mid-way could leave
 	// the database in a mixed state with some issues renamed and others not.
 	// For production use, consider implementing a single atomic RenamePrefix() method
 	// in the storage layer that wraps all updates in one transaction.
 
-	oldPrefixPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldPrefix) + `-(\d+)\b`)
+	oldP := strings.TrimRight(oldPrefix, "-")
+	newP := strings.TrimRight(newPrefix, "-")
+	oldPrefixPattern := regexp.MustCompile(`\b` + regexp.QuoteMeta(oldP) + `-(\d+)\b`)
 
 	replaceFunc := func(match string) string {
-		return strings.Replace(match, oldPrefix+"-", newPrefix+"-", 1)
+		return strings.Replace(match, oldP+"-", newP+"-", 1)
 	}
 
 	for _, issue := range issues {
 		oldID := issue.ID
-		numPart := strings.TrimPrefix(oldID, oldPrefix+"-")
-		newID := fmt.Sprintf("%s-%s", newPrefix, numPart)
-
-		issue.ID = newID
+		newID := rewriteIssueID(oldP, newP, oldID)
 
 		issue.Title = oldPrefixPattern.ReplaceAllStringFunc(issue.Title, replaceFunc)
 		issue.Description = oldPrefixPattern.ReplaceAllStringFunc(issue.Description, replaceFunc)
@@ -378,12 +449,19 @@ func renamePrefixInDB(ctx context.Context, oldPrefix, newPrefix string, issues [
 			issue.Notes = oldPrefixPattern.ReplaceAllStringFunc(issue.Notes, replaceFunc)
 		}
 
+		// ID already on the target prefix (stale config cell only): skip UpdateIssueID
+		// so we never produce atlas-atlas-* (GH#4827).
+		if newID == oldID {
+			continue
+		}
+
+		issue.ID = newID
 		if err := store.UpdateIssueID(ctx, oldID, newID, issue, actor); err != nil {
 			return fmt.Errorf("failed to update issue %s: %w", oldID, err)
 		}
 	}
 
-	if err := store.SetConfig(ctx, "issue_prefix", newPrefix); err != nil {
+	if err := store.SetConfig(ctx, "issue_prefix", newP); err != nil {
 		return fmt.Errorf("failed to update config: %w", err)
 	}
 

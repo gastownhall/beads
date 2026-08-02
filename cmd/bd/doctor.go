@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 )
 
@@ -67,7 +68,11 @@ const ConfigKeyHintsDoctor = "hints.doctor"
 var doctorCmd = &cobra.Command{
 	Use:     "doctor [path]",
 	GroupID: "maint",
-	Short:   "Check and fix beads installation health (start here)",
+	// doctor diagnoses installation health and must run without opening the
+	// store. It opts out of store init via the annotation seam rather than the
+	// noDbCommands list (see commandOptsOutOfStore in main.go).
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
+	Short:       "Check and fix beads installation health (start here)",
 	Long: `Sanity check the beads installation for the current directory or specified path.
 
 This command checks:
@@ -83,10 +88,17 @@ This command checks:
   - .beads/.gitignore up to date
   - Metadata.json version tracking (LastBdVersion field)
 
+Storage Availability:
+  Full diagnostics, --perf, --deep, --server, --migration, and
+  --check=validate currently require Dolt server mode. Embedded Dolt
+  supports --check=artifacts, --check=conventions, and
+  --check=pollution. --check-health has a limited hook-health fallback.
+  Unsupported combinations return a notice without changing storage.
+
 Performance Mode (--perf):
   Run performance diagnostics on your database:
   - Times key operations (bd ready, bd list, bd show, etc.)
-  - Collects system info (OS, arch, SQLite version, database stats)
+  - Collects system info (OS, arch, database stats)
   - Generates CPU profile for analysis
   - Outputs shareable report for bug reports
 
@@ -122,18 +134,12 @@ Server Mode (--server):
   - Schema compatible: Can query beads tables?
   - Connection pool: Pool health metrics
 
-Migration Validation Mode (--migration):
-  Run Dolt migration validation checks with machine-parseable output.
-  Use --migration=pre before migration to verify readiness:
-  - JSONL file exists and is valid (parseable, no corruption)
-  - All JSONL issues are present in SQLite (or explains discrepancies)
-  - No blocking issues prevent migration
-  Use --migration=post after migration to verify completion:
-  - Dolt database exists and is healthy
-  - All issues from JSONL are present in Dolt
-  - No data was lost during migration
-  - Dolt database has no locks or uncommitted changes
-  Combine with --json for machine-parseable output for automation.
+Legacy Dolt Migration Validation Mode (--migration):
+  Retained for older SQLite-to-Dolt migration workflows and available only in
+  Dolt server mode. It is not the migration path for removed backends
+  (PostgreSQL, MySQL, SQLite); those fail closed with export/import guidance.
+  Combine
+  with --json for machine-parseable diagnostic output.
 
 Agent Mode (--agent):
   Output diagnostics designed for AI agent consumption. Instead of terse
@@ -180,110 +186,114 @@ Examples:
   bd doctor --check=validate --fix   # Auto-fix data-integrity issues
   bd doctor --deep             # Full graph integrity validation
   bd doctor --server           # Dolt server mode health checks
-  bd doctor --migration=pre    # Validate readiness for Dolt migration
-  bd doctor --migration=post   # Validate Dolt migration completed
-  bd doctor --migration=pre --json  # Machine-parseable migration validation`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if !usesSQLServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in embedded mode.")
-			fmt.Fprintln(os.Stderr, "")
-			fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
-			fmt.Fprintln(os.Stderr, "  • Verify database exists:  ls -la .beads/embeddeddolt/")
-			fmt.Fprintln(os.Stderr, "  • Check bd version:        bd version")
-			fmt.Fprintln(os.Stderr, "  • Reinitialize if needed:  bd init --force")
-			fmt.Fprintln(os.Stderr, "  • Switch to server mode:   bd init --server")
-			os.Exit(0)
-		}
-		if usesProxiedServer() {
-			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
-			os.Exit(0)
-		}
-		// Use global jsonOutput set by PersistentPreRun
+  bd doctor --migration=pre    # Legacy Dolt-server migration diagnostic
+  bd doctor --migration=post   # Legacy Dolt-server completion diagnostic
+  bd doctor --migration=pre --json  # Machine-parseable legacy diagnostic`,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		evt := metrics.NewCommandEvent("doctor")
+		defer func() {
+			if c := metrics.Global(); c != nil {
+				c.CloseEventAndAdd(evt)
+			}
+		}()
 
-		// Determine path to check
-		// Precedence: explicit arg > BEADS_DIR (parent) > CWD
 		var checkPath string
 		if len(args) > 0 {
 			checkPath = args[0]
 		} else if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
-			// BEADS_DIR points to .beads directory, doctor needs parent
 			checkPath = filepath.Dir(beadsDir)
 		} else {
 			checkPath = "."
 		}
 
-		// Convert to absolute path
 		absPath, err := filepath.Abs(checkPath)
 		if err != nil {
-			FatalError("failed to resolve path: %v", err)
+			return HandleError("failed to resolve path: %v", err)
+		}
+		if err := validateDoctorWorkspaceBackend(absPath); err != nil {
+			return HandleError("%v", err)
 		}
 
-		// Guardrail: never run mutating bd doctor fix from orchestrator workspace root.
-		// Workspace roots have additional invariants beyond single-project repos;
-		// repairs should go through the orchestrator's own doctor command.
+		if usesProxiedServer() {
+			fmt.Fprintln(os.Stderr, "Note: 'bd doctor' is not yet supported in proxied-server mode.")
+			return nil
+		}
+
 		if doctorFix && isOrchestratorRoot(absPath) {
-			FatalErrorWithHint(
+			return HandleErrorWithHint(
 				"refusing to run 'bd doctor --fix' at orchestrator workspace root",
 				"Run the orchestrator's doctor command from workspace root, or run 'bd doctor --fix' inside a specific project clone",
 			)
 		}
 
-		// Run performance diagnostics if --perf flag is set
-		if perfMode {
-			if err := doctor.RunPerformanceDiagnostics(absPath); err != nil {
-				FatalError("performance diagnostics: %v", err)
-			}
-			return
-		}
-
-		// Run quick health check if --check-health flag is set
+		// --check-health has a hook-only fallback for embedded mode
+		// (doctor_health.go), so it runs before the embedded-mode gate below.
 		if checkHealthMode {
-			runCheckHealth(absPath)
-			return
+			return runCheckHealth(absPath)
 		}
 
-		// Run specific check if --check flag is set
+		// --perf opens a live server-mode connection; route embedded users to
+		// the structured stub instead of a hard connection error (GH#3597).
+		if perfMode {
+			if isEmbeddedMode() {
+				printEmbeddedUnsupported("doctor --perf")
+				return nil
+			}
+			if err := doctor.RunPerformanceDiagnostics(absPath); err != nil {
+				return HandleError("performance diagnostics: %v", err)
+			}
+			return nil
+		}
+
+		// artifacts, conventions, and pollution work in embedded mode and run
+		// unconditionally; validate still requires a server-mode connection
+		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
 			switch doctorCheckFlag {
-			case "pollution":
-				runPollutionCheck(absPath, doctorClean, doctorYes)
-				return
-			case "validate":
-				runValidateCheck(absPath)
-				return
 			case "artifacts":
-				runArtifactsCheck(absPath, doctorClean, doctorYes)
-				return
+				return runArtifactsCheck(absPath, doctorClean, doctorYes)
 			case "conventions":
-				runConventionsCheck(absPath)
-				return
+				return runConventionsCheck(absPath)
+			case "pollution":
+				return runPollutionCheck(absPath, doctorClean, doctorYes)
+			case "validate":
+				if isEmbeddedMode() {
+					printEmbeddedUnsupported("doctor --check=validate")
+					return nil
+				}
+				return runValidateCheck(absPath)
 			default:
-				FatalErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
+				return HandleErrorWithHint(fmt.Sprintf("unknown check %q", doctorCheckFlag), "Available checks: artifacts, conventions, pollution, validate")
 			}
 		}
 
-		// Run deep validation if --deep flag is set
+		// Bare `bd doctor` and the remaining mode-specific flags (--deep,
+		// --server, --migration) aren't wired up for embedded mode yet.
+		// Policy (GH#3794): embedded support is enabled one subcommand at a
+		// time, each human-vetted — do not lift this gate wholesale. Checks
+		// that reach into the database layer stay server-gated until the
+		// storage driver interface covers them (AGENTS.md "Storage Boundary").
+		if isEmbeddedMode() {
+			printEmbeddedUnsupported("doctor")
+			return nil
+		}
+
 		if doctorDeep {
-			runDeepValidation(absPath)
-			return
+			return runDeepValidation(absPath)
 		}
 
-		// Run server mode health checks if --server flag is set
 		if doctorServer {
-			runServerHealth(absPath)
-			return
+			return runServerHealth(absPath)
 		}
 
-		// Run migration validation if --migration flag is set
 		if doctorMigration != "" {
-			runMigrationValidation(absPath, doctorMigration)
-			return
+			return runMigrationValidation(absPath, doctorMigration)
 		}
 
-		// Run diagnostics
 		result := runDiagnostics(absPath)
 
-		// Preview fixes (dry-run) or apply fixes if requested
 		if doctorDryRun {
 			previewFixes(result)
 		} else if doctorFix {
@@ -292,39 +302,39 @@ Examples:
 			result = runDiagnostics(absPath)
 		}
 
-		// Add timestamp and platform info for export
 		if doctorOutput != "" || jsonOutput {
 			result.Timestamp = time.Now().UTC().Format(time.RFC3339)
 			result.Platform = doctor.CollectPlatformInfo(absPath)
 		}
 
-		// Export to file if --output specified
 		if doctorOutput != "" {
 			if err := exportDiagnostics(result, doctorOutput); err != nil {
-				FatalError("failed to export diagnostics: %v", err)
+				return HandleError("failed to export diagnostics: %v", err)
 			}
 			fmt.Printf("✓ Diagnostics exported to %s\n", doctorOutput)
 		}
 
-		// Output results
 		if doctorAgent {
 			agentResult := buildAgentResult(result)
 			if jsonOutput {
-				outputJSON(agentResult)
+				if err := outputJSON(agentResult); err != nil {
+					return err
+				}
 			} else {
 				printAgentDiagnostics(agentResult)
 			}
 		} else if jsonOutput {
-			outputJSON(result)
+			if err := outputJSON(result); err != nil {
+				return err
+			}
 		} else if doctorOutput == "" {
-			// Only print to console if not exporting (to avoid duplicate output)
 			printDiagnostics(result)
 		}
 
-		// Exit with error if any checks failed
 		if !result.OverallOK {
-			os.Exit(1)
+			return SilentExit()
 		}
+		return nil
 	},
 }
 
@@ -338,12 +348,72 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorOrchestrator, "orchestrator", false, "Running in orchestrator multi-workspace mode (routes.jsonl is expected, higher duplicate tolerance)")
 	doctorCmd.Flags().IntVar(&orchestratorDuplicatesThreshold, "orchestrator-duplicates-threshold", 1000, "Duplicate tolerance threshold for orchestrator mode (wisps are ephemeral)")
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
-	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run Dolt migration validation: 'pre' (before migration) or 'post' (after migration)")
+	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run legacy Dolt-server migration diagnostics: 'pre' or 'post'")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
 }
 
 func shouldSkipDoctorNetworkChecks() bool {
 	return jsonOutput || !ui.IsTerminal()
+}
+
+// validateDoctorWorkspaceBackend keeps doctor diagnostics read-only when metadata
+// selects a removed or unknown implementation or cannot be parsed. Doctor contains
+// direct diagnostic store paths and may run under shared-server mode, so corrupt
+// metadata must be rejected before version tracking or any database check begins.
+func validateDoctorWorkspaceBackend(path string) error {
+	beadsDir := doctor.ResolveBeadsDirForRepo(path)
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+	}
+	return validateConfiguredBackend(cfg)
+}
+
+// printEmbeddedUnsupported reports that a doctor variant is not yet wired up
+// for embedded mode. Emits a structured payload to stderr when --json or
+// --agent is set so downstream tooling can detect the gap without parsing
+// prose, and the existing prose stub otherwise (GH#3597).
+//
+// Follows the bd error-JSON contract (docs/JSON_SCHEMA.md): stderr, includes
+// a `code` field, and is wrapped with schema_version. Exit code stays 0 - a
+// benign refusal, not a failure.
+func printEmbeddedUnsupported(commandLabel string) {
+	hints := []string{
+		"Verify database exists:  ls -la .beads/embeddeddolt/",
+		"Check bd version:        bd version",
+		"Reinitialize if needed:  bd init --reinit-local",
+		"Switch to server mode:   bd init --server",
+	}
+	supported := []string{"artifacts", "conventions", "pollution"}
+	unsupported := []string{"validate"}
+
+	if jsonOutput || doctorAgent {
+		payload := map[string]interface{}{
+			"error":                               fmt.Sprintf("'bd %s' is not yet supported in embedded mode", commandLabel),
+			"code":                                "embedded_unsupported",
+			"unsupported":                         true,
+			"mode":                                "embedded",
+			"command":                             commandLabel,
+			"checks_supported_in_embedded_mode":   supported,
+			"checks_unsupported_in_embedded_mode": unsupported,
+			"hints":                               hints,
+		}
+		encoder := json.NewEncoder(os.Stderr)
+		encoder.SetIndent("", "  ")
+		_ = encoder.Encode(wrapWithSchemaVersion(payload))
+		return
+	}
+
+	fmt.Fprintf(os.Stderr, "Note: 'bd %s' is not yet supported in embedded mode.\n\n", commandLabel)
+	fmt.Fprintln(os.Stderr, "For embedded mode troubleshooting:")
+	for _, h := range hints {
+		fmt.Fprintf(os.Stderr, "  • %s\n", h)
+	}
+	fmt.Fprintln(os.Stderr, "")
+	fmt.Fprintln(os.Stderr, "Checks available in embedded mode:")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=artifacts")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=conventions")
+	fmt.Fprintln(os.Stderr, "  • bd doctor --check=pollution")
 }
 
 func runDiagnostics(path string) doctorResult {
@@ -377,6 +447,11 @@ func runDiagnostics(path string) doctorResult {
 	// Check for stale .legacy hook sidecars calling removed "bd hook" command (GH#2398)
 	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, legacyCheck)
+
+	// Check for a dangling core.hooksPath pointing at a missing directory (GH#4440)
+	hooksPathCheck := convertWithCategory(doctor.CheckHooksPath(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, hooksPathCheck)
+	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.
 
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
 	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
@@ -421,8 +496,15 @@ func runDiagnostics(path string) doctorResult {
 		})
 	}
 
+	// Check 1c: Managed-city handoff port conflict (GH#3926)
+	managedHandoffCheck := convertDoctorCheck(doctor.CheckManagedHandoffPort(path))
+	result.Checks = append(result.Checks, managedHandoffCheck)
+	if managedHandoffCheck.Status == statusWarning || managedHandoffCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// bd-jgxi: Auto-migrate database version before checking it.
-	// Since doctor skips PersistentPreRun DB init (it's in noDbCommands),
+	// Since doctor skips PersistentPreRun DB init (via skipStoreAnnotation),
 	// trackBdVersion() and autoMigrateOnVersionBump() haven't run yet.
 	//
 	// Scope version tracking to the doctor target. Without this, `bd doctor <path>`
@@ -543,6 +625,14 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 7e1: Corrupt-manifest state (GH#3290). Detection only; the
+	// destructive backup+reinit repair runs solely via doctor --fix (bd-6dnrw.6).
+	corruptManifestCheck := convertDoctorCheck(doctor.CheckCorruptManifest(path))
+	result.Checks = append(result.Checks, corruptManifestCheck)
+	if corruptManifestCheck.Status == statusError {
+		result.OverallOK = false
+	}
+
 	// Check 7e2: Stale circuit breaker files
 	circuitCheck := convertDoctorCheck(doctor.CheckCircuitBreaker())
 	result.Checks = append(result.Checks, circuitCheck)
@@ -550,15 +640,21 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
-	// Check 7f: Remote consistency (SQL vs CLI)
-	remoteCheck := convertWithCategory(doctor.CheckRemoteConsistency(path), doctor.CategoryData)
-	result.Checks = append(result.Checks, remoteCheck)
-	// Don't fail overall for remote discrepancies, just warn
+	// Check 7f1: Dolt remote URL collision with git origin (be-7eu1d)
+	doltOriginCheck := convertWithCategory(doctor.CheckDoltRemoteGitOrigin(path), doctor.CategoryDolt)
+	result.Checks = append(result.Checks, doltOriginCheck)
+
+	// Check 7f: Migration content skew vs the cached remote ref (#4259). Advisory.
+	skewCheck := convertWithCategory(doctor.CheckMigrationContentSkew(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, skewCheck)
 
 	// Dolt health checks (connection, schema, issue count, status).
 	for _, dc := range doctor.RunDoltHealthChecks(path) {
 		result.Checks = append(result.Checks, convertDoctorCheck(dc))
 	}
+
+	legacyRemoteCheck := convertWithCategory(doctor.CheckLegacyCLIRemotes(path), doctor.CategoryFederation)
+	result.Checks = append(result.Checks, legacyRemoteCheck)
 
 	// Federation health checks (bd-wkumz.6)
 	// Check 8d: Federation remotesapi port accessibility
@@ -599,6 +695,24 @@ func runDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Check 10b: Rekey-backfill leftovers — randomly-keyed or targetless
+	// dependency rows that survive the #4259 migration backfill (bd-6dnrw.17).
+	depKeyCheck := convertWithCategory(doctor.CheckDependencyKeysWithStore(sharedStore), doctor.CategoryMetadata)
+	result.Checks = append(result.Checks, depKeyCheck)
+	if depKeyCheck.Status == statusError || depKeyCheck.Status == statusWarning {
+		result.OverallOK = false
+	}
+
+	// Check 10c: is_blocked consistency — derived flags a skipped post-pull
+	// recompute can leave stale (bd-6dnrw.37). `bd ready` trusts is_blocked, so
+	// staleness silently hides ready work; the full recompute repairs it.
+	// Warn-only (does not fail OverallOK): this is a new check shipping in a
+	// patch, and is_blocked is self-healing via 'bd doctor --fix' / the next
+	// pull's recompute — surface it as actionable without turning doctor red
+	// across the fleet if an unforeseen dependency shape trips the predicate.
+	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, blockedConsistencyCheck)
+
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)
@@ -626,7 +740,24 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, bdPathCheck)
 	// Don't fail overall check for missing bd in PATH, just warn
 
-	// Check 11e: Documentation bd prime references match installed version
+	// Check 11e: Cursor integration (agent hooks)
+	cursorCheck := convertWithCategory(doctor.CheckCursor(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorCheck)
+	// Don't fail overall check for missing Cursor integration, just warn
+
+	// Check 11f: Cursor hooks file health (malformed JSON detection)
+	cursorSettingsCheck := convertWithCategory(doctor.CheckCursorSettingsHealth(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorSettingsCheck)
+	if cursorSettingsCheck.Status == statusError {
+		result.OverallOK = false // Malformed hooks.json is a real problem
+	}
+
+	// Check 11g: Cursor hook completeness (all three lifecycle events)
+	cursorHookCheck := convertWithCategory(doctor.CheckCursorHookCompleteness(path), doctor.CategoryIntegration)
+	result.Checks = append(result.Checks, cursorHookCheck)
+	// Don't fail overall check for incomplete hooks, just warn
+
+	// Check 11h: Documentation bd prime references match installed version
 	bdPrimeDocsCheck := convertWithCategory(doctor.CheckDocumentationBdPrimeReference(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, bdPrimeDocsCheck)
 	// Don't fail overall check for doc mismatch, just warn
@@ -656,9 +787,14 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, gitignoreCheck)
 	// Don't fail overall check for gitignore, just warn
 
-	// Check 14a: Project-root .gitignore has Dolt exclusion patterns (GH#2034)
-	projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
-	result.Checks = append(result.Checks, projectGitignoreCheck)
+	// Check 14a: Project-root Dolt exclusion patterns (GH#2034). In stealth mode these live in
+	// .git/info/exclude, so check that location instead to avoid recreating .gitignore.
+	if isStealthRepo(path) {
+		result.Checks = append(result.Checks, convertWithCategory(checkProjectExcludeStealth(path), doctor.CategoryGit))
+	} else {
+		projectGitignoreCheck := convertWithCategory(doctor.CheckProjectGitignore(path), doctor.CategoryGit)
+		result.Checks = append(result.Checks, projectGitignoreCheck)
+	}
 	// Don't fail overall check for project gitignore, just warn
 
 	// Check 14b: redirect file tracking (worktree redirect files shouldn't be committed)
@@ -727,6 +863,11 @@ func runDiagnostics(path string) doctorResult {
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
+
+	// Check 21b: Clone-local FKs severed by hard resets (bd-7bpkd)
+	cloneLocalFKCheck := convertDoctorCheck(doctor.CheckCloneLocalFKs(path))
+	result.Checks = append(result.Checks, cloneLocalFKCheck)
+	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
@@ -869,22 +1010,28 @@ func runInitDiagnostics(path string) doctorResult {
 		result.OverallOK = false
 	}
 
+	// Open one shared store for the database-backed init checks. Server-mode
+	// workspaces may not have a local .beads/dolt directory, so the path-only
+	// checks would otherwise report a false missing database.
+	sharedStore := doctor.NewSharedStore(path)
+	defer sharedStore.Close()
+
 	// Check 2: Database version
-	dbCheck := convertWithCategory(doctor.CheckDatabaseVersion(path, Version), doctor.CategoryCore)
+	dbCheck := convertWithCategory(doctor.CheckDatabaseVersionWithStore(sharedStore, Version), doctor.CategoryCore)
 	result.Checks = append(result.Checks, dbCheck)
 	if dbCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 3: Schema compatibility
-	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibility(path), doctor.CategoryCore)
+	schemaCheck := convertWithCategory(doctor.CheckSchemaCompatibilityWithStore(sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, schemaCheck)
 	if schemaCheck.Status == statusError {
 		result.OverallOK = false
 	}
 
 	// Check 4: Permissions
-	permCheck := convertWithCategory(doctor.CheckPermissions(path), doctor.CategoryCore)
+	permCheck := convertWithCategory(doctor.CheckPermissionsWithStore(path, sharedStore), doctor.CategoryCore)
 	result.Checks = append(result.Checks, permCheck)
 	if permCheck.Status == statusError {
 		result.OverallOK = false
@@ -1156,7 +1303,7 @@ func printAllChecks(checksByCategory map[string][]doctorCheck) {
 // runMigrationValidation runs Dolt migration validation checks.
 // Phase can be "pre" (before migration) or "post" (after migration).
 // Outputs machine-parseable JSON when --json flag is set.
-func runMigrationValidation(path string, phase string) {
+func runMigrationValidation(path string, phase string) error {
 	var check doctorCheck
 	var result doctor.MigrationValidationResult
 
@@ -1170,10 +1317,9 @@ func runMigrationValidation(path string, phase string) {
 		check = convertDoctorCheck(dc)
 		result = mr
 	default:
-		FatalError("invalid migration phase %q (use 'pre' or 'post')", phase)
+		return HandleError("invalid migration phase %q (use 'pre' or 'post')", phase)
 	}
 
-	// JSON output for machine consumption
 	if jsonOutput {
 		output := struct {
 			Check      doctorCheck                      `json:"check"`
@@ -1186,11 +1332,13 @@ func runMigrationValidation(path string, phase string) {
 			CLIVersion: Version,
 			Timestamp:  time.Now().UTC().Format(time.RFC3339),
 		}
-		outputJSON(output)
-		if !result.Ready {
-			os.Exit(1)
+		if err := outputJSON(output); err != nil {
+			return err
 		}
-		return
+		if !result.Ready {
+			return SilentExit()
+		}
+		return nil
 	}
 
 	// Human-readable output
@@ -1257,8 +1405,8 @@ func runMigrationValidation(path string, phase string) {
 	fmt.Println()
 	if result.Ready {
 		fmt.Printf("%s\n", ui.RenderPass("✓ Migration validation passed"))
-	} else {
-		fmt.Printf("%s\n", ui.RenderFail("✗ Migration validation failed"))
-		os.Exit(1)
+		return nil
 	}
+	fmt.Printf("%s\n", ui.RenderFail("✗ Migration validation failed"))
+	return SilentExit()
 }

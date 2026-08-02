@@ -46,7 +46,10 @@ func TestValidateDescriptionUpdateRejectsEmptyStdinWithoutOptIn(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		description, changed := getDescriptionFlag(cmd)
+		description, changed, flagErr := getDescriptionFlag(cmd)
+		if flagErr != nil {
+			t.Fatalf("unexpected error: %v", flagErr)
+		}
 		err := validateDescriptionUpdate(cmd, description, changed)
 		if err == nil {
 			t.Fatal("expected empty stdin description to be rejected")
@@ -64,7 +67,10 @@ func TestValidateDescriptionUpdateRejectsEmptyDashShorthandWithoutOptIn(t *testi
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		description, changed := getDescriptionFlag(cmd)
+		description, changed, flagErr := getDescriptionFlag(cmd)
+		if flagErr != nil {
+			t.Fatalf("unexpected error: %v", flagErr)
+		}
 		err := validateDescriptionUpdate(cmd, description, changed)
 		if err == nil {
 			t.Fatal("expected empty dash shorthand description to be rejected")
@@ -87,7 +93,10 @@ func TestValidateDescriptionUpdateRejectsEmptyBodyFileWithoutOptIn(t *testing.T)
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	description, changed := getDescriptionFlag(cmd)
+	description, changed, flagErr := getDescriptionFlag(cmd)
+	if flagErr != nil {
+		t.Fatalf("unexpected error: %v", flagErr)
+	}
 	err := validateDescriptionUpdate(cmd, description, changed)
 	if err == nil {
 		t.Fatal("expected empty body file description to be rejected")
@@ -104,7 +113,10 @@ func TestValidateDescriptionUpdateAllowsEmptyStdinWithOptIn(t *testing.T) {
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		description, changed := getDescriptionFlag(cmd)
+		description, changed, flagErr := getDescriptionFlag(cmd)
+		if flagErr != nil {
+			t.Fatalf("unexpected error: %v", flagErr)
+		}
 		if err := validateDescriptionUpdate(cmd, description, changed); err != nil {
 			t.Fatalf("expected opt-in empty stdin to succeed, got: %v", err)
 		}
@@ -121,7 +133,10 @@ func TestValidateDescriptionUpdateAllowsNonEmptyStdinWithoutOptIn(t *testing.T) 
 			t.Fatalf("failed to parse flags: %v", err)
 		}
 
-		description, changed := getDescriptionFlag(cmd)
+		description, changed, flagErr := getDescriptionFlag(cmd)
+		if flagErr != nil {
+			t.Fatalf("unexpected error: %v", flagErr)
+		}
 		if err := validateDescriptionUpdate(cmd, description, changed); err != nil {
 			t.Fatalf("expected non-empty stdin to succeed, got: %v", err)
 		}
@@ -137,7 +152,10 @@ func TestValidateDescriptionUpdateAllowsExplicitInlineEmpty(t *testing.T) {
 		t.Fatalf("failed to parse flags: %v", err)
 	}
 
-	description, changed := getDescriptionFlag(cmd)
+	description, changed, flagErr := getDescriptionFlag(cmd)
+	if flagErr != nil {
+		t.Fatalf("unexpected error: %v", flagErr)
+	}
 	if err := validateDescriptionUpdate(cmd, description, changed); err != nil {
 		t.Fatalf("expected explicit inline empty description to succeed, got: %v", err)
 	}

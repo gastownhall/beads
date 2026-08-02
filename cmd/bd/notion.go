@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/notion"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
@@ -19,6 +20,14 @@ import (
 type notionConfig struct {
 	DataSourceID string
 	ViewURL      string
+}
+
+type notionConfigSetter interface {
+	SetConfig(ctx context.Context, key, value string) error
+}
+
+type notionConfigDeleter interface {
+	DeleteConfig(ctx context.Context, key string) error
 }
 
 type notionUnsupportedPushStats struct {
@@ -83,21 +92,27 @@ var notionCmd = &cobra.Command{
 }
 
 var notionStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show Notion sync status",
-	RunE:  runNotionStatus,
+	Use:           "status",
+	Short:         "Show Notion sync status",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionStatus,
 }
 
 var notionInitCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Create a dedicated Beads database in Notion",
-	RunE:  runNotionInit,
+	Use:           "init",
+	Short:         "Create a dedicated Beads database in Notion",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionInit,
 }
 
 var notionConnectCmd = &cobra.Command{
-	Use:   "connect",
-	Short: "Connect bd to an existing Notion database or data source",
-	RunE:  runNotionConnect,
+	Use:           "connect",
+	Short:         "Connect bd to an existing Notion database or data source",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionConnect,
 }
 
 var notionSyncCmd = &cobra.Command{
@@ -105,7 +120,9 @@ var notionSyncCmd = &cobra.Command{
 	Short: "Sync issues with Notion",
 	Long: "Synchronize issues between beads and Notion.\n\n" +
 		"By default this performs bidirectional sync. Use --pull or --push to limit direction.",
-	RunE: runNotionSync,
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runNotionSync,
 }
 
 func init() {
@@ -136,26 +153,31 @@ func init() {
 
 func getNotionConfig() notionConfig {
 	ctx := context.Background()
-	return notionConfig{
-		DataSourceID: getNotionConfigValue(ctx, "notion.data_source_id", "NOTION_DATA_SOURCE_ID"),
-		ViewURL:      getNotionConfigValue(ctx, "notion.view_url", "NOTION_VIEW_URL"),
-	}
-}
-
-func getNotionConfigValue(ctx context.Context, key, envVar string) string {
 	if store != nil {
-		value, _ := store.GetConfig(ctx, key)
-		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value)
-		}
-	} else if dbPath != "" {
+		return getNotionConfigWithReader(ctx, store)
+	}
+	if dbPath != "" {
 		tempStore, err := openReadOnlyStoreForDBPath(ctx, dbPath)
 		if err == nil {
 			defer func() { _ = tempStore.Close() }()
-			value, _ := tempStore.GetConfig(ctx, key)
-			if strings.TrimSpace(value) != "" {
-				return strings.TrimSpace(value)
-			}
+			return getNotionConfigWithReader(ctx, tempStore)
+		}
+	}
+	return getNotionConfigWithReader(ctx, nil)
+}
+
+func getNotionConfigWithReader(ctx context.Context, reader notion.ConfigReader) notionConfig {
+	return notionConfig{
+		DataSourceID: getNotionConfigValue(ctx, reader, "notion.data_source_id", "NOTION_DATA_SOURCE_ID"),
+		ViewURL:      getNotionConfigValue(ctx, reader, "notion.view_url", "NOTION_VIEW_URL"),
+	}
+}
+
+func getNotionConfigValue(ctx context.Context, reader notion.ConfigReader, key, envVar string) string {
+	if reader != nil {
+		value, _ := reader.GetConfig(ctx, key)
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
 		}
 	}
 	if envVar != "" {
@@ -210,10 +232,20 @@ func maskNotionAuth(auth *notion.ResolvedAuth) string {
 }
 
 func runNotionStatus(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion status is not supported in proxied-server mode")
+	}
+	evt := metrics.NewCommandEvent("notion-status")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	cfg := getNotionConfig()
 	auth, err := resolveNotionAuth(cmd.Context())
 	if err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	result := notion.StatusResponse{
 		Configured:   auth != nil && strings.TrimSpace(auth.Token) != "" && cfg.DataSourceID != "",
@@ -232,7 +264,8 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 		if jsonOutput {
 			return writeNotionJSON(cmd, result)
 		}
-		return renderNotionStatus(cmd, auth, cfg, &result)
+		renderNotionStatus(cmd, auth, cfg, &result)
+		return nil
 	}
 
 	client := newNotionStatusClient(auth.Token)
@@ -267,39 +300,37 @@ func runNotionStatus(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		return writeNotionJSON(cmd, result)
 	}
-	return renderNotionStatus(cmd, auth, cfg, &result)
+	renderNotionStatus(cmd, auth, cfg, &result)
+	return nil
 }
 
 func runNotionInit(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion init is not supported in proxied-server mode")
+	}
 	CheckReadonly("notion init")
+
+	evt := metrics.NewCommandEvent("notion-init")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
+		return HandleError("database not available: %v", err)
 	}
 	auth, err := resolveNotionAuth(cmd.Context())
 	if err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if err := validateNotionToken(auth); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
-	client := newNotionSetupClient(auth.Token)
-	db, err := client.CreateDatabase(cmd.Context(), notionInitParent, notionInitTitle)
+	result, err := runNotionInitAfterValidation(cmd.Context(), newNotionSetupClient(auth.Token), notionInitParent, notionInitTitle, store, notionConfigDeleteTarget())
 	if err != nil {
-		return err
-	}
-	if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
-		return fmt.Errorf("Notion create database response did not include a child data source")
-	}
-	result := notionSetupResult{
-		Action:       "init",
-		DatabaseID:   strings.TrimSpace(db.ID),
-		DataSourceID: strings.TrimSpace(db.DataSources[0].ID),
-		ViewURL:      strings.TrimSpace(db.URL),
-		Message:      "Notion target initialized",
-	}
-	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if jsonOutput {
 		return writeNotionJSON(cmd, result)
@@ -313,39 +344,32 @@ func runNotionInit(cmd *cobra.Command, _ []string) error {
 }
 
 func runNotionConnect(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion connect is not supported in proxied-server mode")
+	}
 	CheckReadonly("notion connect")
+
+	evt := metrics.NewCommandEvent("notion-connect")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
+		return HandleError("database not available: %v", err)
 	}
 	auth, err := resolveNotionAuth(cmd.Context())
 	if err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if err := validateNotionToken(auth); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
-	client := newNotionSetupClient(auth.Token)
-	resolved, err := notion.ResolveDataSourceReference(cmd.Context(), client, notionConnectURL)
+	result, err := runNotionConnectAfterValidation(cmd.Context(), newNotionSetupClient(auth.Token), notionConnectURL, store, notionConfigDeleteTarget())
 	if err != nil {
-		return err
-	}
-	schema := notion.ValidateDataSourceSchema(resolved.DataSource)
-	if len(schema.Missing) > 0 {
-		return fmt.Errorf("target is missing required Notion properties: %s", strings.Join(schema.Missing, ", "))
-	}
-	result := notionSetupResult{
-		Action:       "connect",
-		DatabaseID:   "",
-		DataSourceID: resolved.DataSourceID,
-		ViewURL:      strings.TrimSpace(notionConnectURL),
-		Message:      "Notion target connected",
-	}
-	if resolved.Database != nil {
-		result.DatabaseID = strings.TrimSpace(resolved.Database.ID)
-	}
-	if err := saveNotionTargetConfig(cmd.Context(), result.DataSourceID, result.ViewURL); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if jsonOutput {
 		return writeNotionJSON(cmd, result)
@@ -357,7 +381,7 @@ func runNotionConnect(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
-func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notionConfig, result *notion.StatusResponse) error {
+func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notionConfig, result *notion.StatusResponse) {
 	out := cmd.OutOrStdout()
 	_, _ = fmt.Fprintln(out, "Notion Configuration")
 	_, _ = fmt.Fprintln(out, "====================")
@@ -391,35 +415,44 @@ func renderNotionStatus(cmd *cobra.Command, auth *notion.ResolvedAuth, cfg notio
 			_, _ = fmt.Fprintf(out, "Schema: missing %s\n", strings.Join(result.Schema.Missing, ", "))
 		}
 	}
-	return nil
 }
 
 func runNotionSync(cmd *cobra.Command, _ []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("notion sync is not supported in proxied-server mode")
+	}
+	evt := metrics.NewCommandEvent("notion-sync")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
 	cfg := getNotionConfig()
 	auth, err := resolveNotionAuth(cmd.Context())
 	if err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if err := validateNotionConfig(cfg, auth); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if !notionSyncDryRun {
 		CheckReadonly("notion sync")
 	}
 	if notionPreferLocal && notionPreferNotion {
-		return fmt.Errorf("cannot use both --prefer-local and --prefer-notion")
+		return HandleError("cannot use both --prefer-local and --prefer-notion")
 	}
 	if notionSyncPull && notionSyncPush {
-		return fmt.Errorf("cannot use both --pull and --push")
+		return HandleError("cannot use both --pull and --push")
 	}
 	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
+		return HandleError("database not available: %v", err)
 	}
 
 	ctx := cmd.Context()
 	nt := &notion.Tracker{}
 	if err := nt.Init(ctx, store); err != nil {
-		return fmt.Errorf("initializing Notion tracker: %w", err)
+		return HandleError("initializing Notion tracker: %v", err)
 	}
 
 	engine := tracker.NewEngine(nt, store, actor)
@@ -461,12 +494,12 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	}
 
 	if err := applySelectiveSyncFlags(cmd, &syncOpts, push); err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 
 	result, err := engine.Sync(ctx, syncOpts)
 	if err != nil {
-		return err
+		return HandleError("%v", err)
 	}
 	if warning := unsupportedStats.warningText(); warning != "" {
 		result.Warnings = append(result.Warnings, warning)
@@ -475,10 +508,11 @@ func runNotionSync(cmd *cobra.Command, _ []string) error {
 	if jsonOutput {
 		return writeNotionJSON(cmd, result)
 	}
-	return renderNotionSyncResult(cmd, result)
+	renderNotionSyncResult(cmd, result)
+	return nil
 }
 
-func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) error {
+func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) {
 	out := cmd.OutOrStdout()
 	if notionSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Dry run mode")
@@ -504,7 +538,6 @@ func renderNotionSyncResult(cmd *cobra.Command, result *tracker.SyncResult) erro
 	if notionSyncDryRun {
 		_, _ = fmt.Fprintln(out, "Run without --dry-run to apply changes")
 	}
-	return nil
 }
 
 func summarizeNotionSyncWarnings(warnings []string) []string {
@@ -618,17 +651,69 @@ func matchesNotionPushLabel(issue *types.Issue, pushLabel string) bool {
 	return false
 }
 
-func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) error {
+func runNotionInitAfterValidation(ctx context.Context, client *notion.Client, parent, title string, setter notionConfigSetter, deleter notionConfigDeleter) (notionSetupResult, error) {
+	db, err := client.CreateDatabase(ctx, parent, title)
+	if err != nil {
+		return notionSetupResult{}, err
+	}
+	if len(db.DataSources) == 0 || strings.TrimSpace(db.DataSources[0].ID) == "" {
+		return notionSetupResult{}, fmt.Errorf("Notion create database response did not include a child data source")
+	}
+	result := notionSetupResult{
+		Action:       "init",
+		DatabaseID:   strings.TrimSpace(db.ID),
+		DataSourceID: strings.TrimSpace(db.DataSources[0].ID),
+		ViewURL:      strings.TrimSpace(db.URL),
+		Message:      "Notion target initialized",
+	}
+	if err := saveNotionTargetConfigWithWriter(ctx, setter, deleter, result.DataSourceID, result.ViewURL); err != nil {
+		return notionSetupResult{}, err
+	}
+	return result, nil
+}
+
+func runNotionConnectAfterValidation(ctx context.Context, client *notion.Client, url string, setter notionConfigSetter, deleter notionConfigDeleter) (notionSetupResult, error) {
+	resolved, err := notion.ResolveDataSourceReference(ctx, client, url)
+	if err != nil {
+		return notionSetupResult{}, err
+	}
+	schema := notion.ValidateDataSourceSchema(resolved.DataSource)
+	if len(schema.Missing) > 0 {
+		return notionSetupResult{}, fmt.Errorf("target is missing required Notion properties: %s", strings.Join(schema.Missing, ", "))
+	}
+	result := notionSetupResult{
+		Action:       "connect",
+		DataSourceID: resolved.DataSourceID,
+		ViewURL:      strings.TrimSpace(url),
+		Message:      "Notion target connected",
+	}
+	if resolved.Database != nil {
+		result.DatabaseID = strings.TrimSpace(resolved.Database.ID)
+	}
+	if err := saveNotionTargetConfigWithWriter(ctx, setter, deleter, result.DataSourceID, result.ViewURL); err != nil {
+		return notionSetupResult{}, err
+	}
+	return result, nil
+}
+
+func notionConfigDeleteTarget() notionConfigDeleter {
 	if store == nil {
+		return nil
+	}
+	deleter, _ := storage.UnwrapStore(store).(notionConfigDeleter)
+	return deleter
+}
+
+func saveNotionTargetConfigWithWriter(ctx context.Context, setter notionConfigSetter, deleter notionConfigDeleter, dataSourceID, viewURL string) error {
+	if setter == nil {
 		return fmt.Errorf("database not available")
 	}
-	if err := store.SetConfig(ctx, "notion.data_source_id", strings.TrimSpace(dataSourceID)); err != nil {
+	if err := setter.SetConfig(ctx, "notion.data_source_id", strings.TrimSpace(dataSourceID)); err != nil {
 		return fmt.Errorf("save notion.data_source_id: %w", err)
 	}
 	viewURL = strings.TrimSpace(viewURL)
 	if viewURL == "" {
-		deleter, ok := storage.UnwrapStore(store).(storage.ConfigMetadataStore)
-		if !ok {
+		if deleter == nil {
 			return fmt.Errorf("store does not support config deletion")
 		}
 		if err := deleter.DeleteConfig(ctx, "notion.view_url"); err != nil {
@@ -636,7 +721,7 @@ func saveNotionTargetConfig(ctx context.Context, dataSourceID, viewURL string) e
 		}
 		return nil
 	}
-	if err := store.SetConfig(ctx, "notion.view_url", viewURL); err != nil {
+	if err := setter.SetConfig(ctx, "notion.view_url", viewURL); err != nil {
 		return fmt.Errorf("save notion.view_url: %w", err)
 	}
 	return nil

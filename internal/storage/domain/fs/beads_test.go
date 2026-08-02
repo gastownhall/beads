@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 func (s *testSuite) TestBeadsDirFSRepository() {
@@ -416,14 +417,13 @@ func (s *testSuite) resolveBeadsDirPathHonorsEnv() {
 }
 
 func (s *testSuite) resolveBeadsDirPathLocalFallback() {
-	workDir, beadsDir, repo := s.newRepo()
+	workDir, _, repo := s.newRepo()
 
 	res := repo.ResolveBeadsDirPath(s.Ctx())
 	s.False(res.HasExplicit)
 	// When BEADS_DIR is unset and we're outside a git worktree, the fallback is
 	// workDir/.beads (FollowRedirect leaves the path unchanged when no redirect).
-	s.Equal(beadsDir, res.BeadsDir)
-	_ = workDir
+	s.Equal(filepath.Join(utils.CanonicalizePath(workDir), ".beads"), res.BeadsDir)
 }
 
 func (s *testSuite) beadsDirIsLocalTrue() {

@@ -1,4 +1,4 @@
-//go:build cgo
+//go:build cgo && integration
 
 package main
 
@@ -271,9 +271,6 @@ func strVal(m map[string]interface{}, key string) string {
 // Linear integration currently supports: title, description, priority, status,
 // and external_ref. See upstream #3187.
 func TestLinearRoundTripCoreFields(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	teamID := "test-team-uuid"
@@ -465,9 +462,6 @@ func TestLinearRoundTripCoreFields(t *testing.T) {
 }
 
 func TestLinearPullMilestonesCreatesEpicHierarchy(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping integration test in short mode")
-	}
 
 	ctx := context.Background()
 	teamID := "test-team-uuid"

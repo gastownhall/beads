@@ -1,11 +1,14 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/formula"
+	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
@@ -22,7 +25,8 @@ var pourCmd = &cobra.Command{
 	Long: `Pour a proto into a persistent mol - like pouring molten metal into a mold.
 
 This is the chemistry-inspired command for creating PERSISTENT work from templates.
-The resulting mol lives in .beads/ (permanent storage) and is synced with git.
+The resulting mol is stored as persistent beads in the issue database and
+syncs like any other bead (bd dolt push / pull).
 
 Phase transition: Proto (solid) -> pour -> Mol (liquid)
 
@@ -44,128 +48,193 @@ TIP: Formulas can specify phase:"vapor" to recommend wisp usage.
 Examples:
   bd mol pour mol-feature --var name=auth    # Persistent feature work
   bd mol pour mol-review --var pr=123        # Persistent code review`,
-	Args: cobra.ExactArgs(1),
-	Run:  runPour,
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runPour,
 }
 
-func runPour(cmd *cobra.Command, args []string) {
-	CheckReadonly("pour")
+type pourInput struct {
+	protoArg   string
+	dryRun     bool
+	varFlags   []string
+	assignee   string
+	attachArgs []string
+	attachType string
+}
 
-	ctx := rootCtx
+func gatherPourInput(cmd *cobra.Command, args []string) pourInput {
+	in := pourInput{protoArg: args[0]}
+	in.dryRun, _ = cmd.Flags().GetBool("dry-run")
+	in.varFlags, _ = cmd.Flags().GetStringArray("var")
+	in.assignee, _ = cmd.Flags().GetString("assignee")
+	in.attachArgs, _ = cmd.Flags().GetStringSlice("attach")
+	in.attachType, _ = cmd.Flags().GetString("attach-type")
+	return in
+}
 
-	// Pour requires direct store access for cloning
-	if store == nil {
-		FatalError("no database connection")
-	}
-
-	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	varFlags, _ := cmd.Flags().GetStringArray("var")
-	assignee, _ := cmd.Flags().GetString("assignee")
-	attachFlags, _ := cmd.Flags().GetStringSlice("attach")
-	attachType, _ := cmd.Flags().GetString("attach-type")
-
-	// Parse variables
+func parseVarFlags(varFlags []string) (map[string]string, error) {
 	vars := make(map[string]string)
 	for _, v := range varFlags {
 		parts := strings.SplitN(v, "=", 2)
 		if len(parts) != 2 {
-			FatalError("invalid variable format '%s', expected 'key=value'", v)
+			return nil, fmt.Errorf("invalid variable format '%s', expected 'key=value'", v)
 		}
 		vars[parts[0]] = parts[1]
 	}
+	return vars, nil
+}
 
-	// Try to load as formula first (ephemeral proto - gt-4v1eo)
-	// If that fails, fall back to loading from DB (legacy proto beads)
+func runPour(cmd *cobra.Command, args []string) error {
+	CheckReadonly("pour")
+
+	evt := metrics.NewCommandEvent("pour")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	in := gatherPourInput(cmd, args)
+
+	if usesProxiedServer() {
+		return runPourProxiedServer(rootCtx, in)
+	}
+
+	ctx := rootCtx
+
+	if store == nil {
+		return HandleError("no database connection")
+	}
+
+	vars, err := parseVarFlags(in.varFlags)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
 	var subgraph *TemplateSubgraph
 	var protoID string
-	isFormula := false
 
-	// Try to cook formula inline (gt-4v1eo: ephemeral protos)
-	// This works for any valid formula name, not just "mol-" prefixed ones
-	// Pass vars for step condition filtering (bd-7zka.1)
-	sg, err := resolveAndCookFormulaWithVars(args[0], nil, vars)
+	sg, err := resolveAndCookFormulaWithVars(in.protoArg, nil, vars)
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
-		isFormula = true
 
-		// Warn if formula recommends vapor phase (bd-mol cleanup)
 		if sg.Phase == "vapor" {
-			fmt.Fprintf(os.Stderr, "%s Formula %q recommends vapor phase (ephemeral)\n", ui.RenderWarn("⚠"), args[0])
-			fmt.Fprintf(os.Stderr, "  Consider using: bd mol wisp %s", args[0])
-			for _, v := range varFlags {
-				fmt.Fprintf(os.Stderr, " --var %s", v)
-			}
-			fmt.Fprintf(os.Stderr, "\n")
-			fmt.Fprintf(os.Stderr, "  Pour creates persistent issues that sync to git.\n")
-			fmt.Fprintf(os.Stderr, "  Wisp creates ephemeral issues that auto-cleanup.\n\n")
+			warnPourVaporFormula(in.protoArg, in.varFlags)
 		}
+	} else if errors.Is(err, formula.ErrVarValidation) {
+		// in.protoArg IS a formula; the --var values it was given fail
+		// enum/pattern/required-empty constraints. Report that directly
+		// instead of falling through to the proto-ID lookup below, which
+		// would otherwise mask this as "not found as formula or proto ID".
+		return HandleError("%v", err)
 	}
 
 	if subgraph == nil {
-		// Try to load as existing proto bead (legacy path)
-		resolvedID, err := utils.ResolvePartialID(ctx, store, args[0])
+		resolvedID, err := utils.ResolvePartialID(ctx, store, in.protoArg)
 		if err != nil {
-			FatalError("%s not found as formula or proto ID", args[0])
+			return HandleError("%s not found as formula or proto ID", in.protoArg)
 		}
 		protoID = resolvedID
 
-		// Verify it's a proto
 		protoIssue, err := store.GetIssue(ctx, protoID)
 		if err != nil {
-			FatalError("loading proto %s: %v", protoID, err)
+			return HandleError("loading proto %s: %v", protoID, err)
 		}
 		if !isProto(protoIssue) {
-			FatalError("%s is not a proto (missing '%s' label)", protoID, MoleculeLabel)
+			return HandleError("%s is not a proto (missing '%s' label)", protoID, MoleculeLabel)
 		}
 
-		// Load the proto subgraph from DB
 		subgraph, err = loadTemplateSubgraph(ctx, store, protoID)
 		if err != nil {
-			FatalError("loading proto: %v", err)
+			return HandleError("loading proto: %v", err)
 		}
 	}
 
-	_ = isFormula // For future use (e.g., logging)
-
-	// Resolve and load attached protos
 	type attachmentInfo struct {
 		id       string
 		issue    *types.Issue
 		subgraph *TemplateSubgraph
 	}
 	var attachments []attachmentInfo
-	for _, attachArg := range attachFlags {
+	for _, attachArg := range in.attachArgs {
 		attachID, err := utils.ResolvePartialID(ctx, store, attachArg)
 		if err != nil {
-			FatalError("resolving attachment ID %s: %v", attachArg, err)
+			return HandleError("resolving attachment ID %s: %v", attachArg, err)
 		}
 		attachIssue, err := store.GetIssue(ctx, attachID)
 		if err != nil {
-			FatalError("loading attachment %s: %v", attachID, err)
+			return HandleError("loading attachment %s: %v", attachID, err)
 		}
 		if !isProto(attachIssue) {
-			FatalError("%s is not a proto (missing '%s' label)", attachID, MoleculeLabel)
+			return HandleError("%s is not a proto (missing '%s' label)", attachID, MoleculeLabel)
 		}
 		attachSubgraph, err := loadTemplateSubgraph(ctx, store, attachID)
 		if err != nil {
-			FatalError("loading attachment subgraph %s: %v", attachID, err)
+			return HandleError("loading attachment subgraph %s: %v", attachID, err)
 		}
-		attachments = append(attachments, attachmentInfo{
-			id:       attachID,
-			issue:    attachIssue,
-			subgraph: attachSubgraph,
-		})
+		attachments = append(attachments, attachmentInfo{attachID, attachIssue, attachSubgraph})
 	}
 
-	// Apply variable defaults from formula
 	vars = applyVariableDefaults(vars, subgraph)
 
-	// Check for missing required variables (those without defaults)
+	var attachSubgraphs []*TemplateSubgraph
+	for _, a := range attachments {
+		attachSubgraphs = append(attachSubgraphs, a.subgraph)
+	}
+	if err := checkPourVars(subgraph, attachSubgraphs, vars); err != nil {
+		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", missingVarHint(subgraph, attachSubgraphs, vars)))
+	}
+
+	if in.dryRun {
+		var previews []pourAttachPreview
+		for _, a := range attachments {
+			previews = append(previews, pourAttachPreview{title: a.issue.Title, steps: len(a.subgraph.Issues)})
+		}
+		renderPourDryRun(protoID, subgraph, vars, in.assignee, in.attachType, previews)
+		return nil
+	}
+
+	result, err := spawnMolecule(ctx, store, subgraph, vars, in.assignee, actor, false, types.IDPrefixMol)
+	if err != nil {
+		return HandleError("pouring proto: %v", err)
+	}
+
+	totalAttached := 0
+	if len(attachments) > 0 {
+		spawnedMol, err := store.GetIssue(ctx, result.NewEpicID)
+		if err != nil {
+			return HandleError("loading spawned mol: %v", err)
+		}
+
+		for _, attach := range attachments {
+			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, in.attachType, vars, "", actor, false, true)
+			if err != nil {
+				return HandleError("attaching %s: %v", attach.id, err)
+			}
+			totalAttached += bondResult.Spawned
+		}
+	}
+
+	return renderPourResult(result, totalAttached, len(attachments))
+}
+
+func warnPourVaporFormula(protoArg string, varFlags []string) {
+	fmt.Fprintf(os.Stderr, "%s Formula %q recommends vapor phase (ephemeral)\n", ui.RenderWarn("⚠"), protoArg)
+	fmt.Fprintf(os.Stderr, "  Consider using: bd mol wisp %s", protoArg)
+	for _, v := range varFlags {
+		fmt.Fprintf(os.Stderr, " --var %s", v)
+	}
+	fmt.Fprintf(os.Stderr, "\n")
+	fmt.Fprintf(os.Stderr, "  Pour creates persistent issues that sync like any other bead.\n")
+	fmt.Fprintf(os.Stderr, "  Wisp creates ephemeral issues that auto-cleanup.\n\n")
+}
+
+func requiredVarsAcross(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph) []string {
 	requiredVars := extractRequiredVariables(subgraph)
-	for _, attach := range attachments {
-		attachVars := extractRequiredVariables(attach.subgraph)
-		for _, v := range attachVars {
+	for _, attachSubgraph := range attachSubgraphs {
+		for _, v := range extractRequiredVariables(attachSubgraph) {
 			found := false
 			for _, rv := range requiredVars {
 				if rv == v {
@@ -178,80 +247,72 @@ func runPour(cmd *cobra.Command, args []string) {
 			}
 		}
 	}
+	return requiredVars
+}
+
+func checkPourVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) error {
 	var missingVars []string
-	for _, v := range requiredVars {
+	for _, v := range requiredVarsAcross(subgraph, attachSubgraphs) {
 		if _, ok := vars[v]; !ok {
 			missingVars = append(missingVars, v)
 		}
 	}
 	if len(missingVars) > 0 {
-		FatalErrorWithHint(
-			fmt.Sprintf("missing required variables: %s", strings.Join(missingVars, ", ")),
-			fmt.Sprintf("Provide them with: --var %s=<value>", missingVars[0]),
-		)
+		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
+	return nil
+}
 
-	if dryRun {
-		fmt.Printf("\nDry run: would pour %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
-		fmt.Printf("Storage: permanent (.beads/)\n\n")
-		for _, issue := range subgraph.Issues {
-			newTitle := substituteVariables(issue.Title, vars)
-			suffix := ""
-			if issue.ID == subgraph.Root.ID && assignee != "" {
-				suffix = fmt.Sprintf(" (assignee: %s)", assignee)
-			}
-			fmt.Printf("  - %s (from %s)%s\n", newTitle, issue.ID, suffix)
+func missingVarHint(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) string {
+	for _, v := range requiredVarsAcross(subgraph, attachSubgraphs) {
+		if _, ok := vars[v]; !ok {
+			return v
 		}
-		if len(attachments) > 0 {
-			fmt.Printf("\nAttachments (%s bonding):\n", attachType)
-			for _, attach := range attachments {
-				fmt.Printf("  + %s (%d issues)\n", attach.issue.Title, len(attach.subgraph.Issues))
-			}
+	}
+	return ""
+}
+
+type pourAttachPreview struct {
+	title string
+	steps int
+}
+
+func renderPourDryRun(protoID string, subgraph *TemplateSubgraph, vars map[string]string, assignee, attachType string, attachments []pourAttachPreview) {
+	fmt.Printf("\nDry run: would pour %d issues from proto %s\n\n", len(subgraph.Issues), protoID)
+	fmt.Printf("Storage: permanent (.beads/)\n\n")
+	for _, issue := range subgraph.Issues {
+		newTitle := substituteVariables(issue.Title, vars)
+		suffix := ""
+		if issue.ID == subgraph.Root.ID && assignee != "" {
+			suffix = fmt.Sprintf(" (assignee: %s)", assignee)
 		}
-		return
+		fmt.Printf("  - %s (from %s)%s\n", newTitle, issue.ID, suffix)
 	}
-
-	// Spawn as persistent mol (ephemeral=false)
-	// Use mol prefix for distinct visual recognition (see types.IDPrefixMol)
-	result, err := spawnMolecule(ctx, store, subgraph, vars, assignee, actor, false, types.IDPrefixMol)
-	if err != nil {
-		FatalError("pouring proto: %v", err)
-	}
-
-	// Attach bonded protos
-	totalAttached := 0
 	if len(attachments) > 0 {
-		spawnedMol, err := store.GetIssue(ctx, result.NewEpicID)
-		if err != nil {
-			FatalError("loading spawned mol: %v", err)
-		}
-
+		fmt.Printf("\nAttachments (%s bonding):\n", attachType)
 		for _, attach := range attachments {
-			// pour command always creates persistent (Wisp=false) issues
-			bondResult, err := bondProtoMol(ctx, store, attach.issue, spawnedMol, attachType, vars, "", actor, false, true)
-			if err != nil {
-				FatalError("attaching %s: %v", attach.id, err)
-			}
-			totalAttached += bondResult.Spawned
+			fmt.Printf("  + %s (%d issues)\n", attach.title, attach.steps)
 		}
 	}
+}
 
+func renderPourResult(result *InstantiateResult, totalAttached, attachCount int) error {
 	if jsonOutput {
 		type pourResult struct {
 			*InstantiateResult
 			Attached int    `json:"attached"`
 			Phase    string `json:"phase"`
 		}
-		outputJSON(pourResult{result, totalAttached, "liquid"})
-		return
+		return outputJSON(pourResult{result, totalAttached, "liquid"})
 	}
 
 	fmt.Printf("%s Poured mol: created %d issues\n", ui.RenderPass("✓"), result.Created)
 	fmt.Printf("  Root issue: %s\n", result.NewEpicID)
-	fmt.Printf("  Phase: liquid (persistent in .beads/)\n")
+	fmt.Printf("  Phase: liquid (persistent in the issue database)\n")
 	if totalAttached > 0 {
-		fmt.Printf("  Attached: %d issues from %d protos\n", totalAttached, len(attachments))
+		fmt.Printf("  Attached: %d issues from %d protos\n", totalAttached, attachCount)
 	}
+	return nil
 }
 
 func init() {

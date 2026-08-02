@@ -150,27 +150,39 @@ func TestShouldCheckGate(t *testing.T) {
 	}
 }
 
-func TestCheckBeadGate_InvalidFormat(t *testing.T) {
+// fakeBeadGateGetter fakes the one lookup checkBeadGate performs.
+type fakeBeadGateGetter struct {
+	issues map[string]*types.Issue
+	err    error
+}
+
+func (f *fakeBeadGateGetter) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	return f.issues[id], nil
+}
+
+func TestCheckBeadGate_CrossRigStaysPending(t *testing.T) {
 	ctx := context.Background()
 
+	// The cross-rig <rig>:<bead-id> form cannot be evaluated since multi-rig
+	// routing was removed; it must stay pending with the explanatory message,
+	// never consult the store, and never resolve.
 	tests := []struct {
 		name    string
 		awaitID string
 	}{
-		{name: "empty", awaitID: ""},
-		{name: "no colon", awaitID: "my-project-mp-abc"},
 		{name: "missing rig", awaitID: ":gt-abc"},
 		{name: "missing bead", awaitID: "my-project:"},
+		{name: "well-formed cross-rig", awaitID: "nonexistent:some-id"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			satisfied, reason := checkBeadGate(ctx, tt.awaitID)
+			satisfied, reason := checkBeadGate(ctx, nil, tt.awaitID)
 			if satisfied {
 				t.Errorf("expected not satisfied for %q", tt.awaitID)
-			}
-			if reason == "" {
-				t.Error("expected reason to be set")
 			}
 			if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
 				t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
@@ -179,24 +191,75 @@ func TestCheckBeadGate_InvalidFormat(t *testing.T) {
 	}
 }
 
-func TestCheckBeadGate_RigNotFound(t *testing.T) {
-	ctx := context.Background()
-
-	// With multi-rig routing removed, all bead gates return the same message
-	satisfied, reason := checkBeadGate(ctx, "nonexistent:some-id")
+func TestCheckBeadGate_EmptyAwaitID(t *testing.T) {
+	satisfied, reason := checkBeadGate(context.Background(), nil, "")
 	if satisfied {
-		t.Error("expected not satisfied for non-existent rig")
+		t.Error("expected not satisfied for empty await_id")
 	}
 	if reason == "" {
 		t.Error("expected reason to be set")
 	}
-	if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
-		t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
+}
+
+func TestCheckBeadGate_LocalBead(t *testing.T) {
+	// A plain (no-colon) await_id is a bead in this rig's own database
+	// (wy-hgms2): closed resolves the gate, anything else stays pending with
+	// a status-bearing reason.
+	ctx := context.Background()
+	st := &fakeBeadGateGetter{
+		issues: map[string]*types.Issue{
+			"bd-closed": {ID: "bd-closed", Status: types.StatusClosed},
+			"bd-open":   {ID: "bd-open", Status: types.StatusOpen},
+		},
+	}
+
+	satisfied, reason := checkBeadGate(ctx, st, "bd-closed")
+	if !satisfied {
+		t.Errorf("expected satisfied for closed local bead, got reason %q", reason)
+	}
+	if !gateTestContainsIgnoreCase(reason, "closed") {
+		t.Errorf("reason %q does not mention closed", reason)
+	}
+
+	satisfied, reason = checkBeadGate(ctx, st, "bd-open")
+	if satisfied {
+		t.Error("expected not satisfied for open local bead")
+	}
+	if !gateTestContainsIgnoreCase(reason, "open") {
+		t.Errorf("reason %q does not mention the bead status", reason)
 	}
 }
 
-func TestCheckBeadGate_TargetClosed(t *testing.T) {
-	t.Skip("SQLite-specific: created SQLite DB directly; full integration testing requires routes.jsonl + Dolt rig infrastructure")
+func TestCheckBeadGate_LocalBeadNotFound(t *testing.T) {
+	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{}}
+	satisfied, reason := checkBeadGate(context.Background(), st, "bd-missing")
+	if satisfied {
+		t.Error("expected not satisfied for missing local bead")
+	}
+	if !gateTestContainsIgnoreCase(reason, "not found") {
+		t.Errorf("reason %q does not mention not found", reason)
+	}
+}
+
+func TestCheckBeadGate_LocalBeadLookupError(t *testing.T) {
+	st := &fakeBeadGateGetter{err: errors.New("dolt exploded")}
+	satisfied, reason := checkBeadGate(context.Background(), st, "bd-abc")
+	if satisfied {
+		t.Error("expected not satisfied on lookup error")
+	}
+	if !gateTestContainsIgnoreCase(reason, "dolt exploded") {
+		t.Errorf("reason %q does not carry the lookup error", reason)
+	}
+}
+
+func TestCheckBeadGate_NilStoreStaysPending(t *testing.T) {
+	satisfied, reason := checkBeadGate(context.Background(), nil, "bd-abc")
+	if satisfied {
+		t.Error("expected not satisfied with no store")
+	}
+	if reason == "" {
+		t.Error("expected reason to be set")
+	}
 }
 
 func TestCheckGHPRUsesStateWithoutMergedField(t *testing.T) {
@@ -364,7 +427,7 @@ func TestCheckGHRun_DryRunDoesNotPersistDiscoveredRunID(t *testing.T) {
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, false)
+	}, nil)
 	if err != nil {
 		t.Fatalf("checkGHRun returned error: %v", err)
 	}
@@ -419,7 +482,7 @@ func TestCheckGHRun_PersistsDiscoveredRunIDOutsideDryRun(t *testing.T) {
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, true)
+	}, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	if err != nil {
 		t.Fatalf("checkGHRun returned error: %v", err)
 	}
@@ -470,7 +533,7 @@ func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T)
 	resolved, escalated, reason, err := checkGHRun(&types.Issue{
 		ID:      "bd-gate",
 		AwaitID: "release.yml",
-	}, true)
+	}, func(gateID, runID string) error { return updateGateAwaitIDFunc(nil, gateID, runID) })
 	if err == nil {
 		t.Fatal("expected checkGHRun to return an error when await_id persistence fails")
 	}
@@ -609,7 +672,9 @@ func TestGateCheck_GHRunWorkflowDiscoveryPersistence(t *testing.T) {
 			}
 
 			output := captureGateStdout(t, func() {
-				gateCheckCmd.Run(gateCheckCmd, nil)
+				if err := gateCheckCmd.RunE(gateCheckCmd, nil); err != nil {
+					t.Fatalf("gateCheckCmd.RunE: %v", err)
+				}
 			})
 
 			if updateCalls != tt.wantUpdateCalls {
@@ -837,4 +902,62 @@ func gateTestFindSubstring(s, substr string) int {
 		}
 	}
 	return -1
+}
+
+// TestFilterIssueGates covers the bead-scoping helper behind `bd gate list <issue-id>`:
+// only gate-type dependencies are returned, --all controls closed visibility, and the
+// limit is honored. Regression guard for the bug where `bd gate list <bead>` silently
+// ignored the argument and returned the DB-wide gate list.
+func TestFilterIssueGates(t *testing.T) {
+	gate := types.IssueType("gate")
+	task := types.IssueType("task")
+	deps := []*types.Issue{
+		{ID: "g-open", IssueType: gate, Status: types.StatusOpen},
+		{ID: "g-closed", IssueType: gate, Status: types.StatusClosed},
+		{ID: "t-blocker", IssueType: task, Status: types.StatusOpen}, // not a gate
+		nil, // defensive: skipped
+		{ID: "g-open2", IssueType: gate, Status: types.StatusOpen},
+	}
+
+	t.Run("open_only_excludes_closed_and_nongates", func(t *testing.T) {
+		got := filterIssueGates(deps, false, 0)
+		ids := gateIDs(got)
+		if len(got) != 2 || ids[0] != "g-open" || ids[1] != "g-open2" {
+			t.Fatalf("expected [g-open g-open2], got %v", ids)
+		}
+	})
+
+	t.Run("all_includes_closed_gates_only", func(t *testing.T) {
+		got := filterIssueGates(deps, true, 0)
+		ids := gateIDs(got)
+		if len(got) != 3 {
+			t.Fatalf("expected 3 gates (incl. closed), got %v", ids)
+		}
+		for _, id := range ids {
+			if id == "t-blocker" {
+				t.Fatalf("non-gate dependency leaked into result: %v", ids)
+			}
+		}
+	})
+
+	t.Run("limit_caps_results", func(t *testing.T) {
+		got := filterIssueGates(deps, true, 1)
+		if len(got) != 1 || got[0].ID != "g-open" {
+			t.Fatalf("expected limit=1 -> [g-open], got %v", gateIDs(got))
+		}
+	})
+
+	t.Run("empty_deps", func(t *testing.T) {
+		if got := filterIssueGates(nil, true, 0); len(got) != 0 {
+			t.Fatalf("expected no gates, got %v", gateIDs(got))
+		}
+	})
+}
+
+func gateIDs(gs []*types.Issue) []string {
+	ids := make([]string, 0, len(gs))
+	for _, g := range gs {
+		ids = append(ids, g.ID)
+	}
+	return ids
 }

@@ -19,26 +19,33 @@ func buildIssueTree(issues []*types.Issue) (roots []*types.Issue, childrenMap ma
 
 // buildIssueTreeWithDeps builds parent-child tree using dependency records
 // If allDeps is nil, falls back to dotted ID hierarchy (e.g., "parent.1")
-// Treats any dependency on an epic as a parent-child relationship
+// Only parent-child dependency edges establish nesting; other edge types
+// (blocks, waits-for, discovered-from, relates-to, ...) are workflow/graph
+// links and are not rendered as hierarchy.
 func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.Dependency) (roots []*types.Issue, childrenMap map[string][]*types.Issue) {
 	issueMap := make(map[string]*types.Issue)
 	childrenMap = make(map[string][]*types.Issue)
 	isChild := make(map[string]bool)
 
-	// Build issue map and identify epics
-	epicIDs := make(map[string]bool)
 	for _, issue := range issues {
 		issueMap[issue.ID] = issue
-		if issue.IssueType == "epic" {
-			epicIDs[issue.ID] = true
-		}
 	}
 
-	// If we have dependency records, use them to find parent-child relationships
+	// If we have dependency records, use them to find parent-child relationships.
+	// Nesting is driven strictly by the parent-child edge type. Earlier versions
+	// also nested any dependency whose target was an epic, but that conflated
+	// workflow edges (a task that merely blocks an epic) with membership, so a
+	// genuinely 2-layer parent tree could render as a 6+ level tangle and trigger
+	// false "the hierarchy is broken" conclusions. This now matches the storage
+	// layer, which scopes an epic's children to parent-child edges only
+	// (see epic_closure.go); non-hierarchical edges stay off the tree.
 	if allDeps != nil {
 		addedChild := make(map[string]bool) // tracks "parentID:childID" to prevent duplicates
 		for issueID, deps := range allDeps {
 			for _, dep := range deps {
+				if dep.Type != types.DepParentChild {
+					continue
+				}
 				parentID := dep.DependsOnID
 				// Only include if both parent and child are in the issue set
 				child, childOk := issueMap[issueID]
@@ -47,17 +54,12 @@ func buildIssueTreeWithDeps(issues []*types.Issue, allDeps map[string][]*types.D
 					continue
 				}
 
-				// Treat as parent-child if:
-				// 1. Explicit parent-child dependency type, OR
-				// 2. Any dependency where the target is an epic
-				if dep.Type == types.DepParentChild || epicIDs[parentID] {
-					key := parentID + ":" + issueID
-					if !addedChild[key] {
-						childrenMap[parentID] = append(childrenMap[parentID], child)
-						addedChild[key] = true
-					}
-					isChild[issueID] = true
+				key := parentID + ":" + issueID
+				if !addedChild[key] {
+					childrenMap[parentID] = append(childrenMap[parentID], child)
+					addedChild[key] = true
 				}
+				isChild[issueID] = true
 			}
 		}
 	}
@@ -109,13 +111,19 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
-// printPrettyTree recursively prints the issue tree
-// Children are sorted by priority (P0 first) for intuitive reading
-func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string) {
+// printPrettyTree recursively prints the issue tree.
+// Children are ordered by dependency then priority when dr != nil (--deps), else
+// by priority (P0 first) for intuitive reading. When dr is set, each node's
+// dependency edges are annotated just beneath it.
+func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
 	children := childrenMap[parentID]
 
-	// Sort children by priority using same comparison as roots for consistency
-	slices.SortFunc(children, compareIssuesByPriority)
+	if dr != nil {
+		children = orderSiblingsByDeps(children, dr.allDeps)
+	} else {
+		// Sort children by priority using same comparison as roots for consistency
+		slices.SortFunc(children, compareIssuesByPriority)
+	}
 
 	for i, child := range children {
 		isLast := i == len(children)-1
@@ -129,7 +137,8 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			extension = "    "
 		}
-		printPrettyTree(childrenMap, child.ID, prefix+extension)
+		dr.annotationsFor(child.ID, prefix+extension)
+		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
 	}
 }
 
@@ -139,8 +148,16 @@ func displayPrettyList(issues []*types.Issue, showHeader bool) {
 	displayPrettyListWithDeps(issues, showHeader, nil)
 }
 
-// displayPrettyListWithDeps displays issues in tree format using dependency data
+// displayPrettyListWithDeps displays issues in tree format using dependency data.
 func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "")
+}
+
+// displayPrettyListWithDepsMode displays issues in tree format. When depsMode is
+// "scheduling" or "all", the tree also annotates each node's dependency edges and
+// orders siblings by their scheduling dependencies (see orderSiblingsByDeps). An
+// empty depsMode is the plain parent-child tree.
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -157,9 +174,20 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 
 	roots, childrenMap := buildIssueTreeWithDeps(issues, allDeps)
 
+	var dr *depRender
+	if depsMode != "" {
+		inView := make(map[string]*types.Issue, len(issues))
+		for _, issue := range issues {
+			inView[issue.ID] = issue
+		}
+		dr = &depRender{mode: depsMode, allDeps: allDeps, inView: inView}
+		roots = orderSiblingsByDeps(roots, allDeps)
+	}
+
 	for _, issue := range roots {
 		fmt.Println(formatPrettyIssue(issue))
-		printPrettyTree(childrenMap, issue.ID, "")
+		dr.annotationsFor(issue.ID, "")
+		printPrettyTree(childrenMap, issue.ID, "", dr)
 	}
 
 	// Summary
@@ -178,4 +206,7 @@ func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps m
 	fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	if dr != nil {
+		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph)
+	}
 }

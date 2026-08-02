@@ -35,6 +35,7 @@ type Compactor struct {
 type compactableStore interface {
 	CheckEligibility(ctx context.Context, issueID string, tier int) (bool, string, error)
 	GetIssue(ctx context.Context, issueID string) (*types.Issue, error)
+	SnapshotIssue(ctx context.Context, issueID string, tier int) error
 	UpdateIssue(ctx context.Context, issueID string, updates map[string]interface{}, actor string) error
 	ApplyCompaction(ctx context.Context, issueID string, tier int, originalSize int, compactedSize int, commitHash string) error
 	AddComment(ctx context.Context, issueID, actor, comment string) error
@@ -127,6 +128,13 @@ func (c *Compactor) CompactTier1(ctx context.Context, issueID string) error {
 			return fmt.Errorf("failed to record warning: %w", err)
 		}
 		return fmt.Errorf("compaction would increase size (%d → %d bytes), keeping original", originalSize, compactedSize)
+	}
+
+	// Archive the original content BEFORE the destructive overwrite, so the
+	// compaction is reversible (bd restore reads this snapshot). If archiving
+	// fails we abort with the original content intact rather than lose it.
+	if err := c.store.SnapshotIssue(ctx, issueID, 1); err != nil {
+		return fmt.Errorf("failed to archive pre-compaction snapshot: %w", err)
 	}
 
 	// Update issue with summarized content

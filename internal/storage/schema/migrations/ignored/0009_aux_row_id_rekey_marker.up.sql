@@ -1,0 +1,22 @@
+-- Ignored migration 0009: clone-local marker for the one-time aux-row-id
+-- re-key backfill (bd-6dnrw.2; the events/comments/snapshots sibling of the
+-- #4259 dependencies fix).
+--
+-- Migration 0037 backfilled the CHAR(36) primary keys of events, comments,
+-- issue_snapshots and compaction_snapshots with per-clone-random UUID()s, so
+-- legacy clones that upgraded independently hold the same logical rows under
+-- different primary keys and their merges duplicate or refuse. While this
+-- version is still pending, MigrateUp runs rekeyAuxRowIDs (Go), which rewrites
+-- those ids to deterministic content-derived values (internal/storage/rowid)
+-- that converge across clones; recording this version is what makes that pass
+-- run exactly once per clone. The cursor table is dolt-ignored, so the marker
+-- is clone-local by construction — every clone performs its own convergence
+-- pass, which is safe precisely because the derivation is deterministic.
+--
+-- Rows inserted after the backfill keep their DB-minted random ids: they are
+-- created on exactly one clone and reach the others by merge, so the id is
+-- random but consistent everywhere. Re-keying on every later migration pass
+-- would churn synced tables for no convergence benefit, hence the marker.
+--
+-- The marker itself changes nothing.
+SELECT 1;

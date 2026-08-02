@@ -34,12 +34,12 @@ const gitAddTimeout = 5 * time.Second
 
 // maybeAutoExport writes a git-tracked JSONL file if enabled and due.
 // Called from PersistentPostRun after auto-backup.
-func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) error {
-	if serverMode {
-		debug.Logf("auto-export: skipping — server mode\n")
-		return nil
-	}
-
+//
+// This runs in server mode too: clients of a shared dolt sql-server rely on
+// the JSONL export for git-durable state exactly like embedded users do — in
+// topologies without a Dolt remote it is the only durability. Skipping here
+// made `git push` silently publish stale issue state (wy-4ope).
+func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// Skip when running as a git hook to avoid re-export during pre-commit.
 	if os.Getenv("BD_GIT_HOOK") == "1" {
 		debug.Logf("auto-export: skipping — running as git hook\n")
@@ -80,9 +80,9 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 		interval = 60 * time.Second
 	}
 
-	// Change detection via Dolt commit hash. This is cheap, so do it before
+	// Change detection via Dolt state hash. This is cheap, so do it before
 	// throttle: when there are no changes, there is nothing to throttle.
-	currentCommit, err := store.GetCurrentCommit(ctx)
+	currentCommit, err := storeStateHash(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to get current commit: %v\n", err)
 		return nil
@@ -164,6 +164,18 @@ func maybeAutoExport(ctx context.Context, serverMode, allowEmptyOverwrite bool) 
 	return nil
 }
 
+// storeStateHash returns the hash used for auto-export change detection.
+// It prefers a working-set-aware hash (storage.StateHasher) over the HEAD
+// commit: in server mode dolt auto-commit is off, so writes stay in the
+// working set and HEAD does not advance — HEAD-based detection would go
+// permanently quiet after the first export.
+func storeStateHash(ctx context.Context) (string, error) {
+	if sh, ok := storage.UnwrapStore(store).(storage.StateHasher); ok {
+		return sh.GetStateHash(ctx)
+	}
+	return store.GetCurrentCommit(ctx)
+}
+
 // shouldExport reports whether the throttle window has elapsed, or whether
 // this is the first auto-export attempt. It returns false only when a recent
 // export exists and the configured interval has not elapsed.
@@ -202,15 +214,27 @@ func countIssueRecordsInJSONL(path string) (int, error) {
 }
 
 func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, error) {
-	existingIDs, err := issueIDsInJSONL(path)
+	// GH#4988: only refuse when *in-scope* JSONL issue records are absent from
+	// the store. Ephemeral wisps, templates, and infra types are outside
+	// auto-export scope (buildAutoExportFilter / GH#3649). Compaction can
+	// delete wisps from Dolt while an older JSONL still lists them; treating
+	// those as hard orphans wedged auto-export permanently.
+	existing, err := issueRecordsInJSONL(path)
 	if err != nil {
 		return nil, err
 	}
-	if len(existingIDs) == 0 {
+	if len(existing) == 0 {
 		return nil, nil
 	}
 
-	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0})
+	// Store-side query stays unfiltered and MaxRows: 0 (opts out of
+	// BEADS_MAX_ROWS). This guard's failure mode is a permanent wedge, so a
+	// narrower filter here — or a row cap — can only ever manufacture
+	// phantom "missing" ids, never fewer (maphew review, GH#4988 follow-up).
+	// buildAutoExportFilter is still consulted for infraTypeSet, which
+	// classifies the JSONL-side records below.
+	_, infraTypeSet := buildAutoExportFilter(ctx)
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
 	if err != nil {
 		return nil, fmt.Errorf("failed to search issues: %w", err)
 	}
@@ -220,15 +244,29 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, er
 	}
 
 	missing := make([]string, 0)
-	for _, id := range existingIDs {
-		if _, ok := localIDs[id]; !ok {
-			missing = append(missing, id)
+	for _, rec := range existing {
+		if rec.Ephemeral || rec.IsTemplate || infraTypeSet[string(rec.IssueType)] {
+			continue
+		}
+		if _, ok := localIDs[rec.ID]; !ok {
+			missing = append(missing, rec.ID)
 		}
 	}
 	return missing, nil
 }
 
-func issueIDsInJSONL(path string) ([]string, error) {
+// jsonlIssueRecord is a lightweight issue line from issues.jsonl used by
+// auto-export safety guards.
+type jsonlIssueRecord struct {
+	ID         string
+	IssueType  types.IssueType
+	IsTemplate bool
+	Ephemeral  bool
+}
+
+// issueRecordsInJSONL returns issue records (id + scope fields) from a JSONL
+// export file. Tombstones and non-issue record types are skipped.
+func issueRecordsInJSONL(path string) ([]jsonlIssueRecord, error) {
 	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -242,7 +280,7 @@ func issueIDsInJSONL(path string) ([]string, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
 	seen := make(map[string]struct{})
-	var ids []string
+	var records []jsonlIssueRecord
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
@@ -261,11 +299,11 @@ func issueIDsInJSONL(path string) ([]string, error) {
 			}
 		}
 
-		var id string
+		var rec jsonlIssueRecord
 		if rawID, ok := raw["id"]; ok {
-			_ = json.Unmarshal(rawID, &id)
+			_ = json.Unmarshal(rawID, &rec.ID)
 		}
-		if id == "" {
+		if rec.ID == "" {
 			continue
 		}
 
@@ -277,17 +315,39 @@ func issueIDsInJSONL(path string) ([]string, error) {
 			continue
 		}
 
-		if _, ok := seen[id]; ok {
+		if rawIT, ok := raw["issue_type"]; ok {
+			_ = json.Unmarshal(rawIT, &rec.IssueType)
+		}
+		if rawTpl, ok := raw["is_template"]; ok {
+			_ = json.Unmarshal(rawTpl, &rec.IsTemplate)
+		}
+		if rawEph, ok := raw["ephemeral"]; ok {
+			_ = json.Unmarshal(rawEph, &rec.Ephemeral)
+		}
+
+		if _, ok := seen[rec.ID]; ok {
 			continue
 		}
-		seen[id] = struct{}{}
-		ids = append(ids, id)
+		seen[rec.ID] = struct{}{}
+		records = append(records, rec)
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, err
 	}
 
-	sort.Strings(ids)
+	sort.Slice(records, func(i, j int) bool { return records[i].ID < records[j].ID })
+	return records, nil
+}
+
+func issueIDsInJSONL(path string) ([]string, error) {
+	records, err := issueRecordsInJSONL(path)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, len(records))
+	for i, rec := range records {
+		ids[i] = rec.ID
+	}
 	return ids, nil
 }
 
@@ -306,7 +366,9 @@ func autoExportFilter(ctx context.Context) types.IssueFilter {
 }
 
 func buildAutoExportFilter(ctx context.Context) (types.IssueFilter, map[string]bool) {
-	filter := types.IssueFilter{Limit: 0}
+	// MaxRows: 0 opts out of BEADS_MAX_ROWS — auto-export is a data-integrity
+	// sweep and must not be capped (designer §4.1).
+	filter := types.IssueFilter{Limit: 0, MaxRows: 0}
 	var infraTypes []string
 	if store != nil {
 		infraSet := store.GetInfraTypes(ctx)
@@ -358,7 +420,28 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 		return 0, 0, fmt.Errorf("failed to search issues: %w", err)
 	}
 
-	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories); err != nil {
+	// Owner-exclusion safety net: auto-export writes the git-committed
+	// .beads/issues.jsonl, so the export.exclude_owners config (and legacy
+	// export.exclude_owner) must filter here too. Otherwise contributor/personal
+	// issues that the manual `bd export` path excludes can still leak into git
+	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
+	// no --exclude-owner flag, so only config-sourced owners apply here.
+	if ownerExcludes := buildOwnerExcludeSet(ctx, nil); len(ownerExcludes) > 0 {
+		issues = filterOutOwners(issues, ownerExcludes)
+	}
+
+	// Store-presence set for the shrink guard (#4069 vs #4988): an
+	// out-of-scope row already in the JSONL only blocks the rewrite when its
+	// id is STILL in the store. Computed unfiltered here — not from the
+	// in-scope `issues` above — because the guard needs to see infra/
+	// template/ephemeral ids too, to tell "still in Dolt" apart from
+	// "compacted away".
+	storeIDs, err := storeKnownIssueIDs(ctx)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	if err := guardAutoExportOverwrite(path, infraTypeSet, includeMemories, storeIDs); err != nil {
 		return 0, 0, err
 	}
 
@@ -447,7 +530,28 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	return issueCount, memoryCount, nil
 }
 
-func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool) error {
+// storeKnownIssueIDs returns the set of issue ids currently present in the
+// store, ignoring auto-export scope (infra/template/ephemeral rows are
+// included). guardAutoExportOverwrite uses this to implement the
+// store-presence rule: an out-of-scope row already in the JSONL is only
+// safe to drop when its id is no longer in the store (a TTL-compacted wisp,
+// GH#4988); if the store still has it, dropping it repeats #4069's data
+// loss. Deliberately unfiltered + MaxRows: 0, for the same reason as
+// missingJSONLIssueIDsInStore's store-side query: this guard's failure mode
+// is a permanent wedge, so the query must stay maximally permissive.
+func storeKnownIssueIDs(ctx context.Context) (map[string]struct{}, error) {
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{Limit: 0, MaxRows: 0})
+	if err != nil {
+		return nil, fmt.Errorf("failed to search issues: %w", err)
+	}
+	ids := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		ids[issue.ID] = struct{}{}
+	}
+	return ids, nil
+}
+
+func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMemories bool, storeIDs map[string]struct{}) error {
 	f, err := os.Open(path) //nolint:gosec
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -467,7 +571,7 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 		if line == "" {
 			continue
 		}
-		if err := classifyExistingAutoExportRecord([]byte(line), infraTypes, includeMemories, &stats); err != nil {
+		if err := classifyExistingAutoExportRecord([]byte(line), infraTypes, includeMemories, storeIDs, &stats); err != nil {
 			return fmt.Errorf("auto-export shrink guard: inspect existing JSONL line %d: %w", lineNo, err)
 		}
 	}
@@ -475,6 +579,11 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 		return fmt.Errorf("auto-export shrink guard: inspect existing JSONL: %w", err)
 	}
 
+	// Store-presence rule (#4069 vs #4988): block on memories (when
+	// excluded), unknown record types, and out-of-scope issue rows whose id
+	// is STILL present in the store — those are exactly what #4069 says we
+	// must not silently drop. An out-of-scope row absent from the store
+	// (e.g. a TTL-compacted wisp) is safe to drop and does not block.
 	if stats.FilteredRecords == 0 {
 		return nil
 	}
@@ -482,13 +591,13 @@ func guardAutoExportOverwrite(path string, infraTypes map[string]bool, includeMe
 }
 
 type autoExportOverwriteStats struct {
-	FilteredRecords int
+	FilteredRecords int // blocking total: Memories + FilteredIssues + UnknownRecords
 	Memories        int
-	FilteredIssues  int
+	FilteredIssues  int // infra/template/ephemeral issues still present in the store — blocking (restores GH#4069)
 	UnknownRecords  int
 }
 
-func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, includeMemories bool, stats *autoExportOverwriteStats) error {
+func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, includeMemories bool, storeIDs map[string]struct{}, stats *autoExportOverwriteStats) error {
 	var record struct {
 		Type       string          `json:"_type"`
 		IssueType  types.IssueType `json:"issue_type"`
@@ -514,8 +623,14 @@ func classifyExistingAutoExportRecord(line []byte, infraTypes map[string]bool, i
 			return nil
 		}
 		if infraTypes[string(record.IssueType)] || record.IsTemplate || record.Ephemeral {
-			stats.FilteredRecords++
-			stats.FilteredIssues++
+			// Store-presence rule: only block when the row still exists in
+			// Dolt (#4069's exact scenario). A row that's gone from the
+			// store (TTL-compacted wisp — GH#4988) is safe to drop; the
+			// rewrite doesn't lose anything the store didn't already lose.
+			if _, present := storeIDs[record.ID]; present {
+				stats.FilteredRecords++
+				stats.FilteredIssues++
+			}
 		}
 		return nil
 	default:
@@ -576,7 +691,15 @@ func gitAddFile(path string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), gitAddTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "git", "add", path)
+	// Pass the basename only, defensively: cmd.Dir is the parent of path, so
+	// a full path argument would double-root (cd .beads && git add
+	// .beads/issues.jsonl → pathspec looks under .beads/.beads/) if a caller
+	// ever passed a relative path here. Both current callers pass absolute
+	// paths, so this guards against a regression rather than fixing a live
+	// failure. See GH#4351.
+	// Keep cmd.Dir = parent so GH#3311 hook worktree staging still resolves
+	// the index path under the repo root (not bare "issues.jsonl" at root).
+	cmd := exec.CommandContext(ctx, "git", "add", "--", filepath.Base(path))
 	cmd.Dir = filepath.Dir(path)
 	cmd.Env = env
 	// Capture combined output so the caller's warning surfaces git's stderr

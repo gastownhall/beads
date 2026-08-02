@@ -1,0 +1,6 @@
+{
+  "branch": "<BRANCH>",
+  "build": "<BUILD>",
+  "schema_version": 1,
+  "version": "<VERSION>"
+}

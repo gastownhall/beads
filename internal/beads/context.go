@@ -15,7 +15,7 @@
 //	}
 //	cmd := rc.GitCmd(ctx, "status")  // Runs in beads repo, not CWD
 //
-// See docs/REPO_CONTEXT.md for detailed documentation.
+// See engdocs/REPO_CONTEXT.md for detailed documentation.
 package beads
 
 import (
@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -233,7 +234,8 @@ func getRepoRootFromPath(path string) (string, error) {
 // We explicitly set GIT_DIR and GIT_WORK_TREE to ensure git operates on
 // the correct repository (the one containing .beads/).
 func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "git", args...)
+	gitArgs := append([]string{"-c", "core.hooksPath="}, args...)
+	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = rc.RepoRoot
 
 	// GH#2538: Ensure git uses the target repository, not the worktree we may be running from.
@@ -243,7 +245,6 @@ func (rc *RepoContext) GitCmd(ctx context.Context, args ...string) *exec.Cmd {
 	// Security: Disable git hooks and templates to prevent code execution
 	// in potentially malicious repositories (SEC-001, SEC-002)
 	cmd.Env = append(os.Environ(),
-		"GIT_HOOKS_PATH=",            // Disable hooks
 		"GIT_TEMPLATE_DIR=",          // Disable templates
 		"GIT_DIR="+gitDir,            // Ensure git uses the correct .git directory
 		"GIT_WORK_TREE="+rc.RepoRoot, // Ensure git uses the correct work tree
@@ -308,17 +309,23 @@ func isPathInSafeBoundary(path string) bool {
 		return false
 	}
 
-	// Allow OS-designated temp directories (e.g., /var/folders on macOS)
-	// On macOS, TempDir() returns paths under /var/folders which symlinks to /private/var/folders
-	tempDir := os.TempDir()
-	resolvedTemp, _ := filepath.EvalSymlinks(tempDir)
-	resolvedPath, _ := filepath.EvalSymlinks(absPath)
-	if resolvedTemp != "" && strings.HasPrefix(resolvedPath, resolvedTemp) {
-		return true
-	}
-	// Also check unresolved paths (in case symlink resolution fails)
-	if strings.HasPrefix(absPath, tempDir) {
-		return true
+	// Allow OS-designated temp directories (e.g., /var/folders on macOS, which
+	// symlinks to /private/var/folders). World-writable, so resolve symlinks
+	// before admitting: a symlink planted under the temp dir whose target
+	// escapes the boundary must be rejected, not followed into a system
+	// directory — same treatment as the /Users/Shared carve-out below
+	// (be-kghzr SEC-003 hardening).
+	// The carve-out must admit both spellings of the temp root: os.TempDir()
+	// itself (on macOS the symlinked /var/folders/... form) and its physical
+	// resolution (/private/var/folders/...). A caller-supplied path that has
+	// already been symlink-resolved arrives in the physical form and would
+	// otherwise skip this branch and be rejected by the /private deny prefix
+	// below.
+	tempDir := strings.TrimSuffix(os.TempDir(), "/")
+	physTempDir := strings.TrimSuffix(resolveLongestExistingAncestor(tempDir), "/")
+	if absPath == tempDir || strings.HasPrefix(absPath, tempDir+"/") ||
+		absPath == physTempDir || strings.HasPrefix(absPath, physTempDir+"/") {
+		return resolvedPathWithinRoot(absPath, tempDir)
 	}
 
 	// Allow /var/home as a valid user home directory (Fedora Silverblue, Bluefin, etc.)
@@ -326,19 +333,104 @@ func isPathInSafeBoundary(path string) bool {
 		return true
 	}
 
+	// Allow /var/tmp as the FHS-standard secondary temp directory (persists across
+	// reboots, unlike /tmp). This is distinct from the os.TempDir() carve-out
+	// above: a machine's build tooling can set GOTMPDIR to redirect Go's own
+	// test/compile temp dirs under /var/tmp even while os.TempDir() itself still
+	// reports /tmp, so t.TempDir() in a test binary can land here without the
+	// os.TempDir() check ever seeing it (be-odye4). Like /Users/Shared, /var/tmp is
+	// world-writable (drwxrwxrwt), so resolve symlinks before admitting (SEC-003):
+	// a symlink planted under it must not be followed into a rejected directory.
+	if absPath == "/var/tmp" || strings.HasPrefix(absPath, "/var/tmp/") {
+		return resolvedPathWithinRoot(absPath, "/var/tmp")
+	}
+
 	for _, prefix := range unsafePrefixes {
 		if strings.HasPrefix(absPath, prefix+"/") || absPath == prefix {
 			return false
 		}
 	}
-	// Also reject other users' home directories
-	homeDir, _ := os.UserHomeDir()
+	// macOS's /Users/Shared is the OS-designated shared directory, not a peer
+	// user's home — allow it (and its subpaths) before the peer-home rejection
+	// below. SEC-003 guards against path traversal into system directories; the
+	// unsafePrefixes blocklist above stays authoritative, so this carve-out only
+	// admits the shared dir, mirroring the /var/home/ allowance. /Users/Shared is
+	// world-writable (drwxrwxrwt), so resolve symlinks before admitting: a symlink
+	// planted under it whose target escapes the boundary must be rejected, not
+	// followed into a system directory (be-vc1 SEC-003 hardening).
+	if absPath == "/Users/Shared" || strings.HasPrefix(absPath, "/Users/Shared/") {
+		return resolvedPathWithinRoot(absPath, "/Users/Shared")
+	}
+
+	// Also reject other users' home directories.
 	if strings.HasPrefix(absPath, "/Users/") || strings.HasPrefix(absPath, "/home/") || strings.HasPrefix(absPath, "/var/home/") {
-		if homeDir != "" && !strings.HasPrefix(absPath, homeDir) {
-			return false
+		// Resolve the current user's home from the account database, which is
+		// not affected by $HOME manipulation. Fall back to $HOME when that
+		// lookup is unavailable (e.g. CGO-free builds where the user is not in
+		// /etc/passwd); leaving homeDir empty here would skip the check and
+		// fail open, which is worse than trusting $HOME.
+		homeDir := ""
+		if u, err := user.Current(); err == nil {
+			homeDir = u.HomeDir
+		}
+		if homeDir == "" {
+			homeDir, _ = os.UserHomeDir()
+		}
+		if homeDir != "" {
+			home := strings.TrimSuffix(homeDir, "/")
+			// Compare on a path boundary so a sibling like /home/aliceXX is
+			// not treated as inside /home/alice.
+			if absPath != home && !strings.HasPrefix(absPath, home+"/") {
+				return false
+			}
 		}
 	}
 	return true
+}
+
+// resolveLongestExistingAncestor canonicalizes path by resolving symlinks on its
+// longest existing ancestor and re-appending the trailing segments that do not
+// exist yet. Unlike a bare filepath.EvalSymlinks (which fails on a non-existent
+// path and leaves it unresolved), this lets a not-yet-created BEADS_DIR still be
+// canonicalized against a real, symlink-free root. The upward walk mirrors the
+// filepath.Dir loops elsewhere in this package.
+func resolveLongestExistingAncestor(path string) string {
+	cur := filepath.Clean(path)
+	remainder := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(cur); err == nil {
+			if remainder == "" {
+				return resolved
+			}
+			return filepath.Join(resolved, remainder)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			// Reached the filesystem root without resolving anything; return the
+			// cleaned input unchanged (best effort).
+			return filepath.Clean(path)
+		}
+		remainder = filepath.Join(filepath.Base(cur), remainder)
+		cur = parent
+	}
+}
+
+// resolvedPathWithinRoot reports whether absPath, after symlink resolution, still
+// lies within root. Both sides are resolved via resolveLongestExistingAncestor so
+// the comparison is symlink-safe and works for not-yet-created paths: a symlink
+// under root whose target escapes root resolves outside and returns false, while
+// a real (or not-yet-created) subpath of a non-symlinked root returns true.
+//
+// This hardens the /Users/Shared carve-out (be-vc1, SEC-003): /Users/Shared is
+// world-writable, so a co-located user could plant a symlink there pointing at a
+// system directory; matching on the unresolved path would admit it. Resolving
+// first closes that path-traversal vector. Resolving root too is a no-op for the
+// real /Users/Shared but is required for temp-dir-rooted tests on macOS, where
+// the temp dir lives under the symlinked /var.
+func resolvedPathWithinRoot(absPath, root string) bool {
+	resolved := resolveLongestExistingAncestor(absPath)
+	resolvedRoot := resolveLongestExistingAncestor(root)
+	return resolved == resolvedRoot || strings.HasPrefix(resolved, resolvedRoot+string(filepath.Separator))
 }
 
 // GetRepoContextForWorkspace returns a fresh RepoContext for a specific workspace.
