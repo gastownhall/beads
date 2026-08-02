@@ -331,4 +331,4 @@ This project is governed by [The Agentic Covenant](CODE_OF_CONDUCT.md). All cont
 
 ---
 
-Thank you for contributing to bd!
+Thank you for contributing to bd! 🎉
