@@ -64,7 +64,7 @@ Contributions that include `Assisted-by` disclosures must receive the same quali
 
 If a contributor believes their disclosure was used against them, they may report it through the enforcement process. This safe harbor governs conduct within this project's community spaces.
 
-**Maintainer discretion.** For the avoidance of doubt: maintainers retain full authority over code quality, architectural direction, and project scope. A good-faith decision to close, reject, or request changes on a contribution is not a conduct violation simply because the contribution was AI-assisted. However, this discretion is subject to the Safe Harbor above. A quality justification does not insulate a pattern of differential treatment — the enforcement team may consider comparative evidence including approval rates, review depth, and consistency of standards across disclosed and non-disclosed contributions.
+**Maintainer discretion.** For the avoidance of doubt: maintainers retain full authority over code quality, architectural direction, and project scope. A good-faith decision to close, reject, or request changes on a contribution is not a conduct violation simply because the contribution was AI-assisted. However, this discretion is subject to the Safe Harbor above. A quality justification does not insulate a pattern of differential treatment — the maintainers may consider comparative evidence including approval rates, review depth, and consistency of standards across disclosed and non-disclosed contributions.
 
 ### Rate Limits and Resource Stewardship
 
@@ -135,7 +135,7 @@ When building on another contributor's work, preserve `Co-authored-by:` trailers
 
 ### Reporting
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers at **conduct@beads.dev**. All reports will be reviewed promptly and fairly. The enforcement team is obligated to respect the privacy of the reporter.
+Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the project maintainers at **security@steveyegge.com** — the same monitored address published in [SECURITY.md](SECURITY.md); mark the subject "conduct report". For content posted on GitHub you may also use GitHub's built-in *Report content* option. All reports will be reviewed promptly and fairly. The maintainers are obligated to respect the privacy of the reporter.
 
 ### For Human Conduct Violations
 
@@ -163,7 +163,7 @@ When an agent is actively causing harm, maintainers may immediately block the ag
 
 ### Appeals
 
-Any enforcement decision may be appealed by contacting the enforcement team. Appeals are reviewed by a different member of the team, or an independent party for projects with fewer than three enforcement team members.
+Any enforcement decision may be appealed by contacting the maintainers. Appeals are reviewed by a maintainer not involved in the original decision, or an independent party when no uninvolved maintainer is available.
 
 ---
 
