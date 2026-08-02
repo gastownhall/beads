@@ -15,13 +15,13 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
+The AI approach sends candidate pairs to Claude for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 

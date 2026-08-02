@@ -1585,13 +1585,13 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
+The AI approach sends candidate pairs to Claude for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 
@@ -4664,7 +4664,7 @@ actively referenced. This is permanent graceful decay - original content is disc
 Modes:
   - Analyze: Export candidates for agent review (no API key needed)
   - Apply: Accept agent-provided summary (no API key needed)
-  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
+  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY or ai.api_key, legacy)
   - Dolt: Run Dolt garbage collection (for Dolt-backend repositories)
 
 Tiers:
@@ -4688,11 +4688,10 @@ Examples:
   bd compact --apply --id bd-42 --summary summary.txt
   bd compact --apply --id bd-42 --summary - &lt; summary.txt
 
-  # AI-powered workflow
+  # Legacy AI-powered workflow
   bd compact --auto --dry-run              # Preview candidates
   bd compact --auto --all                  # Compact all eligible issues
   bd compact --auto --id bd-42             # Compact specific issue
-  MINIMAX_API_KEY=... bd compact --auto --all
 
   # Statistics
   bd compact --stats                       # Show statistics
@@ -4709,7 +4708,7 @@ bd admin compact [flags]
       --all              Process all candidates
       --analyze          Analyze mode: export candidates for agent review
       --apply            Apply mode: accept agent-provided summary
-      --auto             Auto mode: AI-powered compaction
+      --auto             Auto mode: AI-powered compaction (legacy)
       --batch-size int   Issues per batch (default 10)
       --dolt             Dolt mode: run Dolt garbage collection on .beads/dolt
       --dry-run          Preview without compacting
