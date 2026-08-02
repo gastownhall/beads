@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -173,8 +174,9 @@ func TestWrapUOWProviderFiltersExternalBlockedWorkByParent(t *testing.T) {
 
 func TestWrapUOWProviderPaginatesCombinedExternalBlockedWork(t *testing.T) {
 	local, external := issue("be-local"), issue("be-external")
-	local.Priority = 1
-	external.Priority = 0
+	createdAt := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
+	local.Priority, external.Priority = 0, 0
+	local.CreatedAt, external.CreatedAt = createdAt, createdAt
 	inner := &fakeUOW{
 		issues: &fakeIssueUseCase{
 			ready:   []*types.Issue{external},

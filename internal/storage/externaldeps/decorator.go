@@ -253,7 +253,10 @@ func finishBlockedIssues(items []*types.BlockedIssue, filter types.WorkFilter) (
 		if items[i].Priority != items[j].Priority {
 			return items[i].Priority < items[j].Priority
 		}
-		return items[i].CreatedAt.After(items[j].CreatedAt)
+		if !items[i].CreatedAt.Equal(items[j].CreatedAt) {
+			return items[i].CreatedAt.After(items[j].CreatedAt)
+		}
+		return items[i].ID < items[j].ID
 	})
 	if filter.Offset > 0 {
 		if filter.Offset >= len(items) {

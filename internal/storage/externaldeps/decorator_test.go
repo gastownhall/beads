@@ -5,6 +5,7 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -393,8 +394,9 @@ func TestGetBlockedIssuesAddsUnsatisfiedExternalRefs(t *testing.T) {
 
 func TestGetBlockedIssuesPaginatesCombinedExternalResults(t *testing.T) {
 	local, external := issue("be-local"), issue("be-external")
-	local.Priority = 1
-	external.Priority = 0
+	createdAt := time.Date(2026, time.August, 2, 0, 0, 0, 0, time.UTC)
+	local.Priority, external.Priority = 0, 0
+	local.CreatedAt, external.CreatedAt = createdAt, createdAt
 	raw := &fakeStore{
 		ready:   []*types.Issue{external},
 		blocked: []*types.BlockedIssue{{Issue: *local, BlockedBy: []string{"be-local-blocker"}, BlockedByCount: 1}},
