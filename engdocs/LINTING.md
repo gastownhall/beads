@@ -1,31 +1,31 @@
 # Linting Policy
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-08-02
 
-Freshness source: `.golangci.yml`, `.github/workflows/pr.yml`,
-`.github/workflows/main.yml`, and
-`golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...` returning zero
-issues.
+Freshness source: `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`,
+`.github/workflows/pr.yml`, and `.github/workflows/main.yml`.
 
 This document explains the required Go lint gate for this codebase.
 
 ## Current Status
 
-Lint is a required CI gate. The PR and main workflows run `golangci-lint` with
-the repository configuration and `--build-tags=gms_pure_go`; it is expected to
-pass with zero issues.
+Lint is a required CI gate. The PR and main workflows install the pinned
+golangci-lint v2.10.1 release and invoke the repository-owned `ci-pr-lint`
+wrapper, which must pass with zero issues.
 
-Run the same check locally with:
-
-```bash
-golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...
-```
-
-Formatting is a separate required gate:
+Run the same required contract locally with:
 
 ```bash
-make fmt-check
+make ci-pr-lint
 ```
+
+The wrapper runs:
+
+- `make fmt-check`;
+- golangci-lint with `.golangci.yml`, readonly module downloads, a five-minute
+  timeout, and the `gms_pure_go` build tag; and
+- a second non-CGO Windows cross-lint pass when the native host does not already
+  cover that target.
 
 ## Policy
 
@@ -45,18 +45,13 @@ test-fixture file reads, and documented security false positives.
 
 ## CI Cleanup Decision
 
-`pr-lint` should stay separate from `pr-policy` and `pr-core` so failures are
-easy to identify and rerun. It should include:
-
-- `make fmt-check`
-- `golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...`
+`pr-lint` stays separate from `pr-policy` and `pr-core` so failures are easy to
+identify and rerun. Its repository-owned wrapper is
+`scripts/ci/pr-lint.sh`, exposed as `make ci-pr-lint`.
 
 See [`CI_CLEANUP_PLAN.md`](CI_CLEANUP_PLAN.md) for the full CI tier policy.
 
 ## Future Work
 
-- Pin the `golangci-lint` version in CI instead of using `version: latest`.
-- Move the final CI shape behind a repository-owned `scripts/ci/pr-lint.sh`
-  wrapper.
 - Periodically audit `.golangci.yml` exclusions and remove entries that are no
   longer needed.

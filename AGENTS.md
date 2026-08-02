@@ -127,7 +127,7 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed):
-   - `golangci-lint run ./...` (or `pre-commit run --all-files` if pre-commit is installed)
+   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
    - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
    - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items

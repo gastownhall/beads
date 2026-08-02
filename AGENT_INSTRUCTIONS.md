@@ -9,7 +9,8 @@ This document contains detailed operational instructions for AI agents working o
 ### Code Standards
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
+- **Linting**: `make ci-pr-lint` must pass with zero issues; see
+  [engdocs/LINTING.md](engdocs/LINTING.md)
 - **Testing**: All new features need tests; use [engdocs/TESTING.md](engdocs/TESTING.md) for command selection, test design, and PR readiness.
 - **Documentation**: Update relevant .md files
 
@@ -83,8 +84,8 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 ### Before Committing
 
 1. **Run tests**: follow [engdocs/TESTING.md](engdocs/TESTING.md).
-2. **Run linter when its code surface changed**: `golangci-lint run ./...`
-   (ignore baseline warnings)
+2. **Run the required lint contract when its code surface changed**:
+   `make ci-pr-lint`
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
