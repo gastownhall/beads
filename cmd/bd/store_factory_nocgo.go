@@ -58,6 +58,7 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.Open(ctx, beadsDir)
 	}
@@ -85,6 +86,7 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
 	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
 		return backend.OpenReadOnly(ctx, beadsDir)
 	}
@@ -102,6 +104,13 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+}
+
+// newPreviewStoreFromConfig is the non-CGO twin of the CGO build's preview
+// factory. The two differ only in how they open the EMBEDDED store, and this
+// build has no embedded store at all, so preview and read-only coincide here.
+func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return newReadOnlyStoreFromConfig(ctx, beadsDir)
 }
 
 const nocgoEmbeddedErrMsg = `embedded Dolt requires a CGO build, but this bd binary was built with CGO_ENABLED=0.

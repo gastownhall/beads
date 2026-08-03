@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/worktreeremove"
 )
 
 // WorktreeInfo contains information about a git worktree
@@ -128,142 +129,6 @@ func init() {
 	worktreeCmd.AddCommand(worktreeInfoCmd)
 	rootCmd.AddCommand(worktreeCmd)
 }
-
-type singleWorktreeStringFlag struct {
-	name  string
-	value string
-	set   bool
-}
-
-func (flag *singleWorktreeStringFlag) Set(value string) error {
-	if flag.set {
-		return fmt.Errorf("--%s may be specified only once", flag.name)
-	}
-	flag.set = true
-	if value == "" {
-		return fmt.Errorf("--%s requires a non-empty value", flag.name)
-	}
-	flag.value = value
-	return nil
-}
-
-func (flag *singleWorktreeStringFlag) String() string {
-	return flag.value
-}
-
-func (flag *singleWorktreeStringFlag) Type() string {
-	return "string"
-}
-
-type singleWorktreeBoolFlag struct {
-	name  string
-	value bool
-	set   bool
-}
-
-func (flag *singleWorktreeBoolFlag) Set(value string) error {
-	if flag.set {
-		return fmt.Errorf("--%s may be specified only once", flag.name)
-	}
-	flag.set = true
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fmt.Errorf("invalid boolean value %q", value)
-	}
-	flag.value = parsed
-	return nil
-}
-
-func (flag *singleWorktreeBoolFlag) String() string {
-	return strconv.FormatBool(flag.value)
-}
-
-func (flag *singleWorktreeBoolFlag) Type() string {
-	return "bool"
-}
-
-func (flag *singleWorktreeBoolFlag) IsBoolFlag() bool {
-	return true
-}
-
-type worktreeRemoveOptions struct {
-	force      singleWorktreeBoolFlag
-	mergedInto singleWorktreeStringFlag
-}
-
-func (options *worktreeRemoveOptions) validate() error {
-	if options.force.set && options.mergedInto.set {
-		return fmt.Errorf("--force and --merged-into cannot be used together")
-	}
-	return nil
-}
-
-func newWorktreeRemoveCommand() *cobra.Command {
-	return newWorktreeRemoveCommandWithHooks(worktreeRemoveHooks{})
-}
-
-func newWorktreeRemoveCommandWithHook(beforeFinalCheck func() error) *cobra.Command {
-	return newWorktreeRemoveCommandWithHooks(worktreeRemoveHooks{
-		beforeFinalCheck: beforeFinalCheck,
-	})
-}
-
-type worktreeRemoveHooks struct {
-	afterTargetResolution func() error
-	beforeFinalCheck      func() error
-	beforeRemove          func() error
-	afterRemoval          func() error
-}
-
-func newWorktreeRemoveCommandWithHooks(hooks worktreeRemoveHooks) *cobra.Command {
-	options := &worktreeRemoveOptions{
-		force:      singleWorktreeBoolFlag{name: "force"},
-		mergedInto: singleWorktreeStringFlag{name: "merged-into"},
-	}
-
-	command := &cobra.Command{
-		Use:   "remove <name>",
-		Short: "Remove a worktree with safety checks",
-		Long: `Remove a registered git worktree with fail-closed safety checks.
-
-Without --force, the target must be clean and its pinned HEAD must be contained
-in either the configured upstream or the single comparator selected by
---merged-into. Comparators may be full refs, unambiguous short ref names, or
-full commit object IDs. Revision expressions and worktree-local pseudorefs such
-as HEAD and ORIG_HEAD are rejected.
-
---force skips cleanliness and containment requirements, but it does not skip
-registered-identity and concurrent-change checks. --force and --merged-into
-are mutually exclusive, and each flag may be specified at most once.
-
-Worktree removal and .gitignore cleanup are not atomic. If removal succeeds but
-cleanup fails, this command returns an error that explicitly reports the
-worktree as removed; it does not claim or attempt a rollback.
-
-Examples:
-  bd worktree remove feature-auth                    # Check the configured upstream
-  bd worktree remove feature-auth --merged-into main # Check containment in main
-  bd worktree remove feature-auth --force            # Skip clean/containment checks`,
-		Args: func(cmd *cobra.Command, args []string) error {
-			if err := cobra.ExactArgs(1)(cmd, args); err != nil {
-				return err
-			}
-			return options.validate()
-		},
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorktreeRemove(cmd, args, options, hooks)
-		},
-	}
-
-	command.Flags().Var(&options.force, "force", "Skip cleanliness and containment checks")
-	command.Flags().Lookup("force").NoOptDefVal = "true"
-	command.Flags().Var(&options.mergedInto, "merged-into", "Require worktree HEAD to be contained in this ref")
-	return command
-}
-
-var worktreeRemoveCmd = newWorktreeRemoveCommand()
 
 // repairWorktreeBeadsPermissions applies FixBeadsDirPermissions to worktreePath/.beads when
 // the directory exists. Git worktree checkout can leave tracked .beads/ at permissive modes.
@@ -460,78 +325,18 @@ func runWorktreeRemove(
 		}
 	}()
 
-	ctx := cmd.Context()
-	plan, err := prepareWorktreeRemoval(
-		ctx,
-		args[0],
-		options,
-		hooks.afterTargetResolution,
-	)
-	if err != nil {
-		return fmt.Errorf("cannot prepare worktree removal: %w", err)
-	}
-
-	if hooks.beforeFinalCheck != nil {
-		if err := hooks.beforeFinalCheck(); err != nil {
-			return fmt.Errorf("worktree removal interrupted before final safety check: %w", err)
-		}
-	}
-
-	if err := plan.revalidate(ctx); err != nil {
-		return fmt.Errorf("worktree changed before removal: %w; nothing was removed", err)
-	}
-
-	if hooks.beforeRemove != nil {
-		if err := hooks.beforeRemove(); err != nil {
-			return fmt.Errorf("worktree removal interrupted before the destructive operation: %w", err)
-		}
-	}
-
-	// Git uses core.ignorecase while selecting a registration by path. The
-	// target path comes from the exact registry spelling, so force ordinal
-	// matching for the destructive command: a concurrent disappearance or
-	// config change must not redirect removal to a case-variant sibling.
-	removeArgs := []string{"-c", "core.ignorecase=false", "worktree", "remove"}
+	mode := worktreeremove.Normal
 	if options.force.value {
-		removeArgs = append(removeArgs, "--force")
+		mode = worktreeremove.Force
 	}
-	removeArgs = append(removeArgs, "--", plan.target.path)
-	output, err := plan.git.combinedOutput(ctx, plan.executionRoot, removeArgs...)
-	if err != nil {
-		return plan.classifyRemovalFailure(ctx, err, output)
-	}
-
-	if hooks.afterRemoval != nil {
-		if err := hooks.afterRemoval(); err != nil {
-			return &worktreeRemovalPartialError{
-				path:  plan.target.path,
-				stage: "post-removal processing",
-				err:   err,
-			}
-		}
-	}
-
-	if plan.gitignoreCleanup != nil {
-		if err := plan.gitignoreCleanup.apply(); err != nil {
-			return &worktreeRemovalPartialError{
-				path:  plan.target.path,
-				stage: ".gitignore cleanup",
-				err:   err,
-			}
-		}
-	}
-
-	if jsonOutput {
-		result := map[string]interface{}{
-			"removed": plan.target.path,
-		}
-		encoder := json.NewEncoder(os.Stdout)
-		encoder.SetIndent("", "  ")
-		return encoder.Encode(result)
-	}
-
-	fmt.Printf("%s Removed worktree: %s\n", ui.RenderPass("✓"), plan.target.path)
-	return nil
+	adapter := &gitWorktreeRemovalAdapter{name: args[0], options: options, hooks: hooks}
+	return runWorktreeRemovalOrchestration(
+		cmd.Context(),
+		worktreeRemovalRequest{mode: mode},
+		adapter,
+		adapter,
+		cliWorktreeRemovalPresenter{},
+	)
 }
 
 type worktreeRemovalPartialError struct {
@@ -1376,6 +1181,8 @@ type worktreeRemovalPlan struct {
 	comparator       *pinnedWorktreeComparator
 	force            bool
 	gitignoreCleanup *gitignoreCleanupPlan
+	prepareFacts     worktreeremove.PrepareFacts
+	prepareErr       error
 }
 
 func prepareWorktreeRemoval(
@@ -1410,11 +1217,19 @@ func prepareWorktreeRemoval(
 	if err != nil {
 		return nil, err
 	}
+	plan := &worktreeRemovalPlan{
+		force: options.force.value,
+		prepareFacts: worktreeremove.PrepareFacts{
+			Registration: worktreeremove.Present,
+		},
+	}
 	if targetEntry.isMain {
-		return nil, fmt.Errorf("cannot remove the primary worktree")
+		plan.prepareFacts.Target = worktreeremove.PrimaryWorktree
+		return plan, nil
 	}
 	if sameWorktreePath(targetEntry.path, currentRoot) {
-		return nil, fmt.Errorf("cannot remove the worktree containing the running command")
+		plan.prepareFacts.Target = worktreeremove.CurrentWorktree
+		return plan, nil
 	}
 	if afterTargetResolution != nil {
 		if err := afterTargetResolution(); err != nil {
@@ -1438,15 +1253,7 @@ func prepareWorktreeRemoval(
 	if err != nil {
 		return nil, err
 	}
-	if !sameWorktreePath(target.commonDir, mainCommonDir) {
-		return nil, fmt.Errorf(
-			"target common git directory %q does not match repository %q",
-			target.commonDir,
-			mainCommonDir,
-		)
-	}
-
-	plan := &worktreeRemovalPlan{
+	plan = &worktreeRemovalPlan{
 		git:           gitRunner,
 		executionRoot: filepath.Clean(mainWorktree.path),
 		mainWorktree:  filepath.Clean(mainWorktree.path),
@@ -1454,43 +1261,84 @@ func prepareWorktreeRemoval(
 		target:        target,
 		force:         options.force.value,
 	}
+	status := worktreeremove.Clean
+	if target.status != "" {
+		status = worktreeremove.Dirty
+	}
+	plan.prepareFacts = worktreeremove.PrepareFacts{
+		Registration:   worktreeremove.Present,
+		Target:         worktreeremove.RegisteredTarget,
+		RegisteredPath: target.path,
+		TargetDir:      worktreeremove.Present,
+		GitAdminDir:    worktreeremove.Present,
+		GitMarker:      worktreeremove.Present,
+		CommonDir:      worktreeremove.Matched,
+		Head:           worktreeremove.Present,
+		Status:         status,
+		ManagedIgnore:  worktreeremove.IgnoreAbsent,
+	}
+	if !sameWorktreePath(target.commonDir, mainCommonDir) {
+		plan.prepareFacts.CommonDir = worktreeremove.Unmatched
+		plan.prepareErr = fmt.Errorf(
+			"target common git directory %q does not match repository %q",
+			target.commonDir,
+			mainCommonDir,
+		)
+		return plan, nil
+	}
 	if relative, inside := relativeWorktreePath(plan.mainWorktree, target.path); inside {
 		plan.gitignoreCleanup, err = prepareGitignoreCleanup(plan.mainWorktree, relative)
 		if err != nil {
 			return nil, fmt.Errorf("cannot safely prepare .gitignore cleanup: %w", err)
 		}
+		if plan.gitignoreCleanup != nil {
+			plan.prepareFacts.ManagedIgnore = worktreeremove.IgnoreManaged
+			plan.prepareFacts.ManagedIgnoreEntry = plan.gitignoreCleanup.entry
+		}
 	}
 
-	if !options.force.value {
-		if target.status != "" {
-			return nil, fmt.Errorf("worktree contains modified, untracked, or ignored files")
-		}
-
-		var comparator pinnedWorktreeComparator
-		if options.mergedInto.set {
-			comparator, err = resolveExplicitWorktreeComparator(
-				ctx,
-				gitRunner,
-				plan.executionRoot,
-				target,
-				options.mergedInto.value,
-			)
-		} else {
-			comparator, err = resolveUpstreamWorktreeComparator(
-				ctx,
-				gitRunner,
-				plan.executionRoot,
-				target,
-			)
-		}
-		if err != nil {
-			return nil, err
-		}
-		if err := verifyWorktreeContainment(ctx, gitRunner, plan.executionRoot, target.headOID, comparator); err != nil {
-			return nil, err
-		}
-		plan.comparator = &comparator
+	if options.force.value {
+		plan.prepareFacts.Comparator = worktreeremove.ComparatorNotRequired
+		plan.prepareFacts.Containment = worktreeremove.ContainmentNotRequired
+		return plan, nil
 	}
+	if target.status != "" {
+		return plan, nil
+	}
+
+	var comparator pinnedWorktreeComparator
+	if options.mergedInto.set {
+		comparator, err = resolveExplicitWorktreeComparator(
+			ctx,
+			gitRunner,
+			plan.executionRoot,
+			target,
+			options.mergedInto.value,
+		)
+	} else {
+		comparator, err = resolveUpstreamWorktreeComparator(
+			ctx,
+			gitRunner,
+			plan.executionRoot,
+			target,
+		)
+	}
+	if err != nil {
+		plan.prepareFacts.Comparator = worktreeremove.ComparatorMissing
+		plan.prepareErr = err
+		return plan, nil
+	}
+	plan.prepareFacts.Comparator = worktreeremove.ComparatorAvailable
+	containment, err := verifyWorktreeContainment(ctx, gitRunner, plan.executionRoot, target.headOID, comparator)
+	plan.prepareFacts.Containment = containment
+	if err != nil {
+		if containment == worktreeremove.ContainmentUnknown {
+			return nil, err
+		}
+		plan.prepareErr = err
+		return plan, nil
+	}
+	plan.comparator = &comparator
 
 	return plan, nil
 }
@@ -1506,86 +1354,140 @@ func relativeWorktreePath(root, target string) (string, bool) {
 	return filepath.ToSlash(relative), true
 }
 
-func (plan *worktreeRemovalPlan) revalidate(ctx context.Context) error {
+type worktreeRevalidationObservation struct {
+	facts worktreeremove.RevalidationFacts
+	err   error
+}
+
+func (plan *worktreeRemovalPlan) observeRevalidation(ctx context.Context) worktreeRevalidationObservation {
+	facts := worktreeremove.RevalidationFacts{}
 	worktrees, err := listRegisteredWorktrees(ctx, plan.git, plan.executionRoot)
 	if err != nil {
-		return err
+		return worktreeRevalidationObservation{facts: facts, err: err}
 	}
 	currentEntry, found := findRegisteredWorktreeByPath(worktrees, plan.target.path)
 	if !found {
-		return fmt.Errorf("target is no longer registered at %s", plan.target.path)
+		facts.Registration = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target is no longer registered at %s", plan.target.path)}
 	}
 	if worktreeRegistryIdentity(currentEntry) != plan.target.registryID {
-		return fmt.Errorf("registered target identity changed")
+		facts.Registration = worktreeremove.InvariantChanged
+		if currentEntry.locked != plan.target.locked || currentEntry.lockReason != plan.target.lockReason ||
+			currentEntry.prunable != plan.target.prunable || currentEntry.pruneReason != plan.target.pruneReason {
+			facts.LockPrune = worktreeremove.InvariantChanged
+		}
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("registered target identity changed")}
 	}
+	facts.Registration = worktreeremove.InvariantStable
+	facts.LockPrune = worktreeremove.InvariantStable
+	facts.TargetPath = worktreeremove.InvariantStable
 
 	currentTarget, err := inspectWorktreeTarget(ctx, plan.git, currentEntry)
 	if err != nil {
-		return err
+		return worktreeRevalidationObservation{facts: facts, err: err}
 	}
 	if !sameWorktreePath(currentTarget.gitDir, plan.target.gitDir) {
-		return fmt.Errorf("target git directory changed")
+		facts.GitAdminDirectory = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target git directory changed")}
 	}
+	facts.GitAdminDirectory = worktreeremove.InvariantStable
 	if !sameWorktreePath(currentTarget.commonDir, plan.commonDir) {
-		return fmt.Errorf("target common git directory changed")
+		facts.CommonDirectory = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target common git directory changed")}
 	}
+	facts.CommonDirectory = worktreeremove.InvariantStable
 	if currentTarget.headOID != plan.target.headOID {
-		return fmt.Errorf("target HEAD changed from %s to %s", plan.target.headOID, currentTarget.headOID)
+		facts.Head = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target HEAD changed from %s to %s", plan.target.headOID, currentTarget.headOID)}
 	}
+	facts.Head = worktreeremove.InvariantStable
 	if currentTarget.status != plan.target.status {
-		return fmt.Errorf("target cleanliness changed")
+		if (currentTarget.status == "") != (plan.target.status == "") {
+			facts.Cleanliness = worktreeremove.InvariantChanged
+		} else {
+			facts.Cleanliness = worktreeremove.InvariantStable
+		}
+		facts.StatusBytes = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target cleanliness changed")}
 	}
+	facts.Cleanliness = worktreeremove.InvariantStable
+	facts.StatusBytes = worktreeremove.InvariantStable
 	if currentTarget.statusFingerprint != plan.target.statusFingerprint {
-		return fmt.Errorf("target changed files changed")
+		facts.DirtyFileFingerprint = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target changed files changed")}
 	}
+	facts.DirtyFileFingerprint = worktreeremove.InvariantStable
 	if !plan.force && currentTarget.status != "" {
-		return fmt.Errorf("target is no longer clean")
+		facts.Cleanliness = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target is no longer clean")}
 	}
 	if !os.SameFile(currentTarget.pathInfo, plan.target.pathInfo) ||
 		!samePinnedFileMetadata(currentTarget.pathInfo, plan.target.pathInfo) {
-		return fmt.Errorf("target directory identity changed")
+		facts.TargetDirectory = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target directory identity changed")}
 	}
+	facts.TargetDirectory = worktreeremove.InvariantStable
 	if !os.SameFile(currentTarget.gitDirInfo, plan.target.gitDirInfo) ||
 		!samePinnedFileMetadata(currentTarget.gitDirInfo, plan.target.gitDirInfo) {
-		return fmt.Errorf("target git directory identity changed")
+		facts.GitAdminDirectory = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target git directory identity changed")}
 	}
+	facts.GitAdminDirectory = worktreeremove.InvariantStable
 	if !os.SameFile(currentTarget.gitMarkerInfo, plan.target.gitMarkerInfo) ||
 		!samePinnedFileMetadata(currentTarget.gitMarkerInfo, plan.target.gitMarkerInfo) {
-		return fmt.Errorf("target git marker identity changed")
+		facts.GitMarker = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target git marker identity changed")}
 	}
+	facts.GitMarker = worktreeremove.InvariantStable
 	if currentTarget.gitDirFingerprint != plan.target.gitDirFingerprint {
-		return fmt.Errorf("target git directory identity changed (contents mismatch)")
+		facts.GitAdminDirectoryBytes = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("target git directory identity changed (contents mismatch)")}
 	}
+	facts.GitAdminDirectoryBytes = worktreeremove.InvariantStable
 	if currentTarget.gitMarkerFingerprint != plan.target.gitMarkerFingerprint {
-		return fmt.Errorf("registered target identity changed (git marker mismatch)")
+		facts.GitMarkerBytes = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf("registered target identity changed (git marker mismatch)")}
 	}
+	facts.GitMarkerBytes = worktreeremove.InvariantStable
 	if plan.gitignoreCleanup != nil {
 		if err := plan.gitignoreCleanup.validate(); err != nil {
-			return fmt.Errorf(".gitignore changed before removal: %w", err)
+			facts.ManagedIgnore = worktreeremove.InvariantChanged
+			return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf(".gitignore changed before removal: %w", err)}
 		}
 	}
+	facts.ManagedIgnore = worktreeremove.InvariantStable
 
 	if plan.comparator == nil {
-		return nil
+		facts.Comparator = worktreeremove.InvariantNotRequired
+		facts.Containment = worktreeremove.InvariantNotRequired
+		return worktreeRevalidationObservation{facts: facts}
 	}
 	currentComparator, err := plan.resolveComparator(ctx, currentTarget)
 	if err != nil {
-		return err
+		return worktreeRevalidationObservation{facts: facts, err: err}
 	}
 	if currentComparator != *plan.comparator {
-		return fmt.Errorf(
+		facts.Comparator = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: fmt.Errorf(
 			"comparison target changed (was %s, now %s)",
 			plan.comparator.oid,
 			currentComparator.oid,
-		)
+		)}
 	}
-	return verifyWorktreeContainment(
+	facts.Comparator = worktreeremove.InvariantStable
+	_, err = verifyWorktreeContainment(
 		ctx,
 		plan.git,
 		plan.executionRoot,
 		currentTarget.headOID,
 		currentComparator,
 	)
+	if err != nil {
+		facts.Containment = worktreeremove.InvariantChanged
+		return worktreeRevalidationObservation{facts: facts, err: err}
+	}
+	facts.Containment = worktreeremove.InvariantStable
+	return worktreeRevalidationObservation{facts: facts}
 }
 
 func samePinnedFileMetadata(current, pinned os.FileInfo) bool {
@@ -1595,14 +1497,72 @@ func samePinnedFileMetadata(current, pinned os.FileInfo) bool {
 		current.ModTime().Equal(pinned.ModTime())
 }
 
-func (plan *worktreeRemovalPlan) classifyRemovalFailure(
-	ctx context.Context,
+type worktreeRemovalFailureObservation struct {
+	facts           worktreeremove.FailureFacts
+	reinspectionErr error
+	state           string
+}
+
+func (plan *worktreeRemovalPlan) observeRemovalFailure(ctx context.Context) worktreeRemovalFailureObservation {
+	reinspection := plan.observeRevalidation(ctx)
+
+	worktrees, listErr := listRegisteredWorktrees(ctx, plan.git, plan.executionRoot)
+	registered := false
+	registration := worktreeremove.PresenceUnknown
+	if listErr == nil {
+		_, registered = findRegisteredWorktreeByPath(worktrees, plan.target.path)
+		if registered {
+			registration = worktreeremove.Present
+		} else {
+			registration = worktreeremove.Missing
+		}
+	}
+	_, pathErr := os.Lstat(plan.target.path)
+	pathExists := pathErr == nil
+	pathPresence := worktreeremove.PresenceUnknown
+	if pathErr == nil {
+		pathPresence = worktreeremove.Present
+	} else if os.IsNotExist(pathErr) {
+		pathPresence = worktreeremove.Missing
+	}
+	if pathErr != nil && !os.IsNotExist(pathErr) {
+		pathExists = true
+	}
+
+	state := fmt.Sprintf("registered=%t, path_exists=%t", registered, pathExists)
+	if listErr != nil {
+		state += fmt.Sprintf(", registry inspection failed: %v", listErr)
+	}
+	if pathErr != nil && !os.IsNotExist(pathErr) {
+		state += fmt.Sprintf(", path inspection failed: %v", pathErr)
+	}
+	return worktreeRemovalFailureObservation{
+		facts: worktreeremove.FailureFacts{
+			Revalidation:       reinspection.facts,
+			RevalidationResult: revalidationResult(reinspection.err),
+			Registration:       registration,
+			TargetPath:         pathPresence,
+		},
+		reinspectionErr: reinspection.err,
+		state:           state,
+	}
+}
+
+func revalidationResult(err error) worktreeremove.RevalidationResult {
+	if err != nil {
+		return worktreeremove.RevalidationFailed
+	}
+	return worktreeremove.RevalidationPassed
+}
+
+func formatWorktreeRemovalFailure(
+	kind worktreeremove.FailureKind,
+	observation worktreeRemovalFailureObservation,
 	removeErr error,
 	output []byte,
 ) error {
-	reinspectionErr := plan.revalidate(ctx)
 	diagnostic := strings.TrimSpace(string(output))
-	if reinspectionErr == nil {
+	if kind == worktreeremove.UnchangedFailure {
 		if diagnostic == "" {
 			return fmt.Errorf(
 				"git worktree remove failed, but the target was revalidated unchanged: %w",
@@ -1615,38 +1575,19 @@ func (plan *worktreeRemovalPlan) classifyRemovalFailure(
 			diagnostic,
 		)
 	}
-
-	worktrees, listErr := listRegisteredWorktrees(ctx, plan.git, plan.executionRoot)
-	registered := false
-	if listErr == nil {
-		_, registered = findRegisteredWorktreeByPath(worktrees, plan.target.path)
-	}
-	_, pathErr := os.Lstat(plan.target.path)
-	pathExists := pathErr == nil
-	if pathErr != nil && !os.IsNotExist(pathErr) {
-		pathExists = true
-	}
-
-	state := fmt.Sprintf("registered=%t, path_exists=%t", registered, pathExists)
-	if listErr != nil {
-		state += fmt.Sprintf(", registry inspection failed: %v", listErr)
-	}
-	if pathErr != nil && !os.IsNotExist(pathErr) {
-		state += fmt.Sprintf(", path inspection failed: %v", pathErr)
-	}
 	if diagnostic == "" {
 		return fmt.Errorf(
 			"git worktree remove failed and target state is partial or indeterminate (%s): %w; reinspection: %v",
-			state,
+			observation.state,
 			removeErr,
-			reinspectionErr,
+			observation.reinspectionErr,
 		)
 	}
 	return fmt.Errorf(
 		"git worktree remove failed and target state is partial or indeterminate (%s): %w; reinspection: %v\n%s",
-		state,
+		observation.state,
 		removeErr,
-		reinspectionErr,
+		observation.reinspectionErr,
 		diagnostic,
 	)
 }
@@ -2039,7 +1980,7 @@ func verifyWorktreeContainment(
 	executionRoot string,
 	headOID string,
 	comparator pinnedWorktreeComparator,
-) error {
+) (worktreeremove.Containment, error) {
 	output, err := git.output(
 		ctx,
 		executionRoot,
@@ -2049,21 +1990,21 @@ func verifyWorktreeContainment(
 		comparator.oid,
 	)
 	if err == nil {
-		return nil
+		return worktreeremove.Contained, nil
 	}
 	var exitError *exec.ExitError
 	if errors.As(err, &exitError) && exitError.ExitCode() == 1 {
 		if comparator.explicit {
-			return fmt.Errorf(
+			return worktreeremove.NotContained, fmt.Errorf(
 				"worktree HEAD %s is not contained in --merged-into value %q at %s",
 				headOID,
 				comparator.selector,
 				comparator.oid,
 			)
 		}
-		return fmt.Errorf("worktree has commits not contained in its configured upstream")
+		return worktreeremove.NotContained, fmt.Errorf("worktree has commits not contained in its configured upstream")
 	}
-	return fmt.Errorf(
+	return worktreeremove.ContainmentUnknown, fmt.Errorf(
 		"failed to verify worktree containment (%s in %s): %w\n%s",
 		headOID,
 		comparator.oid,
@@ -2159,6 +2100,7 @@ func isIgnoredByGit(ctx context.Context, repoRoot, entry string) (bool, error) {
 type gitignoreCleanupPlan struct {
 	repoRoot string
 	path     string
+	entry    string
 	info     os.FileInfo
 	original []byte
 	updated  []byte
@@ -2193,6 +2135,7 @@ func prepareGitignoreCleanup(repoRoot, entry string) (*gitignoreCleanupPlan, err
 	return &gitignoreCleanupPlan{
 		repoRoot: repoRoot,
 		path:     gitignorePath,
+		entry:    entry,
 		info:     info,
 		original: content,
 		updated:  updated,

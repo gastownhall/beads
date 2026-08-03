@@ -620,6 +620,26 @@ func TestValidateVars(t *testing.T) {
 			values:  map[string]string{"required_var": "x", "pattern_var": "123"},
 			wantErr: true,
 		},
+		{
+			name:    "required var provided empty",
+			values:  map[string]string{"required_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "enum var provided empty",
+			values:  map[string]string{"required_var": "x", "enum_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "pattern var provided empty",
+			values:  map[string]string{"required_var": "x", "pattern_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "optional var genuinely absent still ok",
+			values:  map[string]string{"required_var": "x"},
+			wantErr: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -627,6 +647,86 @@ func TestValidateVars(t *testing.T) {
 			err := ValidateVars(formula, tt.values)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("ValidateVars() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateProvidedVars(t *testing.T) {
+	fallback := "fallback"
+	formula := &Formula{
+		Formula: "mol-vars-provided",
+		Vars: map[string]*VarDef{
+			"required_var":  {Required: true},
+			"enum_var":      {Enum: []string{"a", "b", "c"}},
+			"pattern_var":   {Pattern: `^[a-z]+$`},
+			"no_default":    {},
+			"defaulted_var": {Default: &fallback},
+		},
+	}
+
+	tests := []struct {
+		name    string
+		values  map[string]string
+		wantErr bool
+	}{
+		{
+			name:    "required var entirely absent is not flagged",
+			values:  map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "required var provided empty is flagged",
+			values:  map[string]string{"required_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "enum var absent is not flagged",
+			values:  map[string]string{},
+			wantErr: false,
+		},
+		{
+			name:    "enum var provided invalid is flagged",
+			values:  map[string]string{"enum_var": "invalid"},
+			wantErr: true,
+		},
+		{
+			name:    "enum var provided empty is flagged",
+			values:  map[string]string{"enum_var": ""},
+			wantErr: true,
+		},
+		{
+			name:    "pattern var provided invalid is flagged",
+			values:  map[string]string{"pattern_var": "123"},
+			wantErr: true,
+		},
+		{
+			name:    "all provided and valid",
+			values:  map[string]string{"required_var": "x", "enum_var": "a", "pattern_var": "abc"},
+			wantErr: false,
+		},
+		{
+			// No default means the command paths treat the var as required, so
+			// a provided-empty value is the same unset-shell-variable trap.
+			name:    "no-default var provided empty is flagged",
+			values:  map[string]string{"no_default": ""},
+			wantErr: true,
+		},
+		{
+			// A defaulted, unconstrained var provided explicitly empty is a
+			// deliberate choice the formula tolerates; only enum/pattern
+			// constraints could reject it.
+			name:    "defaulted var provided empty is tolerated",
+			values:  map[string]string{"defaulted_var": ""},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateProvidedVars(formula, tt.values)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateProvidedVars() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
 	}

@@ -611,22 +611,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			configPort := config.GetYamlConfig("dolt.port")
 			envPort := os.Getenv("BEADS_DOLT_SERVER_PORT")
 
-			effectiveHost := configHost
-			hostSource := "config.yaml"
-			if envHost != "" {
-				effectiveHost = envHost
-				hostSource = "environment"
-			}
-
-			if effectiveHost != "" && !isLocalHost(effectiveHost) {
-				detail := fmt.Sprintf("dolt.host (%s) is", effectiveHost)
-				if configPort != "" || envPort != "" {
-					detail = fmt.Sprintf("dolt.host (%s) and dolt.port are", effectiveHost)
+			if conflict := detectInitRemoteHostConflict(configHost, envHost, configPort, envPort); conflict != nil {
+				detail := fmt.Sprintf("dolt.host (%s) is", conflict.host)
+				if conflict.includesPort {
+					detail = fmt.Sprintf("dolt.host (%s) and dolt.port are", conflict.host)
 				}
 				return fmt.Errorf("%s set via %s but server mode is not enabled.\n"+
 					"  Embedded mode has no host/port — these settings require server mode.\n"+
 					"  Set dolt.mode: server in %s or pass --server to bd init.",
-					detail, hostSource, config.UserConfigYamlPath())
+					detail, conflict.source, config.UserConfigYamlPath())
 			}
 		}
 
@@ -1162,20 +1155,20 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 		if syncFromRemote {
-			var err error
 			cloneCfg := initTimeCloneConfig(initServerMode, serverHost, serverPort, serverSocket, serverUser, dbName)
-			err = cloneFromRemoteWithMode(ctx, beadsDir, syncURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
+			disposition, err := runInitRemoteClone(syncURL, func(remoteURL string) error {
+				return cloneFromRemoteWithMode(ctx, beadsDir, remoteURL, dbName, cloneCfg, initRemoteCloneMode(initServerMode, externalServer))
+			})
 			if err != nil {
-				if isEmptyRemoteCloneError(err) {
-					if !quiet {
-						fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
-					}
-					syncFromRemote = false
-				} else {
-					fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
-					fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
-					return &exitError{Code: 1}
+				fmt.Fprintf(os.Stderr, "Error: failed to clone remote %q: %v\n", syncURL, err)
+				fmt.Fprintf(os.Stderr, "Hint: verify the URL is reachable and any credentials are valid, or omit --remote to initialize a fresh local database.\n")
+				return &exitError{Code: 1}
+			}
+			if disposition == initRemoteCloneFresh {
+				if !quiet {
+					fmt.Printf("  %s Remote has no Dolt data yet; initialized a fresh local database\n", ui.RenderWarn("!"))
 				}
+				syncFromRemote = false
 			} else {
 				bootstrappedFromRemote = true
 				if !quiet {
@@ -1762,11 +1755,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 
 		// Auto-commit Dolt state so bd doctor doesn't warn about uncommitted
-		// changes and users don't need a separate "bd vc commit" step. Skipped in
-		// gateway mode: the shared server owns its own history and the credential
-		// may be read-only, so bd must not issue DOLT_ADD/DOLT_COMMIT against it.
+		// changes and users don't need a separate "bd vc commit" step. Init
+		// intentionally writes issue_prefix to config, while ordinary Commit
+		// excludes config to avoid sweeping unrelated stale values. Skip this in
+		// gateway mode: the shared server owns its history and the credential may
+		// be read-only, so bd must not issue DOLT_ADD/DOLT_COMMIT against it.
 		if shouldWriteInitStateToDB(doltCfg.Gateway) {
-			if err := store.Commit(ctx, "bd init"); err != nil {
+			if err := commitInitState(ctx, store); err != nil {
 				// Non-fatal: some setups (e.g. no tables yet) may have nothing to commit
 				if !strings.Contains(err.Error(), "nothing to commit") {
 					fmt.Fprintf(os.Stderr, "Warning: failed to commit initial state: %v\n", err)
@@ -2970,6 +2965,18 @@ func isEmptyRemoteCloneError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "contains no dolt data")
+}
+
+type initStateCommitter interface {
+	CommitWithConfig(context.Context, string) error
+}
+
+// commitInitState commits the configuration init deliberately created as well
+// as the initial schema state. The ordinary Commit contract excludes config to
+// avoid sweeping unrelated stale values, so using it here leaves every fresh
+// database dirty immediately after a successful init.
+func commitInitState(ctx context.Context, store initStateCommitter) error {
+	return store.CommitWithConfig(ctx, "bd init")
 }
 
 // verifyMetadata writes a metadata field and verifies the write succeeded.

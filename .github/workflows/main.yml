@@ -58,20 +58,35 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
-      - name: Run policy checks
-        run: make ci-pr-policy
-
-      - name: Run lint checks
-        run: make ci-pr-lint
+      # Per `go help cache`, Go's content-addressed build cache includes
+      # compiler options, so this base-tag directory can serve builds with
+      # additional tags. Race builds stay separate; Windows native/cgo
+      # non-race builds share theirs.
+      - name: Restore non-race Go build cache
+        id: restore-non-race-go-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Build reusable Linux artifacts
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -101,6 +116,20 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+      - name: Save Go module cache
+        if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Save non-race Go build cache
+        if: steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
   # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
@@ -129,6 +158,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
         env:
@@ -201,6 +231,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Build bd
         run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
@@ -334,6 +365,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Run PR policy wrapper
         run: make ci-pr-policy
@@ -346,9 +378,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        id: restore-race-go-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -376,6 +426,7 @@ jobs:
       - name: Run PR core wrapper
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
 
   pr-lint-wrapper:
@@ -388,6 +439,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
@@ -418,9 +470,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        id: restore-non-race-go-build-cache
+        if: matrix.os == 'macos-latest'
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Restore race Go build cache
+        id: restore-race-go-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt (Linux/macOS)
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -456,12 +535,15 @@ jobs:
 
       - name: Build
         if: matrix.os != 'ubuntu-latest'
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
       - name: Test (with coverage + JUnit XML)
         if: matrix.coverage
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: |
           gotestsum \
             --junitfile junit.xml \
@@ -470,6 +552,9 @@ jobs:
 
       - name: Test
         if: ${{ !matrix.coverage }}
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
 
       - name: Upload coverage to Codecov
@@ -491,6 +576,29 @@ jobs:
           report_type: test_results
           fail_ci_if_error: false
 
+      # Only the macOS leg owns macOS generations. The Linux leg restores the
+      # Linux writers above and must never become a second cache publisher.
+      - name: Save Go module cache
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-go-module-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Save non-race Go build cache
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+
+      - name: Save race Go build cache
+        if: ${{ !cancelled() && matrix.os == 'macos-latest' && steps.restore-race-go-build-cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and
   # also live behind the existing ./... matrix, but TestDomainDB requires the
@@ -508,6 +616,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install Dolt CLI
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -572,6 +681,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -655,6 +765,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -798,17 +909,41 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        id: restore-race-go-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Build embedded bd binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
       - name: Build embedded cmd test binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
       - name: Upload binaries
@@ -820,6 +955,13 @@ jobs:
             /tmp/embeddeddolt-test
             /tmp/bd-cmd-test
           retention-days: 1
+
+      - name: Save race Go build cache
+        if: steps.restore-race-go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
 
   test-embedded-storage:
     name: Test (Embedded Dolt Storage ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -948,9 +1090,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        id: restore-go-module-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        id: restore-non-race-go-build-cache
+        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Configure Git
         run: |
@@ -958,6 +1118,8 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Build (pure Go regex)
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go -o bd.exe ./cmd/bd
 
       - name: Smoke test - version
@@ -965,6 +1127,20 @@ jobs:
 
       - name: Smoke test - help
         run: ./bd.exe help
+
+      - name: Save Go module cache
+        if: steps.restore-go-module-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+
+      - name: Save non-race Go build cache
+        if: steps.restore-non-race-go-build-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
 
   fmt-check:
     name: Check formatting
@@ -976,6 +1152,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Check gofmt
         run: make fmt-check
@@ -990,6 +1167,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9

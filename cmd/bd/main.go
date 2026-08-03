@@ -36,6 +36,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	dbidentifier "github.com/steveyegge/beads/internal/storage/domain/db"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/telemetry"
@@ -174,6 +175,22 @@ var readOnlyCommands = map[string]bool{
 // that would trigger file watchers. See GH#804.
 func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
+}
+
+// isPreviewCommand reports whether cmd was explicitly invoked in a
+// non-mutating preview mode. Preview flags are command-local rather than
+// persistent, so checking them here after Cobra has parsed the selected
+// command is the earliest reliable point to keep the store open read-only.
+func isPreviewCommand(cmd *cobra.Command) bool {
+	for _, name := range []string{"dry-run", "inspect"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil {
+			enabled, err := cmd.Flags().GetBool(name)
+			if err == nil && enabled {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 type rootStorePolicy struct {
@@ -447,9 +464,10 @@ func loadServerModeFromBeadsDir(beadsDir string) error {
 	if err != nil {
 		return fmt.Errorf("load %s: %w (storage mode unknown; data commands will refuse to run rather than fall back to the embedded store)", configfile.ConfigPath(beadsDir), err)
 	}
-	if cfg == nil {
-		return nil
-	}
+	// Absent metadata.json keeps the fresh-repo embedded default unless
+	// env/config.yaml supply a remote host (GH#3545) — inference must not
+	// depend on metadata existing.
+	cfg = normalizeLoadedConfig(cfg)
 	warnSharedServerEmbeddedMismatch(cfg)
 	psm := cfg.IsDoltProxiedServerMode()
 	sm := cfg.IsDoltServerMode()
@@ -1168,6 +1186,14 @@ var rootCmd = &cobra.Command{
 					// or unknown metadata likewise must reach config validation
 					// instead of becoming a generic "no database" result.
 					dbPath = bd
+				} else if cfg == nil && cfgErr == nil &&
+					configfile.DefaultConfig().HostImpliesServerMode() {
+					// Metadata-less workspace whose server lives at a
+					// remote host named by BEADS_DOLT_SERVER_HOST or
+					// config.yaml (GH#3545): there is no local database
+					// directory to discover, so route the .beads dir as
+					// a server workspace instead of "no database found".
+					dbPath = bd
 				}
 			}
 		}
@@ -1294,18 +1320,29 @@ var rootCmd = &cobra.Command{
 			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
 		}
 
+		// Check if this is a read-only command (GH#804) or an explicitly
+		// non-mutating preview. Both must open the store read-only: otherwise
+		// schema initialization runs before the command's RunE can honor
+		// --dry-run/--inspect or reject invalid arguments. Resolved here,
+		// ahead of version tracking, because that is the first step a preview
+		// has to change.
+		previewMode := isPreviewCommand(cmd)
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
+		useReadOnly := policy.readOnly || previewMode
 
 		// Track bd version changes unless strict readonly forbids repository mutation.
 		// Best-effort tracking - failures are silent.
+		//
+		// A preview detects the change but must not consume it: .local_version
+		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
+		// skips that reconciliation (see below). See trackBdVersionPreview.
 		if policy.runMaintenance {
-			trackBdVersion()
+			if previewMode {
+				trackBdVersionPreview()
+			} else {
+				trackBdVersion()
+			}
 		}
-
-		// Check if this is a read-only command (GH#804)
-		// Read-only commands open the store in read-only mode to avoid modifying
-		// the database (which breaks file watchers).
-		useReadOnly := policy.readOnly
 
 		// If the operator passed --force on `bd migrate` or `bd migrate schema`,
 		// set the programmatic gate override before both autoMigrateOnVersionBump
@@ -1322,12 +1359,17 @@ var rootCmd = &cobra.Command{
 		schema.SetForceAllowRemoteMigrate(forcedMigrate)
 
 		// Auto-migrate database on version bump (bd-jgxi).
-		// Runs for ALL commands (including read-only ones) because the migration
-		// opens its own store connection, writes the version metadata, commits it,
-		// and closes BEFORE the main store is opened. This ensures bd doctor and
-		// read-only commands see the correct version after a CLI upgrade.
-
-		if policy.runMaintenance {
+		// Runs for ALL non-preview commands (including read-only ones) because
+		// the migration opens its own store connection, writes the version
+		// metadata, commits it, and closes BEFORE the main store is opened.
+		// This ensures bd doctor and read-only commands see the correct version
+		// after a CLI upgrade.
+		//
+		// Preview paths must never call this helper: it opens a separate
+		// writable store before the main read-only store and can therefore
+		// apply schema migrations before RunE validates arguments or renders a
+		// dry-run plan.
+		if policy.runMaintenance && !previewMode {
 			autoMigrateOnVersionBump(beadsDir)
 		}
 
@@ -1339,6 +1381,7 @@ var rootCmd = &cobra.Command{
 		doltPath := doltserver.ResolveDoltDir(beadsDir)
 		doltCfg := &dolt.Config{
 			ReadOnly:         useReadOnly,
+			Preview:          previewMode,
 			DisableAutoStart: policy.disableAutoStart,
 			BeadsDir:         beadsDir,
 			LenientOpen:      isWorkingSetReconcileCommand(cmd),
@@ -1351,7 +1394,14 @@ var rootCmd = &cobra.Command{
 		// deployments that empty relic answers every query with an empty
 		// result set and exit 0 (false-empty), which readers misinterpret as
 		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
-		// the fresh-repo embedded default below.
+		// the fresh-repo embedded default below — unless env/config.yaml
+		// supply a remote host (GH#3545): host inference must not depend
+		// on metadata existing, so substitute the default config and let
+		// the normal mode/connection resolution run.
+		if cfg == nil && configfile.DefaultConfig().HostImpliesServerMode() {
+			logConfigDiscovery(beadsDir, "no metadata.json; host inference (GH#3545) selects server mode")
+			cfg = configfile.DefaultConfig()
+		}
 		if cfg != nil {
 			warnSharedServerEmbeddedMismatch(cfg)
 			doltCfg.ProxiedServer = cfg.IsDoltProxiedServerMode()
@@ -1446,14 +1496,23 @@ var rootCmd = &cobra.Command{
 
 		// In proxied mode the CLI short-circuits to the uowProvider path and
 		// dispatches through the *_proxied_server.go duals.
+		//
+		// Preview commands take the same policy here as they do on the
+		// embedded and server paths, and for the same reason: the provider
+		// open runs CREATE DATABASE and schema.MigrateUpWithLock, and
+		// reconcileVersionProxiedServer writes version metadata — all during
+		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
+		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride)
+			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, previewProviderOptions(previewMode)...)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
 			uowProvider = p
 
-			reconcileVersionProxiedServer(rootCtx)
+			if !previewMode {
+				reconcileVersionProxiedServer(rootCtx)
+			}
 
 			syncCommandContext()
 			return nil
@@ -1654,21 +1713,40 @@ var rootCmd = &cobra.Command{
 						return HandleError("dolt tip auto-commit failed: %v", err)
 					} else if mode == doltAutoCommitOn {
 						// Apply tip metadata writes now (deferred in recordTipShown for Dolt).
+						//
+						// A store that refuses writes by construction — the
+						// preview open, and strict --readonly — must not turn
+						// an otherwise successful command into a non-zero exit
+						// here. This block is deliberately not gated by the
+						// read-only classification, and that has been fine
+						// because OpenForReadOnlyCommand is "otherwise a normal
+						// writable store"; the write-refusing opens break that
+						// assumption. Tip bookkeeping is incidental and
+						// recordTipShown's own contract is that it may fail
+						// silently, so skip it and carry on.
+						tipWritesRefused := false
 						for tipID := range commandTipIDsShown {
 							key := fmt.Sprintf("tip_%s_last_shown", tipID)
 							value := time.Now().Format(time.RFC3339)
 							if err := store.SetLocalMetadata(rootCtx, key, value); err != nil {
+								if errors.Is(err, embeddeddolt.ErrReadOnly) {
+									debug.Logf("tip auto-commit: store is read-only, skipping tip metadata: %v", err)
+									tipWritesRefused = true
+									break
+								}
 								return HandleError("dolt tip auto-commit failed: %v", err)
 							}
 						}
 
-						ids := make([]string, 0, len(commandTipIDsShown))
-						for tipID := range commandTipIDsShown {
-							ids = append(ids, tipID)
-						}
-						msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
-						if err := runPostRunAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
-							return HandleError("dolt tip auto-commit failed: %v", err)
+						if !tipWritesRefused {
+							ids := make([]string, 0, len(commandTipIDsShown))
+							for tipID := range commandTipIDsShown {
+								ids = append(ids, tipID)
+							}
+							msg := formatDoltAutoCommitMessage("tip", getActor(), ids)
+							if err := runPostRunAutoCommit(rootCtx, doltAutoCommitParams{Command: "tip", MessageOverride: msg}); err != nil {
+								return HandleError("dolt tip auto-commit failed: %v", err)
+							}
 						}
 					}
 				}

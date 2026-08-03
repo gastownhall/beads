@@ -773,11 +773,19 @@ required. Use this command for explicit control or diagnostics.`,
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
-		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+		fileCfg, err := loadDoltBackendConfig(beadsDir)
+		if err != nil {
 			return HandleError("%v", err)
 		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt start' is not supported in embedded mode (no Dolt server)")
+		}
+		// A remote (non-localhost) server host means bd does not own the
+		// server lifecycle (GH#3545/GH#3518): starting a repo-local
+		// server here would write local PID/port state that shadows the
+		// configured remote endpoint.
+		if host := fileCfg.GetDoltServerHost(); !usesProxiedServer() && !configfile.IsLocalHostString(host) {
+			return HandleError("the configured Dolt server host is remote (%s); 'bd dolt start' only manages a local server.\nStart the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to run one locally", host)
 		}
 		serverDir := doltserver.ResolveServerDir(beadsDir)
 
@@ -826,11 +834,19 @@ scope cannot be established.`,
 		if beadsDir == "" {
 			return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 		}
-		if _, err := loadDoltBackendConfig(beadsDir); err != nil {
+		fileCfg, err := loadDoltBackendConfig(beadsDir)
+		if err != nil {
 			return HandleError("%v", err)
 		}
 		if !usesSQLServer() {
 			return HandleError("'bd dolt stop' is not supported in embedded mode (no Dolt server)")
+		}
+		// Same remote-host ownership guard as 'bd dolt start': with a
+		// remote server host, the repo-local PID state (if any) is a
+		// leftover, and stopping it would report success while the
+		// configured external server keeps running (GH#3545/GH#3518).
+		if host := fileCfg.GetDoltServerHost(); !usesProxiedServer() && !configfile.IsLocalHostString(host) {
+			return HandleError("the configured Dolt server host is remote (%s); 'bd dolt stop' only manages a local server.\nStop the server on that host, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST to manage one locally", host)
 		}
 		force, _ := cmd.Flags().GetBool("force")
 

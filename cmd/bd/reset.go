@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var resetCmd = &cobra.Command{
@@ -83,6 +84,15 @@ func runReset(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	home, _ := os.UserHomeDir()
+	repoRoot := git.GetRepoRoot()
+	if repoRoot == "" {
+		repoRoot = filepath.Dir(gitCommonDir)
+	}
+	if err := refuseGlobalBeadsDir(beadsDir, repoRoot, home); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
 	items, preserved := collectResetItems(gitCommonDir, beadsDir)
 
 	if !force {
@@ -148,6 +158,47 @@ func collectResetItems(gitCommonDir, beadsDir string) (items, preserved []resetI
 	})
 
 	return items, preserved
+}
+
+// refuseGlobalBeadsDir stops a repo-scoped reset from deleting the user-global
+// ~/.beads directory.
+//
+// bd admin reset removes whatever FindBeadsDir returns, and FindBeadsDir walks
+// up from the working directory with no upper boundary — repoRoot is used to
+// classify a hit, never to stop the climb. So in any git repository under the
+// home directory that has no .beads of its own, the walk continues past the repo
+// and lands on ~/.beads. hasBeadsProjectFiles is documented as the thing that
+// prevents this, but it is a content guard, not a boundary guard: it holds only
+// while the global directory is not itself a real project. Once a user has one,
+// it stops holding, and that is when it matters.
+//
+// That is the shape of the 2026-07-21 incident, where a reset aimed at a temp
+// repository removed the global .beads along with hooks from an unrelated
+// checkout.
+//
+// The narrow rule here decides nothing about what -C should mean or how the two
+// target resolutions in runReset ought to be reconciled — both are open
+// questions. It only says that a reset run inside some project is never a
+// request to delete the user's global directory. When the repository root IS the
+// home directory, ~/.beads is that repository's own beads dir and the reset is
+// exactly what was asked for.
+func refuseGlobalBeadsDir(beadsDir, repoRoot, home string) error {
+	if home == "" {
+		// Without a home directory there is no global location to protect.
+		return nil
+	}
+	if !utils.PathsEqual(beadsDir, filepath.Join(home, ".beads")) {
+		return nil
+	}
+	if utils.PathsEqual(repoRoot, home) {
+		// The home directory is the repository. ~/.beads is its beads dir.
+		return nil
+	}
+
+	return fmt.Errorf("refusing to reset: this repository has no .beads of its own, so beads resolved to the "+
+		"user-global directory\n  repository:  %s\n  would remove: %s\n"+
+		"Removing global beads state is not part of resetting a repository. "+
+		"Delete that directory yourself if you mean to.", repoRoot, beadsDir)
 }
 
 // hookOwnership says how much of a git hook file bd is responsible for, which

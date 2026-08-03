@@ -144,6 +144,10 @@ func isGitTracked(path string) bool {
 }
 
 var secretKeyEnvVarHints = map[string]string{ //nolint:gosec // Values are environment variable names, not credentials.
+	// Single var name only: this value is interpolated into an
+	// `export %s="..."` shell template, where "A or B" would silently
+	// assign to B alone. ANTHROPIC_API_KEY is the primary; MiniMax users
+	// can export MINIMAX_API_KEY instead (same resolution chain).
 	"ai.api_key":     "ANTHROPIC_API_KEY",
 	"github.token":   "GITHUB_TOKEN",
 	"linear.api_key": "LINEAR_API_KEY",

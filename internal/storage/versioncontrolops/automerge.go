@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // Domain-aware auto-merge (federation ask #1, the flagship).
@@ -337,6 +339,21 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 	}
 	ourKey, _ := row.value("our", issuesKeyColumn)
 
+	// row_lock is the opaque optimistic-concurrency token every
+	// status/ownership write remints (freshRowLock in issueops/lease.go), so
+	// whenever both sides edited the row it is contested by construction — and
+	// it must never be settled by LWW like a data cell: keeping either side's
+	// pre-merge token would let a stale ExpectedVersion (types.Issue.RowVersion)
+	// win a CAS against a row whose content the merge just changed. It is
+	// excluded from classification here and handled after the merge plan is
+	// built: a settled row that differs from ours gets a token fresh relative
+	// to BOTH parents (see below). Excluding it also keeps a token-only
+	// divergence — two replicas independently settling the same merge mint
+	// different random tokens — from declining the next sync's conflict, since
+	// LWW could never break that tie (both sides carry the same updated_at).
+	ourLock := mustValue(row, "our", "row_lock")
+	theirLock := mustValue(row, "their", "row_lock")
+
 	ourUpdatedRaw := mustValue(row, "our", "updated_at")
 	theirUpdatedRaw := mustValue(row, "their", "updated_at")
 	ourUpdated, ourTimeOK := parseConflictTimestamp(ourUpdatedRaw)
@@ -347,7 +364,8 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 	theirsWinLWW := lwwUsable && theirUpdated.After(ourUpdated)
 
 	// Classify every data column once; the group rules below read the map.
-	cols := row.dataColumns(issuesKeyColumn)
+	// row_lock is deliberately not a data column here (see above).
+	cols := row.dataColumns(issuesKeyColumn, "row_lock")
 	verdicts := make(map[string]cellVerdict, len(cols))
 	theirVals := make(map[string]any, len(cols))
 	for _, col := range cols {
@@ -447,8 +465,59 @@ func mergeIssuesConflictRow(row rawConflictRow) (issuesRowMerge, bool) {
 			merged = theirUpdatedRaw
 		}
 		merge.setColumn("updated_at", merged)
+
+		// The settled row differs from BOTH parents (their absorbed edits make
+		// it differ from ours; our surviving cells make it differ from theirs),
+		// so it must carry a row_lock distinct from both parents' tokens — an
+		// ExpectedVersion CAS read against either pre-merge row must lose
+		// against the merged row (gastownhall/beads#4682's hazard: an
+		// LWW-settled merge that keeps one side's old token lets a stale CAS
+		// win). When nothing is written the settled row IS our row, byte for
+		// byte, so our token still vouches for exactly the content a CAS
+		// holder read and it is correct — and convergence-critical (see the
+		// exclusion comment above) — to leave it alone.
+		//
+		// This reminting on ANY settled write (not just a status/assignee/
+		// started_at change) is wider than RowVersion's documented contract
+		// (storage.go's CloseIssueOptions.ExpectedVersion doc, ~319-325):
+		// RowVersion is meant to track lifecycle/ownership writes only, and a
+		// merge that only touched e.g. title or description is not one of
+		// those. The widening is accepted as fail-safe rather than tightened
+		// to the lifecycle columns: the failure mode is a spurious
+		// ExpectedVersion mismatch on a non-lifecycle-only merge, and a caller
+		// that hits it simply re-reads and retries (types.Issue.RowVersion),
+		// never a missed conflict. Narrowing this to match the documented
+		// contract exactly is a separate, deliberate change, not implied by
+		// this fix.
+		//
+		// Gated on the column actually existing in the conflict table: a
+		// pre-0054 schema (before row_lock was added) has no
+		// our_row_lock/their_row_lock column, and unconditionally naming
+		// "row_lock" in the write-back plan there would turn a clean
+		// auto-merge into a hard "unknown column" pull failure. Degrade to
+		// the pre-row_lock behavior (no row_lock write) when the column is
+		// absent.
+		if _, hasRowLock := row.value("our", "row_lock"); hasRowLock {
+			merge.setColumn("row_lock", freshRowLockDistinctFrom(ourLock, theirLock))
+		}
 	}
 	return merge, true
+}
+
+// freshRowLockDistinctFrom mints a new row_lock token that differs from both
+// parents' tokens. freshRowLock is crypto-random over int64, so a collision is
+// already a ~2⁻⁶³ event; rerolling makes the "the settled row's token matches
+// neither pre-merge row" guarantee exact rather than probabilistic. The raw
+// conflict-table values are compared through the same normalization the merge
+// rules use, so a driver handing back []byte("123") for one side and int64 for
+// the candidate still compares as equal.
+func freshRowLockDistinctFrom(ourLock, theirLock any) int64 {
+	for {
+		candidate := issueops.FreshRowLock()
+		if !conflictCellsEqual(candidate, ourLock) && !conflictCellsEqual(candidate, theirLock) {
+			return candidate
+		}
+	}
 }
 
 // setColumn adds or overwrites a column in the write-back plan.

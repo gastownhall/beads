@@ -67,6 +67,23 @@ func leaseTTL(ctx context.Context) time.Duration {
 // SAME lease row and conflict without any help. Adding a new path that sets
 // status/assignee outside updateIssueInTx without rewriting row_lock would
 // silently reintroduce the zombie-merge bug.
+//
+// The exemptions are load-bearing in the OTHER direction too (analysis
+// absorbed from gastownhall/beads#4682, Julian Knutsen): row_lock doubles as
+// the RowVersion optimistic-concurrency token (types.Issue.RowVersion), so a
+// path that reminted it WITHOUT changing the content a CAS holder cares about
+// would spuriously fail honest ExpectedVersion checks. The is_blocked
+// recompute is the canonical case: it is a denormalized aux-marker refresh
+// that already goes out of its way to preserve updated_at
+// (blocked_state.go), and bumping the token there would clobber a concurrent
+// whole-row CAS over a cell derived from OTHER rows. (The PR's second
+// exemption of this kind, the lease heartbeat, no longer arises here — since
+// bd-lrgn1 heartbeats never touch the issues row at all.) So the invariant
+// cuts both ways: status/ownership writes MUST remint, aux-marker writes MUST
+// NOT. The remint direction is enforced at build time by
+// TestAllIssueRowWritesStampRowLock (row_lock_guard_test.go), whose exemption
+// markers are the machine-readable form of this list — widen the stamping
+// policy there first, not by ad-hoc stamps.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {

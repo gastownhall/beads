@@ -21,6 +21,11 @@ type IssueOperationsStagingFixture struct {
 	Commit        func(context.Context, string) error
 	Exec          func(context.Context, string, ...any) error
 	QueryScalar   func(context.Context, string, []any, ...any) error
+	// UpdateRaw drives the backend's generic update funnel with an untyped
+	// column map, the way an external-sync or backfill caller does. The typed
+	// patch behind Operations.Update carries no closed_at, so this is the only
+	// route to the columns the close-lifecycle assertions cover.
+	UpdateRaw func(context.Context, string, map[string]any, string) error
 }
 
 // RunIssueOperationsCreateReverseNonBlockingStagesConcreteTables proves that a

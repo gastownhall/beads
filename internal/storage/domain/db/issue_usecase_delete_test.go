@@ -19,10 +19,13 @@ func (s *testSuite) TestIssueUseCase_Delete() {
 		s.Run("EmptyIDsIsNoop", s.iucDeleteIssuesEmpty)
 		s.Run("DryRunCountsButDoesNotDelete", s.iucDeleteIssuesDryRun)
 		s.Run("CleansLabelsAndEvents", s.iucDeleteCleansAuxiliaryTables)
+		s.Run("MixedIssueAndWispMutatesCorrectTables", s.iucDeleteIssuesMixedIssueAndWispMutatesCorrectTables)
 		s.Run("UpdateTextReferencesFalseLeavesRefs", s.iucDeleteSkipsRefsWhenFlagOff)
 	})
 	s.Run("DeleteWisp", func() {
 		s.Run("DispatchesToWispsTable", s.iucDeleteWispDispatches)
+		s.Run("CleansAuxiliaryTablesAndCascadesAcrossDependencyTypes", s.iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependencyTypes)
+		s.Run("RewritesTextReferencesInWisps", s.iucDeleteWispRewritesTextReferencesInWisps)
 	})
 	s.Run("PreviewDelete", func() {
 		s.Run("EmptyInputReturnsEmpty", s.iucPreviewEmpty)
@@ -122,21 +125,58 @@ func (s *testSuite) iucDeleteIssuesEmpty() {
 func (s *testSuite) iucDeleteIssuesDryRun() {
 	s.seedOpenIssue("bd-iuc-dry-a")
 	s.seedOpenIssue("bd-iuc-dry-b")
+	s.seedOpenWisp("bd-iuc-dry-c")
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep("bd-iuc-dry-a", "bd-iuc-dry-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-iuc-dry-b", "bd-iuc-dry-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-iuc-dry-c", "bd-iuc-dry-b", types.DepParentChild), "tester",
+		domain.DepInsertOpts{UseWispsTable: true}))
+	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
+		"bd-iuc-dry-a", "dry-run-label", "tester", domain.LabelOpts{}))
+	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
+		"bd-iuc-dry-c", "dry-run-wisp-label", "tester", domain.LabelOpts{UseWispsTable: true}))
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
-		IDs:    []string{"bd-iuc-dry-a"},
-		DryRun: true,
+		IDs:     []string{"bd-iuc-dry-a"},
+		Cascade: true,
+		DryRun:  true,
 	}, "tester")
 	s.Require().NoError(err)
-	s.Equal(0, res.DeletedCount, "DryRun must not actually delete")
-	s.Equal(1, res.DependenciesCount)
+	s.Equal(3, res.DeletedCount, "DryRun must report the cascade candidate count")
+	s.Equal(2, res.DependenciesCount)
+	s.Equal(2, res.LabelsCount)
+	s.Equal(5, res.EventsCount)
 
-	var rows int
-	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM issues WHERE id = ?", "bd-iuc-dry-a").Scan(&rows))
-	s.Equal(1, rows, "row must still exist after DryRun")
+	for _, table := range []struct {
+		name  string
+		where string
+		args  []any
+		want  int
+	}{
+		{name: "issues", where: "id IN (?, ?)", args: []any{"bd-iuc-dry-a", "bd-iuc-dry-b"}, want: 2},
+		{name: "wisps", where: "id = ?", args: []any{"bd-iuc-dry-c"}, want: 1},
+		{
+			name:  "dependencies",
+			where: "issue_id = ? AND depends_on_issue_id = ?",
+			args:  []any{"bd-iuc-dry-b", "bd-iuc-dry-a"},
+			want:  1,
+		},
+		{
+			name:  "wisp_dependencies",
+			where: "issue_id = ? AND depends_on_issue_id = ?",
+			args:  []any{"bd-iuc-dry-c", "bd-iuc-dry-b"},
+			want:  1,
+		},
+		{name: "labels", where: "issue_id = ?", args: []any{"bd-iuc-dry-a"}, want: 1},
+		{name: "wisp_labels", where: "issue_id = ?", args: []any{"bd-iuc-dry-c"}, want: 1},
+		{name: "events", where: "issue_id IN (?, ?)", args: []any{"bd-iuc-dry-a", "bd-iuc-dry-b"}, want: 3},
+		{name: "wisp_events", where: "issue_id = ?", args: []any{"bd-iuc-dry-c"}, want: 2},
+	} {
+		var rows int
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM "+table.name+" WHERE "+table.where, table.args...).Scan(&rows))
+		s.Equal(table.want, rows, "%s rows must remain after DryRun", table.name)
+	}
 }
 
 func (s *testSuite) iucDeleteCleansAuxiliaryTables() {
@@ -161,6 +201,31 @@ func (s *testSuite) iucDeleteCleansAuxiliaryTables() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM events WHERE issue_id = ?", "bd-iuc-aux-a").Scan(&rows))
 	s.Equal(0, rows)
+}
+
+func (s *testSuite) iucDeleteIssuesMixedIssueAndWispMutatesCorrectTables() {
+	s.seedOpenIssue("bd-iuc-mixed-issue")
+	s.seedOpenWisp("bd-iuc-mixed-wisp")
+	s.seedOpenIssue("bd-iuc-mixed-wisp")
+
+	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
+		IDs:                  []string{"bd-iuc-mixed-issue", "bd-iuc-mixed-wisp"},
+		Cascade:              true,
+		UpdateTextReferences: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(2, res.DeletedCount)
+
+	var issueRows, wispRows, shadowIssueRows int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", "bd-iuc-mixed-issue").Scan(&issueRows))
+	s.Equal(0, issueRows)
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM wisps WHERE id = ?", "bd-iuc-mixed-wisp").Scan(&wispRows))
+	s.Equal(0, wispRows)
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", "bd-iuc-mixed-wisp").Scan(&shadowIssueRows))
+	s.Equal(1, shadowIssueRows, "durable row shadowing the wisp ID must remain")
 }
 
 func (s *testSuite) iucDeleteSkipsRefsWhenFlagOff() {
@@ -201,6 +266,66 @@ func (s *testSuite) iucDeleteWispDispatches() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM issues WHERE id = ?", "bd-iuc-delw-1").Scan(&issueRows))
 	s.Equal(1, issueRows, "issues row with shadowed ID must remain")
+}
+
+func (s *testSuite) iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependencyTypes() {
+	root := "bd-iuc-wisp-cascade-root"
+	mid := "bd-iuc-wisp-cascade-mid"
+	leaf := "bd-iuc-wisp-cascade-leaf"
+	for _, id := range []string{root, mid, leaf} {
+		s.seedOpenWisp(id)
+	}
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(mid, root, types.DepBlocks), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(leaf, mid, types.DepParentChild), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
+		root, "delete-me", "tester", domain.LabelOpts{UseWispsTable: true}))
+	s.Require().NoError(s.eventsRepo().Record(s.Ctx(),
+		domain.Event{IssueID: root, Type: types.EventCreated, Actor: "tester"},
+		domain.RecordEventOpts{UseWispsTable: true}))
+
+	res, err := s.issueUseCase().DeleteWisp(s.Ctx(), root, "tester")
+	s.Require().NoError(err)
+	s.Equal(3, res.DeletedCount, "root plus both transitive dependents")
+
+	for _, id := range []string{root, mid, leaf} {
+		var wispRows, labelRows, eventRows, dependencyRows int
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM wisps WHERE id = ?", id).Scan(&wispRows))
+		s.Equal(0, wispRows, "%s should be deleted", id)
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ?", id).Scan(&labelRows))
+		s.Equal(0, labelRows, "%s labels should be deleted", id)
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM wisp_events WHERE issue_id = ?", id).Scan(&eventRows))
+		s.Equal(0, eventRows, "%s events should be deleted", id)
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM wisp_dependencies WHERE issue_id = ? OR depends_on_issue_id = ? OR depends_on_wisp_id = ?",
+			id, id, id).Scan(&dependencyRows))
+		s.Equal(0, dependencyRows, "%s dependencies should be deleted", id)
+	}
+}
+
+func (s *testSuite) iucDeleteWispRewritesTextReferencesInWisps() {
+	target := "bd-iuc-wisp-ref-target"
+	neighbor := "bd-iuc-wisp-ref-neighbor"
+	s.seedOpenWisp(target)
+	s.seedOpenWisp(neighbor)
+	s.Require().NoError(s.issueRepo().Update(s.Ctx(), neighbor,
+		map[string]any{"description": "see " + target + " for context"},
+		"seeder", domain.IssueTableOpts{UseWispsTable: true}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(target, neighbor, types.DepRelated), "tester", domain.DepInsertOpts{UseWispsTable: true}))
+
+	res, err := s.issueUseCase().DeleteWisp(s.Ctx(), target, "tester")
+	s.Require().NoError(err)
+	s.Equal(1, res.DeletedCount)
+	s.GreaterOrEqual(res.ReferencesUpdated, 1)
+
+	updated, err := s.issueRepo().Get(s.Ctx(), neighbor, domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Contains(updated.Description, "[deleted:"+target+"]")
 }
 
 func (s *testSuite) iucPreviewEmpty() {
