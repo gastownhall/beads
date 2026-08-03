@@ -503,7 +503,9 @@ func testAuditStaleStatusOverride(t *testing.T, f Factory) {
 }
 
 // Epics with ZERO children are silently skipped; epics WITH children are returned
-// with Total/Closed counts and EligibleForClose = (Total>0 && Total==Closed).
+// with Total/Closed counts and EligibleForClose = (Total == completing-closed).
+// A child closed for a non-completing reason (duplicate/wontfix/superseded/…)
+// counts toward Closed but not toward eligibility (GH#5026).
 func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -513,9 +515,12 @@ func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-2", Title: "E2", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-2a", Title: "c", Status: types.StatusClosed}), "a"))
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-3", Title: "E3", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-4", Title: "E4", IssueType: types.TypeEpic, Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ee-4a", Title: "c", Status: types.StatusClosed, CloseReason: "duplicate of ee-1"}), "a"))
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-1a", DependsOnID: "ee-1", Type: types.DepParentChild}, "a"))
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-1b", DependsOnID: "ee-1", Type: types.DepParentChild}, "a"))
 	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-2a", DependsOnID: "ee-2", Type: types.DepParentChild}, "a"))
+	must(t, s.AddDependency(c, &types.Dependency{IssueID: "ee-4a", DependsOnID: "ee-4", Type: types.DepParentChild}, "a"))
 
 	epics, err := s.GetEpicsEligibleForClosure(c)
 	must(t, err)
@@ -544,6 +549,17 @@ func testAuditEpicsEligiblePartial(t *testing.T, f Factory) {
 
 	if _, present := byID["ee-3"]; present {
 		t.Error("ee-3 (zero children) must be ABSENT (silent skip)")
+	}
+
+	// dcr-tf2 / GH#5026: a single child closed as a duplicate still counts as
+	// Closed (raw close count), but must NOT count toward EligibleForClose —
+	// the epic's real scope is unfinished, not done.
+	e4 := byID["ee-4"]
+	if e4 == nil {
+		t.Fatal("ee-4 missing (has children, must be returned)")
+	}
+	if e4.TotalChildren != 1 || e4.ClosedChildren != 1 || e4.EligibleForClose {
+		t.Errorf("ee-4 = {Total:%d Closed:%d Eligible:%v}, want {1 1 false} (duplicate close is non-completing)", e4.TotalChildren, e4.ClosedChildren, e4.EligibleForClose)
 	}
 }
 

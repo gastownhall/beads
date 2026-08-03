@@ -3,11 +3,41 @@ package issueops
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// GetEpicsEligibleForClosureInTx returns epics whose children are all closed.
+// nonCompletingCloseRegexp matches close reasons that redirect or abandon work
+// rather than finish a deliverable. Children closed this way must not count
+// toward epic/molecule "complete" eligibility (GH#5026).
+//
+// Matching is word-bounded (\b) rather than raw substring: close_reason is
+// free-form prose (types.Issue.CloseReason is a plain string; cmd/bd/close.go
+// only length-validates it), and a bare substring match false-positives on
+// ordinary English — "added dedup pass for event ingest" contains "dup", and
+// "removed obsolete migration shim" contains "obsolete", yet both describe
+// completed work. The bare "dup" keyword is dropped entirely: it was already
+// redundant with "duplicate"/"dupe" and only added false positives. Likewise
+// the bare adjective "obsolete" is dropped in favor of "obsoleted" — a task
+// closed because it was superseded/deprecated typically reads "obsoleted by
+// X", while "obsolete" alone is commonly just describing what was removed.
+var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont ?fix|won't fix|superseded|obsoleted|not planned)\b`)
+
+// IsNonCompletingClose reports whether closeReason is a redirection/abandon
+// (duplicate, wontfix, superseded, …) rather than finished work. Empty reason
+// is treated as completing for backward compatibility with closes that never
+// recorded a reason.
+func IsNonCompletingClose(closeReason string) bool {
+	if strings.TrimSpace(closeReason) == "" {
+		return false
+	}
+	return nonCompletingCloseRegexp.MatchString(closeReason)
+}
+
+// GetEpicsEligibleForClosureInTx returns open epics whose children are all closed
+// with completing close reasons (not duplicate/wontfix/superseded).
 // nolint:gosec // G201: table names are hardcoded, placeholders contain only ? markers
 func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.EpicStatus, error) {
 	// Step 1: Get open epic IDs (single-table scan)
@@ -66,14 +96,19 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 		depRows.Close()
 	}
 
-	// Step 3: Batch-fetch statuses for all child issues across all epics
+	// Step 3: Batch-fetch statuses + close_reason for all child issues (bd-w2w).
+	// close_reason is required so duplicate/wontfix/superseded closes do not
+	// count as "complete" for EligibleForClose (GH#5026).
 	allChildIDs := make([]string, 0)
 	for _, children := range epicChildMap {
 		allChildIDs = append(allChildIDs, children...)
 	}
-	childStatusMap := make(map[string]string)
+	type childCloseInfo struct {
+		status      string
+		closeReason string
+	}
+	childInfoMap := make(map[string]childCloseInfo)
 	if len(allChildIDs) > 0 {
-		// Check both issues and wisps tables for child statuses (bd-w2w)
 		for _, table := range []string{"issues", "wisps"} {
 			for start := 0; start < len(allChildIDs); start += queryBatchSize {
 				end := start + queryBatchSize
@@ -83,7 +118,10 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 				batch := allChildIDs[start:end]
 				placeholders, args := buildSQLInClause(batch)
 
-				statusQuery := fmt.Sprintf("SELECT id, status FROM %s WHERE id IN (%s)", table, placeholders)
+				statusQuery := fmt.Sprintf(
+					"SELECT id, status, COALESCE(close_reason, '') FROM %s WHERE id IN (%s)",
+					table, placeholders,
+				)
 				statusRows, err := tx.QueryContext(ctx, statusQuery, args...)
 				if err != nil {
 					if isTableNotExistError(err) {
@@ -92,12 +130,12 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 					return nil, fmt.Errorf("failed to batch-fetch child statuses from %s: %w", table, err)
 				}
 				for statusRows.Next() {
-					var id, status string
-					if err := statusRows.Scan(&id, &status); err != nil {
+					var id, status, closeReason string
+					if err := statusRows.Scan(&id, &status, &closeReason); err != nil {
 						statusRows.Close()
 						return nil, fmt.Errorf("scan child status: %w", err)
 					}
-					childStatusMap[id] = status
+					childInfoMap[id] = childCloseInfo{status: status, closeReason: closeReason}
 				}
 				statusRows.Close()
 			}
@@ -135,17 +173,26 @@ func GetEpicsEligibleForClosureInTx(ctx context.Context, tx DBTX) ([]*types.Epic
 
 		totalChildren := len(children)
 		closedChildren := 0
+		completingClosed := 0
 		for _, childID := range children {
-			if status, ok := childStatusMap[childID]; ok && types.Status(status) == types.StatusClosed {
-				closedChildren++
+			info, ok := childInfoMap[childID]
+			if !ok || types.Status(info.status) != types.StatusClosed {
+				continue
+			}
+			closedChildren++
+			if !IsNonCompletingClose(info.closeReason) {
+				completingClosed++
 			}
 		}
 
+		// Eligible only when every child is closed AND every close is a completing
+		// one (finished work). Duplicate/wontfix/superseded closes leave the
+		// epic's real scope unfinished (GH#5026).
 		results = append(results, &types.EpicStatus{
 			Epic:             issue,
 			TotalChildren:    totalChildren,
 			ClosedChildren:   closedChildren,
-			EligibleForClose: totalChildren > 0 && totalChildren == closedChildren,
+			EligibleForClose: totalChildren > 0 && totalChildren == completingClosed,
 		})
 	}
 

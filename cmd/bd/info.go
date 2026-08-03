@@ -1037,7 +1037,7 @@ var versionChanges = []VersionChange{
 			"NEW: Aspect composition - Cross-cutting concerns via aspects field in formulas",
 			"NEW: Runtime expansion - on_complete and for-each dynamic step generation",
 			"NEW: bd formula list/show - Discover and inspect available formulas",
-			"NEW: bd mol stale - Detect complete-but-unclosed molecules",
+			"NEW: bd mol stale - Detect molecules with all children closed but root still open",
 			"NEW: Stale molecules check in bd doctor - Proactive detection",
 			"NEW: Distinct ID prefixes - bd-proto-xxx, bd-mol-xxx, bd-wisp-xxx",
 			"NEW: no-git-ops config - bd config set no-git-ops true for manual git control",
