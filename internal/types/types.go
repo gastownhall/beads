@@ -197,18 +197,24 @@ type Issue struct {
 // eliminate.
 //
 // IssueSummary is read-only. No write methods accept it.
+//
+// The JSON tags mirror the same-named fields on Issue exactly (name, casing,
+// and omitempty), because this type backs list-shaped rendering and `bd list
+// --json` is one of that command's primary modes: a summary-backed list must
+// serialize to the same wire shape a full-Issue-backed one does, or every
+// consumer parsing bd output breaks silently. Keep them in sync with Issue.
 type IssueSummary struct {
-	ID        string
-	Title     string
-	Status    Status
-	Priority  int
-	IssueType IssueType
-	Assignee  string
-	Pinned    bool
-	Labels    []string
-	CreatedAt time.Time
-	UpdatedAt time.Time
-	ClosedAt  *time.Time
+	ID        string     `json:"id"`
+	Title     string     `json:"title"`
+	Status    Status     `json:"status,omitempty"`
+	Priority  int        `json:"priority"` // No omitempty: 0 is valid (P0/critical)
+	IssueType IssueType  `json:"issue_type,omitempty"`
+	Assignee  string     `json:"assignee,omitempty"`
+	Pinned    bool       `json:"pinned,omitempty"`
+	Labels    []string   `json:"labels,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
 }
 
 // ComputeContentHash creates a deterministic hash of the issue's content.
