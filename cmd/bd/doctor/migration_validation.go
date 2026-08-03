@@ -1,5 +1,3 @@
-//go:build cgo
-
 package doctor
 
 import (
@@ -148,7 +146,7 @@ func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResul
 		Status:   status,
 		Message:  message,
 		Detail:   strings.Join(result.Warnings, "\n"),
-		Fix:      "Run 'bd migrate dolt' to start migration",
+		Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify this JSONL export",
 		Category: CategoryMaintenance,
 	}, result
 }
@@ -195,7 +193,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  "Not using Dolt backend",
 			Detail:   fmt.Sprintf("Current backend: %s", result.Backend),
-			Fix:      "Run 'bd migrate dolt' to migrate to Dolt",
+			Fix:      "Follow 'bd help init-safety' to reinitialize with Dolt, then import and verify the issue export",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -302,7 +300,7 @@ func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResu
 			Status:   StatusError,
 			Message:  fmt.Sprintf("Migration incomplete: %d error(s)", len(result.Errors)),
 			Detail:   strings.Join(result.Errors, "\n"),
-			Fix:      "Re-run 'bd migrate dolt' or check for data issues",
+			Fix:      "Check the export/import results; follow 'bd help init-safety' before reinitializing again",
 			Category: CategoryMaintenance,
 		}, result
 	}
@@ -499,28 +497,12 @@ func checkDoltLocks(beadsDir string) (bool, string, error) {
 	}
 	defer rows.Close()
 
-	var changes []string
-	for rows.Next() {
-		var tableName string
-		var staged bool
-		var status string
-		if err := rows.Scan(&tableName, &staged, &status); err != nil {
-			continue
-		}
-		// Skip wisp tables — they are ephemeral and expected to have
-		// uncommitted changes (covered by dolt_ignore).
-		if isWispTable(tableName) {
-			continue
-		}
-		mark := ""
-		if staged {
-			mark = " (staged)"
-		}
-		changes = append(changes, fmt.Sprintf("%s: %s%s", tableName, status, mark))
-	}
-	if err := rows.Err(); err != nil {
+	// Same filter as the "Dolt Status" check — see describeUncommittedTables.
+	scanned, err := scanDoltStatus(rows)
+	if err != nil {
 		return false, "", fmt.Errorf("row iteration error: %w", err)
 	}
+	changes := describeUncommittedTables(scanned)
 
 	if len(changes) > 0 {
 		return true, strings.Join(changes, ", "), nil

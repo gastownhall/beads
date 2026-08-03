@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"strings"
 
 	"go.opentelemetry.io/otel/attribute"
 	oteltrace "go.opentelemetry.io/otel/trace"
@@ -15,11 +14,16 @@ import (
 // span. Pulled out so tests can assert the attribute set without touching
 // global OTel state. The bd.actor attribute is stamped later via SetAttributes
 // in main.go once getActorWithGit() resolves.
-func commandSpanAttrs(cmdName, version string, args []string) []attribute.KeyValue {
+//
+// secretFlags names the flag tokens whose values must never reach the
+// bd.args attribute (see secretFlagTokens); scrubArgsForTelemetry also
+// applies its DSN/userinfo scrub to every arg, so a nil map still redacts
+// positional connection strings.
+func commandSpanAttrs(cmdName, version string, args []string, secretFlags map[string]bool) []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.String("bd.command", cmdName),
 		attribute.String("bd.version", version),
-		attribute.String("bd.args", strings.Join(args, " ")),
+		attribute.String("bd.args", scrubArgsForTelemetry(args, secretFlags)),
 	}
 }
 
@@ -47,9 +51,9 @@ func initTelemetry(ctx context.Context, version string) {
 // telemetry.Init itself so callers can gate the usage-metrics bootstrap
 // block (e.g. skipping span creation for the internal send-metrics
 // subcommand) between the two.
-func startCommandSpan(ctx context.Context, cmdName, version string, args []string) (context.Context, oteltrace.Span) {
+func startCommandSpan(ctx context.Context, cmdName, version string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
 	return telemetry.Tracer("bd").Start(ctx, "bd.command."+cmdName,
-		oteltrace.WithAttributes(commandSpanAttrs(cmdName, version, args)...),
+		oteltrace.WithAttributes(commandSpanAttrs(cmdName, version, args, secretFlags)...),
 	)
 }
 
@@ -61,7 +65,7 @@ func startCommandSpan(ctx context.Context, cmdName, version string, args []strin
 // called) taught us that wiring inside cobra PreRunE is exactly the kind of
 // code that decays silently — this and its two constituent halves exist so
 // that wiring is a single testable line wherever it's used.
-func startCommandTelemetry(ctx context.Context, cmdName, version string, args []string) (context.Context, oteltrace.Span) {
+func startCommandTelemetry(ctx context.Context, cmdName, version string, args []string, secretFlags map[string]bool) (context.Context, oteltrace.Span) {
 	initTelemetry(ctx, version)
-	return startCommandSpan(ctx, cmdName, version, args)
+	return startCommandSpan(ctx, cmdName, version, args, secretFlags)
 }

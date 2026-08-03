@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -24,8 +25,8 @@ import (
 // and dispatches directly against a shared storage.Transaction so the entire
 // batch executes as a single dolt transaction (one DOLT_COMMIT).
 //
-// The supported grammar is a documented subset that matches what the gascity
-// shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
+// The supported grammar is a documented subset that matches what a downstream
+// consumer's shell-script "orders" (gate-sweep.sh, spawn-storm-detect.sh,
 // cross-rig-deps.sh) actually call in loops. See the Long help below for the
 // exact list. Unsupported commands error out loudly.
 
@@ -52,8 +53,15 @@ Grammar (one command per line):
   dep remove <from-id> <to-id>
   #comment  (blank lines and '# ...' comments are ignored)
 
-Supported 'update' keys: status, priority, title, assignee
+Supported 'update' keys: status, priority, title, assignee, force
 Supported dependency types: see 'bd dep add --help' (default: blocks)
+
+'force' is not a field. An update whose status moves the issue into closed
+(or a configured done status) is refused when it still has open children or
+a live blocker, the same as 'bd close'; 'force=true' overrides that refusal.
+Because the batch is one transaction, an unforced refusal rolls back EVERY
+operation in the batch, not just the offending line. Note the asymmetry with
+'close <id>', which does not apply that policy at all.
 
 Tokens are whitespace-separated. Double-quoted strings ("like this") may
 contain spaces; use \" to embed a quote and \\ for a backslash.
@@ -78,6 +86,9 @@ normal 'bd' subcommands for interactive/read operations.`,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("batch is not supported in proxied-server mode")
+		}
 		CheckReadonly("batch")
 
 		evt := metrics.NewCommandEvent("batch")
@@ -472,8 +483,17 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			updates["title"] = value
 		case "assignee":
 			updates["assignee"] = value
+		case "force":
+			// Not a field: the override for close policy on a status that
+			// crosses into done, spelled as a token because a batch script has
+			// no flags. The write funnel pops it before validating fields.
+			force, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("update: invalid force %q: %w", value, err)
+			}
+			updates[issueops.OpForceClosePolicy] = force
 		default:
-			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee)", key)
+			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee, force)", key)
 		}
 	}
 	return updates, nil

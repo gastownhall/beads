@@ -1,6 +1,8 @@
 package linear
 
 import (
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -953,6 +955,76 @@ func TestResolveStateIDForBeadsStatusDeferredExplicitMapping(t *testing.T) {
 	}
 }
 
+func TestIssueTypeToLinearLabelLookupKeyDeterministic(t *testing.T) {
+	cfg := DefaultMappingConfig()
+	cfg.LabelTypeMap["enhancement"] = "feature"
+	cfg.LabelTypeMap["feature"] = "feature"
+	// Lexicographically smallest label key wins when multiple map to the same type.
+	if got := IssueTypeToLinearLabelLookupKey(types.TypeFeature, cfg); got != "enhancement" {
+		t.Fatalf("IssueTypeToLinearLabelLookupKey(feature) = %q, want enhancement", got)
+	}
+}
+
+func TestResolveLabelIDsDedupesAndReportsMissing(t *testing.T) {
+	cfg := DefaultMappingConfig()
+	cache := &LabelCache{
+		IDByLowerName: map[string]string{
+			"bug":        "id-bug",
+			"customer-x": "id-cx",
+			"task":       "id-task",
+		},
+	}
+	issue := &types.Issue{
+		IssueType: types.TypeBug,
+		Labels:    []string{"Customer-X", "ghost"},
+	}
+	ids, missing := ResolveLabelIDs(issue, cache, cfg)
+	sort.Strings(ids)
+	want := []string{"id-bug", "id-cx"}
+	sort.Strings(want)
+	if !slices.Equal(ids, want) {
+		t.Fatalf("ResolveLabelIDs ids = %v, want %v", ids, want)
+	}
+	if len(missing) != 1 || missing[0] != "ghost" {
+		t.Fatalf("ResolveLabelIDs missing = %v, want [ghost]", missing)
+	}
+}
+
+func TestPushFieldsEqualComparesResolvedLabelIDs(t *testing.T) {
+	config := DefaultMappingConfig()
+	cache := &LabelCache{
+		IDByLowerName: map[string]string{
+			"task": "id-task",
+			"a":    "id-a",
+		},
+	}
+	local := &types.Issue{
+		Title:       "x",
+		Description: "d",
+		Status:      types.StatusOpen,
+		Priority:    0, // critical in beads → urgent in Linear (priority 1)
+		IssueType:   types.TypeTask,
+		Labels:      []string{"A"},
+	}
+	remote := &Issue{
+		Title:       "x",
+		Description: "d",
+		Priority:    4, // low in Linear — differs from beads P0 mapping
+		State:       &State{ID: "s", Name: "Backlog", Type: "backlog"},
+		Labels: &Labels{Nodes: []Label{
+			{ID: "id-task", Name: "task"},
+			{ID: "id-a", Name: "a"},
+		}},
+	}
+	if PushFieldsEqual(local, remote, config, cache) {
+		t.Fatal("expected false when Linear priority differs")
+	}
+	remote.Priority = PriorityToLinear(0, config)
+	if !PushFieldsEqual(local, remote, config, cache) {
+		t.Fatal("expected true when fields and resolved label ID sets match")
+	}
+}
+
 func TestPushFieldsEqualIgnoresLocalOnlyDifferences(t *testing.T) {
 	config := DefaultMappingConfig()
 	local := &types.Issue{
@@ -971,7 +1043,7 @@ func TestPushFieldsEqualIgnoresLocalOnlyDifferences(t *testing.T) {
 		State:       &State{ID: "state-3", Name: "In Progress", Type: "started"},
 	}
 
-	if !PushFieldsEqual(local, remote, config) {
+	if !PushFieldsEqual(local, remote, config, nil) {
 		t.Fatal("expected push fields to compare equal despite local-only issue type and labels")
 	}
 }

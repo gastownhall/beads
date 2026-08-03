@@ -58,6 +58,9 @@ func init() {
 }
 
 func runDuplicate(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("duplicate is not supported in proxied-server mode")
+	}
 	CheckReadonly("duplicate")
 
 	evt := metrics.NewCommandEvent("duplicate")
@@ -104,12 +107,9 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to add duplicate link: %w", err)
 	}
 
-	// Close the duplicate issue
-	closedStatus := string(types.StatusClosed)
-	updates := map[string]interface{}{
-		"status": closedStatus,
-	}
-	if err := store.UpdateIssue(ctx, duplicateID, updates, actor); err != nil {
+	// Close the duplicate issue through the lifecycle operation so it records
+	// the complete closure state.
+	if err := store.CloseIssue(ctx, duplicateID, "", actor, ""); err != nil {
 		return fmt.Errorf("failed to close duplicate: %w", err)
 	}
 
@@ -128,6 +128,9 @@ func runDuplicate(cmd *cobra.Command, args []string) error {
 }
 
 func runSupersede(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("supersede is not supported in proxied-server mode")
+	}
 	CheckReadonly("supersede")
 
 	evt := metrics.NewCommandEvent("supersede")
@@ -174,12 +177,9 @@ func runSupersede(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to add supersede link: %w", err)
 	}
 
-	// Close the superseded issue
-	closedStatus := string(types.StatusClosed)
-	updates := map[string]interface{}{
-		"status": closedStatus,
-	}
-	if err := store.UpdateIssue(ctx, oldID, updates, actor); err != nil {
+	// Close the superseded issue through the lifecycle operation so it records
+	// the complete closure state.
+	if err := store.CloseIssue(ctx, oldID, "", actor, ""); err != nil {
 		return fmt.Errorf("failed to close superseded issue: %w", err)
 	}
 

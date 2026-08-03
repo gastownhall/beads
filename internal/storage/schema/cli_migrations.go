@@ -1,12 +1,31 @@
 package schema
 
 // cliCompatibleMigrationSQL returns migration SQL suitable for `dolt sql -q`
-// against a fresh test database. The Dolt CLI accepts PREPARE/EXECUTE DDL but
-// does not apply some prepared ALTER TABLE statements in this path, so the
-// fresh-schema bundle uses direct DDL for prepared DDL that can change the
-// committed schema shape. The bundle's contract is to reproduce the runtime
-// committed schema for a fresh database; runtime migrations still use the source
-// files and remain the source of truth for upgrades of existing databases.
+// against a fresh test database. The Dolt CLI's batch execution path
+// (`dolt sql -q`/`-f`, which is what AllMigrationsSQL below feeds) silently
+// no-ops a PREPARE/EXECUTE statement whose prepared text is DML — UPDATE,
+// INSERT, or DELETE built into a `SET @sql = '...'` string and run via
+// PREPARE ... FROM @sql; EXECUTE stmt — while EXECUTE reports success and a
+// prepared SELECT or a direct (non-prepared) statement on the same path
+// executes correctly. This is dolthub/dolt#11345, verified on dolt 2.2.0 and
+// 2.2.2. Prepared ALTER TABLE is the same underlying limitation and one
+// instance of it, not the whole scope: the fresh-schema bundle uses direct
+// DDL below wherever a source migration guards an ALTER with PREPARE for
+// idempotent re-runs. The bundle's contract is to reproduce the runtime
+// committed schema for a fresh database; runtime migrations still use the
+// source files and remain the source of truth for upgrades of existing
+// databases, where PREPARE/EXECUTE runs over a real driver connection and
+// this limitation does not apply.
+//
+// For a migration whose PREPARE'd DML matters on this path (not just DDL),
+// the fix is not a direct-SQL override here — it is to not depend on
+// PREPARE'd writes to real tables in the source migration at all. Migration
+// 0059 (gastownhall/beads#4877) is the pattern: real-table mutations are
+// direct SQL; the only PREPARE'd statements are best-effort, guarded copies
+// into throwaway stand-in tables that a direct statement then reads, so a
+// silent no-op there degrades gracefully instead of corrupting state.
+// scripts/check-migration-hygiene.sh flags new migrations that use PREPARE'd
+// DML instead of that pattern.
 func cliCompatibleMigrationSQL(name, sqlText string) string {
 	switch name {
 	case "0008_create_child_counters.up.sql":
@@ -54,6 +73,12 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		// apply the prepared ALTER TABLE statements the runtime migration uses
 		// for idempotent re-runs on upgraded databases.
 		return cliMigration0054AddLeaseColumns
+	case "0055_move_leases_to_table.up.sql":
+		// Direct DDL for the same reason as 0054. A fresh bundle has no live
+		// leases to copy (0054 just added empty columns), so this is pure
+		// schema delta: create the ephemeral leases table, drop the issues/
+		// wisps lease columns 0054 added. row_lock stays (see the migration).
+		return cliMigration0055MoveLeasesToTable
 	default:
 		return sqlText
 	}
@@ -80,6 +105,20 @@ CREATE INDEX idx_issues_lease ON issues (status, lease_expires_at);
 ALTER TABLE wisps ADD COLUMN lease_expires_at DATETIME;
 ALTER TABLE wisps ADD COLUMN heartbeat_at DATETIME;
 ALTER TABLE wisps ADD COLUMN row_lock BIGINT NOT NULL DEFAULT 0;`
+
+const cliMigration0055MoveLeasesToTable = `CREATE TABLE leases (
+    issue_id VARCHAR(255) PRIMARY KEY,
+    holder VARCHAR(255) NOT NULL,
+    granted_at DATETIME NOT NULL,
+    lease_expires_at DATETIME NOT NULL,
+    heartbeat_at DATETIME NOT NULL,
+    INDEX idx_leases_expires (lease_expires_at)
+);
+ALTER TABLE issues DROP INDEX idx_issues_lease;
+ALTER TABLE issues DROP COLUMN lease_expires_at;
+ALTER TABLE issues DROP COLUMN heartbeat_at;
+ALTER TABLE wisps DROP COLUMN lease_expires_at;
+ALTER TABLE wisps DROP COLUMN heartbeat_at;`
 
 const cliMigration0041SplitDependenciesTarget = `DELETE FROM dolt_nonlocal_tables;
 CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');

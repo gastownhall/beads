@@ -13,7 +13,21 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 )
 
-func snapshotBootstrapEnv(t *testing.T) func() {
+// snapshotBootstrapEnv saves all BD_/BEADS_-prefixed env vars, clears them,
+// and registers a t.Cleanup to restore them. It restores via t.Cleanup
+// (rather than returning a function for the caller to defer) because
+// t.Cleanup callbacks only start running after the test function's own
+// regular defers have all completed. Tests using this helper commonly call
+// t.Setenv("BEADS_DIR", ...) / t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", ...)
+// afterward; t.Setenv captures its "restore to" value at call time, which
+// would be the already-wiped (absent) state. If this helper's own
+// restoration ran via a caller-deferred function, it would run before those
+// t.Setenv cleanups fire and its correct restoration would be clobbered by
+// them, permanently leaking the wipe forward into later tests in the same
+// binary. Registering via t.Cleanup here instead makes this the
+// first-registered (and thus, by t.Cleanup's LIFO order, last-run) cleanup,
+// so it always has the final word.
+func snapshotBootstrapEnv(t *testing.T) {
 	t.Helper()
 	saved := make(map[string]string)
 	for _, env := range os.Environ() {
@@ -24,7 +38,7 @@ func snapshotBootstrapEnv(t *testing.T) func() {
 			_ = os.Unsetenv(key)
 		}
 	}
-	return func() {
+	t.Cleanup(func() {
 		for _, env := range os.Environ() {
 			if strings.HasPrefix(env, "BD_") || strings.HasPrefix(env, "BEADS_") {
 				parts := strings.SplitN(env, "=", 2)
@@ -34,7 +48,7 @@ func snapshotBootstrapEnv(t *testing.T) func() {
 		for key, val := range saved {
 			_ = os.Setenv(key, val)
 		}
-	}
+	})
 }
 
 func TestDetectBootstrapAction_NoneWhenDatabaseExists(t *testing.T) {
@@ -327,8 +341,7 @@ func TestDetectBootstrapAction_SyncWhenOriginHasDoltRef(t *testing.T) {
 }
 
 func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testing.T) {
-	restore := snapshotBootstrapEnv(t)
-	defer restore()
+	snapshotBootstrapEnv(t)
 	config.ResetForTesting()
 	defer config.ResetForTesting()
 
@@ -364,6 +377,61 @@ func TestDetectBootstrapAction_ExplicitSyncRemotePreservesRemotesAPIURL(t *testi
 	}
 	if plan.SyncRemote != syncRemote {
 		t.Errorf("SyncRemote = %q, want unnormalized explicit sync.remote %q", plan.SyncRemote, syncRemote)
+	}
+}
+
+// TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp is a
+// regression for GH#5037: when sync.remote is set AND embeddeddolt already
+// exists, plan must be Action=none (validate/report), not Action=sync which
+// would DOLT_CLONE into the existing database and fail with Error 1007.
+func TestDetectBootstrapAction_ExistingEmbeddedDBWithSyncRemoteIsNoOp(t *testing.T) {
+	snapshotBootstrapEnv(t)
+	config.ResetForTesting()
+	defer config.ResetForTesting()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Non-empty embedded database footprint (what a prior successful bootstrap left).
+	embedded := filepath.Join(beadsDir, "embeddeddolt")
+	if err := os.MkdirAll(filepath.Join(embedded, "mydb"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(embedded, "mydb", ".keep"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const syncRemote = "http://myserver:7007/mydb"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("sync.remote: "+syncRemote+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize failed: %v", err)
+	}
+
+	oldWd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = os.Chdir(oldWd) }()
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := configfile.DefaultConfig()
+	plan := detectBootstrapAction(beadsDir, cfg)
+
+	if plan.Action != "none" {
+		t.Fatalf("action = %q reason=%q, want none (existing DB must not re-clone when sync.remote set)", plan.Action, plan.Reason)
+	}
+	if !plan.HasExisting {
+		t.Error("HasExisting = false, want true")
+	}
+	if !strings.Contains(plan.Reason, "already exists") {
+		t.Errorf("Reason = %q, want to mention already exists", plan.Reason)
 	}
 }
 
@@ -919,7 +987,10 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
 		// This is the fix path: search parent directories for metadata.json
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -939,6 +1010,37 @@ func TestBootstrapRigSubdirUsesParentDBName(t *testing.T) {
 	}
 }
 
+func TestFindParentConfigDoesNotSkipCorruptNearestAncestor(t *testing.T) {
+	root := t.TempDir()
+	higherBeadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(higherBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(higherBeadsDir, "metadata.json"), []byte(`{"dolt_database":"wrong_higher_database"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	nearestBeadsDir := filepath.Join(root, "workspace", ".beads")
+	if err := os.MkdirAll(nearestBeadsDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	corrupt := []byte("{\n")
+	metadataPath := filepath.Join(nearestBeadsDir, "metadata.json")
+	if err := os.WriteFile(metadataPath, corrupt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	synthesizedDir := filepath.Join(root, "workspace", "rig", ".beads")
+	if cfg, err := findParentConfig(synthesizedDir); err == nil {
+		t.Fatalf("findParentConfig skipped corrupt nearest metadata and selected higher database %q", cfg.GetDoltDatabase())
+	} else if !strings.Contains(err.Error(), filepath.Join("workspace", ".beads", "metadata.json")) {
+		t.Fatalf("findParentConfig error = %v, want nearest metadata path", err)
+	}
+	if after, err := os.ReadFile(metadataPath); err != nil || string(after) != string(corrupt) {
+		t.Fatalf("corrupt nearest metadata changed: got %q, err %v", after, err)
+	}
+}
+
 // TestDetectBootstrapAction_SharedServerEnvUsesSharedPath verifies that when
 // BEADS_DOLT_SHARED_SERVER=1 is set but cfg.DoltMode is the default (embedded),
 // detectBootstrapAction looks in the shared-server directory — not embeddeddolt/.
@@ -955,9 +1057,12 @@ func TestDetectBootstrapAction_SharedServerEnvUsesSharedPath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Override HOME so SharedDoltDir() resolves to our temp directory
-	// instead of the real ~/.beads/shared-server/dolt/.
+	// Override the home dir so SharedDoltDir() resolves to our temp directory
+	// instead of the real ~/.beads/shared-server/dolt/. It goes through
+	// os.UserHomeDir(), which reads USERPROFILE on Windows and HOME elsewhere,
+	// so both must be set for this to be portable.
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir)
 
 	// Create a database directory at the shared-server location.
 	// SharedDoltDir() returns $HOME/.beads/shared-server/dolt/.
@@ -1052,7 +1157,10 @@ func TestDetectBootstrapAction_WorktreeSynthesizedDirPrefersSyncOverDefaultShare
 	synthesizedDir := filepath.Join(localBare, ".beads")
 	cfg, cfgErr := configfile.Load(synthesizedDir)
 	if cfgErr != nil || cfg == nil {
-		cfg = findParentConfig(synthesizedDir)
+		cfg, cfgErr = findParentConfig(synthesizedDir)
+		if cfgErr != nil {
+			t.Fatalf("findParentConfig: %v", cfgErr)
+		}
 	}
 	if cfg == nil {
 		cfg = configfile.DefaultConfig()
@@ -1093,7 +1201,11 @@ func TestDetectBootstrapAction_SynthesizedDirWithoutRecoveryStillUsesExistingSha
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 
 	homeDir := t.TempDir()
+	// detectBootstrapAction resolves the home dir with os.UserHomeDir(), which reads
+	// USERPROFILE on Windows and HOME elsewhere; set both so the shared-server probe
+	// looks inside the temp home on every platform.
 	t.Setenv("HOME", homeDir)
+	t.Setenv("USERPROFILE", homeDir)
 
 	worktreeDir := filepath.Join(t.TempDir(), "worktree")
 	if err := os.MkdirAll(worktreeDir, 0o750); err != nil {
@@ -1228,8 +1340,7 @@ func TestFinalizeSyncedBootstrapWritesConfigFiles(t *testing.T) {
 }
 
 func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testing.T) {
-	restore := snapshotBootstrapEnv(t)
-	defer restore()
+	snapshotBootstrapEnv(t)
 
 	config.ResetForTesting()
 	defer config.ResetForTesting()
@@ -1273,9 +1384,9 @@ func TestFinalizeSyncedBootstrap_WorktreeStubDoesNotShadowTargetConfig(t *testin
 		t.Fatal(err)
 	}
 
-	const remoteURL = "git+ssh://git@github.com/gastownhall/gascity.git"
+	const remoteURL = "git+ssh://git@github.com/example-org/example-app.git"
 	cfg := configfile.DefaultConfig()
-	if err := finalizeSyncedBootstrap(targetBeadsDir, remoteURL, cfg, "gascity"); err != nil {
+	if err := finalizeSyncedBootstrap(targetBeadsDir, remoteURL, cfg, "example-org"); err != nil {
 		t.Fatalf("finalizeSyncedBootstrap failed: %v", err)
 	}
 

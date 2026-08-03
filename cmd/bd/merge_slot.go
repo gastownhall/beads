@@ -114,6 +114,9 @@ func init() {
 }
 
 func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot create is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot create")
 
 	evt := metrics.NewCommandEvent("merge-slot-create")
@@ -145,6 +148,9 @@ func runMergeSlotCreate(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotCheck(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot check is not supported in proxied-server mode")
+	}
 	evt := metrics.NewCommandEvent("merge-slot-check")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -202,6 +208,9 @@ func runMergeSlotCheck(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot acquire is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot acquire")
 
 	evt := metrics.NewCommandEvent("merge-slot-acquire")
@@ -284,6 +293,9 @@ func runMergeSlotAcquire(cmd *cobra.Command, args []string) error {
 }
 
 func runMergeSlotRelease(cmd *cobra.Command, args []string) error {
+	if usesProxiedServer() {
+		return HandleErrorRespectJSON("merge-slot release is not supported in proxied-server mode")
+	}
 	CheckReadonly("merge-slot release")
 
 	evt := metrics.NewCommandEvent("merge-slot-release")

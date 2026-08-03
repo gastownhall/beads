@@ -11,6 +11,8 @@ type UnitOfWork interface {
 	Close(ctx context.Context)
 	Commit(ctx context.Context, message string) error
 
+	SwitchDatabase(ctx context.Context, database string) error
+
 	ConfigUseCase() domain.ConfigUseCase
 	DoltRemoteUseCase() domain.DoltRemoteUseCase
 	BootstrapUseCase() domain.BootstrapUseCase
@@ -55,6 +57,10 @@ func (u *baseUOW) Commit(ctx context.Context, message string) error {
 
 func (u *baseUOW) Close(ctx context.Context) {
 	u.tx.RollbackUnlessCommitted(ctx)
+}
+
+func (u *baseUOW) SwitchDatabase(ctx context.Context, database string) error {
+	return db.NewDDLSQLRepository(u.tx.Runner()).UseDatabase(ctx, database)
 }
 
 func (u *baseUOW) ConfigUseCase() domain.ConfigUseCase {

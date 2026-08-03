@@ -177,13 +177,17 @@ func getConfigKeysInTx(ctx context.Context, tx DBTX, keys ...string) (map[string
 func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx DBTX) ([]types.CustomStatus, error) {
 	// Try the normalized table first
 	rows, err := tx.QueryContext(ctx, "SELECT name, category FROM custom_statuses ORDER BY name")
-	if err == nil {
+	if err != nil {
+		if !isTableNotExistError(err) {
+			return nil, fmt.Errorf("query custom_statuses: %w", err)
+		}
+	} else {
 		defer rows.Close()
 		var result []types.CustomStatus
 		for rows.Next() {
 			var name, category string
 			if err := rows.Scan(&name, &category); err != nil {
-				continue
+				return nil, fmt.Errorf("scan custom_statuses: %w", err)
 			}
 			result = append(result, types.CustomStatus{
 				Name:     name,
@@ -223,6 +227,26 @@ func ResolveCustomStatusesDetailedInTx(ctx context.Context, tx DBTX) ([]types.Cu
 		return ParseStatusFallback(yamlStatuses), nil
 	}
 	return nil, nil
+}
+
+// ReopenCategoryInTx resolves the reopen category for status from the same
+// transaction that will perform the state change. Unknown and malformed custom
+// statuses are treated as unspecified so callers leave them unchanged.
+func ReopenCategoryInTx(ctx context.Context, tx DBTX, status types.Status) (types.StatusCategory, error) {
+	if status.IsValid() {
+		return types.BuiltInStatusCategory(status), nil
+	}
+
+	statuses, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
+	if err != nil {
+		return types.CategoryUnspecified, fmt.Errorf("resolve custom statuses: %w", err)
+	}
+	for _, custom := range statuses {
+		if custom.Name == string(status) {
+			return custom.Category, nil
+		}
+	}
+	return types.CategoryUnspecified, nil
 }
 
 // ResolveCustomTypesInTx reads custom issue types from the custom_types table,

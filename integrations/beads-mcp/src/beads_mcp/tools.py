@@ -10,17 +10,21 @@ from typing import Annotated, Any
 
 from .bd_client import BdClientBase, BdError, create_bd_client
 from .models import (
+    AddCommentParams,
     AddDependencyParams,
+    AddNoteParams,
     BlockedIssue,
     BlockedParams,
     ClaimIssueParams,
     CloseIssueParams,
+    Comment,
     CreateIssueParams,
     DependencyType,
     InitParams,
     Issue,
     IssueStatus,
     IssueType,
+    ListCommentsParams,
     ListIssuesParams,
     ReadyWorkParams,
     ReopenIssueParams,
@@ -613,6 +617,50 @@ async def beads_add_dependency(
         return f"Added dependency: {issue_id} depends on {depends_on_id} ({dep_type})"
     except BdError as e:
         return f"Error: {str(e)}"
+
+
+async def beads_add_comment(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    text: Annotated[str, "Comment text — a human-readable summary of work done, decisions, or verification"],
+) -> str:
+    """Add a comment to an issue.
+
+    Leave a durable, timestamped record of what you did, decided, or verified so
+    humans don't have to read the agent transcript to know what happened. `show`
+    reports comment_count but not the bodies — use beads_list_comments to read them.
+
+    Prefer a comment over overwriting `notes`: comments accumulate as a per-turn
+    trail, whereas the notes field is a single value that gets replaced.
+    """
+    client = await _get_client()
+    params = AddCommentParams(issue_id=issue_id, text=text)
+    return await client.add_comment(params)
+
+
+async def beads_list_comments(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+) -> list[Comment]:
+    """List all comments on an issue in chronological order.
+
+    `show` returns comment_count but not the comment bodies; use this to read them.
+    """
+    client = await _get_client()
+    params = ListCommentsParams(issue_id=issue_id)
+    return await client.list_comments(params)
+
+
+async def beads_add_note(
+    issue_id: Annotated[str, "Issue ID (e.g., bd-1)"],
+    text: Annotated[str, "Note text to append to the issue's notes field"],
+) -> str:
+    """Append a note to an issue's notes field (`bd note`).
+
+    Notes are a single running field on the issue. For a per-turn, timestamped
+    trail that multiple actors can follow, prefer beads_add_comment.
+    """
+    client = await _get_client()
+    params = AddNoteParams(issue_id=issue_id, text=text)
+    return await client.add_note(params)
 
 
 async def beads_quickstart() -> str:

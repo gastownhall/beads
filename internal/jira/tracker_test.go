@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestRegistered(t *testing.T) {
@@ -629,6 +630,12 @@ func (s *configStore) GetAllConfig(_ context.Context) (map[string]string, error)
 }
 
 // Storage interface stubs — not exercised by Init().
+func (s *configStore) IssueLifecycle() (issueops.Lifecycle, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueLifecycle", Backend: "jira-config-stub"}
+}
+func (s *configStore) IssueReader() (issueops.Reader, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueReader", Backend: "jira-config-stub"}
+}
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {
@@ -650,10 +657,16 @@ func (s *configStore) GetIssuesByIDs(_ context.Context, _ []string) ([]*types.Is
 func (s *configStore) UpdateIssue(_ context.Context, _ string, _ map[string]interface{}, _ string) error {
 	return nil
 }
+func (s *configStore) UpdateIssueChecked(_ context.Context, _ string, _ map[string]interface{}, _ string, _ storage.UpdateIssueOptions) error {
+	return nil
+}
 func (s *configStore) ReopenIssue(_ context.Context, _, _, _ string) error     { return nil }
 func (s *configStore) UpdateIssueType(_ context.Context, _, _, _ string) error { return nil }
 func (s *configStore) CloseIssue(_ context.Context, _, _, _, _ string) error   { return nil }
-func (s *configStore) DeleteIssue(_ context.Context, _ string) error           { return nil }
+func (s *configStore) CloseIssueChecked(_ context.Context, _, _ string, _ storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	return storage.CloseIssueResult{}, nil
+}
+func (s *configStore) DeleteIssue(_ context.Context, _ string) error { return nil }
 func (s *configStore) SearchIssuesWithCounts(_ context.Context, _ string, _ types.IssueFilter) ([]*types.IssueWithCounts, error) {
 	return nil, nil
 }
@@ -666,7 +679,13 @@ func (s *configStore) SearchIssueIDs(_ context.Context, _ string, _ types.IssueF
 func (s *configStore) AddDependency(_ context.Context, _ *types.Dependency, _ string) error {
 	return nil
 }
+func (s *configStore) AddDependencyWithOptions(_ context.Context, _ *types.Dependency, _ string, _ storage.DependencyAddOptions) error {
+	return nil
+}
 func (s *configStore) RemoveDependency(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) RemoveDependencyWithOptions(_ context.Context, _, _, _ string, _ storage.DependencyRemoveOptions) error {
+	return nil
+}
 func (s *configStore) GetDependencies(_ context.Context, _ string) ([]*types.Issue, error) {
 	return nil, nil
 }
@@ -708,6 +727,10 @@ func (s *configStore) AddIssueComment(_ context.Context, _, _, _ string) (*types
 func (s *configStore) GetIssueComments(_ context.Context, _ string) ([]*types.Comment, error) {
 	return nil, nil
 }
+
+func (s *configStore) GetIssueCommentsPage(_ context.Context, _ string, _ storage.CommentPageCursor, _ int) ([]*types.Comment, error) {
+	return nil, nil
+}
 func (s *configStore) GetEvents(_ context.Context, _ string, _ int) ([]*types.Event, error) {
 	return nil, nil
 }
@@ -732,10 +755,17 @@ func (s *configStore) MergeSlotAcquire(_ context.Context, _, _ string, _ bool) (
 }
 func (s *configStore) MergeSlotRelease(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) SlotSet(_ context.Context, _, _, _, _ string) error    { return nil }
+func (s *configStore) MergeMetadata(_ context.Context, _, _ string, _ json.RawMessage, _ string) error {
+	return nil
+}
 func (s *configStore) SlotGet(_ context.Context, _, _ string) (string, error) {
 	return "", nil
 }
-func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error { return nil }
+func (s *configStore) SlotClear(_ context.Context, _, _, _ string) error                { return nil }
+func (s *configStore) UnclaimIssue(_ context.Context, _ string, _ string, _ bool) error { return nil }
+func (s *configStore) UnclaimIssueIfAssignee(_ context.Context, _ string, _ string, _ string) error {
+	return nil
+}
 
 func (s *configStore) CountIssues(_ context.Context, _ string, _ types.IssueFilter) (int64, error) {
 	return 0, nil

@@ -2,16 +2,19 @@ package uow
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"path/filepath"
 	"strconv"
 	"sync"
 	"testing"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +47,10 @@ func TestNewExternalDoltServerUOWProvider_ValidationErrors(t *testing.T) {
 				"",
 				tc.external,
 				tc.rootUser,
+				"",
+				0,
+				0,
+				false,
 				"",
 			)
 			assert.Nil(t, p)
@@ -84,6 +91,10 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 		logPath,
 		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
 		"root",
+		"",
+		0,
+		0,
+		false,
 		"",
 	)
 	require.NoError(t, err)
@@ -158,6 +169,10 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 				external,
 				"root",
 				"",
+				0,
+				0,
+				false,
+				"",
 			)
 			results[i] = result{provider: p, err: err}
 		}()
@@ -176,4 +191,177 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 		assert.NoErrorf(t, r.err, "provider %d", i)
 		assert.NotNilf(t, r.provider, "provider %d", i)
 	}
+}
+
+// TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure is
+// the regression test for gastownhall/beads#5012: the proxied shard-1 CI flake
+// where a fresh `bd init --proxied-server` fails with
+//
+//	uow: migrate: pending schema migrations alter pre-existing dirty tables: issues
+//
+// The shape of the failure: initSchema's first attempt dies mid-migration-pass
+// on the shared server (transient serialization failure / poisoned session —
+// the "[mysql] busy buffer" breadcrumb), leaving the failed step's SQL applied
+// to the Dolt working set but never Dolt-committed. The backoff retry then
+// re-runs MigrateUp, whose #4566 dirty-table guard reads that debris, decides
+// the pass's own half-applied step is "pre-existing dirty user data", and
+// converts a retryable transient into a permanent init failure — on a database
+// that did not exist seconds earlier.
+//
+// The test reproduces that exact interleaving deterministically: the per-step
+// fault hook fires once after migration 0001 commits, dirties `issues` in the
+// working set the way a mid-step death does (SQL applied, no Dolt commit), and
+// fails the pass with a retryable serialization error. The retry must
+// self-heal (discard the bootstrap debris and finish the pass) instead of
+// reporting DirtyTablesError.
+func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	t.Cleanup(func() {
+		if err := proxy.Shutdown(storeRootDir); err != nil {
+			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
+		}
+	})
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	// Fire exactly once, right after migration step 1 (create issues) has
+	// committed: dirty `issues` in the working set (schema change applied, no
+	// Dolt commit — indistinguishable from a step whose session died between
+	// its SQL and its per-step commit), then kill the pass with an error the
+	// provider's retry loop classifies as retryable.
+	fired := false
+	restore := schema.SetMigrateStepFaultHookForTest(func(ctx context.Context, db schema.DBConn, version int) error {
+		if version != 1 || fired {
+			return nil
+		}
+		fired = true
+		if _, err := db.ExecContext(ctx, "ALTER TABLE issues ADD COLUMN bd5012_debris INT"); err != nil {
+			return fmt.Errorf("injecting mid-step debris: %w", err)
+		}
+		return &mysql.MySQLError{Number: 1213, Message: "test-injected deadlock (mid-pass session death)"}
+	})
+	t.Cleanup(restore)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	provider, err := NewExternalDoltServerUOWProvider(
+		ctx,
+		storeRootDir,
+		"beads_fresh_heal",
+		logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+		"root",
+		"",
+		0,
+		0,
+		false,
+		"",
+	)
+	require.NoError(t, err, "fresh init must converge after a mid-pass transient failure, not trip the #4566 guard on its own bootstrap debris")
+	require.NotNil(t, provider)
+	t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	require.True(t, fired, "fault hook never fired; test no longer exercises the mid-pass failure path")
+
+	sqlProv, ok := provider.(*doltSQLProvider)
+	require.True(t, ok, "expected *doltSQLProvider, got %T", provider)
+
+	// The injected debris must have been discarded, not committed into history.
+	rows, err := sqlProv.db.QueryContext(ctx, "SHOW COLUMNS FROM issues LIKE 'bd5012_debris'")
+	require.NoError(t, err)
+	defer rows.Close()
+	require.False(t, rows.Next(), "bootstrap debris column survived the self-heal")
+	require.NoError(t, rows.Err())
+
+	// And the migration pass must have completed to the latest version.
+	var version int
+	require.NoError(t, sqlProv.db.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&version))
+	assert.Equal(t, schema.LatestVersion(), version)
+
+	// The working set must not still carry `issues` dirt.
+	statusRows, err := sqlProv.db.QueryContext(ctx,
+		"SELECT table_name FROM dolt_status WHERE table_name = 'issues'")
+	require.NoError(t, err)
+	defer statusRows.Close()
+	assert.False(t, statusRows.Next(), "issues still dirty in dolt_status after init")
+	require.NoError(t, statusRows.Err())
+}
+
+// TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed is
+// the ownership-negative counterpart of the fresh-init self-heal: an
+// initializer that did NOT create the database (its bare CREATE DATABASE loses
+// to an existing one) must keep the #4566 guard's refusal and must not
+// DOLT_RESET the working set — the dirt it sees could be another actor's
+// legitimate uncommitted state, which only the proven creator may discard.
+func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t *testing.T) {
+	port := testutil.StartIsolatedDoltContainer(t)
+	portInt, err := strconv.Atoi(port)
+	require.NoError(t, err)
+
+	bdBin := buildBDBinary(t)
+	prev := proxy.ResolveExecutable
+	proxy.ResolveExecutable = func() (string, error) { return bdBin, nil }
+	t.Cleanup(func() { proxy.ResolveExecutable = prev })
+
+	t.Setenv("HOME", t.TempDir())
+
+	storeRootDir := t.TempDir()
+	shutdownOnInterrupt(t, storeRootDir)
+	t.Cleanup(func() {
+		if err := proxy.Shutdown(storeRootDir); err != nil {
+			t.Logf("proxy.Shutdown(%s): %v", storeRootDir, err)
+		}
+	})
+	logPath := filepath.Join(t.TempDir(), "server.log")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Another actor created the database and left `issues` dirty in the
+	// working set (created, never Dolt-committed) — the state a mid-pass
+	// death leaves behind, indistinguishable from uncommitted user work.
+	admin, err := sql.Open("mysql", fmt.Sprintf("root:@tcp(127.0.0.1:%d)/?parseTime=true", portInt))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = admin.Close() })
+	_, err = admin.ExecContext(ctx, "CREATE DATABASE beads_loser")
+	require.NoError(t, err)
+	_, err = admin.ExecContext(ctx, "CREATE TABLE beads_loser.issues (id INT PRIMARY KEY)")
+	require.NoError(t, err)
+
+	provider, err := NewExternalDoltServerUOWProvider(
+		ctx,
+		storeRootDir,
+		"beads_loser",
+		logPath,
+		configfile.ExternalDoltConfig{Host: "127.0.0.1", Port: portInt},
+		"root",
+		"",
+		0,
+		0,
+		false,
+		"",
+	)
+	if provider != nil {
+		t.Cleanup(func() { _ = provider.Close(context.Background()) })
+	}
+	require.Error(t, err, "non-creator init over a dirty database must keep the #4566 refusal")
+	require.Contains(t, err.Error(), "pending schema migrations alter pre-existing dirty tables: issues")
+
+	// The dirt must be untouched: no DOLT_RESET may have fired.
+	var count int
+	require.NoError(t, admin.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM beads_loser.dolt_status WHERE table_name = 'issues'").Scan(&count))
+	require.Equal(t, 1, count, "issues working-set dirt was discarded by a non-creator init")
 }

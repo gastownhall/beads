@@ -3,11 +3,13 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	gmssql "github.com/dolthub/go-mysql-server/sql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/types"
@@ -59,7 +61,15 @@ type CreateIssueResult struct {
 	// StaleRejected reports that the RejectStaleUpserts guard kept the stored
 	// row: nothing was written, and the issue's aux data must not be
 	// persisted by later batch stages either (bd-578h9.8).
-	StaleRejected bool
+	StaleRejected         bool
+	persistedDependencies []persistedDependency
+}
+
+type persistedDependency struct {
+	source     string
+	target     string
+	depType    types.DependencyType
+	sourceWisp bool
 }
 
 func (r *CreateIssueResult) markChanged(table string) {
@@ -90,24 +100,19 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 
 	issueTable, eventTable := TableRouting(issue)
 
-	if issue.ID == "" {
-		prefix := bc.ConfigPrefix
-		if issue.PrefixOverride != "" {
-			prefix = issue.PrefixOverride
-		} else if issue.IDPrefix != "" {
-			prefix = bc.ConfigPrefix + "-" + issue.IDPrefix
-		} else if IsWisp(issue) {
-			prefix = bc.ConfigPrefix + "-wisp"
+	if err := assignCreateIssueIDInTx(ctx, tx, bc, issue, actor); err != nil {
+		return result, err
+	}
+	if bc.Opts.CreateOnly {
+		if err := EnsureIssueIDAvailableInTx(ctx, tx, issue.ID); err != nil {
+			return result, err
 		}
-		var err error
-		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor)
-		if err != nil {
-			return result, fmt.Errorf("failed to generate issue ID: %w", err)
-		}
-	} else if !bc.Opts.SkipPrefixValidation {
-		if err := ValidateIssueIDPrefix(issue.ID, bc.ConfigPrefix, bc.AllowedPrefixes); err != nil {
-			return result, fmt.Errorf("prefix validation failed for %s: %w", issue.ID, err)
-		}
+	}
+
+	if skip, err := checkCrossTableIDCollision(ctx, tx, issue.ID, issueTable, bc.Opts); err != nil {
+		return result, err
+	} else if skip {
+		return result, nil
 	}
 
 	if skip, err := CheckOrphan(ctx, tx, issue, issueTable, bc.Opts.OrphanHandling); err != nil {
@@ -132,6 +137,16 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.markChanged(issueTable)
 
+	// Reconcile the ephemeral lease row with the accepted issue state
+	// (restore an imported lease / drop an orphaned one — see
+	// RestoreLeaseOnImportInTx). Wisps are never leased. The leases table is
+	// dolt_ignored, so this is deliberately not marked as a changed table.
+	if issueTable == "issues" {
+		if err := RestoreLeaseOnImportInTx(ctx, tx, issue, isNew); err != nil {
+			return result, err
+		}
+	}
+
 	if isNew {
 		if err := RecordEventInTable(ctx, tx, eventTable, issue.ID, types.EventCreated, actor, ""); err != nil {
 			return result, fmt.Errorf("failed to record event for %s: %w", issue.ID, err)
@@ -150,6 +165,32 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	}
 	result.ChangedTables = mergeChangedTables(result.ChangedTables, commentResult.ChangedTables)
 	return result, nil
+}
+
+func assignCreateIssueIDInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) error {
+	if issue.ID == "" {
+		issueTable, _ := TableRouting(issue)
+		prefix := bc.ConfigPrefix
+		if issue.PrefixOverride != "" {
+			prefix = issue.PrefixOverride
+		} else if issue.IDPrefix != "" {
+			prefix = bc.ConfigPrefix + "-" + issue.IDPrefix
+		} else if IsWisp(issue) {
+			prefix = bc.ConfigPrefix + "-wisp"
+		}
+		var err error
+		issue.ID, err = GenerateIssueIDInTable(ctx, tx, issueTable, prefix, issue, actor)
+		if err != nil {
+			return fmt.Errorf("failed to generate issue ID: %w", err)
+		}
+		return nil
+	}
+	if !bc.Opts.SkipPrefixValidation {
+		if err := ValidateIssueIDPrefix(issue.ID, bc.ConfigPrefix, bc.AllowedPrefixes); err != nil {
+			return fmt.Errorf("prefix validation failed for %s: %w", issue.ID, err)
+		}
+	}
+	return nil
 }
 
 // CreateIssuesResult reports side effects that callers need for selective
@@ -221,14 +262,18 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types
 	for table := range changedCounters {
 		result.markChanged(table)
 	}
-	issueIDs, wispIDs := createBlockedRecomputeIDs(issues)
-	if err := RecomputeIsBlockedInTx(ctx, tx, issueIDs, wispIDs); err != nil {
+	issueIDs, wispIDs, err := createBlockedRecomputeIDs(ctx, tx, issues, depResult.persistedDependencies)
+	if err != nil {
 		return CreateIssuesResult{}, err
 	}
-	if len(issueIDs) > 0 {
+	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	if err != nil {
+		return CreateIssuesResult{}, err
+	}
+	if recomputed.IssueRowsChanged {
 		result.markChanged("issues")
 	}
-	if len(wispIDs) > 0 {
+	if recomputed.WispRowsChanged {
 		result.markChanged("wisps")
 	}
 	return result, nil
@@ -283,6 +328,17 @@ func stageableChangedTables(changed map[string]bool) map[string]bool {
 func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	_, err := filterCreateIssuesMixedBucketDependencies(issues, storage.BatchCreateOptions{})
 	return err
+}
+
+// FilterCreateIssuesMixedBucketDependencies applies the same cross-bucket
+// dependency policy as CreateIssuesInTx, but over the full issue set. Callers
+// that split one logical batch into bounded sub-batches (chunked import) must
+// run this once up front: the per-batch filter inside the engine only sees one
+// sub-batch, so it could no longer detect an edge whose endpoints land in
+// different chunks. Filtered edges are reported via opts.OnSkippedDependency;
+// issues whose dependency list changes are copied, never mutated.
+func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+	return filterCreateIssuesMixedBucketDependencies(issues, opts)
 }
 
 func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
@@ -360,7 +416,7 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 	return issues, nil
 }
 
-func createBlockedRecomputeIDs(issues []*types.Issue) ([]string, []string) {
+func createBlockedRecomputeIDs(ctx context.Context, tx *sql.Tx, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
 	issueSeen := make(map[string]bool, len(issues))
 	wispSeen := make(map[string]bool, len(issues))
 	issueIDs := make([]string, 0, len(issues))
@@ -387,18 +443,26 @@ func createBlockedRecomputeIDs(issues []*types.Issue) ([]string, []string) {
 		}
 		isWisp := IsWisp(issue)
 		add(issue.ID, isWisp)
-		for _, dep := range issue.Dependencies {
-			if dep == nil {
-				continue
-			}
-			src := dep.IssueID
-			if src == "" {
-				src = issue.ID
-			}
-			add(src, isWisp)
+	}
+	for _, dependency := range dependencies {
+		var affectedIssues, affectedWisps []string
+		var err error
+		if dependency.sourceWisp {
+			affectedIssues, affectedWisps, err = AffectedByDepChangeForWispInTx(ctx, tx, dependency.source, dependency.target, dependency.depType)
+		} else {
+			affectedIssues, affectedWisps, err = AffectedByDepChangeInTx(ctx, tx, dependency.source, dependency.target, dependency.depType)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("affected by created dependency %s -> %s: %w", dependency.source, dependency.target, err)
+		}
+		for _, id := range affectedIssues {
+			add(id, false)
+		}
+		for _, id := range affectedWisps {
+			add(id, true)
 		}
 	}
-	return issueIDs, wispIDs
+	return issueIDs, wispIDs, nil
 }
 
 // PrepareIssueForInsert normalizes timestamps, validates, and computes the content hash.
@@ -514,6 +578,44 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 	}
 }
 
+// checkCrossTableIDCollision rejects a create whose ID already lives in the
+// sibling table (GH#4455). Issues and wisps share one ID space but live in
+// separate tables; an ID present in both makes the merge-based lookups
+// (bd ready/search) hard-error for the whole store. The target-table
+// existence check in InsertIssueIfNew only sees one table, so nothing else in
+// the create path closes this hole.
+//
+// Promotion (PromoteFromEphemeralInTx) deliberately inserts into issues while
+// the wisp row still exists, then deletes the wisp — but it calls
+// InsertIssueIfNew directly and never routes through here, so its transient
+// dual-presence window is unaffected.
+//
+// ConflictSkip is the auto-import upgrade-recovery path (GH#3955), which must
+// never hard-fail; there we skip the colliding row instead (lookups stay
+// tolerant via GH#4163).
+//
+//nolint:gosec // G201: siblingTable is one of two hardcoded constants
+func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
+	if id == "" {
+		return false, nil
+	}
+	siblingTable := "wisps"
+	if issueTable == "wisps" {
+		siblingTable = "issues"
+	}
+	var siblingCount int
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, siblingTable), id).Scan(&siblingCount); err != nil {
+		return false, fmt.Errorf("failed to check cross-table ID collision for %s: %w", id, err)
+	}
+	if siblingCount == 0 {
+		return false, nil
+	}
+	if opts.ConflictSkip {
+		return true, nil
+	}
+	return false, fmt.Errorf("cannot create %q: ID already exists in the %s table (issues and wisps share one ID space)", id, siblingTable)
+}
+
 // InsertIssueIfNew inserts the issue and returns whether it was genuinely new,
 // and whether the RejectStaleUpserts guard rejected it.
 //
@@ -537,7 +639,7 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 // additively (bd-hj85c).
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
+func InsertIssueIfNew(ctx context.Context, tx DBTX, issueTable string, issue *types.Issue, opts storage.BatchCreateOptions) (isNew bool, staleRejected bool, err error) {
 	var existingCount int
 	if issue.ID != "" {
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE id = ?`, issueTable), issue.ID).Scan(&existingCount); err != nil {
@@ -546,6 +648,15 @@ func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue 
 	}
 	if opts.ConflictSkip && existingCount > 0 {
 		return false, false, nil // issue already exists — skip, never overwrite
+	}
+	if opts.CreateOnly {
+		if err := insertIssueCreateOnly(ctx, tx, issueTable, issue); err != nil {
+			if isCreateOnlyDuplicateError(err) {
+				return false, false, fmt.Errorf("%w: %s", storage.ErrAlreadyExists, issue.ID)
+			}
+			return false, false, err
+		}
+		return true, false, nil
 	}
 	if opts.RejectStaleUpserts && existingCount > 0 {
 		var storedNewer int
@@ -564,6 +675,27 @@ func InsertIssueIfNew(ctx context.Context, tx *sql.Tx, issueTable string, issue 
 	return existingCount == 0, false, nil
 }
 
+func isCreateOnlyDuplicateError(err error) bool {
+	var mysqlError *mysql.MySQLError
+	if errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
+		return true
+	}
+	return gmssql.ErrPrimaryKeyViolation.Is(err) || gmssql.ErrUniqueKeyViolation.Is(err)
+}
+
+// InsertIssueStrictInTx inserts one issue without probing either storage plane.
+// Callers that move an aggregate use it while the source row necessarily still
+// occupies the shared ID, so cross-plane create guards would reject a valid move.
+func InsertIssueStrictInTx(ctx context.Context, tx DBTX, table string, issue *types.Issue) error {
+	if err := insertIssueCreateOnly(ctx, tx, table, issue); err != nil {
+		if isCreateOnlyDuplicateError(err) {
+			return fmt.Errorf("%w: %s", storage.ErrAlreadyExists, issue.ID)
+		}
+		return err
+	}
+	return nil
+}
+
 func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
@@ -579,6 +711,14 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 			continue
 		}
 		seen[label] = struct{}{}
+		// Reject an over-length label before the INSERT IGNORE, which would
+		// otherwise silently truncate it to VARCHAR(255). This is the create and
+		// import chokepoint (AddLabelInTx guards the bd label-add path). The whole
+		// create runs in one transaction, so returning here rolls it back — the
+		// issue and its labels are not persisted.
+		if err := types.CheckFieldLen("label", label); err != nil {
+			return result, err
+		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT IGNORE INTO %s (issue_id, label)
@@ -596,11 +736,12 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 		}
 		result.markChanged(labelTable)
 		comment := "Added label: " + label
-		//nolint:gosec // G201: eventTable is determined by ephemeral flag
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (id, issue_id, event_type, actor, comment)
-			VALUES (?, ?, ?, ?, ?)
-		`, eventTable), NewEventID(), issue.ID, types.EventLabelAdded, actor, comment); err != nil {
+		if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+			IssueID:   issue.ID,
+			EventType: types.EventLabelAdded,
+			Actor:     actor,
+			Comment:   str(comment),
+		}); err != nil {
 			return result, fmt.Errorf("failed to record label event %q for %s: %w", label, issue.ID, err)
 		}
 		result.markChanged(eventTable)
@@ -620,32 +761,49 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (Creat
 	for _, comment := range issue.Comments {
 		createdAt := comment.CreatedAt
 		if createdAt.IsZero() {
-			createdAt = time.Now().UTC()
+			// No supplied timestamp: this is a live comment, so stamp it the
+			// same way AddIssueComment does — one second past the issue's
+			// newest comment when the clock second would collide. Otherwise
+			// several such comments in one create share a second and read back
+			// in content-digest order rather than the order they were listed.
+			stamped, err := NextLiveCommentTime(ctx, tx, commentTable, issue.ID, time.Now())
+			if err != nil {
+				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
+			}
+			createdAt = stamped
 		}
-		// Check for existing identical comment to prevent duplicates on re-import.
-		// The UUID PK means ON DUPLICATE KEY UPDATE would never fire,
-		// so we do an explicit existence check instead.
+		createdAtText := FormatAuxTime(createdAt)
+		if comment.ID == "" {
+			// No incoming id (fresh comment): content-derived id, collapsing
+			// onto an identical existing row exactly like the import dedup.
+			id, existed, err := InsertDerivedComment(ctx, tx, commentTable, issue.ID, comment.Author, comment.Text, createdAtText)
+			if err != nil {
+				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
+			}
+			comment.ID = id
+			if !existed {
+				result.markChanged(commentTable)
+			}
+			continue
+		}
+		// Incoming id (import/interchange): preserve it, with the historical
+		// existence check preventing duplicates on re-import.
 		var exists int
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 				SELECT COUNT(*) FROM %s
 				WHERE issue_id = ? AND author = ? AND created_at = ? AND text = ?
-			`, commentTable), issue.ID, comment.Author, createdAt, comment.Text).Scan(&exists); err != nil {
+			`, commentTable), issue.ID, comment.Author, createdAtText, comment.Text).Scan(&exists); err != nil {
 			return result, fmt.Errorf("failed to check comment existence for %s: %w", issue.ID, err)
 		}
 		if exists > 0 {
 			continue
 		}
-		commentID := comment.ID
-		if commentID == "" {
-			commentID = uuid.Must(uuid.NewV7()).String()
-			comment.ID = commentID
-		}
 		//nolint:gosec // G201: table is determined by ephemeral flag
 		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
-		`, commentTable), commentID, issue.ID, comment.Author, comment.Text, createdAt)
+		`, commentTable), comment.ID, issue.ID, comment.Author, comment.Text, createdAtText)
 		if err != nil {
 			return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 		}
@@ -665,13 +823,14 @@ func PersistDependenciesWithResult(ctx context.Context, tx *sql.Tx, issues []*ty
 
 func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
 	var result CreateIssueResult
+	type pendingDependency struct {
+		dep      *types.Dependency
+		depTable string
+	}
+	var pending []pendingDependency
 	for _, issue := range issues {
 		if len(issue.Dependencies) == 0 {
 			continue
-		}
-		depTable := "dependencies"
-		if IsWisp(issue) {
-			depTable = "wisp_dependencies"
 		}
 		for _, dep := range issue.Dependencies {
 			// Default IssueID to the owning issue when not pre-set (e.g.,
@@ -679,8 +838,26 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			if dep.IssueID == "" {
 				dep.IssueID = issue.ID
 			}
+			depTable := "dependencies"
+			if IsActiveWispInTx(ctx, tx, dep.IssueID) {
+				depTable = "wisp_dependencies"
+			}
+			pending = append(pending, pendingDependency{dep: dep, depTable: depTable})
+		}
+	}
 
-			kind := ClassifyDepTarget(ctx, tx, dep, false)
+	// Persist hierarchy first so blocking edges in the same import see the full
+	// planned ancestry. The enclosing create transaction rolls this phase back
+	// if a later dependency is invalid.
+	for phase := 0; phase < 2; phase++ {
+		parentPhase := phase == 0
+		for _, item := range pending {
+			dep := item.dep
+			if (dep.Type == types.DepParentChild) != parentPhase {
+				continue
+			}
+			isCrossPrefix := types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID)
+			kind := ClassifyDepTarget(ctx, tx, dep, isCrossPrefix)
 
 			if kind != DepTargetExternal {
 				lookupTable := "issues"
@@ -700,6 +877,16 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				}
 			}
 
+			if kind != DepTargetExternal && types.ExtractPrefix(dep.IssueID) == types.ExtractPrefix(dep.DependsOnID) {
+				if err := CheckBlockingHierarchyInTx(ctx, tx, dep, nil); err != nil {
+					if opts.SkipDependencyValidationErrors {
+						recordSkippedDependency(opts, dep, err.Error())
+						continue
+					}
+					return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+				}
+			}
+
 			if err := CheckDependencyCycleInTx(ctx, tx, dep, nil); err != nil {
 				if opts.SkipDependencyValidationErrors {
 					recordSkippedDependency(opts, dep, err.Error())
@@ -716,12 +903,16 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
 			createdBy := dependencyCreatedBy(dep, actor)
-			//nolint:gosec // G201: depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
+			metadata := dep.Metadata
+			if metadata == "" {
+				metadata = "{}"
+			}
+			//nolint:gosec // G201: item.depTable is one of two hardcoded constants; target column from DepTargetKind.Column()
 			sqlResult, err := tx.ExecContext(ctx, fmt.Sprintf(`
-					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at)
-					VALUES (?, ?, ?, ?, ?, ?)
+					INSERT INTO %s (id, issue_id, %s, type, created_by, created_at, metadata, thread_id)
+					VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 					ON DUPLICATE KEY UPDATE type = type
-				`, depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt)
+				`, item.depTable, kind.Column()), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, createdBy, createdAt, metadata, dep.ThreadID)
 			if err != nil {
 				return result, fmt.Errorf("failed to insert dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
@@ -730,7 +921,18 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 				return result, fmt.Errorf("failed to check dependency insert result for %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 			if rowsAffected > 0 {
-				result.markChanged(depTable)
+				result.markChanged(item.depTable)
+				result.persistedDependencies = append(result.persistedDependencies, persistedDependency{
+					source:     dep.IssueID,
+					target:     dep.DependsOnID,
+					depType:    dep.Type,
+					sourceWisp: item.depTable == "wisp_dependencies",
+				})
+				if dep.Type == types.DepParentChild {
+					if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, item.depTable); err != nil {
+						return result, err
+					}
+				}
 			}
 		}
 	}
@@ -801,20 +1003,47 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		}
 	}
 
+	unknownParentIDs := make([]string, 0, len(parents))
+	for parentID, b := range parents {
+		if b.maxChild > 0 && !b.known {
+			unknownParentIDs = append(unknownParentIDs, parentID)
+		}
+	}
+	wispParents, err := WispIDSetInTx(ctx, tx, unknownParentIDs)
+	if err != nil {
+		return nil, fmt.Errorf("failed to route child counter parents: %w", err)
+	}
+	for _, parentID := range unknownParentIDs {
+		_, parents[parentID].isWisp = wispParents[parentID]
+	}
+
 	for parentID, b := range parents {
 		if b.maxChild == 0 {
 			continue
 		}
-		if !b.known {
-			b.isWisp = IsActiveWispInTx(ctx, tx, parentID)
-		}
 		table := "child_counters"
+		parentTable := "issues"
 		if b.isWisp {
 			table = "wisp_child_counters"
+			parentTable = "wisps"
+		}
+		var parentExists int
+		// Orphaned hierarchical IDs are valid import input when the parent was
+		// deleted before export. Their auxiliary counter has no owner and must
+		// not be inserted: both counter tables enforce a parent foreign key.
+		//nolint:gosec // G201: parentTable is one of two hardcoded constants.
+		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+			SELECT 1 FROM %s WHERE id = ?
+		`, parentTable), parentID).Scan(&parentExists)
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to check child counter parent %s: %w", parentID, err)
 		}
 		var current int
 		//nolint:gosec // G201: table is one of two hardcoded constants.
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(`
+		err = tx.QueryRowContext(ctx, fmt.Sprintf(`
 			SELECT last_child FROM %s WHERE parent_id = ?
 		`, table), parentID).Scan(&current)
 		if err != nil && err != sql.ErrNoRows {
@@ -823,10 +1052,13 @@ func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Iss
 		if err == nil && current >= b.maxChild {
 			continue
 		}
+		// Qualify the existing-row column with the table name so the canonical
+		// MySQL form and SQLite's translated ON CONFLICT form both unambiguously
+		// refer to the target row rather than the incoming value.
 		//nolint:gosec // G201: table is one of two hardcoded constants.
 		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			INSERT INTO %s (parent_id, last_child) VALUES (?, ?)
-			ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)
+			INSERT INTO %[1]s (parent_id, last_child) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE last_child = GREATEST(%[1]s.last_child, ?)
 		`, table), parentID, b.maxChild, b.maxChild); err != nil {
 			return nil, fmt.Errorf("failed to reconcile child counter for %s: %w", parentID, err)
 		}

@@ -1,7 +1,10 @@
 package linear
 
 import (
+	"context"
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -470,10 +473,111 @@ func StatusToLinearStateType(status types.Status) string {
 	}
 }
 
+// LabelCache maps normalized Linear label names (lowercase) to Linear label IDs
+// for a single team.
+type LabelCache struct {
+	IDByLowerName map[string]string
+}
+
+// BuildLabelCache fetches team labels and indexes them by lowercase trimmed name.
+func BuildLabelCache(ctx context.Context, client *Client) (*LabelCache, error) {
+	if client == nil {
+		return nil, fmt.Errorf("no linear client")
+	}
+	labels, err := client.GetTeamLabels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	c := &LabelCache{
+		IDByLowerName: make(map[string]string, len(labels)),
+	}
+	for _, lb := range labels {
+		k := strings.ToLower(strings.TrimSpace(lb.Name))
+		if k != "" && lb.ID != "" {
+			c.IDByLowerName[k] = lb.ID
+		}
+	}
+	return c, nil
+}
+
+// IssueTypeToLinearLabelLookupKey returns the label_type_map key (lowercase) for
+// the given beads issue type, inverting linear.label_type_map.<label>=<type>.
+// When multiple labels map to the same type, the smallest key lexicographically wins.
+func IssueTypeToLinearLabelLookupKey(issueType types.IssueType, config *MappingConfig) string {
+	if config == nil || len(config.LabelTypeMap) == 0 {
+		return ""
+	}
+	want := strings.ToLower(strings.TrimSpace(string(issueType)))
+	if want == "" {
+		return ""
+	}
+	var keys []string
+	for labelKey, typeStr := range config.LabelTypeMap {
+		if strings.ToLower(strings.TrimSpace(typeStr)) == want {
+			keys = append(keys, labelKey)
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
+}
+
+// ResolveLabelIDs maps beads issue_type (via inverted label_type_map) and
+// issue.Labels to Linear label UUIDs. Names not present on the team are returned
+// in missing (deduplicated by display string order of discovery).
+func ResolveLabelIDs(issue *types.Issue, cache *LabelCache, config *MappingConfig) (ids []string, missing []string) {
+	if issue == nil || cache == nil || len(cache.IDByLowerName) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]struct{})
+
+	tryAdd := func(lowerName, display string) {
+		if lowerName == "" {
+			return
+		}
+		id, ok := cache.IDByLowerName[lowerName]
+		if !ok {
+			missing = append(missing, display)
+			return
+		}
+		if _, dup := seen[id]; dup {
+			return
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
+	}
+
+	if lk := IssueTypeToLinearLabelLookupKey(issue.IssueType, config); lk != "" {
+		tryAdd(lk, lk)
+	}
+	for _, raw := range issue.Labels {
+		ln := strings.ToLower(strings.TrimSpace(raw))
+		tryAdd(ln, raw)
+	}
+	return ids, missing
+}
+
+func linearIssueLabelIDs(remote *Issue) []string {
+	if remote == nil || remote.Labels == nil {
+		return nil
+	}
+	out := make([]string, 0, len(remote.Labels.Nodes))
+	for _, n := range remote.Labels.Nodes {
+		if n.ID != "" {
+			out = append(out, n.ID)
+		}
+	}
+	return out
+}
+
 // PushFieldsEqual compares only the fields that a Linear push can actually
 // mutate. This avoids repeated updates caused by local-only fields such as
-// issue type, metadata, or labels that are preserved elsewhere.
-func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) bool {
+// issue type and metadata. When labelCache is non-nil, resolved Linear label ID
+// sets are compared so label drift is detected; when nil, labels are ignored
+// (callers that can build a LabelCache should pass it for accurate skip logic).
+func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig, labelCache *LabelCache) bool {
 	if local == nil || remote == nil {
 		return false
 	}
@@ -486,7 +590,19 @@ func PushFieldsEqual(local *types.Issue, remote *Issue, config *MappingConfig) b
 	if PriorityToLinear(local.Priority, config) != remote.Priority {
 		return false
 	}
-	return StateToBeadsStatus(remote.State, config) == local.Status
+	if StateToBeadsStatus(remote.State, config) != local.Status {
+		return false
+	}
+	if labelCache != nil {
+		wantIDs, _ := ResolveLabelIDs(local, labelCache, config)
+		remoteIDs := linearIssueLabelIDs(remote)
+		slices.Sort(wantIDs)
+		slices.Sort(remoteIDs)
+		if !slices.Equal(wantIDs, remoteIDs) {
+			return false
+		}
+	}
+	return true
 }
 
 // PushFieldsEqualToBeads is a fallback comparator for cases where Linear's raw

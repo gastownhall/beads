@@ -157,6 +157,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("swarm validate is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("swarm-validate")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -311,6 +314,13 @@ func analyzeEpicForSwarm(ctx context.Context, s SwarmStorage, epic *types.Issue)
 	return analysis, nil
 }
 
+// issueIsClosed reports whether id is closed. Closed issues count as satisfied
+// and are excluded from cycle detection and ready-front scheduling (GH#4564).
+func issueIsClosed(analysis *SwarmAnalysis, id string) bool {
+	n, ok := analysis.Issues[id]
+	return ok && n.Status == string(types.StatusClosed)
+}
+
 // detectStructuralIssues looks for common problems in the dependency graph.
 //
 //nolint:unparam // issues reserved for future use
@@ -399,6 +409,7 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 
 	// 5. Detect cycles using simple DFS
 	// (The main DetectCycles in storage is more sophisticated, but we do a simple check here)
+	// Closed issues are excluded: a closed cycle must not block open children (GH#4564).
 	inProgress := make(map[string]bool)
 	completed := make(map[string]bool)
 	var cyclePath []string
@@ -406,6 +417,9 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 
 	var detectCycle func(id string) bool
 	detectCycle = func(id string) bool {
+		if issueIsClosed(analysis, id) {
+			return false
+		}
 		if completed[id] {
 			return false
 		}
@@ -431,6 +445,9 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 	}
 
 	for id := range analysis.Issues {
+		if issueIsClosed(analysis, id) {
+			continue
+		}
 		if !completed[id] {
 			if detectCycle(id) {
 				break
@@ -445,19 +462,34 @@ func detectStructuralIssues(analysis *SwarmAnalysis, _ []*types.Issue) {
 }
 
 // computeReadyFronts calculates the waves of parallel work.
+// Closed issues are excluded from waves and do not block dependents (GH#4564):
+// a closed dependency is treated as already satisfied for ready-front purposes.
 func computeReadyFronts(analysis *SwarmAnalysis) {
 	if len(analysis.Errors) > 0 {
 		// Can't compute ready fronts if there are cycles
 		return
 	}
 
-	// Use Kahn's algorithm for topological sort with level tracking
-	inDegree := make(map[string]int)
-	for id, node := range analysis.Issues {
-		inDegree[id] = len(node.DependsOn)
+	isClosed := func(id string) bool {
+		return issueIsClosed(analysis, id)
 	}
 
-	// Start with all nodes that have no dependencies (wave 0)
+	// Kahn's algorithm over open issues only; in-degree counts open blockers.
+	inDegree := make(map[string]int)
+	for id, node := range analysis.Issues {
+		if isClosed(id) {
+			continue
+		}
+		openBlockers := 0
+		for _, depID := range node.DependsOn {
+			if !isClosed(depID) {
+				openBlockers++
+			}
+		}
+		inDegree[id] = openBlockers
+	}
+
+	// Wave 0: open issues with no open dependencies
 	var currentWave []string
 	for id, degree := range inDegree {
 		if degree == 0 {
@@ -491,11 +523,17 @@ func computeReadyFronts(analysis *SwarmAnalysis) {
 			analysis.MaxParallelism = len(currentWave)
 		}
 
-		// Find next wave
+		// Find next wave among open dependents
 		var nextWave []string
 		for _, id := range currentWave {
 			if node, ok := analysis.Issues[id]; ok {
 				for _, dependentID := range node.DependedOnBy {
+					if isClosed(dependentID) {
+						continue
+					}
+					if _, tracked := inDegree[dependentID]; !tracked {
+						continue
+					}
 					inDegree[dependentID]--
 					if inDegree[dependentID] == 0 {
 						nextWave = append(nextWave, dependentID)
@@ -509,8 +547,14 @@ func computeReadyFronts(analysis *SwarmAnalysis) {
 		wave++
 	}
 
-	// Estimated sessions = total issues (each issue is roughly one session)
-	analysis.EstimatedSessions = analysis.TotalIssues
+	// Estimated sessions ≈ remaining open issues (each issue is roughly one session)
+	openCount := 0
+	for id := range analysis.Issues {
+		if !isClosed(id) {
+			openCount++
+		}
+	}
+	analysis.EstimatedSessions = openCount
 }
 
 // renderSwarmAnalysis outputs human-readable analysis.
@@ -620,6 +664,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("swarm status is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("swarm-status")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -904,6 +951,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("swarm create is not supported in proxied-server mode")
+		}
 		CheckReadonly("swarm create")
 
 		evt := metrics.NewCommandEvent("swarm-create")
@@ -1086,6 +1136,9 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("swarm list is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("swarm-list")
 		defer func() {
 			if c := metrics.Global(); c != nil {

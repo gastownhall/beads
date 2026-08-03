@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -498,7 +499,15 @@ func applyS3ChecksumEnvToCmd(cmd *exec.Cmd) {
 // skip them. Same intent as the `--no-verify` fix on the commit side
 // (GH#3340 / GH#3598 / PR #3626), applied at the push site (GH#3724).
 func applyNoGitHooksToCmd(cmd *exec.Cmd) {
-	setCmdEnv(cmd, "GIT_CONFIG_PARAMETERS", "'core.hooksPath=/dev/null'")
+	base := cmd.Env
+	if base == nil {
+		base = os.Environ()
+	}
+	// Append rather than replace: a caller that set its own
+	// GIT_CONFIG_PARAMETERS (a test harness pinning user.email, say) would
+	// otherwise have it silently dropped by this call.
+	setCmdEnv(cmd, githooksenv.ParametersEnv,
+		githooksenv.AppendParameter(githooksenv.Extract(base), githooksenv.NoHooksParam))
 }
 
 // setFederationCredentials sets DOLT_REMOTE_USER and DOLT_REMOTE_PASSWORD env vars.

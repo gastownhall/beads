@@ -39,7 +39,7 @@ func handleRemoteMigrateGateJSON(e *schema.RemoteMigrateGateError) {
 			"observed":                fmt.Sprintf("%d pending schema migration(s) and a configured remote", e.Pending),
 			"expected":                "exactly one designated clone migrates and publishes; every other clone adopts the result",
 			"options":                 opts,
-			"docs":                    "https://github.com/gastownhall/beads/blob/main/website/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones",
+			"docs":                    "https://github.com/gastownhall/beads/blob/main/docs/getting-started/upgrading.md#remote-backed-databases-and-multiple-clones",
 		}
 		// Smart gate (#4516): when a state-aware decision narrowed the stop,
 		// tell the agent which case it is and (for a fork) which versions skewed.

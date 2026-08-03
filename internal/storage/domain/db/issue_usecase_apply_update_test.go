@@ -1,6 +1,8 @@
 package db
 
 import (
+	"database/sql"
+	"encoding/json"
 	"errors"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -12,6 +14,7 @@ func (s *testSuite) TestIssueUseCase_Claim() {
 	s.Run("SuccessReturnsEmptyResult", s.iucClaimSuccess)
 	s.Run("IdempotentReclaimMarksAlreadyClaimed", s.iucClaimIdempotent)
 	s.Run("ConflictWrapsErrAlreadyClaimed", s.iucClaimConflict)
+	s.Run("OpenAssignedRefusalSteersToHolder", s.iucClaimOpenAssignedCopy)
 	s.Run("ClosedWrapsErrNotClaimable", s.iucClaimClosed)
 	s.Run("EmptyIDReturnsError", s.iucClaimEmptyID)
 	s.Run("EmptyActorReturnsError", s.iucClaimEmptyActor)
@@ -24,12 +27,15 @@ func (s *testSuite) TestIssueUseCase_ApplyUpdate() {
 	s.Run("ClaimAndFieldsRunTogether", s.iucApplyUpdateClaimPlusFields)
 	s.Run("AddRemoveLabelPaths", s.iucApplyUpdateAddRemoveLabels)
 	s.Run("SetLabelsDiffsAgainstCurrent", s.iucApplyUpdateSetLabels)
-	s.Run("SetLabelsTakesPrecedenceOverAddRemove", s.iucApplyUpdateSetLabelsBeatsAddRemove)
+	s.Run("SetLabelsThenAddsThenRemoves", s.iucApplyUpdateSetLabelsThenAddRemove)
+	s.Run("SameScalarAndMetadataAreNoops", s.iucApplyUpdateSameScalarAndMetadataAreNoops)
 	s.Run("ReparentReplacesParent", s.iucApplyUpdateReparent)
 	s.Run("ReparentEmptyUnparents", s.iucApplyUpdateUnparent)
 	s.Run("NoSpecBitsIsHarmless", s.iucApplyUpdateEmptySpec)
 	s.Run("WispIDDispatchesToWispTables", s.iucApplyUpdateDispatchesToWisp)
 	s.Run("ClaimAgainstWispDispatches", s.iucClaimDispatchesToWisp)
+	s.Run("ExpectedVersionRefusesStaleWrite", s.iucApplyUpdateExpectedVersion)
+	s.Run("PersistenceMovesNoOpsAndRollsBack", s.iucApplyUpdatePersistence)
 }
 
 func (s *testSuite) seedOpenIssue(id string) {
@@ -69,13 +75,31 @@ func (s *testSuite) iucClaimConflict() {
 	s.Contains(err.Error(), "alice")
 }
 
+// iucClaimOpenAssignedCopy pins the proxied-path refusal copy for an OPEN
+// issue assigned to another real actor (bd-at6rc parity, found by review):
+// it must steer toward the holder like issueops.ClaimIssueInTx, keep the
+// ErrAlreadyClaimed wrap (the proxied batch exit code keys on errors.Is),
+// and never name an eviction command.
+func (s *testSuite) iucClaimOpenAssignedCopy() {
+	s.seedOpenIssue("bd-iuc-cl-openassigned")
+	r := s.issueRepo()
+	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-openassigned",
+		map[string]any{"assignee": "alice"}, "seeder", domain.IssueTableOpts{}))
+
+	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-openassigned", "bob")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrAlreadyClaimed), "expected ErrAlreadyClaimed wrap, got %v", err)
+	s.Contains(err.Error(), "coordinate with the holder")
+	s.NotContains(err.Error(), "unclaim")
+	s.NotContains(err.Error(), "--force")
+}
+
 func (s *testSuite) iucClaimClosed() {
 	s.seedOpenIssue("bd-iuc-cl-closed")
-	r := s.issueRepo()
-	s.Require().NoError(r.Update(s.Ctx(), "bd-iuc-cl-closed",
-		map[string]any{"status": string(types.StatusClosed)}, "seeder", domain.IssueTableOpts{}))
+	_, err := s.issueUseCase().CloseIssue(s.Ctx(), "bd-iuc-cl-closed", domain.CloseIssueParams{}, "seeder")
+	s.Require().NoError(err)
 
-	_, err := s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-closed", "alice")
+	_, err = s.issueUseCase().ClaimIssue(s.Ctx(), "bd-iuc-cl-closed", "alice")
 	s.Require().Error(err)
 	s.True(errors.Is(err, storage.ErrNotClaimable), "expected ErrNotClaimable, got %v", err)
 }
@@ -155,21 +179,37 @@ func (s *testSuite) iucApplyUpdateSetLabels() {
 	s.Equal([]string{"y", "z"}, labels)
 }
 
-func (s *testSuite) iucApplyUpdateSetLabelsBeatsAddRemove() {
-	s.seedOpenIssue("bd-iuc-au-sl-prec")
-	uc := s.issueUseCase()
-
-	desired := []string{"only-this"}
-	_, err := uc.ApplyUpdate(s.Ctx(), "bd-iuc-au-sl-prec", domain.UpdateSpec{
-		AddLabels:    []string{"add-me"},
-		RemoveLabels: []string{"remove-me"},
+func (s *testSuite) iucApplyUpdateSetLabelsThenAddRemove() {
+	s.seedOpenIssue("bd-iuc-au-sl-order")
+	desired := []string{"replace", "remove"}
+	_, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-sl-order", domain.UpdateSpec{
 		SetLabels:    &desired,
+		AddLabels:    []string{"add", "remove"},
+		RemoveLabels: []string{"remove"},
 	}, "tester")
 	s.Require().NoError(err)
-
-	labels, err := s.labelUseCase().GetLabels(s.Ctx(), "bd-iuc-au-sl-prec")
+	labels, err := s.labelUseCase().GetLabels(s.Ctx(), "bd-iuc-au-sl-order")
 	s.Require().NoError(err)
-	s.Equal([]string{"only-this"}, labels)
+	s.Equal([]string{"add", "replace"}, labels)
+}
+
+func (s *testSuite) iucApplyUpdateSameScalarAndMetadataAreNoops() {
+	s.seedOpenIssue("bd-iuc-au-noop")
+	uc := s.issueUseCase()
+	before, err := uc.GetIssue(s.Ctx(), "bd-iuc-au-noop")
+	s.Require().NoError(err)
+	var beforeEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), "SELECT COUNT(*) FROM events WHERE issue_id = ?", before.ID).Scan(&beforeEvents))
+
+	updated, err := uc.ApplyUpdate(s.Ctx(), before.ID, domain.UpdateSpec{Fields: map[string]any{
+		"priority": before.Priority,
+		"metadata": json.RawMessage(`{}`),
+	}}, "tester")
+	s.Require().NoError(err)
+	s.Equal(before.RowVersion, updated.RowVersion)
+	var afterEvents int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(), "SELECT COUNT(*) FROM events WHERE issue_id = ?", before.ID).Scan(&afterEvents))
+	s.Equal(beforeEvents, afterEvents)
 }
 
 func (s *testSuite) iucApplyUpdateReparent() {
@@ -210,6 +250,53 @@ func (s *testSuite) iucApplyUpdateEmptySpec() {
 	updated, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-empty", domain.UpdateSpec{}, "tester")
 	s.Require().NoError(err)
 	s.Equal("bd-iuc-au-empty", updated.ID)
+}
+
+func (s *testSuite) iucApplyUpdateExpectedVersion() {
+	s.seedOpenIssue("bd-iuc-au-version")
+	current, err := s.issueUseCase().GetIssue(s.Ctx(), "bd-iuc-au-version")
+	s.Require().NoError(err)
+	staleVersion := current.RowVersion + 1
+
+	_, err = s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-version", domain.UpdateSpec{
+		ExpectedVersion: &staleVersion,
+		Fields:          map[string]any{"title": "must not persist"},
+	}, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrVersionMismatch), "want ErrVersionMismatch, got %v", err)
+
+	stored, err := s.issueUseCase().GetIssue(s.Ctx(), "bd-iuc-au-version")
+	s.Require().NoError(err)
+	s.Equal("seed", stored.Title)
+}
+
+func (s *testSuite) iucApplyUpdatePersistence() {
+	s.seedOpenIssue("bd-iuc-au-persist")
+	mode := types.PersistenceModeEphemeral
+	moved, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-persist", domain.UpdateSpec{Persistence: &mode}, "tester")
+	s.Require().NoError(err)
+	s.True(moved.Ephemeral)
+
+	_, err = s.issueRepo().Get(s.Ctx(), "bd-iuc-au-persist", domain.IssueTableOpts{})
+	s.True(errors.Is(err, sql.ErrNoRows), "durable source must be removed, got %v", err)
+	stored, err := s.issueRepo().Get(s.Ctx(), "bd-iuc-au-persist", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	version := stored.RowVersion
+
+	unchanged, err := s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-persist", domain.UpdateSpec{Persistence: &mode}, "tester")
+	s.Require().NoError(err)
+	s.Equal(version, unchanged.RowVersion, "same persistence mode must not rewrite the row")
+
+	s.seedOpenIssue("bd-iuc-au-persist-rollback")
+	_, err = s.issueUseCase().ApplyUpdate(s.Ctx(), "bd-iuc-au-persist-rollback", domain.UpdateSpec{
+		Fields:      map[string]any{"not_a_column": "bad"},
+		Persistence: &mode,
+	}, "tester")
+	s.Require().Error(err)
+	_, err = s.issueRepo().Get(s.Ctx(), "bd-iuc-au-persist-rollback", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	_, err = s.issueRepo().Get(s.Ctx(), "bd-iuc-au-persist-rollback", domain.IssueTableOpts{UseWispsTable: true})
+	s.True(errors.Is(err, sql.ErrNoRows), "failed update must not move persistence plane, got %v", err)
 }
 
 func (s *testSuite) seedOpenWisp(id string) {

@@ -14,8 +14,7 @@ func TestFormulaSchemaList_HumanOutput(t *testing.T) {
 	defer func() { jsonOutput = prevJSON }()
 
 	out := captureStdout(t, func() error {
-		runFormulaSchemaList()
-		return nil
+		return runFormulaSchemaList()
 	})
 
 	for _, prim := range formula.Primitives {
@@ -34,8 +33,7 @@ func TestFormulaSchemaList_JSON(t *testing.T) {
 	defer func() { jsonOutput = prevJSON }()
 
 	out := captureStdout(t, func() error {
-		runFormulaSchemaList()
-		return nil
+		return runFormulaSchemaList()
 	})
 
 	// outputJSON injects a schema_version on objects but passes arrays
@@ -55,8 +53,7 @@ func TestFormulaSchemaShow_RendersFields(t *testing.T) {
 	defer func() { jsonOutput = prevJSON }()
 
 	out := captureStdout(t, func() error {
-		runFormulaSchemaShow("loop")
-		return nil
+		return runFormulaSchemaShow("loop")
 	})
 
 	for _, want := range []string{"LoopSpec", "count", "until", "max", "range", "var", "body", "[]*Step"} {
@@ -73,8 +70,7 @@ func TestFormulaSchemaShow_AliasResolution(t *testing.T) {
 
 	for _, input := range []string{"on_complete", "OnComplete", "OnCompleteSpec"} {
 		out := captureStdout(t, func() error {
-			runFormulaSchemaShow(input)
-			return nil
+			return runFormulaSchemaShow(input)
 		})
 		if !strings.Contains(out, "OnCompleteSpec") {
 			t.Errorf("%q did not resolve to OnCompleteSpec; output:\n%s", input, out)
@@ -105,8 +101,7 @@ func TestFormulaSchemaShow_JSON(t *testing.T) {
 	defer func() { jsonOutput = prevJSON }()
 
 	out := captureStdout(t, func() error {
-		runFormulaSchemaShow("loop")
-		return nil
+		return runFormulaSchemaShow("loop")
 	})
 
 	// Single-primitive output goes through outputJSON which injects

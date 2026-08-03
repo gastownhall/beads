@@ -13,6 +13,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
@@ -22,6 +23,16 @@ import (
 // TestUpdateCloseHookFiring verifies hook firing logic for status transitions.
 // Uses RunSync to test hooks without needing the full CLI or Dolt infrastructure.
 func TestUpdateCloseHookFiring(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The hook runner on Windows executes hook files directly via CreateProcess,
+		// which has no shebang dispatch. An extensionless file containing #!/bin/sh
+		// cannot be executed as a shell script, so the marker file is never created
+		// and the assertion fails. Skipping until the runner gains Windows script
+		// support (PATHEXT-aware extension lookup + interpreter dispatch).
+		// See: https://github.com/gastownhall/beads/issues/3800
+		t.Skip("hook script execution not supported on Windows - see GH#3800")
+	}
+
 	t.Run("on_close_fires_for_status_transition_to_closed", func(t *testing.T) {
 		tmpDir := t.TempDir()
 		markerFile := filepath.Join(tmpDir, "on_close_fired.txt")

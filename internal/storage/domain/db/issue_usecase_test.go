@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -16,6 +19,9 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
+	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
+	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
+	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -152,6 +158,91 @@ func (s *testSuite) useCaseMintMissingPrefix() {
 	s.Contains(err.Error(), "issue_prefix")
 }
 
+func (s *testSuite) useCaseExplicitIDPrefixGuard() {
+	s.resetMintConfig("prefixguard", "")
+	uc := s.issueUseCase()
+
+	upsert, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign upsert", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-upsert-1",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-upsert-1", upsert.Issue.ID)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrPrefixMismatch), "want ErrPrefixMismatch, got %v", err)
+	s.Require().NoError(NewConfigSQLRepository(s.Runner()).SetConfig(s.Ctx(), "allowed_prefixes", "allowed"))
+
+	allowed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "allowed", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "allowed-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("allowed-1", allowed.Issue.ID)
+
+	created, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:       &types.Issue{Title: "forced", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID:  "foreign-1",
+		ForcePrefix: true,
+		CreateOnly:  true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-1", created.Issue.ID)
+}
+
+func (s *testSuite) useCaseCreateOnlyRefusesOccupiedID() {
+	s.resetMintConfig("createonly", "")
+	uc := s.issueUseCase()
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "first", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "createonly-1",
+		CreateOnly: true,
+	}
+	_, err := uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().NoError(err)
+
+	params.Issue = &types.Issue{Title: "replacement", IssueType: types.TypeTask, Priority: 2}
+	_, err = uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrAlreadyExists), "want ErrAlreadyExists, got %v", err)
+
+	stored, err := uc.GetIssue(s.Ctx(), "createonly-1")
+	s.Require().NoError(err)
+	s.Equal("first", stored.Title)
+}
+
+func (s *testSuite) useCaseCreateAttachesNormalizedComments() {
+	s.resetMintConfig("comments", "")
+	createdAt := time.Date(2025, time.February, 3, 4, 5, 6, 0, time.UTC)
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "with comments", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "comments-1",
+		Comments: []*types.Comment{
+			{Text: "defaulted"},
+			{ID: "imported-comment", Author: "importer", Text: "preserved", CreatedAt: createdAt},
+		},
+	}
+
+	created, err := s.issueUseCase().CreateIssue(s.Ctx(), params, "actor")
+	s.Require().NoError(err)
+	s.Require().Len(created.Issue.Comments, 2)
+	s.Equal("comments-1", created.Issue.Comments[0].IssueID)
+	s.Equal("actor", created.Issue.Comments[0].Author)
+	s.NotEmpty(created.Issue.Comments[0].ID)
+	s.False(created.Issue.Comments[0].CreatedAt.IsZero())
+	s.Equal("imported-comment", created.Issue.Comments[1].ID)
+	s.Equal("importer", created.Issue.Comments[1].Author)
+	s.Equal(createdAt, created.Issue.Comments[1].CreatedAt)
+
+	s.Equal("", params.Comments[0].IssueID, "create must not mutate caller comments")
+}
+
 func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 	s.Run("ChildrenBeforeParentsSucceed", s.applyGraphChildrenBeforeParents)
 	s.Run("ExplicitParentChildEdgeIsDeduped", s.applyGraphParentChildEdgeDedup)
@@ -159,9 +250,11 @@ func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 	s.Run("ReverseBlockingOverParentChildPairErrors", s.applyGraphReverseBlocking)
 	s.Run("LiveCycleThroughExistingDepsErrors", s.applyGraphLiveCycle)
 	s.Run("ExternalIDIntraBatchBlockingCycleErrors", s.applyGraphExternalIDBlockingCycle)
+	s.Run("CombinedSchedulingCycleErrors", s.applyGraphCombinedSchedulingCycle)
 	s.Run("RegularGraphCycleThroughExistingWispDepErrors", s.applyGraphRegularCycleThroughWispDep)
 	s.Run("WispGraphCycleThroughExistingRegularDepErrors", s.applyGraphWispCycleThroughRegularDep)
-	s.Run("AllowsBlockingThroughExistingParentChild", s.applyGraphAllowsBlockingThroughParentChild)
+	s.Run("RejectsBlockingThroughExistingParentChild", s.applyGraphRejectsBlockingThroughParentChild)
+	s.Run("RejectsBlockingThroughPlannedHierarchy", s.applyGraphRejectsBlockingThroughPlannedHierarchy)
 	s.Run("HealthyPlanRoundTrips", s.applyGraphHealthy)
 	s.Run("WispGraphRoutesToWispTables", s.applyGraphWispRouting)
 }
@@ -169,6 +262,33 @@ func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 func (s *testSuite) TestIssueUseCase_MixedParentChildRouting() {
 	s.Run("WispChildOfRegularParent", s.mixedWispChildOfRegularParent)
 	s.Run("DepTargetClassification", s.mixedDepTargetClassification)
+	s.Run("ReverseDependencyUsesResultingSourceTierAndPreservesThread", s.mixedReverseDependencySourceTier)
+}
+
+func (s *testSuite) mixedReverseDependencySourceTier() {
+	s.resetMintConfig("reverse", "")
+	uc := s.issueUseCase()
+	regular, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "regular source", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp target", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		Dependencies: []domain.DependencySpec{{
+			Type:          types.DepRelated,
+			TargetID:      regular.Issue.ID,
+			SwapDirection: true,
+			ThreadID:      "thread-1",
+		}},
+	}, "tester")
+	s.Require().NoError(err)
+
+	records, err := s.depUseCase().GetIssueDependencyRecords(s.Ctx(), []string{regular.Issue.ID})
+	s.Require().NoError(err)
+	s.Require().Len(records[regular.Issue.ID], 1)
+	s.Equal(wisp.Issue.ID, records[regular.Issue.ID][0].DependsOnID)
+	s.Equal("thread-1", records[regular.Issue.ID][0].ThreadID)
 }
 
 func (s *testSuite) mixedWispChildOfRegularParent() {
@@ -471,6 +591,31 @@ func (s *testSuite) applyGraphExternalIDBlockingCycle() {
 	s.Empty(deps, "no blocking edge may be written when an intra-batch external-ID cycle is detected")
 }
 
+func (s *testSuite) applyGraphCombinedSchedulingCycle() {
+	s.resetMintConfig("gM", "")
+	uc := s.issueUseCase()
+
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Nodes: []domain.GraphNode{
+			newGraphNode("a", "A"),
+			newGraphNode("b", "B"),
+			newGraphNode("c", "C"),
+		},
+		Edges: []domain.GraphEdge{
+			{FromKey: "a", ToKey: "b", Type: types.DepBlocks},
+			{FromKey: "b", ToKey: "c", Type: types.DepParentChild},
+			{FromKey: "c", ToKey: "a", Type: types.DepConditionalBlocks},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cycle")
+	// This low-level suite calls the use case without its normal outer UOW, so
+	// earlier acyclic writes may remain. The edge that closes the cycle must not.
+	for _, d := range s.loadDepRows("dependencies", "gM-%") {
+		s.NotEqual(string(types.DepConditionalBlocks), d.depType, "cycle-closing edge must not be written: %+v", d)
+	}
+}
+
 // applyGraphRegularCycleThroughWispDep proves a regular graph-apply rejects a
 // planned blocking edge that closes a cycle through an existing blocking edge
 // living in wisp_dependencies. The per-edge depRepo.HasCycle probe this
@@ -532,13 +677,11 @@ func (s *testSuite) applyGraphWispCycleThroughRegularDep() {
 		"no wisp blocking edge may be written when the cycle closes through an existing regular dep")
 }
 
-// applyGraphAllowsBlockingThroughParentChild mirrors the embedded
-// TestExecuteGraphApplyUnitAllowsBlockingThroughExistingParentChild on the
-// domain path: a planned blocking edge whose only return path is an existing
-// parent-child dep is allowed, because the blocking-cycle walk never follows
-// non-blocking dep types. This pins that the cycleRelevantDepType filter is not
-// silently widened on the server path.
-func (s *testSuite) applyGraphAllowsBlockingThroughParentChild() {
+// applyGraphRejectsBlockingThroughParentChild verifies that graph apply uses
+// the same hierarchy-deadlock guard as a single dependency add. This is not a
+// mixed-edge cycle check: the parent-child edge only establishes that the
+// proposed blocker is the source's own descendant.
+func (s *testSuite) applyGraphRejectsBlockingThroughParentChild() {
 	s.resetMintConfig("gK", "")
 	uc := s.issueUseCase()
 
@@ -550,23 +693,46 @@ func (s *testSuite) applyGraphAllowsBlockingThroughParentChild() {
 		newDep("gK-child", "gK-parent", types.DepParentChild), "seeder",
 		domain.DepInsertOpts{}))
 
-	// A planned blocking edge gK-parent -> gK-child. Its only "return path"
-	// gK-child -> gK-parent is parent-child, which the cycle walk must not
-	// follow, so this is allowed (matching bd dep add and embedded graph-apply).
+	// A planned blocking edge gK-parent -> gK-child would gate the parent on its
+	// own descendant and can never clear under blocked-state cascading.
 	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
 		Edges: []domain.GraphEdge{
 			{FromID: "gK-parent", ToID: "gK-child", Type: types.DepBlocks},
 		},
 	}, "tester")
-	s.Require().NoError(err)
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its descendant")
 
-	var blockingSeen bool
 	for _, d := range s.loadDepRows("dependencies", "gK-%") {
 		if d.depType == string(types.DepBlocks) && d.issueID == "gK-parent" && d.dependsOnID == "gK-child" {
-			blockingSeen = true
+			s.Fail("hierarchy-deadlocking blocking edge must not be written")
 		}
 	}
-	s.True(blockingSeen, "planned blocking edge gK-parent -> gK-child must be written when the only return path is a parent-child dep")
+}
+
+func (s *testSuite) applyGraphRejectsBlockingThroughPlannedHierarchy() {
+	s.resetMintConfig("gL", "")
+	uc := s.issueUseCase()
+
+	grand := newGraphNode("grand", "grand")
+	parent := newGraphNode("parent", "parent")
+	child := newGraphNode("child", "child")
+	_, err := uc.ApplyIssueGraph(s.Ctx(), domain.GraphPlan{
+		Nodes: []domain.GraphNode{grand, parent, child},
+		Edges: []domain.GraphEdge{
+			{FromKey: "child", ToKey: "grand", Type: types.DepConditionalBlocks}, // Deliberately first.
+			{FromKey: "child", ToKey: "parent", Type: types.DepParentChild},
+			{FromKey: "parent", ToKey: "grand", Type: types.DepParentChild},
+		},
+	}, "tester")
+	s.Require().Error(err)
+	s.Contains(err.Error(), "cannot be blocked by its ancestor")
+
+	for _, d := range s.loadDepRows("dependencies", "gL-%") {
+		if d.depType == string(types.DepConditionalBlocks) {
+			s.Fail("block-first graph edge must not escape planned hierarchy validation")
+		}
+	}
 }
 
 func (s *testSuite) applyGraphHealthy() {

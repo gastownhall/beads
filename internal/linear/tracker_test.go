@@ -35,6 +35,24 @@ func teamStatesResp(teamID, stateID, stateName, stateType string) map[string]int
 	}
 }
 
+// teamLabelsEmptyResp builds a paginated TeamLabels GraphQL response with no labels.
+func teamLabelsEmptyResp(teamID string) map[string]interface{} {
+	return map[string]interface{}{
+		"data": map[string]interface{}{
+			"team": map[string]interface{}{
+				"id": teamID,
+				"labels": map[string]interface{}{
+					"nodes": []interface{}{},
+					"pageInfo": map[string]interface{}{
+						"hasNextPage": false,
+						"endCursor":   "",
+					},
+				},
+			},
+		},
+	}
+}
+
 // issueByIdentifierResp builds the JSON body for an IssueByIdentifier GraphQL response.
 func issueByIdentifierResp(id, identifier, title, description string, priority int, stateID, stateName, stateType string) map[string]interface{} {
 	return map[string]interface{}{
@@ -78,6 +96,8 @@ func TestBatchPush_SkipsUnchangedIssue(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Remote issue has the same title, empty description, priority 0 (no
 			// priority), and "backlog" state — matching the local issue exactly.
@@ -137,6 +157,81 @@ func TestBatchPush_SkipsUnchangedIssue(t *testing.T) {
 	}
 }
 
+// TestBatchPush_SkipsUnchangedIssueWithPreformattedDescription verifies that
+// BatchPush skip semantics still work when descriptions were pre-formatted by
+// the engine's FormatDescription hook (BuildLinearDescription). This guards
+// against double-formatting during skip comparison.
+func TestBatchPush_SkipsUnchangedIssueWithPreformattedDescription(t *testing.T) {
+	var updateCalled bool
+	formattedDescription := "Base body\n\n## Acceptance Criteria\nMust pass"
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var req GraphQLRequest
+		_ = json.Unmarshal(body, &req)
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(req.Query, "TeamStates"):
+			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
+		case strings.Contains(req.Query, "IssueByIdentifier"):
+			json.NewEncoder(w).Encode(issueByIdentifierResp(
+				"remote-uuid", "TEAM-1", "My Issue", formattedDescription, 0,
+				"state-open", "Backlog", "backlog",
+			))
+		case strings.Contains(req.Query, "issueUpdate"):
+			updateCalled = true
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"data": map[string]interface{}{
+					"issueUpdate": map[string]interface{}{
+						"success": true,
+						"issue":   map[string]interface{}{"id": "remote-uuid", "url": "https://linear.app/team/issue/TEAM-1", "updatedAt": "2026-01-01T00:00:00Z"},
+					},
+				},
+			})
+		}
+	}))
+	defer server.Close()
+
+	cfg := DefaultMappingConfig()
+	cfg.ExplicitStateMap = map[string]string{"backlog": "open"}
+
+	extRef := "https://linear.app/team/issue/TEAM-1"
+	local := &types.Issue{
+		ID:                 "local-1",
+		Title:              "My Issue",
+		Description:        formattedDescription,
+		AcceptanceCriteria: "Must pass",
+		Status:             types.StatusOpen,
+		Priority:           4,
+		ExternalRef:        &extRef,
+	}
+
+	tr := &Tracker{
+		teamIDs: []string{"team-1"},
+		clients: map[string]*Client{
+			"team-1": NewClient("key", "team-1").WithEndpoint(server.URL),
+		},
+		config: cfg,
+	}
+
+	result, err := tr.BatchPush(context.Background(), []*types.Issue{local}, nil)
+	if err != nil {
+		t.Fatalf("BatchPush: %v", err)
+	}
+	if updateCalled {
+		t.Error("UpdateIssue was called for an unchanged pre-formatted issue; expected it to be skipped")
+	}
+	if len(result.Skipped) != 1 || result.Skipped[0] != "local-1" {
+		t.Errorf("Skipped = %v, want [local-1]", result.Skipped)
+	}
+	if len(result.Updated) != 0 {
+		t.Errorf("Updated = %v, want []", result.Updated)
+	}
+}
+
 // TestBatchPush_ForceBypassesSkip verifies that an issue in forceIDs is
 // updated even when PushFieldsEqual would normally skip it.
 func TestBatchPush_ForceBypassesSkip(t *testing.T) {
@@ -150,6 +245,8 @@ func TestBatchPush_ForceBypassesSkip(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Return the same content as local (would be skipped without force).
 			json.NewEncoder(w).Encode(issueByIdentifierResp(
@@ -217,6 +314,8 @@ func TestBatchPush_BatchCreateMappingByTitle(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "issueBatchCreate"):
 			// Return the two issues in REVERSE order to expose index-based mapping bugs.
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -306,6 +405,8 @@ func TestBatchPush_PerTeamStateCache(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-2", "t2-state-open", "Ready", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-2"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Return the issue with DIFFERENT title so PushFieldsEqual = false and we proceed.
 			json.NewEncoder(w).Encode(issueByIdentifierResp(
@@ -340,6 +441,8 @@ func TestBatchPush_PerTeamStateCache(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "t1-state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "IssueByIdentifier"):
 			// Team-1 does not own this issue; return an empty result.
 			json.NewEncoder(w).Encode(map[string]interface{}{
@@ -403,6 +506,8 @@ func TestBatchPush_DuplicateTitlesFallbackToSingleCreate(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "FindByDescription"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
@@ -509,6 +614,8 @@ func TestBatchPush_AmbiguousBatchFailureSearchesMarkers(t *testing.T) {
 		switch {
 		case strings.Contains(req.Query, "TeamStates"):
 			json.NewEncoder(w).Encode(teamStatesResp("team-1", "state-open", "Backlog", "backlog"))
+		case strings.Contains(req.Query, "TeamLabels"):
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 		case strings.Contains(req.Query, "issueBatchCreate"):
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
@@ -901,7 +1008,7 @@ func TestCreateIssueNoDoubleFormatDescription(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 
-		if strings.Contains(req.Query, "TeamStates") || strings.Contains(req.Query, "team(") {
+		if strings.Contains(req.Query, "TeamStates") {
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"data": map[string]interface{}{
 					"team": map[string]interface{}{
@@ -914,6 +1021,11 @@ func TestCreateIssueNoDoubleFormatDescription(t *testing.T) {
 					},
 				},
 			})
+			return
+		}
+
+		if strings.Contains(req.Query, "TeamLabels") {
+			json.NewEncoder(w).Encode(teamLabelsEmptyResp("team-1"))
 			return
 		}
 

@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
 
@@ -22,14 +21,17 @@ var labelCmd = &cobra.Command{
 	Short:   "Manage issue labels",
 }
 
-func processBatchLabelOperation(issueIDs []string, label string, operation string, jsonOut bool,
+func processBatchLabelOperation(issueIDs []string, labels []string, operation string, jsonOut bool,
 	txFunc func(context.Context, storage.Transaction, string, string, string) error) error {
 	ctx := rootCtx
-	commitMsg := fmt.Sprintf("bd: label %s '%s' on %d issue(s)", operation, label, len(issueIDs))
+	labelDesc := strings.Join(labels, "', '")
+	commitMsg := fmt.Sprintf("bd: label %s '%s' on %d issue(s)", operation, labelDesc, len(issueIDs))
 	err := transactHonoringAutoCommit(ctx, store, commitMsg, func(tx storage.Transaction) error {
 		for _, issueID := range issueIDs {
-			if err := txFunc(ctx, tx, issueID, label, actor); err != nil {
-				return fmt.Errorf("%s label '%s' on %s: %w", operation, label, issueID, err)
+			for _, label := range labels {
+				if err := txFunc(ctx, tx, issueID, label, actor); err != nil {
+					return fmt.Errorf("%s label '%s' on %s: %w", operation, label, issueID, err)
+				}
 			}
 		}
 		return nil
@@ -39,13 +41,15 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 	}
 	commandDidWrite.Store(true)
 	if jsonOut {
-		results := make([]map[string]interface{}, 0, len(issueIDs))
+		results := make([]map[string]interface{}, 0, len(issueIDs)*len(labels))
 		for _, issueID := range issueIDs {
-			results = append(results, map[string]interface{}{
-				"status":   operation,
-				"issue_id": issueID,
-				"label":    label,
-			})
+			for _, label := range labels {
+				results = append(results, map[string]interface{}{
+					"status":   operation,
+					"issue_id": issueID,
+					"label":    label,
+				})
+			}
 		}
 		return outputJSON(results)
 	}
@@ -55,21 +59,64 @@ func processBatchLabelOperation(issueIDs []string, label string, operation strin
 		verb = "Removed"
 		prep = "from"
 	}
+	noun := "label"
+	if len(labels) > 1 {
+		noun = "labels"
+	}
 	for _, issueID := range issueIDs {
-		fmt.Printf("%s %s label '%s' %s %s\n", ui.RenderPass("✓"), verb, label, prep, issueID)
+		fmt.Printf("%s %s %s '%s' %s %s\n", ui.RenderPass("✓"), verb, noun, labelDesc, prep, issueID)
 	}
 	return nil
 }
-func parseLabelArgs(args []string) (issueIDs []string, label string) {
-	label = args[len(args)-1]
+
+// parseLabelArgs splits positional args into issue IDs and labels. The final
+// arg is the label spec; commas separate multiple labels ("label1,label2").
+func parseLabelArgs(args []string) (issueIDs []string, labels []string) {
+	labels = splitLabelArg(args[len(args)-1])
 	issueIDs = args[:len(args)-1]
 	return
 }
 
+// splitLabelArg splits a comma-separated label argument into individual
+// labels, trimming whitespace and dropping empty entries. Matches the
+// comma-separated convention of bd create --labels.
+func splitLabelArg(arg string) []string {
+	parts := strings.Split(arg, ",")
+	labels := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part = strings.TrimSpace(part); part != "" {
+			labels = append(labels, part)
+		}
+	}
+	return labels
+}
+
+// resolveLabelIssueIDs resolves every issue-ID positional arg, failing hard on
+// the first arg that doesn't resolve. Labels come last on the command line, so
+// when several ID-position args fail the caller almost certainly passed labels
+// space-separated ("bd label add bd-123 a b c"); the error hints at the
+// comma-separated form instead of silently skipping the bad args (bd-vu5kv).
+func resolveLabelIssueIDs(ctx context.Context, subcommand string, issueIDs []string) ([]string, error) {
+	resolved := make([]string, 0, len(issueIDs))
+	for _, id := range issueIDs {
+		fullID, err := utils.ResolvePartialID(ctx, store, id)
+		if err != nil {
+			if len(issueIDs) > 1 {
+				return nil, fmt.Errorf("resolving issue ID %q: %w (to %s multiple labels, pass one comma-separated argument: bd label %s <issue-id> label1,label2)",
+					id, err, subcommand, subcommand)
+			}
+			return nil, fmt.Errorf("resolving issue ID %q: %w", id, err)
+		}
+		resolved = append(resolved, fullID)
+	}
+	return resolved, nil
+}
+
 //nolint:dupl // labelAddCmd and labelRemoveCmd are similar but serve different operations
 var labelAddCmd = &cobra.Command{
-	Use:           "add [issue-id...] [label]",
-	Short:         "Add a label to one or more issues",
+	Use:           "add [issue-id...] [label[,label...]]",
+	Short:         "Add one or more labels to one or more issues",
+	Long:          "Add labels to issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label add bd-123 label1,label2",
 	Args:          cobra.MinimumNArgs(2),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -83,30 +130,27 @@ var labelAddCmd = &cobra.Command{
 			}
 		}()
 
-		issueIDs, label := parseLabelArgs(args)
-		label = strings.TrimSpace(label)
-		if label == "" {
+		if usesProxiedServer() {
+			return runLabelAddProxiedServer(rootCtx, args)
+		}
+
+		issueIDs, labels := parseLabelArgs(args)
+		if len(labels) == 0 {
 			return HandleErrorRespectJSON("label cannot be empty")
 		}
 		ctx := rootCtx
-		resolvedIDs := make([]string, 0, len(issueIDs))
-		for _, id := range issueIDs {
-			var fullID string
-			var err error
-			fullID, err = utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-				continue
+		issueIDs, err := resolveLabelIssueIDs(ctx, "add", issueIDs)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+
+		for _, label := range labels {
+			if strings.HasPrefix(label, "provides:") {
+				return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
 			}
-			resolvedIDs = append(resolvedIDs, fullID)
-		}
-		issueIDs = resolvedIDs
-
-		if strings.HasPrefix(label, "provides:") {
-			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
 		}
 
-		return processBatchLabelOperation(issueIDs, label, "added", jsonOutput,
+		return processBatchLabelOperation(issueIDs, labels, "added", jsonOutput,
 			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
 				return tx.AddLabel(ctx, issueID, lbl, act)
 			})
@@ -115,8 +159,9 @@ var labelAddCmd = &cobra.Command{
 
 //nolint:dupl // labelRemoveCmd and labelAddCmd are similar but serve different operations
 var labelRemoveCmd = &cobra.Command{
-	Use:           "remove [issue-id...] [label]",
-	Short:         "Remove a label from one or more issues",
+	Use:           "remove [issue-id...] [label[,label...]]",
+	Short:         "Remove one or more labels from one or more issues",
+	Long:          "Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2",
 	Args:          cobra.MinimumNArgs(2),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -130,21 +175,20 @@ var labelRemoveCmd = &cobra.Command{
 			}
 		}()
 
-		issueIDs, label := parseLabelArgs(args)
-		ctx := rootCtx
-		resolvedIDs := make([]string, 0, len(issueIDs))
-		for _, id := range issueIDs {
-			var fullID string
-			var err error
-			fullID, err = utils.ResolvePartialID(ctx, store, id)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-				continue
-			}
-			resolvedIDs = append(resolvedIDs, fullID)
+		if usesProxiedServer() {
+			return runLabelRemoveProxiedServer(rootCtx, args)
 		}
-		issueIDs = resolvedIDs
-		return processBatchLabelOperation(issueIDs, label, "removed", jsonOutput,
+
+		issueIDs, labels := parseLabelArgs(args)
+		if len(labels) == 0 {
+			return HandleErrorRespectJSON("label cannot be empty")
+		}
+		ctx := rootCtx
+		issueIDs, err := resolveLabelIssueIDs(ctx, "remove", issueIDs)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		return processBatchLabelOperation(issueIDs, labels, "removed", jsonOutput,
 			func(ctx context.Context, tx storage.Transaction, issueID, lbl, act string) error {
 				return tx.RemoveLabel(ctx, issueID, lbl, act)
 			})
@@ -163,6 +207,10 @@ var labelListCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelListProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 		var issueID string
@@ -206,6 +254,10 @@ var labelListAllCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelListAllProxiedServer(rootCtx)
+		}
 
 		ctx := rootCtx
 		var issues []*types.Issue
@@ -282,6 +334,10 @@ var labelPropagateCmd = &cobra.Command{
 				c.CloseEventAndAdd(evt)
 			}
 		}()
+
+		if usesProxiedServer() {
+			return runLabelPropagateProxiedServer(rootCtx, args)
+		}
 
 		ctx := rootCtx
 

@@ -11,15 +11,42 @@ import (
 
 const JSONSchemaVersion = 1
 
+// PaginationMeta carries truncation context for paginated JSON responses.
+// It is included in the BD_JSON_ENVELOPE=1 output under the "pagination" key
+// whenever the result set was capped by a --limit.
+type PaginationMeta struct {
+	Returned  int  `json:"returned"`
+	Total     int  `json:"total,omitempty"`
+	Truncated bool `json:"truncated"`
+}
+
 func jsonEnvelopeEnabled() bool {
 	return os.Getenv("BD_JSON_ENVELOPE") == "1"
 }
 
 func outputJSON(v interface{}) error {
-	wrapped := wrapWithSchemaVersion(v)
+	return outputJSONWithPagination(v, nil)
+}
+
+// outputJSONWithPagination emits v as JSON, optionally including pagination
+// metadata. When BD_JSON_ENVELOPE=1 and p is non-nil, the envelope gains a
+// "pagination" key so programmatic consumers can detect truncation without
+// parsing stderr. When the envelope is not active, p is ignored and the
+// existing stderr text hint handles the human/text path.
+func outputJSONWithPagination(v interface{}, p *PaginationMeta) error {
+	var out interface{}
+	if jsonEnvelopeEnabled() && p != nil {
+		out = map[string]interface{}{
+			"schema_version": JSONSchemaVersion,
+			"data":           v,
+			"pagination":     p,
+		}
+	} else {
+		out = wrapWithSchemaVersion(v)
+	}
 	encoder := json.NewEncoder(os.Stdout)
 	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(wrapped); err != nil {
+	if err := encoder.Encode(out); err != nil {
 		return fmt.Errorf("encoding JSON: %v", err)
 	}
 
@@ -81,7 +108,7 @@ func emitEnvelopeDeprecation() {
 	fmt.Fprintf(os.Stderr,
 		"NOTE: bd --json output format will change in v2.0. "+
 			"Set BD_JSON_ENVELOPE=1 to opt in early. "+
-			"See docs/JSON_SCHEMA.md for migration details.\n")
+			"See docs/reference/json-schema.md for migration details.\n")
 }
 
 func outputJSONError(err error, code string) error {

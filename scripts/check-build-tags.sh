@@ -8,7 +8,7 @@
 #   (c) is an exempt third-party tool install (go install X@version).
 #
 # This is the source-time companion to scripts/verify-cgo.sh (which is a
-# runtime check on release binaries). See docs/ICU-POLICY.md.
+# runtime check on release binaries). See engdocs/ICU-POLICY.md.
 
 set -euo pipefail
 
@@ -129,7 +129,7 @@ if [[ "$fail" -ne 0 ]]; then
     cat >&2 <<'EOF'
 
 The beads project requires every `go build|test|run|generate|install`
-invocation to build with -tags=gms_pure_go (see docs/ICU-POLICY.md).
+invocation to build with -tags=gms_pure_go (see engdocs/ICU-POLICY.md).
 
 Fix by EITHER:
   1. Source .buildflags in the script (preferred, canonical):

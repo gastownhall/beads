@@ -191,11 +191,20 @@ Examples:
 		// name (e.g. dolt_database). Without this, server-mode rigs get the
 		// default name "beads" instead of their configured name. (GH#3029)
 		cfg, err := configfile.Load(beadsDir)
-		if err != nil || cfg == nil {
-			cfg = findParentConfig(beadsDir)
+		if err != nil {
+			return HandleError("failed to load %s: %v; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
+		}
+		if cfg == nil {
+			cfg, err = findParentConfig(beadsDir)
+			if err != nil {
+				return HandleError("failed to load ancestor storage metadata: %v; no storage database was opened or modified; fix or restore metadata.json and retry", err)
+			}
 		}
 		if cfg == nil {
 			cfg = configfile.DefaultConfig()
+		}
+		if err := requireBootstrapDoltBackend(cfg); err != nil {
+			return HandleError("%v", err)
 		}
 
 		resolvedCfg, repairMsg, err := applyBootstrapMetadataRepair(beadsDir, cfg, !dryRun)
@@ -270,6 +279,23 @@ func noWorkspaceBootstrapPayload() map[string]interface{} {
 	}
 }
 
+func requireBootstrapDoltBackend(cfg *configfile.Config) error {
+	if err := validateConfiguredBackend(cfg); err != nil {
+		return err
+	}
+	// A registered extension backend passes validateConfiguredBackend so its
+	// existing workspaces can be opened, but every bd bootstrap action
+	// (sync, restore, jsonl-import, init) provisions or imports Dolt. Registered
+	// backends are open/discover-only, so reject them here — before
+	// detectBootstrapAction or executeBootstrapPlan — mirroring bd init's
+	// fail-closed gate. Downstream registrants supply their own workspace
+	// provisioning path.
+	if cfg != nil && cfg.GetBackend() != configfile.BackendDolt {
+		return fmt.Errorf("backend %q cannot be bootstrapped by bd bootstrap; it can only open an existing workspace (bd bootstrap provisions %q, the default)", cfg.GetBackend(), configfile.BackendDolt)
+	}
+	return nil
+}
+
 func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPlan {
 	plan := BootstrapPlan{
 		BeadsDir: beadsDir,
@@ -292,6 +318,21 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// than unrelated global config loaded from the caller's current repo.
 	isSharedServer := bootstrapSharedServerMode(beadsDir)
 	isServer := cfg.IsDoltServerMode() || isSharedServer
+
+	// Prefer an existing local database over re-clone (GH#5037). Previously
+	// sync.remote returned Action=sync unconditionally, so a second
+	// `bd bootstrap` on an already-cloned workspace ran DOLT_CLONE into the
+	// existing dir and failed with Error 1007 (database exists) — contradicting
+	// help text ("If database already exists: validates and reports status")
+	// and the multi-clone upgrade guide. If the local beadsDir does not exist
+	// yet, still prefer sync recovery first for Action=="none" so a default
+	// shared-server "beads" DB from another project cannot mask a real clone.
+	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
+		if beadsDirExists || dbAction.Action != "none" {
+			return dbAction
+		}
+		plan = dbAction
+	}
 
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
@@ -317,20 +358,6 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 				return plan
 			}
 		}
-	}
-
-	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
-		// If the local beadsDir does not exist yet, prefer recovering via sync
-		// first. This avoids false "nothing to do" results when the default
-		// shared-server database name happens to exist for another project.
-		if beadsDirExists || dbAction.Action != "none" {
-			return dbAction
-		}
-		// For synthesized paths with no local workspace directory yet, defer the
-		// existing-db no-op until we've ruled out all other recovery paths.
-		// This preserves the sync-precedence fix without downgrading the
-		// legitimate "database already exists" case into a fresh init.
-		plan = dbAction
 	}
 
 	// Check for backup JSONL files (must be non-empty to be useful)
@@ -513,12 +540,38 @@ func confirmPrompt(message string, nonInteractive bool) bool {
 }
 
 func executeBootstrapPlan(plan BootstrapPlan, cfg *configfile.Config, nonInteractive bool) error {
+	if err := requireBootstrapDoltBackend(cfg); err != nil {
+		return err
+	}
 	if !confirmPrompt("Proceed?", nonInteractive) {
 		fmt.Fprintf(os.Stderr, "Aborted.\n")
 		return nil
 	}
 
 	ctx := context.Background()
+
+	// Workspace operation gate: every bootstrap action below replaces or
+	// creates workspace state (sync/restore/jsonl-import/init), and
+	// bootstrap is a skip-store command that the PersistentPreRunE
+	// chokepoint never gates. This is the single point where the target
+	// workspace is known and no state has been touched yet, so acquire the
+	// workspace + physical-root gates EXCLUSIVELY here for the rest of the
+	// plan execution. Exclusive failures are hard errors: bootstrap
+	// refuses to run over live bd activity rather than pretend.
+	//
+	// The resolved PhysicalRoots for plan.BeadsDir do not necessarily cover
+	// the directory the actions below actually open — executeInitAction,
+	// executeRestoreAction, and executeJSONLImportAction all open
+	// doltserver.ResolveDoltDir(plan.BeadsDir) directly (e.g. .beads/dolt
+	// for an embedded-metadata workspace). Pass it as an extraRoot,
+	// mirroring how bd init passes its own resolved db path, so the
+	// physical directory bootstrap writes is actually gated.
+	gateHandle, gateErr := acquireExclusiveWorkspaceGates(ctx, plan.BeadsDir, "bd bootstrap "+plan.Action,
+		doltserver.ResolveDoltDir(plan.BeadsDir))
+	if gateErr != nil {
+		return fmt.Errorf("bd bootstrap refuses to run over live bd activity on this workspace: %w", gateErr)
+	}
+	defer func() { _ = gateHandle.Release() }()
 
 	switch plan.Action {
 	case "sync":
@@ -711,7 +764,7 @@ func printBootstrapRemoteBehindGuidance(w io.Writer, e *schema.RemoteMigrateGate
 			"  Re-running `"+rerunCmd+"` will NOT fix this — the remote itself is behind.\n"+
 			"  Choose one:\n"+
 			"    • This machine is the designated migrator (exactly ONE machine should be):\n"+
-			"        "+schema.AllowRemoteMigrateEnv+"=1 bd migrate\n"+
+			"        bd migrate --force\n"+
 			"        bd dolt push\n"+
 			"      then other machines re-run `bd bootstrap` to adopt the migrated database.\n"+
 			"    • Another machine is the designated migrator: wait for it to push, then\n"+
@@ -955,8 +1008,10 @@ func isNonInteractiveBootstrap(flagValue bool) bool {
 // findParentConfig walks up from beadsDir's parent looking for a
 // .beads/metadata.json in ancestor directories. This handles the case where a
 // rig subdirectory (its own git repo) doesn't have a local .beads but its
-// parent workspace does. Returns nil if no parent config is found.
-func findParentConfig(beadsDir string) *configfile.Config {
+// parent workspace does. Returns nil if no parent config is found. A malformed
+// or unreadable ancestor metadata file is authoritative and returned as an error;
+// bootstrap must not skip it and select a more distant workspace or defaults.
+func findParentConfig(beadsDir string) (*configfile.Config, error) {
 	// Start from the parent of beadsDir's enclosing directory.
 	// beadsDir is typically "<project>/.beads", so we start from <project>'s parent.
 	start := filepath.Dir(filepath.Dir(beadsDir))
@@ -964,8 +1019,12 @@ func findParentConfig(beadsDir string) *configfile.Config {
 
 	for dir := start; dir != "/" && dir != "."; {
 		candidate := filepath.Join(dir, ".beads")
-		if cfg, err := configfile.Load(candidate); err == nil && cfg != nil {
-			return cfg
+		cfg, err := configfile.Load(candidate)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
+		}
+		if cfg != nil {
+			return cfg, nil
 		}
 
 		// Don't search above $HOME
@@ -979,7 +1038,7 @@ func findParentConfig(beadsDir string) *configfile.Config {
 		}
 		dir = parent
 	}
-	return nil
+	return nil, nil
 }
 
 func init() {

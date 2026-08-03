@@ -45,10 +45,10 @@
 // # Recommended local stack
 //
 //	VictoriaMetrics :8428  — metrics storage
-//	VictoriaLogs    :9428  — log storage
+//	VictoriaLogs    :9428  — future log storage
 //	Grafana         :9429  — dashboards
 //
-// See docs/OBSERVABILITY.md for the full reference.
+// See docs/reference/observability.md for the full reference.
 package telemetry
 
 import (

@@ -34,6 +34,28 @@ func (m *mockRefStore) GetCustomStatusesDetailed(_ context.Context) ([]types.Cus
 	return nil, nil
 }
 
+func TestCandidateIDMatcherWordBoundaries(t *testing.T) {
+	candidates := map[string]bool{
+		"be-ref-001":   true,
+		"be-ref-001.1": true,
+		"be-ref-002":   true,
+	}
+	matcher := newCandidateIDMatcher(candidates)
+
+	found := make(map[string]bool)
+	matcher.findAll("see (be-ref-001), be-ref-001.1 and xbe-ref-002 but not be-ref-002x", found)
+
+	if !found["be-ref-001"] {
+		t.Fatal("expected be-ref-001 to match at punctuation boundaries")
+	}
+	if !found["be-ref-001.1"] {
+		t.Fatal("expected be-ref-001.1 to match at punctuation boundaries")
+	}
+	if found["be-ref-002"] {
+		t.Fatal("did not expect be-ref-002 to match inside word boundaries")
+	}
+}
+
 // TestPruneLargeFixture asserts that buildReferencedSet completes in <5s on a
 // 10K-open-bead × ~5KB-body fixture (NFR-02 from be-5sn).
 func TestPruneLargeFixture(t *testing.T) {
@@ -97,8 +119,12 @@ func TestPruneLargeFixture(t *testing.T) {
 		t.Fatalf("buildReferencedSet error: %v", err)
 	}
 
-	// Performance assertion (NFR-02).
-	if elapsed > maxDurationSeconds*time.Second {
+	// Performance assertion (NFR-02). The race detector adds multi-x overhead
+	// that invalidates a wall-clock budget (buildReferencedSet measures ~4x
+	// slower under -race), so only enforce the bound in non-race builds. The
+	// correctness assertions below still run under -race, which is where the
+	// large-fixture pass earns its keep as a data-race check.
+	if !raceEnabled && elapsed > maxDurationSeconds*time.Second {
 		t.Errorf("buildReferencedSet took %v; must complete in <%ds on 10K-bead fixture", elapsed, maxDurationSeconds)
 	}
 

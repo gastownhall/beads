@@ -122,21 +122,58 @@ func (s *testSuite) iucDeleteIssuesEmpty() {
 func (s *testSuite) iucDeleteIssuesDryRun() {
 	s.seedOpenIssue("bd-iuc-dry-a")
 	s.seedOpenIssue("bd-iuc-dry-b")
+	s.seedOpenWisp("bd-iuc-dry-c")
 	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
-		newDep("bd-iuc-dry-a", "bd-iuc-dry-b", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+		newDep("bd-iuc-dry-b", "bd-iuc-dry-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep("bd-iuc-dry-c", "bd-iuc-dry-b", types.DepParentChild), "tester",
+		domain.DepInsertOpts{UseWispsTable: true}))
+	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
+		"bd-iuc-dry-a", "dry-run-label", "tester", domain.LabelOpts{}))
+	s.Require().NoError(s.labelRepo().Insert(s.Ctx(),
+		"bd-iuc-dry-c", "dry-run-wisp-label", "tester", domain.LabelOpts{UseWispsTable: true}))
 
 	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
-		IDs:    []string{"bd-iuc-dry-a"},
-		DryRun: true,
+		IDs:     []string{"bd-iuc-dry-a"},
+		Cascade: true,
+		DryRun:  true,
 	}, "tester")
 	s.Require().NoError(err)
-	s.Equal(0, res.DeletedCount, "DryRun must not actually delete")
-	s.Equal(1, res.DependenciesCount)
+	s.Equal(3, res.DeletedCount, "DryRun must report the cascade candidate count")
+	s.Equal(2, res.DependenciesCount)
+	s.Equal(2, res.LabelsCount)
+	s.Equal(5, res.EventsCount)
 
-	var rows int
-	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
-		"SELECT COUNT(*) FROM issues WHERE id = ?", "bd-iuc-dry-a").Scan(&rows))
-	s.Equal(1, rows, "row must still exist after DryRun")
+	for _, table := range []struct {
+		name  string
+		where string
+		args  []any
+		want  int
+	}{
+		{name: "issues", where: "id IN (?, ?)", args: []any{"bd-iuc-dry-a", "bd-iuc-dry-b"}, want: 2},
+		{name: "wisps", where: "id = ?", args: []any{"bd-iuc-dry-c"}, want: 1},
+		{
+			name:  "dependencies",
+			where: "issue_id = ? AND depends_on_issue_id = ?",
+			args:  []any{"bd-iuc-dry-b", "bd-iuc-dry-a"},
+			want:  1,
+		},
+		{
+			name:  "wisp_dependencies",
+			where: "issue_id = ? AND depends_on_issue_id = ?",
+			args:  []any{"bd-iuc-dry-c", "bd-iuc-dry-b"},
+			want:  1,
+		},
+		{name: "labels", where: "issue_id = ?", args: []any{"bd-iuc-dry-a"}, want: 1},
+		{name: "wisp_labels", where: "issue_id = ?", args: []any{"bd-iuc-dry-c"}, want: 1},
+		{name: "events", where: "issue_id IN (?, ?)", args: []any{"bd-iuc-dry-a", "bd-iuc-dry-b"}, want: 3},
+		{name: "wisp_events", where: "issue_id = ?", args: []any{"bd-iuc-dry-c"}, want: 2},
+	} {
+		var rows int
+		s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+			"SELECT COUNT(*) FROM "+table.name+" WHERE "+table.where, table.args...).Scan(&rows))
+		s.Equal(table.want, rows, "%s rows must remain after DryRun", table.name)
+	}
 }
 
 func (s *testSuite) iucDeleteCleansAuxiliaryTables() {

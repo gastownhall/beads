@@ -2,7 +2,7 @@
 //
 // Iter[T] is a generic streaming-iterator shape that lets storage callers
 // walk an unbounded result set without materializing the whole slice.
-// Per-method implementations live in the dolt/ and postgres/ sub-packages.
+// Per-method implementations live in the concrete backend packages.
 //
 // See be-jaavsb (design) and be-yinl4d (architecture) for the motivation.
 package storage

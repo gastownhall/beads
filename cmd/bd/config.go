@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
+	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -33,8 +34,12 @@ Common namespaces:
   - jira.*            Jira integration settings
   - linear.*          Linear integration settings
   - github.*          GitHub integration settings
+  - gitlab.*          GitLab integration settings
+  - ado.*             Azure DevOps integration settings
+  - notion.*          Notion integration settings
   - custom.*          Custom integration settings
   - status.*          Issue status configuration
+  - claim.*           Claim arbitration settings (pool-aware claiming)
   - doctor.suppress.* Suppress specific bd doctor warnings (GH#1095)
 
 Auto-Export (config.yaml):
@@ -68,6 +73,18 @@ Custom Status States:
   This enables issues to use statuses like 'awaiting_review' in addition to
   the built-in statuses (open, in_progress, blocked, deferred, closed).
 
+Claim Pools:
+  A dispatcher can pre-assign issues to a pool pseudo-assignee (e.g.
+  "fable-crew") and let any actor take them with --claim. List the pool
+  aliases in the claim.pools config key, comma-separated:
+
+    bd config set claim.pools "fable-crew,night-crew"
+
+  Issues assigned to a real actor (or to an alias not in the list) keep
+  their anti-steal protection. Pool takes carry the normal lease; note
+  that if a taker's lease expires, bd reclaim returns the issue to the
+  unassigned pool, not to the pool alias it was dispatched to.
+
 Suppressing Doctor Warnings:
   Suppress specific bd doctor warnings by check name slug:
     bd config set doctor.suppress.pending-migrations true
@@ -84,6 +101,7 @@ Examples:
   bd config set jira.url "https://company.atlassian.net"
   bd config set jira.project "PROJ"
   bd config set status.custom "awaiting_review,awaiting_testing"
+  bd config set claim.pools "fable-crew,night-crew"    # Pool aliases claimable by any actor
   bd config set doctor.suppress.pending-migrations true
   bd config set dolt.debug true                        # Enable Dolt sql-server debug mode (loglevel=debug, --prof cpu)
   bd config set dolt.local-only true                   # Skip wiring a Dolt sync remote during bd init
@@ -120,6 +138,12 @@ var configSetCmd = &cobra.Command{
 			fmt.Fprintln(os.Stderr, "Error: dolt.debug requires a sql-server-backed project (embedded mode has no managed server).")
 			fmt.Fprintln(os.Stderr, "  To migrate: re-init with 'bd init --server' or 'bd init --shared-server'.")
 			return SilentExit()
+		}
+
+		if strings.HasPrefix(key, "storage-class.") {
+			if err := validateStorageClassConfig(key, value); err != nil {
+				return HandleError("%v", err)
+			}
 		}
 
 		if !isRecognizedConfigKey(key) {
@@ -190,8 +214,7 @@ var configSetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigSetProxiedServer(rootCtx, key, value)
-			return nil
+			return runConfigSetProxiedServer(rootCtx, key, value)
 		}
 
 		// Database-stored config requires direct mode
@@ -242,6 +265,17 @@ var configGetCmd = &cobra.Command{
 		}()
 
 		key := args[0]
+
+		if key == "backup.enabled" {
+			// backup.enabled has an auto-detected effective value that
+			// differs from the stored value: when unset it auto-enables
+			// in embedded mode with a git remote, and is forced OFF in
+			// sql-server mode (see isBackupAutoEnabled). Reporting the raw
+			// stored "false"/"not set" here misled operators during the
+			// 2026-07 shared-dolt incident, so show the EFFECTIVE value
+			// and its source.
+			return runConfigGetBackupEnabled()
+		}
 
 		if config.IsYamlOnlyKey(key) {
 			// User-global keys (e.g. metrics.*) must be read from the user-global
@@ -307,8 +341,7 @@ var configGetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigGetProxiedServer(rootCtx, key)
-			return nil
+			return runConfigGetProxiedServer(rootCtx, key)
 		}
 
 		// Database-stored config requires direct mode
@@ -341,6 +374,45 @@ var configGetCmd = &cobra.Command{
 	},
 }
 
+// runConfigGetBackupEnabled reports the EFFECTIVE value of
+// backup.enabled together with its source, rather than the raw stored
+// value. The stored value is misleading because isBackupAutoEnabled()
+// derives the runtime value: unset → auto-enabled in embedded mode
+// when a git remote exists, and forced OFF in sql-server mode.
+func runConfigGetBackupEnabled() error {
+	const key = "backup.enabled"
+	source := config.GetValueSource(key)
+	effective := isBackupAutoEnabled()
+
+	var sourceDesc string
+	switch source {
+	case config.SourceEnvVar:
+		sourceDesc = "env var"
+	case config.SourceConfigFile:
+		sourceDesc = "config.yaml"
+	default: // SourceDefault — value came from auto-detection
+		switch {
+		case usesSQLServer():
+			sourceDesc = "default (auto: off in sql-server mode)"
+		case effective:
+			sourceDesc = "default (auto: on — git remote detected)"
+		default:
+			sourceDesc = "default (auto: off — no git remote)"
+		}
+	}
+
+	if jsonOutput {
+		return outputJSON(map[string]interface{}{
+			"key":       key,
+			"value":     effective,
+			"effective": effective,
+			"source":    string(source),
+		})
+	}
+	fmt.Printf("%t (%s)\n", effective, sourceDesc)
+	return nil
+}
+
 var configListCmd = &cobra.Command{
 	Use:           "list",
 	Short:         "List all configuration",
@@ -355,8 +427,7 @@ var configListCmd = &cobra.Command{
 		}()
 
 		if usesProxiedServer() {
-			runConfigListProxiedServer(rootCtx)
-			return nil
+			return runConfigListProxiedServer(rootCtx)
 		}
 
 		// Config operations work in direct mode only
@@ -529,8 +600,7 @@ var configUnsetCmd = &cobra.Command{
 		}
 
 		if usesProxiedServer() {
-			runConfigUnsetProxiedServer(rootCtx, key)
-			return nil
+			return runConfigUnsetProxiedServer(rootCtx, key)
 		}
 
 		// Database-stored config requires direct mode
@@ -761,6 +831,11 @@ Examples:
 					return HandleError("invalid status.custom value: %v", err)
 				}
 			}
+			if strings.HasPrefix(p.key, "storage-class.") {
+				if err := validateStorageClassConfig(p.key, p.value); err != nil {
+					return HandleError("%v", err)
+				}
+			}
 		}
 
 		var yamlPairs, gitPairs, dbPairs []kvPair
@@ -809,7 +884,9 @@ Examples:
 					keys[i] = p.key
 					values[i] = p.value
 				}
-				runConfigSetManyProxiedServer(rootCtx, keys, values)
+				if err := runConfigSetManyProxiedServer(rootCtx, keys, values); err != nil {
+					return err
+				}
 			} else {
 				if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
 					return HandleError("%v", err)
@@ -864,17 +941,65 @@ Examples:
 
 // recognizedConfigPrefixes lists valid top-level config namespaces.
 // Keys under custom.* are always accepted (user-extensible).
+//
+// Tracker namespaces (jira., linear., github., ado., ...) are NOT listed here:
+// they are derived from the tracker registry at runtime via
+// allRecognizedConfigPrefixes, so the recognizer cannot drift out of sync when
+// a new tracker is added (GH#4427).
 var recognizedConfigPrefixes = []string{
-	"export.", "import.", "dolt.", "jira.", "linear.", "github.", "custom.",
-	"status.", "doctor.suppress.", "routing.", "sync.", "git.",
+	"export.", "import.", "dolt.", "custom.",
+	"status.", "types.", "doctor.suppress.", "routing.", "sync.", "git.",
 	"directory.", "repos.", "external_projects.", "validation.",
-	"hierarchy.", "ai.", "backup.", "federation.", "metrics.",
+	"hierarchy.", "ai.", "backup.", "federation.", "metrics.", "agent.",
+	"claim.", "storage-class.",
+}
+
+// validateStorageClassConfig validates a storage-class.<type> per-type
+// default at config-set time (Protocol v0.1 C-OQ1: values are validated when
+// set, not discovered broken at create time). The key suffix must name an
+// issue type and the value must be a storage class.
+func validateStorageClassConfig(key, value string) error {
+	suffix := strings.TrimPrefix(key, "storage-class.")
+	if suffix == "" || strings.Contains(suffix, ".") {
+		return fmt.Errorf("invalid key %q: expected storage-class.<issue-type> (e.g. storage-class.event)", key)
+	}
+	// The key suffix must be a canonical, known issue type: create-time lookup
+	// keys on the Normalize()d type (resolveStorageClass), so an alias like
+	// storage-class.feat or a typo like storage-class.taks would pass set-time
+	// validation and then silently never match — the C-OQ1 failure mode this
+	// validator exists to prevent.
+	issueType := types.IssueType(suffix)
+	if canonical := issueType.Normalize(); canonical != issueType {
+		return fmt.Errorf("invalid key %q: %q is an alias of %q, and create-time lookup uses the canonical type; set storage-class.%s instead", key, suffix, canonical, canonical)
+	}
+	if !issueType.IsValidWithCustom(loadEmbeddedCustomTypes()) {
+		return fmt.Errorf("invalid key %q: unknown issue type %q (use a built-in type, or add it to types.custom first)", key, suffix)
+	}
+	if _, err := types.ParseStorageClass(value); err != nil {
+		return err
+	}
+	return nil
+}
+
+// allRecognizedConfigPrefixes returns the static namespaces plus the prefix of
+// every registered tracker ("ado.", "jira.", ...). Deriving tracker prefixes
+// from the registry keeps config-key recognition in sync with the set of
+// trackers compiled into bd instead of a hand-maintained allowlist (GH#4427).
+func allRecognizedConfigPrefixes() []string {
+	names := tracker.List()
+	prefixes := make([]string, 0, len(recognizedConfigPrefixes)+len(names))
+	prefixes = append(prefixes, recognizedConfigPrefixes...)
+	for _, name := range names {
+		prefixes = append(prefixes, name+".")
+	}
+	return prefixes
 }
 
 // recognizedConfigKeys lists valid non-namespaced config keys.
 var recognizedConfigKeys = map[string]bool{
 	"no-db": true, "json": true, "db": true, "actor": true,
 	"identity": true, "no-push": true, "no-git-ops": true,
+	"node_id":                    true, // replica identity for the lease guard (read from yaml/env, never the DB)
 	"create.require-description": true, "beads.role": true,
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
@@ -885,7 +1010,7 @@ func isRecognizedConfigKey(key string) bool {
 	if recognizedConfigKeys[key] {
 		return true
 	}
-	for _, prefix := range recognizedConfigPrefixes {
+	for _, prefix := range allRecognizedConfigPrefixes() {
 		if strings.HasPrefix(key, prefix) {
 			return true
 		}
@@ -924,7 +1049,7 @@ func suggestConfigKey(key string) string {
 
 	bestMatch := ""
 	bestDist := 3 // max edit distance to suggest
-	for _, known := range recognizedConfigPrefixes {
+	for _, known := range allRecognizedConfigPrefixes() {
 		knownPrefix := strings.TrimSuffix(known, ".")
 		d := levenshteinDistance(parts[0], knownPrefix)
 		if d > 0 && d < bestDist {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -41,6 +42,8 @@ type ConfigUseCase interface {
 	SetConfig(ctx context.Context, key, value string) error
 	DeleteConfig(ctx context.Context, key string) error
 	GetAllConfig(ctx context.Context) (map[string]string, error)
+	GetMetadata(ctx context.Context, key string) (string, error)
+	GetLocalMetadata(ctx context.Context, key string) (string, error)
 
 	ReconcileVersion(ctx context.Context, cliVersion string) (VersionReconcileResult, error)
 }
@@ -59,6 +62,11 @@ type CreateContext struct {
 	IssuePrefix     string
 	AllowedPrefixes string
 	CustomTypes     []string
+	CustomStatuses  []types.CustomStatus
+	// InfraTypes is the resolved infrastructure-type set. A create whose type
+	// is in this set is routed to the wisp tables, the same routing the
+	// embedded and direct stores apply from IsInfraTypeCtx.
+	InfraTypes map[string]bool
 }
 
 type Issue struct{}
@@ -139,6 +147,22 @@ func (u *configUseCaseImpl) GetInfraTypes(ctx context.Context) (map[string]bool,
 	if err != nil {
 		return nil, fmt.Errorf("GetInfraTypes: %w", err)
 	}
+	// The repo returns only the DB `types.infra` config; an unset/empty value
+	// yields an empty map. Embedded resolves the same way but then falls back to
+	// config.yaml and finally the hardcoded defaults (["agent","role","message"])
+	// via issueops.ResolveInfraTypesInTx / DoltStore.GetInfraTypes. Reproduce that
+	// fallback here so `-t message` auto-routes to ephemeral on this seam exactly
+	// as on the embedded store, instead of being treated as a plain type (#4547 F-3).
+	if len(out) == 0 {
+		typeList := config.GetInfraTypesFromYAML()
+		if len(typeList) == 0 {
+			typeList = DefaultInfraTypes()
+		}
+		out = make(map[string]bool, len(typeList))
+		for _, t := range typeList {
+			out[t] = true
+		}
+	}
 	return out, nil
 }
 
@@ -154,6 +178,22 @@ func (u *configUseCaseImpl) GetConfig(ctx context.Context, key string) (string, 
 	out, err := u.cfgRepo.GetConfig(ctx, key)
 	if err != nil {
 		return "", fmt.Errorf("GetConfig: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) GetMetadata(ctx context.Context, key string) (string, error) {
+	out, err := u.cfgRepo.GetMetadata(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("GetMetadata: %w", err)
+	}
+	return out, nil
+}
+
+func (u *configUseCaseImpl) GetLocalMetadata(ctx context.Context, key string) (string, error) {
+	out, err := u.cfgRepo.GetLocalMetadata(ctx, key)
+	if err != nil {
+		return "", fmt.Errorf("GetLocalMetadata: %w", err)
 	}
 	return out, nil
 }
@@ -257,9 +297,19 @@ func (u *configUseCaseImpl) LoadCreateContext(ctx context.Context) (CreateContex
 	if err != nil {
 		return CreateContext{}, fmt.Errorf("LoadCreateContext: read custom types: %w", err)
 	}
+	customStatuses, err := u.cfgRepo.GetCustomStatuses(ctx)
+	if err != nil {
+		return CreateContext{}, fmt.Errorf("LoadCreateContext: read custom statuses: %w", err)
+	}
+	infraTypes, err := u.GetInfraTypes(ctx)
+	if err != nil {
+		return CreateContext{}, fmt.Errorf("LoadCreateContext: read infra types: %w", err)
+	}
 	return CreateContext{
 		IssuePrefix:     prefix,
 		AllowedPrefixes: allowed,
 		CustomTypes:     customTypes,
+		CustomStatuses:  customStatuses,
+		InfraTypes:      infraTypes,
 	}, nil
 }

@@ -34,7 +34,7 @@ func clearTelemetryEnv(t *testing.T) {
 }
 
 func TestCommandSpanAttrs(t *testing.T) {
-	got := commandSpanAttrs("ready", "1.0.4-dev", []string{"--json", "--include-deferred"})
+	got := commandSpanAttrs("ready", "1.0.4-dev", []string{"--json", "--include-deferred"}, nil)
 
 	want := map[string]string{
 		"bd.command": "ready",
@@ -57,7 +57,7 @@ func TestCommandSpanAttrs(t *testing.T) {
 }
 
 func TestCommandSpanAttrs_EmptyArgs(t *testing.T) {
-	got := commandSpanAttrs("status", "v1", nil)
+	got := commandSpanAttrs("status", "v1", nil, nil)
 	for _, kv := range got {
 		if string(kv.Key) == "bd.args" && kv.Value.AsString() != "" {
 			t.Errorf("bd.args with nil args = %q; want empty string", kv.Value.AsString())
@@ -73,7 +73,7 @@ func TestCommandSpanAttrs_EmptyArgs(t *testing.T) {
 // contract: the function must always return a non-nil context and span.
 func TestStartCommandTelemetry_DisabledStillReturnsSpan(t *testing.T) {
 	clearTelemetryEnv(t)
-	ctx, span := startCommandTelemetry(context.Background(), "ready", "1.0.0", []string{"--json"})
+	ctx, span := startCommandTelemetry(context.Background(), "ready", "1.0.0", []string{"--json"}, nil)
 	if ctx == nil {
 		t.Fatal("startCommandTelemetry returned nil context")
 	}

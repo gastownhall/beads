@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -94,6 +95,183 @@ func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	}
 	if labelEventCount != 2 {
 		t.Fatalf("wisp label event count for %s = %d, want 2", wisp.ID, labelEventCount)
+	}
+}
+
+func TestRunInTransactionCloseIssueEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-close-event",
+		Title:       "transaction close emits event",
+		Description: "exercise doltTransaction.CloseIssue",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: close emits event", func(tx storage.Transaction) error {
+		return tx.CloseIssue(ctx, issue.ID, "done", "tester", "session-1")
+	}); err != nil {
+		t.Fatalf("RunInTransaction CloseIssue: %v", err)
+	}
+
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+}
+
+func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-close-noop-event",
+		Title:       "transaction no-op close leaves events alone",
+		Description: "exercise doltTransaction.CloseIssue already-closed path",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.CloseIssue(ctx, issue.ID, "done", "tester", "session-1"); err != nil {
+		t.Fatalf("CloseIssue seed: %v", err)
+	}
+
+	const strayComment = "uncommitted stray event"
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO events (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)",
+		uuid.Must(uuid.NewV7()).String(), issue.ID, types.EventCommented, "tester", strayComment,
+	); err != nil {
+		t.Fatalf("insert stray event: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: already closed does not stage events", func(tx storage.Transaction) error {
+		return tx.CloseIssue(ctx, issue.ID, "still done", "tester", "session-2")
+	}); err != nil {
+		t.Fatalf("RunInTransaction CloseIssue already closed: %v", err)
+	}
+
+	// events is dolt_ignored since 0062: the stray row can never leak into a
+	// commit because nothing events-shaped is committed at all — but it must
+	// still be durable in the working set alongside the close event.
+	assertEventsNotCommitted(ctx, t, store.db)
+	var got int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
+		issue.ID, types.EventCommented, strayComment,
+	).Scan(&got); err != nil {
+		t.Fatalf("count stray events: %v", err)
+	}
+	if got != 1 {
+		t.Fatalf("stray event count = %d, want 1", got)
+	}
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+}
+
+func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-add-label-event",
+		Title:       "transaction add label emits event",
+		Description: "exercise doltTransaction.AddLabel",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: add label emits event", func(tx storage.Transaction) error {
+		return tx.AddLabel(ctx, issue.ID, "triaged", "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction AddLabel: %v", err)
+	}
+
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
+}
+
+func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	issue := &types.Issue{
+		ID:          "test-tx-remove-label-event",
+		Title:       "transaction remove label emits event",
+		Description: "exercise doltTransaction.RemoveLabel",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := store.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("CreateIssue: %v", err)
+	}
+	if err := store.AddLabel(ctx, issue.ID, "triaged", "tester"); err != nil {
+		t.Fatalf("AddLabel seed: %v", err)
+	}
+
+	if err := store.RunInTransaction(ctx, "test: remove label emits event", func(tx storage.Transaction) error {
+		return tx.RemoveLabel(ctx, issue.ID, "triaged", "tester")
+	}); err != nil {
+		t.Fatalf("RunInTransaction RemoveLabel: %v", err)
+	}
+
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
+}
+
+// assertRecordedEventCount counts audit rows in the working-set events table.
+// events is dolt_ignored since migration 0062 (bd-red8u): rows are durable and
+// visible to every client of the store but never part of committed history,
+// so there is no committed variant of this assertion anymore — see
+// assertEventsNotCommitted for the plane check.
+func assertRecordedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		issueID, eventType,
+	).Scan(&got); err != nil {
+		t.Fatalf("count recorded %s events for %s: %v", eventType, issueID, err)
+	}
+	if got != want {
+		t.Fatalf("recorded %s event count for %s = %d, want %d", eventType, issueID, got, want)
+	}
+}
+
+// assertEventsNotCommitted pins the 0062 plane contract: no events ROW ever
+// reaches committed history. On a production-shaped database the table itself
+// is absent at HEAD (the AS OF probe errors — the embedded contract tests
+// assert that stronger form), but the shared branch-per-test database
+// deliberately materializes an EMPTY events shell at HEAD so branches inherit
+// the schema (testutil.MaterializeLocalTableSchemasForBranchTests), so here
+// the probe may also succeed with zero rows. Any committed row is a
+// regression on both shapes.
+func assertEventsNotCommitted(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(&got); err == nil && got != 0 {
+		t.Fatalf("events has %d rows at HEAD; want none in committed history (dolt_ignored, 0062)", got)
 	}
 }
 

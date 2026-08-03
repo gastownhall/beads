@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // TestApplyCountIncludeInfraMirrorsListFilter pins `bd count --include-infra`
@@ -16,17 +18,17 @@ import (
 // (SkipWisps), template exclusion (IsTemplate), the default gate exclusion
 // (ExcludeTypes), and infra-type routing to the ephemeral tier (Ephemeral).
 func TestApplyCountIncludeInfraMirrorsListFilter(t *testing.T) {
-	cfg := listFilterConfig{}
+	cfg := workapi.ListConfig{}
 	for _, issueType := range []string{"", "task", "gate", "message"} {
 		name := issueType
 		if name == "" {
 			name = "none"
 		}
 		t.Run("type_"+name, func(t *testing.T) {
-			in := listInput{allFlag: true, includeInfra: true, issueType: issueType}
-			want, err := buildListFilter(in, cfg)
+			in := issueops.ListRequest{AllFlag: true, IncludeInfra: true, IssueType: issueType}
+			want, err := workapi.BuildListFilter(in, cfg)
 			if err != nil {
-				t.Fatalf("buildListFilter(%q): %v", issueType, err)
+				t.Fatalf("workapi.BuildListFilter(%q): %v", issueType, err)
 			}
 
 			got := types.IssueFilter{}
@@ -73,7 +75,7 @@ func TestApplyCountIncludeInfraMirrorsListFilter(t *testing.T) {
 // TestApplyCountIncludeInfraCustomInfraTypes verifies that the infra-type
 // routing honors a store-configured infra set, exactly like bd list does.
 func TestApplyCountIncludeInfraCustomInfraTypes(t *testing.T) {
-	cfg := listFilterConfig{infraSet: map[string]bool{"robot": true}}
+	cfg := workapi.ListConfig{InfraSet: map[string]bool{"robot": true}}
 
 	var robot types.IssueFilter
 	applyCountIncludeInfra(&robot, "robot", cfg)
@@ -82,7 +84,7 @@ func TestApplyCountIncludeInfraCustomInfraTypes(t *testing.T) {
 	}
 
 	// "message" is a default infra type but NOT part of the custom set, so it
-	// must not route to the ephemeral tier (mirrors listFilterConfig.isInfra).
+	// must not route to the ephemeral tier (mirrors workapi.ListConfig.IsInfra).
 	var msg types.IssueFilter
 	applyCountIncludeInfra(&msg, "message", cfg)
 	if msg.Ephemeral != nil {

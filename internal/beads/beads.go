@@ -16,11 +16,13 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -144,6 +146,33 @@ func FollowRedirect(beadsDir string) string {
 		return beadsDir
 	}
 
+	// Defense-in-depth (gastownhall/beads#4692): a redirect can end up
+	// pointing at a directory with no database at all, e.g. a stray
+	// worktree-depth redirect written by the "graceful server-to-embedded
+	// fallback" path (related to the "bd worktree create" write-site removed
+	// in #3051). Following such a redirect silently lands bd on an empty,
+	// unrelated location and `bd list`/`bd show` report no issues even
+	// though the real data is untouched elsewhere. docs/reference/advanced.md
+	// ("Database Redirects") already documents the contract: "The target
+	// directory must exist and contain a valid database" -- enforce that
+	// here instead of trusting any redirect file blindly.
+	//
+	// This intentionally does NOT look at the source directory's own mode:
+	// a server-mode source rig redirecting to a shared Gas Town root (each
+	// supplying its own dolt_database via ResolveRedirect/fb51196f7) is a
+	// documented, supported topology, not a staleness signal.
+	//
+	// hasBeadsProjectFiles treats bare presence of metadata.json in the
+	// target as sufficient, even if it later fails to parse: a
+	// present-but-corrupt metadata.json is a config problem, not a
+	// missing-database problem, and store_factory.go's
+	// newDoltStoreFromConfig already hard-errors loudly on an unloadable
+	// metadata.json rather than silently falling back to the embedded store.
+	if !hasBeadsProjectFiles(target) {
+		warnInvalidRedirectTargetOnce(beadsDir, target)
+		return beadsDir
+	}
+
 	// Prevent redirect chains - don't follow if target also has a redirect
 	targetRedirect := filepath.Join(target, RedirectFileName)
 	if _, err := os.Stat(targetRedirect); err == nil {
@@ -155,6 +184,22 @@ func FollowRedirect(beadsDir string) string {
 	}
 
 	return target
+}
+
+// invalidRedirectTargetWarned tracks source beadsDir paths that have already
+// received the "ignoring redirect: invalid target" warning in this process,
+// so warnInvalidRedirectTargetOnce doesn't spam stderr. FollowRedirect is
+// called many times per bd invocation (CWD walk, routing, worktree
+// fallbacks), all for the same source directory.
+var invalidRedirectTargetWarned sync.Map
+
+// warnInvalidRedirectTargetOnce emits the invalid-redirect-target warning at
+// most once per source beadsDir per process.
+func warnInvalidRedirectTargetOnce(beadsDir, target string) {
+	if _, alreadyWarned := invalidRedirectTargetWarned.LoadOrStore(beadsDir, struct{}{}); alreadyWarned {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "Warning: ignoring redirect from %s to %s because the target has no database or metadata.json; fix or delete the redirect file\n", beadsDir, target)
 }
 
 func canonicalizeBeadsDirPath(beadsDir string) string {
@@ -421,13 +466,35 @@ func findLocalBeadsDir() string {
 }
 
 // findDatabaseInBeadsDir searches for a database within a .beads directory.
-// Checks metadata.json for the Dolt database path. For server mode, no local
-// directory is required. For embedded mode, checks both the embeddeddolt/
-// directory (where the embedded engine stores data) and the legacy dolt/ path.
-// Returns empty string if no database is found.
+// Checks metadata.json for the selected implementation's database path. For
+// server mode, no local path needs to exist yet: authoritative
+// metadata is enough to route the caller without falling through to Dolt.
+// Embedded Dolt checks both embeddeddolt/ and the legacy dolt/ path. Returns
+// empty string if no database is configured or found.
 func findDatabaseInBeadsDir(beadsDir string, _ bool) string {
 	// Check for metadata.json first (single source of truth)
-	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		// A present but unreadable/invalid metadata file is authoritative. Do
+		// not bypass it by discovering a leftover local Dolt directory; callers
+		// that need the detailed error should use OpenBestAvailable.
+		return ""
+	}
+	if cfg != nil {
+		if !configfile.IsSupportedBackend(cfg.Backend) {
+			// Unknown and removed backend markers are not Dolt aliases. Let the
+			// storage-selection layer report the metadata error without routing
+			// through a leftover local Dolt directory.
+			return ""
+		}
+		// A registered backend whose workspace is the .beads directory has no
+		// separately discoverable local database; metadata.json plus its remote
+		// store identify the workspace. Return the .beads dir itself so extension
+		// callers discover it, mirroring the CLI's registered-workspace path in
+		// cmd/bd/main.go instead of falling through to Dolt-only discovery.
+		if backends.WorkspaceIsBeadsDir(cfg.GetBackend()) {
+			return beadsDir
+		}
 		// For Dolt server mode, database is on the server - no local directory required
 		if cfg.IsDoltServerMode() {
 			return cfg.DatabasePath(beadsDir)
@@ -491,6 +558,7 @@ func FindDatabasePath() string {
 
 		// BEADS_DIR is set but no database found - this is OK for --no-db mode
 		// Return empty string and let the caller handle it
+		return ""
 	}
 
 	// 2. Check BEADS_DB environment variable (deprecated but still supported)

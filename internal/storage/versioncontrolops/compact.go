@@ -15,7 +15,9 @@ import (
 //  6. Checkout main, hard-reset to temp branch
 //  7. Delete temp branch
 //
-// Callers should run DoltGC afterward to reclaim disk space.
+// Callers should run PruneRemoteRefs and then DoltGC afterward to reclaim disk
+// space — remote-tracking refs still anchor the pre-compact chain, and GC
+// alone reclaims nothing while they exist (bd-agctw).
 //
 // conn must be a single database connection (not a pooled *sql.DB) since the
 // stored procedures rely on session-scoped state (current branch, working set).

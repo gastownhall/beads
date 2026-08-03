@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -202,6 +202,23 @@ func (s *DoltStore) hasPersistedCLIRemote() bool {
 // trust an empty dolt_remotes table at cold start: the remote-migrate gate
 // and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
 func (s *DoltStore) HasPersistedRemote() bool {
+	return len(s.PersistedRemoteInfos()) > 0
+}
+
+// PersistedRemoteInfos returns the remotes persisted on disk in
+// .dolt/repo_state.json — names AND urls — searching the same directories in
+// the same order as HasPersistedRemote: the database CLI directory first,
+// then the dolt server root (GH#2118). The first directory that yields any
+// remotes wins, mirroring HasPersistedRemote's first-hit semantics.
+//
+// Callers in the GH#2118 cold-start window use this to RECOVER the invisible
+// remote rather than merely detect it: a freshly (auto-)started sql-server
+// can report an empty dolt_remotes even though the remote is persisted on
+// disk, so an empty listing is a reporting artifact, not an unconfigured rig
+// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
+// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
+// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -219,10 +236,10 @@ func (s *DoltStore) HasPersistedRemote() bool {
 			continue
 		}
 		if len(remotes) > 0 {
-			return true
+			return remotes
 		}
 	}
-	return false
+	return nil
 }
 
 // RemoveRemote removes a configured remote.
@@ -427,7 +444,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	defer conn.Close()
 
 	// Clean up any leftover staging branch from a previous failed run.
-	_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+	_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 
 	// Create staging branch from the current branch.
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", federationStagingBranch, s.branch); err != nil {
@@ -436,8 +453,8 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 
 	// Ensure cleanup: restore original branch and delete staging.
 	defer func() {
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch)
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_CHECKOUT(?)", s.branch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 	}()
 
 	// Checkout staging branch.
@@ -517,12 +534,12 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "push", peer, refspec)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to push to peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("push to peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -531,11 +548,11 @@ func (s *DoltStore) doltCLIPushRefToPeer(ctx context.Context, peer string, refsp
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "pull", peer, s.branch)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to pull from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("pull from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }
@@ -544,11 +561,11 @@ func (s *DoltStore) doltCLIPullFromPeer(ctx context.Context, peer string, creds 
 // Used for git-protocol remotes where CALL DOLT_FETCH times out through the SQL connection.
 // Credentials are set on the subprocess environment only via cmd.Env.
 func (s *DoltStore) doltCLIFetchFromPeer(ctx context.Context, peer string, creds *remoteCredentials) error {
-	cmd, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, peer, creds, "fetch", peer)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("failed to fetch from peer %s: %s: %w", peer, strings.TrimSpace(string(out)), err)
+		return cliTransferError(fmt.Sprintf("fetch from peer %s", peer), peer, transferCtx, out, err)
 	}
 	return nil
 }

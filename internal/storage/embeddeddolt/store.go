@@ -25,10 +25,12 @@ import (
 // Compile-time interface checks.
 var _ storage.DoltStorage = (*EmbeddedDoltStore)(nil)
 var _ storage.StoreLocator = (*EmbeddedDoltStore)(nil)
+var _ storage.ActiveDatabaseSizer = (*EmbeddedDoltStore)(nil)
 var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
 // Each method call opens a short-lived connection, executes within an explicit
@@ -45,9 +47,10 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
-	// readOnly marks a store opened via OpenReadOnly: open-time mutations
-	// (CREATE DATABASE, schema migrations) were skipped and write
-	// transactions are refused (bd-6dnrw.32).
+	// readOnly marks a store opened via OpenReadOnly or
+	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
+	// migrations) were skipped and write transactions are refused
+	// (bd-6dnrw.32).
 	readOnly bool
 	// intent records why this store was opened, controlling how lenient
 	// initSchema is about pending-migration refusals it would otherwise treat
@@ -82,9 +85,6 @@ const (
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
-
-// errReadOnly is returned when a write is attempted on a read-only store.
-var errReadOnly = errors.New("embeddeddolt: store is read-only")
 
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
@@ -149,6 +149,20 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 // opens of the same directory keep their own lifecycle. Write transactions on
 // the returned store are refused.
 func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, true)
+}
+
+// OpenForPreviewCommand opens an existing embedded database without any
+// open-time mutation and refuses all write transactions. Unlike
+// OpenReadOnly, it permits a behind schema cursor so --dry-run/--inspect can
+// still validate state that is query-compatible with the current binary. A
+// missing column or other genuine incompatibility is reported by the preview
+// query itself; it is never repaired implicitly.
+func OpenForPreviewCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, false)
+}
+
+func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkBehind bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -180,8 +194,10 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := schema.CheckBehindDrift(ctx, db); err != nil {
-		return nil, err
+	if checkBehind {
+		if err := schema.CheckBehindDrift(ctx, db); err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -200,7 +216,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	if commit && s.readOnly {
-		err = errReadOnly
+		err = ErrReadOnly
 		return
 	}
 
@@ -244,7 +260,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 		return 0, errClosed
 	}
 	if s.readOnly {
-		return 0, errReadOnly
+		return 0, ErrReadOnly
 	}
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
@@ -310,7 +326,37 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	// already-initialized database — independently migrating each clone forks the
 	// schema. Embedded mode (the mode the original report was filed against) syncs
 	// via Dolt remotes too, so it needs the same gate as server mode.
-	if err := schema.CheckRemoteMigrateGate(ctx, conn); err != nil {
+	//
+	// adopt injects the driver-side fast-forward ancestry primitives
+	// (mybd-ae1i) so the smart gate can distinguish a losslessly
+	// fast-forwardable remote-ahead case (smartAdoptFastForward) from the
+	// plain destructive adopt, and auto-execute it: CheckRemoteMigrateGate*
+	// calls FastForward and returns nil (proceed, nothing pending) once HEAD
+	// has actually advanced; any execution failure (dirty working set raced
+	// in, non-fast-forward, concurrent writer) falls back to the plain
+	// destructive adopt directive instead of forcing the write.
+	adopt := &schema.FastForwardAdopter{
+		IsStrictAncestor: func(ctx context.Context, db schema.DBConn, ref string) (bool, error) {
+			return versioncontrolops.LocalIsStrictAncestorOf(ctx, db, ref)
+		},
+		WorkingSetClean: func(ctx context.Context, db schema.DBConn) (bool, error) {
+			return versioncontrolops.WorkingSetClean(ctx, db)
+		},
+		FastForward: func(ctx context.Context, db schema.DBConn, ref string) error {
+			return versioncontrolops.FastForwardAdopt(ctx, db, ref)
+		},
+		// ReadOnly is deliberately left unset (false) here: this initSchema
+		// path is only ever reached via newStore (openStrict,
+		// openReadOnlyCommand, or openWorkingSetReconcile intents), all of
+		// which perform a writable open — s.readOnly is never true for any
+		// of them. The genuinely read-only embedded open, OpenReadOnly,
+		// skips initSchema (and this gate) entirely, so there is no
+		// read-only signal to plumb through at this injection site the way
+		// server mode's cfg.ReadOnly is (dolt/store.go initSchema). If that
+		// ever changes — e.g. initSchema starts running on a store that can
+		// report readOnly true — wire it here too.
+	}
+	if err := schema.CheckRemoteMigrateGateWithAdopt(ctx, conn, adopt); err != nil {
 		var gateErr *schema.RemoteMigrateGateError
 		if s.intent != openStrict && errors.As(err, &gateErr) {
 			// The gate exists to stop in-place migration on a remote-backed,
@@ -322,8 +368,10 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 				"  coordination decision, not an auto-fix - do NOT run a migration unless\n" +
 				"  you are the single designated migrator (only ONE clone may migrate a\n" +
 				"  shared remote, else the schema forks; #4259):\n" +
-				"    • designated migrator (only ONE machine): %[3]s=1 bd migrate && bd dolt push\n" +
-				"    • every other clone (another already migrated): bd bootstrap\n"
+				"    • designated migrator (only ONE machine): bd migrate --force && bd dolt push\n" +
+				"    • every other clone (another already migrated): bd bootstrap\n" +
+				"    • several machines: only ONE migrates; sync each other clone and run\n" +
+				"      bd dolt pull after the migrator pushes, before upgrading it\n"
 			switch s.intent {
 			case openWorkingSetReconcile:
 				fmt.Fprintf(os.Stderr,
@@ -331,13 +379,13 @@ func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 						"  Working-set reconcile command: continuing on schema v%[2]d without\n"+
 						"  migrating; the commit applies to the working set at the current\n"+
 						"  schema."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			default: // openReadOnlyCommand
 				fmt.Fprintf(os.Stderr,
 					"Warning: %[1]v\n"+
 						"  Read-only command: continuing on schema v%[2]d without migrating.\n"+
 						"  Writes are blocked until the schema is reconciled."+sharedGuidance,
-					gateErr, gateErr.CurrentVersion, schema.AllowRemoteMigrateEnv)
+					gateErr, gateErr.CurrentVersion)
 			}
 			return nil
 		}
@@ -504,6 +552,20 @@ func (s *EmbeddedDoltStore) GetIssueComments(ctx context.Context, issueID string
 	return result, err
 }
 
+// GetIssueCommentsPage returns one keyset page of an issue's comments in
+// (created_at ASC, id ASC) order, resuming strictly after the cursor. See the
+// storage.Storage doc for the ordering, sargability, and page-walk-equals-full-
+// read contract.
+func (s *EmbeddedDoltStore) GetIssueCommentsPage(ctx context.Context, issueID string, after storage.CommentPageCursor, limit int) ([]*types.Comment, error) {
+	var result []*types.Comment
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsPageInTx(ctx, tx, issueID, after, limit)
+		return err
+	})
+	return result, err
+}
+
 func (s *EmbeddedDoltStore) GetEvents(ctx context.Context, issueID string, limit int) ([]*types.Event, error) {
 	var result []*types.Event
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
@@ -519,6 +581,19 @@ func (s *EmbeddedDoltStore) GetAllEventsSince(ctx context.Context, since time.Ti
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.GetAllEventsSinceInTx(ctx, tx, since)
+		return err
+	})
+	return result, err
+}
+
+// EventsSince returns durable events strictly after the keyset cursor, ordered
+// by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
+// issueID != "" scopes the feed to one bead's history.
+func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, issueID string, limit int) ([]*types.Event, error) {
+	var result []*types.Event
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, issueID, limit)
 		return err
 	})
 	return result, err
@@ -548,6 +623,40 @@ func (s *EmbeddedDoltStore) DoltGC(ctx context.Context) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.DoltGC(ctx, db)
 	})
+}
+
+// ListRemoteRefs returns the names of all cached remote-tracking refs.
+func (s *EmbeddedDoltStore) ListRemoteRefs(ctx context.Context) ([]string, error) {
+	var refs []string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		refs, err = versioncontrolops.ListRemoteRefs(ctx, db)
+		return err
+	})
+	return refs, err
+}
+
+// PruneRemoteRefs deletes all cached remote-tracking refs so a post-squash GC
+// can reclaim the history they anchor (bd-agctw). Returns the deleted names.
+func (s *EmbeddedDoltStore) PruneRemoteRefs(ctx context.Context) ([]string, error) {
+	var pruned []string
+	err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		pruned, err = versioncontrolops.PruneRemoteRefs(ctx, db)
+		return err
+	})
+	return pruned, err
+}
+
+// ListTags returns the names of all Dolt tags.
+func (s *EmbeddedDoltStore) ListTags(ctx context.Context) ([]string, error) {
+	var tags []string
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		tags, err = versioncontrolops.ListTags(ctx, db)
+		return err
+	})
+	return tags, err
 }
 
 // ImportJSONLData atomically checks if the database is empty and, if so,
@@ -661,6 +770,24 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 	return filepath.Join(s.dataDir, s.database)
 }
 
+// ActiveDatabaseSize returns the approximate size of this store's active
+// database directory. Sibling databases under the embedded data root are not
+// part of the result.
+func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
+	if s.closed.Load() {
+		return 0, errClosed
+	}
+	activeDir := s.CLIDir()
+	if activeDir == "" {
+		return 0, fmt.Errorf("embeddeddolt: active database directory is empty")
+	}
+	size, err := storage.MeasureDirectorySize(ctx, activeDir)
+	if err != nil {
+		return 0, fmt.Errorf("measure active database directory %q: %w", activeDir, err)
+	}
+	return size, nil
+}
+
 // ---------------------------------------------------------------------------
 // storage.VersionControl
 // ---------------------------------------------------------------------------
@@ -668,15 +795,17 @@ func (s *EmbeddedDoltStore) CLIDir() string {
 // Branch, Checkout, CurrentBranch, DeleteBranch, ListBranches are
 // implemented in version_control.go via versioncontrolops.
 
+// CommitPending commits all working set changes and reports whether a commit
+// actually landed. It gets that from commitAll's returned bool rather than
+// inspecting Commit's error or reading HEAD before and after: as of GH#3886,
+// Commit itself tolerates Dolt's "nothing to commit" response (matching the
+// server store) and returns nil for it, so an error-based check here would
+// report every clean-store call as "committed", and a HEAD-before/HEAD-after
+// comparison would cost two extra engine opens on every call (this runs on
+// every embedded pull/sync) and race against any concurrent HEAD movement.
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
-	if err := s.Commit(ctx, msg); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return s.commitAll(ctx, msg, true)
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.
@@ -724,6 +853,20 @@ func (s *EmbeddedDoltStore) Diff(ctx context.Context, fromRef, toRef string) ([]
 		return err
 	})
 	return result, err
+}
+
+// PreviousExternalRef returns the external_ref value recorded for issueID
+// as of the most recent commit at or before asOf.
+// Implements storage.ExternalRefHistoryQuerier.
+func (s *EmbeddedDoltStore) PreviousExternalRef(ctx context.Context, issueID string, asOf time.Time) (string, bool, error) {
+	var ref string
+	var found bool
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		ref, found, err = issueops.PreviousExternalRefInTx(ctx, tx, issueID, asOf)
+		return err
+	})
+	return ref, found, err
 }
 
 // ---------------------------------------------------------------------------
@@ -803,6 +946,30 @@ func (s *EmbeddedDoltStore) GetDependencyRecords(ctx context.Context, issueID st
 		return nil
 	})
 	return result, err
+}
+
+// GetDependentRecords returns raw dependency rows whose target is targetID,
+// without hydrating the source issues. Delegates to shared query logic.
+func (s *EmbeddedDoltStore) GetDependentRecords(ctx context.Context, targetID string, depType string, limit int, afterID string) ([]*types.Dependency, error) {
+	var result []*types.Dependency
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetDependentRecordsInTx(ctx, tx, targetID, depType, limit, afterID)
+		return err
+	})
+	return result, err
+}
+
+// CountDependentRecords returns the total inbound-edge count of targetID across
+// both dependency tables. Delegates to issueops.CountDependentRecordsInTx.
+func (s *EmbeddedDoltStore) CountDependentRecords(ctx context.Context, targetID string, depType string) (int, error) {
+	var n int
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		n, err = issueops.CountDependentRecordsInTx(ctx, tx, targetID, depType)
+		return err
+	})
+	return n, err
 }
 
 // IsBlocked is implemented in issues.go.

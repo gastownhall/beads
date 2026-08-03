@@ -18,8 +18,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// bd-206: Test updating open issue to closed preserves closed_at
-func TestImportOpenToClosedTransition(t *testing.T) {
+// TestCloseIssueSetsClosedAt verifies the dedicated close operation owns its lifecycle metadata.
+func TestCloseIssueSetsClosedAt(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -45,13 +45,9 @@ func TestImportOpenToClosedTransition(t *testing.T) {
 		t.Fatalf("Failed to create open issue: %v", err)
 	}
 
-	// Step 2: Update via UpdateIssue with closed status (closed_at managed automatically)
-	updates := map[string]interface{}{
-		"status": types.StatusClosed,
-	}
-
-	if err := testStore.UpdateIssue(ctx, "bd-transition-1", updates, "test"); err != nil {
-		t.Fatalf("Update failed: %v", err)
+	// Step 2: Lifecycle transitions use the dedicated close operation.
+	if err := testStore.CloseIssue(ctx, "bd-transition-1", "", "test", ""); err != nil {
+		t.Fatalf("CloseIssue failed: %v", err)
 	}
 
 	// Step 3: Verify the issue is now closed with correct closed_at
@@ -69,8 +65,8 @@ func TestImportOpenToClosedTransition(t *testing.T) {
 	}
 }
 
-// bd-206: Test updating closed issue to open clears closed_at
-func TestImportClosedToOpenTransition(t *testing.T) {
+// TestReopenIssueClearsClosedAt verifies the dedicated reopen operation clears lifecycle metadata.
+func TestReopenIssueClearsClosedAt(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	dbPath := filepath.Join(tmpDir, "test.db")
@@ -97,13 +93,9 @@ func TestImportClosedToOpenTransition(t *testing.T) {
 		t.Fatalf("Failed to create closed issue: %v", err)
 	}
 
-	// Step 2: Update via UpdateIssue with open status (closed_at managed automatically)
-	updates := map[string]interface{}{
-		"status": types.StatusOpen,
-	}
-
-	if err := testStore.UpdateIssue(ctx, "bd-transition-2", updates, "test"); err != nil {
-		t.Fatalf("Update failed: %v", err)
+	// Step 2: Lifecycle transitions use the dedicated reopen operation.
+	if err := testStore.ReopenIssue(ctx, "bd-transition-2", "", "test"); err != nil {
+		t.Fatalf("ReopenIssue failed: %v", err)
 	}
 
 	// Step 3: Verify the issue is now open with null closed_at
@@ -141,6 +133,12 @@ func TestBlockedEnvVars(t *testing.T) {
 			}
 			if err != nil && !strings.Contains(err.Error(), tt.envVar) {
 				t.Errorf("expected error to mention %s, got: %v", tt.envVar, err)
+			}
+			if err != nil && !strings.Contains(err.Error(), "bd help init-safety") {
+				t.Errorf("expected error to point to safe reinitialization guidance, got: %v", err)
+			}
+			if err != nil && strings.Contains(err.Error(), "bd migrate dolt") {
+				t.Errorf("error must not recommend the removed backend-conversion command: %v", err)
 			}
 		})
 	}
@@ -240,17 +238,10 @@ func TestListUsesRepoBeadsDirWhenDoltDataDirEscapesDotBeads(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 	t.Setenv("BEADS_DOLT_PORT", "")
 
-	binPath := filepath.Join(t.TempDir(), "bd-under-test")
-	packageDir, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("getwd: %v", err)
-	}
-	buildCmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", binPath, ".")
-	buildCmd.Dir = packageDir
-	buildOut, err := buildCmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("go build failed: %v\n%s", err, buildOut)
-	}
+	// Shared once-per-process binary (honors BEADS_TEST_BD_BINARY) instead of
+	// a per-test go build — the in-test link steps dominated cmd/bd's wall
+	// clock (wy-4mtr0).
+	binPath := buildBDForInitTests(t)
 
 	listCmd := exec.Command(binPath, "list", "--json")
 	listCmd.Dir = repoDir

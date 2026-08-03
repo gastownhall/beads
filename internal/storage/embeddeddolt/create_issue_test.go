@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -30,24 +31,12 @@ type testEnv struct {
 // sets the issue_prefix config, and returns a testEnv with raw SQL access.
 func newTestEnv(t *testing.T, prefix string) *testEnv {
 	t.Helper()
-	ctx := t.Context()
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	store, err := embeddeddolt.Open(ctx, beadsDir, prefix, "main")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		t.Fatalf("SetConfig(issue_prefix): %v", err)
-	}
-	if err := store.Commit(ctx, "bd init"); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	fixture := newPristineEmbeddedDoltFixture(t, prefix)
+	t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 	return &testEnv{
-		store:    store,
-		dataDir:  filepath.Join(beadsDir, "embeddeddolt"),
-		database: prefix,
+		store:    fixture.store,
+		dataDir:  fixture.dataDir,
+		database: fixture.database,
 	}
 }
 
@@ -1265,6 +1254,14 @@ func TestCreateIssues(t *testing.T) {
 }
 
 func TestHookFiringStoreCreateIssuesFiresDependencyUpdatesFromEmbeddedStore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// The hook runner on Windows executes hook files directly via CreateProcess,
+		// which has no shebang dispatch. The extensionless #!/bin/sh hook written by
+		// newEmbeddedHookStore cannot be executed as a shell script, so no payload is
+		// ever logged and the assertions fail. Same limitation already skipped in
+		// internal/hooks/hooks_test.go. See: https://github.com/gastownhall/beads/issues/3800
+		t.Skip("hook script execution not supported on Windows - see GH#3800")
+	}
 	t.Run("non_transactional", func(t *testing.T) {
 		te := newTestEnv(t, "hk")
 		ctx := t.Context()

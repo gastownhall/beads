@@ -42,22 +42,24 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 	for i := range cols {
 		cols[i] = strings.TrimSpace(cols[i])
 	}
-	require.Len(t, cols, 48)
+	require.Len(t, cols, 52)
 
 	row := []driver.Value{
 		"bd-test.1", nil, "title", "desc", "", "", "", // id..notes
 		"open", 1, "task", nil, nil, // status..estimated_minutes
 		"2026-06-12 10:00:00", nil, nil, "2026-06-12T10:00:01Z", nil, nil, nil, nil, // created_at..spec_id
-		0, nil, nil, nil, nil, nil, // compaction_level..close_reason
+		0, nil, nil, nil, nil, nil, nil, // compaction_level..closed_by_session
 		nil, nil, nil, nil, nil, nil, // sender..is_template
 		nil, nil, nil, nil, // await_type..waiters
 		nil,                // mol_type
 		nil, nil, nil, nil, // event_kind..payload
 		nil, nil, // due_at, defer_until
 		nil, nil, nil, // work_type, source_system, metadata
-		nil, nil, // lease_expires_at, heartbeat_at
+		int64(12345),  // row_lock
+		nil,           // storage_class
+		nil, nil, nil, // lease_expires_at, heartbeat_at, granted_node
 	}
-	require.Len(t, row, 48)
+	require.Len(t, row, 52)
 
 	mock.ExpectQuery("SELECT").WillReturnRows(sqlmock.NewRows(cols).AddRow(row...))
 
@@ -70,4 +72,6 @@ func TestScanIssue_StringTimestamps(t *testing.T) {
 	require.NoError(t, err, "string timestamps must scan via the shared classic parse")
 	assert.Equal(t, time.Date(2026, 6, 12, 10, 0, 0, 0, time.UTC), issue.CreatedAt)
 	assert.Equal(t, time.Date(2026, 6, 12, 10, 0, 1, 0, time.UTC), issue.UpdatedAt)
+	// row_lock hydrates into the opaque RowVersion token at its positional slot.
+	assert.Equal(t, int64(12345), issue.RowVersion)
 }

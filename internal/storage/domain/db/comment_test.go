@@ -6,6 +6,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func (s *testSuite) TestCommentSQLRepository() {
@@ -26,6 +27,37 @@ func (s *testSuite) TestCommentSQLRepository() {
 		s.Run("ListRoutesToWispComments", s.commentWispListRouting)
 		s.Run("IsolatedFromPermanent", s.commentWispIsolated)
 	})
+	s.Run("Insert", func() {
+		s.Run("EmptyIssueIDReturnsError", s.commentInsertEmptyID)
+		s.Run("MissingIssueReturnsError", s.commentInsertMissingIssue)
+		s.Run("MissingWispReturnsError", s.commentInsertMissingWisp)
+		s.Run("PopulatesReturnedComment", s.commentInsertPopulatesReturn)
+		s.Run("RoundTripsThroughList", s.commentInsertRoundTrip)
+		s.Run("RoutesToWispComments", s.commentInsertWispRouting)
+		s.Run("InsertRecordPreservesImportedValues", s.commentInsertRecordPreservesImportedValues)
+	})
+}
+
+func (s *testSuite) commentInsertRecordPreservesImportedValues() {
+	s.seedIssueRow("bd-cmt-ins-record")
+	createdAt := time.Date(2025, time.January, 2, 3, 4, 5, 987_654_321, time.UTC)
+
+	inserted, err := s.commentRepo().InsertRecord(s.Ctx(), &types.Comment{
+		ID:        "imported-comment-id",
+		IssueID:   "bd-cmt-ins-record",
+		Author:    "importer",
+		Text:      "preserved",
+		CreatedAt: createdAt,
+	}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Equal("imported-comment-id", inserted.ID)
+	s.Equal(createdAt.Truncate(time.Second), inserted.CreatedAt)
+
+	comments, err := s.commentRepo().ListByIssueIDs(s.Ctx(), []string{"bd-cmt-ins-record"}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Require().Len(comments["bd-cmt-ins-record"], 1)
+	s.Equal("imported-comment-id", comments["bd-cmt-ins-record"][0].ID)
+	s.Equal(createdAt.Truncate(time.Second), comments["bd-cmt-ins-record"][0].CreatedAt)
 }
 
 func (s *testSuite) commentRepo() domain.CommentSQLRepository {
@@ -177,6 +209,71 @@ func (s *testSuite) commentWispListRouting() {
 	s.Require().Len(out["bd-cmt-wisp-lst"], 2)
 	s.Equal("first", out["bd-cmt-wisp-lst"][0].Text)
 	s.Equal("second", out["bd-cmt-wisp-lst"][1].Text)
+}
+
+func (s *testSuite) commentInsertEmptyID() {
+	_, err := s.commentRepo().Insert(s.Ctx(), "", "alice", "hi", domain.CommentOpts{})
+	s.Require().Error(err)
+}
+
+func (s *testSuite) commentInsertMissingIssue() {
+	_, err := s.commentRepo().Insert(s.Ctx(), "bd-cmt-ins-ghost", "alice", "hi", domain.CommentOpts{})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not found")
+}
+
+func (s *testSuite) commentInsertMissingWisp() {
+	s.seedIssueRow("bd-cmt-ins-perm-only")
+	_, err := s.commentRepo().Insert(s.Ctx(), "bd-cmt-ins-perm-only", "alice", "hi", domain.CommentOpts{UseWispsTable: true})
+	s.Require().Error(err)
+	s.Contains(err.Error(), "not found")
+}
+
+func (s *testSuite) commentInsertPopulatesReturn() {
+	s.seedIssueRow("bd-cmt-ins-ret")
+	before := time.Now().UTC().Add(-time.Second)
+
+	c, err := s.commentRepo().Insert(s.Ctx(), "bd-cmt-ins-ret", "alice", "hello world", domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Require().NotNil(c)
+	s.NotEmpty(c.ID)
+	s.Equal("bd-cmt-ins-ret", c.IssueID)
+	s.Equal("alice", c.Author)
+	s.Equal("hello world", c.Text)
+	s.False(c.CreatedAt.Before(before), "CreatedAt should be stamped at insert time")
+}
+
+func (s *testSuite) commentInsertRoundTrip() {
+	s.seedIssueRow("bd-cmt-ins-rt")
+
+	inserted, err := s.commentRepo().Insert(s.Ctx(), "bd-cmt-ins-rt", "bob", "a note", domain.CommentOpts{})
+	s.Require().NoError(err)
+
+	out, err := s.commentRepo().ListByIssueIDs(s.Ctx(), []string{"bd-cmt-ins-rt"}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Require().Len(out["bd-cmt-ins-rt"], 1)
+	got := out["bd-cmt-ins-rt"][0]
+	s.Equal(inserted.ID, got.ID)
+	s.Equal("bob", got.Author)
+	s.Equal("a note", got.Text)
+	s.WithinDuration(inserted.CreatedAt, got.CreatedAt, 2*time.Second)
+}
+
+func (s *testSuite) commentInsertWispRouting() {
+	s.seedWispRow("bd-cmt-ins-wisp")
+
+	inserted, err := s.commentRepo().Insert(s.Ctx(), "bd-cmt-ins-wisp", "carol", "wisp note", domain.CommentOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+
+	wispOut, err := s.commentRepo().ListByIssueIDs(s.Ctx(), []string{"bd-cmt-ins-wisp"}, domain.CommentOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Require().Len(wispOut["bd-cmt-ins-wisp"], 1)
+	s.Equal(inserted.ID, wispOut["bd-cmt-ins-wisp"][0].ID)
+	s.Equal("wisp note", wispOut["bd-cmt-ins-wisp"][0].Text)
+
+	permOut, err := s.commentRepo().ListByIssueIDs(s.Ctx(), []string{"bd-cmt-ins-wisp"}, domain.CommentOpts{})
+	s.Require().NoError(err)
+	s.Empty(permOut, "wisp comment should not land in the permanent comments table")
 }
 
 func (s *testSuite) commentWispIsolated() {

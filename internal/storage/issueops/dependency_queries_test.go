@@ -11,9 +11,17 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
+// Shared by both bulk-loader query shapes so they can't drift apart.
+const dependencyProjectionRegex = `SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM `
+
 func allDependencyRecordsQueryRegex(table string) string {
-	return `(?s)SELECT issue_id, COALESCE\(depends_on_issue_id, depends_on_wisp_id, depends_on_external\) AS depends_on_id, type, created_at, created_by, metadata, thread_id\s+FROM ` +
-		regexp.QuoteMeta(table) + `\s+ORDER BY issue_id`
+	return `(?s)` + dependencyProjectionRegex +
+		regexp.QuoteMeta(table) + `\s+ORDER BY issue_id, depends_on_id, type, id`
+}
+
+func dependencyRecordsForIssuesQueryRegex(table string) string {
+	return `(?s)` + dependencyProjectionRegex +
+		regexp.QuoteMeta(table) + ` WHERE issue_id IN \(\?\) ORDER BY issue_id, depends_on_id, type, id`
 }
 
 func dependencyRows() *sqlmock.Rows {
@@ -91,4 +99,41 @@ func onlyDependency(t *testing.T, deps map[string][]*types.Dependency, issueID s
 		t.Fatalf("deps[%q] length = %d, want 1: %+v", issueID, len(got), got)
 	}
 	return got[0]
+}
+
+// TestGetDependencyRecordsForIssuesOrdersByDependsOnID asserts the IN-list bulk
+// loader requests a total ORDER BY (issue_id, depends_on_id, type) and preserves
+// that row order in the returned slice — the property #4749 needs for stable export.
+func TestGetDependencyRecordsForIssuesOrdersByDependsOnID(t *testing.T) {
+	t.Parallel()
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// The FromTable fast path skips PartitionWispIDsInTx, so no partition query.
+	now := time.Now()
+	depsForIssuesRegex := dependencyRecordsForIssuesQueryRegex("dependencies")
+	mock.ExpectQuery(depsForIssuesRegex).
+		WithArgs("src").
+		WillReturnRows(dependencyRows().
+			AddRow("src", "a-target", types.DepBlocks, now, "t", "{}", "").
+			AddRow("src", "z-target", types.DepBlocks, now, "t", "{}", ""))
+
+	got, err := GetDependencyRecordsForIssuesFromTableInTx(context.Background(), db, "dependencies", []string{"src"})
+	if err != nil {
+		t.Fatalf("GetDependencyRecordsForIssuesFromTableInTx: %v", err)
+	}
+	deps := got["src"]
+	if len(deps) != 2 {
+		t.Fatalf("len = %d, want 2", len(deps))
+	}
+	if deps[0].DependsOnID != "a-target" || deps[1].DependsOnID != "z-target" {
+		t.Fatalf("order = [%q, %q], want [a-target, z-target]", deps[0].DependsOnID, deps[1].DependsOnID)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
 }

@@ -33,7 +33,7 @@ func TestEmbeddedDefault(t *testing.T) {
 // build wrong mental models (treating JSONL as source of truth, manually
 // running bd import, etc.) and have to discover the four deeper architecture
 // docs the hard way. The summary must appear before the Quick Reference and
-// link to the canonical SYNC_CONCEPTS.md entry-point.
+// link to the canonical sync-concepts entry-point.
 func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
 	content := EmbeddedDefault()
 
@@ -41,7 +41,7 @@ func TestEmbeddedDefaultArchitectureSummary(t *testing.T) {
 		"Architecture in one line",
 		"refs/dolt/data",
 		"passive export",
-		"SYNC_CONCEPTS.md",
+		"docs/core-concepts/sync-concepts.md",
 	}
 	for _, want := range required {
 		if !strings.Contains(content, want) {

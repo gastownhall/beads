@@ -43,6 +43,7 @@ func TestIsYamlOnlyKey(t *testing.T) {
 		{"backup.future-key", true}, // prefix match
 
 		// Import settings
+		{"import.auto", true},
 		{"import.path", true},
 		{"import.orphan_handling", false},
 

@@ -32,6 +32,9 @@ The database must already be initialized (run 'bd init' first if needed).
 To initialize and restore in one step, use: bd init && bd backup restore`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if usesProxiedServer() {
+			return HandleErrorRespectJSON("backup restore is not supported in proxied-server mode")
+		}
 		evt := metrics.NewCommandEvent("backup-restore")
 		defer func() {
 			if c := metrics.Global(); c != nil {

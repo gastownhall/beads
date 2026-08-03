@@ -217,8 +217,12 @@ func FixMissingDoltDatabase(path string) error {
 		return nil
 	}
 
-	// Connect to the server and probe for the correct database
-	db, err := openDoltDB(beadsDir)
+	// Connect to the server and probe for the correct database. No
+	// verifyFixTargetIdentity guard here: cfg.DoltDatabase is empty at this
+	// point (that's the condition that got us here), so there is no target
+	// database identity to verify yet — this call establishes it by probing
+	// schema across the server, it does not delete or mutate anything.
+	db, _, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  dolt_database fix skipped (server not reachable: %v)\n", err)
 		return nil
@@ -344,6 +348,7 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 			schemaCandidates = append(schemaCandidates, db)
 		}
 	}
+	current, hasCurrent := byName[cfg.GetDoltDatabase()]
 
 	if cfg.ProjectID != "" {
 		var matches []serverDatabaseMetadata
@@ -365,14 +370,26 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 			)
 		}
 		if len(matches) == 1 && cfg.DoltDatabase != matches[0].Name {
+			// Safety guard: when the configured database has its own project_id that
+			// disagrees with metadata.json, and a different database matches the local
+			// project_id, we have conflicting identity signals. Auto-switching databases
+			// here can silently attach this workspace to another project.
+			if hasCurrent && current.HasSchema && current.ProjectID != "" && current.ProjectID != cfg.ProjectID {
+				return false, "", fmt.Errorf(
+					"conflicting project identity: metadata.json project_id %s matches database %q, but configured database %q reports project_id %s",
+					cfg.ProjectID,
+					matches[0].Name,
+					current.Name,
+					current.ProjectID,
+				)
+			}
 			from := cfg.GetDoltDatabase()
 			cfg.DoltDatabase = matches[0].Name
 			return true, fmt.Sprintf("repaired dolt_database: %q -> %q using project_id %s", from, matches[0].Name, cfg.ProjectID), nil
 		}
 	}
 
-	current, ok := byName[cfg.GetDoltDatabase()]
-	if ok && current.HasSchema && current.ProjectID != "" && cfg.ProjectID != current.ProjectID {
+	if hasCurrent && current.HasSchema && current.ProjectID != "" && cfg.ProjectID != current.ProjectID {
 		from := cfg.ProjectID
 		cfg.ProjectID = current.ProjectID
 		if from == "" {
@@ -381,7 +398,10 @@ func reconcileAuthoritativeServerMetadata(cfg *configfile.Config, databases []se
 		return true, fmt.Sprintf("repaired project_id: %s -> %s from database %q", from, current.ProjectID, current.Name), nil
 	}
 
-	if cfg.ProjectID == "" && len(schemaCandidates) == 1 {
+	// In shared-server mode, a sole schema candidate can belong to a different
+	// workspace. Without a local project_id anchor, auto-adopting that database
+	// can redirect this workspace to another project's data.
+	if cfg.ProjectID == "" && len(schemaCandidates) == 1 && !doltserver.IsSharedServerMode() {
 		candidate := schemaCandidates[0]
 		var repairs []string
 		if cfg.DoltDatabase != candidate.Name {
@@ -455,9 +475,15 @@ func inspectServerMetadataDatabases(beadsDir string, cfg *configfile.Config) ([]
 }
 
 // isExpectedProbeError returns true for errors that indicate the table/row
-// simply doesn't exist — safe to treat as "not present". Permission errors,
-// connection failures, and other unexpected errors should be propagated so
-// that reconciliation doesn't act on an incomplete inventory.
+// simply doesn't exist — or that this user cannot inspect that database —
+// safe to treat as "not present" when enumerating SHOW DATABASES.
+//
+// GH#4931: shared sql-servers often host non-beads databases the beads
+// user cannot read. Access denied on those peers must not abort bootstrap
+// / metadata reconciliation for the configured beads database.
+//
+// Hard connection failures (server down, auth to the catalog itself) still
+// surface via openServerCatalogDB / SHOW DATABASES, not this probe helper.
 func isExpectedProbeError(err error) bool {
 	if err == nil {
 		return true
@@ -474,7 +500,23 @@ func isExpectedProbeError(err error) bool {
 			return true
 		case 1054: // Unknown column
 			return true
+		case 1044: // Access denied for user to database
+			return true
+		case 1142: // Access denied for user to table
+			return true
+		case 1143: // Access denied for user to column
+			return true
+		case 1227: // Access denied (requires privilege)
+			return true
+		case 1105: // HY000 — Dolt often wraps access denied here (GH#4931)
+			if strings.Contains(strings.ToLower(mysqlErr.Message), "access denied") {
+				return true
+			}
 		}
+	}
+	// Driver / wrapper may not expose MySQLError; match the common message.
+	if strings.Contains(strings.ToLower(err.Error()), "access denied") {
+		return true
 	}
 	return false
 }

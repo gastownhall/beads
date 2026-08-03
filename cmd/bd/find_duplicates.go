@@ -37,13 +37,13 @@ with different wording.
 
 Approaches:
   mechanical  Token-based text similarity (default, no API key needed)
-  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY or ai.api_key)
+  ai          LLM-based semantic comparison (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
 
 The mechanical approach tokenizes titles and descriptions, then computes
 Jaccard similarity between all issue pairs. It's fast and free but may
 miss semantically similar issues with very different wording.
 
-The AI approach sends candidate pairs to Claude for semantic comparison.
+The AI approach sends candidate pairs to an Anthropic-compatible model for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 
@@ -65,6 +65,8 @@ func init() {
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
+	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
+	addMaxRowsFlag(findDuplicatesCmd)
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -91,45 +93,71 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
 	if model == "" {
-		model = config.DefaultAIModel()
+		_, keySource := config.ResolveAIAPIKey("")
+		model = config.DefaultAIModelFor(keySource)
 	}
-
-	ctx := rootCtx
 
 	if method != "mechanical" && method != "ai" {
 		return HandleErrorRespectJSON("invalid method %q (use: mechanical, ai)", method)
 	}
 
 	if method == "ai" {
-		if os.Getenv("ANTHROPIC_API_KEY") == "" && config.GetString("ai.api_key") == "" {
-			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
+		if apiKey, _ := config.ResolveAIAPIKey(""); apiKey == "" {
+			return HandleErrorRespectJSON("--method ai requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
 		}
 	}
 
-	filter := types.IssueFilter{}
+	// Fetch issues
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return err
+	}
+	filter := types.IssueFilter{
+		MaxRows:       maxRows,
+		MaxRowsSource: maxRowsSource,
+	}
 	if status != "" && status != "all" {
 		s := types.Status(status)
 		filter.Status = &s
 	}
 
-	var issues []*types.Issue
-	var err error
+	if usesProxiedServer() {
+		// maxRows was already resolved above (to build filter); reject using
+		// that value directly instead of re-resolving via
+		// rejectMaxRowsUnderProxiedServer, which would call resolveMaxRows a
+		// second time and double any malformed-env warning it emits.
+		if err := rejectResolvedMaxRowsUnderProxiedServer(maxRows); err != nil {
+			return err
+		}
+		return runFindDuplicatesProxiedServer(rootCtx, filter, status, method, threshold, limit, model)
+	}
 
-	issues, err = store.SearchIssues(ctx, "", filter)
+	issues, err := store.SearchIssues(rootCtx, "", filter)
 	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
+		}
 		return HandleErrorRespectJSON("fetching issues: %v", err)
 	}
+	issues = filterClosedIfNoStatus(issues, status)
 
-	if status == "" {
-		var filtered []*types.Issue
-		for _, issue := range issues {
-			if issue.Status != types.StatusClosed {
-				filtered = append(filtered, issue)
-			}
-		}
-		issues = filtered
+	return reportFindDuplicates(rootCtx, issues, method, threshold, limit, model)
+}
+
+func filterClosedIfNoStatus(issues []*types.Issue, status string) []*types.Issue {
+	if status != "" {
+		return issues
 	}
+	var filtered []*types.Issue
+	for _, issue := range issues {
+		if issue.Status != types.StatusClosed {
+			filtered = append(filtered, issue)
+		}
+	}
+	return filtered
+}
 
+func reportFindDuplicates(ctx context.Context, issues []*types.Issue, method string, threshold float64, limit int, model string) error {
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -367,11 +395,12 @@ func findAIDuplicates(ctx context.Context, issues []*types.Issue, threshold floa
 
 	fmt.Fprintf(os.Stderr, "Analyzing %d candidate pairs with AI...\n", len(candidates))
 
-	apiKey := os.Getenv("ANTHROPIC_API_KEY")
-	if apiKey == "" {
-		apiKey = config.GetString("ai.api_key")
+	apiKey, keySource := config.ResolveAIAPIKey("")
+	clientOptions := []option.RequestOption{option.WithAPIKey(apiKey)}
+	if baseURL := config.DefaultAIBaseURL(keySource); baseURL != "" {
+		clientOptions = append(clientOptions, option.WithBaseURL(baseURL))
 	}
-	client := anthropic.NewClient(option.WithAPIKey(apiKey))
+	client := anthropic.NewClient(clientOptions...)
 
 	var pairs []duplicatePair
 

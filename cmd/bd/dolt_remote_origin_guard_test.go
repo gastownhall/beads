@@ -98,6 +98,81 @@ func TestCanonicalForComparison_TrailingSlashAndDotGit(t *testing.T) {
 	}
 }
 
+func TestCanonicalForComparison_HostCaseFolded(t *testing.T) {
+	// Host case must not cause false negatives in the collision guard.
+	mixed := doltremote.CanonicalForComparison("https://GitHub.com/org/repo.git")
+	lower := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	if mixed != lower {
+		t.Errorf("host-case variants canonical mismatch: %q vs %q", mixed, lower)
+	}
+}
+
+func TestCanonicalForComparison_CredentialsStripped(t *testing.T) {
+	// Embedded user[:pass]@ credentials must be stripped before comparison.
+	userPass := doltremote.CanonicalForComparison("https://user:pass@github.com/org/repo.git")
+	tokenOnly := doltremote.CanonicalForComparison("https://ghp_xxx@github.com/org/repo.git")
+	plain := doltremote.CanonicalForComparison("https://github.com/org/repo.git")
+	if userPass != plain {
+		t.Errorf("user:pass@ credentials not stripped: %q vs %q", userPass, plain)
+	}
+	if tokenOnly != plain {
+		t.Errorf("token-only credentials not stripped: %q vs %q", tokenOnly, plain)
+	}
+}
+
+func TestCanonicalForComparison_UserlessSCP(t *testing.T) {
+	// User-less SCP form must canonicalize equal to the user form and to
+	// Dolt's git+ssh:// form.
+	userless := doltremote.CanonicalForComparison("github.com:org/repo.git")
+	withUser := doltremote.CanonicalForComparison("git@github.com:org/repo.git")
+	gitSSH := doltremote.CanonicalForComparison("git+ssh://git@github.com/org/repo.git")
+	if userless != withUser {
+		t.Errorf("user-less and user SCP canonical mismatch: %q vs %q", userless, withUser)
+	}
+	if userless != gitSSH {
+		t.Errorf("user-less SCP and git+ssh canonical mismatch: %q vs %q", userless, gitSSH)
+	}
+}
+
+func TestCanonicalForComparison_NonDefaultSSHUserPreserved(t *testing.T) {
+	// Non-default SSH users select the remote account/home directory and
+	// must NOT be stripped like HTTP(S) transport credentials - otherwise
+	// distinct remotes for different accounts on the same host would
+	// falsely canonicalize to the same string.
+	alice := doltremote.CanonicalForComparison("alice@example.com:repo.git")
+	bob := doltremote.CanonicalForComparison("bob@example.com:repo.git")
+	if alice == bob {
+		t.Errorf("distinct SSH users must not canonicalize equal, both got %q", alice)
+	}
+
+	aliceGitSSH := doltremote.CanonicalForComparison("git+ssh://alice@example.com/repo.git")
+	if alice != aliceGitSSH {
+		t.Errorf("SCP and git+ssh forms of the same non-default user must match: %q vs %q", alice, aliceGitSSH)
+	}
+	if bob == aliceGitSSH {
+		t.Errorf("git+ssh://alice@... must not match a bob@... origin: %q vs %q", aliceGitSSH, bob)
+	}
+}
+
+func TestCanonicalForComparison_DefaultGitSSHUserStillFolded(t *testing.T) {
+	// The conventional "git" SSH user remains the documented default-equivalent
+	// case: bare host:path and explicit git@host:path must still match.
+	userless := doltremote.CanonicalForComparison("github.com:org/repo.git")
+	withGitUser := doltremote.CanonicalForComparison("git@github.com:org/repo.git")
+	if userless != withGitUser {
+		t.Errorf("default git@ user must still fold with userless form: %q vs %q", withGitUser, userless)
+	}
+}
+
+func TestCanonicalForComparison_SchemeStaysDistinct(t *testing.T) {
+	// http and https must never be folded together.
+	http := doltremote.CanonicalForComparison("http://github.com/org/repo")
+	https := doltremote.CanonicalForComparison("https://github.com/org/repo")
+	if http == https {
+		t.Errorf("http and https canonical must differ, both got %q", http)
+	}
+}
+
 // --- doltRemoteMatchesGitOrigin ---
 
 func TestDoltRemoteMatchesGitOrigin_NoGitDir_ReturnsFalse(t *testing.T) {

@@ -699,20 +699,76 @@ func runGitLabPush(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("initializing GitLab tracker: %w", err)
 	}
 
+	out := cmd.OutOrStdout()
 	engine := tracker.NewEngine(gt, store, actor)
-	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
+	engine.OnMessage = func(msg string) {
+		if !jsonOutput {
+			fmt.Fprintln(out, "  "+msg)
+		}
+	}
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
+	engine.PushHooks = buildGitLabPushHooks()
 
-	result, err := engine.Sync(ctx, tracker.SyncOptions{
+	if dryRun && !jsonOutput {
+		fmt.Fprintln(out, "Dry run mode - no changes will be made")
+		fmt.Fprintln(out)
+	}
+
+	opts := tracker.SyncOptions{
 		Push:     true,
 		Pull:     false,
 		DryRun:   dryRun,
 		IssueIDs: args,
-	})
+	}
+	result, err := engine.Sync(ctx, opts)
 	if err != nil {
 		return err
 	}
-	outputSyncResult(result, dryRun)
+
+	// Dependency-link push parity with `bd gitlab sync`: converge beads
+	// dependencies among the requested issues into GitLab issue links (and
+	// repair epic-child milestones). Without this, `bd gitlab push <ids>`
+	// would sync content but silently omit dependency links. Output is
+	// rendered here (rather than via outputSyncResult) so the link pass runs
+	// before the summary and the --json payload carries the link counts,
+	// matching bd gitlab sync.
+	var linkWarnings []string
+	warnLink := func(msg string) {
+		linkWarnings = append(linkWarnings, msg)
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+	}
+	linksPushed, linksLicenseSkipped, milestonesUpdated := pushGitLabDependencyLinks(ctx, gt, store, opts, dryRun, out, warnLink)
+
+	if jsonOutput {
+		return outputJSON(gitlabSyncResult{
+			DryRun:              dryRun,
+			Pushed:              result.Stats.Pushed,
+			Created:             result.Stats.Created,
+			Updated:             result.Stats.Updated,
+			Skipped:             result.Stats.Skipped,
+			Conflicts:           result.Stats.Conflicts,
+			Errors:              result.Stats.Errors,
+			LinksPushed:         linksPushed,
+			LinksLicenseSkipped: linksLicenseSkipped,
+			MilestonesUpdated:   milestonesUpdated,
+			Warnings:            append(result.Warnings, linkWarnings...),
+		})
+	}
+
+	if dryRun {
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, "Run without --dry-run to apply changes")
+		return nil
+	}
+	if result.Stats.Pushed > 0 {
+		fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
+	}
+	if linksPushed > 0 {
+		fmt.Fprintf(out, "✓ Synced %d dependency links\n", linksPushed)
+	}
+	if result.Stats.Conflicts > 0 {
+		fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
+	}
 	return nil
 }
 

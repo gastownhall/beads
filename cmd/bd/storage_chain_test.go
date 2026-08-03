@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
@@ -8,11 +9,17 @@ import (
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
-// stubChainStore is a stand-in for a concrete DoltStorage. It only carries
-// identity for type-assertion; method invocations would panic on the embedded
-// nil — the chain composition tests must not trigger any of them.
+// stubChainStore is a stand-in for a concrete DoltStorage. The embedded
+// interface exists only for decorator identity tests; ActiveDatabaseSize is
+// implemented explicitly so the sizing-capability test never reaches a nil
+// promoted method.
 type stubChainStore struct {
 	storage.DoltStorage
+	databaseSize int64
+}
+
+func (s *stubChainStore) ActiveDatabaseSize(context.Context) (int64, error) {
+	return s.databaseSize, nil
 }
 
 // clearTelemetryEnv is defined once for the package, in
@@ -64,6 +71,21 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 
 	if peeled := storage.UnwrapStore(got); peeled.(*stubChainStore) != raw {
 		t.Errorf("storage.UnwrapStore should peel both decorator layers; got %T", peeled)
+	}
+}
+
+func TestDoltBackupSizeUnwrapsStorageDecorators(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	raw := &stubChainStore{databaseSize: 99}
+	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+
+	size, available, err := doltBackupSizeForStore(t.Context(), wrapped)
+	if err != nil {
+		t.Fatalf("doltBackupSizeForStore: %v", err)
+	}
+	if !available || size != 99 {
+		t.Fatalf("doltBackupSizeForStore = (%d, %v), want (99, true)", size, available)
 	}
 }
 

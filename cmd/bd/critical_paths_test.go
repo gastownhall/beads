@@ -33,7 +33,7 @@ func TestBurnWisps(t *testing.T) {
 			t.Fatalf("Failed to create wisp: %v", err)
 		}
 
-		result, err := burnWisps(ctx, s, []string{wisp.ID})
+		result, err := burnWisps(ctx, s, []string{wisp.ID}, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -69,7 +69,7 @@ func TestBurnWisps(t *testing.T) {
 			ids = append(ids, wisp.ID)
 		}
 
-		result, err := burnWisps(ctx, s, ids)
+		result, err := burnWisps(ctx, s, ids, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -83,7 +83,7 @@ func TestBurnWisps(t *testing.T) {
 	})
 
 	t.Run("EmptyIDs", func(t *testing.T) {
-		result, err := burnWisps(ctx, s, []string{})
+		result, err := burnWisps(ctx, s, []string{}, "test")
 		if err != nil {
 			t.Fatalf("burnWisps failed: %v", err)
 		}
@@ -93,7 +93,7 @@ func TestBurnWisps(t *testing.T) {
 		}
 	})
 
-	t.Run("InvalidIDsContinue", func(t *testing.T) {
+	t.Run("InvalidIDAbortsAtomically", func(t *testing.T) {
 		// Create one valid wisp
 		wisp := &types.Issue{
 			Title:     "Valid wisp",
@@ -107,15 +107,17 @@ func TestBurnWisps(t *testing.T) {
 			t.Fatalf("Failed to create wisp: %v", err)
 		}
 
-		// Mix valid and invalid IDs — burnWisps should continue past failures
-		result, err := burnWisps(ctx, s, []string{"nonexistent-id", wisp.ID})
-		if err != nil {
-			t.Fatalf("burnWisps failed: %v", err)
+		// burnWisps deletes atomically within a single transaction (bd-6py7):
+		// a nonexistent ID makes DeleteIssue fail, rolling back the whole batch,
+		// so the valid wisp is NOT deleted.
+		if _, err := burnWisps(ctx, s, []string{"nonexistent-id", wisp.ID}, "test"); err == nil {
+			t.Fatal("burnWisps should error when a batch contains a nonexistent ID")
 		}
 
-		// The valid wisp should still be deleted even though the first ID failed
-		if result.DeletedCount < 1 {
-			t.Errorf("DeletedCount = %d, want at least 1", result.DeletedCount)
+		// The valid wisp must survive the rolled-back transaction.
+		got, err := s.GetIssue(ctx, wisp.ID)
+		if err != nil || got == nil {
+			t.Errorf("valid wisp should survive an aborted atomic burn: got=%v err=%v", got, err)
 		}
 	})
 }

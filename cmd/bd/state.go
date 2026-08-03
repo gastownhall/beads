@@ -1,6 +1,6 @@
 // Package main implements the bd CLI state management commands.
 // These commands provide convenient access to the labels-as-state pattern
-// documented in docs/LABELS.md.
+// documented in docs/core-concepts/labels.md.
 package main
 
 import (
@@ -43,6 +43,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runStateProxiedServer(rootCtx, args[0], args[1])
+		}
+
 		ctx := rootCtx
 		issueID := args[0]
 		dimension := args[1]
@@ -60,14 +64,7 @@ Examples:
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		prefix := dimension + ":"
-		var value string
-		for _, label := range labels {
-			if strings.HasPrefix(label, prefix) {
-				value = strings.TrimPrefix(label, prefix)
-				break
-			}
-		}
+		value, _ := findStateLabel(labels, dimension)
 
 		if jsonOutput {
 			result := map[string]interface{}{
@@ -116,8 +113,6 @@ The --reason flag provides context for the event bead (recommended).`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("set-state")
-
 		evt := metrics.NewCommandEvent("set-state")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -125,7 +120,6 @@ The --reason flag provides context for the event bead (recommended).`,
 			}
 		}()
 
-		ctx := rootCtx
 		issueID := args[0]
 		stateSpec := args[1]
 
@@ -137,6 +131,14 @@ The --reason flag provides context for the event bead (recommended).`,
 		newValue := parts[1]
 
 		reason, _ := cmd.Flags().GetString("reason")
+
+		CheckReadonly("set-state")
+
+		if usesProxiedServer() {
+			return runSetStateProxiedServer(rootCtx, issueID, dimension, newValue, reason)
+		}
+
+		ctx := rootCtx
 
 		var fullID string
 		var err error
@@ -151,15 +153,10 @@ The --reason flag provides context for the event bead (recommended).`,
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		prefix := dimension + ":"
-		var oldLabel string
-		var oldValue string
-		for _, label := range labels {
-			if strings.HasPrefix(label, prefix) {
-				oldLabel = label
-				oldValue = strings.TrimPrefix(label, prefix)
-				break
-			}
+		oldValue, found := findStateLabel(labels, dimension)
+		oldLabel := ""
+		if found {
+			oldLabel = dimension + ":" + oldValue
 		}
 
 		newLabel := dimension + ":" + newValue
@@ -279,6 +276,10 @@ Example:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runStateListProxiedServer(rootCtx, args[0])
+		}
+
 		ctx := rootCtx
 		issueID := args[0]
 
@@ -295,14 +296,7 @@ Example:
 			return HandleErrorRespectJSON("%v", err)
 		}
 
-		states := make(map[string]string)
-		for _, label := range labels {
-			if idx := strings.Index(label, ":"); idx > 0 {
-				dimension := label[:idx]
-				value := label[idx+1:]
-				states[dimension] = value
-			}
-		}
+		states := collectStateLabels(labels)
 
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -338,3 +332,23 @@ func init() {
 
 // Ensure ctx is available
 var _ context.Context = rootCtx
+
+func findStateLabel(labels []string, dimension string) (string, bool) {
+	prefix := dimension + ":"
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			return strings.TrimPrefix(label, prefix), true
+		}
+	}
+	return "", false
+}
+
+func collectStateLabels(labels []string) map[string]string {
+	states := make(map[string]string)
+	for _, label := range labels {
+		if index := strings.Index(label, ":"); index > 0 {
+			states[label[:index]] = label[index+1:]
+		}
+	}
+	return states
+}

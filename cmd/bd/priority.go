@@ -40,6 +40,10 @@ Examples:
 			}
 		}()
 
+		if usesProxiedServer() {
+			return runPriorityProxiedServer(rootCtx, args)
+		}
+
 		id := args[0]
 		priorityStr := args[1]
 

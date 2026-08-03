@@ -84,7 +84,7 @@ func (s *EmbeddedDoltStore) withPinnedDBConn(ctx context.Context, fn func(db ver
 // interface and must refuse them here instead (bd-578h9.12).
 func (s *EmbeddedDoltStore) withMutatingDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) error {
 	if s.readOnly {
-		return errReadOnly
+		return ErrReadOnly
 	}
 	return s.withDBConn(ctx, fn)
 }
@@ -93,18 +93,48 @@ func (s *EmbeddedDoltStore) withMutatingDBConn(ctx context.Context, fn func(db v
 // refusal as withMutatingDBConn (bd-578h9.12).
 func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn func(db versioncontrolops.DBConn) error) error {
 	if s.readOnly {
-		return errReadOnly
+		return ErrReadOnly
 	}
 	return s.withPinnedDBConn(ctx, fn)
 }
 
-func (s *EmbeddedDoltStore) Commit(ctx context.Context, message string) error {
-	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
-			return fmt.Errorf("dolt commit: %w", err)
+// commitAll runs the single embedded commit statement, DOLT_COMMIT('-Am'),
+// on one connection (via withConn) and reports whether a commit actually
+// landed. When tolerateEmpty is true, Dolt's "nothing to commit" response is
+// treated as a no-op (committed=false, err=nil) instead of an error — the
+// GH#3886 parity behavior Commit relies on. When tolerateEmpty is false, that
+// same response is returned as an error instead, which CommitMergeResolution
+// relies on (see its doc comment).
+//
+// Callers that need to know whether a commit landed (CommitPending) get it
+// from the returned bool instead of reading HEAD before and after: HEAD reads
+// are extra engine opens and are subject to a HEAD-moved-between-reads race
+// if anything else writes concurrently.
+func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
+	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
+		if _, execErr := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); execErr != nil {
+			if tolerateEmpty && issueops.IsNothingToCommitError(execErr) {
+				committed = false
+				return nil
+			}
+			return fmt.Errorf("dolt commit: %w", execErr)
 		}
+		committed = true
 		return nil
 	})
+	return committed, err
+}
+
+// Commit stages and commits the full working set. A clean working set is not
+// an error here: the server store (DoltStore.Commit et al., via
+// isDoltNothingToCommit) has always tolerated Dolt's "nothing to commit"
+// response, but this embedded path wrapped it as a hard failure — so `bd
+// bootstrap`, which builds an embedded store unconditionally and calls
+// CommitWithConfig (below) right after SetConfig on a pristine, otherwise-clean
+// store, died on it (GH#3886). Tolerating it here brings embedded to parity.
+func (s *EmbeddedDoltStore) Commit(ctx context.Context, message string) error {
+	_, err := s.commitAll(ctx, message, true)
+	return err
 }
 
 // CommitWithConfig commits all working set changes including config.
@@ -116,10 +146,27 @@ func (s *EmbeddedDoltStore) CommitWithConfig(ctx context.Context, message string
 // CommitMergeResolution concludes an operator --strategy merge resolution with
 // config included. Embedded Commit already stages everything via DOLT_COMMIT
 // ('-Am'), so config is never dropped here the way server-mode Commit drops it
-// (GH#2455); this alias satisfies the VersionControl interface so cmd/bd can
-// conclude bd vc merge --strategy uniformly across both stores.
+// (GH#2455).
+//
+// Unlike Commit/CommitWithConfig, this does NOT alias Commit and does NOT
+// tolerate a "nothing to commit" response: a merge resolution that leaves the
+// working set clean is the --ours case, where our values already stood and
+// resolving the conflict dirtied nothing — DoltStore.CommitMergeResolution
+// handles exactly this by explicitly concluding the open merge instead of
+// treating the empty diff as a no-op (concludeOpenMerge, wy-36ilm F12; see
+// versioncontrolops.GetMergeBlockers, which documents the same class of gap:
+// merge state that a plain commit-error check cannot see). Swallowing the
+// error here without also concluding the merge would leave
+// dolt_merge_status.is_merging true while reporting success, silently
+// re-wedging the next pull/sync — worse than today's explicit failure.
+// Whether embedded DOLT_COMMIT('-Am') already concludes an open merge on a
+// clean working set (unlike the server-mode stored-procedure path, which
+// requires the explicit conclude step) was not established here, so this
+// keeps the pre-existing non-tolerant behavior rather than guess (GH#3886
+// scope: fix bootstrap's plain-Commit path, not merge conclusion semantics).
 func (s *EmbeddedDoltStore) CommitMergeResolution(ctx context.Context, message string) error {
-	return s.Commit(ctx, message)
+	_, err := s.commitAll(ctx, message, false)
+	return err
 }
 
 func (s *EmbeddedDoltStore) AddRemote(ctx context.Context, name, url string) error {
@@ -243,6 +290,39 @@ func (s *EmbeddedDoltStore) Merge(ctx context.Context, branch string) ([]storage
 	return conflicts, err
 }
 
+// MergeWithStrategy implements storage.StrategicMerger for `bd vc merge
+// --strategy` (#4992). Unlike Merge, it runs on a PINNED session
+// (withMutatingPinnedDBConn, not withMutatingDBConn): the conflict-tolerant
+// session flags versioncontrolops.MergeWithStrategy sets are session state
+// and must be visible to the merge, resolve, repair, and commit statements
+// that follow — a *sql.DB pool (OpenSQL allows 2 idle conns) could otherwise
+// hand out a different connection mid-sequence.
+//
+// A resolved merge (conflicted or clean) always commits, so — unlike plain
+// Merge, which skips the recompute for a still-conflicted merge — the
+// is_blocked recompute always runs on success here.
+func (s *EmbeddedDoltStore) MergeWithStrategy(ctx context.Context, branch, strategy string) ([]storage.Conflict, error) {
+	preHead := ""
+	if !s.readOnly {
+		preHead = s.preMergeHead(ctx)
+	}
+	var conflicts []storage.Conflict
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		conflicts, err = versioncontrolops.MergeWithStrategy(ctx, db, branch, commitAuthor, strategy)
+		return err
+	})
+	if err != nil {
+		return conflicts, err
+	}
+	if !s.readOnly {
+		if rerr := s.recomputeBlockedAfterPull(ctx, preHead); rerr != nil {
+			return conflicts, fmt.Errorf("merge succeeded but is_blocked recompute failed: %w", rerr)
+		}
+	}
+	return conflicts, nil
+}
+
 // RecomputeBlockedAfterMerge recomputes the denormalized is_blocked column
 // for the rows changed since fromCommit and commits the result — the hook a
 // caller that resolved merge conflicts itself must run after committing the
@@ -301,6 +381,51 @@ func (s *EmbeddedDoltStore) ResolveConflicts(ctx context.Context, table string, 
 	})
 }
 
+// The CLI reaches these two methods through storage.UnwrapStore, so the
+// assertion must keep holding on the concrete store.
+var _ storage.ConflictInspector = (*EmbeddedDoltStore)(nil)
+
+// GetConflictRows returns the live conflicted rows of table, per field.
+// Implements storage.ConflictInspector (backs `bd conflicts list|show`).
+func (s *EmbeddedDoltStore) GetConflictRows(ctx context.Context, table string) ([]storage.ConflictRow, error) {
+	var rows []storage.ConflictRow
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		rows, err = versioncontrolops.GetConflictRows(ctx, db, table)
+		return err
+	})
+	return rows, err
+}
+
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*EmbeddedDoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *EmbeddedDoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	var blockers storage.MergeBlockers
+	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		blockers, err = versioncontrolops.GetMergeBlockers(ctx, db)
+		return err
+	})
+	return blockers, err
+}
+
+// ResolveConflictRows resolves individual conflicted rows of table by key.
+// Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
+// It runs on a PINNED connection: the resolution sets dolt's
+// conflict-tolerance session flags, which the writes that follow must see.
+func (s *EmbeddedDoltStore) ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error) {
+	var n int
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		var err error
+		n, err = versioncontrolops.ResolveConflictRows(ctx, db, table, keys, strategy)
+		return err
+	})
+	return n, err
+}
+
 // ---------------------------------------------------------------------------
 // Remote operations
 // ---------------------------------------------------------------------------
@@ -349,6 +474,40 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 	preHead := s.preMergeHead(ctx)
 	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
 		return versioncontrolops.Pull(ctx, db, defaultRemote, s.branch, remoteAuthUser())
+	})
+	if err != nil {
+		return err
+	}
+	return s.recomputeBlockedAfterPull(ctx, preHead)
+}
+
+// PullWithStrategy implements storage.StrategicPuller for `bd dolt pull
+// --strategy` (#4992 part 2). Identical to Pull except conflicts the
+// auto-resolver declines are resolved with strategy instead of aborting the
+// merge for the operator; see versioncontrolops.PullWithStrategy.
+func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy string) error {
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before pull: %w", err)
+	}
+	preHead := s.preMergeHead(ctx)
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.PullWithStrategy(ctx, db, defaultRemote, s.branch, remoteAuthUser(), strategy)
+	})
+	if err != nil {
+		return err
+	}
+	return s.recomputeBlockedAfterPull(ctx, preHead)
+}
+
+// PullRemoteWithStrategy implements storage.StrategicPuller for a named
+// remote; see PullWithStrategy.
+func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, strategy string) error {
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before pull: %w", err)
+	}
+	preHead := s.preMergeHead(ctx)
+	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		return versioncontrolops.PullWithStrategy(ctx, db, remote, s.branch, remoteAuthUser(), strategy)
 	})
 	if err != nil {
 		return err

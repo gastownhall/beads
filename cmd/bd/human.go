@@ -68,9 +68,8 @@ SUBCOMMANDS:
 		fmt.Println()
 
 		// Setup & Maintenance
-		fmt.Printf("%s\n", ui.RenderAccent("Setup & Sync:"))
+		fmt.Printf("%s\n", ui.RenderAccent("Setup & Maintenance:"))
 		printCmd("init", "Initialize bd in current directory")
-		printCmd("sync", "Sync issues with git remote")
 		printCmd("doctor", "Check installation health")
 		fmt.Println()
 
@@ -217,7 +216,7 @@ Examples:
 
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
-			FatalErrorRespectJSON("responding to human bead: %v", err)
+			return HandleErrorRespectJSON("responding to human bead: %v", err)
 		}
 
 		// Resolve partial ID and get issue
@@ -300,7 +299,7 @@ Examples:
 
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
-			FatalErrorRespectJSON("dismissing human bead: %v", err)
+			return HandleErrorRespectJSON("dismissing human bead: %v", err)
 		}
 
 		// Resolve partial ID and get issue

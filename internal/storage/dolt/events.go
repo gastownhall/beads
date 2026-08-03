@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -54,19 +55,47 @@ func (s *DoltStore) GetAllEventsSince(ctx context.Context, since time.Time) ([]*
 	return result, err
 }
 
-// AddIssueComment adds a comment to an issue (structured comment)
+// EventsSince returns durable events strictly after the keyset cursor, ordered
+// by (created_at ASC, id ASC) and bounded by limit. Durable events table only.
+// issueID != "" scopes the feed to one bead's history.
+func (s *DoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor, issueID string, limit int) ([]*types.Event, error) {
+	var result []*types.Event
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.EventsSinceInTx(ctx, tx, cursor.CreatedAt, cursor.ID, issueID, limit)
+		return err
+	})
+	return result, err
+}
+
+// AddIssueComment adds a comment to an issue (structured comment).
+//
+// Unlike ImportIssueComment it stamps created_at through
+// issueops.AddIssueCommentInTx, which advances past the issue's newest existing
+// comment so a burst of comments still reads back in the order it was written
+// (see issueops.NextLiveCommentTime).
 func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
-	return s.ImportIssueComment(ctx, issueID, author, text, time.Now().UTC())
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)
+	})
 }
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+	})
+}
+
+// addOrImportComment is the shared wisp-routing / retry / dolt-commit tail
+// around either comment insert; insert does the write inside the transaction.
+func (s *DoltStore) addOrImportComment(ctx context.Context, issueID string, insert func(*sql.Tx) (*types.Comment, error)) (*types.Comment, error) {
 	isWisp := s.isActiveWisp(ctx, issueID)
 	var result *types.Comment
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+		result, err = insert(tx)
 		return err
 	})
 	if err != nil {
@@ -101,6 +130,20 @@ func (s *DoltStore) GetIssueComments(ctx context.Context, issueID string) ([]*ty
 	defer rows.Close()
 
 	return scanComments(rows)
+}
+
+// GetIssueCommentsPage returns one keyset page of an issue's comments in
+// (created_at ASC, id ASC) order, resuming strictly after the cursor. See the
+// storage.Storage doc for the ordering, sargability, and page-walk-equals-full-
+// read contract.
+func (s *DoltStore) GetIssueCommentsPage(ctx context.Context, issueID string, after storage.CommentPageCursor, limit int) ([]*types.Comment, error) {
+	var result []*types.Comment
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetIssueCommentsPageInTx(ctx, tx, issueID, after, limit)
+		return err
+	})
+	return result, err
 }
 
 // GetCommentsForIssues retrieves comments for multiple issues
