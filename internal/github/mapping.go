@@ -120,8 +120,9 @@ func GitHubIssueToBeads(gh *Issue, config *MappingConfig) *IssueConversion {
 	labelNames := gh.LabelNames()
 
 	issue := &types.Issue{
+		ID:           ExtractBDIDFromGitHubSyncBlock(gh.Body),
 		Title:        gh.Title,
-		Description:  gh.Body,
+		Description:  StripGitHubSyncBlock(gh.Body),
 		ExternalRef:  &htmlURL,
 		SourceSystem: sourceSystem,
 		IssueType:    types.IssueType(typeFromLabels(labelNames, config)),
@@ -151,9 +152,13 @@ func GitHubIssueToBeads(gh *Issue, config *MappingConfig) *IssueConversion {
 
 // BeadsIssueToGitHubFields converts a beads Issue to GitHub API update fields.
 func BeadsIssueToGitHubFields(issue *types.Issue, config *MappingConfig) map[string]interface{} {
+	body := issue.Description
+	if !strings.Contains(body, "<!-- bd-github-sync: start -->") {
+		body = RenderGitHubIssueBody(issue, nil, nil)
+	}
 	fields := map[string]interface{}{
 		"title": issue.Title,
-		"body":  issue.Description,
+		"body":  body,
 	}
 
 	// Build labels from type, priority, and status
@@ -192,6 +197,179 @@ func BeadsIssueToGitHubFields(issue *types.Issue, config *MappingConfig) map[str
 	}
 
 	return fields
+}
+
+func RenderGitHubIssueBody(issue *types.Issue, dependencies, dependents []*types.IssueWithDependencyMetadata) string {
+	if issue == nil {
+		return ""
+	}
+
+	base := StripGitHubSyncBlock(issue.Description)
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(base))
+	if b.Len() > 0 {
+		b.WriteString("\n\n")
+	}
+	b.WriteString("<!-- bd-github-sync: start -->\n")
+	if strings.TrimSpace(issue.ID) != "" {
+		b.WriteString(fmt.Sprintf("<!-- bd: %s sync=github-v1 -->\n", strings.TrimSpace(issue.ID)))
+	}
+	b.WriteString("## Beads\n\n")
+	if strings.TrimSpace(issue.ID) != "" {
+		b.WriteString(fmt.Sprintf("Source: `%s`\n", strings.TrimSpace(issue.ID)))
+	}
+	appendGitHubTasklistSection(&b, "Dependencies", dependencies, true)
+	appendGitHubTasklistSection(&b, "Blocked by this issue", dependents, false)
+	b.WriteString("<!-- bd-github-sync: end -->")
+	return strings.TrimSpace(b.String())
+}
+
+func appendGitHubTasklistSection(b *strings.Builder, title string, issues []*types.IssueWithDependencyMetadata, incoming bool) {
+	if len(issues) == 0 {
+		return
+	}
+	b.WriteString("\n")
+	b.WriteString("### ")
+	b.WriteString(title)
+	b.WriteString("\n")
+	for _, item := range issues {
+		if item == nil {
+			continue
+		}
+		label := githubDependencyLabel(item.DependencyType, incoming)
+		b.WriteString("- [ ] ")
+		b.WriteString(githubTaskTarget(&item.Issue))
+		if text := githubTaskTitle(item.Title); text != "" {
+			b.WriteString(" — ")
+			b.WriteString(text)
+		}
+		if item.ID != "" || label != "" {
+			b.WriteString(" (")
+			parts := make([]string, 0, 2)
+			if item.ID != "" {
+				parts = append(parts, fmt.Sprintf("`%s`", item.ID))
+			}
+			if label != "" {
+				parts = append(parts, label)
+			}
+			b.WriteString(strings.Join(parts, ", "))
+			b.WriteString(")")
+		}
+		b.WriteString("\n")
+	}
+}
+
+func githubDependencyLabel(depType types.DependencyType, incoming bool) string {
+	switch depType {
+	case types.DepBlocks:
+		if incoming {
+			return "blocked by"
+		}
+		return "blocks"
+	case types.DepParentChild:
+		if incoming {
+			return "parent"
+		}
+		return "child"
+	case types.DepWaitsFor:
+		if incoming {
+			return "waits for"
+		}
+		return "waited on by"
+	case types.DepConditionalBlocks:
+		if incoming {
+			return "conditionally blocked by"
+		}
+		return "conditionally blocks"
+	}
+	return string(depType)
+}
+
+func githubTaskTarget(issue *types.Issue) string {
+	if issue == nil {
+		return "`unknown`"
+	}
+	if issue.ExternalRef != nil {
+		if n := githubIssueNumberFromRef(*issue.ExternalRef); n != "" {
+			return "#" + n
+		}
+	}
+	if strings.TrimSpace(issue.ID) != "" {
+		return fmt.Sprintf("`%s`", strings.TrimSpace(issue.ID))
+	}
+	return "`unknown`"
+}
+
+func githubIssueNumberFromRef(ref string) string {
+	marker := "/issues/"
+	idx := strings.LastIndex(ref, marker)
+	if idx == -1 {
+		return ""
+	}
+	rest := ref[idx+len(marker):]
+	end := 0
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	if end == 0 {
+		return ""
+	}
+	return rest[:end]
+}
+
+func githubTaskTitle(title string) string {
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return ""
+	}
+	if i := strings.IndexAny(title, "\r\n"); i >= 0 {
+		title = strings.TrimSpace(title[:i])
+	}
+	return title
+}
+
+// StripGitHubSyncBlock removes the generated Beads sync footer from a GitHub
+// issue body before storing it as the local issue description.
+func StripGitHubSyncBlock(body string) string {
+	const start = "<!-- bd-github-sync: start -->"
+	const end = "<!-- bd-github-sync: end -->"
+	for {
+		startIdx := strings.Index(body, start)
+		if startIdx == -1 {
+			break
+		}
+		endIdx := strings.Index(body[startIdx:], end)
+		if endIdx == -1 {
+			break
+		}
+		endIdx = startIdx + endIdx + len(end)
+		body = body[:startIdx] + body[endIdx:]
+	}
+	return strings.TrimSpace(body)
+}
+
+func ExtractBDIDFromGitHubSyncBlock(body string) string {
+	idx := strings.Index(body, "<!-- bd:")
+	if idx == -1 {
+		return ""
+	}
+	rest := body[idx+len("<!-- bd:"):]
+	end := strings.Index(rest, "-->")
+	if end == -1 {
+		return ""
+	}
+	fields := strings.Fields(strings.TrimSpace(rest[:end]))
+	for _, field := range fields {
+		field = strings.Trim(field, ",")
+		if strings.HasPrefix(field, "id=") {
+			return strings.Trim(strings.TrimPrefix(field, "id="), "`\"'")
+		}
+		if strings.HasPrefix(field, "sync=") {
+			continue
+		}
+		return strings.Trim(field, "`\"'")
+	}
+	return ""
 }
 
 // priorityToLabel converts beads priority (0-4) to GitHub priority label value.
