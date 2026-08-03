@@ -385,7 +385,15 @@ type Storage interface {
 	// SearchIssueSummaries is a narrow-projection variant of SearchIssues that
 	// returns []*types.IssueSummary instead of full issues, for list-shaped
 	// rendering paths that never dereference TEXT/JSON columns. SortBy/SortDesc
-	// are honored identically to SearchIssues.
+	// are honored identically to SearchIssues — including SortBy=="id", which
+	// both paths deliberately leave to the caller: sqlbuild.OrderBy emits no
+	// ORDER BY for it (sqlbuild.IsGoSideSort), so storage orders id-sorted rows
+	// only where the issues+wisps merge re-sorts them (sqlbuild.LessSummary,
+	// mirroring sqlbuild.Less for SearchIssues). The user-facing id order is
+	// cmd/bd's, applied post-call via utils.NaturalCompareIDs — numeric-aware
+	// and intentionally different from the lexicographic storage comparator, so
+	// a storage-side id sorter here would diverge from SearchIssues rather than
+	// complete it.
 	SearchIssueSummaries(ctx context.Context, query string, filter types.IssueFilter) ([]*types.IssueSummary, error)
 
 	// Dependencies
