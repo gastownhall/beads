@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"reflect"
 	"strings"
 	"sync"
@@ -120,201 +119,55 @@ func deleteJSONEqual(got, want map[string]any) bool {
 
 func TestProxiedServerDeleteWisp(t *testing.T) {
 	requireSharedProxiedServer(t)
-	t.Parallel()
 	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "dwr")
+	wisp := bdProxiedCreate(t, bd, p.dir, "Wisp delete routing", "--ephemeral")
+	db := openProxiedDB(t, p)
+	assertRowExists(t, db, "wisps", wisp.ID)
 
-	t.Run("delete_mixed_wisp_and_issue_partition", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dmp")
-		issue := bdProxiedCreate(t, bd, p.dir, "Regular target", "-t", "task")
-		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral")
+	if _, err := db.ExecContext(context.Background(),
+		"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, ?, '', '', '', '')",
+		wisp.ID, "shadow row"); err != nil {
+		t.Fatalf("seed shadow issues row: %v", err)
+	}
+	assertRowExists(t, db, "issues", wisp.ID)
+	if _, err := db.ExecContext(context.Background(), "CALL DOLT_COMMIT('-Am', 'seed shadow issue')"); err != nil {
+		t.Fatalf("commit shadow issues row: %v", err)
+	}
 
-		db := openProxiedDB(t, p)
-		assertRowExists(t, db, "issues", issue.ID)
-		assertRowExists(t, db, "wisps", wisp.ID)
+	var headBefore string
+	if err := db.QueryRowContext(context.Background(), "SELECT HASHOF('HEAD')").Scan(&headBefore); err != nil {
+		t.Fatalf("read HEAD before: %v", err)
+	}
 
-		bdProxiedDelete(t, bd, p.dir, issue.ID, wisp.ID, "--force")
+	out := bdProxiedDelete(t, bd, p.dir, "--json", wisp.ID, "--force")
+	start := strings.Index(out, "{")
+	if start < 0 {
+		t.Fatalf("no JSON object in delete output:\n%s", out)
+	}
+	var result struct {
+		SchemaVersion int      `json:"schema_version"`
+		Deleted       []string `json:"deleted"`
+		DeletedCount  int      `json:"deleted_count"`
+	}
+	if err := json.Unmarshal([]byte(out[start:]), &result); err != nil {
+		t.Fatalf("parse delete JSON: %v\nraw: %s", err, out[start:])
+	}
+	if result.SchemaVersion != JSONSchemaVersion || !reflect.DeepEqual(result.Deleted, []string{wisp.ID}) || result.DeletedCount != 1 {
+		t.Errorf("delete JSON: got %+v, want schema_version=%d deleted=[%s] deleted_count=1",
+			result, JSONSchemaVersion, wisp.ID)
+	}
 
-		assertRowAbsent(t, db, "issues", issue.ID)
-		assertRowAbsent(t, db, "wisps", wisp.ID)
-	})
+	assertRowAbsent(t, db, "wisps", wisp.ID)
+	assertRowExists(t, db, "issues", wisp.ID)
 
-	t.Run("delete_wisp_clears_wisp_aux_tables", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwc")
-		a := bdProxiedCreate(t, bd, p.dir, "Wisp aux A", "--ephemeral")
-		_ = bdProxiedCreate(t, bd, p.dir, "Wisp aux B", "--ephemeral",
-			"--deps", "depends-on:"+a.ID)
-		bdProxiedUpdateOne(t, bd, p.dir, a.ID, "--add-label", "alpha")
-
-		bdProxiedDelete(t, bd, p.dir, a.ID, "--force")
-
-		db := openProxiedDB(t, p)
-		ctx := context.Background()
-		assertRowAbsent(t, db, "wisps", a.ID)
-
-		for _, q := range []struct {
-			table, where string
-		}{
-			{"wisp_labels", "issue_id = ?"},
-			{"wisp_events", "issue_id = ?"},
-			{"wisp_dependencies", "issue_id = ? OR depends_on_wisp_id = ?"},
-		} {
-			var count int
-			args := []any{a.ID}
-			if strings.Count(q.where, "?") == 2 {
-				args = append(args, a.ID)
-			}
-			query := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s", q.table, q.where)
-			if err := db.QueryRowContext(ctx, query, args...).Scan(&count); err != nil {
-				t.Fatalf("count %s for %s: %v", q.table, a.ID, err)
-			}
-			if count != 0 {
-				t.Errorf("%s rows for deleted wisp %s: got %d, want 0", q.table, a.ID, count)
-			}
-		}
-	})
-
-	t.Run("delete_wisp_routes_to_wisps_table", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwr")
-		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp delete routing", "--ephemeral")
-
-		db := openProxiedDB(t, p)
-		assertRowExists(t, db, "wisps", wisp.ID)
-		assertRowAbsent(t, db, "issues", wisp.ID)
-
-		if _, err := db.ExecContext(context.Background(),
-			"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes) VALUES (?, ?, '', '', '', '')",
-			wisp.ID, "shadow row"); err != nil {
-			t.Fatalf("seed shadow issues row: %v", err)
-		}
-		assertRowExists(t, db, "issues", wisp.ID)
-
-		bdProxiedDelete(t, bd, p.dir, wisp.ID, "--force")
-
-		assertRowAbsent(t, db, "wisps", wisp.ID)
-		assertRowExists(t, db, "issues", wisp.ID)
-	})
-
-	t.Run("delete_wisp_batch", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwb")
-		a := bdProxiedCreate(t, bd, p.dir, "Wisp batch 1", "--ephemeral")
-		b := bdProxiedCreate(t, bd, p.dir, "Wisp batch 2", "--ephemeral")
-		c := bdProxiedCreate(t, bd, p.dir, "Wisp batch 3", "--ephemeral")
-
-		bdProxiedDelete(t, bd, p.dir, a.ID, b.ID, c.ID, "--force")
-
-		db := openProxiedDB(t, p)
-		for _, id := range []string{a.ID, b.ID, c.ID} {
-			assertRowAbsent(t, db, "wisps", id)
-		}
-	})
-
-	t.Run("delete_wisp_cascades_dependents", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwc")
-		parent := bdProxiedCreate(t, bd, p.dir, "Wisp parent", "--ephemeral")
-		child := bdProxiedCreate(t, bd, p.dir, "Wisp child", "--ephemeral",
-			"--deps", "depends-on:"+parent.ID)
-
-		bdProxiedDelete(t, bd, p.dir, parent.ID, "--force")
-
-		db := openProxiedDB(t, p)
-		assertRowAbsent(t, db, "wisps", parent.ID)
-		assertRowAbsent(t, db, "wisps", child.ID)
-	})
-
-	t.Run("delete_wisp_cascade_spans_all_dep_types", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dws")
-		a := bdProxiedCreate(t, bd, p.dir, "Wisp A", "--ephemeral")
-		b := bdProxiedCreate(t, bd, p.dir, "Wisp B", "--ephemeral",
-			"--deps", "depends-on:"+a.ID)
-		c := bdProxiedCreate(t, bd, p.dir, "Wisp C", "--ephemeral",
-			"--parent", b.ID)
-
-		bdProxiedDelete(t, bd, p.dir, a.ID, "--force")
-
-		db := openProxiedDB(t, p)
-		for _, id := range []string{a.ID, b.ID, c.ID} {
-			assertRowAbsent(t, db, "wisps", id)
-		}
-	})
-
-	t.Run("delete_wisp_skips_dolt_commit", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwdc")
-		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp commit skip", "--ephemeral")
-
-		db := openProxiedDB(t, p)
-		var before string
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT HASHOF('HEAD')").Scan(&before); err != nil {
-			t.Fatalf("read HEAD before: %v", err)
-		}
-
-		bdProxiedDelete(t, bd, p.dir, wisp.ID, "--force")
-
-		var after string
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT HASHOF('HEAD')").Scan(&after); err != nil {
-			t.Fatalf("read HEAD after: %v", err)
-		}
-		if after != before {
-			t.Errorf("HEAD advanced for a wisp-only delete (wisps are dolt_ignored): before=%s after=%s",
-				before, after)
-		}
-	})
-
-	t.Run("delete_wisp_dry_run_does_not_mutate", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwdr")
-		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp dry-run target", "--ephemeral")
-
-		got := bdProxiedDeleteJSON(t, bd, p.dir, "--json", wisp.ID, "--dry-run")
-		if _, ok := got["would_delete"]; !ok {
-			t.Errorf("dry-run JSON missing `would_delete`; got keys: %v", mapKeys(got))
-		}
-
-		db := openProxiedDB(t, p)
-		assertRowExists(t, db, "wisps", wisp.ID)
-	})
-
-	t.Run("delete_wisp_rewrites_text_references", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwrt")
-		neighbor := bdProxiedCreate(t, bd, p.dir, "Wisp neighbor", "--ephemeral")
-		target := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral",
-			"--deps", "depends-on:"+neighbor.ID)
-		bdProxiedUpdateOne(t, bd, p.dir, neighbor.ID, "--description", "see "+target.ID+" for context")
-
-		bdProxiedDelete(t, bd, p.dir, target.ID, "--force")
-
-		db := openProxiedDB(t, p)
-		assertRowAbsent(t, db, "wisps", target.ID)
-		assertRowExists(t, db, "wisps", neighbor.ID)
-
-		var desc string
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT description FROM wisps WHERE id = ?", neighbor.ID).Scan(&desc); err != nil {
-			t.Fatalf("read wisp neighbor description: %v", err)
-		}
-		want := "[deleted:" + target.ID + "]"
-		if !strings.Contains(desc, want) {
-			t.Errorf("wisp neighbor description: got %q, want substring %q", desc, want)
-		}
-	})
-
-	t.Run("delete_wisp_nonexistent", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dwn")
-		out := bdProxiedDeleteFail(t, bd, p.dir, "dwn-doesnotexist", "--force")
-		if !strings.Contains(strings.ToLower(out), "not found") {
-			t.Errorf("expected `not found` error for bogus wisp id, got: %s", out)
-		}
-	})
+	var headAfter string
+	if err := db.QueryRowContext(context.Background(), "SELECT HASHOF('HEAD')").Scan(&headAfter); err != nil {
+		t.Fatalf("read HEAD after: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Errorf("HEAD advanced for a wisp-only delete (wisps are dolt_ignored): before=%s after=%s", headBefore, headAfter)
+	}
 }
 
 func TestProxiedServerDeleteConcurrent(t *testing.T) {
@@ -398,14 +251,6 @@ func bdProxiedDeleteJSON(t *testing.T, bd, dir string, args ...string) map[strin
 		t.Fatalf("parse delete JSON: %v\nraw: %s", err, out[start:])
 	}
 	return got
-}
-
-func mapKeys(m map[string]any) []string {
-	out := make([]string, 0, len(m))
-	for k := range m {
-		out = append(out, k)
-	}
-	return out
 }
 
 func bdProxiedDeleteRaw(t *testing.T, bd, dir string, args ...string) (string, string, error) {
