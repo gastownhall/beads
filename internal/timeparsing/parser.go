@@ -139,7 +139,8 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 //  2. Absolute formats (date-only, RFC3339) - checked before NLP to avoid misinterpretation
 //  3. Natural language (tomorrow, next monday)
 //
-// Returns the parsed time in UTC or an error if no layer could parse the input.
+// Timezone-less inputs are interpreted in now's location. Returns the parsed
+// time in UTC or an error if no layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
 	location := now.Location()
 
