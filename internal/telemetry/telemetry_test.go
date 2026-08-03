@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -87,6 +88,55 @@ func TestTranslateLegacyEnv_Stdout(t *testing.T) {
 	}
 	if got := os.Getenv("OTEL_METRICS_EXPORTER"); got != "console" {
 		t.Errorf("OTEL_METRICS_EXPORTER = %q, want console", got)
+	}
+}
+
+func TestTranslateLegacyEnv_StdoutPlusMetricsURLKeepsOTLP(t *testing.T) {
+	clearAllEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	t.Setenv("BD_OTEL_METRICS_URL", "http://example.invalid/metrics")
+	translateLegacyEnv()
+	if got := os.Getenv("OTEL_METRICS_EXPORTER"); got != "console,otlp" {
+		t.Errorf("OTEL_METRICS_EXPORTER = %q, want console,otlp", got)
+	}
+}
+
+func TestSelectedMetricExporters(t *testing.T) {
+	cases := []struct {
+		sel           string
+		console, otlp bool
+	}{
+		{"", false, true}, // SDK default
+		{"otlp", false, true},
+		{"console", true, false},
+		{"console,otlp", true, true},
+		{" Console , OTLP ", true, true},
+		{"none", false, false},
+		{"console,none", false, false}, // none wins
+		{"bogus", false, false},
+	}
+	for _, c := range cases {
+		clearAllEnv(t)
+		t.Setenv("OTEL_METRICS_EXPORTER", c.sel)
+		console, otlp := selectedMetricExporters()
+		if console != c.console || otlp != c.otlp {
+			t.Errorf("selectedMetricExporters(%q) = console:%v otlp:%v, want console:%v otlp:%v",
+				c.sel, console, otlp, c.console, c.otlp)
+		}
+	}
+}
+
+// A console-only selection (the BD_OTEL_STDOUT=true translation) must not let
+// a machine-global OTLP endpoint install a remote exporter — the scenario the
+// legacy-wins guarantee in the package docs promises against.
+func TestSelectedMetricExporters_ConsoleOnlyIgnoresGlobalEndpoint(t *testing.T) {
+	clearAllEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://example.invalid:4318")
+	translateLegacyEnv()
+	_, otlp := selectedMetricExporters()
+	if otlp {
+		t.Error("console-only selection still enables OTLP exporter with a machine-global endpoint set")
 	}
 }
 
@@ -211,7 +261,12 @@ func TestBuildResource_OTELResourceAttributesMerged(t *testing.T) {
 func resetTelemetryState(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
-		Shutdown(context.Background())
+		// Bound the flush: tests configure unreachable endpoints
+		// (example.invalid), and an unbounded Shutdown lets OTLP retry for
+		// ~30s before the test can finish.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		Shutdown(ctx)
 		otel.SetTracerProvider(tracenoop.NewTracerProvider())
 		otel.SetMeterProvider(metricnoop.NewMeterProvider())
 	})

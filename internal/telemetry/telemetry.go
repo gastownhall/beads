@@ -23,6 +23,10 @@
 //	OTEL_TRACES_EXPORTER=console
 //	OTEL_METRICS_EXPORTER=console
 //	    Write spans / metrics to stderr (dev/debug mode).
+//	    OTEL_METRICS_EXPORTER is a comma-separated selection (otlp, console,
+//	    none); unset defaults to otlp per the SDK spec, and the OTLP metric
+//	    exporter is installed only when the selection includes otlp AND an
+//	    OTLP endpoint is configured.
 //
 //	OTEL_SERVICE_NAME=bd
 //	OTEL_RESOURCE_ATTRIBUTES=key=value,...
@@ -113,8 +117,15 @@ func translateLegacyEnv() []string {
 	}
 	if strings.EqualFold(os.Getenv("BD_OTEL_STDOUT"), "true") {
 		_ = os.Setenv("OTEL_TRACES_EXPORTER", "console")
-		_ = os.Setenv("OTEL_METRICS_EXPORTER", "console")
-		mappings = append(mappings, "BD_OTEL_STDOUT=true → OTEL_TRACES_EXPORTER=console + OTEL_METRICS_EXPORTER=console")
+		// Keep the OTLP destination when the legacy metrics URL is also set;
+		// otherwise BD_OTEL_STDOUT means console-only and must not let a
+		// machine-global OTLP endpoint pull in a remote exporter.
+		metricsSel := "console"
+		if os.Getenv("BD_OTEL_METRICS_URL") != "" {
+			metricsSel = "console,otlp"
+		}
+		_ = os.Setenv("OTEL_METRICS_EXPORTER", metricsSel)
+		mappings = append(mappings, "BD_OTEL_STDOUT=true → OTEL_TRACES_EXPORTER=console + OTEL_METRICS_EXPORTER="+metricsSel)
 	}
 	return mappings
 }
@@ -197,7 +208,9 @@ func buildTraceProvider(_ context.Context, res *resource.Resource) (*sdktrace.Tr
 func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
 	opts := []sdkmetric.Option{sdkmetric.WithResource(res)}
 
-	if strings.EqualFold(os.Getenv("OTEL_METRICS_EXPORTER"), "console") {
+	console, otlp := selectedMetricExporters()
+
+	if console {
 		exp, err := stdoutmetric.New()
 		if err != nil {
 			return nil, err
@@ -207,7 +220,7 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 		))
 	}
 
-	if otlpMetricsEndpointSet() {
+	if otlp && otlpMetricsEndpointSet() {
 		exp, err := otlpmetrichttp.New(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("otlp metric exporter: %w", err)
@@ -218,6 +231,30 @@ func buildMetricProvider(ctx context.Context, res *resource.Resource) (*sdkmetri
 	}
 
 	return sdkmetric.NewMeterProvider(opts...), nil
+}
+
+// selectedMetricExporters parses OTEL_METRICS_EXPORTER as the comma-separated
+// exporter list the OTel SDK spec defines. Unset means "otlp" (the SDK
+// default); "none" disables metric export entirely. Gating the OTLP reader on
+// the selector — not just on an endpoint being present — is what keeps a
+// console-only selection (e.g. legacy BD_OTEL_STDOUT=true) from exporting to
+// a machine-global OTEL_EXPORTER_OTLP_ENDPOINT set for some other tool.
+func selectedMetricExporters() (console, otlp bool) {
+	sel := os.Getenv("OTEL_METRICS_EXPORTER")
+	if strings.TrimSpace(sel) == "" {
+		return false, true
+	}
+	for _, tok := range strings.Split(sel, ",") {
+		switch strings.ToLower(strings.TrimSpace(tok)) {
+		case "console":
+			console = true
+		case "otlp":
+			otlp = true
+		case "none":
+			return false, false
+		}
+	}
+	return console, otlp
 }
 
 func otlpMetricsEndpointSet() bool {

@@ -52,7 +52,7 @@ export OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://localhost:8428/opentelemetry/a
 | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `http://localhost:8428/opentelemetry/api/v1/push` | Push metrics to an OTLP HTTP receiver. |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | `http://localhost:9428/insert/opentelemetry/v1/logs` | Push logs to an OTLP HTTP receiver (reserved for future log export). |
 | `OTEL_TRACES_EXPORTER` | `console` | Write spans to stderr (dev/debug). |
-| `OTEL_METRICS_EXPORTER` | `console` | Write metrics to stderr (dev/debug). |
+| `OTEL_METRICS_EXPORTER` | `console` | Metric exporter selection, comma-separated (`otlp`, `console`, `none`). Unset defaults to `otlp`; `console` writes to stderr (dev/debug); a selection without `otlp` never exports to an OTLP endpoint, even if one is configured machine-globally. |
 | `OTEL_SERVICE_NAME` | `bd` | Override the `service.name` resource attribute. |
 | `OTEL_RESOURCE_ATTRIBUTES` | `deployment.environment=workstation,team=infra` | Extend or override resource attributes (comma-separated `key=value`). |
 | `OTEL_SDK_DISABLED` | `true` | Force telemetry off even when `BD_OTEL_ENABLED=true` is set. |
