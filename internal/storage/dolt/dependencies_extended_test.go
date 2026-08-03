@@ -48,11 +48,15 @@ func TestAddDependencyCreatedAtUsesUTC(t *testing.T) {
 		t.Fatalf("read dependency timestamp: %v", err)
 	}
 
-	if offset := utcAfter.Sub(sessionNow); offset != 6*time.Hour {
+	if offset := utcAfter.Truncate(time.Second).Sub(sessionNow); offset != 6*time.Hour {
 		t.Fatalf("session time zone offset = %v, want 6h", offset)
 	}
-	if createdAt.Before(utcBefore) || createdAt.After(utcAfter) {
-		t.Errorf("dependency created_at = %v, want UTC time between %v and %v", createdAt, utcBefore, utcAfter)
+	// created_at is stored in a second-precision DATETIME column, so the
+	// stored value may round to the nearest second of the true insert time.
+	// Allow a one-second slack on each side of the observed window while
+	// still failing if the value lands near session-local time (the bug).
+	if createdAt.Before(utcBefore.Add(-time.Second)) || createdAt.After(utcAfter.Add(time.Second)) {
+		t.Errorf("dependency created_at = %v, want UTC time near %v between %v and %v", createdAt, utcBefore, utcBefore, utcAfter)
 	}
 }
 
