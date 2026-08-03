@@ -263,21 +263,24 @@ func TestProxiedServerWispGC(t *testing.T) {
 		}
 	})
 
-	t.Run("cascade_sweeps_dependent_step_wisps", func(t *testing.T) {
+	t.Run("cascade_respects_age_for_dependent_step_wisps", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "wgc")
 		parentWisp := bdProxiedCreate(t, bd, p.dir, "Abandoned parent wisp", "--ephemeral")
-		childWisp := bdProxiedCreate(t, bd, p.dir, "Fresh child wisp", "--ephemeral")
+		staleChild := bdProxiedCreate(t, bd, p.dir, "Stale child wisp", "--ephemeral")
+		freshChild := bdProxiedCreate(t, bd, p.dir, "Fresh child wisp", "--ephemeral")
 
 		db := openProxiedDB(t, p)
-		if _, err := db.Exec(
-			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
-			childWisp.ID, parentWisp.ID, "blocks"); err != nil {
-			t.Fatalf("plant child->parent wisp edge: %v", err)
+		for _, childID := range []string{staleChild.ID, freshChild.ID} {
+			if _, err := db.Exec(
+				"INSERT INTO wisp_dependencies (id, issue_id, depends_on_wisp_id, type, created_at, created_by) VALUES (UUID(), ?, ?, ?, NOW(), 'test')",
+				childID, parentWisp.ID, "blocks"); err != nil {
+				t.Fatalf("plant child->parent wisp edge: %v", err)
+			}
 		}
-		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id = ?",
-			time.Now().UTC().Add(-2*time.Hour), parentWisp.ID); err != nil {
-			t.Fatalf("backdate parent wisp: %v", err)
+		if _, err := db.Exec("UPDATE wisps SET updated_at = ? WHERE id IN (?, ?)",
+			time.Now().UTC().Add(-2*time.Hour), parentWisp.ID, staleChild.ID); err != nil {
+			t.Fatalf("backdate parent and stale child wisps: %v", err)
 		}
 
 		out, err := bdProxiedRun(t, bd, p.dir, "mol", "wisp", "gc", "--age", "1h", "--json")
@@ -297,8 +300,19 @@ func TestProxiedServerWispGC(t *testing.T) {
 		if !cleaned[parentWisp.ID] {
 			t.Errorf("expected abandoned parent %s cleaned", parentWisp.ID)
 		}
-		if !cleaned[childWisp.ID] {
-			t.Errorf("expected dependent child %s cascaded even though it's not itself old", childWisp.ID)
+		if !cleaned[staleChild.ID] {
+			t.Errorf("expected stale dependent child %s cascaded", staleChild.ID)
+		}
+		if cleaned[freshChild.ID] {
+			t.Errorf("fresh child %s must survive gc despite stale parent, deleted: %v", freshChild.ID, got.Deleted)
+		}
+
+		var count int
+		if err := db.QueryRow("SELECT COUNT(*) FROM wisps WHERE id = ?", freshChild.ID).Scan(&count); err != nil {
+			t.Fatalf("query fresh child wisp: %v", err)
+		}
+		if count != 1 {
+			t.Errorf("expected fresh child %s to remain in wisps table", freshChild.ID)
 		}
 	})
 

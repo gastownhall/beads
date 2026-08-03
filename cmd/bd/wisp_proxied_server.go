@@ -166,9 +166,12 @@ func runWispGCProxiedServer(ctx context.Context, dryRun bool, ageThreshold time.
 	}
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (domain.DeleteIssuesResult, string, error) {
+		// findAbandonedWisps already expanded the cascade under the --age
+		// contract; a second cascade here would sweep fresh children past
+		// that filter.
 		res, err := uw.IssueUseCase().DeleteIssues(ctx, domain.DeleteIssuesParams{
 			IDs:                  ids,
-			Cascade:              true,
+			Cascade:              false,
 			UpdateTextReferences: true,
 		}, actor)
 		if err != nil {
