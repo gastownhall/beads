@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // Store decorates a local store with query-time external capability handling.
@@ -38,6 +39,62 @@ func New(inner storage.DoltStorage, locateProject ProjectLocator, openProject St
 
 // Unwrap exposes the decorated store to storage.UnwrapStore.
 func (s *Store) Unwrap() storage.DoltStorage { return s.inner }
+
+// IssueLifecycle preserves the external close policy for public lifecycle
+// operations. Returning the inner lifecycle directly would promote around the
+// decorator when bd close or bd update uses the lifecycle seam.
+func (s *Store) IssueLifecycle() (publicops.Lifecycle, error) {
+	inner, err := s.inner.IssueLifecycle()
+	if err != nil {
+		return nil, err
+	}
+	return &lifecycle{inner: inner, policy: s}, nil
+}
+
+type lifecycle struct {
+	inner  publicops.Lifecycle
+	policy *Store
+}
+
+var _ publicops.Lifecycle = (*lifecycle)(nil)
+
+func (l *lifecycle) Create(ctx context.Context, request publicops.CreateRequest) (publicops.CreateResult, error) {
+	return l.inner.Create(ctx, request)
+}
+
+func (l *lifecycle) Update(ctx context.Context, request publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	if request.Patch.Status.Set && string(request.Patch.Status.Value) == string(types.StatusClosed) {
+		if err := l.policy.guardExternalClose(ctx, request.IssueID, request.ForceClosePolicy); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+	}
+	return l.inner.Update(ctx, request)
+}
+
+func (l *lifecycle) Close(ctx context.Context, request publicops.CloseRequest) (publicops.CloseResult, error) {
+	if err := l.policy.guardExternalClose(ctx, request.IssueID, request.Force); err != nil {
+		return publicops.CloseResult{}, err
+	}
+	return l.inner.Close(ctx, request)
+}
+
+func (l *lifecycle) Reopen(ctx context.Context, request publicops.ReopenRequest) (publicops.ReopenResult, error) {
+	return l.inner.Reopen(ctx, request)
+}
+
+func (s *Store) guardExternalClose(ctx context.Context, id string, force bool) error {
+	if force {
+		return nil
+	}
+	state, err := s.loadBlockingState(ctx)
+	if err != nil {
+		return err
+	}
+	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+	}
+	return nil
+}
 
 func (s *Store) warnUnresolvedProject(project ProjectName) {
 	s.warnMu.Lock()

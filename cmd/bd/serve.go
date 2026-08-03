@@ -382,7 +382,7 @@ func runServe() error {
 				fmt.Fprintf(os.Stderr, "bd serve: closing the unit-of-work provider: %v\n", err)
 			}
 		}()
-		provider = p
+		provider = wireExternalDependencyUOWProvider(p)
 	}
 
 	defer startServeEventsJournalMaintenance(info.BeadsDir, provider)()

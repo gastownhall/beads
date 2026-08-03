@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // WrapUOWProvider installs the external capability policy on the server UOW
@@ -28,6 +29,7 @@ type uowProvider struct {
 
 var _ uow.UnitOfWorkProvider = (*uowProvider)(nil)
 var _ uow.MaintenanceProvider = (*uowProvider)(nil)
+var _ uow.IssueReaderSource = (*uowProvider)(nil)
 
 // RunNonTx preserves the optional maintenance capability exposed by the
 // proxied provider. Wrapping the provider must not make unrelated commands
@@ -47,6 +49,10 @@ func (p *uowProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
 	}
 	return &unitOfWork{UnitOfWork: inner, policy: p.policy}, nil
 }
+
+// IssueReader preserves the optional reader capability while ensuring reader
+// requests open wrapped unit-of-work use cases.
+func (p *uowProvider) IssueReader() (publicops.Reader, error) { return uow.NewIssueReader(p) }
 
 type unitOfWork struct {
 	uow.UnitOfWork
@@ -154,11 +160,23 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 		if err != nil {
 			return nil, fmt.Errorf("external dependencies: load blocked parent edges: %w", err)
 		}
+		wispParentDeps, err := u.deps.GetWispDependencyRecords(ctx, missing)
+		if err != nil {
+			return nil, fmt.Errorf("external dependencies: load blocked wisp parent edges: %w", err)
+		}
+		for id, deps := range wispParentDeps {
+			parentDeps[id] = append(parentDeps[id], deps...)
+		}
 	}
 	issues, err := u.IssueUseCase.GetIssuesByIDs(ctx, missing)
 	if err != nil {
 		return nil, fmt.Errorf("external dependencies: load blocked sources: %w", err)
 	}
+	wisps, err := u.IssueUseCase.GetWispsByIDs(ctx, missing)
+	if err != nil {
+		return nil, fmt.Errorf("external dependencies: load blocked wisp sources: %w", err)
+	}
+	issues = append(issues, wisps...)
 	for _, issue := range issues {
 		if issue == nil || issue.Status == types.StatusClosed || issue.Status == types.StatusPinned {
 			continue
@@ -173,22 +191,51 @@ func (u *issueUseCase) GetBlockedIssues(ctx context.Context, filter types.WorkFi
 }
 
 func (u *issueUseCase) CloseIssueChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
-	if !force {
-		issue, err := u.IssueUseCase.GetIssue(ctx, id)
-		if err != nil {
-			return domain.CloseIssueResult{}, err
-		}
-		if issue != nil && issue.Status != types.StatusClosed {
-			state, err := u.blockingState(ctx)
-			if err != nil {
-				return domain.CloseIssueResult{}, fmt.Errorf("external dependencies: %w", err)
-			}
-			if blockers := state.refsByIssue[id]; len(blockers) > 0 {
-				return domain.CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-			}
-		}
+	if err := u.guardExternalClose(ctx, id, force); err != nil {
+		return domain.CloseIssueResult{}, err
 	}
 	return u.IssueUseCase.CloseIssueChecked(ctx, id, params, actor, force)
+}
+
+func (u *issueUseCase) CloseWispChecked(ctx context.Context, id string, params domain.CloseIssueParams, actor string, force bool) (domain.CloseIssueResult, error) {
+	if err := u.guardExternalClose(ctx, id, force); err != nil {
+		return domain.CloseIssueResult{}, err
+	}
+	return u.IssueUseCase.CloseWispChecked(ctx, id, params, actor, force)
+}
+
+func (u *issueUseCase) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
+	if isClosedUpdate(spec.Fields) {
+		if err := u.guardExternalClose(ctx, id, false); err != nil {
+			return nil, err
+		}
+	}
+	return u.IssueUseCase.ApplyUpdate(ctx, id, spec, actor)
+}
+
+func isClosedUpdate(fields map[string]any) bool {
+	switch status := fields["status"].(type) {
+	case string:
+		return status == string(types.StatusClosed)
+	case types.Status:
+		return status == types.StatusClosed
+	default:
+		return false
+	}
+}
+
+func (u *issueUseCase) guardExternalClose(ctx context.Context, id string, force bool) error {
+	if force {
+		return nil
+	}
+	state, err := u.blockingState(ctx)
+	if err != nil {
+		return fmt.Errorf("external dependencies: %w", err)
+	}
+	if blockers := state.refsByIssue[id]; len(blockers) > 0 {
+		return fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+	}
+	return nil
 }
 
 type dependencyUseCase struct {

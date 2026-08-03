@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type fakeStore struct {
@@ -24,6 +25,25 @@ type fakeStore struct {
 	isBlocked  bool
 	blockerIDs []string
 	closed     []string
+	lifecycle  publicops.Lifecycle
+}
+
+func (f *fakeStore) IssueLifecycle() (publicops.Lifecycle, error) { return f.lifecycle, nil }
+
+type fakeLifecycle struct {
+	publicops.Lifecycle
+	closed  int
+	updated int
+}
+
+func (f *fakeLifecycle) Close(context.Context, publicops.CloseRequest) (publicops.CloseResult, error) {
+	f.closed++
+	return publicops.CloseResult{}, nil
+}
+
+func (f *fakeLifecycle) Update(context.Context, publicops.UpdateRequest) (publicops.UpdateResult, error) {
+	f.updated++
+	return publicops.UpdateResult{}, nil
 }
 
 func (f *fakeStore) GetReadyWork(_ context.Context, filter types.WorkFilter) ([]*types.Issue, error) {
@@ -389,6 +409,34 @@ func TestGetBlockedIssuesAddsUnsatisfiedExternalRefs(t *testing.T) {
 	}
 	if !slices.Equal(byID[c.ID].BlockedBy, []string{"be-local", "external:remote:identity"}) {
 		t.Fatalf("%s blockers = %v", c.ID, byID[c.ID].BlockedBy)
+	}
+}
+
+func TestIssueLifecycleRefusesExternalCloseAndDoneUpdate(t *testing.T) {
+	issue := issue("be-external")
+	lifecycle := &fakeLifecycle{}
+	raw := &fakeStore{
+		ready:     []*types.Issue{issue},
+		lifecycle: lifecycle,
+		deps: map[string][]*types.Dependency{
+			issue.ID: {externalDep(issue.ID, "external:remote:payments", types.DepBlocks)},
+		},
+	}
+	store := testStore(raw, &fakeStore{}, false)
+	ops, err := store.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle: %v", err)
+	}
+	if _, err := ops.Close(t.Context(), publicops.CloseRequest{IssueID: issue.ID}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("Close error = %v, want ErrCloseBlocked", err)
+	}
+	if _, err := ops.Update(t.Context(), publicops.UpdateRequest{IssueID: issue.ID, Patch: publicops.IssuePatch{
+		Status: publicops.Field[types.Status]{Set: true, Value: types.StatusClosed},
+	}}); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("Update error = %v, want ErrCloseBlocked", err)
+	}
+	if lifecycle.closed != 0 || lifecycle.updated != 0 {
+		t.Fatalf("inner lifecycle calls = close:%d update:%d, want zero", lifecycle.closed, lifecycle.updated)
 	}
 }
 

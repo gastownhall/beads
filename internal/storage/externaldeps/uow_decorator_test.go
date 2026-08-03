@@ -33,6 +33,7 @@ func (u *fakeUOW) DependencyUseCase() domain.DependencyUseCase { return u.deps }
 type fakeIssueUseCase struct {
 	domain.IssueUseCase
 	ready   []*types.Issue
+	wisps   []*types.Issue
 	blocked []*types.BlockedIssue
 	closed  []string
 }
@@ -58,9 +59,43 @@ func (u *fakeIssueUseCase) GetIssuesByIDs(ctx context.Context, ids []string) ([]
 	return result, nil
 }
 
+func (u *fakeIssueUseCase) GetWisp(_ context.Context, id string) (*types.Issue, error) {
+	for _, issue := range u.wisps {
+		if issue.ID == id {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func (u *fakeIssueUseCase) GetWispsByIDs(ctx context.Context, ids []string) ([]*types.Issue, error) {
+	result := make([]*types.Issue, 0, len(ids))
+	for _, id := range ids {
+		issue, err := u.GetWisp(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		if issue != nil {
+			result = append(result, issue)
+		}
+	}
+	return result, nil
+}
+
 func (u *fakeIssueUseCase) CloseIssueChecked(_ context.Context, id string, _ domain.CloseIssueParams, _ string, _ bool) (domain.CloseIssueResult, error) {
 	u.closed = append(u.closed, id)
 	return domain.CloseIssueResult{}, nil
+}
+
+func (u *fakeIssueUseCase) CloseWispChecked(_ context.Context, id string, _ domain.CloseIssueParams, _ string, _ bool) (domain.CloseIssueResult, error) {
+	u.closed = append(u.closed, id)
+	return domain.CloseIssueResult{}, nil
+}
+
+func (u *fakeIssueUseCase) ApplyUpdate(_ context.Context, id string, spec domain.UpdateSpec, _ string) (*types.Issue, error) {
+	u.closed = append(u.closed, id)
+	status, _ := spec.Fields["status"].(string)
+	return &types.Issue{ID: id, Status: types.Status(status)}, nil
 }
 
 func (u *fakeIssueUseCase) GetReadyWork(_ context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
@@ -81,6 +116,7 @@ type fakeDependencyUseCase struct {
 	domain.DependencyUseCase
 	external map[string][]*types.Dependency
 	records  map[string][]*types.Dependency
+	wispDeps map[string][]*types.Dependency
 }
 
 func (u *fakeDependencyUseCase) GetExternalBlockingDependencyRecords(context.Context) (map[string][]*types.Dependency, error) {
@@ -91,6 +127,14 @@ func (u *fakeDependencyUseCase) GetIssueDependencyRecords(_ context.Context, ids
 	result := make(map[string][]*types.Dependency, len(ids))
 	for _, id := range ids {
 		result[id] = u.records[id]
+	}
+	return result, nil
+}
+
+func (u *fakeDependencyUseCase) GetWispDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
+	result := make(map[string][]*types.Dependency, len(ids))
+	for _, id := range ids {
+		result[id] = u.wispDeps[id]
 	}
 	return result, nil
 }
@@ -116,6 +160,17 @@ func TestWrapUOWProviderFiltersProxiedReadyWork(t *testing.T) {
 	}
 	if ids := issueIDs(got.Items); !slices.Equal(ids, []string{ready.ID}) {
 		t.Fatalf("proxied ready IDs = %v, want [%s]", ids, ready.ID)
+	}
+}
+
+func TestWrapUOWProviderPreservesIssueReader(t *testing.T) {
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: &fakeUOW{}}, nil, nil)
+	source, ok := provider.(uow.IssueReaderSource)
+	if !ok {
+		t.Fatalf("wrapped provider %T does not preserve IssueReaderSource", provider)
+	}
+	if reader, err := source.IssueReader(); err != nil || reader == nil {
+		t.Fatalf("IssueReader() = %T, %v", reader, err)
 	}
 }
 
@@ -169,6 +224,42 @@ func TestWrapUOWProviderFiltersExternalBlockedWorkByParent(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].ID != child.ID {
 		t.Fatalf("blocked issues = %v, want [%s]", got, child.ID)
+	}
+}
+
+func TestWrapUOWProviderGuardsDoneUpdatesAndWispCloses(t *testing.T) {
+	durable, wisp := issue("be-durable"), issue("be-wisp")
+	issues := &fakeIssueUseCase{ready: []*types.Issue{durable}, wisps: []*types.Issue{wisp}}
+	inner := &fakeUOW{
+		issues: issues,
+		deps: &fakeDependencyUseCase{external: map[string][]*types.Dependency{
+			durable.ID: {externalDep(durable.ID, "external:remote:payments", types.DepBlocks)},
+			wisp.ID:    {externalDep(wisp.ID, "external:remote:payments", types.DepBlocks)},
+		}},
+	}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, func(ProjectName) (string, bool) {
+		return "", false
+	}, nil)
+	uw, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+	issueUC := uw.IssueUseCase()
+	if _, err := issueUC.ApplyUpdate(t.Context(), durable.ID, domain.UpdateSpec{Fields: map[string]any{"status": string(types.StatusClosed)}}, "tester"); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("ApplyUpdate error = %v, want ErrCloseBlocked", err)
+	}
+	if _, err := issueUC.CloseWispChecked(t.Context(), wisp.ID, domain.CloseIssueParams{}, "tester", false); !errors.Is(err, storage.ErrCloseBlocked) {
+		t.Fatalf("CloseWispChecked error = %v, want ErrCloseBlocked", err)
+	}
+	if len(issues.closed) != 0 {
+		t.Fatalf("inner mutation calls = %v, want none", issues.closed)
+	}
+	blocked, err := issueUC.GetBlockedIssues(t.Context(), types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	if ids := blockedIssueIDs(blocked); !slices.Equal(ids, []string{durable.ID, wisp.ID}) {
+		t.Fatalf("blocked IDs = %v, want [%s %s]", ids, durable.ID, wisp.ID)
 	}
 }
 
