@@ -40,3 +40,22 @@ func IsTableNotExist(err error) bool {
 		quotedTableMissingPattern.MatchString(s) ||
 		unquotedTableMissingPattern.MatchString(s)
 }
+
+// IsMissingForeignKeyTarget reports whether err is the integrity-constraint
+// violation a write hits when it references a row that does not exist: MySQL
+// 1452 (ER_NO_REFERENCED_ROW_2) and its older 1216 (ER_NO_REFERENCED_ROW).
+// It deliberately does not classify 1451 (ER_ROW_IS_REFERENCED_2), which is
+// the opposite direction — deleting a row other rows still point at.
+func IsMissingForeignKeyTarget(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		return mysqlErr.Number == 1452 || mysqlErr.Number == 1216
+	}
+
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "error 1452") || strings.Contains(s, "error 1216")
+}

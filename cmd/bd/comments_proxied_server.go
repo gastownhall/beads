@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +10,12 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runCommentsProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -25,12 +28,12 @@ func runCommentsProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 	}
 	defer uw.Close(ctx)
 
-	issue, isWisp, err := proxiedGetIssueOrWisp(ctx, uw, issueID)
+	issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), issueID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return HandleErrorRespectJSON("issue %s not found", issueID)
+	}
 	if err != nil {
 		return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
-	}
-	if issue == nil {
-		return HandleErrorRespectJSON("issue %s not found", issueID)
 	}
 	issueID = issue.ID
 
@@ -127,7 +130,7 @@ func runCommentsAddProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 	} else if len(args) < 2 {
 		return HandleErrorRespectJSON("comment text required (use -f to read from file)")
 	} else {
-		commentText = args[1]
+		commentText = strings.Join(args[1:], " ")
 	}
 
 	if strings.TrimSpace(commentText) == "" {
@@ -161,9 +164,12 @@ func addCommentProxied(ctx context.Context, id, author, text string) (*types.Com
 		return nil, nil, HandleError("proxied-server UOW provider not initialized")
 	}
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (addCommentProxiedResult, string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-		if issue == nil {
+		issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return addCommentProxiedResult{}, "", fmt.Errorf("issue %s not found", id)
+		}
+		if rerr != nil {
+			return addCommentProxiedResult{}, "", fmt.Errorf("resolving %s: %w", id, rerr)
 		}
 		if err := validateIssueUpdatable(id, issue); err != nil {
 			return addCommentProxiedResult{}, "", err

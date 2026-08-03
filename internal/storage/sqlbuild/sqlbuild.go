@@ -38,13 +38,13 @@ const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends
 const IssueBaseColumns = `id, content_hash, title, description, design, acceptance_criteria, notes,
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
+	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session,
 	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
 	       await_type, await_id, timeout_ns, waiters,
 	       mol_type,
 	       event_kind, actor, target, payload,
 	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock`
+	       work_type, source_system, metadata, row_lock, storage_class`
 
 // LeaseSelectColumns is the lease overlay for full issue hydration. Leases
 // live in the ephemeral leases table (bd-lrgn1), not on the issues row, so

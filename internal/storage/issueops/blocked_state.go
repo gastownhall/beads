@@ -93,27 +93,48 @@ const waitsForGateBlockedSQL = `
 		)
 `
 
+// RecomputeIsBlockedResult reports which issue tables had rows changed while
+// the blocked-state fixpoint converged.
+type RecomputeIsBlockedResult struct {
+	IssueRowsChanged bool
+	WispRowsChanged  bool
+}
+
+// RecomputeIsBlockedInTx recomputes blocked state and discards the per-table
+// change result retained by RecomputeIsBlockedInTxWithResult.
 func RecomputeIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
+	_, err := RecomputeIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	return err
+}
+
+// RecomputeIsBlockedInTxWithResult recomputes blocked state to a fixpoint and
+// reports whether an UPDATE changed rows in each issue table.
+func RecomputeIsBlockedInTxWithResult(
+	ctx context.Context, tx DBTX, issueIDs, wispIDs []string,
+) (RecomputeIsBlockedResult, error) {
+	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
-		return nil
+		return result, nil
 	}
 	for {
 		var changed int64
 
 		n, err := recomputeIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
 		n, err = recomputeIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return nil
+			return result, nil
 		}
 	}
 }
@@ -384,14 +405,20 @@ func runMarkUnmarkBatchedInTx(ctx context.Context, tx DBTX, markTmpl, unmarkTmpl
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (mark): %w", err)
 		}
-		n, _ := res.RowsAffected()
+		n, err := res.RowsAffected()
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (mark rows affected): %w", err)
+		}
 		changed += n
 
 		res, err = tx.ExecContext(ctx, fmt.Sprintf(unmarkTmpl, placeholders), args...)
 		if err != nil {
 			return changed, fmt.Errorf("recompute is_blocked (unmark): %w", err)
 		}
-		n, _ = res.RowsAffected()
+		n, err = res.RowsAffected()
+		if err != nil {
+			return changed, fmt.Errorf("recompute is_blocked (unmark rows affected): %w", err)
+		}
 		changed += n
 	}
 	return changed, nil

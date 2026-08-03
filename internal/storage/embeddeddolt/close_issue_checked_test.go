@@ -77,6 +77,28 @@ func TestEmbeddedCloseIssueChecked(t *testing.T) {
 	if iss.Status != types.StatusClosed {
 		t.Fatalf("cic-target status = %q after force, want closed", iss.Status)
 	}
+
+	parent := &types.Issue{ID: "cicoc-parent", Title: "parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	child := &types.Issue{ID: "cicoc-child", Title: "child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	for _, issue := range []*types.Issue{parent, child} {
+		if err := te.store.CreateIssue(ctx, issue, "tester"); err != nil {
+			t.Fatalf("CreateIssue(%s): %v", issue.ID, err)
+		}
+	}
+	if err := te.store.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}, "tester"); err != nil {
+		t.Fatalf("AddDependency: %v", err)
+	}
+	res, err = te.store.CloseIssueChecked(ctx, parent.ID, "tester", storage.CloseIssueOptions{Reason: "done"})
+	if !errors.Is(err, storage.ErrCloseOpenChildren) {
+		t.Fatalf("close error = %v, want errors.Is(_, ErrCloseOpenChildren)", err)
+	}
+	if iss, getErr := te.store.GetIssue(ctx, parent.ID); getErr != nil || iss.Status != types.StatusOpen {
+		t.Fatalf("GetIssue after refusal = (%+v, %v), want open parent", iss, getErr)
+	}
+	res, err = te.store.CloseIssueChecked(ctx, parent.ID, "tester", storage.CloseIssueOptions{Reason: "override", Force: true})
+	if err != nil || res.Unchanged || res.OpenChildren != 1 {
+		t.Fatalf("force result = %+v, err = %v; want changed close with 1 child", res, err)
+	}
 }
 
 // TestEmbeddedCloseIssueCheckedTransitiveBlockedCloses proves the guard refuses

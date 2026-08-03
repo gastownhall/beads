@@ -37,6 +37,15 @@ func createIssueWithDeps(ctx context.Context, st storage.DoltStorage, issue *typ
 		return st.CreateIssue(ctx, issue, actor)
 	}
 
+	// Normalize --deps targets to full IDs before any write (GH#5005). Fail
+	// closed if a target does not resolve — never store a bare slug that
+	// would become a dangling, list-invisible edge.
+	resolvedSpecs, err := resolveDepSpecTargets(ctx, st, edges.specs)
+	if err != nil {
+		return err
+	}
+	edges.specs = resolvedSpecs
+
 	// Store-level CreateIssue routes configured infra types to the wisps
 	// tables; transaction-level CreateIssue routes on the Ephemeral/NoHistory
 	// flags only, so resolve the routing up front (mirrors DoltStore and

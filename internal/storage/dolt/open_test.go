@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -368,6 +369,36 @@ func TestApplyResolvedConfig(t *testing.T) {
 		}
 		if cfg.ServerUser != "custom" {
 			t.Fatalf("ServerUser override lost: %q", cfg.ServerUser)
+		}
+	})
+
+	t.Run("pool timeouts populate from env vars (bd-vz0y9)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
+		t.Setenv("BEADS_DOLT_POOL_WRITE_TIMEOUT", "45")
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), &configfile.Config{Backend: configfile.BackendDolt}, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 90*time.Second {
+			t.Fatalf("PoolReadTimeout = %v, want 90s", cfg.PoolReadTimeout)
+		}
+		if cfg.PoolWriteTimeout != 45*time.Second {
+			t.Fatalf("PoolWriteTimeout = %v, want 45s (bare number = seconds)", cfg.PoolWriteTimeout)
+		}
+	})
+
+	t.Run("caller-set pool timeouts win over env vars", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_POOL_READ_TIMEOUT", "90s")
+		cfg := &Config{PoolReadTimeout: 2 * time.Minute}
+
+		if err := applyResolvedConfig(context.Background(), t.TempDir(), &configfile.Config{Backend: configfile.BackendDolt}, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.PoolReadTimeout != 2*time.Minute {
+			t.Fatalf("PoolReadTimeout = %v, want caller's 2m", cfg.PoolReadTimeout)
 		}
 	})
 }

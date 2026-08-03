@@ -88,16 +88,10 @@ echo 'Description with `backticks` and "quotes"' | bd create "Title" --descripti
 echo 'Updated text' | bd update <id> --description=-
 ```
 
-## Testing Commands (No Ambiguity)
+## Testing
 
-- Default local test command: `make test` (or `./scripts/test.sh`).
-- Opt-in ICU regex path: `make test-icu-path` (or `./scripts/test-icu-path.sh ./...`).
-- This ICU path is maintainer-only and not part of normal validation; `make test-full-cgo` and `./scripts/test-cgo.sh` are deprecated aliases.
-- For package- or test-scoped shipped-config CGO runs, prefer:
-```bash
-CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
-CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestName$' ./cmd/bd/...
-```
+Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
+test-design guidance, and PR-readiness gates.
 
 ## Non-Interactive Shell Commands
 

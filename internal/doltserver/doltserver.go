@@ -36,6 +36,8 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/fdhygiene"
+	"github.com/steveyegge/beads/internal/githooksenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -172,6 +174,39 @@ func IsAutoStartDisabled() bool {
 	return isFalsyBool(config.GetString("dolt.auto-start"))
 }
 
+// externalNonLocalhostHost reports the configured Dolt server host when
+// it is set to a non-localhost value, indicating bd is talking to a
+// server it does not manage. Returns (host, true) when external,
+// ("", false) otherwise.
+//
+// Used to branch error messages in EnsureRunning so operators with a
+// non-localhost server are not told to "bd dolt start" — that command
+// won't help them and reinforces a wrong mental model (GH#3518).
+//
+// Falls back to a zero Config when no metadata.json exists in beadsDir
+// so env-only configurations (BEADS_DOLT_SERVER_HOST set, no on-disk
+// config) are still detected. configfile.Load error returns are treated
+// as "not external" — the existing local-flavored error message is the
+// safer fallback and the configfile error will surface elsewhere.
+func externalNonLocalhostHost(beadsDir string) (string, bool) {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		return "", false
+	}
+	if cfg == nil {
+		cfg = &configfile.Config{}
+	}
+	if !cfg.IsDoltServerMode() {
+		return "", false
+	}
+	host := cfg.GetDoltServerHost()
+	switch strings.ToLower(strings.TrimSpace(host)) {
+	case "", "localhost", "127.0.0.1", "::1", "[::1]", "0.0.0.0":
+		return "", false
+	}
+	return host, true
+}
+
 // isFalsyBool returns true when s is a recognized "false" value:
 // anything strconv.ParseBool accepts as false, or "off" (case-insensitive).
 // Leading/trailing whitespace is trimmed before parsing.
@@ -288,21 +323,10 @@ func ResolveDoltDir(beadsDir string) string {
 		}
 	}
 
-	// Check env var first (highest priority)
-	if d := os.Getenv("BEADS_DOLT_DATA_DIR"); d != "" {
-		if filepath.IsAbs(d) {
-			return d
-		}
-		return filepath.Join(beadsDir, d)
-	}
-	// Only load config if metadata.json exists (avoids legacy migration side effect)
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-	if _, err := os.Stat(metadataPath); err == nil {
-		if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
-			return cfg.DatabasePath(beadsDir)
-		}
-	}
-	return filepath.Join(beadsDir, "dolt")
+	// Env var, metadata.json dolt_data_dir (stat-guarded), then default —
+	// shared with the side-effect-free DoltDirPath so the two resolvers
+	// cannot drift.
+	return projectDoltDirPath(beadsDir)
 }
 
 // Config holds the server configuration.
@@ -311,6 +335,26 @@ type Config struct {
 	Port     int        // MySQL protocol port (0 = allocate ephemeral port on Start)
 	Host     string     // Bind address (default: 127.0.0.1)
 	Mode     ServerMode // Server ownership mode (Owned, External, Embedded)
+
+	// PortSource records which step of the precedence chain (see
+	// portSources) resolved Port. PortSourceUnset when Port == 0. Callers
+	// that auto-start a replacement server use this to decide whether
+	// silently retargeting to a different port is safe (GH#4052): safe for
+	// bd's own port-file bookkeeping, not safe for a source where the user
+	// (or config on the user's behalf) explicitly asserted the port.
+	PortSource PortSource
+
+	// PortSharedServer records whether Port was resolved in shared-server
+	// mode (BEADS_DOLT_SHARED_SERVER=1): either because port resolution
+	// consulted the shared server directory's sources, or because no source
+	// resolved a port and DefaultConfig fell back to DefaultSharedServerPort.
+	// Orthogonal to PortSource — a shared-mode port can come from any source
+	// (env, port file, config.yaml, ...). Callers use this together with
+	// PortSource.IsAuthoritative() to decide whether auto-starting a
+	// repo-local server on a different port is safe: it never is here,
+	// because the shared server is a different database than whatever
+	// auto-start would create locally (GH#4052).
+	PortSharedServer bool
 }
 
 // State holds runtime information about a managed server.
@@ -497,6 +541,68 @@ func ReadPortFile(beadsDir string) int {
 	return readPortFile(beadsDir)
 }
 
+// PortFileSnapshot captures the exact prior contents of a project's port
+// file, so a caller that speculatively lets EnsureRunningDetailed write a
+// new one can restore the pre-call state exactly if it later decides not to
+// use the new server (GH#4052 fail-closed paths). Existed is false when the
+// file did not exist before the snapshot; in that case Data is nil and
+// RestorePortFile removes the file rather than rewriting it.
+type PortFileSnapshot struct {
+	Data    []byte
+	Existed bool
+}
+
+// SnapshotPortFile captures the current on-disk state of beadsDir's port
+// file (see PortFileSnapshot). Read-only; does not mutate anything.
+func SnapshotPortFile(beadsDir string) (PortFileSnapshot, error) {
+	data, err := os.ReadFile(portPath(beadsDir))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return PortFileSnapshot{}, nil
+		}
+		return PortFileSnapshot{}, err
+	}
+	// Copy: os.ReadFile's backing array should not be retained/mutated by
+	// later callers of the same path.
+	cp := make([]byte, len(data))
+	copy(cp, data)
+	return PortFileSnapshot{Data: cp, Existed: true}, nil
+}
+
+// RestorePortFile restores beadsDir's port file to the state captured by
+// snap: removes the file if it did not exist before, or rewrites it with the
+// exact prior bytes (write-temp-then-rename, matching writePortFile, so a
+// concurrent reader never observes a partially written file). Used on
+// fail-closed auto-start paths (GH#4052) that must leave no port-file trace
+// of a server they decided not to use.
+func RestorePortFile(beadsDir string, snap PortFileSnapshot) error {
+	path := portPath(beadsDir)
+	if !snap.Existed {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	tmp, err := os.CreateTemp(beadsDir, PortFileName+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) //nolint:errcheck // no-op after successful rename
+	if _, err := tmp.Write(snap.Data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, path)
+}
+
 func configYamlPort(beadsDir string) int {
 	path := filepath.Join(ResolveDoltDir(beadsDir), "config.yaml")
 	if _, err := os.Stat(path); err != nil {
@@ -509,19 +615,156 @@ func configYamlPort(beadsDir string) int {
 	return cfg.Port()
 }
 
-// DefaultConfig returns config with sensible defaults.
-// Priority: env var > port file > config.yaml / global config > metadata.json.
-// Returns port 0 when no source provides a port, meaning Start() should
-// allocate an ephemeral port from the OS.
+// PortSource identifies which step of the port-resolution precedence chain
+// (see portSources) produced a Config's Port. Callers use it to distinguish
+// a port the user explicitly asserted (authoritative) from bd's own
+// bookkeeping (the gitignored port file), which auto-start is free to
+// replace without confirmation (GH#4052).
+type PortSource string
+
+const (
+	// PortSourceUnset means no source resolved a port (Port == 0); Start()
+	// will allocate an ephemeral port.
+	PortSourceUnset PortSource = ""
+	// PortSourceEnv is the BEADS_DOLT_SERVER_PORT environment variable.
+	PortSourceEnv PortSource = "env"
+	// PortSourcePortFile is the gitignored .beads/dolt-server.port file that
+	// bd itself writes and rewrites as part of normal server bookkeeping.
+	PortSourcePortFile PortSource = "port_file"
+	// PortSourceDoltConfigYaml is the Dolt server's own config.yaml
+	// (listener.port) in the dolt data directory.
+	PortSourceDoltConfigYaml PortSource = "dolt_config_yaml"
+	// PortSourceConfigYaml is Beads' project/global config.yaml (dolt.port).
+	PortSourceConfigYaml PortSource = "config_yaml"
+	// PortSourceGlobalConfig is retained as an alias of PortSourceConfigYaml
+	// for callers that think of it as "global config" (~/.config/bd/config.yaml
+	// resolves through the same config.GetYamlConfig("dolt.port") lookup).
+	PortSourceGlobalConfig = PortSourceConfigYaml
+	// PortSourceMetadataJSON is the deprecated metadata.json dolt_server_port
+	// fallback. Still an explicit user/tooling assertion, not bd bookkeeping.
+	PortSourceMetadataJSON PortSource = "metadata_json"
+	// PortSourceExternalHostDefault is the documented default port (3307)
+	// assumed for a host-inferred external server when no port source
+	// resolved (GH#3545): the user asserted a remote host, so bd fills in
+	// the default port rather than dialing :0 or allocating locally.
+	PortSourceExternalHostDefault PortSource = "external_host_default"
+)
+
+// IsAuthoritative reports whether this source represents a user (or
+// tooling-on-the-user's-behalf) assertion of where the Dolt server lives, as
+// opposed to bd's own bookkeeping (the port file). Auto-start may freely
+// replace a non-authoritative port; it must not silently replace an
+// authoritative one (GH#4052).
+func (s PortSource) IsAuthoritative() bool {
+	switch s {
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON:
+		return true
+	default:
+		return false
+	}
+}
+
+// portSource is one step in the port-resolution precedence chain that
+// DefaultConfig walks. resolve reports (port, true) when this source has a
+// usable value; DefaultConfig stops at the first true.
+type portSource struct {
+	label   string
+	source  PortSource
+	resolve func(beadsDir string) (int, bool)
+}
+
+// portSources is the single precedence chain for server-port resolution.
+// DefaultConfig consumes it behaviorally; PortSourceLabels exposes the same
+// slice's labels so callers like `bd dolt show-config` render the actual
+// chain instead of hand-copying it out of sync (GH#4511).
+var portSources = []portSource{
+	{
+		label:  "Environment variable (BEADS_DOLT_SERVER_PORT)",
+		source: PortSourceEnv,
+		resolve: func(beadsDir string) (int, bool) {
+			p := os.Getenv("BEADS_DOLT_SERVER_PORT")
+			if p == "" {
+				return 0, false
+			}
+			port, err := strconv.Atoi(p)
+			return port, err == nil
+		},
+	},
+	{
+		// Gitignored, local-only. Elevated above the YAML sources to prevent
+		// git-tracked values from causing cross-project data leakage (GH#2372).
+		label:  "Port file (.beads/dolt-server.port; shared-server dir in shared mode)",
+		source: PortSourcePortFile,
+		resolve: func(beadsDir string) (int, bool) {
+			p := readPortFile(beadsDir)
+			return p, p > 0
+		},
+	},
+	{
+		label:  "Dolt server config.yaml (listener.port, in the dolt data directory)",
+		source: PortSourceDoltConfigYaml,
+		resolve: func(beadsDir string) (int, bool) {
+			p := configYamlPort(beadsDir)
+			return p, p > 0
+		},
+	},
+	{
+		// ~/.config/bd/config.yaml or project config.yaml (GH#2073). Git-tracked,
+		// so it ranks below the port file above.
+		label:  "Beads config.yaml / global config (dolt.port)",
+		source: PortSourceConfigYaml,
+		resolve: func(beadsDir string) (int, bool) {
+			p := config.GetYamlConfig("dolt.port")
+			if p == "" {
+				return 0, false
+			}
+			port, err := strconv.Atoi(p)
+			return port, err == nil && port > 0
+		},
+	},
+	{
+		// Deprecated: git-tracked, propagates to all contributors, causing
+		// cross-project data leakage (GH#2372). Kept as a fallback so existing
+		// setups don't break silently.
+		label:  "metadata.json dolt_server_port (deprecated fallback)",
+		source: PortSourceMetadataJSON,
+		resolve: func(beadsDir string) (int, bool) {
+			metaCfg, err := configfile.Load(beadsDir)
+			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
+				return 0, false
+			}
+			fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
+			fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
+			fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
+			return metaCfg.DoltServerPort, true
+		},
+	},
+}
+
+// PortSourceLabels returns the operator-facing description of each step in
+// the port-resolution precedence chain, in priority order.
+func PortSourceLabels() []string {
+	labels := make([]string, len(portSources))
+	for i, s := range portSources {
+		labels[i] = s.label
+	}
+	return labels
+}
+
+// DefaultConfig returns config with sensible defaults. Port resolution walks
+// portSources in priority order (see PortSourceLabels) and returns port 0
+// when no source provides one, meaning Start() should allocate an ephemeral
+// port from the OS.
 //
-// The port file (dolt-server.port) is written by Start() with the actual port
-// the server is listening on. Consulting it here ensures that commands
-// connecting to an already-running server use the correct port.
+// The port file (dolt-server.port) is written by Start() with the actual
+// listening port, so already-running-server connections use the right port.
 func DefaultConfig(beadsDir string) *Config {
 	// In shared mode, use the shared server directory for port resolution
+	sharedMode := false
 	if IsSharedServerMode() {
 		if sharedDir, err := SharedServerDir(); err == nil {
 			beadsDir = sharedDir
+			sharedMode = true
 		}
 	}
 
@@ -531,51 +774,12 @@ func DefaultConfig(beadsDir string) *Config {
 		Mode:     ResolveServerMode(beadsDir),
 	}
 
-	// Check env var override first (used by tests and manual overrides)
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil {
+	for _, src := range portSources {
+		if port, ok := src.resolve(beadsDir); ok {
 			cfg.Port = port
-			return cfg
-		}
-	}
-
-	// Check the port file (gitignored, local-only) — this is the primary
-	// persistent source. Start() writes the actual listening port here.
-	// Elevated to top priority (after env var) to prevent git-tracked values
-	// from causing cross-project data leakage (GH#2372).
-	if p := readPortFile(beadsDir); 0 < p {
-		cfg.Port = p
-		return cfg
-	}
-
-	if p := configYamlPort(beadsDir); p > 0 {
-		cfg.Port = p
-		return cfg
-	}
-
-	// Check config.yaml / global config (~/.config/bd/config.yaml) (GH#2073)
-	// Note: project-level config.yaml dolt.port is git-tracked and could
-	// propagate to collaborators. Prefer the gitignored port file above.
-	if cfg.Port == 0 {
-		if p := config.GetYamlConfig("dolt.port"); p != "" {
-			if port, err := strconv.Atoi(p); err == nil && port > 0 {
-				cfg.Port = port
-			}
-		}
-	}
-
-	// Deprecated: metadata.json DoltServerPort is git-tracked and propagates
-	// to all contributors, causing cross-project data leakage (GH#2372).
-	// Emit a one-time warning but still use the value as a fallback so
-	// existing setups don't break silently.
-	if cfg.Port == 0 {
-		if metaCfg, err := configfile.Load(beadsDir); err == nil && metaCfg != nil {
-			if metaCfg.DoltServerPort > 0 {
-				fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
-				fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
-				fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
-				cfg.Port = metaCfg.DoltServerPort
-			}
+			cfg.PortSource = src.source
+			cfg.PortSharedServer = sharedMode
+			break
 		}
 	}
 
@@ -584,6 +788,60 @@ func DefaultConfig(beadsDir string) *Config {
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
+		cfg.PortSharedServer = true
+	}
+
+	// Host-inferred external config (GH#3545): the server lives on
+	// another machine.
+	if cfg.Mode == ServerModeExternal {
+		fc := &configfile.Config{}
+		if _, err := os.Stat(configfile.ConfigPath(beadsDir)); err == nil {
+			if loaded, loadErr := configfile.Load(beadsDir); loadErr == nil && loaded != nil {
+				fc = loaded
+			}
+		}
+		if !configfile.IsLocalHostString(fc.GetDoltServerHost()) {
+			// The legacy BEADS_DOLT_PORT override is not in
+			// portSources but the storage layer honors it ahead of
+			// persisted sources; resolve it the same way here so
+			// credentials/probes and the eventual connection agree
+			// on the port. BEADS_DOLT_SERVER_PORT (PortSourceEnv)
+			// still wins over the legacy spelling.
+			if cfg.PortSource != PortSourceEnv {
+				if p, err := strconv.Atoi(strings.TrimSpace(os.Getenv("BEADS_DOLT_PORT"))); err == nil && p > 0 {
+					cfg.Port = p
+					cfg.PortSource = PortSourceEnv
+				}
+			}
+			// The gitignored port file is bd's bookkeeping for a
+			// bd-owned LOCAL server; pairing it with a remote host
+			// dials the remote machine on a stale local ephemeral
+			// port. Discard it and resume the precedence chain so
+			// lower-priority authoritative sources (listener.port,
+			// dolt.port, metadata dolt_server_port) still apply.
+			if cfg.PortSource == PortSourcePortFile {
+				cfg.Port = 0
+				cfg.PortSource = PortSourceUnset
+				for _, src := range portSources {
+					if src.source == PortSourcePortFile {
+						continue
+					}
+					if port, ok := src.resolve(beadsDir); ok {
+						cfg.Port = port
+						cfg.PortSource = src.source
+						cfg.PortSharedServer = sharedMode
+						break
+					}
+				}
+			}
+			// With no configured port, dial the documented default
+			// 3307, not :0 — there is no local Start() to allocate
+			// an ephemeral port for a remote server.
+			if cfg.Port == 0 {
+				cfg.Port = configfile.DefaultDoltServerPort
+				cfg.PortSource = PortSourceExternalHostDefault
+			}
+		}
 	}
 
 	return cfg
@@ -693,6 +951,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	mode := ResolveServerMode(beadsDir)
 	if mode == ServerModeExternal {
 		cfg := DefaultConfig(beadsDir)
+		if host, ok := externalNonLocalhostHost(beadsDir); ok {
+			// Configured for a non-localhost external server:
+			// "bd dolt start" is not the right advice (GH#3518).
+			return 0, false, fmt.Errorf("Dolt server at %s:%d is unreachable, and bd will not "+
+				"start a local server because an external one is configured.\n\n"+
+				"Verify the external server is running and reachable from this host:\n"+
+				"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
+				"  bd dolt status   # detailed external-server check",
+				host, cfg.Port, host, cfg.Port, host, cfg.Port)
+		}
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
 			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
 			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
@@ -705,6 +973,14 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 	// somehow reached this point (e.g. stale AutoStart=true in config).
 	if IsAutoStartDisabled() {
 		cfg := DefaultConfig(beadsDir)
+		if host, ok := externalNonLocalhostHost(beadsDir); ok {
+			return 0, false, fmt.Errorf("Configured Dolt server at %s:%d is unreachable, and auto-start "+
+				"is disabled (dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
+				"This is an external server; bd will not start it. Verify it is running:\n"+
+				"  nc -zv %s %d  # or curl %s:%d for an HTTP-style check\n"+
+				"  bd dolt status   # detailed external-server check",
+				host, cfg.Port, host, cfg.Port, host, cfg.Port)
+		}
 		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
 			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
 			"Start the server manually or enable auto-start.\n"+
@@ -1122,7 +1398,19 @@ func Start(beadsDir string) (*State, error) {
 			cmd.Stderr = logFile
 			cmd.Stdin = nil
 			cmd.SysProcAttr = procAttrDetached()
-			cmd.Env = os.Environ()
+			// In server mode the CALL DOLT_PUSH runs inside THIS child, not in
+			// bd, so the hooks override has to be in the child's environment —
+			// setting it on bd's own process (what the embedded path does)
+			// would be invisible here. GH#4272; approach from PR #4281 by
+			// pmgledhill102.
+			cmd.Env = append(os.Environ(), githooksenv.ParametersEnv+"="+
+				githooksenv.AppendParameter(os.Getenv(githooksenv.ParametersEnv), githooksenv.NoHooksParam))
+
+			// GH#4634: the server outlives the caller, so any descriptor the
+			// caller left non-CLOEXEC (a shell `exec 9>lock`, a CI harness, an
+			// editor terminal) would be pinned by the server until it is
+			// restarted. os/exec does not close those; mark them first.
+			sanitizeInheritedFDs()
 
 			if startErr := cmd.Start(); startErr != nil {
 				lastErr = startErr
@@ -1375,6 +1663,16 @@ func StopWithForce(beadsDir string, force bool) error {
 	}
 
 	return cleanupStateFiles(beadsDir)
+}
+
+// sanitizeInheritedFDs marks descriptors bd inherited but did not open
+// close-on-exec, so the detached sql-server does not pin them for its whole
+// lifetime (GH#4634). It is a free function rather than an inline call because
+// the spawn path shadows the debug package with a local `debug bool`.
+func sanitizeInheritedFDs() {
+	if leaked := fdhygiene.MarkInheritedCloexec(); len(leaked) > 0 {
+		debug.Logf("marked %d inherited fd(s) close-on-exec before starting dolt sql-server: %v", len(leaked), leaked)
+	}
 }
 
 // cleanupStateFiles removes all server state files (PID and port).

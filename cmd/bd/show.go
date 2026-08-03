@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var showCmd = &cobra.Command{
@@ -142,99 +142,32 @@ var showCmd = &cobra.Command{
 			}
 
 			if jsonOutput {
-				// be-ijck6q: default is count-only (no dependents/comments slice in output).
-				// Use --include-dependents / --include-comments to stream the full lists.
-				details := &types.IssueDetails{Issue: *issue}
-				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
-				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-
-				// Aggregate counts — O(1) queries, no row materialization.
-				depCount, _ := issueStore.CountDependents(ctx, issue.ID)
-				details.DependentCount = &depCount
-				depnCount, _ := issueStore.CountDependencies(ctx, issue.ID)
-				details.DependencyCount = &depnCount
-				cmtCount, _ := issueStore.CountIssueComments(ctx, issue.ID)
-				details.CommentCount = &cmtCount
-
-				// --include-dependents: stream via Iter, shallow-copy each item.
-				// May be slow on hub beads with many dependents.
-				if includeDepends {
-					iter, err := issueStore.IterDependentsWithMetadata(ctx, issue.ID)
-					if err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
-					}
-					defer iter.Close() //nolint:errcheck
-					var shallowDeps []*types.IssueWithDependencyMetadata
-					for iter.Next(ctx) {
-						item := iter.Value()
-						shallowDeps = append(shallowDeps, &types.IssueWithDependencyMetadata{
-							Issue: types.Issue{
-								ID:        item.Issue.ID,
-								Status:    item.Issue.Status,
-								IssueType: item.Issue.IssueType,
-								Priority:  item.Issue.Priority,
-								Title:     item.Issue.Title,
-							},
-							DependencyType: item.DependencyType,
-						})
-					}
-					if err := iter.Err(); err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
-					}
-					details.Dependents = shallowDeps
-
-					// Epic progress from streamed dependents.
-					if issue.IssueType == types.TypeEpic && len(shallowDeps) > 0 {
-						total, closed := 0, 0
-						for _, dep := range shallowDeps {
-							if dep.DependencyType == types.DepParentChild {
-								total++
-								if dep.Issue.Status == types.StatusClosed {
-									closed++
-								}
-							}
-						}
-						if total > 0 {
-							details.EpicTotalChildren = &total
-							details.EpicClosedChildren = &closed
-							closeable := total == closed
-							details.EpicCloseable = &closeable
-						}
-					}
+				// Shaping the detail view belongs to the reader role, not the
+				// CLI: the count-only default (be-ijck6q), the
+				// comments-omitted flag (ga-clgh), and the shallow dependent
+				// rows (be-4d36f2) have to read the same from every frontend,
+				// and going through the accessor is what makes that true by
+				// construction rather than by everyone remembering to call the
+				// same helper.
+				//
+				// The id handed over is the CANONICAL one this command already
+				// resolved. Fuzzy and cross-repo resolution stay here on
+				// purpose: an affordance that can answer with a different
+				// issue than the caller named has no place on a contract an
+				// unattended HTTP client also calls.
+				rd, rerr := issueStore.IssueReader()
+				if rerr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", rerr)
 				}
-
-				// --include-comments: stream via Iter.
-				// May be slow on issues with many comments.
-				if includeComments {
-					iter, err := issueStore.IterIssueComments(ctx, issue.ID)
-					if err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
-					}
-					defer iter.Close() //nolint:errcheck
-					for iter.Next(ctx) {
-						details.Comments = append(details.Comments, iter.Value())
-					}
-					if err := iter.Err(); err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
-					}
-				} else if cmtCount > 0 {
-					// ga-clgh: comment_count alone announces content exists without
-					// saying the representation is partial. Flag it explicitly so a
-					// caller reading only `.comments` doesn't read absence as "none".
-					omitted := true
-					details.CommentsOmitted = &omitted
-				}
-
-				// Compute parent from dependencies.
-				for _, dep := range details.Dependencies {
-					if dep.DependencyType == types.DepParentChild {
-						details.Parent = &dep.ID
-						break
-					}
+				details, derr := rd.Get(ctx, issueops.GetRequest{
+					ID:                issue.ID,
+					IncludeDependents: includeDepends,
+					IncludeComments:   includeComments,
+				})
+				if derr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", derr)
 				}
 				allDetails = append(allDetails, details)
 				result.Close()
@@ -450,40 +383,6 @@ var showCmd = &cobra.Command{
 	},
 }
 
-// shallowDependentsForJSON returns a copy of raw with each embedded Issue
-// stripped down to identity-and-shape fields (ID, Status, IssueType, Priority,
-// Title). The heavy fields (Description, Design, Notes, AcceptanceCriteria,
-// metadata blobs, etc.) are dropped.
-//
-// be-4d36f2: hub beads with thousands of dependents previously caused
-// `bd show --json <hub>` to allocate 5-13 GB while marshaling full Issue
-// records into JSON. The shallow shape preserves what callers actually
-// consume (counts, status, type) and drops what they don't (free-form
-// text fields). On a 4-dependent hub this trims output ~60%; on a hub
-// with thousands of dependents, savings scale linearly.
-func shallowDependentsForJSON(raw []*types.IssueWithDependencyMetadata) []*types.IssueWithDependencyMetadata {
-	if len(raw) == 0 {
-		return nil
-	}
-	shallow := make([]*types.IssueWithDependencyMetadata, 0, len(raw))
-	for _, dep := range raw {
-		if dep == nil {
-			continue
-		}
-		shallow = append(shallow, &types.IssueWithDependencyMetadata{
-			Issue: types.Issue{
-				ID:        dep.Issue.ID,
-				Status:    dep.Issue.Status,
-				IssueType: dep.Issue.IssueType,
-				Priority:  dep.Issue.Priority,
-				Title:     dep.Issue.Title,
-			},
-			DependencyType: dep.DependencyType,
-		})
-	}
-	return shallow
-}
-
 func init() {
 	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
 	showCmd.Flags().Bool("short", false, "Show compact one-line output per issue")
@@ -499,44 +398,4 @@ func init() {
 	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
-}
-
-// resolveCurrentIssueID determines the current active issue for the agent.
-// Priority: in-progress assigned to actor > hooked > last touched.
-func resolveCurrentIssueID(ctx context.Context) string {
-	if store == nil {
-		// No store — fall back to last touched
-		return GetLastTouchedID()
-	}
-
-	currentActor := getActorWithGit()
-
-	// 1. In-progress issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusInProgress
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 2. Hooked issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusHooked
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 3. Last touched issue (fallback)
-	return GetLastTouchedID()
 }

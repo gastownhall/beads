@@ -121,12 +121,8 @@ func SnapshotIssueInTx(ctx context.Context, tx *sql.Tx, issueID string, tier int
 		return fmt.Errorf("snapshot issue %s: marshal: %w", issueID, err)
 	}
 
-	now := time.Now().UTC()
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO compaction_snapshots (id, issue_id, compaction_level, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?)`,
-		NewEventID(), issueID, tier, payload, now,
-	); err != nil {
-		return fmt.Errorf("snapshot issue %s: insert: %w", issueID, err)
+	if err := InsertDerivedCompactionSnapshot(ctx, tx, issueID, tier, payload, ""); err != nil {
+		return fmt.Errorf("snapshot issue %s: %w", issueID, err)
 	}
 	return nil
 }

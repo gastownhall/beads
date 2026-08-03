@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 )
@@ -57,6 +58,10 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.Open(ctx, beadsDir)
+	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store should be uow provider")
@@ -81,6 +86,10 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
 	}
+	cfg = normalizeLoadedConfig(cfg)
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.OpenReadOnly(ctx, beadsDir)
+	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
 		return nil, fmt.Errorf("proxy server store needs to be uow provider")
@@ -95,6 +104,13 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 		return dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{ReadOnly: true})
 	}
 	return nil, fmt.Errorf("%s", nocgoEmbeddedErrMsg)
+}
+
+// newPreviewStoreFromConfig is the non-CGO twin of the CGO build's preview
+// factory. The two differ only in how they open the EMBEDDED store, and this
+// build has no embedded store at all, so preview and read-only coincide here.
+func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return newReadOnlyStoreFromConfig(ctx, beadsDir)
 }
 
 const nocgoEmbeddedErrMsg = `embedded Dolt requires a CGO build, but this bd binary was built with CGO_ENABLED=0.

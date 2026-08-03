@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var searchCmd = &cobra.Command{
@@ -108,11 +109,11 @@ Examples:
 		}
 
 		if status != "" && status != "all" {
-			cfg, err := loadDirectListFilterConfig(rootCtx, store)
+			cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
 			if err != nil {
 				return HandleError("loading status configuration: %v", err)
 			}
-			if err := applyStatusFilter(&filter, status, cfg.customStatusNames()); err != nil {
+			if err := workapi.ApplyStatusFilter(&filter, status, cfg.CustomStatusNames()); err != nil {
 				return HandleError("%v", err)
 			}
 		} else if status != "all" {
@@ -251,7 +252,7 @@ Examples:
 		}
 
 		// Apply sorting
-		sortIssues(issues, sortBy, reverse)
+		workapi.SortIssues(issues, sortBy, reverse)
 
 		if jsonOutput {
 			// Get labels and dependency counts

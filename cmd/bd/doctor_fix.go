@@ -290,6 +290,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = doctor.FixTrackedRuntimeFiles(path)
 		case "Git Hooks":
 			err = fix.GitHooks(path)
+		case "Hooks Path":
+			err = doctor.FixHooksPath()
 		case "Sync Divergence":
 			fmt.Printf("  ⚠ Sync divergence fix removed (Dolt-native sync)\n")
 			continue
@@ -324,6 +326,8 @@ func applyFixList(path string, fixes []doctorCheck) {
 			err = fix.CrossTableDuplicates(path, doctorVerbose)
 		case "Orphaned Dependencies":
 			err = fix.OrphanedDependencies(path, doctorVerbose)
+		case "Clone-Local FKs":
+			err = fix.CloneLocalFKEnforcement(path, doctorVerbose)
 		case "Dependency Keys":
 			err = fix.DependencyKeys(path, doctorVerbose)
 		case "Blocked State":

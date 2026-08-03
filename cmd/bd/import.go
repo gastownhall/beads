@@ -24,7 +24,9 @@ var importCmd = &cobra.Command{
 	Long: `Import issues from a JSONL file (newline-delimited JSON) into the database.
 
 If no file is specified, imports from the configured import.path under .beads/
-(default: issues.jsonl). Use "-" to read from stdin. This is the incremental counterpart to
+(default: issues.jsonl). Use "-" to read from stdin; redirecting stdin without
+"-" or a file argument is an error, so a typo'd 'bd import < file' cannot
+silently import the default file instead. This is the incremental counterpart to
 'bd export': new issues are created and existing issues are updated (upsert
 semantics).
 
@@ -153,6 +155,15 @@ func runImportInner(args []string) error {
 	} else if len(args) > 0 {
 		jsonlPath = args[0]
 	} else {
+		// bd-axluy: `bd import < file` (or `... | bd import`) without "-"
+		// used to silently ignore stdin and import the default JSONL — a
+		// mutating command diverging from what the user piped. Demand an
+		// explicit source instead. /dev/null (the stdin subprocesses get by
+		// default) is a character device, so scripted bare `bd import` with
+		// no redirection still works.
+		if fi, statErr := os.Stdin.Stat(); statErr == nil && fi.Mode()&os.ModeCharDevice == 0 {
+			return fmt.Errorf("stdin is redirected, but without \"-\" bd import ignores it and imports the default JSONL instead; use 'bd import -' to import what you piped, or name a file explicitly")
+		}
 		beadsDir := beads.FindBeadsDir()
 		if beadsDir == "" {
 			return fmt.Errorf("%s — %s", activeWorkspaceNotFoundError(), diagHint())

@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -53,6 +54,12 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (storage.DoltStorage, e
 	}
 	if cfg.ServerMode {
 		return dolt.New(ctx, cfg)
+	}
+	if cfg.Preview {
+		// Preview commands are stricter than ordinary read commands: they
+		// must not run schema initialization or permit incidental writes
+		// before their RunE honors --dry-run/--inspect.
+		return embeddeddolt.OpenForPreviewCommand(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	if cfg.ReadOnly {
 		if cfg.DisableAutoStart {
@@ -120,6 +127,10 @@ func newDoltStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltS
 	}
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
+	}
+	cfg = normalizeLoadedConfig(cfg)
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.Open(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
@@ -193,6 +204,22 @@ func migrateHyphenatedDB(beadsDir string, cfg *configfile.Config, oldName, newNa
 // only — no directory renames or metadata.json writes. This prevents cross-repo
 // hydration from mutating foreign projects (GH#3231).
 func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, false)
+}
+
+// newPreviewStoreFromConfig is newReadOnlyStoreFromConfig for a preview
+// command (--dry-run, --inspect) reading a repository it was only pointed at:
+// the same non-mutating open, but a BEHIND schema cursor is tolerated rather
+// than refused, matching embeddeddolt.OpenForPreviewCommand and the preview
+// policy the root pre-run applies to the command's own store. A preview that
+// only reads a parent issue out of another repo should not be the thing that
+// refuses because that repo has not been migrated yet — and it must certainly
+// not migrate it.
+func newPreviewStoreFromConfig(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+	return openNonMutatingStoreFromConfig(ctx, beadsDir, true)
+}
+
+func openNonMutatingStoreFromConfig(ctx context.Context, beadsDir string, preview bool) (storage.DoltStorage, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
 		// Same contract as newDoltStoreFromConfig: a present-but-unloadable
@@ -203,6 +230,10 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	}
 	if err := validateConfiguredBackend(cfg); err != nil {
 		return nil, err
+	}
+	cfg = normalizeLoadedConfig(cfg)
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.OpenReadOnly(ctx, beadsDir)
 	}
 	if cfg != nil && cfg.IsDoltProxiedServerMode() {
 		// TODO: this needs to be uow provider
@@ -223,6 +254,9 @@ func newReadOnlyStoreFromConfig(ctx context.Context, beadsDir string) (storage.D
 	}
 	if sanitized := sanitizeDBName(database); sanitized != database {
 		database = sanitized
+	}
+	if preview {
+		return embeddeddolt.OpenForPreviewCommand(ctx, beadsDir, database, "main")
 	}
 	// OpenReadOnly, not Open: a read-only open of a foreign project must not
 	// run the remote-migrate gate (a behind, remote-backed database would fail

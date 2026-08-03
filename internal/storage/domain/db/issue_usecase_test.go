@@ -2,8 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"strings"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -16,6 +19,9 @@ func (s *testSuite) TestIssueUseCase_MintTopLevelID() {
 	s.Run("IDPrefixSubprefixHonored", s.useCaseMintRespectsIDPrefix)
 	s.Run("WispUsesWispPrefix", s.useCaseMintWispPrefix)
 	s.Run("MissingConfigPrefixErrors", s.useCaseMintMissingPrefix)
+	s.Run("ExplicitIDRequiresConfiguredPrefixUnlessForced", s.useCaseExplicitIDPrefixGuard)
+	s.Run("CreateOnlyRefusesOccupiedID", s.useCaseCreateOnlyRefusesOccupiedID)
+	s.Run("CreateAttachesNormalizedComments", s.useCaseCreateAttachesNormalizedComments)
 }
 
 func (s *testSuite) issueUseCase() domain.IssueUseCase {
@@ -152,6 +158,91 @@ func (s *testSuite) useCaseMintMissingPrefix() {
 	s.Contains(err.Error(), "issue_prefix")
 }
 
+func (s *testSuite) useCaseExplicitIDPrefixGuard() {
+	s.resetMintConfig("prefixguard", "")
+	uc := s.issueUseCase()
+
+	upsert, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign upsert", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-upsert-1",
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-upsert-1", upsert.Issue.ID)
+
+	_, err = uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "foreign", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "foreign-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrPrefixMismatch), "want ErrPrefixMismatch, got %v", err)
+	s.Require().NoError(NewConfigSQLRepository(s.Runner()).SetConfig(s.Ctx(), "allowed_prefixes", "allowed"))
+
+	allowed, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "allowed", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "allowed-1",
+		CreateOnly: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("allowed-1", allowed.Issue.ID)
+
+	created, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue:       &types.Issue{Title: "forced", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID:  "foreign-1",
+		ForcePrefix: true,
+		CreateOnly:  true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal("foreign-1", created.Issue.ID)
+}
+
+func (s *testSuite) useCaseCreateOnlyRefusesOccupiedID() {
+	s.resetMintConfig("createonly", "")
+	uc := s.issueUseCase()
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "first", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "createonly-1",
+		CreateOnly: true,
+	}
+	_, err := uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().NoError(err)
+
+	params.Issue = &types.Issue{Title: "replacement", IssueType: types.TypeTask, Priority: 2}
+	_, err = uc.CreateIssue(s.Ctx(), params, "tester")
+	s.Require().Error(err)
+	s.True(errors.Is(err, storage.ErrAlreadyExists), "want ErrAlreadyExists, got %v", err)
+
+	stored, err := uc.GetIssue(s.Ctx(), "createonly-1")
+	s.Require().NoError(err)
+	s.Equal("first", stored.Title)
+}
+
+func (s *testSuite) useCaseCreateAttachesNormalizedComments() {
+	s.resetMintConfig("comments", "")
+	createdAt := time.Date(2025, time.February, 3, 4, 5, 6, 0, time.UTC)
+	params := domain.CreateIssueParams{
+		Issue:      &types.Issue{Title: "with comments", IssueType: types.TypeTask, Priority: 2},
+		ExplicitID: "comments-1",
+		Comments: []*types.Comment{
+			{Text: "defaulted"},
+			{ID: "imported-comment", Author: "importer", Text: "preserved", CreatedAt: createdAt},
+		},
+	}
+
+	created, err := s.issueUseCase().CreateIssue(s.Ctx(), params, "actor")
+	s.Require().NoError(err)
+	s.Require().Len(created.Issue.Comments, 2)
+	s.Equal("comments-1", created.Issue.Comments[0].IssueID)
+	s.Equal("actor", created.Issue.Comments[0].Author)
+	s.NotEmpty(created.Issue.Comments[0].ID)
+	s.False(created.Issue.Comments[0].CreatedAt.IsZero())
+	s.Equal("imported-comment", created.Issue.Comments[1].ID)
+	s.Equal("importer", created.Issue.Comments[1].Author)
+	s.Equal(createdAt, created.Issue.Comments[1].CreatedAt)
+
+	s.Equal("", params.Comments[0].IssueID, "create must not mutate caller comments")
+}
+
 func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 	s.Run("ChildrenBeforeParentsSucceed", s.applyGraphChildrenBeforeParents)
 	s.Run("ExplicitParentChildEdgeIsDeduped", s.applyGraphParentChildEdgeDedup)
@@ -171,6 +262,33 @@ func (s *testSuite) TestIssueUseCase_ApplyGraph() {
 func (s *testSuite) TestIssueUseCase_MixedParentChildRouting() {
 	s.Run("WispChildOfRegularParent", s.mixedWispChildOfRegularParent)
 	s.Run("DepTargetClassification", s.mixedDepTargetClassification)
+	s.Run("ReverseDependencyUsesResultingSourceTierAndPreservesThread", s.mixedReverseDependencySourceTier)
+}
+
+func (s *testSuite) mixedReverseDependencySourceTier() {
+	s.resetMintConfig("reverse", "")
+	uc := s.issueUseCase()
+	regular, err := uc.CreateIssue(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "regular source", IssueType: types.TypeTask, Priority: 2},
+	}, "tester")
+	s.Require().NoError(err)
+
+	wisp, err := uc.CreateWisp(s.Ctx(), domain.CreateIssueParams{
+		Issue: &types.Issue{Title: "wisp target", IssueType: types.TypeTask, Priority: 2, Ephemeral: true},
+		Dependencies: []domain.DependencySpec{{
+			Type:          types.DepRelated,
+			TargetID:      regular.Issue.ID,
+			SwapDirection: true,
+			ThreadID:      "thread-1",
+		}},
+	}, "tester")
+	s.Require().NoError(err)
+
+	records, err := s.depUseCase().GetIssueDependencyRecords(s.Ctx(), []string{regular.Issue.ID})
+	s.Require().NoError(err)
+	s.Require().Len(records[regular.Issue.ID], 1)
+	s.Equal(wisp.Issue.ID, records[regular.Issue.ID][0].DependsOnID)
+	s.Equal("thread-1", records[regular.Issue.ID][0].ThreadID)
 }
 
 func (s *testSuite) mixedWispChildOfRegularParent() {

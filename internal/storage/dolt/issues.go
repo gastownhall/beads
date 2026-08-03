@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -208,15 +209,19 @@ func (s *DoltStore) UpdateIssue(ctx context.Context, id string, updates map[stri
 	// (https://www.dolthub.com/blog/2023-10-23-hold-my-beer/) — so retry is the
 	// only safety net. withRetryTx owns BeginTx and the final Commit.
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+		result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		if err != nil {
 			return err
+		}
+		if !result.Changed {
+			return nil
 		}
 
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: update %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -282,15 +287,19 @@ func (s *DoltStore) UpdateIssueChecked(ctx context.Context, id string, updates m
 			if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 				return err
 			}
-			if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			result, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+			if err != nil {
 				return err
+			}
+			if !result.Changed {
+				return nil
 			}
 
 			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+				_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 			}
 			commitMsg := fmt.Sprintf("bd: update %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 				return fmt.Errorf("dolt commit: %w", err)
 			}
@@ -340,10 +349,10 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 			// Dolt versioning for permanent issues.
 			// GH#2455: Stage only the tables we modified, then commit without -A.
 			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+				_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 			}
 			commitMsg := fmt.Sprintf("bd: claim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 				return fmt.Errorf("dolt commit: %w", err)
 			}
@@ -374,10 +383,10 @@ func (s *DoltStore) ClaimReadyIssue(ctx context.Context, filter types.WorkFilter
 			}
 
 			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+				_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 			}
 			commitMsg := fmt.Sprintf("bd: claim ready %s", claimed.ID)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 				return fmt.Errorf("dolt commit: %w", err)
 			}
@@ -491,10 +500,10 @@ func (s *DoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan time.Dur
 			return nil
 		}
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: reclaim %d expired lease(s)", len(reclaimed))
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -526,10 +535,10 @@ func (s *DoltStore) UnclaimIssue(ctx context.Context, id string, actor string, f
 
 			// Dolt versioning for permanent issues.
 			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+				_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 			}
 			commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 				return fmt.Errorf("dolt commit: %w", err)
 			}
@@ -555,10 +564,10 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 
 			// Dolt versioning for permanent issues.
 			for _, table := range []string{"issues", "events"} {
-				_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+				_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 			}
 			commitMsg := fmt.Sprintf("bd: unclaim %s", id)
-			if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+			if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 				commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 				return fmt.Errorf("dolt commit: %w", err)
 			}
@@ -567,23 +576,26 @@ func (s *DoltStore) UnclaimIssueIfAssignee(ctx context.Context, id string, actor
 	})
 }
 
-// ReopenIssue reopens a closed issue, setting status to open and clearing
-// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
-// Wraps UpdateIssue for Dolt-specific concerns (wisp routing, DOLT_COMMIT, etc.).
+// ReopenIssue reopens a done-category issue atomically and stages only the
+// versioned tables that this transaction concretely changed.
 func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
-	updates := map[string]interface{}{
-		"status":      string(types.StatusOpen),
-		"defer_until": nil,
-	}
-	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
-		return err
-	}
-	if reason != "" {
-		if err := s.AddComment(ctx, id, actor, reason); err != nil {
-			return fmt.Errorf("reopen comment: %w", err)
+	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
+		res, err := issueops.ReopenIssueInTx(ctx, tx, id, reason, actor)
+		if err != nil {
+			return err
 		}
-	}
-	return nil
+		if !res.Changed {
+			return nil
+		}
+		switch {
+		case !res.IsWisp:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
+		case res.IssueRowsChanged:
+			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
+		default:
+			return nil
+		}
+	})
 }
 
 // UpdateIssueType changes the issue_type field of an issue.
@@ -616,10 +628,10 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 		// Dolt versioning for permanent issues.
 		// GH#2455: Stage only the tables we modified, then commit without -A.
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -653,15 +665,15 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 		if err != nil {
 			return err
 		}
-		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 
 		// Dolt versioning for permanent issues.
 		// GH#2455: Stage only the tables we modified, then commit without -A.
 		for _, table := range []string{"issues", "events"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: close %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -685,10 +697,10 @@ func (s *DoltStore) DeleteIssue(ctx context.Context, id string) error {
 		}
 
 		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: delete %s", id)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -762,10 +774,10 @@ func (s *DoltStore) DeleteIssues(ctx context.Context, ids []string, cascade bool
 		}
 
 		for _, table := range []string{"issues", "dependencies", "labels", "comments", "events", "child_counters", "issue_snapshots", "compaction_snapshots"} {
-			_, _ = tx.ExecContext(ctx, "CALL DOLT_ADD(?)", table)
+			_ = schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table)
 		}
 		commitMsg := fmt.Sprintf("bd: delete %d issue(s)", result.DeletedCount)
-		if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
+		if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 			commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
 			return fmt.Errorf("dolt commit: %w", err)
 		}
@@ -798,11 +810,7 @@ func doltBuildSQLInClause(ids []string) (string, []interface{}) {
 // =============================================================================
 
 func recordEvent(ctx context.Context, tx *sql.Tx, issueID string, eventType types.EventType, actor, oldValue, newValue string) error {
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO events (id, issue_id, event_type, actor, old_value, new_value)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, issueops.NewEventID(), issueID, eventType, actor, oldValue, newValue)
-	return wrapExecError("record event", err)
+	return wrapExecError("record event", issueops.RecordFullEventInTable(ctx, tx, "events", issueID, eventType, actor, oldValue, newValue))
 }
 
 // seedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
@@ -940,8 +948,6 @@ func generateHashID(prefix, title, description, creator string, timestamp time.T
 // Thin wrappers around exported issueops functions, kept for internal callers.
 var (
 	isAllowedUpdateField = issueops.IsAllowedUpdateField
-	manageClosedAt       = issueops.ManageClosedAt
-	determineEventType   = issueops.DetermineEventType
 )
 
 // Aliases for shared nullable helpers from issueops.

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -122,7 +123,7 @@ func TestRunInTransactionCloseIssueEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction CloseIssue: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
 }
 
 func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) {
@@ -150,7 +151,7 @@ func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) 
 	const strayComment = "uncommitted stray event"
 	if _, err := store.db.ExecContext(ctx,
 		"INSERT INTO events (id, issue_id, event_type, actor, comment) VALUES (?, ?, ?, ?, ?)",
-		issueops.NewEventID(), issue.ID, types.EventCommented, "tester", strayComment,
+		uuid.Must(uuid.NewV7()).String(), issue.ID, types.EventCommented, "tester", strayComment,
 	); err != nil {
 		t.Fatalf("insert stray event: %v", err)
 	}
@@ -161,17 +162,21 @@ func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) 
 		t.Fatalf("RunInTransaction CloseIssue already closed: %v", err)
 	}
 
+	// events is dolt_ignored since 0062: the stray row can never leak into a
+	// commit because nothing events-shaped is committed at all — but it must
+	// still be durable in the working set alongside the close event.
+	assertEventsNotCommitted(ctx, t, store.db)
 	var got int
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
 		issue.ID, types.EventCommented, strayComment,
 	).Scan(&got); err != nil {
-		t.Fatalf("count committed stray events: %v", err)
+		t.Fatalf("count stray events: %v", err)
 	}
-	if got != 0 {
-		t.Fatalf("committed stray event count = %d, want 0", got)
+	if got != 1 {
+		t.Fatalf("stray event count = %d, want 1", got)
 	}
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
 }
 
 func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
@@ -199,7 +204,7 @@ func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction AddLabel: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
 }
 
 func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
@@ -230,21 +235,43 @@ func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction RemoveLabel: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
 }
 
-func assertCommittedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
+// assertRecordedEventCount counts audit rows in the working-set events table.
+// events is dolt_ignored since migration 0062 (bd-red8u): rows are durable and
+// visible to every client of the store but never part of committed history,
+// so there is no committed variant of this assertion anymore — see
+// assertEventsNotCommitted for the plane check.
+func assertRecordedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
 	t.Helper()
 
 	var got int
 	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		issueID, eventType,
 	).Scan(&got); err != nil {
-		t.Fatalf("count committed %s events for %s: %v", eventType, issueID, err)
+		t.Fatalf("count recorded %s events for %s: %v", eventType, issueID, err)
 	}
 	if got != want {
-		t.Fatalf("committed %s event count for %s = %d, want %d", eventType, issueID, got, want)
+		t.Fatalf("recorded %s event count for %s = %d, want %d", eventType, issueID, got, want)
+	}
+}
+
+// assertEventsNotCommitted pins the 0062 plane contract: no events ROW ever
+// reaches committed history. On a production-shaped database the table itself
+// is absent at HEAD (the AS OF probe errors — the embedded contract tests
+// assert that stronger form), but the shared branch-per-test database
+// deliberately materializes an EMPTY events shell at HEAD so branches inherit
+// the schema (testutil.MaterializeLocalTableSchemasForBranchTests), so here
+// the probe may also succeed with zero rows. Any committed row is a
+// regression on both shapes.
+func assertEventsNotCommitted(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(&got); err == nil && got != 0 {
+		t.Fatalf("events has %d rows at HEAD; want none in committed history (dolt_ignored, 0062)", got)
 	}
 }
 

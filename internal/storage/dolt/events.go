@@ -68,19 +68,34 @@ func (s *DoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor,
 	return result, err
 }
 
-// AddIssueComment adds a comment to an issue (structured comment)
+// AddIssueComment adds a comment to an issue (structured comment).
+//
+// Unlike ImportIssueComment it stamps created_at through
+// issueops.AddIssueCommentInTx, which advances past the issue's newest existing
+// comment so a burst of comments still reads back in the order it was written
+// (see issueops.NextLiveCommentTime).
 func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
-	return s.ImportIssueComment(ctx, issueID, author, text, time.Now().UTC())
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)
+	})
 }
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
+		return issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+	})
+}
+
+// addOrImportComment is the shared wisp-routing / retry / dolt-commit tail
+// around either comment insert; insert does the write inside the transaction.
+func (s *DoltStore) addOrImportComment(ctx context.Context, issueID string, insert func(*sql.Tx) (*types.Comment, error)) (*types.Comment, error) {
 	isWisp := s.isActiveWisp(ctx, issueID)
 	var result *types.Comment
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
-		result, err = issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+		result, err = insert(tx)
 		return err
 	})
 	if err != nil {

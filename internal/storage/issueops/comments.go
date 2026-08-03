@@ -7,7 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -16,7 +15,7 @@ import (
 // transaction. Automatically routes to wisp_comments if the ID is an active wisp.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetIssueCommentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Comment, error) {
+func GetIssueCommentsInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.Comment, error) {
 	table := "comments"
 	if IsActiveWispInTx(ctx, tx, issueID) {
 		table = "wisp_comments"
@@ -224,15 +223,23 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 // GetIssueCommentsPage cursor: an un-truncated sub-second CreatedAt would sort
 // after same-second rows stored at the truncated second and skip them on resume.
 //
+// It is also advanced past the issue's newest existing comment when that
+// truncation would otherwise collide — see nextLiveCommentTime.
+//
 //nolint:gosec // G201: table names come from hardcoded constants
 func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
-	return ImportIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second))
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second), true)
 }
 
 // ImportIssueCommentInTx adds a comment preserving the original timestamp.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
 func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, createdAt, false)
+}
+
+//nolint:gosec // G201: table names come from hardcoded constants
+func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"
@@ -250,12 +257,21 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		return nil, fmt.Errorf("issue %s not found", issueID)
 	}
 
-	createdAt = createdAt.UTC()
-	id := uuid.Must(uuid.NewV7()).String()
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, author, text, created_at)
-		VALUES (?, ?, ?, ?, ?)
-	`, commentTable), id, issueID, author, text, createdAt); err != nil {
+	if live {
+		advanced, err := NextLiveCommentTime(ctx, tx, commentTable, issueID, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		createdAt = advanced
+	}
+
+	createdAtText := FormatAuxTime(createdAt)
+	id, _, err := InsertDerivedComment(ctx, tx, commentTable, issueID, author, text, createdAtText)
+	if err != nil {
+		return nil, err
+	}
+	stored, err := ParseAuxTime(createdAtText)
+	if err != nil {
 		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
@@ -264,7 +280,7 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
-		CreatedAt: createdAt,
+		CreatedAt: stored,
 	}, nil
 }
 
@@ -276,10 +292,12 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
-	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
-		INSERT INTO %s (id, issue_id, event_type, actor, comment)
-		VALUES (?, ?, ?, ?, ?)
-	`, eventTable), NewEventID(), issueID, types.EventCommented, actor, comment); err != nil {
+	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+		IssueID:   issueID,
+		EventType: types.EventCommented,
+		Actor:     actor,
+		Comment:   str(comment),
+	}); err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
 	return nil

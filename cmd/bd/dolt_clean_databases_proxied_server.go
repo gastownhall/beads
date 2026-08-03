@@ -8,7 +8,7 @@ import (
 )
 
 func runDoltCleanDatabasesProxied(ctx context.Context, beadsDir string, opts cleanDatabasesOptions) error {
-	provider, err := newProxiedServerUOWProvider(ctx, beadsDir)
+	provider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
 	if err != nil {
 		return HandleError("failed to open uow provider: %v", err)
 	}

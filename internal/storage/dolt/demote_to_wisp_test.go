@@ -174,10 +174,12 @@ func TestDemoteToWisp_MetadataAndClosedAtUpdatesApplied(t *testing.T) {
 
 	if err := store.UpdateIssue(ctx, issue.ID, map[string]interface{}{
 		"no_history": true,
-		"status":     string(types.StatusClosed),
 		"metadata":   `{"review":"kept"}`,
 	}, "tester"); err != nil {
 		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if err := store.CloseIssue(ctx, issue.ID, "", "tester", ""); err != nil {
+		t.Fatalf("CloseIssue: %v", err)
 	}
 
 	wisp, err := store.GetIssue(ctx, issue.ID)

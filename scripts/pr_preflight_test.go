@@ -41,10 +41,22 @@ const (
             ;;
         esac
       done
-      printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":[],\"latestReviews\":[]}"
+      printf '%s\n' "{\"number\":${PR_NUMBER},\"title\":\"Compatibility fixture\",\"author\":{\"login\":\"contributor\"},\"url\":\"${PR_URL}\",\"baseRefName\":\"main\",\"headRefName\":\"fix/preflight\",\"headRepositoryOwner\":{\"login\":\"contributor\"},\"isCrossRepository\":true,\"isDraft\":false,\"maintainerCanModify\":true,\"mergeStateStatus\":\"CLEAN\",\"mergeable\":\"MERGEABLE\",\"reviewDecision\":\"APPROVED\",\"changedFiles\":1,\"additions\":1,\"deletions\":0,\"files\":[{\"path\":\"README.md\"}],\"statusCheckRollup\":${PR_ROLLUP:-[]},\"latestReviews\":[]}"
       ;;
     "run list")
-      printf '[]\n'
+      is_pr_gate_call=0
+      prev=""
+      for arg in "$@"; do
+        if [ "$prev" = "--event" ] && [ "$arg" = "pull_request" ]; then
+          is_pr_gate_call=1
+        fi
+        prev="$arg"
+      done
+      if [ "$is_pr_gate_call" = 1 ]; then
+        printf '%s\n' "${PR_GATE_RUN_LIST:-[]}"
+      else
+        printf '%s\n' "${BASE_RUN_LIST:-[]}"
+      fi
       ;;
     "api graphql")
       if [ "$GRAPHQL_EXIT" != 0 ]; then
@@ -68,6 +80,10 @@ type preflightFixture struct {
 	canonicalURL    string
 	graphQLResponse string
 	graphQLExit     string
+	rollup          string
+	baseRunList     string
+	prGateRunList   string
+	blockRedBase    string
 }
 
 type preflightRun struct {
@@ -260,6 +276,244 @@ func TestPRPreflightFixtureIgnoresHostShellAndGitHubState(t *testing.T) {
 	}
 }
 
+// A head SHA whose earlier check suites were cancelled or failed keeps those
+// stale entries in statusCheckRollup next to the fresh green re-runs of the
+// same checks. GitHub's mergeability is latest-per-name; preflight must be
+// too, or green PRs stay blocked forever (gastownhall/beads#5073-5076).
+func TestPRPreflightChecksUseLatestRunPerName(t *testing.T) {
+	staleGreenRollup := `[` +
+		`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-27T10:00:00Z"},` +
+		`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T10:00:00Z"},` +
+		`{"name":"Test (Proxied 1/2)","status":"COMPLETED","conclusion":"CANCELLED","completedAt":"2026-07-27T09:00:00Z"},` +
+		`{"name":"Test (Proxied 1/2)","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T09:00:00Z"},` +
+		`{"name":"Lint","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T08:00:00Z"}` +
+		`]`
+
+	t.Run("stale failures and cancellations are superseded by newer green runs", func(t *testing.T) {
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: staleGreenRollup})
+		if !strings.Contains(run.output, "No failed or pending status checks reported.") {
+			t.Fatalf("expected stale rollup entries to be superseded:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "failed or require action") {
+			t.Fatalf("stale rollup entries still counted as failures:\n%s", run.output)
+		}
+	})
+
+	t.Run("a genuinely failing latest run still blocks", func(t *testing.T) {
+		freshRedRollup := `[` +
+			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-27T10:00:00Z"},` +
+			`{"name":"CI Gate / Required","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: freshRedRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the latest failing run to block:\n%s", run.output)
+		}
+	})
+
+	t.Run("a commit status cannot supersede a same-named check run", func(t *testing.T) {
+		// GitHub treats a check run and a commit status sharing a name as
+		// independent required gates; both must pass.
+		mixedRollup := `[` +
+			`{"__typename":"CheckRun","name":"build","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"},` +
+			`{"__typename":"StatusContext","context":"build","state":"SUCCESS","startedAt":"2026-07-28T11:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: mixedRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the failing check run to block despite the same-named commit status:\n%s", run.output)
+		}
+	})
+
+	t.Run("identically named jobs in different workflows stay independent", func(t *testing.T) {
+		crossWorkflowRollup := `[` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"Test","status":"COMPLETED","conclusion":"FAILURE","completedAt":"2026-07-28T10:00:00Z"},` +
+			`{"__typename":"CheckRun","workflowName":"Nightly","name":"Test","status":"COMPLETED","conclusion":"SUCCESS","completedAt":"2026-07-28T11:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: crossWorkflowRollup})
+		if !strings.Contains(run.output, "1 status check(s) failed or require action.") {
+			t.Fatalf("expected the other workflow's red job to keep blocking:\n%s", run.output)
+		}
+	})
+
+	t.Run("an in-progress rerun with a zero completion time supersedes an old failure as pending", func(t *testing.T) {
+		// gh exports absent CheckRun times as the Go zero time, not null.
+		rerunRollup := `[` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"CI","status":"COMPLETED","conclusion":"FAILURE","startedAt":"2026-07-27T09:00:00Z","completedAt":"2026-07-27T10:00:00Z"},` +
+			`{"__typename":"CheckRun","workflowName":"Main","name":"CI","status":"IN_PROGRESS","conclusion":"","startedAt":"2026-07-28T12:00:00Z","completedAt":"0001-01-01T00:00:00Z"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{rollup: rerunRollup})
+		if !strings.Contains(run.output, "1 status check(s) are still pending.") {
+			t.Fatalf("expected the fresh rerun to classify as pending, not stale failure:\n%s", run.output)
+		}
+	})
+}
+
+// The base-branch health check above reads gh run list --branch <base>, which
+// only sees workflows that actually run on the base branch. A job that exists
+// only in the PR workflow (pr.yml) never runs there, and even sampling
+// pull_request-event runs in aggregate would dilute one broken workflow's
+// signal against every other green PR workflow. This supplemental, warn-only
+// detector groups the sample by workflow and flags any single workflow that
+// is uniformly failing across several distinct branches.
+func TestPRPreflightPRGateHealthSample(t *testing.T) {
+	// The detector only speaks against a base branch known to be green; every
+	// case that exercises it therefore supplies a green base sample.
+	greenBase := `[{"conclusion":"success","workflowName":"CI","createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/base-0"}]`
+	sixRunsThreeHeadsAllFailed := `[` +
+		`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/1"},` +
+		`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/2"},` +
+		`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/3"},` +
+		`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/4"},` +
+		`{"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/5"},` +
+		`{"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z","url":"https://github.com/o/r/actions/runs/6"}` +
+		`]`
+
+	t.Run("all failed across 3+ heads with 5+ decisive runs warns and names the workflow", func(t *testing.T) {
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: sixRunsThreeHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected warn-only exit, got error: %v\n%s", run.err, run.output)
+		}
+		want := "[warn] PR gate workflow 'PR CI' appears broken: all 6 of its recent completed pull_request runs across 3 branches failed (newest: 2026-07-28T10:00:00Z https://github.com/o/r/actions/runs/1)."
+		if !strings.Contains(run.output, want) {
+			t.Fatalf("expected broken-PR-gate warning naming the workflow and newest run:\nwant substring: %s\ngot:\n%s", want, run.output)
+		}
+	})
+
+	t.Run("stays warn-only even under PR_PREFLIGHT_BLOCK_RED_BASE=1", func(t *testing.T) {
+		// The warn-only property is the load-bearing one: mybd's pr-babysit
+		// classifies any unrecognized [block] line as a genuine merge blocker
+		// and parks merge lanes on it, and it withholds the base-fix
+		// exception whenever a non-red-base block is present. This detector
+		// must therefore never escalate to a block, regardless of the
+		// red-base escalation env var.
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: sixRunsThreeHeadsAllFailed, blockRedBase: "1"})
+		if run.err != nil {
+			t.Fatalf("expected warn-only exit even with PR_PREFLIGHT_BLOCK_RED_BASE=1, got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "[warn] PR gate workflow 'PR CI' appears broken") {
+			t.Fatalf("expected the broken-PR-gate warn to still fire:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "[block] PR gate") {
+			t.Fatalf("PR-gate detector must never emit a [block] line:\n%s", run.output)
+		}
+	})
+
+	t.Run("one success in the workflow's sample stays silent", func(t *testing.T) {
+		mostlyFailedOneSuccess := strings.Replace(sixRunsThreeHeadsAllFailed, `"conclusion":"failure","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z"`, `"conclusion":"success","headBranch":"branch-c","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z"`, 1)
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: mostlyFailedOneSuccess})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("a workflow sample with a success should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("all failed but only 2 distinct heads stays silent", func(t *testing.T) {
+		twoHeadsAllFailed := `[` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/1"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/2"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/3"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/4"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/5"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T05:00:00Z","url":"https://github.com/o/r/actions/runs/6"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: twoHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("only 2 distinct heads should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("empty sample stays silent", func(t *testing.T) {
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: "[]"})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("empty sample should stay silent:\n%s", run.output)
+		}
+	})
+
+	t.Run("mixed workflows: only the all-red workflow fires, and it is named", func(t *testing.T) {
+		mixedWorkflows := `[` +
+			`{"conclusion":"success","headBranch":"branch-a","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/runs/201"},` +
+			`{"conclusion":"success","headBranch":"branch-b","workflowName":"PR CI","workflowDatabaseId":101,"createdAt":"2026-07-28T11:30:00Z","url":"https://github.com/o/r/actions/runs/202"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T10:00:00Z","url":"https://github.com/o/r/actions/runs/101"},` +
+			`{"conclusion":"failure","headBranch":"branch-a","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/runs/102"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T08:00:00Z","url":"https://github.com/o/r/actions/runs/103"},` +
+			`{"conclusion":"failure","headBranch":"branch-b","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T07:00:00Z","url":"https://github.com/o/r/actions/runs/104"},` +
+			`{"conclusion":"failure","headBranch":"branch-c","workflowName":"Contract corpus","workflowDatabaseId":202,"createdAt":"2026-07-28T06:00:00Z","url":"https://github.com/o/r/actions/runs/105"}` +
+			`]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: mixedWorkflows})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		want := "[warn] PR gate workflow 'Contract corpus' appears broken: all 5 of its recent completed pull_request runs across 3 branches failed (newest: 2026-07-28T10:00:00Z https://github.com/o/r/actions/runs/101)."
+		if !strings.Contains(run.output, want) {
+			t.Fatalf("expected the all-red workflow to be named despite a healthy sibling workflow:\nwant substring: %s\ngot:\n%s", want, run.output)
+		}
+		if strings.Contains(run.output, "'PR CI'") {
+			t.Fatalf("the healthy workflow must not be named as broken:\n%s", run.output)
+		}
+	})
+
+	t.Run("undetermined base health skips the sample", func(t *testing.T) {
+		// With no decisive base runs at all, preflight has just warned that it
+		// could not determine base health; diagnosing "red for every PR while
+		// the base branch shows green" would contradict that line.
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: "[]", prGateRunList: sixRunsThreeHeadsAllFailed})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("the PR-gate sample must be skipped when base health is undetermined:\n%s", run.output)
+		}
+	})
+
+	t.Run("red base skips the sample even when a workflow would otherwise fire", func(t *testing.T) {
+		redBaseRunList := `[{"conclusion":"failure","workflowName":"CI","createdAt":"2026-07-28T09:00:00Z","url":"https://github.com/o/r/actions/base-1"}]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{
+			baseRunList:   redBaseRunList,
+			prGateRunList: sixRunsThreeHeadsAllFailed,
+		})
+		if run.err != nil {
+			t.Fatalf("expected exit 0 (warn-only), got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "Base branch main CI is RED") {
+			t.Fatalf("expected the existing red-base warning to still fire:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("the PR-gate sample must be skipped while the base is red:\n%s", run.output)
+		}
+	})
+
+	t.Run("unreadable/non-JSON sample stays silent", func(t *testing.T) {
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBase, prGateRunList: "gh: rate limit exceeded"})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("an unreadable sample should stay silent, not error:\n%s", run.output)
+		}
+	})
+
+	t.Run("BASE_RUN_LIST positively drives the base-branch dispatch, not the PR-gate one", func(t *testing.T) {
+		greenBaseRunList := `[{"conclusion":"success","workflowName":"CI","createdAt":"2026-07-28T12:00:00Z","url":"https://github.com/o/r/actions/base-2"}]`
+		run := runPRPreflightWithFakeGH(t, preflightFixture{baseRunList: greenBaseRunList})
+		if run.err != nil {
+			t.Fatalf("expected exit 0, got error: %v\n%s", run.err, run.output)
+		}
+		if !strings.Contains(run.output, "[pass] Base branch main CI is green (latest completed run of each of 1 workflow(s) succeeded).") {
+			t.Fatalf("expected BASE_RUN_LIST to reach the base-branch call, not the PR-gate one:\n%s", run.output)
+		}
+		if strings.Contains(run.output, "PR gate workflow") {
+			t.Fatalf("default empty PR-gate sample should stay silent:\n%s", run.output)
+		}
+	})
+}
+
 func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightRun {
 	t.Helper()
 
@@ -277,6 +531,18 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 	}
 	if fixture.graphQLExit == "" {
 		fixture.graphQLExit = "0"
+	}
+	if fixture.rollup == "" {
+		fixture.rollup = "[]"
+	}
+	if fixture.baseRunList == "" {
+		fixture.baseRunList = "[]"
+	}
+	if fixture.prGateRunList == "" {
+		fixture.prGateRunList = "[]"
+	}
+	if fixture.blockRedBase == "" {
+		fixture.blockRedBase = "0"
 	}
 
 	bash, path := prPreflightProcessTools(t)
@@ -319,6 +585,10 @@ func runPRPreflightWithFakeGH(t *testing.T, fixture preflightFixture) preflightR
 		"GRAPHQL_RESPONSE="+fixture.graphQLResponse,
 		"PR_NUMBER="+fixture.returnedNumber,
 		"PR_URL="+fixture.canonicalURL,
+		"PR_ROLLUP="+fixture.rollup,
+		"BASE_RUN_LIST="+fixture.baseRunList,
+		"PR_GATE_RUN_LIST="+fixture.prGateRunList,
+		"PR_PREFLIGHT_BLOCK_RED_BASE="+fixture.blockRedBase,
 	)
 	out, runErr := cmd.CombinedOutput()
 	logBytes, readErr := os.ReadFile(callLog)

@@ -48,12 +48,18 @@ type claimPostcondition struct {
 }
 
 func claimedBy(actor string) claimPostcondition {
+	return claimedAs(actor, types.StatusInProgress)
+}
+
+// claimedAs is claimedBy for a claim whose request overrides the assignee or
+// status the bare claim would have written.
+func claimedAs(assignee string, status types.Status) claimPostcondition {
 	return claimPostcondition{
 		op: "claim",
-		want: func(assignee string, status types.Status) bool {
-			return assignee == actor && status == types.StatusInProgress
+		want: func(gotAssignee string, gotStatus types.Status) bool {
+			return gotAssignee == assignee && gotStatus == status
 		},
-		desc: fmt.Sprintf("assignee=%q status=%q", actor, types.StatusInProgress),
+		desc: fmt.Sprintf("assignee=%q status=%q", assignee, status),
 	}
 }
 

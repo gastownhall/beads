@@ -27,6 +27,7 @@ var (
 	dbProxyChildExternalPort       int
 	dbProxyChildExternalSocketPath string
 	dbProxyChildExternalKeepAlive  time.Duration
+	dbProxyChildStopEpoch          string
 )
 
 var dbProxyChildCmd = &cobra.Command{
@@ -64,6 +65,7 @@ not intended to be invoked directly by users.`,
 			Port:        dbProxyChildPort,
 			IdleTimeout: dbProxyChildIdleTimeout,
 			Server:      srv,
+			StopEpoch:   dbProxyChildStopEpoch,
 		})
 		if err := p.ListenAndServe(cmd.Context()); err != nil {
 			if errors.Is(err, proxy.ErrLockHeld) {
@@ -101,6 +103,7 @@ func init() {
 	dbProxyChildCmd.Flags().IntVar(&dbProxyChildExternalPort, "external-port", 0, "external backend: TCP port of the dolt sql-server")
 	dbProxyChildCmd.Flags().StringVar(&dbProxyChildExternalSocketPath, "external-socket-path", "", "external backend: absolute path to a unix domain socket (overrides host/port)")
 	dbProxyChildCmd.Flags().DurationVar(&dbProxyChildExternalKeepAlive, "external-keep-alive", 0, "external backend: TCP keepalive period (default 30s)")
+	dbProxyChildCmd.Flags().StringVar(&dbProxyChildStopEpoch, "stop-epoch", "", "stop epoch the parent observed at spawn; the proxy aborts before publishing if it advances")
 	_ = dbProxyChildCmd.MarkFlagRequired("root")
 	_ = dbProxyChildCmd.MarkFlagRequired("port")
 	_ = dbProxyChildCmd.MarkFlagRequired("backend")

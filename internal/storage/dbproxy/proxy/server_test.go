@@ -177,6 +177,37 @@ func TestProxy_HappyPath_Echo(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+func TestProxy_PortZeroPublishesActualDialablePort(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	ts := server.New()
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root,
+		Port:    0,
+		Server:  ts,
+	})
+	waitListening(t, root, listenWait)
+
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	require.NotNil(t, pf)
+	require.NotZero(t, pf.Port, "pidfile must publish the kernel-assigned port")
+
+	conn := dialProxy(t, pf.Port)
+	_, err = conn.Write([]byte("port-zero"))
+	require.NoError(t, err)
+	got := make([]byte, len("port-zero"))
+	_, err = io.ReadFull(conn, got)
+	require.NoError(t, err)
+	assert.Equal(t, "port-zero", string(got))
+	require.NoError(t, conn.Close())
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+	assertNoPidFile(t, root)
+}
+
 func TestProxy_PidFile_WrittenAndRemoved(t *testing.T) {
 	t.Parallel()
 
@@ -243,7 +274,7 @@ func TestProxy_PublishesVerifiableIdentity(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestProxy_ListenError_PortInUse(t *testing.T) {
+func TestProxy_ExplicitPortInUseFailsWithoutRepick(t *testing.T) {
 	t.Parallel()
 
 	hold, err := net.Listen("tcp", "127.0.0.1:0")
@@ -261,6 +292,7 @@ func TestProxy_ListenError_PortInUse(t *testing.T) {
 	err = h.waitErr(t, shutdownWait)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "listen on")
+	assert.Contains(t, err.Error(), strconv.Itoa(port))
 
 	s := stats.Snapshot()
 	assert.Equal(t, int64(0), s.ListenAndServeCalls)

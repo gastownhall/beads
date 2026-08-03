@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runCountProxiedServer(cmd *cobra.Command, ctx context.Context) error {
@@ -19,7 +20,7 @@ func runCountProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	defer uw.Close(ctx)
 
 	if includeInfra {
-		cfg, err := loadProxiedListFilterConfig(ctx, uw)
+		cfg, err := workapi.LoadUOWListConfig(ctx, uw)
 		if err != nil {
 			return HandleError("%v", err)
 		}

@@ -154,6 +154,10 @@ type DepTargetPrecheck struct {
 // Dolt commit stage the events table only when an event row exists, so a
 // no-event add cannot sweep unrelated pending rows into the commit (GH#2455).
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
+	return addDependencyInTx(ctx, tx, dep, actor, opts, nil)
+}
+
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
 	// Auto-detect source routing if not provided.
 	sourceTable := opts.SourceTable
 	writeTable := opts.WriteTable
@@ -273,6 +277,11 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return false, fmt.Errorf("failed to add dependency: %w", err)
 	}
+	if dep.Type == types.DepParentChild {
+		if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, writeTable); err != nil {
+			return false, err
+		}
+	}
 
 	srcIsWisp := writeTable == "wisp_dependencies"
 
@@ -312,9 +321,11 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	if dep.Type == types.DepParentChild {
 		// Parent-child adds are not monotonic: adding an already-closed child can
 		// satisfy an any-children waits-for gate and unblock the waiter.
-		if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+		recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+		if err != nil {
 			return false, fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
+		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		return eventWritten, nil
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
@@ -755,7 +766,7 @@ func nullTimeValue(value sql.NullTime) any {
 	return value.Time
 }
 
-func RetargetInboundDependenciesToWispInTx(ctx context.Context, tx *sql.Tx, id string) error {
+func RetargetInboundDependenciesToWispInTx(ctx context.Context, tx DBTX, id string) error {
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
 		if err := checkRetargetTargetCollision(ctx, tx, table, "depends_on_issue_id", "depends_on_wisp_id", id); err != nil {
 			return err
@@ -774,7 +785,7 @@ func RetargetInboundDependenciesToWispInTx(ctx context.Context, tx *sql.Tx, id s
 	return nil
 }
 
-func RetargetInboundDependenciesToIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
+func RetargetInboundDependenciesToIssueInTx(ctx context.Context, tx DBTX, id string) error {
 	for _, table := range []string{"dependencies", "wisp_dependencies"} {
 		if err := checkRetargetTargetCollision(ctx, tx, table, "depends_on_wisp_id", "depends_on_issue_id", id); err != nil {
 			return err
@@ -807,7 +818,7 @@ func UpdateIssueIDInDependencyTargetsInTx(ctx context.Context, tx *sql.Tx, _, ne
 }
 
 //nolint:gosec // G201: table and typed columns are hardcoded constants.
-func checkRetargetTargetCollision(ctx context.Context, tx *sql.Tx, table, sourceCol, destCol, id string) error {
+func checkRetargetTargetCollision(ctx context.Context, tx DBTX, table, sourceCol, destCol, id string) error {
 	var conflictCols []string
 	switch destCol {
 	case "depends_on_issue_id":
@@ -844,7 +855,7 @@ func checkRetargetTargetCollision(ctx context.Context, tx *sql.Tx, table, source
 }
 
 //nolint:gosec // G201: table and typedCol are hardcoded constants.
-func checkRenameTargetCollision(ctx context.Context, tx *sql.Tx, table, typedCol, newID string) error {
+func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, newID string) error {
 	var otherCols []string
 	switch typedCol {
 	case "depends_on_issue_id":
@@ -895,6 +906,10 @@ func checkRenameTargetCollision(ctx context.Context, tx *sql.Tx, table, typedCol
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
+	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil)
+}
+
+func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, depTable := WispTableRouting(isWisp)
 
@@ -941,10 +956,20 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	if aerr != nil {
 		return false, fmt.Errorf("affected by remove dependency %s -> %s: %w", issueID, dependsOnID, aerr)
 	}
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	recomputed, err := RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
+	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 	return eventWritten, nil
+}
+
+func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {
+	if target == nil {
+		return
+	}
+	target.IssueRowsChanged = target.IssueRowsChanged || source.IssueRowsChanged
+	target.WispRowsChanged = target.WispRowsChanged || source.WispRowsChanged
 }
 
 // GetIssuesByIDsInTx retrieves multiple issues by ID within an existing

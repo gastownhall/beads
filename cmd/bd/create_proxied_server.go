@@ -123,6 +123,16 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			}
 		}
 
+		// Configured infra types live in the wisp tables, the same routing the
+		// embedded path applies (cmd/bd/create_atomic.go, DoltStore.CreateIssue)
+		// and the uow facade applies in uow.issueOperations.Create. Mark the
+		// issue before params reads it so ID minting and table routing agree on
+		// the destination. A no-history create keeps its own retention mode and
+		// already routes to wisps.
+		if !issue.Ephemeral && !issue.NoHistory && cctx.InfraTypes[string(issue.IssueType)] {
+			issue.Ephemeral = true
+		}
+
 		params := domain.CreateIssueParams{
 			Issue:                   issue,
 			ExplicitID:              in.explicitID,
@@ -131,8 +141,10 @@ func runCreateProxiedSingle(_ *cobra.Command, ctx context.Context, in createInpu
 			InheritLabelsFromParent: !in.noInheritLabels && in.parentID != "",
 			Dependencies:            deps,
 			WaitsFor:                waitsFor,
-			DiscoveredFromParent:    discoveredFromParent(in.deps),
-			ForcePrefix:             in.force,
+			// Reuse the already-parsed specs (not the raw --deps strings) so
+			// this can't drift from parseDepSpec's normalization rules.
+			DiscoveredFromParent: discoveredFromParentSpec(deps),
+			ForcePrefix:          in.force,
 		}
 
 		var result domain.CreateIssueResult

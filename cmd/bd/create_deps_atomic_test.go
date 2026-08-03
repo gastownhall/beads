@@ -309,4 +309,39 @@ func TestCreateDepsAtomicity(t *testing.T) {
 			t.Error("issue \"bad dep type issue\" persisted despite invalid dep type")
 		}
 	})
+
+	// GH#4626: --deps discovered-from:X,blocked-by:X used to silently keep
+	// only one edge, because dependency uniqueness is per (issue_id, target),
+	// not per type. Two DIFFERENT types on the same target must now be
+	// rejected before create runs (real-binary regression: exit code and
+	// absence of an orphan, which a direct parseDepSpecs unit test can't
+	// prove).
+	t.Run("multi_type_same_target_rejected_before_create_no_orphan", func(t *testing.T) {
+		out, err := runCreateDepsBDRaw(bd, dir, "create", "multi-type collision issue", "--json",
+			"--deps", "discovered-from:"+blocker, "--deps", "blocked-by:"+blocker)
+		if err == nil {
+			t.Errorf("create with multi-type same-target --deps exited 0; output:\n%s", out)
+		}
+		if !strings.Contains(out, blocker) {
+			t.Errorf("error output should name the colliding target %s, got:\n%s", blocker, out)
+		}
+		if createDepsIssueTitles(t, bd, dir)["multi-type collision issue"] {
+			t.Error("issue \"multi-type collision issue\" persisted despite rejected multi-type same-target --deps")
+		}
+	})
+
+	// Same target, same normalized type (blocked-by and depends-on both
+	// alias to DepBlocks with no swap) must NOT be rejected: storage already
+	// treats a repeated identical edge as idempotent, so --deps should
+	// dedupe rather than hard-fail.
+	t.Run("duplicate_identical_dep_is_deduped_not_rejected", func(t *testing.T) {
+		out := runCreateDepsBD(t, bd, dir, "create", "deduped dep issue", "--json",
+			"--deps", "blocked-by:"+blocker, "--deps", "depends-on:"+blocker)
+		child := createDepsExtractID(t, out)
+
+		depOut := runCreateDepsBD(t, bd, dir, "dep", "list", child, "--json")
+		if !strings.Contains(depOut, blocker) {
+			t.Errorf("dep list %s should include %s:\n%s", child, blocker, depOut)
+		}
+	})
 }

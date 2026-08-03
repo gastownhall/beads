@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 )
 
@@ -201,6 +202,23 @@ func (s *DoltStore) hasPersistedCLIRemote() bool {
 // trust an empty dolt_remotes table at cold start: the remote-migrate gate
 // and the push/pull "no remote configured" exit-0 skip (bd-578h9.10).
 func (s *DoltStore) HasPersistedRemote() bool {
+	return len(s.PersistedRemoteInfos()) > 0
+}
+
+// PersistedRemoteInfos returns the remotes persisted on disk in
+// .dolt/repo_state.json — names AND urls — searching the same directories in
+// the same order as HasPersistedRemote: the database CLI directory first,
+// then the dolt server root (GH#2118). The first directory that yields any
+// remotes wins, mirroring HasPersistedRemote's first-hit semantics.
+//
+// Callers in the GH#2118 cold-start window use this to RECOVER the invisible
+// remote rather than merely detect it: a freshly (auto-)started sql-server
+// can report an empty dolt_remotes even though the remote is persisted on
+// disk, so an empty listing is a reporting artifact, not an unconfigured rig
+// (wy-6k7f7). Read/parse failures are logged and skipped, matching the old
+// HasPersistedRemote behavior — callers only consult this after a SUCCESSFUL
+// (empty) ListRemotes, so a read failure here never masquerades as evidence.
+func (s *DoltStore) PersistedRemoteInfos() []storage.RemoteInfo {
 	cliDir := s.CLIDir()
 	dirs := []string{cliDir}
 	if s.dbPath != "" && s.dbPath != cliDir {
@@ -218,10 +236,10 @@ func (s *DoltStore) HasPersistedRemote() bool {
 			continue
 		}
 		if len(remotes) > 0 {
-			return true
+			return remotes
 		}
 	}
-	return false
+	return nil
 }
 
 // RemoveRemote removes a configured remote.
@@ -426,7 +444,7 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 	defer conn.Close()
 
 	// Clean up any leftover staging branch from a previous failed run.
-	_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+	_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 
 	// Create staging branch from the current branch.
 	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, ?)", federationStagingBranch, s.branch); err != nil {
@@ -435,8 +453,8 @@ func (s *DoltStore) filteredPushToPeer(ctx context.Context, peer string, exclude
 
 	// Ensure cleanup: restore original branch and delete staging.
 	defer func() {
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", s.branch)
-		_, _ = conn.ExecContext(ctx, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_CHECKOUT(?)", s.branch)
+		_ = schema.DrainCall(ctx, conn, "CALL DOLT_BRANCH('-Df', ?)", federationStagingBranch)
 	}()
 
 	// Checkout staging branch.

@@ -47,9 +47,10 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
-	// readOnly marks a store opened via OpenReadOnly: open-time mutations
-	// (CREATE DATABASE, schema migrations) were skipped and write
-	// transactions are refused (bd-6dnrw.32).
+	// readOnly marks a store opened via OpenReadOnly or
+	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
+	// migrations) were skipped and write transactions are refused
+	// (bd-6dnrw.32).
 	readOnly bool
 	// intent records why this store was opened, controlling how lenient
 	// initSchema is about pending-migration refusals it would otherwise treat
@@ -84,9 +85,6 @@ const (
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
-
-// errReadOnly is returned when a write is attempted on a read-only store.
-var errReadOnly = errors.New("embeddeddolt: store is read-only")
 
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
@@ -151,6 +149,20 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 // opens of the same directory keep their own lifecycle. Write transactions on
 // the returned store are refused.
 func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, true)
+}
+
+// OpenForPreviewCommand opens an existing embedded database without any
+// open-time mutation and refuses all write transactions. Unlike
+// OpenReadOnly, it permits a behind schema cursor so --dry-run/--inspect can
+// still validate state that is query-compatible with the current binary. A
+// missing column or other genuine incompatibility is reported by the preview
+// query itself; it is never repaired implicitly.
+func OpenForPreviewCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, false)
+}
+
+func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkBehind bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -182,8 +194,10 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := schema.CheckBehindDrift(ctx, db); err != nil {
-		return nil, err
+	if checkBehind {
+		if err := schema.CheckBehindDrift(ctx, db); err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -202,7 +216,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	if commit && s.readOnly {
-		err = errReadOnly
+		err = ErrReadOnly
 		return
 	}
 
@@ -246,7 +260,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 		return 0, errClosed
 	}
 	if s.readOnly {
-		return 0, errReadOnly
+		return 0, ErrReadOnly
 	}
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
@@ -781,15 +795,17 @@ func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, erro
 // Branch, Checkout, CurrentBranch, DeleteBranch, ListBranches are
 // implemented in version_control.go via versioncontrolops.
 
+// CommitPending commits all working set changes and reports whether a commit
+// actually landed. It gets that from commitAll's returned bool rather than
+// inspecting Commit's error or reading HEAD before and after: as of GH#3886,
+// Commit itself tolerates Dolt's "nothing to commit" response (matching the
+// server store) and returns nil for it, so an error-based check here would
+// report every clean-store call as "committed", and a HEAD-before/HEAD-after
+// comparison would cost two extra engine opens on every call (this runs on
+// every embedded pull/sync) and race against any concurrent HEAD movement.
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
-	if err := s.Commit(ctx, msg); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return s.commitAll(ctx, msg, true)
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.

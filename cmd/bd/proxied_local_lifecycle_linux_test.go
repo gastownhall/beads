@@ -83,6 +83,9 @@ func TestManagedLocalProxiedLifecycleSmoke(t *testing.T) {
 	if proxyPF == nil {
 		t.Fatal("proxy.pid missing while a proxied connection is held open")
 	}
+	if proxyPF.Port == 0 {
+		t.Fatal("proxy.pid published port 0 instead of the child's OS-assigned listener port")
+	}
 	backendPF := readManagedBackendPidFile(t, p)
 	if backendPF == nil {
 		t.Fatal("proxy-child.pid missing while a proxied connection is held open")

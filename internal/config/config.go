@@ -19,6 +19,38 @@ var v *viper.Viper
 // GetValueSource can distinguish them from Viper defaults.
 var overriddenKeys = map[string]bool{}
 
+// ignoredConfigKey normalizes a config path into the single form the
+// BEADS_TEST_IGNORE_REPO_CONFIG ignore set is keyed by, so that membership does
+// not depend on which alias of a directory the caller happened to hold.
+//
+// The set is built from os.Getwd(), which honors $PWD and therefore reports the
+// path the process was given rather than the one the kernel resolved. The
+// BEADS_DIR that is tested against it is written by the CLI's own dispatch from
+// beads.FindBeadsDir, which runs utils.CanonicalizePath (filepath.EvalSymlinks).
+// Comparing those two strings directly misses whenever the workspace is reached
+// through a symlink, the ignore is not applied, and the repo config is merged
+// after all — which is exactly what the flag exists to prevent.
+//
+// On macOS that is not an edge case, it is every temp workspace: $TMPDIR is
+// /var/folders/... and /var is a symlink to /private/var, so every t.TempDir()
+// has two names and the two sides pick different ones.
+//
+// Symlinks are resolved on the directory, not the file: callers pass candidate
+// config paths that may not exist, and EvalSymlinks fails on a missing leaf.
+// When the directory cannot be resolved either, fall back to a lexical clean —
+// applied identically on both insert and lookup, so the two still agree.
+func ignoredConfigKey(path string) string {
+	if path == "" {
+		return ""
+	}
+	dir, base := filepath.Split(filepath.Clean(path))
+	resolvedDir, err := filepath.EvalSymlinks(filepath.Clean(dir))
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(filepath.Join(resolvedDir, base))
+}
+
 // Initialize sets up the viper configuration singleton
 // Should be called once at application startup
 func Initialize() error {
@@ -81,17 +113,27 @@ func Initialize() error {
 	if beadsDirEnv != "" {
 		beadsEnvConfigPath = filepath.Clean(filepath.Join(beadsDirEnv, "config.yaml"))
 	}
+	// A beads checkout usually has its own `.beads/config.yaml` (untracked developer
+	// state) that sets non-default values. In `go test` — especially for `cmd/bd` —
+	// we want to avoid unintentionally picking up that repo-local config, while still
+	// allowing tests to load config.yaml from temp repos.
+	//
+	// If BEADS_TEST_IGNORE_REPO_CONFIG is set, we ignore the config at
+	// <module-root>/.beads/config.yaml (where module-root is the nearest parent
+	// containing go.mod) and at the worktree fallback location.
+	//
+	// The ignore set applies to every source that can name those paths, including
+	// BEADS_DIR below. BEADS_DIR used to bypass the flag, and because in-process CLI
+	// dispatch sets BEADS_DIR at the checkout's own .beads via a raw os.Setenv with no
+	// restore, that bypass re-imported the repo config into every later Initialize in
+	// the same test binary (ga-e6h6i). A test that genuinely wants the repo config
+	// unsets the flag.
+	ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
+	ignoredRepoConfigPaths := map[string]bool{}
+
 	cwd, err := os.Getwd()
 	if err == nil {
-		// In the beads repo, `.beads/config.yaml` is tracked and may set non-default config values.
-		// In `go test` (especially for `cmd/bd`), we want to avoid unintentionally picking up
-		// the repo-local config, while still allowing tests to load config.yaml from temp repos.
-		//
-		// If BEADS_TEST_IGNORE_REPO_CONFIG is set, we will ignore the config at
-		// <module-root>/.beads/config.yaml (where module-root is the nearest parent containing go.mod).
-		ignoreRepoConfig := os.Getenv("BEADS_TEST_IGNORE_REPO_CONFIG") != ""
 		var moduleRoot string
-		ignoredRepoConfigPaths := map[string]bool{}
 		if ignoreRepoConfig {
 			// Find module root by walking up to go.mod.
 			for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
@@ -101,10 +143,10 @@ func Initialize() error {
 				}
 			}
 			if moduleRoot != "" {
-				ignoredRepoConfigPaths[filepath.Clean(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
+				ignoredRepoConfigPaths[ignoredConfigKey(filepath.Join(moduleRoot, ".beads", "config.yaml"))] = true
 			}
 			if fallbackPath := worktreeFallbackConfigPath(cwd); fallbackPath != "" {
-				ignoredRepoConfigPaths[filepath.Clean(fallbackPath)] = true
+				ignoredRepoConfigPaths[ignoredConfigKey(fallbackPath)] = true
 			}
 		}
 
@@ -115,7 +157,7 @@ func Initialize() error {
 			if _, err := os.Stat(path); err != nil {
 				return false
 			}
-			if ignoreRepoConfig && ignoredRepoConfigPaths[filepath.Clean(path)] {
+			if ignoreRepoConfig && ignoredRepoConfigPaths[ignoredConfigKey(path)] {
 				return false
 			}
 			configPaths = append(configPaths, path)
@@ -137,6 +179,13 @@ func Initialize() error {
 					break
 				}
 			}
+			if ignoreRepoConfig && moduleRoot != "" && dir == moduleRoot {
+				// Don't walk above the test module root: anything further up is
+				// outside this repo entirely (e.g. an outer orchestration
+				// project's own unrelated .beads/config.yaml) and must never
+				// leak into a beads-under-test process (be-yjp4z).
+				break
+			}
 		}
 
 		// Worktree/shared fallback: the active workspace may live outside the
@@ -150,7 +199,13 @@ func Initialize() error {
 	// 0. BEADS_DIR: highest priority
 	if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
 		p := filepath.Join(beadsDir, "config.yaml")
-		if _, err := os.Stat(p); err == nil {
+		// Honor the test ignore set here too, and skip primaryConfigPath along with
+		// the merge so ConfigFileUsed does not name the ignored repo config. This
+		// fences the read and merge path only: SaveConfigValue falls back to the
+		// caller-supplied beadsDir when ConfigFileUsed is empty, so where a write
+		// lands is still the caller's choice, not this flag's.
+		ignored := ignoreRepoConfig && ignoredRepoConfigPaths[ignoredConfigKey(p)]
+		if _, err := os.Stat(p); err == nil && !ignored {
 			// Avoid duplicate if BEADS_DIR points to same config as CWD walk
 			if primaryConfigPath == "" || filepath.Clean(p) != filepath.Clean(primaryConfigPath) {
 				configPaths = append(configPaths, p)
@@ -269,6 +324,7 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+	v.SetDefault("ai.base_url", "")
 
 	// List command defaults
 	v.SetDefault("list.limit", 50)
@@ -701,6 +757,80 @@ func Set(key string, value interface{}) {
 // Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
 func DefaultAIModel() string {
 	return GetString("ai.model")
+}
+
+// DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
+// accounting for which provider the resolved key selects: an explicitly
+// configured ai.model always wins; otherwise a MiniMax-selected key gets a
+// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
+// MiniMax does not serve the Claude default model.
+func DefaultAIModelFor(keySource AIAPIKeySource) string {
+	if GetValueSource("ai.model") != SourceDefault {
+		return GetString("ai.model")
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if m := os.Getenv("MINIMAX_MODEL"); m != "" {
+			return m
+		}
+		return MiniMaxDefaultModel
+	}
+	return GetString("ai.model")
+}
+
+// AIAPIKeySource identifies where the active Anthropic-compatible API key came from.
+type AIAPIKeySource string
+
+const (
+	AIAPIKeySourceNone         AIAPIKeySource = ""
+	AIAPIKeySourceAnthropicEnv AIAPIKeySource = "ANTHROPIC_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceMiniMaxEnv   AIAPIKeySource = "MINIMAX_API_KEY"   //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceConfig       AIAPIKeySource = "ai.api_key"
+	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
+
+	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
+
+	// MiniMaxDefaultModel is used when MINIMAX_API_KEY selected the key and
+	// the user did not configure ai.model: MiniMax's Anthropic-compatible
+	// endpoint does not serve the Claude default model, so key-only setup
+	// must route to a model MiniMax actually hosts. Override with
+	// MINIMAX_MODEL or ai.model.
+	MiniMaxDefaultModel = "MiniMax-M2"
+)
+
+// ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.
+//
+// Precedence: ANTHROPIC_API_KEY > MINIMAX_API_KEY > ai.api_key > explicit.
+func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
+	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceAnthropicEnv
+	}
+	if envKey := os.Getenv("MINIMAX_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceMiniMaxEnv
+	}
+	if configKey := GetString("ai.api_key"); configKey != "" {
+		return configKey, AIAPIKeySourceConfig
+	}
+	if explicit != "" {
+		return explicit, AIAPIKeySourceExplicit
+	}
+	return "", AIAPIKeySourceNone
+}
+
+// DefaultAIBaseURL returns the configured base URL for Anthropic-compatible AI calls.
+//
+// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL > MiniMax default
+// when MINIMAX_API_KEY selected the key. Empty means use the SDK's Anthropic default.
+func DefaultAIBaseURL(keySource AIAPIKeySource) string {
+	if baseURL := GetString("ai.base_url"); baseURL != "" {
+		return baseURL
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" {
+			return baseURL
+		}
+		return MiniMaxDefaultBaseURL
+	}
+	return ""
 }
 
 // AllSettings returns all configuration settings as a map

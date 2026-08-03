@@ -64,7 +64,7 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	// MigrateUp re-asserts the canonical dolt_ignore patterns before anything
 	// else (GH#4378); the rows changed, so a scoped commit lands before the
 	// pass runs (#4566: the seed must not ride the per-step pass commits).
-	expectIgnorePatternSeed(mock)
+	expectIgnorePatternSeed(mock, 42)
 	// migrationWorkNeeded: mainSource.atLatest reads the current cursor; v42
 	// is behind LatestVersion(), so the || short-circuits before checking
 	// ignoredSource.atLatest or the content-hash/backfill probes.
@@ -75,10 +75,10 @@ func TestMigrateUpReturnsDirtyTablesErrorForPreExistingDirtyTable(t *testing.T) 
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
 	// The seed changed rows, so it is committed scoped+labeled right after
 	// pre-existing tables are unstaged, before the dirty-table guards run.
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	// committableDirtyTables -> dirtyTables(ctx, db, true): same dirty state.
 	expectDirtyDoltStatusRow(mock, "dependencies", false)
 
@@ -123,6 +123,7 @@ func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T)
 
 	mock.ExpectQuery(`SELECT COALESCE\(MAX\(version\), 0\) FROM ignored_schema_migrations`).
 		WillReturnRows(sqlmock.NewRows([]string{"version"}).AddRow(2))
+	expectIgnoredSentinelProbes(mock, true)
 
 	touched, err := ignoredSource.pendingMigrationDirtyTables(context.Background(), db, map[string]dirtyTableState{
 		"wisp_dependencies": {},
@@ -217,6 +218,21 @@ func TestCheckNoDuplicateVersionsPanicsWithBothFilenames(t *testing.T) {
 		}
 	}()
 	checkNoDuplicateVersions(files)
+}
+
+// TestEmbeddedMigrationSourcesHaveNoDuplicateVersions runs discovery over the
+// real embedded migration tree for both sources. list() panics on duplicate
+// numeric prefixes — at runtime that panic fires at store open, before any
+// command's RunE, so a duplicate bricks every bd command. Tests that read a
+// migration's SQL file directly bypass list() and cannot catch this; this
+// discovery-level check makes the whole failure class fail in CI instead.
+func TestEmbeddedMigrationSourcesHaveNoDuplicateVersions(t *testing.T) {
+	for _, src := range []migrationSource{mainSource, ignoredSource} {
+		files := src.list() // panics on duplicate versions
+		if len(files) == 0 {
+			t.Errorf("migrationSource(%s).list() returned no migrations", src.dir)
+		}
+	}
 }
 
 func TestDirtyTableSignatureRejectsUnsafeTableName(t *testing.T) {
@@ -484,12 +500,12 @@ func TestRunMigrationsSnapshotsDirtyTablesBeforeRepairSoRepairMutationsCommitAto
 	// force-added alongside the cursor table and committed in the same call.
 	mock.ExpectQuery(dirtyStatusQuery).
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}).AddRow("dependencies", false))
-	mock.ExpectExec(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("dependencies").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 0))
-	mock.ExpectExec(`CALL DOLT_COMMIT`).
-		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectQuery(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("dependencies").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(`CALL DOLT_ADD\('-f', \?\)`).WithArgs("schema_migrations").
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(`CALL DOLT_COMMIT`).
+		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 
 	applied, err := runMigrations(context.Background(), db, mainSource, 52, 53, true)
 	if err != nil {
@@ -1697,9 +1713,9 @@ func TestStageSchemaTablesSkipsIgnoredTables(t *testing.T) {
 	mock.ExpectQuery(`(?s)SELECT t\.TABLE_NAME\s+FROM INFORMATION_SCHEMA\.TABLES t\s+WHERE .*NOT EXISTS`).
 		WillReturnRows(sqlmock.NewRows([]string{"TABLE_NAME"}).
 			AddRow("schema_migrations"))
-	mock.ExpectExec(`CALL DOLT_ADD\('-f', \?\)`).
+	mock.ExpectQuery(`CALL DOLT_ADD\('-f', \?\)`).
 		WithArgs("schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 
 	staged, err := stageSchemaTables(context.Background(), db, map[string]dirtyTableState{})
 	if err != nil {
@@ -1725,12 +1741,12 @@ func TestUnstageIgnoredTablesResetsExistingIgnoredTables(t *testing.T) {
 			AddRow("ignored_schema_migrations", true).
 			AddRow("wisp_dependencies", true).
 			AddRow("wisps", false))
-	mock.ExpectExec(`CALL DOLT_RESET\(\?\)`).
+	mock.ExpectQuery(`CALL DOLT_RESET\(\?\)`).
 		WithArgs("ignored_schema_migrations").
-		WillReturnResult(sqlmock.NewResult(0, 1))
-	mock.ExpectExec(`CALL DOLT_RESET\(\?\)`).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(`CALL DOLT_RESET\(\?\)`).
 		WithArgs("wisp_dependencies").
-		WillReturnResult(sqlmock.NewResult(0, 1))
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
 
 	if err := unstageIgnoredTables(context.Background(), db); err != nil {
 		t.Fatalf("unstageIgnoredTables: %v", err)
@@ -1918,13 +1934,14 @@ func TestRunMigrationsStderrOutput(t *testing.T) {
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
 
-	// Bounded below migration 47: that version's preMigrationRepair (and 53's)
-	// issues real INFORMATION_SCHEMA probes (see
-	// TestPreMigrationRepairScopedToMain0047 /
-	// TestPreMigrationRepairScopedToMain0053), which mockDB.QueryRowContext
-	// doesn't support. This test only exercises the stderr lines, not the
-	// repair path.
-	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false)
+	// Bounded below migration 40: migrations 40/41 carry preMigrationRepairs and
+	// CALL DOLT_* bodies that issue real queries via mockDB.QueryRowContext /
+	// QueryContext, and the repairs at 47 and 53 issue real INFORMATION_SCHEMA
+	// probes (see TestPreMigrationRepairScopedToMain0047 /
+	// TestPreMigrationRepairScopedToMain0053) — none of which the panic-stub mock
+	// supports. This test only exercises the stderr lines, not the repair or
+	// proc-drain paths.
+	n, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations: %v", err)
 	}
@@ -1961,19 +1978,19 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	issueRowCounter = func(context.Context, DBConn) (int64, error) { return 0, nil }
 	defer func() { issueRowCounter = origCounter }()
 
-	// Bounded below migration 47 for the same reason as
-	// TestRunMigrationsStderrOutput: mockDB can't answer the real
-	// INFORMATION_SCHEMA queries preMigrationRepair issues from that version
-	// (and from 53) onward.
-	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false)
+	// Bounded below migration 40 for the same reason as
+	// TestRunMigrationsStderrOutput: mockDB can't answer the queries the
+	// preMigrationRepairs at versions 40/41/47/53 (and 40/41's CALL DOLT_*
+	// bodies) issue on the pinned connection.
+	main, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(mainSource): %v", err)
 	}
 	// Same upTo cap as the mainSource call: the source-threading regression
 	// this test guards (hardcoding mainSource) is only detectable when both
 	// calls share a bound, so their counts collapse to equal under the bug.
-	// ignoredSource has 11 migrations, so 46 is a no-op on correct behavior.
-	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 46, false)
+	// ignoredSource has 16 migrations, so 39 is a no-op on correct behavior.
+	ignored, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 39, false)
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
 	}
@@ -2000,7 +2017,10 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	var mainBuf bytes.Buffer
 	orig := stderr
 	stderr = &mainBuf
-	if _, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 46, false); err != nil {
+	// Bounded below migration 40 for the same reason as
+	// TestRunMigrationsStderrOutput: the panic-stub mock can't answer the
+	// queries versions 40/41/47/53 issue on the pinned connection.
+	if _, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 39, false); err != nil {
 		stderr = orig
 		t.Fatalf("runMigrations(mainSource): %v", err)
 	}
@@ -2011,7 +2031,7 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 
 	var ignoredBuf bytes.Buffer
 	stderr = &ignoredBuf
-	_, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 46, false)
+	_, err := runMigrations(context.Background(), &mockDB{}, ignoredSource, 0, 39, false)
 	stderr = orig
 	if err != nil {
 		t.Fatalf("runMigrations(ignoredSource): %v", err)
@@ -2019,4 +2039,55 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	if strings.Contains(ignoredBuf.String(), "Large rig detected") {
 		t.Errorf("expected ignoredSource pass to stay silent on the large-rig notice (main-source pass already warned); got: %q", ignoredBuf.String())
 	}
+}
+
+func TestIgnoredMigration0017AddsWispsDeferUntilIndexThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create wisps defer_until index dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0017 up migration: %v", err)
+	}
+	const indexCountQuery = `SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps' AND INDEX_NAME = 'idx_wisps_defer_until'`
+
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir, indexCountQuery, "1")
+
+	// Idempotent: re-applying must not error or duplicate the index.
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir, indexCountQuery, "1")
+}
+
+func TestIgnoredMigration0017NoopsWithoutWispsTableThroughDoltCLI(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	dir := filepath.Join(t.TempDir(), "wisps-defer-until-index-no-wisps")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("create no-wisps dir: %v", err)
+	}
+	runDoltCommand(t, dir, "init", "--name", "test", "--email", "test@example.com")
+	runDoltSQL(t, dir, AllMigrationsSQL())
+	runDoltSQL(t, dir, `
+DROP TABLE IF EXISTS wisp_child_counters;
+DROP TABLE IF EXISTS wisp_comments;
+DROP TABLE IF EXISTS wisp_events;
+DROP TABLE IF EXISTS wisp_dependencies;
+DROP TABLE IF EXISTS wisp_labels;
+DROP TABLE IF EXISTS wisps;
+`)
+
+	migrationSQL, err := ignoredSource.files.ReadFile("migrations/ignored/0017_add_wisps_defer_until_index.up.sql")
+	if err != nil {
+		t.Fatalf("read ignored 0017 up migration: %v", err)
+	}
+	runDoltSQL(t, dir, string(migrationSQL))
+	requireDoltCount(t, dir,
+		`SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps'`, "0")
 }

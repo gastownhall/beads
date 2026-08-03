@@ -279,7 +279,7 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 	if err := wrapTransactionError("commit close wisp", tx.Commit()); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
-	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed}, nil
+	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}, nil
 }
 
 // deleteWisp permanently removes a wisp and its related data.

@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage/domain"
 )
 
 // ContextInfo contains the effective backend identity and repository context.
@@ -59,7 +60,14 @@ Examples:
 			return runContextProxiedServer(cmd, rootCtx)
 		}
 
-		info := ContextInfo{
+		// The direct route reads config files itself rather than through the
+		// contextinfo provider — it must answer in degraded states where no
+		// database can be opened — but it assembles the SAME snapshot the
+		// proxied route gets from the provider, and hands it to the same
+		// view. That is what keeps `bd context` one answer across two routes,
+		// and what puts both of them on the projection GET /v0/beads/context
+		// serves.
+		snapshot := domain.ContextInfo{
 			Backend:   configfile.BackendDolt,
 			BdVersion: Version,
 		}
@@ -79,14 +87,14 @@ Examples:
 			return HandleError("cannot resolve repo context: %v", err)
 		}
 
-		info.BeadsDir = rc.BeadsDir
-		info.RepoRoot = rc.RepoRoot
-		info.CWDRepoRoot = rc.CWDRepoRoot
-		info.IsRedirected = rc.IsRedirected
-		info.IsWorktree = rc.IsWorktree
+		snapshot.BeadsDir = rc.BeadsDir
+		snapshot.RepoRoot = rc.RepoRoot
+		snapshot.CWDRepoRoot = rc.CWDRepoRoot
+		snapshot.IsRedirected = rc.IsRedirected
+		snapshot.IsWorktree = rc.IsWorktree
 
 		if role, ok := rc.Role(); ok {
-			info.Role = string(role)
+			snapshot.Role = string(role)
 		}
 
 		cfg, err := configfile.Load(rc.BeadsDir)
@@ -97,32 +105,30 @@ Examples:
 			cfg = configfile.DefaultConfig()
 		}
 
-		info.DoltMode = cfg.GetDoltMode()
-		info.Database = cfg.GetDoltDatabase()
-		info.ProjectID = cfg.ProjectID
+		snapshot.DoltMode = cfg.GetDoltMode()
+		snapshot.Database = cfg.GetDoltDatabase()
+		snapshot.ProjectID = cfg.ProjectID
 
 		if cfg.IsDoltServerMode() {
-			info.ServerHost = cfg.GetDoltServerHost()
+			snapshot.ServerHost = cfg.GetDoltServerHost()
 			dsCfg := doltserver.DefaultConfig(rc.BeadsDir)
-			info.ServerPort = dsCfg.Port
+			snapshot.ServerPort = dsCfg.Port
 		}
 		if cfg.IsDoltProxiedServerMode() {
 			p, err := resolveProxiedServerRootPath(rc.BeadsDir)
 			if err != nil {
 				return HandleError("resolve proxied server root: %v", err)
 			}
-			info.ProxiedDir = p
+			snapshot.ProxiedDir = p
 		}
 
 		if dataDir := cfg.GetDoltDataDir(); dataDir != "" {
-			info.DataDir = dataDir
+			snapshot.DataDir = dataDir
 		}
 
-		if remote := resolveSyncRemoteFromDir(rc.BeadsDir); remote != "" {
-			info.SyncRemote = remote
-			info.SyncGitRemote = remote
-		}
+		snapshot.SyncRemote = resolveSyncRemoteFromDir(rc.BeadsDir)
 
+		info := contextInfoView(snapshot)
 		if jsonOutput {
 			return outputJSON(info)
 		}

@@ -50,10 +50,13 @@ func DatabaseVersionWithBdVersion(path string, bdVersion string) error {
 	ctx := context.Background()
 
 	if _, err := os.Stat(dbPath); os.IsNotExist(err) {
-		// No database - create a new Dolt store
+		// No database - create a new Dolt store. Creation is this branch's
+		// explicit purpose, so opt out of the dolt.New create-guard
+		// (bd-kjfsq: without CreateIfMissing the guard fails the fix with
+		// "database not found" on exactly the fresh clones it exists for).
 		fmt.Println("  → No database found, creating Dolt store...")
 
-		store, err := dolt.NewFromConfig(ctx, beadsDir)
+		store, err := dolt.NewFromConfigWithOptions(ctx, beadsDir, &dolt.Config{CreateIfMissing: true})
 		if err != nil {
 			return fmt.Errorf("failed to create database: %w", err)
 		}

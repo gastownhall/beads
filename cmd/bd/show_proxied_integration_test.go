@@ -46,12 +46,48 @@ func TestProxiedServerShow(t *testing.T) {
 		}
 	})
 
-	t.Run("show_nonexistent_id_exits_nonzero", func(t *testing.T) {
+	// bd-hc1: proxied `bd show <missing>` answered with the domain seam's raw
+	// "Error fetching x: get x: sql: no rows in result set" - the only visible
+	// difference between a typo and a broken database was the wording of a
+	// driver sentinel. This is the user-facing half of the normalization, so it
+	// asserts both streams rather than only the exit code.
+	t.Run("show_nonexistent_id_reports_not_found", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "sne")
+
 		stdout, stderr := bdProxiedShowFail(t, bd, p.dir, "sne-nonexistent999")
-		_ = stdout
-		_ = stderr
+		if want := "Issue sne-nonexistent999 not found"; !strings.Contains(stderr, want) {
+			t.Errorf("stderr = %q, want it to contain %q", stderr, want)
+		}
+		if strings.Contains(stderr, "sql: no rows in result set") {
+			t.Errorf("stderr leaks the raw driver sentinel: %q", stderr)
+		}
+		if strings.Contains(stdout, "not found") {
+			t.Errorf("the diagnostic belongs on stderr, not stdout: %q", stdout)
+		}
+
+		// --json takes the same lookup and must report it the same way, with
+		// the machine-readable envelope still alone on stdout.
+		jsonStdout, jsonStderr := bdProxiedShowFail(t, bd, p.dir, "--json", "sne-nonexistent999")
+		if want := "Issue sne-nonexistent999 not found"; !strings.Contains(jsonStderr, want) {
+			t.Errorf("--json stderr = %q, want it to contain %q", jsonStderr, want)
+		}
+		if strings.Contains(jsonStderr, "sql: no rows in result set") {
+			t.Errorf("--json stderr leaks the raw driver sentinel: %q", jsonStderr)
+		}
+		start := strings.Index(jsonStdout, "{")
+		if start < 0 {
+			t.Fatalf("--json stdout carries no JSON object: %q", jsonStdout)
+		}
+		var envelope map[string]interface{}
+		if err := json.Unmarshal([]byte(jsonStdout[start:]), &envelope); err != nil {
+			t.Fatalf("--json stdout is not a JSON object: %v\nraw: %s", err, jsonStdout)
+		}
+		// The key sits at the top level or under "data" depending on the
+		// envelope setting; either way it has to be there.
+		if !strings.Contains(jsonStdout, `"error"`) {
+			t.Errorf("--json stdout carries no error key: %s", jsonStdout)
+		}
 	})
 
 	t.Run("show_no_args_errors", func(t *testing.T) {

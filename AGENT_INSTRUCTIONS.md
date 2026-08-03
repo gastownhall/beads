@@ -10,7 +10,7 @@ This document contains detailed operational instructions for AI agents working o
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
 - **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
-- **Testing**: All new features need tests (`make test` for the normal local/CI path, `make test-icu-path` only when intentionally exercising the opt-in ICU regex path)
+- **Testing**: All new features need tests; use [engdocs/TESTING.md](engdocs/TESTING.md) for command selection, test design, and PR readiness.
 - **Documentation**: Update relevant .md files
 
 ### File Organization
@@ -30,16 +30,25 @@ beads/
 
 **IMPORTANT:** Never pollute the production database with test issues!
 
-**For manual testing**, use the `BEADS_DB` environment variable to point to a temporary database:
+For test commands, tier selection, and test-design guidance, use the canonical
+[engdocs/TESTING.md](engdocs/TESTING.md).
+
+**For manual testing**, keep initialization and all experiments in a disposable
+working directory. This safety example supplements the canonical testing guide:
 
 ```bash
-# Create test issues in isolated database
-BEADS_DB=/tmp/test.db bd init --quiet --prefix test
-BEADS_DB=/tmp/test.db bd create "Test issue" -p 1
-
-# Or for quick testing
-BEADS_DB=/tmp/test.db bd create "Test feature" -p 1
+beads_manual_dir="$(mktemp -d)"
+(
+  set -e
+  cd "$beads_manual_dir"
+  bd init --quiet --prefix test --skip-hooks --skip-agents
+  bd create "Test issue" -p 1
+)
+rm -rf -- "$beads_manual_dir"
 ```
+
+`BEADS_DB` alone does not redirect `bd init` workspace setup. Do not run manual
+initialization from a production workspace even when selecting another database.
 
 **For automated tests**, use `t.TempDir()` in Go tests:
 
@@ -61,7 +70,9 @@ git config core.hooksPath .git/hooks
 Do not rely on the developer's global git config. Global `core.hooksPath` can leak
 into temp repos and produce flaky test behavior.
 
-**Warning:** bd will warn you when creating issues with "Test" prefix in the production database. Always use `BEADS_DB` for manual testing.
+**Warning:** bd will warn you when creating issues with a "Test" prefix in the
+production database. The disposable working directory is the isolation
+boundary for manual initialization and experiments.
 
 **Tmpfs hosts:** the `cmd/bd` test suite creates an isolated `$HOME` and several
 test binaries under `$TMPDIR`. They are normally cleaned by the test process,
@@ -71,9 +82,9 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 
 ### Before Committing
 
-1. **Run tests**: `make test` (or `./scripts/test.sh`)
-   - Only if intentionally exercising the ICU regex path: `make test-icu-path`
-2. **Run linter**: `golangci-lint run ./...` (ignore baseline warnings)
+1. **Run tests**: follow [engdocs/TESTING.md](engdocs/TESTING.md).
+2. **Run linter when its code surface changed**: `golangci-lint run ./...`
+   (ignore baseline warnings)
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
@@ -375,27 +386,20 @@ case types.StatusClosed:
 4. Link from `examples/README.md`
 5. Mention in main README.md
 
-## Building and Testing
+## Building
 
 ```bash
 # Build and install bd to ~/.local/bin (the canonical location)
 make install
-
-# Test (local baseline)
-make test
-
-# Optional ICU regex path smoke (maintainer-only, not normal validation)
-make test-icu-path
-
-# Coverage run
-go test -tags gms_pure_go -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
 
 # Verify installed binary
 bd init --prefix test
 bd create "Test issue" -p 1
 bd ready
 ```
+
+For testing commands, test design, and PR-readiness gates, use
+[engdocs/TESTING.md](engdocs/TESTING.md).
 
 > **WARNING**: Do NOT use `go build -o bd ./cmd/bd`, `go install ./cmd/bd`,
 > or raw `go run ./cmd/bd ...`.

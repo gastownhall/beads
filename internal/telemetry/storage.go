@@ -559,6 +559,14 @@ func (s *InstrumentedStorage) RunInTransaction(ctx context.Context, commitMsg st
 	return err
 }
 
+// RunInIssueLifecycleTransaction traces the required internal lifecycle lane.
+func (s *InstrumentedStorage) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
+	ctx, span, t := s.op(ctx, "RunInIssueLifecycleTransaction", attribute.String("db.commit_msg", commitMsg))
+	err := s.inner.RunInIssueLifecycleTransaction(ctx, commitMsg, fn)
+	s.done(ctx, span, t, err)
+	return err
+}
+
 // ── Wisp queries ─────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) ListWisps(ctx context.Context, filter types.WispFilter) ([]*types.Issue, error) {

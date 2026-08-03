@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/go-sql-driver/mysql"
 
@@ -13,13 +14,24 @@ import (
 
 // mockUnitOfWork implements UnitOfWork for testing
 type mockUnitOfWork struct {
-	commitErr   error
-	commitCount int
-	closed      bool
+	commitErr         error
+	commitCount       int
+	closed            bool
+	configUseCase     domain.ConfigUseCase
+	issueUseCase      domain.IssueUseCase
+	dependencyUseCase domain.DependencyUseCase
+	labelUseCase      domain.LabelUseCase
+	commentUseCase    domain.CommentUseCase
+	// Recorded AT Close time: the close context's state afterwards says
+	// nothing, because a detached close cancels its own context on the way out.
+	closeErr         error
+	closeHasDeadline bool
 }
 
 func (m *mockUnitOfWork) Close(ctx context.Context) {
 	m.closed = true
+	m.closeErr = ctx.Err()
+	_, m.closeHasDeadline = ctx.Deadline()
 }
 
 func (m *mockUnitOfWork) Commit(ctx context.Context, message string) error {
@@ -29,23 +41,25 @@ func (m *mockUnitOfWork) Commit(ctx context.Context, message string) error {
 
 func (m *mockUnitOfWork) SwitchDatabase(ctx context.Context, database string) error { return nil }
 
-func (m *mockUnitOfWork) ConfigUseCase() domain.ConfigUseCase         { return nil }
+func (m *mockUnitOfWork) ConfigUseCase() domain.ConfigUseCase         { return m.configUseCase }
 func (m *mockUnitOfWork) DoltRemoteUseCase() domain.DoltRemoteUseCase { return nil }
 func (m *mockUnitOfWork) BootstrapUseCase() domain.BootstrapUseCase   { return nil }
-func (m *mockUnitOfWork) IssueUseCase() domain.IssueUseCase           { return nil }
-func (m *mockUnitOfWork) DependencyUseCase() domain.DependencyUseCase { return nil }
-func (m *mockUnitOfWork) LabelUseCase() domain.LabelUseCase           { return nil }
-func (m *mockUnitOfWork) CommentUseCase() domain.CommentUseCase       { return nil }
+func (m *mockUnitOfWork) IssueUseCase() domain.IssueUseCase           { return m.issueUseCase }
+func (m *mockUnitOfWork) DependencyUseCase() domain.DependencyUseCase { return m.dependencyUseCase }
+func (m *mockUnitOfWork) LabelUseCase() domain.LabelUseCase           { return m.labelUseCase }
+func (m *mockUnitOfWork) CommentUseCase() domain.CommentUseCase       { return m.commentUseCase }
 func (m *mockUnitOfWork) RawSQLUseCase() domain.RawSQLUseCase         { return nil }
 
 // mockUnitOfWorkProvider implements UnitOfWorkProvider for testing
 type mockUnitOfWorkProvider struct {
-	uows      []*mockUnitOfWork
-	uowIndex  int
-	newUOWErr error
+	uows        []*mockUnitOfWork
+	uowIndex    int
+	newUOWCalls int
+	newUOWErr   error
 }
 
 func (m *mockUnitOfWorkProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
+	m.newUOWCalls++
 	if m.newUOWErr != nil {
 		return nil, m.newUOWErr
 	}
@@ -64,6 +78,11 @@ func (m *mockUnitOfWorkProvider) Close(ctx context.Context) error {
 func newMySQLError(code uint16) error {
 	return &mysql.MySQLError{Number: code, Message: "test error"}
 }
+
+type sqlStateError string
+
+func (e sqlStateError) Error() string    { return "sqlstate " + string(e) }
+func (e sqlStateError) SQLState() string { return string(e) }
 
 func TestRunTx_Success(t *testing.T) {
 	uw := &mockUnitOfWork{}
@@ -166,6 +185,28 @@ func TestRunTx_RetriesOnLockWaitTimeout(t *testing.T) {
 	}
 }
 
+func TestRunTx_RetriesOnPostgresSerializationStates(t *testing.T) {
+	for _, state := range []string{"40001", "40P01"} {
+		t.Run(state, func(t *testing.T) {
+			first := &mockUnitOfWork{commitErr: sqlStateError(state)}
+			second := &mockUnitOfWork{}
+			provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{first, second}}
+
+			var calls int32
+			err := RunTx(context.Background(), provider, func(context.Context, UnitOfWork) (string, error) {
+				atomic.AddInt32(&calls, 1)
+				return "retry postgres serialization", nil
+			})
+			if err != nil {
+				t.Fatalf("RunTx() error = %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("work calls = %d, want 2", calls)
+			}
+		})
+	}
+}
+
 func TestRunTx_NothingToCommitIsSuccess(t *testing.T) {
 	uw := &mockUnitOfWork{commitErr: errors.New("nothing to commit")}
 	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}}
@@ -254,6 +295,38 @@ func TestRunTxResult_RetriesOnSerializationError(t *testing.T) {
 	}
 }
 
+// TestRunTxResultWithin_ExhaustedBudgetReturnsSerializationError pins what a
+// caller branches on when every attempt loses Dolt's commit-time merge: the
+// explicit budget bounds the loop, and the error handed back is the last
+// serialization failure itself — not a context error, not a wrapper. Callers
+// (bd update on the proxied-server path, and the HTTP claim endpoint after it)
+// use IsSerializationError on this error to report an exhausted write conflict
+// loudly instead of exiting 0 on a write that never landed.
+func TestRunTxResultWithin_ExhaustedBudgetReturnsSerializationError(t *testing.T) {
+	provider := &mockUnitOfWorkProvider{}
+
+	var callCount int32
+	start := time.Now()
+	_, err := RunTxResultWithin(context.Background(), provider, 100*time.Millisecond,
+		func(ctx context.Context, uw UnitOfWork) (int, string, error) {
+			atomic.AddInt32(&callCount, 1)
+			return 0, "", newMySQLError(1213)
+		})
+
+	if err == nil {
+		t.Fatal("expected an error once the retry budget ran out")
+	}
+	if !IsSerializationError(err) {
+		t.Errorf("err = %v, want the last serialization failure", err)
+	}
+	if callCount < 2 {
+		t.Errorf("attempts = %d, want more than one before the budget ran out", callCount)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Errorf("elapsed = %s: the explicit budget was not honored", elapsed)
+	}
+}
+
 func TestRunTxResult_NothingToCommitReturnsResult(t *testing.T) {
 	uw := &mockUnitOfWork{commitErr: errors.New("nothing to commit")}
 	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}}
@@ -267,6 +340,90 @@ func TestRunTxResult_NothingToCommitReturnsResult(t *testing.T) {
 	}
 	if result != "my result" {
 		t.Errorf("expected 'my result', got %q", result)
+	}
+}
+
+// TestRunTxResult_ClosesWithADetachedContext protects the pinned connection.
+// Close sends ROLLBACK, and the transaction layer poisons the connection when
+// that send fails rather than returning it to the pool — so closing with the
+// caller's already-canceled context (an HTTP client that hung up mid-claim, an
+// expired deadline) would burn one session every time. Correctness is safe
+// either way; capacity is not.
+func TestRunTxResult_ClosesWithADetachedContext(t *testing.T) {
+	uw := &mockUnitOfWork{}
+	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := RunTxResult(ctx, provider, func(context.Context, UnitOfWork) (int, string, error) {
+		// The caller goes away while the attempt is in flight.
+		cancel()
+		return 1, "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunTxResult: %v", err)
+	}
+
+	if !uw.closed {
+		t.Fatal("unit of work was never closed; the rollback is not guaranteed")
+	}
+	if uw.closeErr != nil {
+		t.Fatalf("close context was already done (%v): the ROLLBACK cannot be sent, so the pinned connection is poisoned instead of returned", uw.closeErr)
+	}
+	if !uw.closeHasDeadline {
+		t.Error("close context has no deadline; a hung rollback would block the caller forever")
+	}
+}
+
+// TestRunTxClosesWithADetachedContext and its RunTxRead twin: same hazard, same
+// protection, different entry point. These two are what the ~nine proxied CLI
+// commands run through, so the caller whose context goes away mid-attempt is a
+// user pressing Ctrl-C rather than an HTTP client hanging up — and it burns the
+// pinned session exactly the same way.
+func TestRunTxClosesWithADetachedContext(t *testing.T) {
+	uw := &mockUnitOfWork{}
+	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	err := RunTx(ctx, provider, func(context.Context, UnitOfWork) (string, error) {
+		cancel()
+		return "", nil
+	})
+	if err != nil {
+		t.Fatalf("RunTx: %v", err)
+	}
+
+	if !uw.closed {
+		t.Fatal("unit of work was never closed; the rollback is not guaranteed")
+	}
+	if uw.closeErr != nil {
+		t.Fatalf("close context was already done (%v): the ROLLBACK cannot be sent, so the pinned connection is poisoned instead of returned", uw.closeErr)
+	}
+	if !uw.closeHasDeadline {
+		t.Error("close context has no deadline; a hung rollback would block the caller forever")
+	}
+}
+
+func TestRunTxReadClosesWithADetachedContext(t *testing.T) {
+	uw := &mockUnitOfWork{}
+	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := RunTxRead(ctx, provider, func(context.Context, UnitOfWork) (int, error) {
+		cancel()
+		return 1, nil
+	})
+	if err != nil {
+		t.Fatalf("RunTxRead: %v", err)
+	}
+
+	if !uw.closed {
+		t.Fatal("unit of work was never closed; the rollback is not guaranteed")
+	}
+	if uw.closeErr != nil {
+		t.Fatalf("close context was already done (%v): the ROLLBACK cannot be sent, so the pinned connection is poisoned instead of returned", uw.closeErr)
+	}
+	if !uw.closeHasDeadline {
+		t.Error("close context has no deadline; a hung rollback would block the caller forever")
 	}
 }
 

@@ -102,6 +102,7 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	result.EventsCount = evIssue + evWisp
 
 	if params.DryRun {
+		result.DeletedCount = len(regularIDs) + len(wispIDs)
 		return result, nil
 	}
 

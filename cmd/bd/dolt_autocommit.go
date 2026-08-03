@@ -46,6 +46,43 @@ func transactHonoringAutoCommit(ctx context.Context, s storage.DoltStorage, comm
 	return err
 }
 
+// embeddedWritesCommitNow reports whether an embedded-mode CLI write should
+// create its Dolt version commit now. Batch and off defer it to an explicit
+// commit point (bd dolt commit); an unset value is the embedded default, which
+// PersistentPreRun resolves to "on". Server mode is never the CLI's commit to
+// make — the storage layer versions those writes itself.
+func embeddedWritesCommitNow() (bool, error) {
+	if !isEmbeddedMode() {
+		return false, nil
+	}
+	if strings.TrimSpace(doltAutoCommit) == "" {
+		return true, nil
+	}
+	mode, err := getDoltAutoCommitMode()
+	if err != nil {
+		return false, err
+	}
+	return mode == doltAutoCommitOn, nil
+}
+
+// issueOpsContext applies command auto-commit policy to the context a write verb
+// hands the issue-operations facade. The facade creates its Dolt version commit
+// inside the storage layer, so batch mode cannot blank a commit message the way
+// transactHonoringAutoCommit does — it has to say so on the context instead.
+func issueOpsContext(ctx context.Context) (context.Context, error) {
+	if !isEmbeddedMode() {
+		return ctx, nil
+	}
+	commitNow, err := embeddedWritesCommitNow()
+	if err != nil {
+		return nil, err
+	}
+	if commitNow {
+		return ctx, nil
+	}
+	return issueops.WithDeferredVersionCommit(ctx), nil
+}
+
 type doltAutoCommitParams struct {
 	// Command is the top-level bd command name (e.g., "create", "update").
 	Command string

@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/query"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var queryCmd = &cobra.Command{
@@ -170,7 +171,7 @@ Examples:
 					iwc = iwc[:limit]
 				}
 			}
-			sortIssuesWithCounts(iwc, sortBy, reverse)
+			workapi.SortIssuesWithCounts(iwc, sortBy, reverse)
 			if iwc == nil {
 				iwc = []*types.IssueWithCounts{}
 			}
@@ -195,7 +196,7 @@ Examples:
 			}
 		}
 
-		sortIssues(issues, sortBy, reverse)
+		workapi.SortIssues(issues, sortBy, reverse)
 
 		outputQueryResults(issues, queryStr, longFormat)
 		return nil

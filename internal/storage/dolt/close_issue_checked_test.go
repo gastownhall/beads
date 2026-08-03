@@ -1,10 +1,13 @@
 package dolt
 
 import (
+	"database/sql"
 	"errors"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -413,6 +416,315 @@ func TestCloseIssueChecked(t *testing.T) {
 			res, err := store.CloseIssueChecked(ctx, id, "tester", tc.opts)
 			tc.check(t, id, res, err)
 		})
+	}
+
+	t.Run("open children refuse and force reports count", func(t *testing.T) {
+		parent, permanentChild, wispChild := "cic-children-parent", "cic-children-permanent", "cic-children-wisp"
+		blocker := "cic-children-blocker"
+		createPerm(t, ctx, store, parent)
+		createPerm(t, ctx, store, permanentChild)
+		createWisp(t, ctx, store, wispChild)
+		createPerm(t, ctx, store, blocker)
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: parent, DependsOnID: blocker, Type: types.DepBlocks}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", parent, blocker, err)
+		}
+		for _, child := range []string{permanentChild, wispChild} {
+			if err := store.AddDependency(ctx, &types.Dependency{IssueID: child, DependsOnID: parent, Type: types.DepParentChild}, "tester"); err != nil {
+				t.Fatalf("AddDependency(%s -> %s): %v", child, parent, err)
+			}
+		}
+		res, err := store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "done"})
+		var childErr *storage.CloseOpenChildrenError
+		if !errors.Is(err, storage.ErrCloseOpenChildren) || !errors.As(err, &childErr) || childErr.IssueID != parent || childErr.OpenChildren != 2 {
+			t.Fatalf("child error = %+v, err = %v; want typed refusal for %s with 2 children", childErr, err, parent)
+		}
+		if got, want := getStatus(t, parent), types.StatusOpen; got != want {
+			t.Fatalf("parent status after refusal = %q, want %q", got, want)
+		}
+		res, err = store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "override", Force: true})
+		if err != nil || res.Unchanged || res.OpenChildren != 2 {
+			t.Fatalf("force result = %+v, err = %v; want changed close with 2 children", res, err)
+		}
+		res, err = store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "again"})
+		if !errors.Is(err, storage.ErrCloseOpenChildren) {
+			t.Fatalf("non-force re-close error = %v, want ErrCloseOpenChildren", err)
+		}
+		res, err = store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "again", Force: true})
+		if err != nil || !res.Unchanged || res.OpenChildren != 2 {
+			t.Fatalf("forced re-close result = %+v, err = %v; want unchanged with 2 children", res, err)
+		}
+
+		wispParent, childOfWispParent := "cic-children-wisp-parent", "cic-children-wisp-parent-child"
+		createWisp(t, ctx, store, wispParent)
+		createPerm(t, ctx, store, childOfWispParent)
+		if err := store.AddDependency(ctx, &types.Dependency{IssueID: childOfWispParent, DependsOnID: wispParent, Type: types.DepParentChild}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", childOfWispParent, wispParent, err)
+		}
+		res, err = store.CloseIssueChecked(ctx, wispParent, "tester", storage.CloseIssueOptions{Reason: "done"})
+		if !errors.Is(err, storage.ErrCloseOpenChildren) {
+			t.Fatalf("wisp parent close error = %v, want ErrCloseOpenChildren", err)
+		}
+		res, err = store.CloseIssueChecked(ctx, wispParent, "tester", storage.CloseIssueOptions{Reason: "override", Force: true})
+		if err != nil || res.Unchanged || res.OpenChildren != 1 {
+			t.Fatalf("wisp parent force result = %+v, err = %v; want changed close with 1 child", res, err)
+		}
+	})
+
+	t.Run("duplicate durable and wisp child edge counts once", func(t *testing.T) {
+		parent, child := "cic-collision-parent", "cic-collision-child"
+		createPerm(t, ctx, store, parent)
+		createPerm(t, ctx, store, child)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", child, parent, err)
+		}
+		if _, err := store.execContext(ctx, `
+			INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, no_history)
+			VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?)
+		`, child, "wisp duplicate "+child, types.StatusOpen, 2, types.TypeTask, false, true); err != nil {
+			t.Fatalf("insert matching wisp child: %v", err)
+		}
+
+		collisionID := depid.New(child, parent)
+		if _, err := store.db.ExecContext(ctx,
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, ?, 'parent-child', 'tester')",
+			collisionID, child, parent); err != nil {
+			t.Fatalf("seed duplicate child edge: %v", err)
+		}
+
+		res, err := store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "done"})
+		var childErr *storage.CloseOpenChildrenError
+		if !errors.Is(err, storage.ErrCloseOpenChildren) || !errors.As(err, &childErr) || childErr.OpenChildren != 1 {
+			t.Fatalf("child error = %+v, err = %v; want typed refusal with 1 child", childErr, err)
+		}
+		res, err = store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "override", Force: true})
+		if err != nil || res.Unchanged || res.OpenChildren != 1 {
+			t.Fatalf("force result = %+v, err = %v; want changed close with 1 child", res, err)
+		}
+	})
+
+	t.Run("durable dependency wins a cross-table type conflict", func(t *testing.T) {
+		parent, child := "cic-conflict-parent", "cic-conflict-child"
+		createPerm(t, ctx, store, parent)
+		createPerm(t, ctx, store, child)
+		if err := store.AddDependency(ctx, &types.Dependency{
+			IssueID: child, DependsOnID: parent, Type: types.DepRelated,
+		}, "tester"); err != nil {
+			t.Fatalf("AddDependency(%s -> %s): %v", child, parent, err)
+		}
+		if _, err := store.execContext(ctx, `
+			INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, no_history)
+			VALUES (?, ?, '', '', '', '', ?, ?, ?, ?, ?)
+		`, child, "wisp duplicate "+child, types.StatusOpen, 2, types.TypeTask, false, true); err != nil {
+			t.Fatalf("insert matching wisp child: %v", err)
+		}
+
+		collisionID := depid.New(child, parent)
+		if _, err := store.db.ExecContext(ctx,
+			"INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_by) VALUES (?, ?, ?, 'parent-child', 'tester')",
+			collisionID, child, parent); err != nil {
+			t.Fatalf("seed conflicting child edge: %v", err)
+		}
+
+		res, err := store.CloseIssueChecked(ctx, parent, "tester", storage.CloseIssueOptions{Reason: "done"})
+		if err != nil || res.Unchanged || res.OpenChildren != 0 {
+			t.Fatalf("close result = %+v, err = %v; want changed close with no durable parent-child child", res, err)
+		}
+	})
+
+	t.Run("missing target precedes child count", func(t *testing.T) {
+		child, missing := "cic-dangling-child", "cic-dangling-parent"
+		createPerm(t, ctx, store, child)
+		if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+			t.Fatalf("disable FK checks: %v", err)
+		}
+		if _, err := store.db.ExecContext(ctx, "INSERT INTO dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (UUID(), ?, ?, 'parent-child', NOW(), 'tester')", child, missing); err != nil {
+			t.Fatalf("insert dangling parent-child edge: %v", err)
+		}
+		if _, err := store.db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+			t.Fatalf("re-enable FK checks: %v", err)
+		}
+		_, err := store.CloseIssueChecked(ctx, missing, "tester", storage.CloseIssueOptions{Reason: "done"})
+		if !errors.Is(err, storage.ErrNotFound) || errors.Is(err, storage.ErrCloseOpenChildren) {
+			t.Fatalf("err = %v, want ErrNotFound but not ErrCloseOpenChildren", err)
+		}
+	})
+}
+
+// TestCloseIssueCheckedParentChildInsertCannotPhantomMerge is a controlled
+// two-transaction Dolt regression: a close which observes no children and a
+// concurrently-created open parent-child edge must not both commit. If they do,
+// the resulting durable state can preserve an overlapping stale-snapshot
+// decision instead of forcing one writer to retry against the other.
+func TestCloseIssueCheckedParentChildInsertCannotPhantomMerge(t *testing.T) {
+	store, cleanup := setupConcurrentTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const (
+		parent = "close-child-phantom-parent"
+		child  = "close-child-phantom-child"
+	)
+	createPerm(t, ctx, store, parent)
+	createPerm(t, ctx, store, child)
+
+	// Deliberately start both transactions before either writes. The close reads
+	// zero children before txAdd inserts its edge; committing close first makes
+	// this interleaving deterministic rather than timing-dependent.
+	txClose, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin close transaction: %v", err)
+	}
+	defer txClose.Rollback() // no-op after Commit; preserves cleanup on early Fatal.
+	txAdd, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin add-child transaction: %v", err)
+	}
+	defer txAdd.Rollback()
+
+	closeResult, err := issueops.CloseIssueCheckedInTx(ctx, txClose, parent, "done", "tester", "", false, nil)
+	if err != nil {
+		t.Fatalf("checked close before concurrent edge: %v", err)
+	}
+	if closeResult.OpenChildren != 0 || closeResult.AlreadyClosed {
+		t.Fatalf("close precondition result = %+v, want a real close after observing zero children", closeResult)
+	}
+
+	if _, err := issueops.AddDependencyInTx(ctx, txAdd, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "tester", issueops.AddDependencyOpts{}); err != nil {
+		t.Fatalf("insert concurrent parent-child edge: %v", err)
+	}
+
+	closeCommitErr := txClose.Commit()
+	addCommitErr := txAdd.Commit()
+	t.Logf("controlled close/add commits: close=%v add=%v", closeCommitErr, addCommitErr)
+	if closeCommitErr == nil && addCommitErr == nil {
+		var parentStatus, childStatus string
+		if err := store.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", parent).Scan(&parentStatus); err != nil {
+			t.Fatalf("read parent after both commits: %v", err)
+		}
+		if err := store.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", child).Scan(&childStatus); err != nil {
+			t.Fatalf("read child after both commits: %v", err)
+		}
+		t.Fatalf("phantom parent-child merge: checked close and edge insert both committed (parent=%s child=%s); one transaction must conflict or be refused", parentStatus, childStatus)
+	}
+
+	// A conflict on either commit is the required serialization outcome. Keep
+	// both errors in the failure below should a future Dolt version return an
+	// unexpected non-serialization result from a changed transaction contract.
+	if closeCommitErr != nil && !isSerializationError(closeCommitErr) {
+		t.Fatalf("close commit error = %v, want a serialization conflict", closeCommitErr)
+	}
+	if addCommitErr != nil && !isSerializationError(addCommitErr) {
+		t.Fatalf("add-child commit error = %v, want a serialization conflict", addCommitErr)
+	}
+}
+
+// TestCloseIssueCheckedPinnedConnRefusalRestoresCoordinationSavepoint proves
+// that the production pinned-connection UOW can catch a checked-close refusal
+// and commit a sibling operation without persisting the refused close's
+// coordination writes.
+func TestCloseIssueCheckedPinnedConnRefusalRestoresCoordinationSavepoint(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const (
+		parent  = "close-savepoint-parent"
+		child   = "close-savepoint-child"
+		sibling = "close-savepoint-sibling"
+	)
+	for _, id := range []string{parent, child, sibling} {
+		createPerm(t, ctx, store, id)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{
+		IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+	}, "tester"); err != nil {
+		t.Fatalf("AddDependency(%s -> %s): %v", child, parent, err)
+	}
+
+	coordinationValue := func(t *testing.T, tier string) *string {
+		t.Helper()
+		var value string
+		err := store.db.QueryRowContext(ctx,
+			"SELECT value FROM local_metadata WHERE `key` LIKE ?",
+			"dependency-coordination/v1/"+tier+"/%",
+		).Scan(&value)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		if err != nil {
+			t.Fatalf("read %s coordination cell: %v", tier, err)
+		}
+		return &value
+	}
+	beforeDurable := coordinationValue(t, "dependencies")
+	beforeWisp := coordinationValue(t, "wisp_dependencies")
+	if beforeDurable == nil || beforeWisp != nil {
+		t.Fatalf("pre-call coordination = durable:%v wisp:%v, want durable token and absent wisp token", beforeDurable, beforeWisp)
+	}
+
+	conn, err := store.db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin transaction connection: %v", err)
+	}
+	transactionOpen := true
+	defer func() {
+		if transactionOpen {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+		_ = conn.Close()
+	}()
+	if _, err := conn.ExecContext(ctx, "START TRANSACTION"); err != nil {
+		t.Fatalf("start pinned-connection transaction: %v", err)
+	}
+
+	_, err = issueops.CloseIssueCheckedInTx(ctx, conn, parent, "done", "tester", "", false, nil)
+	if !errors.Is(err, storage.ErrCloseOpenChildren) {
+		t.Fatalf("checked close error = %v, want ErrCloseOpenChildren", err)
+	}
+	if _, err := issueops.CloseIssueInTx(ctx, conn, sibling, "done", "tester", ""); err != nil {
+		t.Fatalf("close sibling after refused parent close: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		t.Fatalf("commit sibling close after refusal: %v", err)
+	}
+	transactionOpen = false
+	if err := conn.Close(); err != nil {
+		t.Fatalf("release committed transaction connection: %v", err)
+	}
+
+	for _, check := range []struct {
+		id     string
+		status types.Status
+	}{{parent, types.StatusOpen}, {sibling, types.StatusClosed}} {
+		issue, err := store.GetIssue(ctx, check.id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s): %v", check.id, err)
+		}
+		if issue.Status != check.status {
+			t.Fatalf("%s status = %q, want %q", check.id, issue.Status, check.status)
+		}
+	}
+
+	for _, check := range []struct {
+		tier string
+		want *string
+	}{
+		{tier: "dependencies", want: beforeDurable},
+		{tier: "wisp_dependencies", want: beforeWisp},
+	} {
+		got := coordinationValue(t, check.tier)
+		if (got == nil) != (check.want == nil) {
+			t.Fatalf("%s coordination presence = %v, want %v", check.tier, got != nil, check.want != nil)
+		}
+		if got != nil && *got != *check.want {
+			t.Fatalf("%s coordination value = %q, want pre-call %q", check.tier, *got, *check.want)
+		}
 	}
 }
 

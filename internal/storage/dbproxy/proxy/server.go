@@ -33,6 +33,15 @@ type ProxyOpts struct {
 	Port        int
 	IdleTimeout time.Duration
 	Server      server.DatabaseServer
+	// StopEpoch is the proxy stop epoch the spawning parent observed under
+	// proxy.lock before forking this proxy. ListenAndServe re-reads the
+	// epoch immediately before publishing proxy.pid and aborts if it has
+	// advanced, so a slow backend start cannot outlast a concurrent
+	// `bd dolt stop` and publish a running proxy after the stop returned.
+	// Empty means "no stop had ever run", which readStopEpoch also reports
+	// for a missing epoch file, so the zero value stays correct for direct
+	// (non-forked) callers such as tests.
+	StopEpoch string
 	// Stats is optional. When non-nil, the proxy records per-event counters
 	// against it; tests use Snapshot() to assert. Production code should
 	// leave this nil.
@@ -45,6 +54,7 @@ type proxyServer struct {
 	idleTimeout time.Duration
 	server      server.DatabaseServer
 	stats       *Stats
+	stopEpoch   string
 
 	logger      *log.Logger
 	listener    net.Listener
@@ -88,6 +98,7 @@ func NewProxyServer(opts ProxyOpts) *proxyServer {
 		idleTimeout: opts.IdleTimeout,
 		server:      opts.Server,
 		stats:       opts.Stats,
+		stopEpoch:   opts.StopEpoch,
 	}
 }
 
@@ -203,6 +214,21 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	identReply.Birth = string(birth)
 	identReply.ControlPort = control.Port()
 	identMu.Unlock()
+
+	// Last fence before publishing: the spawn marker was cleared when this
+	// process took proxy.lock, so a `bd dolt stop` that began during a slow
+	// backend start has no record of this attempt. It did advance the stop
+	// epoch first, so re-check it here and abort instead of publishing a
+	// running proxy after that stop returned.
+	if changed, err := stopEpochChanged(p.rootDir, p.stopEpoch); err != nil {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("re-check proxy stop epoch before publish: %w", err)
+	} else if changed {
+		p.stats.IncBackendStop()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)
+	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{
 		Pid:         os.Getpid(),

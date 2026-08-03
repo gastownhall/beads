@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -17,6 +16,12 @@ import (
 // errors.Is(err, ErrAmbiguousID) to distinguish "ambiguous" from
 // "not found" and surface the candidate list instead of a generic failure.
 var ErrAmbiguousID = errors.New("ambiguous issue ID")
+
+type PartialIDResolverStore interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+	SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error)
+	GetConfig(ctx context.Context, key string) (string, error)
+}
 
 // parseIssueID ensures an issue ID has the configured prefix.
 // If the input already has the prefix (e.g., "bd-a3f8e9"), returns it as-is.
@@ -44,7 +49,7 @@ func parseIssueID(input string, prefix string) string {
 // Returns an error if:
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
-func ResolvePartialID(ctx context.Context, store storage.Storage, input string) (string, error) {
+func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
 	}
@@ -250,7 +255,7 @@ func looksLikePartialIDHash(input string) bool {
 
 // ResolvePartialIDs resolves multiple potentially partial issue IDs.
 // Returns the resolved IDs and any errors encountered.
-func ResolvePartialIDs(ctx context.Context, store storage.Storage, inputs []string) ([]string, error) {
+func ResolvePartialIDs(ctx context.Context, store PartialIDResolverStore, inputs []string) ([]string, error) {
 	var resolved []string
 	for _, input := range inputs {
 		fullID, err := ResolvePartialID(ctx, store, input)

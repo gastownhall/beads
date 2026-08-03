@@ -145,6 +145,11 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
+	if dep.Type == types.DepParentChild {
+		if err := issueops.TouchDependencyCoordinationTableInTx(ctx, r.runner, dep.DependsOnID, table); err != nil {
+			return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
+		}
+	}
 
 	// Record the dependency_added event on the source's event table, matching the
 	// embedded/issueops AddDependencyInTx path so the bd CLI and library callers

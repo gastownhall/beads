@@ -4,15 +4,18 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // CheckIDFormat checks whether issues use hash-based or sequential IDs.
@@ -155,70 +158,32 @@ func CheckDependencyCyclesWithStore(ss *SharedStore) DoctorCheck {
 	return checkDependencyCyclesWithStore(store)
 }
 
+// dependencyCyclePageSize bounds the rows fetched per query while loading the
+// dependency graph. Shared dolt sql-servers enforce per-query read timeouts
+// (read_timeout_millis) that kill long-running streaming queries mid-stream
+// ("invalid connection"); keyset-paginated pages keep every query small.
+const dependencyCyclePageSize = 1000
+
+// dependencyCycleMaxEdges bounds the in-memory graph. Beyond this the check
+// degrades to a warning instead of risking excessive memory use.
+const dependencyCycleMaxEdges = 1_000_000
+
+// dependencyCycleTables are the tables cycle detection traverses, matching
+// issueops.DetectCyclesInTx and doctorDependencyUnionSQL: wisp edges
+// participate in the same blocking graph as durable ones.
+var dependencyCycleTables = []string{"dependencies", "wisp_dependencies"}
+
 func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 	db := store.UnderlyingDB()
 
-	// Query for cycles using simplified SQL (CONCAT for Dolt/MySQL compatibility)
-	query := `
-		WITH RECURSIVE paths AS (
-			SELECT
-				issue_id,
-				COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) AS depends_on_id,
-				issue_id as start_id,
-				CONCAT(issue_id, '→', COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)) as path,
-				0 as depth
-			FROM dependencies
-
-			UNION ALL
-
-			SELECT
-				d.issue_id,
-				COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external) AS depends_on_id,
-				p.start_id,
-				CONCAT(p.path, '→', COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external)),
-				p.depth + 1
-			FROM dependencies d
-			JOIN paths p ON d.issue_id = p.depends_on_id
-			WHERE p.depth < 100
-			  AND p.path NOT LIKE CONCAT('%', COALESCE(d.depends_on_issue_id, d.depends_on_wisp_id, d.depends_on_external), '→%')
-		)
-		SELECT DISTINCT start_id
-		FROM paths
-		WHERE depends_on_id = start_id`
-
-	rows, err := db.Query(query)
-	if err != nil {
-		return DoctorCheck{
-			Name:    "Dependency Cycles",
-			Status:  StatusWarning,
-			Message: "Unable to check for cycles",
-			Detail:  err.Error(),
-		}
-	}
-	defer rows.Close()
-
-	cycleCount := 0
-	var firstCycle string
-	for rows.Next() {
-		var startID string
-		if err := rows.Scan(&startID); err != nil {
-			continue
-		}
-		cycleCount++
-		if cycleCount == 1 {
-			firstCycle = startID
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return DoctorCheck{
-			Name:    "Dependency Cycles",
-			Status:  StatusWarning,
-			Message: "Row iteration error",
-			Detail:  err.Error(),
-		}
+	edges, check := loadDependencyEdges(db, dependencyCyclePageSize, dependencyCycleMaxEdges)
+	if check != nil {
+		return *check
 	}
 
-	if cycleCount == 0 {
+	cycleNodes := dependencyCycleNodes(edges)
+
+	if len(cycleNodes) == 0 {
 		return DoctorCheck{
 			Name:    "Dependency Cycles",
 			Status:  StatusOK,
@@ -229,10 +194,275 @@ func checkDependencyCyclesWithStore(store *dolt.DoltStore) DoctorCheck {
 	return DoctorCheck{
 		Name:    "Dependency Cycles",
 		Status:  StatusError,
-		Message: fmt.Sprintf("Found %d circular dependency cycle(s)", cycleCount),
-		Detail:  fmt.Sprintf("First cycle involves: %s", firstCycle),
+		Message: fmt.Sprintf("Found %d circular dependency cycle(s)", len(cycleNodes)),
+		Detail:  fmt.Sprintf("First cycle involves: %s", cycleNodes[0]),
 		Fix:     "Run 'bd dep cycles' to see full cycle paths, then 'bd dep remove' to break cycles",
 	}
+}
+
+// loadDependencyEdges reads the blocking edges of both dependency tables as
+// one adjacency map, one bounded page per query. Cycle detection used to run
+// as a single WITH RECURSIVE path enumeration, which is exponential in dense
+// graphs and exceeded per-query read timeouts on shared dolt sql-servers.
+//
+// Only blocking edge types are traversed, matching issueops.DetectCyclesInTx
+// and the cycle prevention on 'bd dep add': non-blocking types (tracks,
+// related, discovered-from, ...) legitimately form loops and previously made
+// this check disagree with the 'bd dep cycles' command its fix hint points at.
+//
+// All pages of both tables run inside one transaction so the whole graph is
+// read from a single snapshot; on a shared server, per-statement implicit
+// transactions could interleave with concurrent edge writes and paginate over
+// a shifting id sequence, dropping or duplicating edges.
+// Returns a non-nil DoctorCheck on failure.
+func loadDependencyEdges(db *sql.DB, pageSize, maxEdges int) (map[string][]string, *DoctorCheck) {
+	ctx := context.Background()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, dependencyCycleWarning("Unable to check for cycles", err.Error())
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	edges := make(map[string][]string)
+	edgeCount := 0
+	for _, table := range dependencyCycleTables {
+		var check *DoctorCheck
+		if dependencyIDPaginationUsable(ctx, tx, table) {
+			check = loadDependencyEdgePages(ctx, tx, table, pageSize, maxEdges, &edgeCount, edges)
+		} else {
+			check = loadDependencyEdgeScan(ctx, tx, table, maxEdges, &edgeCount, edges)
+		}
+		if check != nil {
+			return nil, check
+		}
+	}
+	return edges, nil
+}
+
+// dependencyIDPaginationUsable reports whether `WHERE id > ? ORDER BY id`
+// keyset pagination visits every row of table exactly once. That requires an
+// id column with no NULLs, and doctor cannot assume either: supported
+// databases exist where dependencies.id never materialized (#4690) or is
+// mid-backfill NULL (ensureDependenciesIDColumn), and doctor opens the store
+// read-only without running the migration chain that repairs those shapes.
+// NULL never satisfies `id > ?`, so paginating over such rows would silently
+// drop their edges from the graph.
+func dependencyIDPaginationUsable(ctx context.Context, tx *sql.Tx, table string) bool {
+	var idColumns int
+	err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ? AND column_name = 'id'`,
+		table).Scan(&idColumns)
+	if err != nil || idColumns == 0 {
+		return false
+	}
+	var one int
+	//nolint:gosec // G202: table is hardcoded in dependencyCycleTables
+	err = tx.QueryRowContext(ctx, `SELECT 1 FROM `+table+` WHERE id IS NULL LIMIT 1`).Scan(&one)
+	return errors.Is(err, sql.ErrNoRows)
+}
+
+// loadDependencyEdgePages loads table via id keyset pagination, bounding the
+// work of every query. dependencies.id is a deterministic primary key on the
+// current schema (migration 0050); wisp_dependencies.id has been a primary
+// key since the table's creation (migration 0021).
+func loadDependencyEdgePages(ctx context.Context, tx *sql.Tx, table string, pageSize, maxEdges int, edgeCount *int, edges map[string][]string) *DoctorCheck {
+	lastID := ""
+	for {
+		rowsRead, check := loadDependencyEdgePage(ctx, tx, table, pageSize, maxEdges, &lastID, edgeCount, edges)
+		if check != nil {
+			return check
+		}
+		if rowsRead < pageSize {
+			return nil
+		}
+	}
+}
+
+func loadDependencyEdgePage(ctx context.Context, tx *sql.Tx, table string, pageSize, maxEdges int, lastID *string, edgeCount *int, edges map[string][]string) (int, *DoctorCheck) {
+	//nolint:gosec // G202: table is hardcoded in dependencyCycleTables
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, issue_id, `+doctorDependencyTargetExpr+` AS depends_on_id, type
+		FROM `+table+`
+		WHERE id > ?
+		ORDER BY id
+		LIMIT ?`, *lastID, pageSize)
+	if err != nil {
+		return 0, dependencyCycleWarning("Unable to check for cycles", table+": "+err.Error())
+	}
+	defer rows.Close()
+
+	rowsRead := 0
+	for rows.Next() {
+		var id, issueID, depType string
+		var dependsOnID sql.NullString
+		if err := rows.Scan(&id, &issueID, &dependsOnID, &depType); err != nil {
+			// Must fail loudly: a skipped row would leave rowsRead short of
+			// pageSize, silently ending pagination with a truncated graph.
+			return 0, dependencyCycleWarning("Unable to check for cycles", "scan "+table+": "+err.Error())
+		}
+		rowsRead++
+		*lastID = id
+		if check := addBlockingDependencyEdge(edges, issueID, dependsOnID, depType, maxEdges, edgeCount); check != nil {
+			return 0, check
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return 0, dependencyCycleWarning("Row iteration error", err.Error())
+	}
+	return rowsRead, nil
+}
+
+// loadDependencyEdgeScan streams table in one query, the same single linear
+// pass issueops.AppendBlockingGraphInTx makes. It is the fallback for schema
+// shapes where id keyset pagination would be unsound; the exponential work
+// this check must avoid was the recursive path enumeration, not the plain
+// edge scan 'bd dep cycles' itself relies on.
+func loadDependencyEdgeScan(ctx context.Context, tx *sql.Tx, table string, maxEdges int, edgeCount *int, edges map[string][]string) *DoctorCheck {
+	//nolint:gosec // G202: table is hardcoded in dependencyCycleTables
+	rows, err := tx.QueryContext(ctx, `
+		SELECT issue_id, `+doctorDependencyTargetExpr+` AS depends_on_id, type
+		FROM `+table)
+	if err != nil {
+		return dependencyCycleWarning("Unable to check for cycles", table+": "+err.Error())
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var issueID, depType string
+		var dependsOnID sql.NullString
+		if err := rows.Scan(&issueID, &dependsOnID, &depType); err != nil {
+			return dependencyCycleWarning("Unable to check for cycles", "scan "+table+": "+err.Error())
+		}
+		if check := addBlockingDependencyEdge(edges, issueID, dependsOnID, depType, maxEdges, edgeCount); check != nil {
+			return check
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return dependencyCycleWarning("Row iteration error", err.Error())
+	}
+	return nil
+}
+
+// addBlockingDependencyEdge adds one row to the adjacency map if it is a
+// blocking edge. The type filter runs client-side like
+// issueops.AppendBlockingGraphInTx: a WHERE on type would let one paginated
+// page scan an unbounded id range when blocking edges are sparse, defeating
+// the bounded-work-per-query guarantee. Returns the graph-too-large warning
+// once the in-memory graph would exceed maxEdges.
+func addBlockingDependencyEdge(edges map[string][]string, issueID string, dependsOnID sql.NullString, depType string, maxEdges int, edgeCount *int) *DoctorCheck {
+	blocking := types.DependencyType(depType) == types.DepBlocks ||
+		types.DependencyType(depType) == types.DepConditionalBlocks
+	if !blocking || !dependsOnID.Valid {
+		return nil
+	}
+	if *edgeCount >= maxEdges {
+		return dependencyCycleWarning("Unable to check for cycles",
+			fmt.Sprintf("dependency graph too large (more than %d edges)", maxEdges))
+	}
+	edges[issueID] = append(edges[issueID], dependsOnID.String)
+	*edgeCount++
+	return nil
+}
+
+func dependencyCycleWarning(message, detail string) *DoctorCheck {
+	return &DoctorCheck{
+		Name:    "Dependency Cycles",
+		Status:  StatusWarning,
+		Message: message,
+		Detail:  detail,
+	}
+}
+
+// dependencyCycleNodes returns the sorted ids of every node that participates
+// in at least one dependency cycle: members of any strongly connected
+// component of size >= 2, plus nodes with a self-edge. This matches the set
+// the recursive SQL reported (nodes with some simple path back to themselves).
+func dependencyCycleNodes(edges map[string][]string) []string {
+	type frame struct {
+		node string
+		succ int
+	}
+
+	index := make(map[string]int, len(edges))
+	low := make(map[string]int, len(edges))
+	onStack := make(map[string]bool, len(edges))
+	var sccStack []string
+	next := 0
+	var cycleNodes []string
+
+	for root := range edges {
+		if _, seen := index[root]; seen {
+			continue
+		}
+		frames := []frame{{node: root}}
+		for len(frames) > 0 {
+			f := &frames[len(frames)-1]
+			v := f.node
+			if f.succ == 0 {
+				index[v] = next
+				low[v] = next
+				next++
+				sccStack = append(sccStack, v)
+				onStack[v] = true
+			}
+			descended := false
+			for f.succ < len(edges[v]) {
+				w := edges[v][f.succ]
+				f.succ++
+				if _, seen := index[w]; !seen {
+					frames = append(frames, frame{node: w})
+					descended = true
+					break
+				}
+				if onStack[w] && index[w] < low[v] {
+					low[v] = index[w]
+				}
+			}
+			if descended {
+				continue
+			}
+			if low[v] == index[v] {
+				scc := popSCC(&sccStack, onStack, v)
+				if len(scc) > 1 || hasSelfEdge(edges, v) {
+					cycleNodes = append(cycleNodes, scc...)
+				}
+			}
+			frames = frames[:len(frames)-1]
+			if len(frames) > 0 {
+				parent := frames[len(frames)-1].node
+				if low[v] < low[parent] {
+					low[parent] = low[v]
+				}
+			}
+		}
+	}
+
+	sort.Strings(cycleNodes)
+	return cycleNodes
+}
+
+func popSCC(sccStack *[]string, onStack map[string]bool, v string) []string {
+	var scc []string
+	for {
+		s := *sccStack
+		w := s[len(s)-1]
+		*sccStack = s[:len(s)-1]
+		onStack[w] = false
+		scc = append(scc, w)
+		if w == v {
+			return scc
+		}
+	}
+}
+
+func hasSelfEdge(edges map[string][]string, v string) bool {
+	for _, w := range edges[v] {
+		if w == v {
+			return true
+		}
+	}
+	return false
 }
 
 // CheckDeletionsManifest checks the status of the legacy deletions.jsonl file
@@ -383,7 +613,7 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	currentRepoID, err := beads.ComputeRepoIDForPath(path)
+	currentRepoID, currentSource, err := beads.ComputeRepoIDForPathWithSource(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{
@@ -400,7 +630,30 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
+	return classifyRepoFingerprint(storedRepoID, currentRepoID, currentSource)
+}
+
+// classifyRepoFingerprint turns a stored-vs-current fingerprint comparison into
+// a doctor check. Pure so the mismatch branches are unit-testable without a
+// store.
+func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource beads.RepoIDSource) DoctorCheck {
 	if storedRepoID != currentRepoID {
+		// bd-46vla: with no origin remote here, the local fingerprint is a
+		// path hash that can never match a remote-derived stored id — the
+		// signature of a synced clone on a host without the canonical remote.
+		// The stored id is the shared value; repo_id lives in the VERSIONED
+		// metadata table, so 'bd migrate --update-repo-id' would stamp this
+		// host's path hash into shared state and propagate it to every clone
+		// on the next sync (the GH#4361 class).
+		if currentSource == beads.RepoIDSourcePath {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but this checkout has no origin remote",
+				Detail:  fmt.Sprintf("stored: %s, current (path hash): %s — on a synced clone the stored id is the canonical shared value and this mismatch is cosmetic", truncateID(storedRepoID), truncateID(currentRepoID)),
+				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,

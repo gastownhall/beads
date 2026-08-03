@@ -8,20 +8,17 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// ErrSelfDependency is returned when a dependency edge would point an issue at
-// itself. It is the static prefix of the formatted message, wrapped so callers
-// can errors.Is it while the human-readable text is preserved byte-for-byte.
-var ErrSelfDependency = errors.New("cannot add self-dependency")
-
-// ErrDependencyCycle is returned when adding a dependency edge would introduce a
-// scheduling cycle. It is scoped to the dependency-add family — the single and
-// bulk add paths (add/addBulk) and the dolt cross-tier check — so callers can
-// errors.Is any dependency-add cycle rejection. The whole-graph construction
-// paths (ApplyIssueGraph/ApplyWispGraph) are a separate family and deliberately
-// do not carry this sentinel yet.
-var ErrDependencyCycle = errors.New("adding dependency would create a cycle")
+// The dependency-edge refusals are declared and documented by the public
+// contract package, github.com/steveyegge/beads/issueops. These are the same
+// values, so every domain.ErrX reference and every errors.Is site keeps
+// matching the identical error.
+var (
+	ErrSelfDependency  = issueops.ErrSelfDependency
+	ErrDependencyCycle = issueops.ErrDependencyCycle
+)
 
 // cycleError carries a fully-formatted cycle-rejection message while unwrapping
 // to ErrDependencyCycle. The bulk dependency-add path surfaces this text
@@ -52,41 +49,14 @@ func NewCycleError(format string, args ...any) error {
 	return cycleErrorf(format, args...)
 }
 
-// DependencyTypeConflictError is returned when an edge already exists between
-// the same pair with a DIFFERENT type. Its message is byte-identical to the
-// embedded issueops path (issueops/dependencies.go) so `bd dep add` surfaces
-// the same user-facing retype error on the domain/db seam as on the embedded
-// store. It is a typed error so the use-case can pass it through
-// unwrapped instead of burying it under an "add dep: insert:" prefix.
-type DependencyTypeConflictError struct {
-	IssueID       string
-	DependsOnID   string
-	ExistingType  string
-	RequestedType string
-}
+// DependencyTypeConflictError reports a duplicate dependency pair with a
+// conflicting requested type. See issueops.DependencyTypeConflictError.
+type DependencyTypeConflictError = issueops.DependencyTypeConflictError
 
-// DependencyHierarchyConflictError is returned when a blocking dependency
-// would gate an issue on one of its own ancestors or descendants. Either shape
-// can never clear under the parent-child close/blocking semantics.
-type DependencyHierarchyConflictError struct {
-	IssueID           string
-	BlockerID         string
-	BlockerIsAncestor bool
-}
-
-func (e *DependencyHierarchyConflictError) Error() string {
-	if e.BlockerIsAncestor {
-		return fmt.Sprintf("%s cannot be blocked by its ancestor %s: %s cannot close until its descendants finish, so the gate would never clear",
-			e.IssueID, e.BlockerID, e.BlockerID)
-	}
-	return fmt.Sprintf("%s cannot be blocked by its descendant %s: blocked status cascades to descendants, so %s would inherit the block and never close",
-		e.IssueID, e.BlockerID, e.BlockerID)
-}
-
-func (e *DependencyTypeConflictError) Error() string {
-	return fmt.Sprintf("dependency %s -> %s already exists with type %q (requested %q); remove it first with 'bd dep remove' then re-add",
-		e.IssueID, e.DependsOnID, e.ExistingType, e.RequestedType)
-}
+// DependencyHierarchyConflictError reports a dependency that would make a
+// blocking hierarchy impossible to complete. See
+// issueops.DependencyHierarchyConflictError.
+type DependencyHierarchyConflictError = issueops.DependencyHierarchyConflictError
 
 type DepDirection int
 

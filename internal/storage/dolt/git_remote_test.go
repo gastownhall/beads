@@ -1060,15 +1060,20 @@ func TestCreateIssueAfterPull(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Simulate a second peer via CLI: clone, add data with UUID
-	// rows (issue + event), commit, and push back to the shared remote.
+	// Simulate a second peer via CLI: clone, add an issue row, commit, and
+	// push back to the shared remote. events is dolt_ignored since 0062
+	// (bd-red8u): the table is not part of committed history, so a fresh
+	// clone arrives without it and audit rows never cross a remote — the
+	// peer's contribution is the issue row alone.
 	cloneDir := filepath.Join(setup.baseDir, "clone-ai")
 	doltClone(t, setup.remoteURL, cloneDir)
+	eventsProbe := exec.Command("dolt", "sql", "-q", "SELECT COUNT(*) FROM events")
+	eventsProbe.Dir = cloneDir
+	if out, err := eventsProbe.CombinedOutput(); err == nil {
+		t.Fatalf("fresh clone materialized the events table from the remote; want it absent (dolt_ignored, 0062)\noutput: %s", out)
+	}
 	sourceInsertIssue(t, cloneDir, "ai-clone-001", "Clone issue generating events")
-	runDoltSQL(t, cloneDir,
-		`INSERT INTO events (id, issue_id, event_type, actor, created_at) `+
-			`VALUES (UUID(), 'ai-clone-001', 'created', 'clone-user', NOW())`)
-	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001 with event")
+	sourceCommitAndPush(t, cloneDir, "Add ai-clone-001")
 
 	// Pull into the source store — this is the code path under test.
 	// With UUID primary keys, there are no counter collisions after pull.
@@ -1094,10 +1099,11 @@ func TestCreateIssueAfterPull(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to count events: %v", err)
 	}
-	// At least 3 events: source created (ai-src-001), clone created (ai-clone-001),
-	// post-pull created (ai-src-002)
-	if eventCount < 3 {
-		t.Errorf("expected at least 3 events, got %d", eventCount)
+	// At least 2 node-local events: source created (ai-src-001) and post-pull
+	// created (ai-src-002). The clone's own audit trail is node-local and
+	// never arrives via pull.
+	if eventCount < 2 {
+		t.Errorf("expected at least 2 events, got %d", eventCount)
 	}
 
 	for _, id := range []string{"ai-src-001", "ai-clone-001", "ai-src-002"} {

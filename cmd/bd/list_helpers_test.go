@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type watchListDependencyStoreStub struct {
@@ -275,7 +276,7 @@ func TestListSortIssues_ClosedNilLast(t *testing.T) {
 	open := &types.Issue{ID: "bd-3", ClosedAt: nil}
 
 	issues := []*types.Issue{open, closedOld, closedNew}
-	sortIssues(issues, "closed", false)
+	workapi.SortIssues(issues, "closed", false)
 	if issues[0].ID != "bd-2" || issues[1].ID != "bd-1" || issues[2].ID != "bd-3" {
 		t.Fatalf("unexpected order: %s, %s, %s", issues[0].ID, issues[1].ID, issues[2].ID)
 	}

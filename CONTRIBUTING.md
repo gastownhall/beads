@@ -44,20 +44,10 @@ beads/
 
 ## Running Tests
 
-```bash
-# Run all tests (recommended — uses correct build tags)
-make test
-
-# Run tests with coverage
-go test -tags gms_pure_go -v -coverprofile=coverage.out ./...
-go tool cover -html=coverage.out
-
-# Run specific package tests
-go test -tags gms_pure_go ./internal/storage/dolt/ -v
-
-# Run tests with race detection
-go test -tags gms_pure_go -race ./...
-```
+Use the canonical [testing guide](engdocs/TESTING.md) to choose focused tests,
+the proportional validation budget, and any applicable CI wrapper. The setup
+and safety notes in this file supplement that guide; they do not define a
+second test policy.
 
 ## Code Style
 
@@ -139,22 +129,19 @@ If you are contributing code that involves AI decision-making or orchestration, 
 
 ## Testing Guidelines
 
-For how to run tests, see [engdocs/TESTING.md](engdocs/TESTING.md). For what to
-test and why (the test pyramid and tiering we follow), see
-[engdocs/TESTING_PHILOSOPHY.md](engdocs/TESTING_PHILOSOPHY.md).
+For test commands, test design, and PR-readiness gates, see the canonical
+[engdocs/TESTING.md](engdocs/TESTING.md).
 
 ### Before Opening a PR
 
-- Run `make test` (or `./scripts/test.sh`) locally and make sure it passes.
-- Add tests for new functionality; extend existing tests when fixing bugs.
-- Write table-driven tests for multiple scenarios, use descriptive test
-  names, use `t.Run()` for subtests, and clean up resources (database
-  files, etc.) in test teardown.
+- Follow the proportional validation budget in
+  [engdocs/TESTING.md](engdocs/TESTING.md): docs-only changes use docs checks;
+  Go changes use focused and affected-package tests plus one final `make test`.
 - If you hit a test failure unrelated to your change, don't silently skip
   it -- check `.test-skip` and file an issue if it's not already tracked
-  (see [engdocs/TESTING.md](engdocs/TESTING.md#known-broken-tests)).
-- Ensure CI passes (`make ci-pr-core`, `make ci-pr-policy`, `make
-  ci-pr-lint`) before requesting review.
+  (see [engdocs/TESTING.md](engdocs/TESTING.md#failures-skips-and-review)).
+- Run a named CI wrapper only when its risk or surface is affected, or when
+  reproducing that CI check.
 - If your change touches ICU or build tags, see
   [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md) for the policy and rationale.
 

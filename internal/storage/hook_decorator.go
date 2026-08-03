@@ -259,6 +259,26 @@ func (h *HookFiringStore) RunInTransaction(ctx context.Context, commitMsg string
 	return nil
 }
 
+// RunInIssueLifecycleTransaction tracks lifecycle hooks and fires them only
+// after the underlying lifecycle transaction commits.
+func (h *HookFiringStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error {
+	var tracked *hookTrackingLifecycleTransaction
+	err := h.inner.RunInIssueLifecycleTransaction(ctx, commitMsg, func(tx IssueLifecycleTransaction) error {
+		tracked = &hookTrackingLifecycleTransaction{
+			hookTrackingTransaction: &hookTrackingTransaction{Transaction: tx},
+			reopener:                tx,
+		}
+		return fn(tracked)
+	})
+	if err != nil || tracked == nil {
+		return err
+	}
+	for _, p := range tracked.pending {
+		h.fireHook(p.event, p.issue)
+	}
+	return nil
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
@@ -266,6 +286,34 @@ func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
 		return
 	}
 	h.runner.Run(event, issue)
+}
+
+// CompleteIssueOperationCreate fires hooks for a committed guarded create.
+// dependencies is a request-neutral snapshot of the dependency changes whose
+// source issues need update hooks.
+func (h *HookFiringStore) CompleteIssueOperationCreate(ctx context.Context, issue *types.Issue, dependencies []*types.Dependency) {
+	for _, pending := range createHookEvents(issue) {
+		h.fireHook(pending.event, pending.issue)
+	}
+	if h.runner == nil || len(dependencies) == 0 {
+		return
+	}
+	request := &types.Issue{Dependencies: cloneDependenciesForHook(dependencies)}
+	for _, pending := range dependencyHookEvents(ctx, []*types.Issue{request}, h.inner.GetIssue, h.inner.GetDependencyRecords) {
+		h.fireHook(pending.event, pending.issue)
+	}
+}
+
+// CompleteIssueOperationUpdate fires the update hook for a committed guarded
+// operation.
+func (h *HookFiringStore) CompleteIssueOperationUpdate(issue *types.Issue) {
+	h.fireHook(hooks.EventUpdate, issue)
+}
+
+// CompleteIssueOperationClose fires the close hook for a committed guarded
+// close.
+func (h *HookFiringStore) CompleteIssueOperationClose(issue *types.Issue) {
+	h.fireHook(hooks.EventClose, issue)
 }
 
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
@@ -521,6 +569,22 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 		t.pending = append(t.pending, pendingHook{hooks.EventClose, issue})
 	}
 	return nil
+}
+
+type hookTrackingLifecycleTransaction struct {
+	*hookTrackingTransaction
+	reopener IssueLifecycleTransaction
+}
+
+func (t *hookTrackingLifecycleTransaction) ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error) {
+	changed, err := t.reopener.ReopenIssueWithResult(ctx, id, reason, actor)
+	if err != nil || !changed {
+		return changed, err
+	}
+	if issue, getErr := t.Transaction.GetIssue(ctx, id); getErr == nil {
+		t.pending = append(t.pending, pendingHook{hooks.EventUpdate, issue})
+	}
+	return true, nil
 }
 
 func (t *hookTrackingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
