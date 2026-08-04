@@ -207,3 +207,50 @@ func TestWispDeleteCascade_CleansUpAuxiliaryTables(t *testing.T) {
 		assertWispAuxRowsGone(t, ctx, store.db, wispB.ID)
 	})
 }
+
+// assertWispAuxTablesTotalZero fails the test if any row remains anywhere in
+// the four wisp auxiliary tables — a store-wide total, not scoped to a single
+// id. Used by TestWispDeleteCascade_RepeatedCyclesLeaveNoOrphans, where the
+// property under test is that orphan counts across the whole store stay at 0
+// cycle over cycle, not just that a single known id's rows are gone.
+func assertWispAuxTablesTotalZero(t *testing.T, ctx context.Context, db *sql.DB, cycle int) {
+	t.Helper()
+	for _, tc := range wispAuxTables {
+		var count int
+		//nolint:gosec // G201: tc.table comes from the fixed wispAuxTables literal, not input.
+		q := fmt.Sprintf("SELECT COUNT(*) FROM %s", tc.table)
+		if err := db.QueryRowContext(ctx, q).Scan(&count); err != nil {
+			t.Fatalf("cycle %d: count %s: %v", cycle, tc.table, err)
+		}
+		if count != 0 {
+			t.Errorf("cycle %d: expected 0 total rows in %s, got %d", cycle, tc.table, count)
+		}
+	}
+}
+
+// TestWispDeleteCascade_RepeatedCyclesLeaveNoOrphans is the round-2 regression
+// test for be-wnuyt's uncovered acceptance criterion: "orphan counts on a
+// fresh store stay at 0 after a reap cycle." TestWispDeleteCascade_CleansUpAuxiliaryTables
+// only ever takes a single before/after snapshot scoped to one wisp id; it
+// cannot catch a bug that only shows up across repeated create/delete
+// cycles (e.g. delete scoping that leaves a previous cycle's rows behind
+// once several wisps have passed through the table). This test runs several
+// create-seed-delete cycles and asserts the aux tables' store-wide totals —
+// not per-id existence — are 0 after every single cycle.
+func TestWispDeleteCascade_RepeatedCyclesLeaveNoOrphans(t *testing.T) {
+	store := setupWispCascadeStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+
+	const cycles = 5
+	for i := 0; i < cycles; i++ {
+		wisp := createTestWisp(t, ctx, store, fmt.Sprintf("repeat-cycle wisp %d", i))
+		seedWispAuxRows(t, ctx, store.db, wisp.ID)
+
+		if err := store.deleteWisp(ctx, wisp.ID); err != nil {
+			t.Fatalf("cycle %d: deleteWisp: %v", i, err)
+		}
+
+		assertWispAuxTablesTotalZero(t, ctx, store.db, i)
+	}
+}
