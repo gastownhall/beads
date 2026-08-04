@@ -41,6 +41,9 @@ type fakeIssues struct {
 	claims []claimCall
 	// claim answers the CAS. Default: the caller wins it.
 	claim func(id, actor string) (domain.ClaimResult, error)
+	// wispCAS records every CAS attempt against the WISP plane. It must stay
+	// empty: v0 claims issues only.
+	wispCAS []claimCall
 	// issue is what the same-transaction read returns; get overrides it.
 	issue *types.Issue
 	get   func(id string) (*types.Issue, error)
@@ -65,10 +68,23 @@ func (f *fakeIssues) GetIssue(_ context.Context, id string) (*types.Issue, error
 	return f.issue, nil
 }
 
+func (f *fakeIssues) ClaimWisp(_ context.Context, id, actor string) (domain.ClaimResult, error) {
+	f.mu.Lock()
+	f.wispCAS = append(f.wispCAS, claimCall{id, actor})
+	f.mu.Unlock()
+	return domain.ClaimResult{}, nil
+}
+
 func (f *fakeIssues) claimed() []claimCall {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.claims)
+}
+
+func (f *fakeIssues) wispClaims() []claimCall {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.wispCAS)
 }
 
 func seededIssue(id, assignee string, status types.Status) *types.Issue {
@@ -158,8 +174,8 @@ func TestClaimWritesOnceAndAnswersWithTheRowItWrote(t *testing.T) {
 	if len(uows) != 1 {
 		t.Fatalf("opened %d units of work, want 1", len(uows))
 	}
-	if got := uows[0].commitMessages(); len(got) != 1 || got[0] != "bd serve: claim bd-1 by alice" {
-		t.Errorf("commit messages = %q, want exactly [bd serve: claim bd-1 by alice]", got)
+	if got := uows[0].commitMessages(); len(got) != 1 || got[0] != "bd: claim bd-1 by alice" {
+		t.Errorf("commit messages = %q, want exactly [bd: claim bd-1 by alice]", got)
 	}
 
 	// The observability floor holds for the write too: a claim that waited on
@@ -471,7 +487,7 @@ func TestClaimTrimsTheActor(t *testing.T) {
 		t.Errorf("CAS actor = %v, want the trimmed value", got)
 	}
 	uows := provider.openedUOWs()
-	if got := uows[0].commitMessages(); len(got) != 1 || got[0] != "bd serve: claim bd-1 by alice" {
+	if got := uows[0].commitMessages(); len(got) != 1 || got[0] != "bd: claim bd-1 by alice" {
 		t.Errorf("commit messages = %q, want the trimmed actor", got)
 	}
 }
@@ -694,6 +710,59 @@ func TestClaimTakesADatabaseSlot(t *testing.T) {
 		return
 	}
 	t.Fatalf("no %s row in the route table", OpClaimIssue)
+}
+
+// TestClaimNeverReachesTheWispPlane pins as a test what was prose until the
+// claim became a role: this surface addresses the issues table only, so a wisp
+// id names no row it can see and answers 404 rather than claiming the wisp. The
+// fake's ClaimWisp records rather than panicking, so the assertion is "it was
+// never called" instead of "the test crashed".
+func TestClaimNeverReachesTheWispPlane(t *testing.T) {
+	issues := &fakeIssues{claim: func(string, string) (domain.ClaimResult, error) {
+		// What the issues-plane CAS reports for an id whose row lives in the
+		// wisp tables: the pre-image read finds nothing.
+		return domain.ClaimResult{}, fmt.Errorf("db: Claim bd-w1: read old issue: %w", sql.ErrNoRows)
+	}}
+	ts, _ := newClaimServer(t, issues)
+
+	resp := ts.claim(t, "/v0/beads/issues/bd-w1:claim", `{"actor":"alice"}`)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if body := decodeBody(t, resp); body["code"] != string(CodeNotFound) {
+		t.Errorf("code = %v, want %s", body["code"], CodeNotFound)
+	}
+	if got := issues.wispClaims(); len(got) != 0 {
+		t.Errorf("the claim fell back to the wisp plane: %v", got)
+	}
+}
+
+// TestAClaimTimesTheUnitsOfWorkItsClaimerOpens is the write-side twin of
+// TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens, and it exists for the same
+// tempting edit: `p.inner.IssueClaimer()` — "add the layer by recursion, like
+// every other decorator". This decorator's layer is on NewUOW, which only a
+// claimer holding THIS wrapper can reach, so recursion hands back a claimer
+// bound to the untimed provider. It compiles, and the one write on this
+// surface reports uow_ms=0.000 forever.
+func TestAClaimTimesTheUnitsOfWorkItsClaimerOpens(t *testing.T) {
+	issues := &fakeIssues{issue: seededIssue("bd-1", "alice", types.StatusInProgress)}
+	provider := &fakeProvider{issues: issues, delay: 5 * time.Millisecond}
+	ts := newTestServer(t, Config{Provider: provider})
+
+	if resp := ts.claim(t, claimPath, `{"actor":"alice"}`); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if n := len(provider.openedUOWs()); n != 1 {
+		t.Fatalf("opened %d units of work, want 1", n)
+	}
+
+	line := findLogLine(t, ts.stderr.String(), "op="+OpClaimIssue)
+	if !strings.Contains(line, "uow_ms=") {
+		t.Fatalf("claim request line has no uow_ms field:\n%s", line)
+	}
+	if strings.Contains(line, "uow_ms=0.000") {
+		t.Errorf("claim request line reports no unit-of-work time though the provider took 5ms; the claimer is bound to the untimed provider:\n%s", line)
+	}
 }
 
 func jsonBody(t *testing.T, v any) string {

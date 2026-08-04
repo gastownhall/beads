@@ -14,6 +14,33 @@ var ErrAlreadyClaimed = errors.New("issue already claimed")
 // same actor owning the claim.
 var ErrNotClaimable = errors.New("issue not claimable")
 
+// ClaimConflictError reports the state that refused a claim — the current
+// assignee and status, read inside the same transaction that lost the
+// compare-and-set. It wraps the refusal rather than replacing it, so the
+// sentinel still matches, the refusal's carefully-worded prose survives
+// byte-for-byte, and a caller can classify the conflict from typed fields
+// instead of parsing that prose.
+//
+// Err is set by every implementation that returns this type; a Claimer whose
+// same-transaction re-read fails returns the bare refusal instead.
+type ClaimConflictError struct {
+	// IssueID names the issue that refused the claim.
+	IssueID string
+	// Assignee is the holder observed by the losing transaction. It is empty
+	// when the refusal was about the status rather than a foreign holder.
+	Assignee string
+	// Status is the status observed by the losing transaction.
+	Status Status
+	// Err is the wrapped refusal. It matches ErrAlreadyClaimed or
+	// ErrNotClaimable.
+	Err error
+}
+
+func (e *ClaimConflictError) Error() string { return e.Err.Error() }
+
+// Unwrap makes ClaimConflictError match the refusal it carries.
+func (e *ClaimConflictError) Unwrap() error { return e.Err }
+
 // ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
 // current assignee does not match the expected assignee (including when the
 // issue is no longer assigned at all). The caller's view of the claim was

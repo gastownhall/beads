@@ -364,6 +364,19 @@ func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
 	return src.IssueReader()
 }
 
+// claimer returns the guarded atomic-claim surface for one request, obtained
+// from the provider's own capability accessor.
+//
+// It is the write-side twin of reader above, for all the same reasons: built
+// per request so its units of work are timed into THIS request's log line, and
+// held by INTERFACE so uow.IssueClaimerSource is load-bearing rather than
+// decorative. Config keeps holding a provider rather than a role — a claimer
+// on Config could not be bound to the request's own timing wrapper.
+func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
+	var src uow.IssueClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.IssueClaimer()
+}
+
 // WithUOW runs fn inside one unit of work and guarantees the rollback.
 //
 // The close context is DETACHED on purpose. Close sends ROLLBACK on the pinned

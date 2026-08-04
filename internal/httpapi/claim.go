@@ -14,8 +14,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
@@ -64,8 +62,14 @@ const (
 // fire (a user-controlled subprocess per mutation is an unbounded latency
 // multiplier and an orphaned child at shutdown), and the per-command
 // auto-commit machinery never runs. The only durable effect is the single
-// storage commit RunTxResult makes inside the claim's own transaction — which
-// is exactly what a proxied CLI write does today.
+// storage commit the claim role makes inside its own transaction — which is
+// exactly what a proxied CLI write does today.
+//
+// Everything above the role here is argument validation: the path split, the
+// media type, the body shape and the actor rules. The claim itself — the CAS,
+// the eligibility rules, the claim pools, the transaction retry and the
+// refusal vocabulary — belongs to issueops.Claimer, reached through the
+// provider's own accessor.
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 	id, ok := s.claimTarget(w, r)
 	if !ok {
@@ -82,18 +86,21 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rec := requestInfo(r.Context())
-	out, err := uow.RunTxResult(r.Context(), timedProvider{inner: s.provider, rec: rec},
-		func(ctx context.Context, uw uow.UnitOfWork) (claimOutcome, string, error) {
-			return claimOnUOW(ctx, uw, id, actor)
-		})
+	claimer, err := s.claimer(r)
 	if err != nil {
 		s.failClaim(w, r, err)
 		return
 	}
+	result, err := claimer.Claim(r.Context(), issueops.ClaimRequest{IssueID: id, Actor: actor})
+	if err != nil {
+		s.failClaim(w, r, err)
+		return
+	}
+	// `already_claimed` is the wire's name for the idempotent re-claim, which
+	// is exactly the case the role reports as an unchanged result.
 	writeJSON(w, apigen.ClaimResponse{
-		Issue:          *out.issue,
-		AlreadyClaimed: out.alreadyClaimed,
+		Issue:          *result.Issue,
+		AlreadyClaimed: !result.Changed,
 	})
 }
 
@@ -289,7 +296,7 @@ func validateActor(actor string) (string, *Result) {
 // This is deliberately WIDER than the schema's pattern, which excludes only C0
 // and DEL. The document's prose is what governs here — it promises refusal of
 // "any control character including newline" — and C1 qualifies: U+0085 is NEL,
-// a line break on a VT-conformant terminal, so "alice<U+0085>bd serve: claim bd-9
+// a line break on a VT-conformant terminal, so "alice<U+0085>bd: claim bd-9
 // by mallory" forges exactly the audit-trail line the C0 check exists to
 // prevent once the actor reaches the storage commit message. U+009B is the
 // one-byte CSI introducer, which makes an unfiltered actor an escape-sequence
@@ -300,120 +307,16 @@ func isControlChar(r rune) bool {
 	return unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
 }
 
-// claimOutcome is what one successful attempt produces: the row as it stands
-// after the CAS, and whether the caller already held it.
-type claimOutcome struct {
-	issue          *types.Issue
-	alreadyClaimed bool
-}
-
-// claimOnUOW is ONE attempt over one open unit of work: the CAS, then a fresh
-// read of the row it just wrote. No retry and no commit of its own — the caller
-// owns both, and uow.RunTxResult is the single implementation of that protocol
-// (the proxied CLI's claim runs through the same one). Copying the retry
-// protocol in here would be the second implementation that rule exists to
-// prevent.
-//
-// WHY THIS SHARES NO FUNCTION WITH `bd update --claim`, recorded here rather
-// than left as an oversight for someone to rediscover.
-//
-// The claim itself already IS one implementation, one level below both
-// surfaces: domain issueUseCaseImpl.claim holds the CAS, the eligibility
-// rules, the claim-pool case and the exact text of both refusals, and
-// ClaimIssue below and ApplyUpdate's spec.Claim arm — which is what the CLI
-// reaches — are two names for that one call. There is no claim logic above it
-// to extract.
-//
-// What sits above it on each surface is that surface's own protocol, and the
-// two have almost nothing in common. The CLI's is a batch over N ids that
-// accumulates a per-id failure list so a later winner cannot flip the exit code
-// and hide the ones that lost, resolves issue-or-wisp, applies guard
-// preconditions and merge-shaped field edits in the same attempt, fires hooks
-// after the write lands, and sorts its failures into an exit-code taxonomy
-// (ExitGuardMismatch is not exit 1). This one takes a single id, refuses wisps
-// outright, and answers a typed 409 carrying the assignee and status read back
-// inside the losing transaction so that a client never has to classify a
-// refusal by parsing its prose. A "shared claim function" spanning those would
-// be the batch loop and the problem-details shaping welded together, which is
-// not a claim and would have exactly one caller for each half.
-//
-// If that assessment stops holding it will be because a role appears — a claim
-// role beside issueops.Lifecycle, with its own accessor — and then both
-// surfaces move onto it. Until then they meet at uow.RunTxResult and at the
-// domain use case, which is where the correctness actually lives.
-//
-// WISPS ARE NOT CLAIMABLE OVER v0. This dispatches to the issues table only, so
-// a wisp id answers 404 — the wisp-aware resolve the CLI's `bd update --claim`
-// performs is the shared read path the detail slice introduces, and inventing a
-// private copy of it here is exactly the drift this design forbids.
-func claimOnUOW(ctx context.Context, uw uow.UnitOfWork, id, actor string) (claimOutcome, string, error) {
-	uc := uw.IssueUseCase()
-
-	res, err := uc.ClaimIssue(ctx, id, actor)
-	if err != nil {
-		return claimOutcome{}, "", claimRefusal(ctx, uc, id, err)
-	}
-
-	// Read back INSIDE this transaction, so the body is the row this CAS wrote
-	// and not a later writer's. It is also the same call `bd update --claim`
-	// re-fetches with (the tail of domain ApplyUpdate), which is what keeps the
-	// two surfaces from answering with differently shaped issues.
-	issue, err := uc.GetIssue(ctx, id)
-	if err != nil {
-		return claimOutcome{}, "", err
-	}
-	if issue == nil {
-		// A miss with a nil error is the other shape a not-found takes at this
-		// seam; normalize it rather than dereferencing nil.
-		return claimOutcome{}, "", fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
-	}
-
-	if res.AlreadyClaimed {
-		// The idempotent re-claim by the current holder: the CAS matched no row
-		// because there was nothing to change. An empty commit message tells
-		// RunTxResult to skip the commit, so a polling client cannot mint an
-		// empty storage commit per call.
-		return claimOutcome{issue: issue, alreadyClaimed: true}, "", nil
-	}
-	return claimOutcome{issue: issue}, fmt.Sprintf("bd serve: claim %s by %s", id, actor), nil
-}
-
-// claimConflict is a lost CAS carrying the state that lost it, read back in the
-// SAME transaction. It wraps the sentinel rather than replacing it, so
-// ClassifyError's errors.Is mapping keeps producing the 409 unedited.
-type claimConflict struct {
-	assignee string
-	status   string
-	err      error
-}
-
-func (c *claimConflict) Error() string { return c.err.Error() }
-func (c *claimConflict) Unwrap() error { return c.err }
-
-// claimRefusal attaches the conflicting state to a lost CAS.
-//
-// The re-read is the whole point: the 409's `assignee` and `issue_status`
-// members come from a query in this transaction, never from parsing fragments
-// out of the sentinel's message ("already assigned to", "claimed by"). That
-// substring classification is what a client adopting this endpoint gets to
-// delete, and it can only delete it if the server never does it either.
-func claimRefusal(ctx context.Context, uc domain.IssueUseCase, id string, err error) error {
-	if !errors.Is(err, storage.ErrAlreadyClaimed) && !errors.Is(err, storage.ErrNotClaimable) {
-		return err
-	}
-	issue, readErr := uc.GetIssue(ctx, id)
-	if readErr != nil || issue == nil {
-		// The refusal stands; it just cannot carry the extensions. Reporting
-		// the read's failure instead would replace a precise 409 with a 500.
-		return err
-	}
-	return &claimConflict{assignee: issue.Assignee, status: string(issue.Status), err: err}
-}
-
 // failClaim answers a failed claim, adding the extension members a typed 409
 // carries.
+//
+// The extensions come from issueops.ClaimConflictError, which the role fills
+// from a query inside the transaction that lost the CAS — never from parsing
+// fragments out of the sentinel's message ("already assigned to", "claimed
+// by"). That substring classification is what a client adopting this endpoint
+// gets to delete, and it can only delete it if the server never does it either.
 func (s *Server) failClaim(w http.ResponseWriter, r *http.Request, err error) {
-	var conflict *claimConflict
+	var conflict *issueops.ClaimConflictError
 	if !errors.As(err, &conflict) {
 		s.failErr(w, r, err)
 		return
@@ -422,11 +325,11 @@ func (s *Server) failClaim(w http.ResponseWriter, r *http.Request, err error) {
 	// `assignee` is documented with already_claimed only: an issue refused for
 	// its STATUS may well carry a stale assignee, and publishing it there would
 	// tell a client someone holds work they do not.
-	if res.Problem.Code == string(CodeAlreadyClaimed) && conflict.assignee != "" {
-		res = res.WithAssignee(conflict.assignee)
+	if res.Problem.Code == string(CodeAlreadyClaimed) && conflict.Assignee != "" {
+		res = res.WithAssignee(conflict.Assignee)
 	}
-	if conflict.status != "" {
-		res = res.WithIssueStatus(conflict.status)
+	if conflict.Status != "" {
+		res = res.WithIssueStatus(string(conflict.Status))
 	}
 	s.fail(w, r, res)
 }
@@ -443,14 +346,17 @@ type timedProvider struct {
 	rec   *reqInfo
 }
 
-// timedProvider carries the capability accessor, so a read handler asks the
+// timedProvider carries the capability accessors, so a handler asks the
 // provider it holds for the role — the same two-step a CLI command performs on
 // a store — instead of reaching past it to a constructor.
-var _ uow.IssueReaderSource = timedProvider{}
+var (
+	_ uow.IssueReaderSource  = timedProvider{}
+	_ uow.IssueClaimerSource = timedProvider{}
+)
 
 // IssueReader builds the reader OVER THIS WRAPPER rather than delegating to the
-// wrapped provider's own accessor, and that is the one place in this slice
-// where a constructor is the right call: the whole purpose of the wrapper is
+// wrapped provider's own accessor, and this and IssueClaimer below are the two
+// places where a constructor is the right call: the whole purpose of the wrapper is
 // that every unit of work the reader opens goes through NewUOW below and lands
 // in this request's uow_ms. `p.inner.IssueReader()` would return a reader
 // bound to the untimed provider and the measurement would silently read zero.
@@ -470,6 +376,15 @@ var _ uow.IssueReaderSource = timedProvider{}
 // provider ever appears, this is the line that has to grow a wrap.
 func (p timedProvider) IssueReader() (issueops.Reader, error) {
 	return uow.NewIssueReader(p)
+}
+
+// IssueClaimer builds the claimer OVER THIS WRAPPER, for the same reason and
+// with the same hazard as IssueReader above: the role's units of work must go
+// through NewUOW below or the one write on this surface reports uow_ms=0.000.
+// TestAClaimTimesTheUnitsOfWorkItsClaimerOpens is the assertion that fails
+// instead of the recursion looking correct.
+func (p timedProvider) IssueClaimer() (issueops.Claimer, error) {
+	return uow.NewIssueClaimer(p)
 }
 
 func (p timedProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {

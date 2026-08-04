@@ -636,6 +636,9 @@ func (s *configStore) IssueLifecycle() (issueops.Lifecycle, error) {
 func (s *configStore) IssueReader() (issueops.Reader, error) {
 	return nil, &storage.ErrUnsupported{Op: "IssueReader", Backend: "jira-config-stub"}
 }
+func (s *configStore) IssueClaimer() (issueops.Claimer, error) {
+	return nil, &storage.ErrUnsupported{Op: "IssueClaimer", Backend: "jira-config-stub"}
+}
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
 func (s *configStore) GetLocalMetadata(_ context.Context, _ string) (string, error) {

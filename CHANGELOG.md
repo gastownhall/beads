@@ -184,6 +184,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Tracker sync-pull always forces (remote state is authoritative).
   `bd batch close` remains unchecked, as before.
 
+- **Public `beads.Storage` interface gained a required `IssueClaimer()` method**
+  (bd-serve claim role). `IssueClaimer() (issueops.Claimer, error)` returns the
+  guarded atomic claim: `Claim(ctx, issueops.ClaimRequest) (issueops.ClaimResult,
+  error)`, one compare-and-set that sets assignee and status only while the
+  issue is claimable, reports the idempotent re-claim as `Changed: false` with
+  nothing written, and refuses a lost CAS with a wrapped `ErrAlreadyClaimed` or
+  `ErrNotClaimable`. When the refusing state was readable in the same
+  transaction the refusal is an `*issueops.ClaimConflictError` carrying the
+  assignee and status — so a client classifies a conflict from typed fields
+  instead of matching substrings in the message, while `errors.Is` and the
+  refusal's exact prose are unchanged. `POST /v0/beads/issues/{id}:claim` now
+  runs on the role; the CLI's `bd update --claim` is not on it yet. It is a role
+  of its own rather than a fifth verb on `issueops.Lifecycle` — a capability
+  that role does not cover gets its own accessor. Consumers that only *call* the
+  interface are unaffected; any external type that *implements* it (a custom
+  store, mock, or proxy) must add the method to compile. A decorator must
+  implement it by recursing into the store it wraps, the way `IssueLifecycle()`
+  does. `ClaimResult.Issue` is the post-state issue ROW — deliberately without
+  labels, dependency records or comments, unlike `UpdateResult` — because that
+  is what the already-published v0 claim response and `bd update --claim --json`
+  both report today.
+
 - **Public `beads.Storage` interface gained a required `IssueReader()` method**
   (bd-serve reader role). `IssueReader() (issueops.Reader, error)` is the read
   counterpart of `IssueLifecycle()`: one accessor returning a role that answers

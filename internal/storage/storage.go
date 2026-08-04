@@ -100,6 +100,13 @@ type Storage interface {
 	// reason about decorator-by-decorator is not a seam.
 	IssueReader() (issueops.Reader, error)
 
+	// IssueClaimer returns the guarded atomic-claim surface for this store:
+	// its own role beside IssueLifecycle and IssueReader rather than a fifth
+	// verb on the lifecycle. Like the other two accessors, every decorator in
+	// a store's chain answers for itself and layers its own behavior onto the
+	// inner result.
+	IssueClaimer() (issueops.Claimer, error)
+
 	// Issue CRUD
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error

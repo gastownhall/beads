@@ -120,17 +120,9 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	}
 
 	if rowsAffected == 0 {
-		// Query current state inside the same transaction for consistency.
-		var currentAssignee sql.NullString
-		var currentStatus types.Status
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(
-			`SELECT assignee, status FROM %s WHERE id = ?`, issueTable), id).Scan(&currentAssignee, &currentStatus)
+		assignee, currentStatus, err := readClaimStateInTx(ctx, tx, issueTable, id)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current claim state: %w", err)
-		}
-		assignee := ""
-		if currentAssignee.Valid {
-			assignee = currentAssignee.String
 		}
 		// Idempotent: if already claimed in_progress by the same actor, treat as success.
 		// This supports agent retry workflows where claim may be called multiple
@@ -188,6 +180,22 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	}
 
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
+}
+
+// readClaimStateInTx reads one row's coordination columns inside tx — the
+// state a lost compare-and-set reports. Shared by the CAS itself and by the
+// public claim role, so the two cannot disagree about what "the state that
+// refused this claim" means.
+//
+//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
+func readClaimStateInTx(ctx context.Context, tx DBTX, issueTable, id string) (string, types.Status, error) {
+	var assignee sql.NullString
+	var status types.Status
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT assignee, status FROM %s WHERE id = ?`, issueTable), id).Scan(&assignee, &status); err != nil {
+		return "", "", err
+	}
+	return assignee.String, status, nil
 }
 
 // ClaimReadyIssueInTx claims the first currently ready issue matching filter in
