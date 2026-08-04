@@ -203,7 +203,11 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
-	applied, err = MigrateUp(ctx, conn)
+	// A migration pass must run to completion once the lock is held: the
+	// caller's context can no longer abandon it mid-flight, which would
+	// leave schema_migrations short of latest under a released lock.
+	migrateCtx := context.WithoutCancel(ctx)
+	applied, err = MigrateUp(migrateCtx, conn)
 	var dirtyErr *DirtyTablesError
 	if err != nil && o.freshBootstrapHeal != nil && errors.As(err, &dirtyErr) {
 		// Authorization is checked after the dirty guard fires and while the
@@ -227,7 +231,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
-		applied, err = MigrateUp(ctx, conn)
+		applied, err = MigrateUp(migrateCtx, conn)
 	}
 	return applied, err
 }
