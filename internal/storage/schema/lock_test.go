@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -90,6 +91,66 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 	if applied != 1 {
 		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcquire
+// covers the gap left by TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit
+// (dolt package) and TestMigrationLockReleaseIgnoresCanceledCallerContext
+// (this package): both exercise a caller context that is already canceled
+// before or during lock acquisition/release, but neither covers a context
+// that expires while a migration is actually executing under a held lock.
+//
+// A migration lock guards exclusive access to a shared database. Abandoning
+// the pass mid-flight because the caller's context expired leaves
+// schema_migrations short of latest under a now-released lock -- a state
+// indistinguishable to the next caller from an interrupted-bootstrap crash,
+// and outside the narrow, capability-gated fresh-bootstrap-heal recovery
+// path. Once MigrateUpWithLock holds the lock, the migration pass must run
+// to completion regardless of the caller's context.
+//
+// The first query MigrateUp issues is delayed well past a short caller
+// deadline that only starts counting down after GET_LOCK (undelayed)
+// resolves, so the deadline reliably fires while migration work is in
+// flight, never during lock acquisition. Today, an abandoned pass leaves the
+// full expectation sequence unfulfilled, so the deferred RELEASE_LOCK call
+// also mismatches its (ordered, not-yet-reached) expectation -- the
+// resulting error is a join of the context-cancellation failure and that
+// mismatch, not just the latter alone.
+func TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcquire(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock, 250*time.Millisecond)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the migration to run to completion despite caller context expiry after lock acquisition", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1 (migration must not be abandoned mid-flight)", applied)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
@@ -221,9 +282,11 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 // MigrateUp runs before anything else, with every pattern actually inserted
 // (RowsAffected=1: an under-seeded database). mainVersion is what the seed's
 // cursor probe reports; version-gated patterns (events, >= 0062) are only
-// expected when it qualifies them.
-func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 1)
+// expected when it qualifies them. An optional firstDelay stalls the very
+// first seed exec (MigrateUp's first DB call) so a caller context can be
+// timed to expire while it is in flight.
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int, firstDelay ...time.Duration) {
+	expectIgnorePatternSeedRows(mock, mainVersion, 1, firstDelay...)
 }
 
 // expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
@@ -232,11 +295,14 @@ func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
 	expectIgnorePatternSeedRows(mock, mainVersion, 0)
 }
 
-func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64) {
-	for _, pattern := range doltIgnorePatterns {
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64, firstDelay ...time.Duration) {
+	for i, pattern := range doltIgnorePatterns {
+		exp := mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(pattern).
 			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
+		if i == 0 && len(firstDelay) > 0 {
+			exp.WillDelayFor(firstDelay[0])
+		}
 	}
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
 	for _, gated := range versionGatedDoltIgnorePatterns {
@@ -249,13 +315,13 @@ func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffe
 	}
 }
 
-func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
+func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock, firstStepDelay ...time.Duration) {
 	t.Helper()
 
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
 
-	expectIgnorePatternSeed(mock, latest-1)
+	expectIgnorePatternSeed(mock, latest-1, firstStepDelay...)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
