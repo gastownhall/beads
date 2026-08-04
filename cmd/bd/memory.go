@@ -420,10 +420,7 @@ Examples:
 func truncateMemory(s string, maxLen int) string {
 	// Replace newlines with spaces for single-line display
 	s = strings.ReplaceAll(s, "\n", " ")
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen-3] + "..."
+	return truncate(s, maxLen)
 }
 
 func init() {

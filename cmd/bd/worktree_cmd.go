@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -2352,8 +2353,25 @@ func (plan *gitignoreCleanupPlan) validate() error {
 }
 
 func truncate(s string, maxLen int) string {
+	// Byte budget (len counts bytes), but never split a UTF-8 code point.
+	// Compact prime memories and other display paths call this; a mid-rune
+	// cut emits invalid UTF-8 and breaks SessionStart hosts that decode strictly.
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	if maxLen <= 3 {
+		cut := maxLen
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		return s[:cut]
+	}
+	cut := maxLen - 3
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }
