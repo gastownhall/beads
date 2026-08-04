@@ -17,6 +17,7 @@ func (s *testSuite) TestIssueSearchAcrossIssuesAndWispsWithCounts() {
 	s.Run("SortByPriorityThenCreatedAt", s.searchCountsSortOrder)
 	s.Run("LimitRespected", s.searchCountsLimit)
 	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.searchCountsCollision)
+	s.Run("PredicateFormMatchesByIDsForm", s.searchCountsPredicateMatchesByIDs)
 }
 
 func (s *testSuite) searchCountsDepAndRDep() {
@@ -215,6 +216,61 @@ func (s *testSuite) searchCountsCollision() {
 	s.Require().Len(out.Items, 1, "the id must come back once, not once per plane")
 	s.Require().NotNil(out.Items[0].Issue)
 	s.Equal("wisp", out.Items[0].Issue.Title, "the wisps copy is canonical; the issues copy is the stale one")
+}
+
+// searchCountsPredicateMatchesByIDs pins be-dlt6f's result-equivalence
+// guarantee (see the SearchCountsSQL doc comment): narrowing each aggregate
+// subquery's input to the driver's filtered row set must change the query
+// plan, not the rows. Every count/JSON field the mega-query projects is
+// exercised (dep/rdep/comment counts, parent, labels, deps_json) so a fix
+// that accidentally drops rows from one subquery's bound would surface here.
+func (s *testSuite) searchCountsPredicateMatchesByIDs() {
+	r := s.issueRepo()
+	dep := s.depRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+
+	parent := newTestIssue("bd-srxc-par2-parent", "parent")
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	mid := newTestIssue("bd-srxc-par2-mid", "mid")
+	s.Require().NoError(r.Insert(s.Ctx(), mid, "tester", domain.InsertIssueOpts{}))
+	a := newTestIssue("bd-srxc-par2-a", "a")
+	s.Require().NoError(r.Insert(s.Ctx(), a, "tester", domain.InsertIssueOpts{}))
+
+	// mid blocks a (outgoing/DependencyCount); a blocks mid (incoming/
+	// DependentCount); mid is a child of parent (Parent); mid has a label and
+	// a comment. Every projected count/JSON field is nonzero so a subquery
+	// that silently drops mid's rows would show up as a mismatch, not a
+	// coincidental 0 == 0.
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-mid", "bd-srxc-par2-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-a", "bd-srxc-par2-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-mid", "bd-srxc-par2-parent", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(labelRepo.Insert(s.Ctx(), "bd-srxc-par2-mid", "alpha", "tester", domain.LabelOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO comments (id, issue_id, author, text) VALUES (UUID(), ?, ?, ?)",
+		"bd-srxc-par2-mid", "tester", "comment")
+	s.Require().NoError(err)
+
+	// IDPrefix drives the predicate form (whereSQL bounds the driver, ids is
+	// empty); IDs drives the by-IDs form. Same issue, same filter intent.
+	byPredicate, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDPrefix: "bd-srxc-par2-mid", SkipWisps: true})
+	s.Require().NoError(err)
+	s.Require().Len(byPredicate.Items, 1)
+
+	byID, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDs: []string{"bd-srxc-par2-mid"}, SkipWisps: true})
+	s.Require().NoError(err)
+	s.Require().Len(byID.Items, 1)
+
+	p, i := byPredicate.Items[0], byID.Items[0]
+	s.Equal(i.DependencyCount, p.DependencyCount, "dependency_count parity")
+	s.Equal(i.DependentCount, p.DependentCount, "dependent_count parity")
+	s.Equal(i.CommentCount, p.CommentCount, "comment_count parity")
+	s.Require().NotNil(i.Parent)
+	s.Require().NotNil(p.Parent)
+	s.Equal(*i.Parent, *p.Parent, "parent parity")
+	s.ElementsMatch(i.Issue.Labels, p.Issue.Labels, "labels parity")
+	s.Require().Len(p.Issue.Dependencies, len(i.Issue.Dependencies), "deps_json length parity")
 }
 
 func iwcIDs(page domain.SearchCountsPage) []string {

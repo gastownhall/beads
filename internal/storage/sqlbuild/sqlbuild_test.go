@@ -301,7 +301,30 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
-	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, CountsHydration{SkipLabels: true})
+	// Predicate form must bound every aggregate subquery to the filtered driver
+	// row set, not aggregate the whole side table before the outer join
+	// discards non-matching rows (be-dlt6f: unfiltered wisp_labels join costs a
+	// fixed ~1.6s regardless of how narrow the search is). The filter clause
+	// must still appear exactly once — repeating whereSQL's text once per
+	// subquery would add placeholders the caller (which supplies its own args
+	// separately; predicate form returns nil) never fills in.
+	if n := strings.Count(sql, "WHERE x = ?"); n != 1 {
+		t.Errorf("WHERE x = ? must appear exactly once (else caller args desync), got %d", n)
+	}
+	if n := strings.Count(sql, "filtered_ids"); n < 7 {
+		t.Errorf("filtered_ids must bound the driver and all 6 aggregate subqueries (labels, dc, rc-deps, rc-wisp, cc, pc, d), got %d references:\n%s", n, sql)
+	}
+	labelsStart := strings.Index(sql, "JSON_ARRAYAGG(label)")
+	labelsEnd := strings.Index(sql, "GROUP BY issue_id")
+	if labelsStart < 0 || labelsEnd < 0 || labelsEnd < labelsStart {
+		t.Fatalf("could not locate labels subquery block")
+	}
+	if block := sql[labelsStart:labelsEnd]; !strings.Contains(block, "filtered_ids") {
+		t.Errorf("labels subquery must bound to filtered_ids, got block:\n%s", block)
+	}
+
+	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
+>>>>>>> 1f6306fba (test(feat): red — Fix: predicate-form search aggregates the whole side table — unfiltered wisp_labels join costs a fixed ~1.6s (refs be-dlt6f))
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
@@ -316,6 +339,11 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 	if !strings.Contains(noWispDeps, "NULL AS labels_json") {
 		t.Error("counts SQL must project NULL labels_json when skipLabels is set")
+	}
+	// An unfiltered predicate form has no whereSQL to bound the subqueries to,
+	// so it must keep the plain unbounded shape.
+	if strings.Contains(noWispDeps, "filtered_ids") {
+		t.Error("unfiltered predicate form must not reference filtered_ids")
 	}
 
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
@@ -336,6 +364,11 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 	if len(idArgs) != 8*2 {
 		t.Errorf("by-IDs args = %d, want %d", len(idArgs), 8*2)
+	}
+	// The by-IDs form's subqueries are already id-constrained; it must not
+	// also reference filtered_ids (that mechanism is predicate-form only).
+	if strings.Contains(byIDs, "filtered_ids") {
+		t.Error("by-IDs form must not reference filtered_ids")
 	}
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
