@@ -180,11 +180,20 @@ func runServe() error {
 
 // serveModeGate refuses the one workspace mode bd serve cannot answer for.
 //
-// Embedded is permanent, and the message is written to promise nothing: there
-// is no unit-of-work provider for that backend, and there will not be one. Its
+// Embedded is permanent, and the message is written to promise nothing: its
 // commit protocol runs outside the SQL transaction on a separate connection, so
-// the per-request atomicity this server's contract states would be a lie there
-// even if a provider were written.
+// the per-request atomicity this server's contract states would be a lie there.
+// That is a property of the backend rather than of what has been built so far,
+// which is also why no unit-of-work provider for it exists or will.
+//
+// THIS IS THE ENFORCEMENT POINT, and it is now the only one. It used to be
+// redundant: httpapi.Listen took a unit-of-work provider or nothing, so deleting
+// this gate would still have left an embedded-backed server unbuildable.
+// httpapi.Config now also accepts the two issue roles as a database source and
+// the embedded store publishes both accessors, so it is buildable — and nothing
+// downstream will catch a bypass here, because internal/httpapi cannot see the
+// backend behind a role. That is also why runServe builds a provider and never
+// hands Listen roles, which TestServeBuildsOnlyAProviderBackedServer pins.
 //
 // Every mode that does have a SQL server behind it is served: proxied (managed
 // or external), and — since bd-emv — server, external-server and shared-server,
@@ -201,9 +210,10 @@ func serveModeGate() error {
 	return nil
 }
 
-// errServeEmbedded is the PERMANENT refusal. There is no unit-of-work provider
-// for the embedded backend and there will not be one: the message says what the
-// workspace is and what serve needs, and promises nothing further.
+// errServeEmbedded is the PERMANENT refusal. The message says what the
+// workspace is and what serve needs, and promises nothing further: the reason
+// is the embedded backend's commit protocol (see serveModeGate), which no
+// amount of provider or role plumbing changes.
 func errServeEmbedded() error {
 	return fmt.Errorf("%w: bd serve requires a Dolt SQL server; this workspace uses embedded Dolt",
 		&storage.ErrUnsupported{Op: "serve", Backend: "embedded-dolt"})

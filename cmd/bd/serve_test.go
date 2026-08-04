@@ -2,6 +2,12 @@ package main
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -193,4 +199,97 @@ func useStorageModeGlobals(t *testing.T) {
 		serverMode, proxiedServerMode = oldServerMode, oldProxied
 		cmdCtx, testModeUseGlobals = oldCmdCtx, oldUseGlobals
 	})
+}
+
+// TestServeBuildsOnlyAProviderBackedServer is the source-level half of the
+// embedded refusal, and it exists because the other half stopped being
+// structural.
+//
+// httpapi.Listen once took a unit-of-work provider or nothing, and there is no
+// provider for the embedded backend, so an embedded-backed server could not be
+// built even with serveModeGate deleted. httpapi.Config now also accepts the
+// two issue roles as a database source, and the embedded store publishes both
+// accessors — so the shortest edit from here to a server whose per-request
+// atomicity claim is false is handing Listen the roles off the store the root
+// command already opened. internal/httpapi will not catch it: a role is an
+// interface, and nothing about one says which backend is behind it.
+//
+// So the claim this pins is narrow and checkable: bd names exactly one database
+// source, and it is the provider serveModeGate has already vouched for. An edit
+// that reaches for the roles instead fails here and has to read that gate.
+func TestServeBuildsOnlyAProviderBackedServer(t *testing.T) {
+	dir := packageDir(t)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+
+	fset := token.NewFileSet()
+	configs, provided := 0, 0
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, filepath.Join(dir, name), nil, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", name, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			lit, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			sel, ok := lit.Type.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Config" {
+				return true
+			}
+			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "httpapi" {
+				return true
+			}
+			configs++
+			for _, elt := range lit.Elts {
+				kv, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := kv.Key.(*ast.Ident)
+				if !ok {
+					continue
+				}
+				switch key.Name {
+				case "Reader", "Claimer":
+					t.Errorf("%s: bd serve sets httpapi.Config.%s. The roles source bypasses the unit-of-work "+
+						"provider serveModeGate vouched for, and internal/httpapi cannot tell an embedded-backed "+
+						"role from any other — read serveModeGate before changing this",
+						fset.Position(kv.Pos()), key.Name)
+				case "Provider":
+					provided++
+				}
+			}
+			return true
+		})
+	}
+
+	// Both counts, so the test cannot pass because the literal moved, was
+	// renamed, or stopped naming a source at all.
+	if configs == 0 {
+		t.Fatal("no httpapi.Config literal in cmd/bd: this test no longer looks at the code that builds the server")
+	}
+	if provided != configs {
+		t.Errorf("%d of %d httpapi.Config literals set Provider; every server bd builds is provider-backed", provided, configs)
+	}
+}
+
+// packageDir is this test file's own directory, resolved from the compiled-in
+// source path rather than from the working directory: tests in this package
+// chdir into temporary workspaces, and a relative path would read whichever one
+// happened to be current.
+func packageDir(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot resolve this test's source path")
+	}
+	return filepath.Dir(file)
 }

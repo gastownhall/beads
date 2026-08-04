@@ -60,6 +60,36 @@ type Unwrapper interface {
 // Unwrap returns the underlying store, satisfying Unwrapper.
 func (h *HookFiringStore) Unwrap() DoltStorage { return h.inner }
 
+// RoleFiresHooks reports whether an issue role taken off a store carries this
+// decorator's hook layer — that is, whether a landed write through it runs the
+// workspace's user hook scripts.
+//
+// It is the question a caller cannot answer from the role's own type, and the
+// one a NETWORK server has to answer before it serves anything: `bd serve`
+// documents that hooks do not fire (a user-controlled subprocess per mutation
+// is an unbounded latency multiplier and an orphaned child at shutdown), and
+// the accessors on a decorated store return decorated roles by design —
+// IssueClaimer recurses precisely so a CLI claim keeps its on_update. So the
+// exact value the obvious `store.IssueClaimer()` produces on bd's own storage
+// chain is the one value that server must refuse, and this is what lets it.
+//
+// A decorator built with a nil runner still answers true. Whether hooks fire
+// on this instant's configuration is not the property: the type's contract is
+// to fire them, and a server that admitted it would be one config change away
+// from breaking its own.
+//
+// NOT ENFORCED, because the assertion is on the type: a role this decorator
+// produced and something else then wrapped is invisible here, and so is a
+// future decorator elsewhere that fires hooks of its own. Every case that
+// exists today is in the switch, and a new one belongs there too.
+func RoleFiresHooks(role any) bool {
+	switch role.(type) {
+	case *hookIssueClaimer:
+		return true
+	}
+	return false
+}
+
 // UnwrapStore peels back any chain of Unwrapper decorators and returns
 // the innermost store. Use this before type-asserting to optional
 // interfaces (StoreLocator, BackupStore, Flattener, RawDBAccessor, etc.)

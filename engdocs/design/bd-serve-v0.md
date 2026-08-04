@@ -298,12 +298,36 @@ methods on the read one.
 
 ## Workspace modes
 
-`bd serve` refuses exactly one workspace mode, permanently: embedded Dolt.
-There is no unit-of-work provider for that backend and there will not be one.
-Its commit protocol runs outside the SQL transaction on a separate connection,
-so the per-request atomicity this contract states would be a lie there even if
-a provider were written. The refusal names the workspace and what serve needs,
-and promises nothing further.
+`bd serve` refuses exactly one workspace mode, permanently: embedded Dolt. Its
+commit protocol runs outside the SQL transaction on a separate connection, so
+the per-request atomicity this contract states would be a lie there. That is a
+property of the backend rather than of what has been built so far, which is what
+makes the refusal permanent — and it is also why there is no unit-of-work
+provider for it and will not be one. The refusal names the workspace and what
+serve needs, and promises nothing further.
+
+**WHERE IT IS ENFORCED**, stated exactly, because it used to be enforced by
+construction and no longer is. `httpapi.Listen` once took a unit-of-work
+provider or nothing at all, so an embedded-backed server was not *constructible*
+— the absence of a provider was itself the refusal. `httpapi.Config` now also
+takes the two issue roles as a database source, and the embedded store publishes
+both accessors, so one is. The gate is `serveModeGate` in `cmd/bd/serve.go`: it
+runs before serve resolves anything else about the workspace, and
+`TestServeRefusalsPromiseNothing` pins both that it refuses and that its message
+promises nothing. `bd serve` also builds provider-backed servers and only those,
+which `TestServeBuildsOnlyAProviderBackedServer` pins against the source of
+`cmd/bd` — so a change that routed serve through store roles fails a test rather
+than quietly reaching the embedded backend by a path this gate never sees.
+
+**NOT ENFORCED.** `internal/httpapi` does not refuse an embedded-backed server
+and cannot. A role is an interface, and no inspection of one reveals the commit
+protocol of the backend behind it; every check available at that layer is a
+self-declaration by the same caller-supplied code being checked, which is the
+trust it would be replacing rather than a replacement for it. The precondition
+is therefore stated on `Config.Reader`/`Config.Claimer` — each call commits on
+its own, atomically and durably — and a caller outside `bd` that hands the
+server embedded-backed roles gets a server whose per-request atomicity claim is
+false, with nothing in this repository to stop it.
 
 Every mode with a SQL server behind it is served: proxied (managed or
 external), and server, external-server and shared-server. In the latter three

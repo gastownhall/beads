@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -443,4 +444,145 @@ func TestWithUOWRefusesWithoutAProvider(t *testing.T) {
 	if ran {
 		t.Error("the callback ran without a unit of work")
 	}
+}
+
+// TestARoleThatAnswersWithNothingIsNotDereferenced covers the one guarantee a
+// configured role cannot be asked for: that a call which reports no error
+// carries the value the handler is about to dereference.
+//
+// It used to hold BY CONSTRUCTION. s.reader() could only return
+// uow.NewIssueReader(...), whose Get routes through workapi.GetIssueOrWisp —
+// a function whose whole reason to exist is folding both miss shapes into
+// ErrNotFound so that no caller can write `if err != nil || issue == nil` and
+// report a dropped connection as "not found". A caller-supplied role is
+// ordinary code and carries no such guarantee, and both handlers that hold a
+// pointer from a role dereference it unconditionally.
+func TestARoleThatAnswersWithNothingIsNotDereferenced(t *testing.T) {
+	// The answer is the SAME 404 a real miss produces, byte for byte: the
+	// document states one not-found body, and a client must not be able to
+	// tell a broken role from an absent issue.
+	t.Run("a reader with no detail view is the documented miss", func(t *testing.T) {
+		silent := newTestServer(t, Config{Reader: &roleReader{}, Claimer: &roleClaimer{}})
+		missed := newTestServer(t, Config{
+			Reader:  &roleReader{err: fmt.Errorf("get bd-1: %w", storage.ErrNotFound)},
+			Claimer: &roleClaimer{},
+		})
+
+		got := silent.get(t, "/v0/beads/issues/bd-1")
+		want := missed.get(t, "/v0/beads/issues/bd-1")
+		if got.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404: %s", got.StatusCode, readAll(t, got))
+		}
+		gotBody, wantBody := decodeBody(t, got), decodeBody(t, want)
+		// request_id is per request and is the only member that may differ.
+		delete(gotBody, "request_id")
+		delete(wantBody, "request_id")
+		if !reflect.DeepEqual(gotBody, wantBody) {
+			t.Errorf("body = %v, want the body a real miss produces: %v", gotBody, wantBody)
+		}
+		assertNoPanic(t, silent)
+	})
+
+	// A claim that reports success without a row is not a documented outcome —
+	// there is no wire code for it — so it is the generic 500. What it must not
+	// be is a panic: the response is recovered into the same status, but the
+	// fault reaches the log as a stack trace instead of as an error, and the
+	// panic path writes no request_error line for an operator to alert on.
+	t.Run("a claimer with no issue is the generic failure", func(t *testing.T) {
+		ts := newTestServer(t, Config{
+			Reader:  &roleReader{},
+			Claimer: &roleClaimer{result: issueops.ClaimResult{Changed: true}},
+		})
+
+		resp := ts.claim(t, claimPath, `{"actor":"alice"}`)
+		if resp.StatusCode != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want 500: %s", resp.StatusCode, readAll(t, resp))
+		}
+		if body := decodeBody(t, resp); body["code"] != string(CodeInternal) {
+			t.Errorf("code = %v, want %s", body["code"], CodeInternal)
+		}
+		assertNoPanic(t, ts)
+		if line := findLogLine(t, ts.stderr.String(), "event=request_error"); !strings.Contains(line, "claim") {
+			t.Errorf("the 500 is logged without naming the operation that produced it:\n%s", line)
+		}
+	})
+}
+
+// assertNoPanic fails when the server recovered a panic. Every case in this
+// file is one a handler could reach by trusting a role's return value, so the
+// status alone does not distinguish a refusal from a recovered dereference.
+func assertNoPanic(t *testing.T, ts *testServer) {
+	t.Helper()
+	if log := ts.stderr.String(); strings.Contains(log, "event=panic") {
+		t.Errorf("a handler dereferenced what the role did not return:\n%s", log)
+	}
+}
+
+// hookableStore is the smallest thing storage.NewHookFiringStore will decorate:
+// the DoltStorage surface is embedded nil because IssueClaimer is the only
+// method this test ever reaches through it.
+type hookableStore struct {
+	storage.DoltStorage
+	claimer issueops.Claimer
+}
+
+func (s hookableStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
+
+// TestListenRefusesARoleThatFiresTheWorkspaceHooks.
+//
+// `bd serve` documents that hooks do not fire, and until roles became
+// configuration nothing could make them: the provider seam builds its claimer
+// from a unit of work, which carries no hook layer at all. A store is the
+// opposite — its accessors hand out its decorators, deliberately, so that a CLI
+// claim keeps its on_update — and bd's own chain is
+// caller -> HookFiringStore -> InstrumentedStorage -> raw. So the one line a
+// caller with a store would obviously write, store.IssueClaimer(), returns
+// exactly the claimer this server may not serve.
+//
+// The refusal is at Listen because the alternative is silent: a server built
+// that way answers every request correctly and runs a user's subprocess per
+// landed claim for as long as it is up.
+func TestListenRefusesARoleThatFiresTheWorkspaceHooks(t *testing.T) {
+	// A nil runner, which is what a HookFiringStore built without one carries.
+	// The refusal must not depend on that: the type's job is to fire hooks, and
+	// a server that admitted this one would be a config change away from
+	// breaking its own contract.
+	hooked := storage.NewHookFiringStore(hookableStore{claimer: &roleClaimer{}}, nil)
+
+	fromTheStore, err := hooked.IssueClaimer()
+	if err != nil {
+		t.Fatalf("IssueClaimer: %v", err)
+	}
+	if !storage.RoleFiresHooks(fromTheStore) {
+		t.Fatal("the store's own accessor no longer returns a hook-firing claimer; this test proves nothing")
+	}
+
+	listen := func(cl issueops.Claimer) (*Server, error) {
+		return Listen(Config{
+			Addr:    "127.0.0.1:0",
+			Stdout:  io.Discard,
+			Stderr:  io.Discard,
+			Reader:  &roleReader{},
+			Claimer: cl,
+		})
+	}
+
+	if _, err := listen(fromTheStore); err == nil {
+		t.Error("Listen bound a server whose claim route runs the workspace's hook scripts")
+	} else if !strings.Contains(err.Error(), "hooks") {
+		t.Errorf("refusal %q does not say what is wrong with the role", err)
+	}
+
+	// And the store BENEATH the decorator is the value the doc sends a caller
+	// to, so it has to be servable. Without this the guard could be a blanket
+	// refusal of every store-backed claimer and still pass.
+	fromBeneath, err := hooked.Unwrap().IssueClaimer()
+	if err != nil {
+		t.Fatalf("IssueClaimer on the undecorated store: %v", err)
+	}
+	srv, err := listen(fromBeneath)
+	if err != nil {
+		t.Fatalf("Listen: %v, want a bound server for the claimer beneath the hook layer", err)
+	}
+	t.Cleanup(func() { _ = srv.http.Close() })
 }

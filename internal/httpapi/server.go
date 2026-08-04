@@ -24,6 +24,7 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
@@ -128,18 +129,40 @@ type Config struct {
 	// would bind, answer every read, and fail the one write on this surface with
 	// a nil dereference inside a handler.
 	//
-	// A caller with a store passes what the store's own accessors return:
+	// A caller with a store takes them off the store's own accessors, and WHICH
+	// store value it takes them off is the whole question. Every decorator a
+	// store wears is on the value its accessor returns — that is what the
+	// accessors are for — and bd's chain is
+	// HookFiringStore -> InstrumentedStorage -> raw, so `store.IssueClaimer()`
+	// there returns a claimer that runs the workspace's on_update hook script
+	// for every claim it lands. That is precisely what this server documents it
+	// does not do (cmd/bd/serve.go). Take the roles from BENEATH the hook layer:
 	//
-	//	rd, err := store.IssueReader()
-	//	cl, err := store.IssueClaimer()
+	//	src := store
+	//	if hooked, ok := src.(*storage.HookFiringStore); ok {
+	//		src = hooked.Unwrap() // keeps the telemetry layer, drops the hooks
+	//	}
+	//	rd, err := src.IssueReader()
+	//	cl, err := src.IssueClaimer()
 	//	httpapi.Listen(httpapi.Config{Reader: rd, Claimer: cl, ...})
+	//
+	// Listen refuses a hook-firing role rather than trusting the paragraph
+	// above — see checkDatabaseSource.
+	//
+	// WHAT LISTEN CANNOT CHECK, and the caller therefore owns: each call must
+	// commit ON ITS OWN, atomically and durably. That is what this server's
+	// contract states per request, and nothing here can observe the commit
+	// protocol of the backend behind an interface — every check available would
+	// be a self-declaration by the same caller-supplied code being checked.
+	// Embedded Dolt is the backend that does not qualify (its commit runs
+	// outside the SQL transaction on a separate connection) and it is refused
+	// where the workspace is actually known: serveModeGate in cmd/bd/serve.go.
 	//
 	// Unlike the provider path these are built ONCE, before Listen, rather than
 	// per request. The provider path rebuilds its roles per request for exactly
 	// one reason — so the units of work they open land in that request's uow_ms
 	// (see Server.reader) — and a role reached this way opens none through this
-	// server, so a rebuild would buy nothing. Every decorator a store carries is
-	// already on the value its accessor returned.
+	// server, so a rebuild would buy nothing.
 	Reader  issueops.Reader
 	Claimer issueops.Claimer
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
@@ -332,12 +355,26 @@ func Listen(cfg Config) (*Server, error) {
 // set both holds two different opinions about where this server reads from, and
 // silently honoring one of them leaves the other as configuration that looks
 // live and is not.
+//
+// The last refusal is the one a caller does not see coming. A store wears
+// decorators and its accessors hand them out — that is what the accessors are
+// FOR — so the obvious `store.IssueClaimer()` on bd's own storage chain returns
+// a claimer that fires the workspace's on_update hook for every claim it lands.
+// This server's contract says hooks do not fire (cmd/bd/serve.go), and a
+// contract broken by the caller's most natural line is not a contract. Refusing
+// at Listen is the difference between a startup error naming the store to take
+// roles from and a server that has been quietly running a user's subprocess per
+// claim since it booted.
 func checkDatabaseSource(cfg Config) error {
 	switch {
 	case cfg.Provider != nil && (cfg.Reader != nil || cfg.Claimer != nil):
 		return errors.New("httpapi: both a unit-of-work provider and issue roles were set; pass exactly one database source")
 	case cfg.Provider == nil && (cfg.Reader == nil || cfg.Claimer == nil):
 		return errors.New("httpapi: no database source: set Provider, or Reader and Claimer together")
+	case storage.RoleFiresHooks(cfg.Reader) || storage.RoleFiresHooks(cfg.Claimer):
+		return errors.New("httpapi: a configured role fires this workspace's hooks; " +
+			"this server does not run hooks, so take the roles from the store beneath the hook decorator " +
+			"((*storage.HookFiringStore).Unwrap)")
 	}
 	return nil
 }
@@ -412,10 +449,9 @@ func (s *Server) connState(_ net.Conn, state http.ConnState) {
 
 // reader returns the issue-query surface for one request.
 //
-// On the ROLES source it is the configured role, handed back unchanged. There
-// is nothing to build and nothing to wrap: a store's accessor already answered
-// for its whole decorator chain when the caller called it, and this server
-// opens no units of work on that path.
+// On the ROLES source it is the configured role. There is nothing to build: a
+// store's accessor already answered for its whole decorator chain when the
+// caller called it, and this server opens no units of work on that path.
 //
 // On the PROVIDER source it is built per request rather than once at startup so
 // that the units of work it opens are timed into THIS request's log line. That
@@ -426,12 +462,20 @@ func (s *Server) connState(_ net.Conn, state http.ConnState) {
 // makes uow.IssueReaderSource load-bearing rather than decorative: this call
 // site type-checks against the accessor the provider seam publishes, so
 // renaming or dropping it is a compile error here.
+//
+// EITHER WAY it goes out through checkedReader, which is what makes
+// handleGetIssue's dereference of the detail view safe by construction again —
+// see roles.go.
 func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
 	if s.provider == nil {
-		return s.issueReader, nil
+		return checkedReader{inner: s.issueReader}, nil
 	}
 	var src uow.IssueReaderSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
-	return src.IssueReader()
+	rd, err := src.IssueReader()
+	if err != nil {
+		return nil, err
+	}
+	return checkedReader{inner: rd}, nil
 }
 
 // claimer returns the guarded atomic-claim surface for one request.
@@ -439,13 +483,18 @@ func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
 // It is the write-side twin of reader above, for all the same reasons: the
 // configured role on the roles source, and on the provider source one built per
 // request so its units of work are timed into THIS request's log line, held by
-// INTERFACE so uow.IssueClaimerSource is load-bearing rather than decorative.
+// INTERFACE so uow.IssueClaimerSource is load-bearing rather than decorative —
+// and, from either source, wrapped in checkedClaimer.
 func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
 	if s.provider == nil {
-		return s.issueClaimer, nil
+		return checkedClaimer{inner: s.issueClaimer}, nil
 	}
 	var src uow.IssueClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
-	return src.IssueClaimer()
+	cl, err := src.IssueClaimer()
+	if err != nil {
+		return nil, err
+	}
+	return checkedClaimer{inner: cl}, nil
 }
 
 // WithUOW runs fn inside one unit of work and guarantees the rollback.
