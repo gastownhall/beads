@@ -175,7 +175,10 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 	if cfg.Addr == "" {
 		cfg.Addr = "127.0.0.1:0"
 	}
-	if cfg.Provider == nil {
+	// The default source, for the tests that care about something else. A
+	// config that already names a source — either one — keeps it: defaulting a
+	// provider onto a roles-backed config would serve the wrong one and pass.
+	if cfg.Provider == nil && cfg.Reader == nil && cfg.Claimer == nil {
 		cfg.Provider = &fakeProvider{}
 	}
 	cfg.Stdout = stdout
