@@ -198,6 +198,10 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	if err := checkCreatedWorktreeClean(ctx, worktreePath); err != nil {
+		return err
+	}
+
 	// Tracked .beads/ checked out by git worktree add can inherit umask defaults (0755).
 	// Align with bd init / GH#3391 so agent loops do not hit permission warnings (GH#3593).
 	repairWorktreeBeadsPermissions(worktreePath)
@@ -435,6 +439,22 @@ func runWorktreeInfo(cmd *cobra.Command, args []string) error {
 }
 
 // Helper functions
+
+var checkCreatedWorktreeClean = ensureCreatedWorktreeClean
+
+func ensureCreatedWorktreeClean(ctx context.Context, worktreePath string) error {
+	gitCmd := gitCmdInDir(ctx, worktreePath, "status", "--porcelain=v1", "--untracked-files=all")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to inspect created worktree cleanliness: %w\n%s", err, string(output))
+	}
+
+	if status := strings.TrimSpace(string(output)); status != "" {
+		return fmt.Errorf("created worktree is dirty after checkout; refusing to continue: %s\n%s", worktreePath, status)
+	}
+
+	return nil
+}
 
 // gitCmdInDir creates a git command that runs in the specified directory.
 // This is used for worktree operations that need to run in a specific location
