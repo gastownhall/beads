@@ -235,14 +235,22 @@ func (s *testSuite) searchCountsPredicateMatchesByIDs() {
 	s.Require().NoError(r.Insert(s.Ctx(), mid, "tester", domain.InsertIssueOpts{}))
 	a := newTestIssue("bd-srxc-par2-a", "a")
 	s.Require().NoError(r.Insert(s.Ctx(), a, "tester", domain.InsertIssueOpts{}))
+	b := newTestIssue("bd-srxc-par2-b", "b")
+	s.Require().NoError(r.Insert(s.Ctx(), b, "tester", domain.InsertIssueOpts{}))
 
-	// mid blocks a (outgoing/DependencyCount); a blocks mid (incoming/
+	// mid depends on a (outgoing/DependencyCount); b depends on mid (incoming/
 	// DependentCount); mid is a child of parent (Parent); mid has a label and
 	// a comment. Every projected count/JSON field is nonzero so a subquery
 	// that silently drops mid's rows would show up as a mismatch, not a
 	// coincidental 0 == 0.
+	//
+	// The incoming edge comes from a distinct issue b, not from a: mid -> a
+	// plus a -> mid is a 2-cycle, and Insert rejects scheduling deps that
+	// close one (domain.ErrDependencyCycle). parent cannot play that role
+	// either — a blocker that is the issue's ancestor trips
+	// ValidateBlockingHierarchy — so the incoming blocker needs its own issue.
 	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-mid", "bd-srxc-par2-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
-	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-a", "bd-srxc-par2-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-b", "bd-srxc-par2-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-par2-mid", "bd-srxc-par2-parent", types.DepParentChild), "tester", domain.DepInsertOpts{}))
 	s.Require().NoError(labelRepo.Insert(s.Ctx(), "bd-srxc-par2-mid", "alpha", "tester", domain.LabelOpts{}))
 	_, err := s.Runner().ExecContext(s.Ctx(),
@@ -263,6 +271,15 @@ func (s *testSuite) searchCountsPredicateMatchesByIDs() {
 	s.Require().Len(byID.Items, 1)
 
 	p, i := byPredicate.Items[0], byID.Items[0]
+	// Guard the premise before comparing: every parity assertion below is
+	// vacuous if the fixture left the reference side at zero, so pin the
+	// by-IDs form's counts as nonzero first. Without this a fixture that
+	// stopped producing edges would keep passing as 0 == 0.
+	s.Require().NotZero(i.DependencyCount, "fixture must give the reference side an outgoing dep")
+	s.Require().NotZero(i.DependentCount, "fixture must give the reference side an incoming dep")
+	s.Require().NotZero(i.CommentCount, "fixture must give the reference side a comment")
+	s.Require().NotEmpty(i.Issue.Labels, "fixture must give the reference side a label")
+	s.Require().NotEmpty(i.Issue.Dependencies, "fixture must give the reference side deps_json rows")
 	s.Equal(i.DependencyCount, p.DependencyCount, "dependency_count parity")
 	s.Equal(i.DependentCount, p.DependentCount, "dependent_count parity")
 	s.Equal(i.CommentCount, p.CommentCount, "comment_count parity")
