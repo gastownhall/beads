@@ -73,10 +73,11 @@ func (h CountsHydration) IssueColumns() string {
 //
 // There are two forms of the same projection, selected by ids:
 //
-//   - Predicate form (ids empty): whereSQL bounds the driver in an inner
-//     subquery BEFORE the aggregate LEFT JOINs (see below); orderBySQL and
-//     limitSQL stay at the outer level, after the joins. Each count subquery
-//     aggregates its whole side table. The caller supplies its own args; the
+//   - Predicate form (ids empty): whereSQL bounds the driver in a filtered_ids
+//     CTE BEFORE the aggregate LEFT JOINs (see below); orderBySQL and limitSQL
+//     stay at the outer level, after the joins. When whereSQL is non-empty,
+//     each count subquery also bounds its scan to filtered_ids instead of
+//     aggregating its whole side table. The caller supplies its own args; the
 //     returned args slice is nil.
 //
 //   - By-IDs form (ids non-empty): whereSQL/orderBySQL/limitSQL are ignored and
@@ -97,17 +98,22 @@ func (h CountsHydration) IssueColumns() string {
 // input to ids drops only rows for other issues, so the per-issue rows it
 // aggregates — and their relative order — are unchanged.
 //
-// In the predicate form, whereSQL filters the main table in an inner subquery,
-// BEFORE the aggregate LEFT JOINs. The joins all preserve every main row, so
-// filtering before vs. after them yields the identical row set — but it changes
-// the plan Dolt picks: instead of materializing the dep/rdep/comment/label/parent
-// aggregates and joining them to every main row before the WHERE prunes the
-// result, the joins now drive off the already-narrowed set. That is the win for
-// the narrow ephemeral-work searches that dominate the hot path. Only the WHERE
-// moves inward; orderBySQL and limitSQL remain after the joins, because ORDER BY
-// and LIMIT must see the projected aggregate columns and must apply to the final
-// joined result. An empty whereSQL keeps the plain "FROM <main> i" driver: there
-// is no predicate to push down, so the derived table would only interpose a
+// In the predicate form, whereSQL filters the main table once, in a
+// filtered_ids CTE, evaluated BEFORE the aggregate LEFT JOINs. The driver and
+// every aggregate subquery (labels, dc, rc, cc, pc, d) then bound their own
+// scan to filtered_ids instead of aggregating their whole side table before
+// the outer join discards non-matching rows. The joins all preserve every
+// main row, so filtering before vs. after them yields the identical row set —
+// but it changes the plan Dolt picks, and it keeps each subquery from
+// scanning rows the driver filter will discard anyway. That is the win for
+// the narrow ephemeral-work searches that dominate the hot path. whereSQL's
+// placeholders must appear exactly once — the caller supplies args sized for
+// one occurrence — so the CTE is whereSQL's sole owner; every other reference
+// is by id only (SELECT id FROM filtered_ids), no new placeholders. orderBySQL
+// and limitSQL remain after the joins, because ORDER BY and LIMIT must see the
+// projected aggregate columns and must apply to the final joined result. An
+// empty whereSQL keeps the plain "FROM <main> i" driver and skips the CTE:
+// there is no predicate to push down, so either would only interpose a
 // needless wrapper between the planner and the base table.
 //
 // That shape REQUIRES that whereSQL reference only main-table columns (or
@@ -135,9 +141,12 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 
 	// Per-subquery id constraints. Empty strings in the predicate form leave the
 	// projection unchanged; in the by-IDs form they push the page down so no
-	// subquery aggregates more than the page's worth of rows.
+	// subquery aggregates more than the page's worth of rows. The predicate
+	// form (whereSQL != "") bounds via the filtered_ids CTE instead of a raw id
+	// list — see driverSQL below.
 	var labelWhere, depBlocksExtra, rcDepExtra, rcWispExtra, ccWhere, pcExtra, depWhere string
-	if byIDs {
+	switch {
+	case byIDs:
 		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, inSQL)
@@ -145,6 +154,15 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
 		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", inSQL)
 		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", inSQL)
+	case whereSQL != "":
+		const filteredIDs = "SELECT id FROM filtered_ids"
+		labelWhere = fmt.Sprintf("WHERE issue_id IN (%s)", filteredIDs)
+		depBlocksExtra = fmt.Sprintf(" AND issue_id IN (%s)", filteredIDs)
+		rcDepExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, filteredIDs)
+		rcWispExtra = fmt.Sprintf(" AND %s IN (%s)", DepTargetExpr, filteredIDs)
+		ccWhere = fmt.Sprintf("WHERE issue_id IN (%s)", filteredIDs)
+		pcExtra = fmt.Sprintf(" AND issue_id IN (%s)", filteredIDs)
+		depWhere = fmt.Sprintf("WHERE issue_id IN (%s)", filteredIDs)
 	}
 
 	reverseBlockerSelect := fmt.Sprintf(`
@@ -206,25 +224,37 @@ func SearchCountsSQL(tables FilterTables, ids []string, whereSQL, orderBySQL, li
 		countsJoins = ""
 	}
 
-	// Predicate form with a filter: whereSQL filters the main table inside a
-	// derived table so the aggregate joins drive off the already-narrowed set;
-	// ORDER BY and LIMIT stay outer, after the joins. Everything else — empty
-	// whereSQL (nothing to push down) and the by-IDs form (subqueries already
-	// id-constrained) — keeps the plain driver.
+	// Predicate form with a filter: whereSQL filters the main table once, in a
+	// filtered_ids CTE, so every aggregate subquery below (labels, dc, rc, cc,
+	// pc, d) can bound its own scan to filtered_ids instead of aggregating its
+	// whole side table before the outer join discards non-matching rows
+	// (be-dlt6f: that unfiltered join cost a fixed ~1.6s regardless of how
+	// narrow the search was). whereSQL's placeholders must appear exactly once
+	// — the caller supplies args sized for one occurrence — so the CTE is the
+	// sole owner of whereSQL text; everything else references filtered_ids by
+	// id only. ORDER BY and LIMIT stay outer, after the joins. Everything else
+	// — empty whereSQL (nothing to push down) and the by-IDs form (subqueries
+	// already id-constrained) — keeps the plain driver.
 	driverSQL := fmt.Sprintf("%s i", tables.Main)
+	var cteSQL string
 	if !byIDs && whereSQL != "" {
-		driverSQL = fmt.Sprintf(`(
+		cteSQL = fmt.Sprintf(`WITH filtered_ids AS (
 			SELECT i.*
 			FROM %s i
 			%s
-		) i`, tables.Main, whereSQL)
+		)
+		`, tables.Main, whereSQL)
+		driverSQL = `(
+			SELECT i.*
+			FROM filtered_ids i
+		) i`
 	}
 	outerClause := fmt.Sprintf("%s\n\t\t%s", orderBySQL, limitSQL)
 	if byIDs {
 		outerClause = fmt.Sprintf("WHERE i.id IN (%s)", inSQL)
 	}
 
-	sqlText := fmt.Sprintf(`
+	sqlText := cteSQL + fmt.Sprintf(`
 		SELECT %s,
 			%s,
 			%s,

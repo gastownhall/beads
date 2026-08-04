@@ -323,8 +323,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		t.Errorf("labels subquery must bound to filtered_ids, got block:\n%s", block)
 	}
 
-	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
->>>>>>> 1f6306fba (test(feat): red — Fix: predicate-form search aggregates the whole side table — unfiltered wisp_labels join costs a fixed ~1.6s (refs be-dlt6f))
+	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, CountsHydration{SkipLabels: true})
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
