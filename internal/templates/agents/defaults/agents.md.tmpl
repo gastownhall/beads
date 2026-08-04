@@ -47,7 +47,7 @@ cp -rf source dest          # NOT: cp -r source dest
 - `apt-get` - use `-y` flag
 - `brew` - use `HOMEBREW_NO_AUTO_UPDATE=1` env var
 
-<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:bacef91e -->
+<!-- BEGIN BEADS INTEGRATION v:1 profile:full hash:35c30d9d -->
 ## Issue Tracking with bd (beads)
 
 **IMPORTANT**: This project uses **bd (beads)** for ALL issue tracking. Do NOT use markdown TODOs, task lists, or other tracking methods.
@@ -151,6 +151,17 @@ The managed Beads block is task-tracking guidance, not permission to override re
 - **Conservative (default)**: Use `bd` for task tracking. Do not run git commits, git pushes, or Dolt remote sync unless explicitly asked. At handoff, report changed files, validation, and suggested next commands.
 - **Minimal**: Keep tool instruction files as pointers to `bd prime`; use the same conservative git policy unless active instructions say otherwise.
 - **Team-maintainer**: Only when the repository explicitly opts in, agents may close beads, run quality gates, commit, and push as part of session close. A current "do not commit" or "do not push" instruction still wins.
+
+## Workflow Invocation Authorization
+
+An explicit user invocation of a documented workflow skill, command, or prompt authorizes every
+step required by that workflow's published completion contract. This includes required commit, Git
+push, and Beads/Dolt persistence steps. Do not ask for a second confirmation merely because the
+active profile is conservative. Automatic skill selection does not grant this authority.
+
+This grant is limited to the invoked workflow. It does not authorize force pushes, destructive
+cleanup, unrelated dirty changes, or bypassing required safety gates. Current instructions such as
+"do not commit" or "do not push" still override it.
 
 ## Session Completion
 

@@ -125,6 +125,31 @@ func TestRenderSectionMinimal(t *testing.T) {
 	}
 }
 
+func TestEmbeddedProfilesExplainWorkflowInvocationAuthorization(t *testing.T) {
+	profiles := map[string]string{
+		"greenfield-full": EmbeddedDefault(),
+		"managed-full":    RenderSection(ProfileFull),
+		"managed-minimal": RenderSection(ProfileMinimal),
+	}
+	for name, content := range profiles {
+		t.Run(name, func(t *testing.T) {
+			normalized := strings.Join(strings.Fields(content), " ")
+			for _, want := range []string{
+				"explicit user invocation of a documented workflow",
+				"required commit, Git push, and Beads/Dolt persistence steps",
+				"Automatic skill selection",
+				"force pushes",
+				"do not commit",
+				"do not push",
+			} {
+				if !strings.Contains(normalized, want) {
+					t.Errorf("generated profile missing workflow authorization fragment %q", want)
+				}
+			}
+		})
+	}
+}
+
 func TestCodexSectionBody(t *testing.T) {
 	body := CodexSectionBody()
 	if body == "" {

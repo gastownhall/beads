@@ -66,6 +66,12 @@ Template profiles control how much text gets installed. Policy profiles control 
 | `minimal` | Hook-first integrations where `bd prime` carries the detailed workflow | Same git authority as conservative; the installed file stays short and points to `bd prime`. |
 | `team-maintainer` | Repositories that explicitly delegate session close to agents | Agents may close beads, run quality gates, commit, run `bd dolt push`, and `git push` as part of routine work. Current "do not commit" or "do not push" instructions still override the profile. |
 
+An explicit user invocation of a documented workflow is also explicit authority for the commit,
+Git push, and Beads/Dolt persistence steps required by that workflow's published completion
+contract, even under the conservative profile. Automatic workflow selection grants no such
+authority. The grant remains limited to the invoked workflow, preserves safety gates, and never
+overrides a current "do not commit" or "do not push" instruction.
+
 The generated beads section and `bd prime` default to conservative git authority. Set the profile explicitly with the `agent.profile` config key or the `BD_AGENT_PROFILE` environment variable (values: `conservative`, `minimal`, `team-maintainer`; the env var takes precedence; an unrecognized value falls back to `conservative`):
 
 ```bash
