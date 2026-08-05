@@ -179,8 +179,15 @@ func printContextText(info ContextInfo) {
 	// Backend
 	fmt.Println("Backend:")
 	fmt.Printf("  type:         %s\n", info.Backend)
-	fmt.Printf("  mode:         %s\n", info.DoltMode)
-	fmt.Printf("  database:     %s\n", info.Database)
+	// Dolt-only identity. A registered backend reports neither, and a bare
+	// "mode:" with nothing after it reads as a failure to determine rather than
+	// as not-applicable — so omit them, like every other optional field here.
+	if info.DoltMode != "" {
+		fmt.Printf("  mode:         %s\n", info.DoltMode)
+	}
+	if info.Database != "" {
+		fmt.Printf("  database:     %s\n", info.Database)
+	}
 	if info.ServerHost != "" {
 		fmt.Printf("  server:       %s:%d\n", info.ServerHost, info.ServerPort)
 	}

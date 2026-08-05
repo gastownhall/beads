@@ -34,6 +34,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt provider and either failed with a misleading Dolt error or connected to
   a defaulted host and served the wrong database.
 
+### Changed
+
+- **BREAKING: `bd --readonly serve` is now refused instead of binding a server
+  that cannot do what it advertises.** On a Dolt SQL-server workspace this
+  previously bound a fully functional, fully writable server — the flag was a
+  silent no-op there — so anyone scripting `bd --readonly serve` as a "safe"
+  read server loses it on upgrade and should drop the flag. The advertised capability set is a property of the
+  build and includes the issue-claim operation, so under strict readonly the
+  two database sources degraded differently and silently: a registered backend
+  bound on its read-only store and answered every claim with an opaque 500
+  while still advertising `issues.claim`, and a Dolt SQL-server workspace built
+  its own writable provider and let every claim land, so the flag bought
+  nothing. `bd serve` now refuses to start under `--readonly` (or `readonly` in
+  config), before it resolves the workspace, so the answer is the same on both.
+
 ### Fixed
 
 - **`GET /v0/beads/context` and `bd context` no longer describe every
@@ -48,16 +63,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the empty string for both, which is the only value `bd` can assert about a
   backend it does not implement. No wire field is renamed, retyped or dropped
   — both remain required strings, and the `v0` shape is unchanged.
-
-- **`bd --readonly serve` is refused instead of binding a server that cannot
-  do what it advertises.** The advertised capability set is a property of the
-  build and includes the issue-claim operation, so under strict readonly the
-  two database sources degraded differently and silently: a registered backend
-  bound on its read-only store and answered every claim with an opaque 500
-  while still advertising `issues.claim`, and a Dolt SQL-server workspace built
-  its own writable provider and let every claim land, so the flag bought
-  nothing. `bd serve` now refuses to start under `--readonly` (or `readonly` in
-  config), before it resolves the workspace, so the answer is the same on both.
 
 - **Public surface for out-of-tree storage backends** (bd-h3dib.2). The
   storage backend contract and its conformance suite are now importable by

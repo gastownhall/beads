@@ -112,6 +112,10 @@ func TestContextRoutesNameOneWorkspaceTheSameWay(t *testing.T) {
 	}
 }
 
+// NOT COVERED: this drives applyContextBackend, not contextCmd's RunE, so it
+// pins the shared projection rather than the command's own wiring. A change
+// that bypassed applyContextBackend inside RunE would not be caught here.
+//
 // directContextSnapshot assembles the snapshot `bd context`'s direct route
 // answers from, off the same config files the command reads.
 func directContextSnapshot(t *testing.T, beadsDir string) domain.ContextInfo {
