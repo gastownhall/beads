@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // serveCmdName is the command name, shared with the root command's post-run
@@ -85,20 +88,27 @@ WHAT THIS DOES NOT DO
 }
 
 func init() {
-	serveCmd.Flags().StringVar(&serveAddr, "addr", "127.0.0.1:0",
-		"Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port")
-	serveCmd.Flags().BoolVar(&serveAllowNonLoopback, "allow-non-loopback", false,
-		"Permit a bind beyond loopback. bd serve has no authentication: every peer that can reach the address gets full read and claim access")
+	registerServeFlags(serveCmd)
 	rootCmd.AddCommand(serveCmd)
+}
+
+// registerServeFlags declares bd serve's own flags.
+//
+// It is a named function rather than a block in init so a test that runs the
+// command in-process can put the flag set back the way it found it: cobra
+// merges every inherited persistent flag into a command's own FlagSet the first
+// time it parses one, and that mutation outlives the run.
+func registerServeFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&serveAddr, "addr", "127.0.0.1:0",
+		"Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port")
+	cmd.Flags().BoolVar(&serveAllowNonLoopback, "allow-non-loopback", false,
+		"Permit a bind beyond loopback. bd serve has no authentication: every peer that can reach the address gets full read and claim access")
 }
 
 func runServe() error {
 	// Flag validation first: it depends on nothing about the workspace, so the
 	// refusal for a bad --addr is the same in every mode.
 	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
-		return HandleError("%v", err)
-	}
-	if err := serveModeGate(); err != nil {
 		return HandleError("%v", err)
 	}
 
@@ -111,15 +121,58 @@ func runServe() error {
 		return HandleError("cannot resolve workspace context: %v", err)
 	}
 
+	// The classification reads the workspace's own configuration, so it runs
+	// after the context resolves rather than before it. A directory with no
+	// workspace at all therefore reports that it has none, instead of reporting
+	// the embedded refusal for a workspace nobody found.
+	db, err := serveDatabaseSource(info.BeadsDir)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	if serveAllowNonLoopback {
+		fmt.Fprintf(os.Stderr,
+			"bd serve: WARNING: --allow-non-loopback binds %s beyond loopback. "+
+				"This API has no authentication and no TLS: any peer that can reach it can read every issue and claim work as any actor.\n",
+			serveAddr)
+	}
+
+	if db.source == serveSourceStore {
+		// Nothing to create. PersistentPreRunE already opened this workspace
+		// through the same backends.Lookup dispatch every ordinary bd command
+		// opens it with, so the store bd list and bd create answer from is the
+		// store sitting in front of this server — one creation path, which is
+		// the whole point of this arm. Opening a second handle here would
+		// double the pools and self-conflict with any backend that takes an
+		// exclusive workspace lock.
+		//
+		// Closing it is the root command's business too: PersistentPostRunE
+		// runs after this function returns, which is after the server has
+		// fully drained, so no request can reach a closed store. runServe must
+		// not close it.
+		reader, claimer, err := serveIssueRoles(store)
+		if err != nil {
+			return HandleError("bd serve: %v", err)
+		}
+		return serveListen(httpapi.Config{
+			Addr:             serveAddr,
+			AllowNonLoopback: serveAllowNonLoopback,
+			Reader:           reader,
+			Claimer:          claimer,
+			Workspace:        info,
+			SchemaVersion:    JSONSchemaVersion,
+			Mode:             serveResolvedMode(info, db),
+		})
+	}
+
 	provider := uowProvider
 	if provider == nil {
 		// Server, external-server and shared-server workspaces: PersistentPreRunE
 		// builds a DoltStore for those and no unit-of-work provider, so serve
 		// builds its own from the same connection settings the store used.
 		//
-		// That store stays open for the life of the process and serve never
-		// touches it. Opening and closing it is the root command's business, not
-		// a single command's, but it is not free either: its pool holds an idle
+		// On this arm that store stays open for the life of the process and
+		// serve never touches it. It is not free either: its pool holds an idle
 		// connection or two against the very server this process is about to
 		// pool twenty more on. Worth knowing when sizing a shared Dolt server's
 		// max_connections.
@@ -132,6 +185,10 @@ func runServe() error {
 		// which knows nothing about --global. Report the database the provider
 		// actually opened, or the handshake names one database while every
 		// operation answers from another.
+		//
+		// The store source needs no such override: backend.Open consumes the
+		// same metadata.json GetContextInfo just read, so the handshake and the
+		// operations share one source of truth by construction.
 		info.Database = topology.database
 		p, err := newSQLServerUOWProvider(rootCtx, info.BeadsDir, topology)
 		if err != nil {
@@ -149,74 +206,158 @@ func runServe() error {
 		provider = p
 	}
 
-	if serveAllowNonLoopback {
-		fmt.Fprintf(os.Stderr,
-			"bd serve: WARNING: --allow-non-loopback binds %s beyond loopback. "+
-				"This API has no authentication and no TLS: any peer that can reach it can read every issue and claim work as any actor.\n",
-			serveAddr)
-	}
-
-	srv, err := httpapi.Listen(httpapi.Config{
+	return serveListen(httpapi.Config{
 		Addr:             serveAddr,
 		AllowNonLoopback: serveAllowNonLoopback,
 		Provider:         provider,
 		Workspace:        info,
 		SchemaVersion:    JSONSchemaVersion,
-		Mode:             serveResolvedMode(info),
+		Mode:             serveResolvedMode(info, db),
 	})
+}
+
+// serveListen binds and runs. It is where the two database sources converge:
+// everything past the source is the same server.
+//
+// Graceful shutdown rides the signal context the root command already sets up
+// (SIGINT/SIGTERM/SIGHUP). A proxied provider is closed where every proxied
+// command closes it, in PersistentPostRunE — which in proxied mode does nothing
+// else; the provider serve built for a server-mode workspace is closed by
+// runServe's own defer, and a registered backend's store by the same
+// PersistentPostRunE that opened it. None of those paths runs the auto-commit,
+// export or push maintenance: proxied mode never had it, and serve is excluded
+// from it by name (runsPostCommandMaintenance, cmd/bd/main.go).
+func serveListen(cfg httpapi.Config) error {
+	srv, err := httpapi.Listen(cfg)
 	if err != nil {
 		return HandleError("%v", err)
 	}
-
-	// Graceful shutdown rides the signal context the root command already sets
-	// up (SIGINT/SIGTERM/SIGHUP). A proxied provider is closed where every
-	// proxied command closes it, in PersistentPostRunE — which in proxied mode
-	// does nothing else; the provider serve built for a server-mode workspace is
-	// closed by the defer above. Neither path runs the auto-commit, export or
-	// push maintenance: proxied mode never had it, and server mode is excluded
-	// from it by name (runsPostCommandMaintenance, cmd/bd/main.go).
 	return srv.Serve(rootCtx)
 }
 
-// serveModeGate refuses the one workspace mode bd serve cannot answer for.
+// serveSource names which of httpapi.Config's two database sources a workspace
+// is served from.
+type serveSource int
+
+const (
+	// serveSourceProvider is the unit-of-work provider: one unit of work per
+	// request, timed into that request's uow_ms and drawn from a pool bd serve
+	// bounds itself. Every Dolt SQL-server topology takes it.
+	serveSourceProvider serveSource = iota
+	// serveSourceStore is the two issue roles, taken off the store the root
+	// command already opened. A registered backend's facade is a store rather
+	// than a unit-of-work provider, so this is the source it has.
+	serveSourceStore
+)
+
+// String names the source. It exists so a failed comparison prints "store" or
+// "provider" rather than an integer.
+func (s serveSource) String() string {
+	if s == serveSourceStore {
+		return "store"
+	}
+	return "provider"
+}
+
+// serveDatabase is the resolved answer to the one question bd serve asks about
+// a workspace before it binds anything: where does this server read and claim
+// from.
+type serveDatabase struct {
+	// source is which of httpapi.Config's two database sources to build.
+	source serveSource
+	// backend is the registered backend's name on the store source, and empty
+	// on the provider source.
+	backend string
+}
+
+// serveDatabaseSource classifies the workspace. It is both the mode gate and
+// the wiring decision, in one function, so the two can never disagree about one
+// workspace.
 //
-// Embedded is permanent, and the message is written to promise nothing: its
-// commit protocol runs outside the SQL transaction on a separate connection, so
-// the per-request atomicity this server's contract states would be a lie there.
-// That is a property of the backend rather than of what has been built so far,
-// which is also why no unit-of-work provider for it exists or will.
+// THE REGISTRY IS CONSULTED FIRST, and that ordering is not a preference.
+// PersistentPreRunE dispatches the store open on backends.Lookup before
+// anything looks at Dolt mode, so a registered workspace opens its registered
+// store even with BEADS_DOLT_SHARED_SERVER=1 exported. Resolving it the other
+// way here would build a Dolt unit-of-work provider over a non-Dolt store and
+// answer HTTP from a different database than the CLI reaches in the same
+// directory. Registry-first is also what closes the !cgo corner, where
+// isEmbeddedMode is a constant false and a registered workspace would otherwise
+// be handed to the Dolt provider and fail with a misleading Dolt error — or
+// connect to a defaulted host and serve the wrong database.
 //
-// THIS IS THE ENFORCEMENT POINT, and it is now the only one. It used to be
-// redundant: httpapi.Listen took a unit-of-work provider or nothing, so deleting
-// this gate would still have left an embedded-backed server unbuildable.
-// httpapi.Config now also accepts the two issue roles as a database source and
-// the embedded store publishes both accessors, so it is buildable — and nothing
-// downstream will catch a bypass here, because internal/httpapi cannot see the
-// backend behind a role. That is also why runServe builds a provider and never
-// hands Listen roles, which TestServeBuildsOnlyAProviderBackedServer pins.
-//
-// Every mode that does have a SQL server behind it is served: proxied (managed
-// or external), and — since bd-emv — server, external-server and shared-server,
-// which build their provider in runServe.
+// EMBEDDED DOLT IS PERMANENT, and this is the only place that refusal lives.
+// Its commit protocol runs outside the SQL transaction on a separate
+// connection, so the per-request atomicity this server's contract states would
+// be a lie there. That is a property of the backend rather than of what has
+// been built so far, which is also why no unit-of-work provider for it exists
+// or will. Nothing downstream will catch a bypass: internal/httpapi cannot see
+// the backend behind a role, and every store publishes both role accessors
+// whatever it is. TestServeNamesOneDatabaseSourcePerServerItBuilds pins that
+// the roles are only ever reached through here.
+func serveDatabaseSource(beadsDir string) (serveDatabase, error) {
+	cfg, err := configfile.Load(beadsDir)
+	if err != nil {
+		// Never classify past an unreadable metadata.json. The classification's
+		// default is the embedded refusal, so falling back would refuse a
+		// workspace whose real backend nobody managed to read.
+		return serveDatabase{}, fmt.Errorf("load %s: %w", configfile.ConfigPath(beadsDir), err)
+	}
+	if backend := normalizeLoadedConfig(cfg).GetBackend(); backends.Registered(backend) {
+		return serveDatabase{source: serveSourceStore, backend: backend}, nil
+	}
+	if isEmbeddedMode() {
+		return serveDatabase{}, errServeEmbedded()
+	}
+	return serveDatabase{source: serveSourceProvider}, nil
+}
+
+// errServeEmbedded is the PERMANENT refusal. The message says what the
+// workspace is and what serve needs, and promises nothing further: the reason
+// is the embedded backend's commit protocol (see serveDatabaseSource), which no
+// amount of provider or role plumbing changes.
 //
 // The mode belongs in the message, not in ErrUnsupported.Backend: that field is
 // documented as a BACKEND name and is the embryo of the pluggable-backend error
 // taxonomy, so putting a topology string in it would hand every downstream
 // errors.As a mixed backend/mode vocabulary.
-func serveModeGate() error {
-	if isEmbeddedMode() {
-		return errServeEmbedded()
-	}
-	return nil
-}
-
-// errServeEmbedded is the PERMANENT refusal. The message says what the
-// workspace is and what serve needs, and promises nothing further: the reason
-// is the embedded backend's commit protocol (see serveModeGate), which no
-// amount of provider or role plumbing changes.
 func errServeEmbedded() error {
 	return fmt.Errorf("%w: bd serve requires a Dolt SQL server; this workspace uses embedded Dolt",
 		&storage.ErrUnsupported{Op: "serve", Backend: "embedded-dolt"})
+}
+
+// serveIssueRoles takes the two issue roles this server answers from off the
+// store the root command already opened.
+//
+// ONE PEEL, and never storage.UnwrapStore. bd's chain is
+// HookFiringStore -> InstrumentedStorage -> raw, and every decorator publishes
+// its own roles — that is what the accessors are for — so store.IssueClaimer()
+// returns a claimer that runs the workspace's on_update script for every claim
+// it lands. This server documents that hooks do not fire, so the hook layer has
+// to come off; the telemetry layer beneath it must not, or every request this
+// process serves goes unspanned and untimed. httpapi.Listen refuses a
+// hook-firing role rather than trusting this comment, so getting it wrong is a
+// startup error rather than a silent subprocess per claim.
+//
+// The assertion is conditional because a BD_NO_HOOKS=1 workspace has no hook
+// layer to peel.
+func serveIssueRoles(src storage.DoltStorage) (issueops.Reader, issueops.Claimer, error) {
+	if src == nil {
+		// Two nil roles would reach Listen as "no database source" — true, and
+		// useless. Name the condition that actually happened.
+		return nil, nil, errors.New("no store is open for this workspace")
+	}
+	if hooked, ok := src.(*storage.HookFiringStore); ok {
+		src = hooked.Unwrap()
+	}
+	reader, err := src.IssueReader()
+	if err != nil {
+		return nil, nil, fmt.Errorf("issue reader: %w", err)
+	}
+	claimer, err := src.IssueClaimer()
+	if err != nil {
+		return nil, nil, fmt.Errorf("issue claimer: %w", err)
+	}
+	return reader, claimer, nil
 }
 
 // serveResolvedMode labels the topology for the startup log line. Cosmetic —
@@ -224,7 +365,18 @@ func errServeEmbedded() error {
 // naming: an external dolt sql-server shares its max_connections budget with
 // every other bd process pointed at it, and this server's pool is a claim on
 // that budget.
-func serveResolvedMode(info domain.ContextInfo) string {
+//
+// A registered backend is named instead of being given a Dolt mode.
+// info.DoltMode carries one for every workspace, registered ones included:
+// GetContextInfo projects the Dolt fields unconditionally and hardcodes Backend
+// to "dolt" (internal/storage/domain/context.go). That is a pre-existing gap
+// shared with `bd context`, and its fix belongs in that shared projection so
+// CLI and API stay one identity — but repeating it in this label would be this
+// command's own choice to do so.
+func serveResolvedMode(info domain.ContextInfo, db serveDatabase) string {
+	if db.source == serveSourceStore {
+		return db.backend + " (registered backend)"
+	}
 	if !usesProxiedServer() {
 		// Server, external-server and shared-server: serve fronts the running
 		// dolt sql-server rather than starting one, so from this process the

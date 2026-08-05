@@ -9,6 +9,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd serve` runs on a registered storage backend.** A downstream
+  distribution that registers a backend
+  (`github.com/steveyegge/beads/backend`.`Register`) could already use it from
+  every ordinary `bd` command — `bd list`, `bd create` and friends dispatch
+  the store open through the registry — but `bd serve` alone reimplemented a
+  creation path of its own, hard-wired to Dolt's SQL wire, and refused the
+  workspace before it got there. It now uses the store the root command
+  already opened, through the same registry dispatch: zero creation calls of
+  its own, so there is one creation path rather than two. The two issue roles
+  are taken from BENEATH the workspace's hook decorator, keeping the
+  documented "hooks do not fire" contract (`httpapi.Listen` refuses a
+  hook-firing role rather than trusting the caller), and the store's lifecycle
+  stays where it was — opened and closed by the root command, closed only
+  after the server has drained. The startup line names the source
+  (`db=roles`) and the backend (`mode="<name> (registered backend)"`).
+
+  The permanent refusal is unchanged and unweakened: an embedded-Dolt
+  workspace is still refused, because its commit protocol runs outside the SQL
+  transaction and this server's per-request atomicity would be a lie there.
+  The classification consults the registry before any Dolt-mode signal, which
+  is the order the store open already resolves them in — and which also fixes
+  a latent `CGO_ENABLED=0` bug where a registered workspace was handed to the
+  Dolt provider and either failed with a misleading Dolt error or connected to
+  a defaulted host and served the wrong database.
+
 - **Public surface for out-of-tree storage backends** (bd-h3dib.2). The
   storage backend contract and its conformance suite are now importable by
   external Go modules — the conformance-gated external-backend path promised

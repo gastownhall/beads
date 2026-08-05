@@ -311,13 +311,18 @@ construction and no longer is. `httpapi.Listen` once took a unit-of-work
 provider or nothing at all, so an embedded-backed server was not *constructible*
 — the absence of a provider was itself the refusal. `httpapi.Config` now also
 takes the two issue roles as a database source, and the embedded store publishes
-both accessors, so one is. The gate is `serveModeGate` in `cmd/bd/serve.go`: it
-runs before serve resolves anything else about the workspace, and
-`TestServeRefusalsPromiseNothing` pins both that it refuses and that its message
-promises nothing. `bd serve` also builds provider-backed servers and only those,
-which `TestServeBuildsOnlyAProviderBackedServer` pins against the source of
-`cmd/bd` — so a change that routed serve through store roles fails a test rather
-than quietly reaching the embedded backend by a path this gate never sees.
+both accessors, so one is. The gate is `serveDatabaseSource` in
+`cmd/bd/serve.go`, which classifies the workspace and refuses; it is both the
+gate and the wiring decision, in one function, so the two cannot disagree about
+one workspace. `TestServeRefusalsPromiseNothing` pins both that it refuses and
+that its message promises nothing, and
+`TestServeRefusesAnEmbeddedWorkspaceEndToEnd` drives the refusal through
+`runServe`. `TestServeNamesOneDatabaseSourcePerServerItBuilds` pins against the
+source of `cmd/bd` that every server `bd` builds names exactly one complete
+database source and that a roles-backed one is only ever built where that
+classification is consulted — so a change that reached for store roles anywhere
+else fails a test rather than quietly reaching the embedded backend by a path
+this gate never sees.
 
 **NOT ENFORCED.** `internal/httpapi` does not refuse an embedded-backed server
 and cannot. A role is an interface, and no inspection of one reveals the commit
@@ -334,3 +339,28 @@ external), and server, external-server and shared-server. In the latter three
 the root command has already opened a `DoltStore` that serve never uses; serve
 builds its own unit-of-work provider from the same connection settings. That
 idle store matters only for the connection budget — see the runbook.
+
+**A REGISTERED BACKEND IS SERVED FROM THE STORE THE ROOT COMMAND OPENED.** A
+downstream distribution registers a backend (`internal/storage/backends`) whose
+facade is a store rather than a unit-of-work provider, and
+`PersistentPreRunE` already opens it through the same `backends.Lookup` dispatch
+every ordinary `bd` command opens it with. So serve creates nothing on this arm:
+it takes `Config.Reader` and `Config.Claimer` off that store and hands them to
+`Listen`. A second handle would double the pools and self-conflict with any
+backend holding an exclusive workspace lock, and one creation path is the point.
+`PersistentPostRunE` closes the store, after `runServe` returns and therefore
+after the server has drained.
+
+The roles come from BENEATH the hook decorator
+(`(*storage.HookFiringStore).Unwrap`, one layer, never `storage.UnwrapStore` —
+the telemetry layer below it must survive). A store's accessors hand out its
+decorators by design, so the obvious `store.IssueClaimer()` returns a claimer
+that runs the workspace's `on_update` script for every claim it lands, which is
+exactly what this server documents it does not do. `Listen` refuses a
+hook-firing role rather than trusting that anyone read this paragraph.
+
+The classification consults the registry BEFORE any Dolt-mode signal, because
+the store open already resolves them in that order: a registered workspace opens
+its registered store even with `BEADS_DOLT_SHARED_SERVER=1` exported. Resolving
+it the other way would build a Dolt provider over a non-Dolt store and answer
+HTTP from a different database than the CLI reaches in the same directory.
