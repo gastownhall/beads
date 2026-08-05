@@ -201,7 +201,12 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		var updated *UpdateResult
+		if attempt.Claim {
+			updated, err = UpdateClaimedIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		} else {
+			updated, err = UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		}
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
