@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
@@ -362,4 +364,92 @@ func packageDir(t *testing.T) string {
 		t.Fatal("cannot resolve this test's source path")
 	}
 	return filepath.Dir(file)
+}
+
+// TestServeRefusesStrictReadonly.
+//
+// `bd --readonly serve` is a contradiction, and until it was refused it
+// resolved differently on each of the two database sources — badly on both.
+//
+// On the STORE source the root command opens the workspace through
+// backend.OpenReadOnly and serve takes its claimer off that store, so the
+// server bound, GET /v0/beads/context went on advertising `issues.claim` (the
+// capability set is derived from the route table and knows nothing about a CLI
+// flag), and every claim came back 500 with the issue left open and unassigned.
+// A server that advertises a write it will always fail is worse than no server.
+//
+// On the PROVIDER source it was the other silent answer: serve builds its own
+// unit-of-work provider from the workspace's connection settings, which has no
+// read-only posture at all, so `--readonly` bought the operator nothing and
+// every claim landed. (Proxied mode never got that far — the root pre-run
+// already refuses strict readonly for it.)
+//
+// Refusing is the same policy bd already applies one layer down, where a
+// backend that cannot guarantee mutation-free access is turned away rather than
+// opened anyway. It is also the only answer that is the same on both sources.
+//
+// The gate is ahead of the workspace, which this pins by refusing in a
+// directory that has no workspace at all: no topology can reach past it.
+func TestServeRefusesStrictReadonly(t *testing.T) {
+	// Refused in a directory with NO workspace, which is how the ordering is
+	// pinned: the gate cannot be sitting behind a topology if there is no
+	// topology to resolve. That is what makes one test cover both sources.
+	// TestServeRefusesStrictReadonlyOnARegisteredBackend drives the same
+	// refusal in a workspace that would otherwise have served.
+	t.Run("before any workspace is resolved", func(t *testing.T) {
+		stderr, err := runServeUnderReadonly(t, t.TempDir())
+		if err == nil {
+			t.Fatalf("bd --readonly serve bound a server\nstderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "--readonly") {
+			t.Errorf("the refusal does not name the flag that caused it: %q", stderr)
+		}
+		if strings.Contains(stderr, "cannot resolve workspace context") {
+			t.Errorf("the readonly refusal runs after the workspace is resolved: %q", stderr)
+		}
+	})
+
+	t.Run("the capability set stays honest", func(t *testing.T) {
+		// The other way to settle this would have been to drop issues.claim
+		// from what a read-only server advertises. That is a wire change —
+		// `capabilities` is the documented pre-flight a client checks — and it
+		// would make one operation's presence depend on a CLI flag, which no
+		// client can discover before connecting. Refusing the process instead
+		// leaves the published surface a property of the build.
+		if !slices.Contains(httpapi.Capabilities(), "issues.claim") {
+			t.Error("issues.claim left the advertised capability set; bd serve refuses --readonly " +
+				"precisely so that set never has to vary")
+		}
+	})
+}
+
+// runServeUnderReadonly runs bd serve with strict readonly set, in dir, and
+// returns what it wrote to stderr. The refusal reaches the operator through
+// HandleError, which writes the message to stderr and returns an opaque exit
+// error, so the message is only observable here.
+func runServeUnderReadonly(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	useStorageModeGlobals(t)
+	restoreServeGlobals(t)
+
+	origReadonly := readonlyMode
+	readonlyMode = true
+	t.Cleanup(func() { readonlyMode = origReadonly })
+
+	store = nil
+	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	setRootContext(ctx, cancel)
+	t.Chdir(dir)
+	// The workspace snapshot is resolved once per process and cached, so
+	// without this a directory with no workspace would still resolve to
+	// whichever one an earlier test in this binary left behind — and "no
+	// workspace" is the whole premise of the ordering assertion above.
+	beads.ResetCaches()
+	t.Cleanup(beads.ResetCaches)
+
+	var err error
+	stderr := captureBootstrapStderr(t, func() { err = runServe() })
+	return stderr, err
 }

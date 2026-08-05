@@ -364,3 +364,74 @@ the store open already resolves them in that order: a registered workspace opens
 its registered store even with `BEADS_DOLT_SHARED_SERVER=1` exported. Resolving
 it the other way would build a Dolt provider over a non-Dolt store and answer
 HTTP from a different database than the CLI reaches in the same directory.
+
+That "one store" claim is pinned as a property rather than as a shape.
+`TestServeAnswersFromTheStoreTheRootCommandOpened` wires the registered
+backend so every open hands back a store whose reader answers with one issue
+named after that open, and reads the name back off `GET /v0/beads/ready`: a
+serve that opened a handle of its own answers as `store-2`. The end-to-end test
+counts opens through the registry and requires exactly one for the whole
+process. Both are needed — the count catches the leak, the name catches the
+substitution — because a second handle is otherwise invisible: same reads, same
+claims, same handshake, same clean shutdown.
+
+**THE IDENTITY HANDSHAKE IS BACKEND-AWARE.** `GET /v0/beads/context` reported
+`backend="dolt"`, `dolt_mode="embedded"`, `database="beads"` for a registered
+workspace — a full description of the exact topology this command refuses to
+serve, on the one endpoint automation is told to trust for a server's identity,
+while the startup line beside it named the registered backend correctly. The
+cause was in the shared projection: `GetContextInfo` hardcoded the backend to
+`dolt` and copied the Dolt fields unconditionally, and both of those DEFAULT
+rather than fail (an absent dolt_mode reads "embedded", an absent dolt_database
+reads "beads").
+
+The fix is in that projection (`domain.ContextInfo.SetBackendIdentity`), not in
+`bd serve`, and the placement is the point: `bd context`, `bd context --json`
+and this endpoint all read their workspace identity through
+`domain.PublishedContext`, which exists so the three cannot name one workspace
+differently. Correcting the value in `runServe` would have made the HTTP
+handshake truthful and left the CLI printing `backend: dolt` in the same
+directory — reintroducing exactly the drift that projection prevents. It also
+put the gate beside the one already there: `IsDoltServerMode` and
+`IsDoltProxiedServerMode` are false for any non-Dolt backend, so the bind
+endpoint and proxied root were already withheld; `dolt_mode` and `database` were
+the two with no such guard.
+
+There were TWO copies of the hardcode, which is why one policy function rather
+than one edit: the contextinfo use case, and `bd context`'s direct route, which
+reads the config files itself so it can answer in degraded states where no
+database opens. Both carried their own `Backend: configfile.BackendDolt`, so
+they agreed by telling the same lie — indistinguishable, until now, from
+agreeing. `TestContextRoutesNameOneWorkspaceTheSameWay` compares what the two
+routes publish for one workspace, which is the claim the shared projection has
+always made and nothing had tested.
+
+A registered backend reports the EMPTY string for both, and that is the only
+value `bd` can assert. The backend's `Open` reads whatever it wants out of the
+workspace; `bd` does not implement it and cannot know which logical database it
+settled on, so any non-empty guess is the same lie made quieter. Both stay
+required strings on the wire — no field is renamed, retyped or dropped, and the
+`v0` shape is unchanged.
+
+**STRICT READONLY IS REFUSED.** `bd --readonly serve` does not bind, on either
+source, and the gate runs before the workspace is resolved so that the answer
+cannot depend on the topology. Every server this command builds publishes the
+same operation set, claim included.
+
+It had degraded differently and silently on each source. On the store source
+the root command opens through `backend.OpenReadOnly` and serve took its claimer
+off that store, so the server bound, kept advertising `issues.claim`, and
+answered every claim with an opaque 500, leaving the issue open and unassigned.
+On the provider source serve builds its own unit-of-work provider from the
+workspace's connection settings, which carries no read-only posture, so
+`--readonly` bought nothing and every claim landed. (Proxied mode never reached
+either: the root pre-run already refuses strict readonly for it.)
+
+The alternative — dropping `issues.claim` from a read-only server's advertised
+capabilities — was rejected as a wire change: `capabilities` is the documented
+pre-flight a client checks before calling, and making one operation's presence
+depend on a flag on the process that started the server gives a client something
+it cannot discover before connecting. Refusing keeps the published surface a
+property of the build, and matches how `bd` already answers this question one
+layer down, where a backend that cannot guarantee mutation-free access is turned
+away rather than opened anyway.

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"io"
@@ -11,11 +10,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/spf13/pflag"
-
+	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
@@ -56,11 +55,22 @@ func TestServeAnswersFromARegisteredBackendStore(t *testing.T) {
 	hookMarker := filepath.Join(dir, "on_update.ran")
 	plantOnUpdateHook(t, beadsDir, hookMarker)
 
+	// Every store this process opens for the registered name is counted, and
+	// the count is an assertion at the end: bd serve creates NOTHING on this
+	// arm, so the root command's one open has to be the only one in the
+	// process. A serve that opened a handle of its own would leak it — nothing
+	// closes it — and double the backend's pools against a workspace some
+	// backends hold an exclusive lock on. Counting here catches it wherever it
+	// is spelled, because every store factory in cmd/bd dispatches through this
+	// same registry (newDoltStoreFromConfig, newReadOnlyStoreFromConfig).
+	var opens atomic.Int64
 	backends.Register(name, backends.Backend{
 		Open: func(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+			opens.Add(1)
 			return embeddeddolt.Open(ctx, beadsDir, serveRegisteredDatabase, "main")
 		},
 		OpenReadOnly: func(ctx context.Context, beadsDir string) (storage.DoltStorage, error) {
+			opens.Add(1)
 			return embeddeddolt.OpenReadOnly(ctx, beadsDir, serveRegisteredDatabase, "main")
 		},
 		WorkspaceIsBeadsDir: true,
@@ -77,6 +87,31 @@ func TestServeAnswersFromARegisteredBackendStore(t *testing.T) {
 		body := getJSON(t, base+"/v0/beads/context")
 		if body["schema_version"] == nil {
 			t.Errorf("GET /v0/beads/context returned no schema_version: %v", body)
+		}
+	})
+
+	// GET /v0/beads/context is the one endpoint automation is told to trust for
+	// this server's identity, and it was reporting backend="dolt",
+	// dolt_mode="embedded", database="beads" here — a full, confident
+	// description of the exact topology bd serve REFUSES to serve, while the
+	// startup line beside it named the registered backend correctly.
+	//
+	// database is empty even though this workspace's metadata.json carries
+	// dolt_database and the store behind the registered name really does open
+	// it: bd does not implement this backend, its Open reads whatever it wants
+	// out of the workspace, and a value bd cannot verify is the same lie made
+	// quieter. Empty is what bd can assert. Both fields stay required strings —
+	// the wire shape is unchanged.
+	t.Run("the handshake names the registered backend", func(t *testing.T) {
+		body := getJSON(t, base+"/v0/beads/context")
+		if body["backend"] != name {
+			t.Errorf("backend = %v, want %q: the handshake names a backend this server is not on", body["backend"], name)
+		}
+		if body["dolt_mode"] != "" {
+			t.Errorf("dolt_mode = %v, want empty: a registered backend has no Dolt mode", body["dolt_mode"])
+		}
+		if body["database"] != "" {
+			t.Errorf("database = %v, want empty: bd cannot know which database a registered backend opened", body["database"])
 		}
 	})
 
@@ -114,6 +149,13 @@ func TestServeAnswersFromARegisteredBackendStore(t *testing.T) {
 	rootCancel()
 	if err := <-done; err != nil {
 		t.Fatalf("bd serve returned %v, want a clean shutdown", err)
+	}
+
+	// One open for the whole process, and it is the root command's. Serving
+	// from the store bd already opened is the entire point of this arm; a
+	// second handle here would be an unclosed leak with no owner.
+	if n := opens.Load(); n != 1 {
+		t.Errorf("the registered backend was opened %d times, want 1: bd serve created a store of its own", n)
 	}
 
 	// The root command owns the store's whole lifecycle: PersistentPostRunE
@@ -281,127 +323,7 @@ func startServeInProcess(t *testing.T, dir, beadsDir string) (string, <-chan err
 		done <- err
 	}()
 
-	deadline := time.After(2 * time.Minute)
-	for {
-		select {
-		case line, ok := <-lines:
-			if !ok {
-				t.Fatalf("bd serve exited before it bound: %v", <-done)
-			}
-			const prefix = "bd serve: listening on http://"
-			if addr, found := strings.CutPrefix(strings.TrimSpace(line), prefix); found {
-				return addr, done
-			}
-		case <-deadline:
-			t.Fatal("bd serve did not print a bound address")
-		}
-	}
-}
-
-// restoreServeGlobals snapshots the package state one in-process serve run can
-// touch and puts it back afterwards, so a registered backend and a bound server
-// cannot leak into the tests sharing this binary.
-//
-// The flag set is part of that state and the least obvious part of it: cobra
-// merges every inherited persistent flag into serveCmd's own FlagSet the first
-// time it parses one, so a run through rootCmd.Execute leaves `bd serve`
-// carrying --json, --db and the rest of the root's surface. That is what
-// TestServeFlags reads. ResetFlags plus the command's own registration function
-// is the un-merge cobra does not offer.
-func restoreServeGlobals(t *testing.T) {
-	t.Helper()
-	origStore, origDBPath := store, dbPath
-	origServer, origProxied := serverMode, proxiedServerMode
-	origAddr, origNonLoopback := serveAddr, serveAllowNonLoopback
-	origCtx, origCancel := rootCtx, rootCancel
-	origCmdCtx, origUseGlobals := cmdCtx, testModeUseGlobals
-	t.Cleanup(func() {
-		if store != nil && store != origStore {
-			store.Close()
-		}
-		serveCmd.ResetFlags()
-		registerServeFlags(serveCmd) // rebinds serveAddr/serveAllowNonLoopback to the defaults
-		store, dbPath = origStore, origDBPath
-		serverMode, proxiedServerMode = origServer, origProxied
-		serveAddr, serveAllowNonLoopback = origAddr, origNonLoopback
-		rootCtx, rootCancel = origCtx, origCancel
-		cmdCtx, testModeUseGlobals = origCmdCtx, origUseGlobals
-		rootCmd.SetArgs(nil)
-	})
-}
-
-// resetRootPersistentFlags puts every root persistent flag back to the default
-// it was declared with, and clears its Changed bit, for the duration of one
-// test.
-//
-// A test binary that runs the root command in-process inherits whatever the
-// thousands of tests before it left in those flags and their bound globals —
-// and `Changed` is what several PersistentPreRunE branches dispatch on, not the
-// value. A stale `--db`/`--database` alone makes the pre-run refuse with
-// "--database ... is only supported in proxied-server mode" before the command
-// under test ever runs. Reset before, restore after, so this test neither reads
-// nor writes that shared state.
-func resetRootPersistentFlags(t *testing.T) {
-	t.Helper()
-	type flagState struct {
-		value   string
-		changed bool
-	}
-	before := map[string]flagState{}
-	rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
-		before[f.Name] = flagState{value: f.Value.String(), changed: f.Changed}
-		if err := f.Value.Set(f.DefValue); err != nil {
-			t.Fatalf("reset --%s to its default %q: %v", f.Name, f.DefValue, err)
-		}
-		f.Changed = false
-	})
-	t.Cleanup(func() {
-		rootCmd.PersistentFlags().VisitAll(func(f *pflag.Flag) {
-			state, ok := before[f.Name]
-			if !ok {
-				return
-			}
-			_ = f.Value.Set(state.value)
-			f.Changed = state.changed
-		})
-	})
-}
-
-// captureStdoutLines redirects os.Stdout and streams its lines. bd serve prints
-// the address it bound — the only way to discover an ephemeral port — to
-// stdout, and the server is running by the time it does.
-func captureStdoutLines(t *testing.T) (<-chan string, func()) {
-	t.Helper()
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatalf("os.Pipe: %v", err)
-	}
-	orig := os.Stdout
-	os.Stdout = w
-
-	lines := make(chan string, 64)
-	go func() {
-		defer close(lines)
-		scanner := bufio.NewScanner(r)
-		for scanner.Scan() {
-			lines <- scanner.Text()
-		}
-	}()
-
-	var stopped bool
-	stop := func() {
-		if stopped {
-			return
-		}
-		stopped = true
-		os.Stdout = orig
-		_ = w.Close()
-	}
-	t.Cleanup(func() {
-		stop()
-		_ = r.Close()
-	})
-	return lines, stop
+	return waitForBoundAddress(t, lines, done), done
 }
 
 // getJSON issues a GET and decodes a JSON object body, failing on anything else.
@@ -430,4 +352,117 @@ func mustMarshal(t *testing.T, v any) []byte {
 		t.Fatalf("marshal: %v", err)
 	}
 	return out
+}
+
+// TestServeRefusesStrictReadonlyOnARegisteredBackend drives the strict-readonly
+// refusal in the workspace where it was measured, and where the alternative was
+// worst.
+//
+// Under `--readonly` the root command opens this workspace through
+// backend.OpenReadOnly, and serve takes its claimer off that store. The server
+// bound anyway, kept advertising `issues.claim` on GET /v0/beads/context — the
+// capability set comes off the route table and cannot see a CLI flag — and
+// answered every claim with an opaque 500, leaving the issue open and
+// unassigned. That is a server lying about what it can do, which is worse than
+// no server.
+//
+// The workspace here would serve: the same registration and the same store
+// answer reads over HTTP when the flag is absent
+// (TestServeAnswersFromTheStoreTheRootCommandOpened). What stops it is the
+// refusal, not a workspace that could not have answered anyway.
+// serveRefusalBudget is how long a refusal is given to be a refusal. Only a
+// failing run ever waits it out.
+const serveRefusalBudget = 30 * time.Second
+
+func TestServeRefusesStrictReadonlyOnARegisteredBackend(t *testing.T) {
+	const name = "serve-readonly-registered"
+	backends.Register(name, backends.Backend{
+		// Open is required by the registry and never reached: strict readonly
+		// is what sends the root command down OpenReadOnly, and that is the
+		// posture under test.
+		Open: func(context.Context, string) (storage.DoltStorage, error) {
+			return &serveIdentityStore{id: "read-write"}, nil
+		},
+		OpenReadOnly: func(context.Context, string) (storage.DoltStorage, error) {
+			return &serveIdentityStore{id: "read-only"}, nil
+		},
+		WorkspaceIsBeadsDir: true,
+	})
+	t.Cleanup(func() { backends.Deregister(name) })
+
+	dir := t.TempDir()
+	initGitRepoAt(t, dir)
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	if err := (&configfile.Config{Backend: name}).Save(beadsDir); err != nil {
+		t.Fatalf("save metadata.json: %v", err)
+	}
+
+	useStorageModeGlobals(t)
+	restoreServeGlobals(t)
+	t.Chdir(dir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	beads.ResetCaches()
+	t.Cleanup(beads.ResetCaches)
+
+	origReadonly := readonlyMode
+	readonlyMode = true
+	t.Cleanup(func() { readonlyMode = origReadonly })
+
+	// What PersistentPreRunE leaves behind under --readonly: the read-only open
+	// of this workspace, which is the store serve would have taken a claimer
+	// off.
+	backend, ok := backends.Lookup(name)
+	if !ok {
+		t.Fatalf("backend %q is not registered", name)
+	}
+	opened, err := backend.OpenReadOnly(t.Context(), beadsDir)
+	if err != nil {
+		t.Fatalf("read-only open: %v", err)
+	}
+	store = opened
+
+	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	setRootContext(ctx, cancel)
+
+	// runServe is run on its own goroutine and bounded, because the failure
+	// this test is here to catch does not return: a serve that binds blocks
+	// until the root context is canceled, and an unbounded wait would turn the
+	// regression into a package-wide timeout instead of one named failure.
+	lines, stopCapture := captureStdoutLines(t)
+	var (
+		runErr error
+		bound  bool
+	)
+	done := make(chan error, 1)
+	stderr := captureBootstrapStderr(t, func() {
+		go func() { done <- runServe() }()
+		select {
+		case runErr = <-done:
+		case <-time.After(serveRefusalBudget):
+			bound = true
+			cancel()
+			runErr = <-done
+		}
+	})
+	stopCapture()
+
+	if bound {
+		t.Fatalf("bd --readonly serve bound a server over a read-only store and had to be stopped\nstderr:\n%s", stderr)
+	}
+	if runErr == nil {
+		t.Fatalf("bd --readonly serve returned no error\nstderr:\n%s", stderr)
+	}
+	if !strings.Contains(stderr, "--readonly") {
+		t.Errorf("the refusal does not name the flag that caused it: %q", stderr)
+	}
+	for line := range lines {
+		if strings.Contains(line, "listening on") {
+			t.Errorf("bd serve bound before refusing: %q", line)
+		}
+	}
 }

@@ -80,7 +80,13 @@ WHAT THIS DOES NOT DO
 
   An actor on an HTTP request is caller-asserted provenance for the audit trail,
   not authenticated identity — the same thing it has always been on the CLI,
-  where any local process can pass any --actor.`,
+  where any local process can pass any --actor.
+
+  It does not run under --readonly, and refuses to start rather than binding.
+  Every server it binds publishes the issue-claim operation, and the capability
+  set it advertises is a property of the build rather than of the flags on the
+  process that started it — so a read-only server would advertise a write it
+  could never land.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runServe()
@@ -110,6 +116,9 @@ func runServe() error {
 	// refusal for a bad --addr is the same in every mode.
 	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
 		return HandleError("%v", err)
+	}
+	if readonlyMode {
+		return HandleError("%v", errServeReadonly())
 	}
 
 	cwd, err := os.Getwd()
@@ -311,6 +320,43 @@ func serveDatabaseSource(beadsDir string) (serveDatabase, error) {
 	return serveDatabase{source: serveSourceProvider}, nil
 }
 
+// errServeReadonly refuses `bd --readonly serve`.
+//
+// AHEAD OF THE WORKSPACE, deliberately: every server this command builds
+// publishes the same operation set, claim included, so the answer cannot depend
+// on which database source the workspace resolves to. Putting it here is also
+// what makes it one answer rather than two — the two sources degraded
+// differently, and both silently.
+//
+//   - On the STORE source the root command opens the workspace through
+//     backend.OpenReadOnly and serve takes its claimer off that store. The
+//     server bound, GET /v0/beads/context went on advertising `issues.claim`
+//     (the capability set is derived from the route table and knows nothing
+//     about a CLI flag), and every claim answered 500 with the issue left open.
+//   - On the PROVIDER source serve builds its own unit-of-work provider from
+//     the workspace's connection settings, which carries no read-only posture,
+//     so `--readonly` bought the operator nothing and every claim landed.
+//     (Proxied mode never got here: the root pre-run already refuses strict
+//     readonly for it.)
+//
+// REFUSING RATHER THAN NARROWING THE SURFACE. Dropping `issues.claim` from a
+// read-only server's advertised capabilities would be a wire change — that list
+// is the documented pre-flight a client checks — and it would make one
+// operation's presence depend on a flag on the process that happened to start
+// the server, which no client can discover before connecting. bd already
+// answers this question the same way one layer down, where a backend that
+// cannot guarantee mutation-free access is turned away rather than opened
+// anyway (backendSupportsStrictReadonly, cmd/bd/main.go).
+//
+// The value is read from the global rather than a flag lookup because
+// `readonly` is also a config key, and PersistentPreRunE has already folded
+// both into readonlyMode by the time any RunE runs.
+func errServeReadonly() error {
+	return errors.New("bd serve is unavailable under strict readonly (--readonly, or readonly in config): " +
+		"every server it binds publishes the issue-claim operation, and refusing to start is the only honest " +
+		"answer — a server that advertised a claim it could never land would be worse than no server")
+}
+
 // errServeEmbedded is the PERMANENT refusal. The message says what the
 // workspace is and what serve needs, and promises nothing further: the reason
 // is the embedded backend's commit protocol (see serveDatabaseSource), which no
@@ -366,13 +412,11 @@ func serveIssueRoles(src storage.DoltStorage) (issueops.Reader, issueops.Claimer
 // every other bd process pointed at it, and this server's pool is a claim on
 // that budget.
 //
-// A registered backend is named instead of being given a Dolt mode.
-// info.DoltMode carries one for every workspace, registered ones included:
-// GetContextInfo projects the Dolt fields unconditionally and hardcodes Backend
-// to "dolt" (internal/storage/domain/context.go). That is a pre-existing gap
-// shared with `bd context`, and its fix belongs in that shared projection so
-// CLI and API stay one identity — but repeating it in this label would be this
-// command's own choice to do so.
+// A registered backend is named instead of being given a Dolt mode, which it
+// no longer has: GetContextInfo projects the Dolt-derived identity only for the
+// Dolt backend (internal/storage/domain/context.go), so info.DoltMode is empty
+// here and " (external dolt)" would read as a bare parenthetical about a
+// topology this workspace is not on.
 func serveResolvedMode(info domain.ContextInfo, db serveDatabase) string {
 	if db.source == serveSourceStore {
 		return db.backend + " (registered backend)"

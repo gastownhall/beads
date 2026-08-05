@@ -156,7 +156,8 @@ type Config struct {
 	// be a self-declaration by the same caller-supplied code being checked.
 	// Embedded Dolt is the backend that does not qualify (its commit runs
 	// outside the SQL transaction on a separate connection) and it is refused
-	// where the workspace is actually known: serveModeGate in cmd/bd/serve.go.
+	// where the workspace is actually known: serveDatabaseSource in
+	// cmd/bd/serve.go.
 	//
 	// Unlike the provider path these are built ONCE, before Listen, rather than
 	// per request. The provider path rebuilds its roles per request for exactly
