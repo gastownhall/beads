@@ -8,8 +8,6 @@ import (
 	"time"
 
 	"github.com/dolthub/eventkit"
-
-	"github.com/steveyegge/beads/internal/config"
 )
 
 const (
@@ -41,18 +39,29 @@ func Endpoint() string {
 	return endpoint
 }
 
-// DataDir returns the telemetry queue directory, eventsData beside the
-// user-global config.yaml. Telemetry is machine-scoped (see eventkit.MachineID),
-// so this deliberately ignores BEADS_DIR and the resolved workspace, which is
-// what fixes GH#4807 on a fresh install where no workspace exists yet.
+// DataDir returns the telemetry queue directory, ~/.config/bd/eventsData.
+// Telemetry is machine-scoped (see eventkit.MachineID), so this deliberately
+// ignores BEADS_DIR and the resolved workspace, which is what fixes GH#4807
+// on a fresh install where no workspace exists yet.
+//
+// This is intentionally a pure function of the home directory only — it does
+// NOT call config.UserConfigYamlPath(), which probes for whichever of two
+// candidate config.yaml locations currently exists on disk (~/.config/bd vs.
+// the OS config dir, e.g. ~/Library/Application Support on macOS) and can
+// therefore return a different directory across runs as those files are
+// created or removed. Following that here would let the same machine's
+// telemetry queue silently move out from under itself, stranding any
+// already-queued .evtq files at the old location (GH#4828).
 func DataDir() (string, error) {
 	// os.UserHomeDir can return a non-absolute value (e.g. HOME=~) with no error, creating a literal "~" dir under cwd.
-	if home, err := os.UserHomeDir(); err != nil {
+	home, err := os.UserHomeDir()
+	if err != nil {
 		return "", fmt.Errorf("metrics: resolve home dir: %w", err)
-	} else if !filepath.IsAbs(home) {
+	}
+	if !filepath.IsAbs(home) {
 		return "", fmt.Errorf("metrics: resolve home dir: not absolute: %q", home)
 	}
-	return filepath.Join(filepath.Dir(config.UserConfigYamlPath()), "eventsData"), nil
+	return filepath.Join(home, ".config", "bd", "eventsData"), nil
 }
 
 // Init constructs the global collector and, when enabled, its on-disk file
