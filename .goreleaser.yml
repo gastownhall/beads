@@ -237,6 +237,6 @@ release:
     Download the appropriate binary for your platform below, extract it, and place it in your PATH.
     {{ end }}
 
-# Announce the release
+# This fork distributes only through its own GitHub Releases.
 announce:
-  skip: false
+  skip: true
