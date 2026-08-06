@@ -98,12 +98,15 @@ SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db
     "$PROJECT_ROOT"/website/docs/**/*.md \
     2>/dev/null \
     | grep -v 'CHANGELOG\|removed\|legacy\|migration\|migrate\|was removed\|pre-\|old\|deprecated' \
+    | grep -vE 'docs/CLI_REFERENCE\.md:.*--db string.*Database path' \
+    | grep -vE 'docs/architecture/dolt\.md:.*\.backup-.*\.db' \
+    | grep -vE 'AGENT_INSTRUCTIONS\.md:.*filepath\.Join\(tmpDir, "\.beads", "beads\.db"\)' \
     || true)
 
 if [ -n "$SQLITE_REFS" ]; then
-    echo "WARN: Found possible legacy SQLite/database references:"
+    echo "FAIL: Found stale SQLite/database references:"
     echo "$SQLITE_REFS" | head -20
-    # Don't increment ERRORS — these may be intentional migration docs
+    ERRORS=$((ERRORS + 1))
 else
     echo "PASS: No stale SQLite references"
 fi

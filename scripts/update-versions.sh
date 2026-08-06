@@ -73,6 +73,15 @@ if [ "$BASE_VERSION" != "$NEW_VERSION" ]; then
     IS_PRERELEASE=1
 fi
 
+python_version() {
+    local version=$1
+    if [[ $version =~ ^([0-9]+\.[0-9]+\.[0-9]+)-dc([0-9]+)$ ]]; then
+        printf '%s.dev%s+dc%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}" "${BASH_REMATCH[2]}"
+        return
+    fi
+    printf '%s\n' "${version/-rc./rc}"
+}
+
 # Check we're in repo root
 if [ ! -f "cmd/bd/version.go" ]; then
     echo -e "${RED}Error: Must run from repository root${NC}"
@@ -81,6 +90,8 @@ fi
 
 # Get current version
 CURRENT_VERSION=$(grep 'Version = ' cmd/bd/version.go | sed 's/.*"\(.*\)".*/\1/')
+CURRENT_PYTHON_VERSION=$(python_version "$CURRENT_VERSION")
+NEW_PYTHON_VERSION=$(python_version "$NEW_VERSION")
 # Base (prerelease-stripped) form of the current version. The Windows PE
 # numeric fields (file_version/product_version, manifest version) only ever
 # hold the base form, so they must be matched on the base, not on the full
@@ -116,8 +127,27 @@ update_file ".claude-plugin/marketplace.json" "\"version\": \"$CURRENT_VERSION\"
 
 # 3. MCP Python package
 echo "  • integrations/beads-mcp/*"
-update_file "integrations/beads-mcp/pyproject.toml" "version = \"$CURRENT_VERSION\"" "version = \"$NEW_VERSION\""
-update_file "integrations/beads-mcp/src/beads_mcp/__init__.py" "__version__ = \"$CURRENT_VERSION\"" "__version__ = \"$NEW_VERSION\""
+update_file "integrations/beads-mcp/pyproject.toml" "version = \"$CURRENT_PYTHON_VERSION\"" "version = \"$NEW_PYTHON_VERSION\""
+update_file "integrations/beads-mcp/src/beads_mcp/__init__.py" "__version__ = \"$CURRENT_PYTHON_VERSION\"" "__version__ = \"$NEW_PYTHON_VERSION\""
+# The release workflow's MCP package gate runs `uv sync --locked`, so a
+# pyproject bump without a lock refresh fails the release only in the
+# tag-triggered run — after the tag exists and can no longer be rewritten.
+# That cost v1.1.0 and v1.1.2 their first release runs and burned the v1.1.1
+# tag outright. Regenerate the lock as part of the bump. A failure here must
+# not abort the bump half-applied (set -e): warn and let check-versions.sh
+# hold the gate.
+if command -v uv >/dev/null 2>&1; then
+    echo "  • integrations/beads-mcp/uv.lock"
+    if ! uv lock --directory integrations/beads-mcp; then
+        echo -e "${RED}✗ uv lock failed — integrations/beads-mcp/uv.lock NOT refreshed.${NC}"
+        echo "  Fix and rerun before tagging, or check-versions.sh and the release MCP gate will fail:"
+        echo "    uv lock --directory integrations/beads-mcp"
+    fi
+else
+    echo -e "${RED}✗ uv not found — integrations/beads-mcp/uv.lock NOT refreshed.${NC}"
+    echo "  Run this before tagging, or check-versions.sh and the release MCP gate will fail:"
+    echo "    uv lock --directory integrations/beads-mcp"
+fi
 
 # 4. npm package
 echo "  • npm-package/package.json"
