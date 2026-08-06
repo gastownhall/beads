@@ -138,6 +138,24 @@ func TestDetectTestPollution_PrefixSequentialIDShortDescriptionScoresHigh(t *tes
 	}
 }
 
+func TestDetectTestPollution_GenericTitleSubstringAloneStaysReviewOnly(t *testing.T) {
+	// Regression for GH#5137: an unanchored substring match on "test issue"
+	// must not, combined with just an empty description, reach the 0.9
+	// --clean cutoff. "Fix test issue detection regression" is a legitimate
+	// issue title (not a test-prefixed fixture, not a sequential/hash
+	// fixture ID) and must stay in the review-only band, never cleanable.
+	issues := []*types.Issue{
+		mkPollutionIssue("dcr-b7e1", "Fix test issue detection regression", "", types.StatusOpen, types.TypeBug),
+	}
+	got := detectTestPollution(issues)
+	if len(got) != 1 {
+		t.Fatalf("expected the title-substring match to still be flagged for review, got %d hits", len(got))
+	}
+	if got[0].score >= 0.9 {
+		t.Fatalf("score = %v, want < 0.9 (must not reach the --clean high-confidence band)", got[0].score)
+	}
+}
+
 func TestDetectTestPollution_PrefixHashIDThinDescriptionAtBoundary(t *testing.T) {
 	// Prefixed title (0.4) + hash id + thin description (0.3) = 0.70 (GH#5137):
 	// flagged for review, but below the 0.9 band clean mode acts on.

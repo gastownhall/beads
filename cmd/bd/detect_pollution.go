@@ -91,11 +91,18 @@ func detectTestPollution(issues []*types.Issue) []pollutionResult {
 			reasons = append(reasons, "Very short description")
 		}
 
-		// Explicit generic fixture titles (strong corroboration).
+		// Explicit generic fixture titles (corroboration, not a standalone
+		// clean signal). Weighted at 0.3 rather than 0.5 (GH#5137 review):
+		// these are unanchored substring matches ("test issue" also appears
+		// inside legitimate titles like "Fix test issue detection
+		// regression"), so title-substring + empty-description alone
+		// (0.3 + 0.4 = 0.7) must land in the review-only band and never
+		// reach the 0.9 --clean cutoff without another corroborating signal
+		// (e.g. a test-prefixed title or a sequential/hash fixture ID).
 		if strings.Contains(title, "issue for testing") ||
 			strings.Contains(title, "test issue") ||
 			strings.Contains(title, "sample issue") {
-			score += 0.5
+			score += 0.3
 			corroboration = true
 			reasons = append(reasons, "Generic test title")
 		}
