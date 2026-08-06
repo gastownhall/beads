@@ -199,6 +199,80 @@ func TestCheckFlagWrites(t *testing.T) {
 	}
 }
 
+// unreachableGate mirrors the `unreachable` FixGate literal in
+// cmd/bd/doctor/fix_gate.go (AssessSchemaFixGate, openDoltDB failure branch):
+// Determined and AllowFSFix are true, but AllowDBFix and Reason are left at
+// their zero values (false, ""). A gate keyed off `gate.Reason == ""` reads
+// this shape as "safe to fix" and admits database fixes on a stopped or
+// unreachable Dolt server — the bypass GH#4993 exists to close.
+func unreachableGate() doctor.FixGate {
+	return doctor.FixGate{
+		Determined:    true,
+		RecommendFix:  true,
+		AllowFSFix:    true,
+		BinaryVersion: 49,
+	}
+}
+
+func resultWithDBFix() doctorResult {
+	return doctorResult{
+		Path:       "/tmp/does-not-need-to-exist",
+		CLIVersion: "test",
+		Checks: []doctorCheck{
+			{
+				Name:     "Schema Compatibility",
+				Status:   statusError,
+				Message:  "schema version mismatch",
+				Category: "Core",
+				Fix:      "run 'bd doctor --fix' to migrate",
+			},
+		},
+	}
+}
+
+// TestApplyFixesWithholdsDBFixOnUnreachableGate is the regression test for the
+// gate bypass: applyFixes admitted a database fix whenever
+// `gate.AllowDBFix || gate.Reason == ""`, which is true for the unreachable
+// shape above even though AllowDBFix is false. Gating on AllowDBFix alone
+// withholds it.
+func TestApplyFixesWithholdsDBFixOnUnreachableGate(t *testing.T) {
+	gate := unreachableGate()
+	result := resultWithDBFix()
+
+	out := captureStdout(t, func() error {
+		applyFixes(result, gate)
+		return nil
+	})
+
+	if strings.Contains(out, "Fixing Schema Compatibility") {
+		t.Fatalf("applyFixes attempted a database fix on an unreachable gate:\n%s", out)
+	}
+	if !strings.Contains(out, "No fixable issues found") {
+		t.Fatalf("expected applyFixes to withhold the only fix (a database fix) on an unreachable gate, got:\n%s", out)
+	}
+}
+
+// TestPreviewFixesFlagsDBFixAsBlockedOnUnreachableGate is the dry-run half of
+// the same regression: blockDB used `!gate.AllowDBFix && gate.Reason != ""`,
+// which is false (not blocked) for the same unreachable shape, so a dry run
+// never warned that the fix would actually be withheld.
+func TestPreviewFixesFlagsDBFixAsBlockedOnUnreachableGate(t *testing.T) {
+	gate := unreachableGate()
+	result := resultWithDBFix()
+
+	out := captureStdout(t, func() error {
+		previewFixes(result, gate)
+		return nil
+	})
+
+	if !strings.Contains(out, "Blocked by the schema gate") {
+		t.Fatalf("previewFixes did not flag the database fix as blocked on an unreachable gate:\n%s", out)
+	}
+	if !strings.Contains(out, "blocked by the schema gate") {
+		t.Fatalf("expected the dry-run summary to report the fix(es) as blocked, got:\n%s", out)
+	}
+}
+
 // TestCollectFixableIssuesPartitionsByBlastRadius pins the split that lets a
 // schema gate withhold schema writes without also refusing to repair a file
 // mode — the "no hatch for filesystem-only fixes" complaint.
