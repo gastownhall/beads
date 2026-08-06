@@ -36,6 +36,14 @@ func TestIsNonCompletingClose(t *testing.T) {
 		{"removed obsolete shim", false},
 		{"duplicate of ee-1", true},
 		{"added dedup pass for event ingest", false},
+		// GH#5138 review: hyphenated separator ("wont-fix") and the U+2019
+		// typographic right single quote in "won't" must resolve like the
+		// already-handled ASCII forms above.
+		{"wont-fix", true},
+		{"won’t fix", true}, // explicit ’ escape: U+2019 RIGHT SINGLE QUOTATION MARK, not ASCII '
+		// Hyphenated prose must not be swallowed by the hyphen tolerance —
+		// only the exact "wont[-]fix" keyword pair gets it.
+		{"not-yet-planned", false},
 	}
 	for _, tc := range cases {
 		got := IsNonCompletingClose(tc.reason)

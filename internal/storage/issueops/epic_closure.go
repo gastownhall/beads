@@ -23,7 +23,18 @@ import (
 // the bare adjective "obsolete" is dropped in favor of "obsoleted" — a task
 // closed because it was superseded/deprecated typically reads "obsoleted by
 // X", while "obsolete" alone is commonly just describing what was removed.
-var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont ?fix|won't fix|superseded|obsoleted|not planned)\b`)
+//
+// Two separator variants are matched directly in the regex rather than via a
+// global text normalization pass (GH#5138 review): "wont[- ]?fix" accepts a
+// hyphen or space (or neither) between "wont" and "fix", and the apostrophe
+// class "['’]" accepts both the ASCII apostrophe and the U+2019
+// typographic right single quote ("won't"/"won’t"). A blanket
+// hyphen-to-space fold on the whole string was deliberately avoided: it
+// would risk turning unrelated hyphenated prose into a false match (e.g.
+// collapsing "not-yet-planned" into something that reads like "not planned").
+// Scoping the hyphen tolerance to just this one keyword pair sidesteps that
+// entirely.
+var nonCompletingCloseRegexp = regexp.MustCompile(`(?i)\b(duplicate|dupe|wont[- ]?fix|won['\x{2019}]t fix|superseded|obsoleted|not planned)\b`)
 
 // IsNonCompletingClose reports whether closeReason is a redirection/abandon
 // (duplicate, wontfix, superseded, …) rather than finished work. Empty reason
