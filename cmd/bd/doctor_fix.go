@@ -72,7 +72,11 @@ func previewFixes(result doctorResult, gate doctor.FixGate) {
 		fmt.Println()
 	}
 
-	blockDB := !gate.AllowDBFix && gate.Reason != ""
+	// GH#4993: gate solely on AllowDBFix. Reason is advisory text, not a
+	// safety signal — an unreachable/undetermined gate leaves Reason at its
+	// zero value ("") while still needing DB fixes withheld, so admitting on
+	// gate.Reason == "" reopened the bypass this gate exists to close.
+	blockDB := !gate.AllowDBFix
 	for _, issue := range fsFixes {
 		printIssue(issue, !gate.AllowFSFix)
 	}
@@ -107,11 +111,19 @@ func applyFixes(result doctorResult, gate doctor.FixGate) {
 	if gate.AllowFSFix {
 		fixableIssues = append(fixableIssues, fsFixes...)
 	}
-	if gate.AllowDBFix || gate.Reason == "" {
+	// GH#4993: gate solely on AllowDBFix — see the matching comment in
+	// previewFixes. An unreachable/undetermined gate has Reason == "" but
+	// must still withhold DB fixes; falling open on an empty Reason is the
+	// bypass this gate exists to close.
+	if gate.AllowDBFix {
 		fixableIssues = append(fixableIssues, dbFixes...)
 	} else if len(dbFixes) > 0 {
+		reason := gate.Reason
+		if reason == "" {
+			reason = "database schema state could not be assessed"
+		}
 		fmt.Printf("\n%s Skipping %d database fix(es) — %s\n",
-			ui.RenderFail("✗"), len(dbFixes), gate.Reason)
+			ui.RenderFail("✗"), len(dbFixes), reason)
 		for _, issue := range dbFixes {
 			fmt.Printf("    · %s\n", issue.Name)
 		}
