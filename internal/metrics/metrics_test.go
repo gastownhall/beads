@@ -6,16 +6,20 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/steveyegge/beads/internal/config"
 )
 
 // wantDataDir mirrors DataDir()'s own construction, so tests assert against
-// the documented location (beside the user-global config.yaml) rather than
-// duplicating a hardcoded path that could drift from the implementation.
+// the documented location (~/.config/bd/eventsData) rather than duplicating
+// a hardcoded path that could drift from the implementation. This is
+// deliberately a pure function of the home dir, NOT config.UserConfigYamlPath
+// — see TestDataDirStableRegardlessOfConfigFileExistence.
 func wantDataDir(t *testing.T) string {
 	t.Helper()
-	return filepath.Join(filepath.Dir(config.UserConfigYamlPath()), "eventsData")
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home dir: %v", err)
+	}
+	return filepath.Join(home, ".config", "bd", "eventsData")
 }
 
 func TestDataDirUsesUserConfigDir(t *testing.T) {
@@ -28,6 +32,69 @@ func TestDataDirUsesUserConfigDir(t *testing.T) {
 	if want := wantDataDir(t); got != want {
 		t.Fatalf("DataDir() = %q, want %q", got, want)
 	}
+}
+
+// TestDataDirStableRegardlessOfConfigFileExistence is the regression for
+// GH#4828: DataDir() previously followed config.UserConfigYamlPath(), whose
+// result depends on which of two candidate config.yaml locations currently
+// exists on disk (~/.config/bd vs. the OS config dir — e.g. ~/Library/
+// Application Support on macOS). That meant DataDir() could resolve to a
+// different directory across runs as those files were created or removed,
+// silently switching the telemetry queue and stranding any already-queued
+// .evtq files at the old location. DataDir() must now be a pure function of
+// the home directory only, indifferent to which config.yaml (if any) exists.
+func TestDataDirStableRegardlessOfConfigFileExistence(t *testing.T) {
+	isolateUserProfile(t)
+	want := wantDataDir(t)
+
+	assertUnchanged := func(t *testing.T) {
+		t.Helper()
+		got, err := DataDir()
+		if err != nil {
+			t.Fatalf("DataDir: %v", err)
+		}
+		if got != want {
+			t.Fatalf("DataDir() = %q, want %q (must not depend on config.yaml existence)", got, want)
+		}
+	}
+
+	// Baseline: neither candidate config.yaml exists yet.
+	assertUnchanged(t)
+
+	// Candidate 1: the OS-native config dir (~/Library/Application Support/bd
+	// on macOS; identical to candidate 2 on platforms where os.UserConfigDir()
+	// already returns ~/.config, e.g. Linux under this test's env).
+	osConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolve os config dir: %v", err)
+	}
+	osCandidate := filepath.Join(osConfigDir, "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(osCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(osCandidate), err)
+	}
+	if err := os.WriteFile(osCandidate, []byte{}, 0o600); err != nil {
+		t.Fatalf("write %s: %v", osCandidate, err)
+	}
+	assertUnchanged(t)
+
+	if err := os.Remove(osCandidate); err != nil {
+		t.Fatalf("remove %s: %v", osCandidate, err)
+	}
+	assertUnchanged(t)
+
+	// Candidate 2: the documented cross-platform ~/.config/bd path.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home dir: %v", err)
+	}
+	xdgCandidate := filepath.Join(home, ".config", "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(xdgCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(xdgCandidate), err)
+	}
+	if err := os.WriteFile(xdgCandidate, []byte{}, 0o600); err != nil {
+		t.Fatalf("write %s: %v", xdgCandidate, err)
+	}
+	assertUnchanged(t)
 }
 
 // TestDataDirIgnoresBeadsDir is the regression for the maintainer-reported gap
