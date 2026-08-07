@@ -24,15 +24,21 @@
 // it is part of what the contract MEANS — it is why a memory converges on pull
 // and a setting does not — not because a caller has to construct it.
 //
-// WHAT THIS PACKAGE IMPORTS: stdlib, plus github.com/steveyegge/beads/issueops
-// for the error sentinels and nothing else. That is narrower than the issueops
-// leaf rule ("internal/types and stdlib"): a memory is a string under a string
-// key, so nothing in internal/types is needed here and importing it would only
-// invite issue-shaped types into a plane that has none. The one sentinel is
-// ALIASED rather than redeclared — see errors.go — and the transitive pull of
-// internal/types through issueops is an artifact of that alias, not a
-// dependency anything here uses. Nobody should "fix" it by copying the
-// sentinel.
+// WHAT THIS PACKAGE IMPORTS: stdlib, plus
+// github.com/steveyegge/beads/beadserrors for the error sentinel and nothing
+// else. That is narrower than the issueops leaf rule ("internal/types and
+// stdlib"): a memory is a string under a string key, so nothing in
+// internal/types is needed here and importing it would only invite issue-shaped
+// types into a plane that has none. The sentinel is ALIASED rather than
+// redeclared — see errors.go.
+//
+// It aliases through beadserrors rather than through issueops, which is where
+// that value used to live. Reaching into the issue package for it worked and
+// kept errors.Is identity, but it put issueops in this leaf's dependency graph
+// and internal/types behind it — a claim that the memory plane sits downstream
+// of the issue plane, when the two are siblings over one config table. The
+// shared vocabulary moved down instead. beadserrors imports stdlib only, and a
+// depguard rule keeps it that way.
 //
 // THERE IS NO PAGE HERE. Memories are a keyed namespace a workspace holds tens
 // of, exactly like settings, so List answers with a map: no order, no limit, no

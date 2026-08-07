@@ -62,7 +62,10 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
 1. **The leaf contract.** `issueops/<role>.go`. Request and result types plus
    the interface, with the doc comment written as a SPECIFICATION — every
    promise a conformance case will cite by line. The package imports
-   `internal/types` and stdlib only, and exports no constructors.
+   `internal/types`, `beadserrors` and stdlib only, and exports no
+   constructors. A leaf in some OTHER namespace imports `beadserrors` and
+   stdlib, and reaches for `internal/types` only if its plane actually holds
+   issue-shaped things — `memoryops` does not, and says so.
    Template: `issueops/readyclaimer.go`, `issueops/commenter.go`.
 
 2. **The shared request→filter builder**, if the role takes a filter-shaped
@@ -293,31 +296,45 @@ because that is the list a third one inherits, and each of these reads like a
 convention until you notice it was situational.
 
 **Alias the sentinels; do not mint a second vocabulary.** `memoryops/errors.go`
-is one line of declaration — `var ErrValidation = issueops.ErrValidation`
-(:16) — and the IDENTITY is the entire point. `errors.Is` against that one
+is one line of declaration — `var ErrValidation = beadserrors.ErrValidation`
+— and the IDENTITY is the entire point. `errors.Is` against that one
 value is what the HTTP problem classifier, `cmd/bd`'s error handling and every
 conformance contract already do. A `memoryops`-flavored twin would be a
 different value meaning the same thing, so all of those sites would have to
 match both forever; and the cost is not the double-match, it is the site that
 adds only the first arm and classifies a validation refusal as an internal
-error. Re-exporting rather than telling callers to reach through `issueops` is
-the other half: code holding only `Memories` can classify a refusal without
-knowing the issue package exists.
+error. Re-exporting rather than telling callers to reach through the declaring
+package is the other half: code holding only `Memories` can classify a refusal
+without discovering a second import.
 
-That import is the leaf's only non-stdlib one, and it makes step 1's rule
-NARROWER here rather than wider — a memory is a string under a string key, so
-nothing in `internal/types` is needed and importing it would invite
-issue-shaped types into a plane that has none. Say that in the package doc,
-along with the fact that `internal/types` still arrives transitively through
-`issueops` (`memoryops/doc.go:27-35`): it looks like a dependency, it is an
-artifact of the alias, and the obvious "fix" for it is to copy the sentinel.
+**Alias DOWNWARD, to `beadserrors`, not sideways into `issueops`.** This is the
+part the second namespace got wrong first and then fixed. `memoryops` originally
+aliased `issueops.ErrValidation`, which kept identity but put the issue package
+in a memory leaf's dependency graph with `internal/types` behind it — a claim
+that the memory plane sits downstream of the issue plane, when the two are
+siblings over one config table. `beadserrors` now declares the namespace-neutral
+vocabulary (`ErrValidation`, `ErrNotFound`, `ErrNotInitialized`, the
+`ErrUnsupported` type) and `issueops` re-exports it by alias like everyone else.
+`memoryops` depends on `beadserrors` and `context`, nothing more.
 
-The open question is a THIRD namespace's to answer, not to inherit. Two
-namespaces sharing one vocabulary by alias is right. At three, the shared
-sentinels probably want their own tiny leaf that all of them re-export from —
-and that move is CHEAP BEFORE the third namespace exists and expensive after,
-because by then every `errors.Is` site in the tree points at the `issueops`
-value and either the new leaf aliases backwards or every site moves at once.
+The test for what belongs down there: **would a leaf for a plane nobody has
+written yet need it?** A request can be invalid, a row can be missing, a
+substrate can be uninitialized and a backend can not implement a capability, on
+any plane. `ErrCloseBlocked` and `ErrDependencyCycle` name issue concepts and
+stay put. `beadserrors` imports stdlib and nothing else — enforced by the
+`beadserrors-leaf` depguard rule, not just asked for, because the next tempting
+import is always one shared constant that "obviously belongs with the errors".
+
+**One earlier claim here was wrong and is worth keeping visible**: this section
+used to say moving the sentinels later would be expensive, "because by then
+every `errors.Is` site in the tree points at the `issueops` value and either the
+new leaf aliases backwards or every site moves at once." That is a false
+dichotomy. A Go alias preserves identity in both directions, so the new leaf
+declares canonically and the old home aliases FORWARD to it — 141 `ErrValidation`
+references across the tree, and not one of them moved. What actually grows with
+each namespace is not migration cost but the number of leaves that have baked in
+the wrong dependency direction. Judge that timing on the direction, not on churn
+that never materializes.
 
 **No `.golangci.yml` entry, and that is not an omission.** `memoryops` adds
 nothing to the `cmd-bd-role-constructors` deny list because there is nothing to

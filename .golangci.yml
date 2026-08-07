@@ -171,6 +171,22 @@ linters:
               desc: "a command reaches the ready-count role through store.ReadyCounter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadycounter/counter.go"
             - pkg: github.com/steveyegge/beads/internal/workapi/storequerier
               desc: "a command reaches the boolean-query role through store.Querier(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storequerier/querier.go"
+        # beadserrors sits BENEATH every role leaf, so whatever it imports is
+        # imported by all of them - which is the reason it exists. The second
+        # leaf reached into issueops for one sentinel and pulled internal/types
+        # along behind it, and that import claimed the memory plane sits
+        # downstream of the issue plane. Stdlib only, and enforced rather than
+        # requested, because the next tempting import is always one shared
+        # constant that "obviously belongs with the errors".
+        #
+        # strict, not lax: this is an allowlist of the whole world, so a rule
+        # that named packages to deny would have to predict them.
+        beadserrors-leaf:
+          list-mode: strict
+          files:
+            - "**/beadserrors/**"
+          allow:
+            - "$gostd"
     # The CONSTRUCTION half of that same boundary, and the half that actually
     # matches the failure. The depguard rule above denies a handler IMPORTING
     # the builders; it does not deny a handler naming the filter types, which
