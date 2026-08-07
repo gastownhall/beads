@@ -5,15 +5,30 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
+// Lifecycle over a REAL unit of work, for the promises the IssueOperations
+// contract does not hold at this backend. newRealIssueOperationsWithProvider
+// below is also the IssueOperations contract runner's own fixture constructor
+// (issue_operations_contract_test.go), so this file cannot be retired whole
+// whatever happens to the cases in it.
+//
+// WHAT MOVED OUT, and what covers it now:
+//
+//   - Cross-tier ID collisions on create. RunIssueOperationsCreateRefusesAn-
+//     OccupiedID asserts all three directions (durable over durable, durable
+//     over wisp, ephemeral over durable) against the raw rows of both tables,
+//     which is a superset of what the case here seeded.
+//   - Invalid canonical field values refused without a mutation. Every one of
+//     its five rows is the same row, with the same value, in
+//     TestIssueOperationsRejectsInvalidRequestsBeforeOpeningUOW — which proves
+//     something strictly stronger without a database: the request never opens a
+//     unit of work at all, so there is no write to look for.
 func TestIssueOperationsOwnerPatchPersists(t *testing.T) {
 	ctx := context.Background()
 	operations := newRealIssueOperations(t, ctx)
@@ -47,135 +62,6 @@ func TestIssueOperationsOwnerPatchPersists(t *testing.T) {
 	if updated.Issue == nil || updated.Issue.Owner != "updated-owner" {
 		t.Fatalf("Update(owner).Issue = %#v, want updated-owner", updated.Issue)
 	}
-}
-
-func TestIssueOperationsRejectsInvalidCanonicalUpdatesWithoutMutation(t *testing.T) {
-	ctx := context.Background()
-	operations, provider := newRealIssueOperationsWithProvider(t, ctx)
-	created, err := operations.Create(ctx, issueops.CreateRequest{
-		Actor: "tester",
-		Issue: &issueops.Issue{
-			ID:        "bd-invalid-update",
-			Title:     "valid incumbent",
-			IssueType: types.TypeTask,
-			Priority:  2,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	negativeEstimate := -1
-	checks := []struct {
-		name  string
-		patch issueops.IssuePatch
-	}{
-		{"empty title", issueops.IssuePatch{Title: issueops.Field[string]{Set: true}}},
-		{"overlong title", issueops.IssuePatch{Title: issueops.Field[string]{Set: true, Value: strings.Repeat("x", 501)}}},
-		{"negative priority", issueops.IssuePatch{Priority: issueops.Field[int]{Set: true, Value: -1}}},
-		{"priority above maximum", issueops.IssuePatch{Priority: issueops.Field[int]{Set: true, Value: 5}}},
-		{"negative estimated minutes", issueops.IssuePatch{EstimatedMinutes: issueops.Field[*int]{Set: true, Value: &negativeEstimate}}},
-	}
-
-	before := readIssueMutationSnapshot(t, ctx, provider, created.Issue.ID, false)
-	for _, check := range checks {
-		t.Run(check.name, func(t *testing.T) {
-			_, err := operations.Update(ctx, issueops.UpdateRequest{
-				Actor:   "tester",
-				IssueID: created.Issue.ID,
-				Patch:   check.patch,
-			})
-			if !errors.Is(err, issueops.ErrValidation) {
-				t.Fatalf("Update() error = %v, want ErrValidation", err)
-			}
-			after := readIssueMutationSnapshot(t, ctx, provider, created.Issue.ID, false)
-			if after != before {
-				t.Fatalf("invalid update changed durable state: before=%+v after=%+v", before, after)
-			}
-			stored := readStoredIssue(t, ctx, provider, created.Issue.ID)
-			if stored.Title != "valid incumbent" || stored.Priority != 2 || stored.EstimatedMinutes != nil {
-				t.Fatalf("invalid update persisted candidate state: %#v", stored)
-			}
-		})
-	}
-}
-
-func TestIssueOperationsCreateRejectsCrossTierIDCollisions(t *testing.T) {
-	ctx := context.Background()
-	operations, provider := newRealIssueOperationsWithProvider(t, ctx)
-
-	durable, err := operations.Create(ctx, issueops.CreateRequest{
-		Actor: "tester",
-		Issue: &issueops.Issue{
-			ID:        "bd-cross-tier-durable",
-			Title:     "durable incumbent",
-			IssueType: types.TypeTask,
-			Priority:  2,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(durable incumbent) error = %v", err)
-	}
-	durableBefore := readIssueMutationSnapshot(t, ctx, provider, durable.Issue.ID, false)
-
-	_, err = operations.Create(ctx, issueops.CreateRequest{
-		Actor: "tester",
-		Issue: &issueops.Issue{
-			ID:        durable.Issue.ID,
-			Title:     "wisp replacement",
-			IssueType: types.TypeTask,
-			Priority:  2,
-			Ephemeral: true,
-		},
-	})
-	if !errors.Is(err, issueops.ErrAlreadyExists) {
-		t.Fatalf("Create(wisp collision) error = %v, want ErrAlreadyExists", err)
-	}
-	durableAfter := readIssueMutationSnapshot(t, ctx, provider, durable.Issue.ID, false)
-	if durableAfter != durableBefore {
-		t.Fatalf("wisp collision changed durable incumbent: before=%+v after=%+v", durableBefore, durableAfter)
-	}
-	storedDurable := readStoredIssue(t, ctx, provider, durable.Issue.ID)
-	if storedDurable.Title != "durable incumbent" {
-		t.Fatalf("durable incumbent title = %q, want unchanged", storedDurable.Title)
-	}
-	assertStoredIssueMissing(t, ctx, provider, durable.Issue.ID, true)
-
-	wisp, err := operations.Create(ctx, issueops.CreateRequest{
-		Actor: "tester",
-		Issue: &issueops.Issue{
-			ID:        "bd-cross-tier-wisp",
-			Title:     "wisp incumbent",
-			IssueType: types.TypeTask,
-			Priority:  2,
-			Ephemeral: true,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create(wisp incumbent) error = %v", err)
-	}
-	wispBefore := readIssueMutationSnapshot(t, ctx, provider, wisp.Issue.ID, true)
-
-	_, err = operations.Create(ctx, issueops.CreateRequest{
-		Actor: "tester",
-		Issue: &issueops.Issue{
-			ID:        wisp.Issue.ID,
-			Title:     "durable replacement",
-			IssueType: types.TypeTask,
-			Priority:  2,
-		},
-	})
-	if !errors.Is(err, issueops.ErrAlreadyExists) {
-		t.Fatalf("Create(durable collision) error = %v, want ErrAlreadyExists", err)
-	}
-	wispAfter := readIssueMutationSnapshot(t, ctx, provider, wisp.Issue.ID, true)
-	if wispAfter != wispBefore {
-		t.Fatalf("durable collision changed wisp incumbent: before=%+v after=%+v", wispBefore, wispAfter)
-	}
-	storedWisp := readStoredWisp(t, ctx, provider, wisp.Issue.ID)
-	if storedWisp.Title != "wisp incumbent" {
-		t.Fatalf("wisp incumbent title = %q, want unchanged", storedWisp.Title)
-	}
-	assertStoredIssueMissing(t, ctx, provider, wisp.Issue.ID, false)
 }
 
 func TestIssueOperationsTypedIssueTypeUsesConfiguredTypes(t *testing.T) {
@@ -454,28 +340,4 @@ func readStoredIssue(t *testing.T, ctx context.Context, provider UnitOfWorkProvi
 		t.Fatalf("read issue %s: %v", id, err)
 	}
 	return issue
-}
-
-func readStoredWisp(t *testing.T, ctx context.Context, provider UnitOfWorkProvider, id string) *types.Issue {
-	t.Helper()
-	issue, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (*types.Issue, error) {
-		return uw.IssueUseCase().GetWisp(ctx, id)
-	})
-	if err != nil {
-		t.Fatalf("read wisp %s: %v", id, err)
-	}
-	return issue
-}
-
-func assertStoredIssueMissing(t *testing.T, ctx context.Context, provider UnitOfWorkProvider, id string, useWisp bool) {
-	t.Helper()
-	_, err := RunTxRead(ctx, provider, func(ctx context.Context, uw UnitOfWork) (*types.Issue, error) {
-		if useWisp {
-			return uw.IssueUseCase().GetWisp(ctx, id)
-		}
-		return uw.IssueUseCase().GetIssue(ctx, id)
-	})
-	if !dberrors.IsNoRows(err) {
-		t.Fatalf("read missing issue %s (wisp=%t) error = %v, want no rows", id, useWisp, err)
-	}
 }
