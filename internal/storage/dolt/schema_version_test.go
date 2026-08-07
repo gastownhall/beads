@@ -315,6 +315,13 @@ func TestIgnoredMigration0011CleansOrphanedChildCounters(t *testing.T) {
 		t.Fatalf("commit counter fixture: %v", err)
 	}
 
+	// Bind the const to its file: if the ignored series is ever renumbered,
+	// fail here with a self-explaining message instead of silently replaying
+	// the wrong tail.
+	if _, err := schema.IgnoredMigrationSQL("0011_cleanup_orphaned_child_counters.up.sql"); err != nil {
+		t.Fatalf("orphanCleanupIgnoredVersion (%d) no longer matches an ignored migration file: %v", orphanCleanupIgnoredVersion, err)
+	}
+
 	// Pending detection is MAX-based (currentVersion = MAX(version)), so
 	// deleting only one cursor row re-runs only the LATEST ignored migration.
 	// Roll the cursor back to before 0011 so the orphan cleanup itself re-runs;
