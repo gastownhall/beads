@@ -11,13 +11,13 @@ import (
 // =============================================================================
 // GetDependenciesWithMetadata Tests
 // =============================================================================
-
-func TestGetDependenciesWithMetadata(t *testing.T) {
-	// Note: This test is skipped in embedded Dolt mode because GetDependenciesWithMetadata
-	// makes nested GetIssue calls inside a rows cursor, which can cause connection issues.
-	// This is a known limitation of the current implementation (see bd-tdgo.3).
-	t.Skip("Skipping: GetDependenciesWithMetadata has nested query issue in embedded Dolt mode")
-}
+//
+// GetDependenciesWithMetadata and GetDependentsWithMetadata make nested GetIssue
+// calls inside a rows cursor, which the embedded engine cannot serve on one
+// connection (bd-tdgo.3). The populated-graph tests for both were unconditional
+// t.Skip bodies with no assertion in them at all — green forever, including
+// against the limitation they were named for — so they were removed rather than
+// left reading as coverage. The empty-graph case below runs for real.
 
 func TestGetDependenciesWithMetadata_NoResults(t *testing.T) {
 	store, cleanup := setupTestStore(t)
@@ -46,17 +46,6 @@ func TestGetDependenciesWithMetadata_NoResults(t *testing.T) {
 	if len(deps) != 0 {
 		t.Errorf("expected 0 dependencies, got %d", len(deps))
 	}
-}
-
-// =============================================================================
-// GetDependentsWithMetadata Tests
-// =============================================================================
-
-func TestGetDependentsWithMetadata(t *testing.T) {
-	// Note: This test is skipped in embedded Dolt mode because GetDependentsWithMetadata
-	// makes nested GetIssue calls inside a rows cursor, which can cause connection issues.
-	// This is a known limitation of the current implementation (see bd-tdgo.3).
-	t.Skip("Skipping: GetDependentsWithMetadata has nested query issue in embedded Dolt mode")
 }
 
 // =============================================================================
@@ -1193,6 +1182,14 @@ func TestAddDependency_Blocks_DeepCrossTypeChain(t *testing.T) {
 		}
 	}
 }
+
+// The combined-graph RULE the next two pin — the ADD-time gate walks
+// parent-child hops, which DetectCycles deliberately does not — now runs at all
+// three backends as
+// conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop, together
+// with the acyclic chain TestAddDependency_Blocks_DeepCrossTypeChain guards.
+// They stay for the route: the contract drives the DependencyEditor role, these
+// drive DoltStore.AddDependency, and the seam recomputes its own routing.
 
 func TestAddDependency_CombinedGraphCycle_BlocksClosesLoop(t *testing.T) {
 	// Cycle detection now walks both blocks and parent-child edges so a
