@@ -186,6 +186,10 @@ const (
 	// memory plane is user data riding in the config table, not settings, and
 	// the two have different merge semantics and a different miss contract.
 	OpRememberMemory = "rememberMemory"
+	// OpGetMemory reads one memory by key. It is the ONE operation on this
+	// surface that answers a miss with a 404 where its settings counterpart
+	// deliberately does not: see its operationCodes row.
+	OpGetMemory = "getMemory"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -280,6 +284,14 @@ var operationCodes = map[string][]Code{
 	// collide with. Its 400 is the body vocabulary plus the ROLE's two
 	// refusals — empty content, and content no key can be derived from.
 	OpRememberMemory: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// THE 404 IS THE DIVERGENCE, and it is deliberate. OpGetSetting has none
+	// because on that plane an absent key and a key stored empty are one answer
+	// the CLI itself prints identically, so a 404 would publish an invented
+	// distinction. Here the CLI already distinguishes a miss — `bd recall` has
+	// an exit-code contract for it — and the role answers Found rather than a
+	// value, so the 404 reports a distinction that exists. The stored-empty row
+	// falls on the miss side of it, which the document states.
+	OpGetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 }
 
 // Result is a problem response ready to be written: the envelope plus the
@@ -368,6 +380,18 @@ func InvalidCursor() Result {
 // apart would be probing which ids are well-formed.
 func NotFound() Result {
 	return newResult(CodeNotFound, "no issue or wisp with that id")
+}
+
+// MemoryNotFound builds the 404 for a key this workspace holds no memory under.
+//
+// A separate constructor rather than a detail argument on NotFound, because the
+// two say different things: that one is about the issue id space, and reusing
+// its sentence here would tell a client its memory key was an issue id. The
+// detail deliberately does NOT distinguish an absent row from one stored as the
+// empty string — the role cannot see the difference, so the wire must not claim
+// to.
+func MemoryNotFound() Result {
+	return newResult(CodeNotFound, "this workspace holds no memory under that key")
 }
 
 // ClassifyError maps an error from the storage seam onto the wire. The caller

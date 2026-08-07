@@ -1876,6 +1876,82 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/memories/{key}:
+    get:
+      operationId: getMemory
+      summary: Get one stored memory
+      description: >-
+        The memory stored under one key, used verbatim: no namespace completion,
+        no case folding, no dash/underscore equivalence. It is the operation
+        behind `bd recall`.
+
+
+        THIS OPERATION HAS A REAL 404, and it is the one place this surface
+        diverges from `GET /v0/beads/config/{key}`, which deliberately has none.
+        The planes genuinely differ. On the settings plane a key nothing stored
+        and a key stored empty are one answer that `bd config get` prints
+        identically, so a 404 would publish a distinction the server would have
+        to invent. On this plane `bd recall` ALREADY distinguishes a miss, by
+        exit code, and the role answers a miss as a result rather than a value
+        — so a 404 reports a distinction that exists rather than minting one.
+
+
+        A MEMORY STORED AS THE EMPTY STRING IS A 404 TOO. No front door can
+        create one — storing empty content is refused — but an out-of-band write
+        to the config table can, and the role does not invent a distinction the
+        storage seam beneath it cannot see. `GET /v0/beads/memories` DOES
+        enumerate such a row, because its key exists, and that asymmetry is the
+        one way a client can tell the two apart.
+
+
+        MEMORY CONTENT IS SERVED IN FULL and this API has no authentication:
+        `Memory` carries no `redacted` member and withholds nothing. See
+        `POST /v0/beads/memories` for why a key-name heuristic would be worse
+        than no promise at all.
+
+
+        KEYS THIS OPERATION CANNOT REACH. `bd remember --key` accepts any
+        string, so a stored key may carry a control character — and `key` is one
+        path segment, percent-decoded once, so such a key would arrive here as a
+        decoded control character in a path. This operation refuses it with a
+        `400` rather than looking it up, exactly as `getSetting` does. The ROLE
+        stays verbatim: breaking `bd recall` of an odd key someone already
+        stored, to tidy a wire rule, would be the tail wagging the dog. Such a
+        memory is reachable from the CLI and from `GET /v0/beads/memories`, and
+        not by path.
+      parameters:
+        - $ref: '#/components/parameters/MemoryKey'
+      responses:
+        '200':
+          description: The stored memory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is
+            empty after trimming or carries a control character.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: >-
+            This workspace holds no memory under that key — or holds one stored
+            as the empty string, which answers the same way. `detail` says which
+            plane was asked, not which of those two it was.
+          x-bd-codes: [not_found]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
 components:
 
   parameters:
@@ -1887,6 +1963,19 @@ components:
         Exact setting key, used verbatim. Keys routinely contain dots
         (`status.custom`); they occupy one path segment and are
         percent-decoded once.
+      schema:
+        type: string
+        minLength: 1
+    MemoryKey:
+      name: key
+      in: path
+      required: true
+      description: >-
+        Exact memory key, used verbatim. It occupies one path segment and is
+        percent-decoded once. Keys may contain spaces, dots and unicode — the
+        plane stores what `bd remember --key` was given — and a key carrying a
+        CONTROL character is refused here rather than looked up; see the
+        operation description.
       schema:
         type: string
         minLength: 1
@@ -2883,7 +2972,7 @@ components:
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
             `dependencies.list`, `dependencies.blocking`, `dependencies.tree`,
-            `memories.remember`;
+            `memories.get`, `memories.remember`;
             it grows additively, and an operation never
             appears here unless it is fully implemented. This is how a client
             checks for an operation — never the version string.
@@ -3384,6 +3473,43 @@ components:
 
             Always present, including when false, so a client never has to
             infer redaction from an absent member.
+
+    Memory:
+      type: object
+      required: [key, value]
+      description: >-
+        One entry of the workspace's persistent memory plane.
+
+
+        NOT `x-go-type`-PINNED, for the reason `Setting` is not: the CLI
+        marshals an ad-hoc map per verb, so there is no canonical Go struct
+        whose JSON encoding is this contract, and minting one to pin to would
+        mean changing what `bd recall --json` prints in order to satisfy a rule
+        about not changing it.
+
+
+        IT HAS NO `redacted` MEMBER, and that is the deliberate difference from
+        `Setting`. Redaction there is a decision about the KEY NAME, which works
+        because settings keys are configured names; memory keys are derived from
+        the content, so the same rule would withhold a memory about credentials
+        and serve one containing a credential under an innocuous slug. This
+        surface has no authentication and states the exposure rather than
+        implying a protection it does not have.
+      properties:
+        key:
+          type: string
+          description: The memory's key, echoed verbatim.
+        value:
+          type: string
+          description: >-
+            The stored content, verbatim: newlines, surrounding space and
+            unicode as stored, never truncated and never withheld.
+
+
+            Always present. It is the empty string only where a row was written
+            out of band with an empty value, which
+            `GET /v0/beads/memories/{key}` answers as a `404` and
+            `GET /v0/beads/memories` enumerates.
 
     RememberRequest:
       type: object

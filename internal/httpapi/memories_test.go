@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/memoryops"
@@ -220,6 +221,143 @@ func TestRememberRefusesAQueryString(t *testing.T) {
 		t.Errorf("reason = %v, want %q", got, ReasonUnknownParameter)
 	}
 	if n := len(memories.rememberRequests()); n != 0 {
+		t.Errorf("the role was called %d times for a refused request, want 0", n)
+	}
+}
+
+// TestGetMemoryAnswersTheStoredValue: the path segment reaches the role
+// verbatim — percent-decoded once and not otherwise touched — and the answer is
+// the stored bytes.
+//
+// The key here carries a space, a dot and a non-ASCII rune on purpose:
+// `bd remember --key` accepts any string, so a handler that slugged, folded or
+// trimmed the segment would answer about a different memory than the one asked
+// for.
+func TestGetMemoryAnswersTheStoredValue(t *testing.T) {
+	memories := &roleMemories{recalled: memoryops.RecallResult{
+		Key: "Has Spaces.✓", Value: "  the\nstored bytes  ", Found: true,
+	}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.get(t, memoriesPath+"/Has%20Spaces.%E2%9C%93")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	reqs := memories.recallRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d recalls, want 1", len(reqs))
+	}
+	if reqs[0].Key != "Has Spaces.✓" {
+		t.Errorf("role received key %q, want the decoded segment verbatim", reqs[0].Key)
+	}
+
+	body := decodeBody(t, resp)
+	if got := body["value"]; got != "  the\nstored bytes  " {
+		t.Errorf("value = %q, want the stored content verbatim", got)
+	}
+	// No redaction on this plane, deliberately: there is no member to carry it
+	// and no value to withhold.
+	if _, ok := body["redacted"]; ok {
+		t.Error("the response carries `redacted`; this plane has no redaction, and a member that says otherwise is a promise the key-name heuristic cannot keep")
+	}
+}
+
+// TestGetMemoryAnswersAMissWithA404 is the deliberate divergence from the
+// settings surface's no-404 doctrine.
+//
+// Both legs are the SAME answer from the role — Found false — and both are a
+// 404: a row stored as the empty string is a miss here because the storage seam
+// cannot tell it from an absent row, and the wire does not claim to see what
+// the role cannot. `GET /v0/beads/memories` enumerating such a row is the one
+// way a client tells them apart.
+func TestGetMemoryAnswersAMissWithA404(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		result memoryops.RecallResult
+	}{
+		{name: "nothing stored", result: memoryops.RecallResult{Key: "gone"}},
+		{name: "stored as the empty string", result: memoryops.RecallResult{Key: "gone", Value: ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestServer(t, rolesConfig(Config{Memories: &roleMemories{recalled: tc.result}}))
+
+			resp := ts.get(t, memoriesPath+"/gone")
+			if resp.StatusCode != http.StatusNotFound {
+				t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if got := body["code"]; got != string(CodeNotFound) {
+				t.Errorf("code = %v, want %q", got, CodeNotFound)
+			}
+			if body["request_id"] == nil {
+				t.Error("no request_id on the problem body")
+			}
+			// The detail is about the MEMORY plane. Reusing the issue-id
+			// sentence would tell a client its memory key was an issue id.
+			if got, _ := body["detail"].(string); !strings.Contains(got, "memory") {
+				t.Errorf("detail = %q, want it to name the memory plane", got)
+			}
+		})
+	}
+}
+
+// TestGetMemoryRefusesAKeyItCannotAddress covers the two 400s, and the second
+// one is the documented consequence worth pinning: a control character is
+// refused at the door rather than looked up, so a memory stored under such a
+// key is unreachable by path while the ROLE stays verbatim and the CLI still
+// recalls it.
+//
+// The refusal is a 400 and not the 404 beside it, because a 404 would be a
+// claim about storage that nothing here asked storage about.
+func TestGetMemoryRefusesAKeyItCannotAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "empty after trimming", path: memoriesPath + "/%20%20"},
+		{name: "control character", path: memoriesPath + "/bad%0Akey"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memories := &roleMemories{recalled: memoryops.RecallResult{Found: true, Value: "v"}}
+			ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+			resp := ts.get(t, tc.path)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if got := body["param"]; got != "key" {
+				t.Errorf("param = %v, want \"key\"", got)
+			}
+			if got := body["reason"]; got != string(ReasonInvalidValue) {
+				t.Errorf("reason = %v, want %q", got, ReasonInvalidValue)
+			}
+			if n := len(memories.recallRequests()); n != 0 {
+				t.Errorf("the role was called %d times for a key the door refused, want 0", n)
+			}
+		})
+	}
+}
+
+// TestGetMemoryRefusesAQueryString: this operation takes no parameters, and an
+// ignored one is a client's silently unanswered question.
+func TestGetMemoryRefusesAQueryString(t *testing.T) {
+	memories := &roleMemories{recalled: memoryops.RecallResult{Found: true, Value: "v"}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.get(t, memoriesPath+"/k?verbose=1")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if got := body["param"]; got != "verbose" {
+		t.Errorf("param = %v, want \"verbose\"", got)
+	}
+	if got := body["reason"]; got != string(ReasonUnknownParameter) {
+		t.Errorf("reason = %v, want %q", got, ReasonUnknownParameter)
+	}
+	if n := len(memories.recallRequests()); n != 0 {
 		t.Errorf("the role was called %d times for a refused request, want 0", n)
 	}
 }

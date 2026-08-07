@@ -257,6 +257,18 @@ var routeTable = []route{
 		implemented: true,
 		handler:     (*Server).handleRememberMemory,
 	},
+	{
+		op:     OpGetMemory,
+		method: http.MethodGet,
+		// A single-segment wildcard, so pattern and specPath agree and no
+		// declaration is needed. It cannot collide with the collection path
+		// above: ServeMux requires the separating slash, and nothing is
+		// registered for GET on the bare collection until listMemories lands.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.get",
+		implemented: true,
+		handler:     (*Server).handleGetMemory,
+	},
 }
 
 // specPathOf is the document path for a route, defaulting to the router

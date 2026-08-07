@@ -214,7 +214,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.remember`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.get`, `memories.remember`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	Capabilities []string `json:"capabilities"`
 
 	// Database Logical database name (not a host or a DSN).
@@ -367,6 +367,21 @@ type IssuesPage struct {
 
 	// NextCursor Present if and only if `has_more` is true. Pass it back verbatim as `cursor` to fetch the next page. Opaque and server-private.
 	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// Memory One entry of the workspace's persistent memory plane.
+//
+// NOT `x-go-type`-PINNED, for the reason `Setting` is not: the CLI marshals an ad-hoc map per verb, so there is no canonical Go struct whose JSON encoding is this contract, and minting one to pin to would mean changing what `bd recall --json` prints in order to satisfy a rule about not changing it.
+//
+// IT HAS NO `redacted` MEMBER, and that is the deliberate difference from `Setting`. Redaction there is a decision about the KEY NAME, which works because settings keys are configured names; memory keys are derived from the content, so the same rule would withhold a memory about credentials and serve one containing a credential under an innocuous slug. This surface has no authentication and states the exposure rather than implying a protection it does not have.
+type Memory struct {
+	// Key The memory's key, echoed verbatim.
+	Key string `json:"key"`
+
+	// Value The stored content, verbatim: newlines, surrounding space and unicode as stored, never truncated and never withheld.
+	//
+	// Always present. It is the empty string only where a row was written out of band with an empty value, which `GET /v0/beads/memories/{key}` answers as a `404` and `GET /v0/beads/memories` enumerates.
+	Value string `json:"value"`
 }
 
 // Problem RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
@@ -591,6 +606,9 @@ type TreeNode = types.TreeNode
 
 // IssueID defines model for IssueID.
 type IssueID = string
+
+// MemoryKey defines model for MemoryKey.
+type MemoryKey = string
 
 // SettingKey defines model for SettingKey.
 type SettingKey = string

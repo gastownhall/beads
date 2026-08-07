@@ -75,6 +75,74 @@ func (s *Server) handleRememberMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleGetMemory answers GET /v0/beads/memories/{key}.
+func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireNoQuery(w, r) {
+		return
+	}
+	key, ok := s.memoryKey(w, r)
+	if !ok {
+		return
+	}
+
+	memories, err := s.memories(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	result, err := memories.Recall(r.Context(), memoryops.RecallRequest{Key: key})
+	if err != nil {
+		s.failMemoryErr(w, r, err)
+		return
+	}
+	// A MISS IS A 404 HERE, and this is the one operation on this surface where
+	// that diverges from its settings counterpart. getSetting has no 404
+	// because an absent key and a key stored empty are one answer `bd config
+	// get` prints identically; on this plane `bd recall` already distinguishes a
+	// miss by exit code and the role answers Found rather than a value, so the
+	// status reports a distinction that exists rather than inventing one.
+	//
+	// A row stored as the EMPTY STRING falls on the miss side of it, because
+	// that is where the role puts it — the storage seam cannot tell it from an
+	// absent row, and this handler will not claim to see what the role cannot.
+	// listMemories enumerates such a row, which is the one way a client tells
+	// the two apart.
+	if !result.Found {
+		s.fail(w, r, MemoryNotFound())
+		return
+	}
+	writeJSON(w, apigen.Memory{Key: result.Key, Value: result.Value})
+}
+
+// memoryKey validates the path parameter and reports whether the request may
+// proceed. It is settingKey's rules, deliberately unchanged, so the two keyed
+// planes refuse the same shapes with the same `param` and the same `reason`.
+//
+// A control character is refused rather than looked up, because a
+// percent-escape in the path decodes to one and a key carrying a newline could
+// only have come from a client assembling paths by concatenation. THE ROLE
+// STAYS VERBATIM: `bd remember --key` accepts any string, so such a memory can
+// exist, and it stays reachable from the CLI and from the collection read. It
+// is unreachable by path, and the document says so rather than this refusal
+// being discovered.
+//
+// The refusal is a 400 and not the 404 beside it: the 404 says this workspace
+// holds no such memory, which is a claim about storage that nothing here has
+// asked storage about.
+func (s *Server) memoryKey(w http.ResponseWriter, r *http.Request) (string, bool) {
+	key := r.PathValue("key")
+	switch {
+	case strings.TrimSpace(key) == "":
+		s.fail(w, r, InvalidArgument("key", ReasonInvalidValue, "`key` is empty after trimming"))
+		return "", false
+	case strings.ContainsFunc(key, isControlChar):
+		requestInfo(r.Context()).refuse(key)
+		s.fail(w, r, InvalidArgument("key", ReasonInvalidValue, "`key` must not contain control characters"))
+		return "", false
+	}
+	return key, true
+}
+
 // rememberRequest decodes the body into the role's request, member by member,
 // so that every refusal can NAME the member it is about.
 //
