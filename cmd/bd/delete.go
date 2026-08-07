@@ -131,7 +131,11 @@ Force: Delete and orphan dependents
 			Force:  force,
 			DryRun: dryRun || !force,
 		}
-		result, err := deleter.Delete(ctx, request)
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		result, err := deleter.Delete(opsCtx, request)
 		if request.DryRun {
 			if err != nil {
 				if previewErr := outputDeletionPreview([]string{issueID}, map[string]*types.Issue{issueID: issue}, false, dryRun, nil, err, jsonOutput); previewErr != nil {
@@ -332,7 +336,11 @@ func deleteBatch(_ *cobra.Command, issueIDs []string, force bool, dryRun bool, c
 		Force:   force,
 		DryRun:  dryRun || !force,
 	}
-	result, err := deleter.Delete(ctx, request)
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return HandleError("%v", err)
+	}
+	result, err := deleter.Delete(opsCtx, request)
 	if request.DryRun {
 		if err != nil {
 			if previewErr := outputDeletionPreview(resolvedIDs, issues, cascade, dryRun, nil, err, jsonOutput); previewErr != nil {

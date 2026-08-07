@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sweep up another client's deferred rows — deferral bounds who *creates*
   commits, not commit contents.
 
+  Scope: embedded and direct SQL-server modes. Proxied-server routes never
+  apply auto-commit policy (they short-circuit before it resolves), so
+  batch/off remain inert there — tracked as a follow-up. A deployment that
+  had explicitly configured `dolt.auto-commit: off` from the old help text
+  note: in server mode that was behaving like `on`; it now genuinely stops
+  minting version commits until an explicit `bd dolt commit`.
+
 
 - **`bd delete --cascade` no longer marks LIVE issues as deleted in other
   issues' text** (bd-x82so). When the deletion named a wisp, the set used to
