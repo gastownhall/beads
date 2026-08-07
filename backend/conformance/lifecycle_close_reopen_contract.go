@@ -734,6 +734,15 @@ func RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory(t *testing.T, ctx c
 // version on the request that would have done nothing anyway. An implementation
 // that filters the no-op first answers a lost-update precondition with success,
 // and the caller's compare-and-set silently stops fencing.
+//
+// The case also pins the OTHER end of the same ordering, because the version
+// check is early but not first: both verbs RESOLVE THE ISSUE before they judge
+// the precondition, so a request naming an id that was never created reports
+// ErrNotFound and not ErrVersionMismatch. The two answers send a caller
+// somewhere different — a mismatch means "re-read and retry", a not-found means
+// "this id is wrong" — and a body that read the version first would report the
+// mismatch with every other case in this file still green, since nothing else
+// here names a missing id at all.
 func RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
@@ -798,6 +807,67 @@ func RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps(t *testing.T, ctx contex
 	}
 	if noOp.Changed {
 		t.Errorf("reopen of open %s with the current version reported Changed = true, want false", openID)
+	}
+
+	// The lookup comes FIRST. An id that names no row is ErrNotFound whether or
+	// not the request carries a precondition, and it is never ErrVersionMismatch
+	// — a caller that matched the mismatch would re-read and retry forever
+	// against an id that will never exist.
+	//
+	// Both legs matter. Without a version the request reaches the plain resolve;
+	// with one it reaches the precondition, which is the arm where an
+	// implementation that reads row_lock before deciding the row exists reports
+	// the wrong sentinel. The version supplied is arbitrary: a row that is not
+	// there has no version for it to agree with.
+	missingID := fixture.IssuePrefix + "-lcr-version-missing"
+	arbitraryVersion := int64(1)
+	for _, tc := range []struct {
+		name    string
+		version *int64
+	}{
+		{name: "unguarded"},
+		{name: "guarded on a version", version: &arbitraryVersion},
+	} {
+		t.Run("missing id "+tc.name, func(t *testing.T) {
+			_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+				Actor: "writer", IssueID: missingID, ExpectedVersion: tc.version,
+			})
+			assertLifecycleMissingIDRefusal(t, "close", missingID, err)
+
+			_, err = fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{
+				Actor: "writer", IssueID: missingID, ExpectedVersion: tc.version,
+			})
+			assertLifecycleMissingIDRefusal(t, "reopen", missingID, err)
+
+			// Neither refusal may have created the row it could not find.
+			for _, table := range []string{"issues", "wisps"} {
+				var rows int
+				//nolint:gosec // G201: table is one of this file's own literals
+				if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id = ?", []any{missingID}, &rows); err != nil {
+					t.Fatalf("count %s rows for %s: %v", table, missingID, err)
+				}
+				if rows != 0 {
+					t.Errorf("%s holds %d rows for the missing id %s, want none", table, rows, missingID)
+				}
+			}
+		})
+	}
+}
+
+// assertLifecycleMissingIDRefusal checks the sentinel a verb answers a missing
+// id with. It asserts the NEGATIVE too: matching ErrNotFound is not enough if
+// the error also matches ErrVersionMismatch, because a caller branching on the
+// mismatch would take the retry path.
+func assertLifecycleMissingIDRefusal(t *testing.T, verb, id string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s of the missing id %s: err = nil, want ErrNotFound", verb, id)
+	}
+	if !errors.Is(err, publicops.ErrNotFound) {
+		t.Errorf("%s of the missing id %s: err = %v, want ErrNotFound", verb, id, err)
+	}
+	if errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Errorf("%s of the missing id %s: err = %v, want it NOT to match ErrVersionMismatch — the id is wrong, not stale", verb, id, err)
 	}
 }
 
