@@ -1,9 +1,11 @@
 package testutil
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // PinDockerHostFromContext resolves the Docker CLI's active context endpoint
@@ -22,12 +24,18 @@ func PinDockerHostFromContext() {
 	if os.Getenv("DOCKER_HOST") != "" {
 		return
 	}
-	out, err := exec.Command("docker", "context", "inspect", "-f", "{{.Endpoints.docker.Host}}").Output()
+	// context inspect reads local metadata only (never the daemon), so 5s is
+	// generous; the timeout guards against a pathological docker shim hanging
+	// TestMain.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "docker", "context", "inspect", "-f", "{{.Endpoints.docker.Host}}").Output()
 	if err != nil {
 		return
 	}
 	host := strings.TrimSpace(string(out))
-	if host == "" {
+	if !strings.Contains(host, "://") {
+		// Not endpoint-shaped (empty, or a shim CLI printed something else).
 		return
 	}
 	_ = os.Setenv("DOCKER_HOST", host)
