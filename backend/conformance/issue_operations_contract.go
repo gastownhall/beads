@@ -347,8 +347,12 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 
 	ordered, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
 		Metadata: publicops.MetadataPatch{
-			Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"keep":"merged","merged":true}`)},
-			Set:   map[string]json.RawMessage{"added": json.RawMessage(`"set"`), "keep": json.RawMessage(`"set"`)},
+			Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"keep":"merged","contested":"merged","merged":true}`)},
+			Set: map[string]json.RawMessage{
+				"added":     json.RawMessage(`"set"`),
+				"keep":      json.RawMessage(`"set"`),
+				"contested": json.RawMessage(`"set"`),
+			},
 			Unset: []string{"keep", "drop"},
 		},
 	}})
@@ -360,8 +364,17 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 	}
 	// "keep" was merged, then set, then unset — removal is last, so it is gone.
 	// "drop" was seeded and unset. "merged" and "added" are what survives.
-	assertIssueOperationsMetadata(t, "ordered metadata patch", ordered.Issue.Metadata, `{"added":"set","merged":true}`)
-	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after the ordered metadata patch", `{"added":"set","merged":true}`)
+	//
+	// "contested" is what makes the MERGE≺SET half of this case falsifiable, and
+	// it is the reason a key colliding in Merge and Set is not enough on its own:
+	// "keep" collides too, but Unset removes it, so a body running Set BEFORE
+	// Merge produces the identical document and this case would pass over a
+	// broken order. "contested" survives the patch, so it records which of the
+	// two wrote last — Set does, per issueops.go's Merge≺Set≺Unset promise.
+	assertIssueOperationsMetadata(t, "ordered metadata patch", ordered.Issue.Metadata,
+		`{"added":"set","contested":"set","merged":true}`)
+	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after the ordered metadata patch",
+		`{"added":"set","contested":"set","merged":true}`)
 
 	// Replace beside any incremental edit is refused, and the document the
 	// replacement would have written never lands.
@@ -386,7 +399,8 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 			}); !errors.Is(err, publicops.ErrValidation) {
 				t.Fatalf("%s: err = %v, want ErrValidation", name, err)
 			}
-			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after "+name, `{"added":"set","merged":true}`)
+			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after "+name,
+				`{"added":"set","contested":"set","merged":true}`)
 		})
 	}
 	events.assert(t, "refused replace-plus-incremental patches", 0, nil)
