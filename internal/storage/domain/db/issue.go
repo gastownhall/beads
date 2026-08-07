@@ -98,6 +98,21 @@ func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*type
 	return nil
 }
 
+// PromoteFromEphemeral promotes an active wisp into the Dolt-versioned issues
+// plane in place: same id, wisp_type retained, labels/dependencies/events/
+// comments carried across to the permanent tables, inbound wisp-targeted
+// dependency edges retargeted, and blocked state recomputed. It delegates to
+// the exact issueops implementation the classic (direct/embedded) route runs,
+// so the two modes cannot drift. The issueops error is returned unwrapped on
+// purpose: the CLI surfaces it verbatim ("wisp <id> not found"), and that
+// text is part of the classic error contract.
+func (r *issueSQLRepositoryImpl) PromoteFromEphemeral(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return errors.New("db: PromoteFromEphemeral: id must not be empty")
+	}
+	return issueops.PromoteFromEphemeralInTx(ctx, r.runner, id, actor)
+}
+
 func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (bool, error) {
 	issue, err := issueops.GetIssueInTx(ctx, r.runner, id)
 	if err != nil {
@@ -833,6 +848,12 @@ func normalizeUpdateValue(key string, value any) any {
 		case []byte:
 			return string(v)
 		}
+	case "waiters":
+		// The column is TEXT holding a JSON array; the embedded path
+		// (issueops.updateIssueInTx) marshals unconditionally, and a raw
+		// []string would be refused by the SQL driver here.
+		waitersJSON, _ := json.Marshal(value)
+		return string(waitersJSON)
 	}
 	return value
 }
@@ -1102,6 +1123,53 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssue: %w", err)
 	}
 	return nil
+}
+
+// UnclaimIssueIfAssignee runs the classic compare-and-swap release against this
+// runner. Like UnclaimIssue it takes no IssueTableOpts: issueops routes the
+// write to the issues or wisps tables from the row itself, so a wisp's claim is
+// released against the wisp tables on both backends. The mismatch verdict
+// (storage.ErrAssigneeMismatch, nothing written) is produced by the shared
+// helper, not restated here.
+func (r *issueSQLRepositoryImpl) UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+	if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, r.runner, id, actor, expectedAssignee); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssueIfAssignee: %w", err)
+	}
+	return nil
+}
+
+// HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
+// mirroring DoltStore.HeartbeatIssue: wisps are ephemeral and never leased,
+// and the SQL work is the classic issueops.HeartbeatIssueInTx — same clock
+// (time.Now().UTC()), same TTL resolution (issueops.LeaseTTL), and the same
+// only-current-owner classification (storage.ErrAlreadyClaimed /
+// ErrNotClaimable) — so classic `bd reclaim` staleness semantics see proxied
+// heartbeats identically. Deliberately NO Dolt commit: the leases table is
+// dolt_ignored (bd-lrgn1), and the cmd layer commits this transaction with
+// uow.RunTxEphemeral (plain SQL COMMIT, nothing in dolt_log).
+func (r *issueSQLRepositoryImpl) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	if issueops.IsActiveWispInTx(ctx, r.runner, id) {
+		return fmt.Errorf("db: IssueSQLRepository.HeartbeatIssue: %w: %s is ephemeral", storage.ErrNotClaimable, id)
+	}
+	if err := issueops.HeartbeatIssueInTx(ctx, r.runner, id, actor); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.HeartbeatIssue: %w", err)
+	}
+	return nil
+}
+
+// WakeExpiredDefers runs the shared lazy defer-wake body against this
+// repository's runner (the same DBTX-shaped seam ReclaimExpiredLeases uses)
+// and reports how many rows woke per table. The issues count decides whether
+// the transaction's owner mints a dolt commit; the wisps count decides
+// whether it must still issue a plain SQL commit — wisp tables are
+// dolt_ignored, so a wisp-only wake mints no version commit, but a caller
+// that treats it as "nothing happened" rolls the wisp writes back.
+func (r *issueSQLRepositoryImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	out, err := issueops.WakeExpiredDefersInTx(ctx, r.runner)
+	if err != nil {
+		return 0, 0, fmt.Errorf("db: IssueSQLRepository.WakeExpiredDefers: %w", err)
+	}
+	return len(out.Issues), len(out.Wisps), nil
 }
 
 func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

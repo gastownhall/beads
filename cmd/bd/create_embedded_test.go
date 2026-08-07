@@ -1146,8 +1146,8 @@ func TestEmbeddedCreateWithGitRemote(t *testing.T) {
 	}
 }
 
-// TestEmbeddedCreateConcurrent verifies that 20 concurrent bd create processes
-// can each create 10 issues without data loss or corruption.
+// TestEmbeddedCreateConcurrent verifies one contended create from each of six
+// CLI processes, then proves every requested issue was durably created.
 func TestEmbeddedCreateConcurrent(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
@@ -1157,81 +1157,112 @@ func TestEmbeddedCreateConcurrent(t *testing.T) {
 	bd := buildEmbeddedBD(t)
 	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "cc")
 
-	const (
-		numWorkers      = 20
-		issuesPerWorker = 10
-	)
+	// Six first attempts plus at most one serial retry per lock loser keeps the
+	// create-process budget at twelve.
+	const numWorkers = 6
 
 	type result struct {
-		worker int
-		ids    []string
-		err    error
+		title string
+		out   string
+		err   error
 	}
 
 	results := make([]result, numWorkers)
+	ready := make(chan struct{}, numWorkers)
+	start := make(chan struct{})
 	var wg sync.WaitGroup
 	wg.Add(numWorkers)
 
 	for w := 0; w < numWorkers; w++ {
 		go func(worker int) {
 			defer wg.Done()
-			var ids []string
-			for i := 0; i < issuesPerWorker; i++ {
-				title := fmt.Sprintf("worker-%d-issue-%d", worker, i)
-				out, err := bdRunWithFlockRetry(t, bd, dir, "create", "--silent", title)
-				if err != nil {
-					results[worker] = result{worker: worker, err: fmt.Errorf("issue %d: %v\n%s", i, err, out)}
-					return
-				}
-				id := strings.TrimSpace(string(out))
-				if id == "" {
-					results[worker] = result{worker: worker, err: fmt.Errorf("issue %d: empty ID", i)}
-					return
-				}
-				ids = append(ids, id)
-			}
-			results[worker] = result{worker: worker, ids: ids}
+			title := fmt.Sprintf("concurrent-create-%d", worker)
+			ready <- struct{}{}
+			<-start
+
+			cmd := exec.Command(bd, "create", "--silent", title)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			out, err := cmd.CombinedOutput()
+			results[worker] = result{title: title, out: string(out), err: err}
 		}(w)
 	}
+	for range numWorkers {
+		<-ready
+	}
+	close(start)
 	wg.Wait()
 
-	// Collect all IDs and check for errors
-	allIDs := make(map[string]bool)
-	var failures int
+	expected := make(map[string]string, numWorkers)
+	lockLosers := make([]result, 0, numWorkers)
+	immediateSuccesses := 0
+	recordSuccess := func(title, out string) {
+		t.Helper()
+		id := strings.TrimSpace(out)
+		if id == "" {
+			t.Fatalf("create %q succeeded without an issue ID", title)
+		}
+		if previousTitle, exists := expected[id]; exists {
+			t.Fatalf("create %q returned duplicate ID %q already returned for %q", title, id, previousTitle)
+		}
+		expected[id] = title
+	}
+
 	for _, r := range results {
-		if r.err != nil {
-			if !strings.Contains(r.err.Error(), "one writer at a time") {
-				t.Errorf("worker %d failed: %v", r.worker, r.err)
-			}
-			failures++
+		if r.err == nil {
+			recordSuccess(r.title, r.out)
+			immediateSuccesses++
 			continue
 		}
-		for _, id := range r.ids {
-			if allIDs[id] {
-				t.Errorf("duplicate ID %q from worker %d", id, r.worker)
-			}
-			allIDs[id] = true
+		if strings.Contains(r.out, "panic") {
+			t.Fatalf("first create %q panicked:\n%s", r.title, r.out)
+		}
+		if isEmbeddedLockOutput(r.out) {
+			lockLosers = append(lockLosers, r)
+			continue
+		}
+		t.Fatalf("first create %q failed unexpectedly: %v\n%s", r.title, r.err, r.out)
+	}
+	if immediateSuccesses == 0 {
+		t.Fatal("expected at least one immediate create success")
+	}
+
+	// Retry only the lock losers, once each, after concurrent contention ends.
+	for _, r := range lockLosers {
+		cmd := exec.Command(bd, "create", "--silent", r.title)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("retry create %q failed: %v\n%s", r.title, err, out)
+		}
+		recordSuccess(r.title, string(out))
+	}
+
+	if len(expected) != numWorkers {
+		t.Fatalf("got %d unique issue IDs, want %d", len(expected), numWorkers)
+	}
+
+	// Read the durable store directly: a CLI list would duplicate a read path
+	// rather than prove an additional risk here.
+	store := openStore(t, beadsDir, "cc")
+	issues, err := store.SearchIssues(t.Context(), "", types.IssueFilter{})
+	if err != nil {
+		t.Fatalf("SearchIssues durable readback: %v", err)
+	}
+	got := make(map[string]string, len(issues))
+	for _, issue := range issues {
+		if previousTitle, exists := got[issue.ID]; exists {
+			t.Fatalf("durable readback contains duplicate ID %q for %q and %q", issue.ID, previousTitle, issue.Title)
+		}
+		got[issue.ID] = issue.Title
+	}
+	if len(got) != len(expected) {
+		t.Fatalf("durable issue count = %d, want exactly %d; got ID-title pairs %#v", len(got), len(expected), got)
+	}
+	for id, wantTitle := range expected {
+		if gotTitle, exists := got[id]; !exists || gotTitle != wantTitle {
+			t.Errorf("durable issue %q title = %q, want %q", id, gotTitle, wantTitle)
 		}
 	}
-
-	successes := numWorkers - failures
-	if successes < 1 {
-		t.Fatalf("expected at least 1 successful worker, got %d", successes)
-	}
-
-	if len(allIDs) < 1 {
-		t.Errorf("expected at least 1 unique ID, got %d", len(allIDs))
-	}
-
-	// Verify all successfully created issues exist in the database
-	store := openStore(t, beadsDir, "cc")
-	stats, err := store.GetStatistics(t.Context())
-	if err != nil {
-		t.Fatalf("GetStatistics: %v", err)
-	}
-	if stats.TotalIssues < len(allIDs) {
-		t.Errorf("expected at least %d issues in DB, got %d", len(allIDs), stats.TotalIssues)
-	}
-
-	t.Logf("created %d issues across %d concurrent workers (%d succeeded), %d in DB", len(allIDs), numWorkers, successes, stats.TotalIssues)
 }

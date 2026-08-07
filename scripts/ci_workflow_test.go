@@ -60,6 +60,61 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
+	const (
+		workspaceBDBinary = "${{ github.workspace }}/bd"
+		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
+		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
+		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
+	)
+
+	workflows := map[string]ciWorkflow{
+		"main.yml": readCIWorkflow(t, "main.yml"),
+		"pr.yml":   readCIWorkflow(t, "pr.yml"),
+	}
+
+	prMacOS := workflows["pr.yml"].job(t, "test-macos")
+	if prMacOS.RunsOn != macOSRunner {
+		t.Errorf("pr macOS test runner = %q, want %q", prMacOS.RunsOn, macOSRunner)
+	}
+	assertStepRunsExactly(t, prMacOS, "Build", buildCommand)
+	assertStepRunsExactly(t, prMacOS, "Test", prTestCommand)
+	assertStepsBefore(t, prMacOS, []string{"Build"}, []string{"Test"})
+	assertStepEnvValue(t, prMacOS, "Test", "BEADS_TEST_BD_BINARY", workspaceBDBinary)
+
+	mainTest := workflows["main.yml"].job(t, "test")
+	assertStepRunsExactly(t, mainTest, "Build", buildCommand)
+	assertStepRunsExactly(t, mainTest, "Test", mainTestCommand)
+	assertStepsBefore(t, mainTest, []string{"Build"}, []string{"Test"})
+	if got := mainTest.step(t, "Build").If; got != "matrix.os != 'ubuntu-latest'" {
+		t.Errorf("main build condition = %q, want macOS-only condition", got)
+	}
+	if got := mainTest.step(t, "Test").If; got != "${{ !matrix.coverage }}" {
+		t.Errorf("main test condition = %q, want non-coverage condition", got)
+	}
+	if got := mainTest.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", macOSRunner}) {
+		t.Errorf("main test matrix os = %v, want [ubuntu-latest %s]", got, macOSRunner)
+	}
+	if got := mainTest.Strategy.Matrix.Include; len(got) != 2 ||
+		got[0].OS != "ubuntu-latest" || !got[0].Coverage ||
+		got[1].OS != macOSRunner || got[1].Coverage || got[1].TestFlags != "-v -race -short" {
+		t.Errorf("main test matrix include = %+v, want macOS non-coverage entry with -v -race -short", got)
+	}
+	assertStepEnvValue(t, mainTest, "Test", "BEADS_TEST_BD_BINARY", workspaceBDBinary)
+
+	for workflowName, workflow := range workflows {
+		for jobName, job := range workflow.Jobs {
+			for _, step := range job.Steps {
+				if step.Env["BEADS_TEST_BD_BINARY"] == workspaceBDBinary &&
+					!(workflowName == "pr.yml" && jobName == "test-macos" && step.Name == "Test") &&
+					!(workflowName == "main.yml" && jobName == "test" && step.Name == "Test") {
+					t.Errorf("%s job %q step %q has unexpected workspace bd binary override", workflowName, jobName, step.Name)
+				}
+			}
+		}
+	}
+}
+
 func TestGoCacheOwnershipTopology(t *testing.T) {
 	workflows := map[string]ciWorkflow{
 		"main.yml":    readCIWorkflow(t, "main.yml"),
@@ -434,6 +489,32 @@ func assertGoCacheEnv(t *testing.T, job ciWorkflowJob, stepName, profile string)
 	}
 }
 
+func assertStepRunsExactly(t *testing.T, job ciWorkflowJob, stepName, want string) {
+	t.Helper()
+	if got := job.step(t, stepName).Run; got != want {
+		t.Errorf("step %q run = %q, want %q", stepName, got, want)
+	}
+}
+
+func assertStepEnvValue(t *testing.T, job ciWorkflowJob, stepName, key, want string) {
+	t.Helper()
+	if got := job.step(t, stepName).Env[key]; got != want {
+		t.Errorf("step %q env %s = %q, want %q", stepName, key, got, want)
+	}
+}
+
+func equalStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func assertGoCacheWriter(t *testing.T, workflow ciWorkflow, wantJob, wantRunner, wantStep, wantCondition string) {
 	t.Helper()
 
@@ -524,7 +605,14 @@ type ciWorkflowStrategy struct {
 }
 
 type ciWorkflowMatrix struct {
-	OS []string `yaml:"os"`
+	OS      []string                  `yaml:"os"`
+	Include []ciWorkflowMatrixInclude `yaml:"include"`
+}
+
+type ciWorkflowMatrixInclude struct {
+	OS        string `yaml:"os"`
+	Coverage  bool   `yaml:"coverage"`
+	TestFlags string `yaml:"test-flags"`
 }
 
 type ciWorkflowStep struct {

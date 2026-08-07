@@ -25,13 +25,25 @@ import (
 // The comparison is on DECODED JSON, so key order and whitespace do not enter
 // into it; what is compared is every key and every value of every item.
 
-// readsParityAllowlist is the complete set of documented differences between
-// the two surfaces' bodies. It is EMPTY, deliberately: both surfaces marshal
-// the same canonical Go structs (the wire schemas are x-go-type-pinned to
-// them), so there is nothing left for an item to differ by. An entry here is a
-// permanent, reviewed divergence — not a place to record a surprise.
+// readsParityAllowlist is the complete set of documented per-field differences
+// between the two surfaces' bodies. An entry here is a permanent, reviewed
+// divergence — not a place to record a surprise. Both surfaces otherwise
+// marshal the same canonical Go structs (the wire schemas are x-go-type-pinned
+// to them), so the field-level answer is identical except for the one entry
+// below.
 //
-// The three differences that DO exist are structural rather than per-field, so
+//   - `revision`: the guarded-write optimistic-concurrency token (the issues
+//     row_lock cell) is a CLI-only detail projection. `bd show --json` renames
+//     it to the storage-neutral `revision` for guarded clients
+//     (projectShowJSONDetails in show_unit_helpers.go); GET
+//     /v0/beads/issues/{id} serializes the raw IssueDetails, whose RowVersion
+//     is json:"-", so the field is absent over HTTP by design. The v0 HTTP
+//     object schema is apigen-frozen and the token is only meaningful to the
+//     CLI's guarded-write path, so this asymmetry is intentional, not drift. If
+//     the token is ever needed over HTTP, extend that surface and delete this
+//     entry.
+//
+// Three further differences exist but are structural rather than per-field, so
 // every comparison below states its terms explicitly instead of waving them
 // through here:
 //
@@ -49,7 +61,12 @@ import (
 //     TestListLimitPolicyIsResolvedBeforeTheRequest pins that policy branch by
 //     branch; every comparison here passes an EXPLICIT limit on both sides so
 //     it is comparing the operation and not that policy.
-var readsParityAllowlist = map[string]string{}
+var readsParityAllowlist = map[string]string{
+	"revision": "CLI-only guarded-write token: `bd show --json` projects the " +
+		"row_lock optimistic-concurrency cell as `revision` (projectShowJSONDetails); " +
+		"the apigen-frozen v0 HTTP object keeps RowVersion json:\"-\", so the " +
+		"field is absent over GET /v0/beads/issues/{id} by design.",
+}
 
 // getJSONArray fetches a page endpoint and returns its decoded items.
 func (sp *serveProcess) items(t *testing.T, path string) []map[string]any {

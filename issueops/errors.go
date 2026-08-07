@@ -3,6 +3,8 @@ package issueops
 import (
 	"errors"
 	"fmt"
+
+	"github.com/steveyegge/beads/beadserrors"
 )
 
 // ErrAlreadyClaimed is returned when attempting to claim an issue that is already
@@ -14,21 +16,67 @@ var ErrAlreadyClaimed = errors.New("issue already claimed")
 // same actor owning the claim.
 var ErrNotClaimable = errors.New("issue not claimable")
 
+// ClaimConflictError reports the state that refused a claim — the current
+// assignee and status, read inside the same transaction that lost the
+// compare-and-set. It wraps the refusal rather than replacing it, so the
+// sentinel still matches, the refusal's carefully-worded prose survives
+// byte-for-byte, and a caller can classify the conflict from typed fields
+// instead of parsing that prose.
+//
+// Err is set by every implementation that returns this type; a Claimer whose
+// same-transaction re-read fails returns the bare refusal instead.
+type ClaimConflictError struct {
+	// IssueID names the issue that refused the claim.
+	IssueID string
+	// Assignee is the holder observed by the losing transaction. It is empty
+	// when the refusal was about the status rather than a foreign holder.
+	Assignee string
+	// Status is the status observed by the losing transaction.
+	Status Status
+	// Err is the wrapped refusal. It matches ErrAlreadyClaimed or
+	// ErrNotClaimable.
+	Err error
+}
+
+func (e *ClaimConflictError) Error() string { return e.Err.Error() }
+
+// Unwrap makes ClaimConflictError match the refusal it carries.
+func (e *ClaimConflictError) Unwrap() error { return e.Err }
+
+// ErrUnsupported reports a capability this backend does not serve. It is an
+// alias of beadserrors.ErrUnsupported — the same type, so one errors.As arm
+// matches it under either name — and it is re-exported here because a caller
+// holding an issueops role should not have to discover a second package to
+// classify the refusal.
+//
+// It is declared there rather than here because the capability shell is not an
+// issue concept: a memory role can go unimplemented by a backend exactly as a
+// Reader can.
+type ErrUnsupported = beadserrors.ErrUnsupported
+
 // ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
 // current assignee does not match the expected assignee (including when the
 // issue is no longer assigned at all). The caller's view of the claim was
 // stale; the issue is left untouched.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
-// ErrNotFound is returned when a requested entity does not exist in the database.
-var ErrNotFound = errors.New("not found")
-
-// ErrValidation classifies deterministic request-validation failures.
-var ErrValidation = errors.New("validation failed")
-
-// ErrNotInitialized is returned when the database has not been initialized
-// (e.g., issue_prefix config is missing).
-var ErrNotInitialized = errors.New("database not initialized")
+// The namespace-neutral part of this vocabulary is declared by beadserrors and
+// re-exported here. These are ALIASES, so they are the same values: every
+// existing issueops.ErrX reference and every errors.Is site keeps matching the
+// identical error, and a leaf that never imports issueops still matches it too.
+//
+// They live down there because none of them names an issue: a request can be
+// invalid, a row can be missing and a database can be uninitialized on any
+// plane. The refusals BELOW that name issue concepts stay here.
+var (
+	// ErrNotFound is returned when a requested entity does not exist in the database.
+	ErrNotFound = beadserrors.ErrNotFound
+	// ErrValidation classifies deterministic request-validation failures.
+	ErrValidation = beadserrors.ErrValidation
+	// ErrNotInitialized is returned when the database has not been initialized
+	// (e.g., issue_prefix config is missing).
+	ErrNotInitialized = beadserrors.ErrNotInitialized
+)
 
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
@@ -62,6 +110,44 @@ func (e *CloseOpenChildrenError) Unwrap() error {
 // already occupied. The issue and wisp tables share one ID space.
 var ErrAlreadyExists = errors.New("issue already exists")
 
+// ErrAlreadyIdentified is returned by Bootstrapper.Bootstrap when the substrate
+// already carries a workspace identity. It is its own sentinel rather than
+// ErrAlreadyExists because that one is about an occupied ISSUE ID in a shared
+// id space, and a caller that classifies the two together would answer a
+// re-init with advice about `bd update`.
+var ErrAlreadyIdentified = errors.New("workspace already identified")
+
+// AlreadyIdentifiedError reports the identity a substrate was found carrying
+// when a bootstrap was refused, read inside the same transaction that would
+// have written over it.
+//
+// It carries the pair rather than formatting it away because the two things a
+// caller does next both need the values: adopting the identity needs them, and
+// telling a COMPLETE identity apart from a half-written one — the state a
+// bootstrap that failed partway leaves on a substrate with no transactions —
+// means looking at which of the two is empty.
+type AlreadyIdentifiedError struct {
+	// Prefix is the issue prefix found, or "" when the substrate carried none.
+	Prefix string
+	// ProjectID is the project identity found, or "" when the substrate
+	// carried none.
+	ProjectID string
+}
+
+func (e *AlreadyIdentifiedError) Error() string {
+	switch {
+	case e.Prefix != "" && e.ProjectID != "":
+		return fmt.Sprintf("workspace already identified as prefix %q, project %s", e.Prefix, e.ProjectID)
+	case e.Prefix != "":
+		return fmt.Sprintf("workspace already identified as prefix %q with no project id", e.Prefix)
+	default:
+		return fmt.Sprintf("workspace already identified as project %s with no issue prefix", e.ProjectID)
+	}
+}
+
+// Unwrap makes AlreadyIdentifiedError match ErrAlreadyIdentified.
+func (e *AlreadyIdentifiedError) Unwrap() error { return ErrAlreadyIdentified }
+
 // ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
 // no longer matches the row's current version (row_lock) — an optimistic
 // concurrency failure. Callers errors.Is it to distinguish a lost-update
@@ -81,10 +167,10 @@ var ErrSelfDependency = errors.New("cannot add self-dependency")
 
 // ErrDependencyCycle is returned when adding a dependency edge would introduce a
 // scheduling cycle. It is scoped to the dependency-add family — the single and
-// bulk add paths (add/addBulk) and the dolt cross-tier check — so callers can
-// errors.Is any dependency-add cycle rejection. The whole-graph construction
-// paths (ApplyIssueGraph/ApplyWispGraph) are a separate family and deliberately
-// do not carry this sentinel yet.
+// bulk add paths (add/AddDependencies) and the dolt cross-tier check — so
+// callers can errors.Is any dependency-add cycle rejection. The whole-graph
+// construction paths (ApplyIssueGraph/ApplyWispGraph) are a separate family and
+// deliberately do not carry this sentinel yet.
 var ErrDependencyCycle = errors.New("adding dependency would create a cycle")
 
 // DependencyTypeConflictError is returned when an edge already exists between

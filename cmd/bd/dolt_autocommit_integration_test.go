@@ -218,10 +218,29 @@ func TestDoltAutoCommit_Batch_DefersCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("bd create (2) failed: %v\n%s", err, out)
 	}
+	var created struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(out[strings.Index(out, "{"):]), &created); err != nil || created.ID == "" {
+		t.Fatalf("parse create JSON id: %v\n%s", err, out)
+	}
+	secondID := created.ID
 
 	afterCreate2 := doltHeadCommit(t, tmpDir, env)
 	if afterCreate2 != before {
 		t.Fatalf("expected Dolt HEAD still unchanged; before=%s after=%s", before, afterCreate2)
+	}
+
+	// Delete rides the issueops facade, not transactHonoringAutoCommit — it
+	// must defer too (the bd-4wamg review caught it passing a bare rootCtx).
+	out, err = runBDExecAllowErrorWithEnv(t, tmpDir, env, "--dolt-auto-commit", "batch", "delete", secondID, "--force")
+	if err != nil {
+		t.Fatalf("bd delete failed: %v\n%s", err, out)
+	}
+
+	afterDelete := doltHeadCommit(t, tmpDir, env)
+	if afterDelete != before {
+		t.Fatalf("expected Dolt HEAD unchanged after batch-mode delete; before=%s after=%s", before, afterDelete)
 	}
 
 	// An explicit "bd dolt commit" should commit all accumulated changes.

@@ -1,0 +1,252 @@
+//go:build cgo
+
+package embeddeddolt_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// roleFixtureKit is the embedded store's answer to the hooks every issueops
+// role fixture in package conformance needs. A role's wiring file composes one
+// of these with the accessor under test and the IssuePrefix, so the seeding and
+// scalar-query plumbing is written once per backend instead of once per role.
+//
+// The field names and signatures are IDENTICAL across the three backends'
+// kits, and identical to the fields the conformance fixtures declare, so a kit
+// closure is assignable to any role fixture with no adapter in between. That
+// sameness is the point of the type; changing a signature here is a change to
+// all three backends and to every role wiring at once.
+//
+// FROZEN SURFACE. This file is owned by the scaffolding slice (bd-kue5t) and
+// no role slice edits it. A role that needs a hook this kit does not expose
+// routes the addition through a follow-up commit against that bead, so the
+// three kits never drift apart in a worktree.
+//
+// NAMING CONVENTION FOR EVERYTHING BUILT ON THIS KIT: every unexported helper a
+// role slice adds — in package conformance and in the per-backend wiring files —
+// is ROLE-PREFIXED (seedRelationsAnchor, assertCommenterEventCount), the way the
+// existing contract already names seedDependencyEditorIssue and
+// assertDependencyEdgeCount. Five slices add files to one package from separate
+// worktrees; two of them each defining a bare seedIssue would compile alone and
+// break combined. The scaffolding's own helpers are prefixed roleFixtureKit for
+// the same reason.
+type roleFixtureKit struct {
+	// IssuePrefix namespaces the ids each assertion seeds, so several
+	// assertions can share one database.
+	IssuePrefix string
+	// CreateIssue seeds a durable issue in the issues plane.
+	CreateIssue func(context.Context, *types.Issue, string) error
+	// CreateWisp seeds an ephemeral issue in the wisps plane. It is a separate
+	// field rather than a flag because the three backends reach the two planes
+	// through different verbs.
+	CreateWisp func(context.Context, *types.Issue, string) error
+	// AddDependency seeds ONE edge, routed to the plane the edge's SOURCE lives
+	// in, and RECORDS a dependency_added event.
+	//
+	// The event is not incidental. The unit-of-work backend has no event-free
+	// route to the dependency tables — both domain.DependencyUseCase.add and
+	// AddDependencies hard-code EmitEvent: true — while the two store backends
+	// default the other way (dolt/dependencies.go:20-26 "adds a dependency
+	// between two issues WITHOUT recording a dependency_added event"). Rather
+	// than let the same seed leave different rows behind on different backends,
+	// all three kits emit. A contract case that counts events must therefore
+	// take a DELTA around the operation under test; an absolute count taken
+	// after seeding edges counts the seeds too.
+	//
+	// SPEC-GAP bd-yby99.1: no issueops leaf doc says whether a structural
+	// dependency insert records an event, so the kits normalise rather than
+	// pick a winner. The owner adjudicates it with the rest of the batch.
+	AddDependency func(context.Context, *types.Dependency, string) error
+	// SetConfig writes one workspace config key, which is how a case installs
+	// the vocabulary (excluded types, default limits) a request is read against.
+	SetConfig func(context.Context, string, string) error
+	// QueryScalar runs a single-row query and scans it, and RETURNS the error
+	// rather than failing the test, so a case can assert on a query that is
+	// expected to fail.
+	QueryScalar func(context.Context, string, []any, ...any) error
+	// CountHistory reports how many history entries the fixture's branch has,
+	// for the "at most one entry per call, none when nothing landed" clause the
+	// role contracts state. Cases take it before and after rather than reading
+	// the top of the log, because two commits made inside one second tie on
+	// date and their relative order is not something to rely on.
+	//
+	// A nil CountHistory means "this backend cannot observe history here". A
+	// case that needs it must then skip LOUDLY with that reason rather than
+	// pass quietly. It is non-nil on all three backends today; see
+	// uow/role_fixture_kit_test.go for the evidence on the awkward one.
+	CountHistory func(context.Context) (int, error)
+}
+
+// roleFixtureKitComposesConformanceFixtures is the compile-time half of the
+// kit's promise: every hook is assignable to the fixture field of the same
+// name with NO adapter in between. A signature drifting apart from the
+// conformance fixtures breaks here, in the frozen file that owns the
+// signatures, instead of in five role wirings at once.
+var roleFixtureKitComposesConformanceFixtures = func(kit roleFixtureKit) (conformance.DependencyEditorFixture, conformance.IssueOperationsStagingFixture) {
+	return conformance.DependencyEditorFixture{
+			IssuePrefix: kit.IssuePrefix,
+			CreateIssue: kit.CreateIssue,
+			CreateWisp:  kit.CreateWisp,
+			QueryScalar: kit.QueryScalar,
+		}, conformance.IssueOperationsStagingFixture{
+			IssuePrefix:   kit.IssuePrefix,
+			CreateIssue:   kit.CreateIssue,
+			AddDependency: kit.AddDependency,
+			SetConfig:     kit.SetConfig,
+			QueryScalar:   kit.QueryScalar,
+		}
+}
+
+// newEmbeddedRoleFixtureKit builds the kit for an environment from newTestEnv.
+// The store's own create routes an ephemeral issue to the wisps plane, so the
+// two seed verbs differ only by the flag already on the issue.
+//
+// The scalar hooks open their own short-lived SQL connection and RETURN the
+// error, rather than delegating to testEnv.queryScalar, which fails the test
+// on any error and so cannot express "this query was expected to fail". That
+// keeps QueryScalar's meaning identical to the other two backends'.
+func newEmbeddedRoleFixtureKit(te *testEnv, prefix string) roleFixtureKit {
+	queryScalar := func(ctx context.Context, query string, args []any, dest ...any) error {
+		db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+		if err != nil {
+			return err
+		}
+		defer func() { _ = cleanup() }()
+		return db.QueryRowContext(ctx, query, args...).Scan(dest...)
+	}
+	return roleFixtureKit{
+		IssuePrefix: prefix,
+		CreateIssue: te.store.CreateIssue,
+		CreateWisp:  te.store.CreateIssue,
+		AddDependency: func(ctx context.Context, dep *types.Dependency, actor string) error {
+			return te.store.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true})
+		},
+		SetConfig:   te.store.SetConfig,
+		QueryScalar: queryScalar,
+		CountHistory: func(ctx context.Context) (int, error) {
+			var entries int
+			err := queryScalar(ctx, "SELECT COUNT(*) FROM dolt_log", nil, &entries)
+			return entries, err
+		},
+	}
+}
+
+// TestEmbeddedRoleFixtureKitHooksAreUsable is the scaffolding's own tripwire:
+// every hook the role fixtures compose is exercised once here, so a kit broken
+// by a signature change fails in one obvious place instead of five role suites.
+func TestEmbeddedRoleFixtureKitHooksAreUsable(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "kit")
+	ctx := t.Context()
+
+	assertRoleFixtureKitHooksAreUsable(t, ctx, newEmbeddedRoleFixtureKit(te, "kit"))
+}
+
+// assertRoleFixtureKitHooksAreUsable drives every hook once and checks the rows
+// landed where the field docs say they land. It pins the FIXTURE, not a role,
+// and is deliberately a byte-for-byte sibling of the same helper in the other
+// two backends' kit files so the three can be diffed.
+func assertRoleFixtureKitHooksAreUsable(t *testing.T, ctx context.Context, kit roleFixtureKit) {
+	t.Helper()
+	issue := kit.IssuePrefix + "-kit-issue"
+	target := kit.IssuePrefix + "-kit-target"
+	wisp := kit.IssuePrefix + "-kit-wisp"
+
+	for _, id := range []string{issue, target} {
+		if err := kit.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		}, "seed"); err != nil {
+			t.Fatalf("kit.CreateIssue(%s): %v", id, err)
+		}
+	}
+	if err := kit.CreateWisp(ctx, &types.Issue{
+		ID: wisp, Title: wisp, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
+	}, "seed"); err != nil {
+		t.Fatalf("kit.CreateWisp(%s): %v", wisp, err)
+	}
+	if err := kit.AddDependency(ctx, &types.Dependency{
+		IssueID: issue, DependsOnID: target, Type: types.DepBlocks,
+	}, "seed"); err != nil {
+		t.Fatalf("kit.AddDependency: %v", err)
+	}
+	if err := kit.SetConfig(ctx, "role_fixture_kit_probe", "on"); err != nil {
+		t.Fatalf("kit.SetConfig: %v", err)
+	}
+
+	var issues, wisps, edges int
+	if err := kit.QueryScalar(ctx, "SELECT COUNT(*) FROM issues WHERE id IN (?, ?)", []any{issue, target}, &issues); err != nil {
+		t.Fatalf("kit.QueryScalar issues: %v", err)
+	}
+	if issues != 2 {
+		t.Fatalf("seeded durable issues = %d, want 2", issues)
+	}
+	if err := kit.QueryScalar(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", []any{wisp}, &wisps); err != nil {
+		t.Fatalf("kit.QueryScalar wisps: %v", err)
+	}
+	if wisps != 1 {
+		t.Fatalf("seeded wisps = %d, want 1 — CreateWisp did not reach the ephemeral plane", wisps)
+	}
+	if err := kit.QueryScalar(ctx,
+		// The target's own class decides which typed column holds it, so the
+		// contracts resolve it through this COALESCE rather than one column.
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND "+
+			"COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external) = ?",
+		[]any{issue, target}, &edges); err != nil {
+		t.Fatalf("kit.QueryScalar dependencies: %v", err)
+	}
+	if edges != 1 {
+		t.Fatalf("seeded edges = %d, want 1", edges)
+	}
+	var configured string
+	if err := kit.QueryScalar(ctx, "SELECT value FROM config WHERE `key` = ?", []any{"role_fixture_kit_probe"}, &configured); err != nil {
+		t.Fatalf("kit.QueryScalar config: %v", err)
+	}
+	if configured != "on" {
+		t.Fatalf("configured value = %q, want %q", configured, "on")
+	}
+
+	if kit.CountHistory == nil {
+		t.Fatal("kit.CountHistory is nil — this backend cannot observe history, which the role contracts' entry-per-call clause needs")
+	}
+	entries, err := kit.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("kit.CountHistory: %v", err)
+	}
+	if entries < 1 {
+		t.Fatalf("history entries = %d, want at least the initializing commit", entries)
+	}
+}
+
+// TestEmbeddedRoleFixtureKitCountHistoryMovesWithACommit is the other half of
+// the history capability: CountHistory has to MOVE, not merely answer. The seed
+// hooks are the wrong probe for it here — withConn takes a SQL commit, not a
+// Dolt one, so an embedded AddDependency writes rows without versioning them —
+// so the delta is proven with the store's own committing verb.
+func TestEmbeddedRoleFixtureKitCountHistoryMovesWithACommit(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "kithist")
+	ctx := t.Context()
+	kit := newEmbeddedRoleFixtureKit(te, "kithist")
+
+	seedIssues(t, ctx, te.store, "kithist-a")
+	before, err := kit.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory before: %v", err)
+	}
+	if err := te.store.Commit(ctx, "bd: role fixture kit history probe"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	after, err := kit.CountHistory(ctx)
+	if err != nil {
+		t.Fatalf("CountHistory after: %v", err)
+	}
+	if after != before+1 {
+		t.Fatalf("history entries went %d -> %d across one commit, want exactly one more", before, after)
+	}
+}

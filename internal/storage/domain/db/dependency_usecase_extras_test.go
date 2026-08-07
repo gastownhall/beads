@@ -29,9 +29,9 @@ func (s *testSuite) TestDependencyUseCase_Extras() {
 		s.Run("SkipPerEdgeStillRunsFinalCheck", s.ducAddBulkFinalCycleCheck)
 		s.Run("SkipPerEdgeAcceptsAcyclicBulk", s.ducAddBulkSkipPerEdgeAcyclic)
 		s.Run("NonBlockingEdgesSkipCycleChecks", s.ducAddBulkNonBlockingNoCheck)
-	})
-	s.Run("AddWispDependencies", func() {
-		s.Run("RoutesToWispDepsTable", s.ducAddBulkWispRoutes)
+		s.Run("WispSourceRoutesToWispDepsTable", s.ducAddBulkWispRoutes)
+		s.Run("MixedBatchLandsEachEdgeInItsSourcePlane", s.ducAddBulkSourceRoutesMixedBatch)
+		s.Run("RefusesCrossPlaneCycle", s.ducAddBulkSourceRoutesRefusesCrossPlaneCycle)
 	})
 }
 
@@ -329,8 +329,11 @@ func (s *testSuite) ducAddBulkSelfEdge() {
 	s.Equal(0, count, "self-edge must not have been inserted")
 }
 
-// ---- AddWispDependencies ----
+// ---- AddDependencies: source routing ----
 
+// ducAddBulkWispRoutes pins the all-wisp batch: a source that lives in the wisp
+// plane gets its edge written to wisp_dependencies and nothing written to the
+// issues plane.
 func (s *testSuite) ducAddBulkWispRoutes() {
 	s.seedWispRow("bd-duc-bw-src")
 	s.seedIssueRow("bd-duc-bw-tgt")
@@ -338,7 +341,7 @@ func (s *testSuite) ducAddBulkWispRoutes() {
 	deps := []*types.Dependency{
 		newDep("bd-duc-bw-src", "bd-duc-bw-tgt", types.DepBlocks),
 	}
-	res, err := s.depUseCase().AddWispDependencies(s.Ctx(), deps, "tester", domain.BulkAddDepsOpts{})
+	res, err := s.depUseCase().AddDependencies(s.Ctx(), deps, "tester", domain.BulkAddDepsOpts{})
 	s.Require().NoError(err)
 	s.Require().Len(res.Added, 1)
 
@@ -349,4 +352,56 @@ func (s *testSuite) ducAddBulkWispRoutes() {
 	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
 		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ?", "bd-duc-bw-src").Scan(&permCount))
 	s.Equal(0, permCount, "wisp-routed bulk add must not touch the issues dep table")
+}
+
+// ducAddBulkSourceRoutesMixedBatch pins the mixed-plane batch at the layer
+// that decides the plane: one call, two write paths, each edge in the table
+// its own source lives in.
+func (s *testSuite) ducAddBulkSourceRoutesMixedBatch() {
+	s.seedWispRow("bd-duc-sr-wisp")
+	s.seedIssueRow("bd-duc-sr-issue")
+	s.seedIssueRow("bd-duc-sr-tgt")
+
+	res, err := s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-sr-wisp", "bd-duc-sr-tgt", types.DepBlocks),
+		newDep("bd-duc-sr-issue", "bd-duc-sr-tgt", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().NoError(err)
+	s.Require().Len(res.Added, 2)
+
+	s.Equal(1, s.countDepRows("wisp_dependencies", "bd-duc-sr-wisp"))
+	s.Equal(0, s.countDepRows("dependencies", "bd-duc-sr-wisp"))
+	s.Equal(1, s.countDepRows("dependencies", "bd-duc-sr-issue"))
+	s.Equal(0, s.countDepRows("wisp_dependencies", "bd-duc-sr-issue"))
+}
+
+// ducAddBulkSourceRoutesRefusesCrossPlaneCycle pins bd-xe27 at this layer: the
+// final gate walks both tables, so a loop that leaves the issues plane and
+// returns through the wisp plane is still a loop.
+//
+// It asserts the REFUSAL only. Undoing the edge the gate refused is the
+// caller's transaction's job, and this suite runs the use case on a bare
+// runner; the rolled-back-across-both-planes half is pinned against the real
+// unit of work (conformance.RunDependencyEditorMixedBatchRefusalRollsBackBothPlanes).
+func (s *testSuite) ducAddBulkSourceRoutesRefusesCrossPlaneCycle() {
+	s.seedIssueRow("bd-duc-sx-issue")
+	s.seedWispRow("bd-duc-sx-wisp")
+
+	_, err := s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-sx-issue", "bd-duc-sx-wisp", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{})
+	s.Require().NoError(err)
+
+	_, err = s.depUseCase().AddDependencies(s.Ctx(), []*types.Dependency{
+		newDep("bd-duc-sx-wisp", "bd-duc-sx-issue", types.DepBlocks),
+	}, "tester", domain.BulkAddDepsOpts{SkipPerEdgeCycleCheck: true})
+	s.Require().ErrorIs(err, domain.ErrDependencyCycle)
+}
+
+//nolint:gosec // G201: table is one of two hardcoded test constants.
+func (s *testSuite) countDepRows(table, sourceID string) int {
+	var count int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM "+table+" WHERE issue_id = ?", sourceID).Scan(&count))
+	return count
 }

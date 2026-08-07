@@ -195,6 +195,64 @@ func TestStoreReaderListOverFetchesForAPushdownSort(t *testing.T) {
 	}
 }
 
+// TestStoreReaderRefusesANonZeroOffset is the store-backed half of the offset
+// split the role now promises (issueops/reader.go, ReadyRequest.Offset and
+// ListRequest.Offset). This body renders LIMIT without OFFSET, so an offset it
+// accepted would come back as the unpaged first page — which is what it used to
+// do, silently. The refusal names the operation AND the backend, because that
+// pair is all a caller holding only issueops.Reader gets to work with.
+//
+// The store must not be queried at all: a refusal that had already asked the
+// database for the wrong page would be a wasted round trip on the way to the
+// same error.
+func TestStoreReaderRefusesANonZeroOffset(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		wantOp string
+		call   func(issueops.Reader) (issueops.IssuePage, error)
+	}{
+		{"Ready", "Reader.Ready(Offset)", func(rd issueops.Reader) (issueops.IssuePage, error) {
+			return rd.Ready(context.Background(), issueops.ReadyRequest{Sort: "priority", Offset: 1})
+		}},
+		{"List", "Reader.List(Offset)", func(rd issueops.Reader) (issueops.IssuePage, error) {
+			return rd.List(context.Background(), issueops.ListRequest{SortBy: "created", Offset: 1})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rd, store := storeReaderFor(t, readerFixture(3))
+			page, err := tc.call(rd)
+			var unsupported *storage.ErrUnsupported
+			if !errors.As(err, &unsupported) {
+				t.Fatalf("%s with Offset 1 = (%v, %v), want *storage.ErrUnsupported", tc.name, ids(page), err)
+			}
+			if unsupported.Op != tc.wantOp || unsupported.Backend != offsetBackend {
+				t.Errorf("refusal = Op %q Backend %q, want %q and %q",
+					unsupported.Op, unsupported.Backend, tc.wantOp, offsetBackend)
+			}
+			if queries := len(store.readyFilters) + len(store.searchFilters); queries != 0 {
+				t.Errorf("the refused request still ran %d queries", queries)
+			}
+		})
+	}
+}
+
+// TestStoreReaderServesOffsetZero: zero is the absence of a page request, not a
+// request for page zero, so the refusal above must not catch the default. Every
+// other test in this file would fail if it did, but none of them says why.
+func TestStoreReaderServesOffsetZero(t *testing.T) {
+	rd, store := storeReaderFor(t, readerFixture(2))
+
+	if _, err := rd.Ready(context.Background(), issueops.ReadyRequest{Sort: "priority", Offset: 0}); err != nil {
+		t.Fatalf("Ready at Offset 0: %v", err)
+	}
+	if _, err := rd.List(context.Background(), issueops.ListRequest{SortBy: "created", Offset: 0}); err != nil {
+		t.Fatalf("List at Offset 0: %v", err)
+	}
+	if len(store.readyFilters) != 1 || len(store.searchFilters) != 1 {
+		t.Errorf("ran %d ready and %d search queries, want one each", len(store.readyFilters), len(store.searchFilters))
+	}
+}
+
 // TestStoreReaderRefusesANilStore: the accessor is the only door, and a door
 // that hands back a reader over nothing would fail on the first query with a
 // nil dereference instead of at the seam that knows what is missing.

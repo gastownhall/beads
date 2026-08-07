@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -115,13 +116,13 @@ func (r *issueSQLRepositoryImpl) getReadyWorkWithCountsUnion(ctx context.Context
 		return domain.SearchCountsPage{Items: nil, HasMore: hasMore}, nil
 	}
 
-	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, false)
+	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, sqlbuild.CountsHydration{})
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate issues: %w", err)
 	}
 	var wispsByID map[string]*types.IssueWithCounts
 	if len(page.wispIDs) > 0 {
-		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, false)
+		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, sqlbuild.CountsHydration{})
 		if err != nil && !dberrors.IsTableNotExist(err) {
 			return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate wisps: %w", err)
 		}

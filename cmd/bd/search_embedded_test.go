@@ -152,6 +152,19 @@ func TestEmbeddedSearch(t *testing.T) {
 		}
 	})
 
+	t.Run("search_default_includes_closed", func(t *testing.T) {
+		// bd-t5yex: "was this already filed/fixed?" is the dominant search
+		// query, so the default must not silently hide closed issues.
+		results := bdSearchJSON(t, bd, dir, "sr-")
+		ids := map[string]bool{}
+		for _, r := range results {
+			ids[r["id"].(string)] = true
+		}
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("expected default search to include open and closed issues")
+		}
+	})
+
 	t.Run("search_status_comma_separated", func(t *testing.T) {
 		results := bdSearchJSON(t, bd, dir, "sr-", "--status", "open,closed")
 		ids := map[string]bool{}

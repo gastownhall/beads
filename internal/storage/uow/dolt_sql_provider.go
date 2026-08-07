@@ -42,6 +42,33 @@ type doltSQLProvider struct {
 	preview bool
 }
 
+type bootstrapPreparationError struct {
+	err       error
+	retryable bool
+}
+
+func (e *bootstrapPreparationError) Error() string {
+	return e.err.Error()
+}
+
+func (e *bootstrapPreparationError) Unwrap() error {
+	return e.err
+}
+
+func classifyInitSchemaError(err error) error {
+	var preparationErr *bootstrapPreparationError
+	if errors.As(err, &preparationErr) {
+		if preparationErr.retryable {
+			return fmt.Errorf("uow: bootstrap preparation: %w", err)
+		}
+		return backoff.Permanent(err)
+	}
+	if isSerializationError(err) || schema.IsMigrationLockError(err) {
+		return fmt.Errorf("uow: migrate: %w", err)
+	}
+	return backoff.Permanent(fmt.Errorf("uow: migrate: %w", err))
+}
+
 // ProviderOption tunes how a SQL-server unit-of-work provider opens. Options
 // are variadic so the existing constructor call sites — every one of which
 // wants the ordinary mutating open — stay unchanged.
@@ -137,6 +164,55 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 	// never inferred again from probing or CREATE IF NOT EXISTS.
 	created := false
 	var bootstrapHeal *schema.FreshBootstrapHealCapability
+	prepareBootstrap := func(ctx context.Context, conn *sql.Conn) (*schema.FreshBootstrapHealCapability, error) {
+		ddl := db.NewDDLSQLRepository(conn)
+		justCreated := false
+		if created {
+			// Re-assert on retries so a database dropped between attempts
+			// (e.g. a concurrent clean-databases) is recreated rather than
+			// failing the USE below.
+			if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
+				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+			}
+		} else {
+			switch err := ddl.CreateDatabase(ctx, database); {
+			case err == nil:
+				created = true
+				justCreated = true
+			case isDatabaseExistsError(err):
+				// Pre-existing (or a concurrent initializer won the create
+				// race): not ours, heal stays off.
+			case isSerializationError(err):
+				// Only the initial bare CREATE preserves its historical
+				// serialization retry classification. The later sticky CREATE,
+				// USE, and identity capture remain permanent regardless of
+				// their nested driver error.
+				return nil, &bootstrapPreparationError{
+					err:       fmt.Errorf("uow: creating database: %w", err),
+					retryable: true,
+				}
+			default:
+				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: creating database: %w", err)}
+			}
+		}
+		if err := ddl.UseDatabase(ctx, database); err != nil {
+			return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: switching to database: %w", err)}
+		}
+		if justCreated {
+			// Capture authority only in the same attempt that won the exact bare
+			// CREATE. A later retry may re-create a missing database for
+			// availability, but it must never infer ownership of a replacement
+			// incarnation from CREATE IF NOT EXISTS.
+			var err error
+			bootstrapHeal, err = schema.CaptureFreshBootstrapHealCapability(
+				ctx, conn, p.serverEndpoint, database,
+			)
+			if err != nil {
+				return nil, &bootstrapPreparationError{err: fmt.Errorf("uow: capture fresh database identity: %w", err)}
+			}
+		}
+		return bootstrapHeal, nil
+	}
 	return backoff.Retry(func() error {
 		conn, err := p.db.Conn(ctx)
 		if err != nil {
@@ -188,53 +264,9 @@ func (p *doltSQLProvider) initSchema(ctx context.Context, database string) error
 			}
 			return nil
 		}
-		justCreated := false
-		if created {
-			// Re-assert on retries so a database dropped between attempts
-			// (e.g. a concurrent clean-databases) is recreated rather than
-			// failing the USE below.
-			if err := ddl.CreateDatabaseIfNotExists(ctx, database); err != nil {
-				return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
-			}
-		} else {
-			switch err := ddl.CreateDatabase(ctx, database); {
-			case err == nil:
-				created = true
-				justCreated = true
-			case isDatabaseExistsError(err):
-				// Pre-existing (or a concurrent initializer won the create
-				// race): not ours, heal stays off.
-			case isSerializationError(err):
-				return fmt.Errorf("uow: creating database: %w", err)
-			default:
-				return backoff.Permanent(fmt.Errorf("uow: creating database: %w", err))
-			}
-		}
-		if err := ddl.UseDatabase(ctx, database); err != nil {
-			return backoff.Permanent(fmt.Errorf("uow: switching to database: %w", err))
-		}
-		if justCreated {
-			// Capture authority only in the same attempt that won the exact bare
-			// CREATE. A later retry may re-create a missing database for
-			// availability, but it must never infer ownership of a replacement
-			// incarnation from CREATE IF NOT EXISTS.
-			bootstrapHeal, err = schema.CaptureFreshBootstrapHealCapability(
-				ctx, conn, p.serverEndpoint, database,
-			)
-			if err != nil {
-				return backoff.Permanent(fmt.Errorf("uow: capture fresh database identity: %w", err))
-			}
-		}
-
-		var migrateOpts []schema.MigrateLockOption
-		if bootstrapHeal != nil {
-			migrateOpts = append(migrateOpts, schema.WithFreshBootstrapHeal(bootstrapHeal, p.serverEndpoint))
-		}
-		if _, err := schema.MigrateUpWithLock(ctx, conn, database, migrateOpts...); err != nil {
-			if isSerializationError(err) || schema.IsMigrationLockError(err) {
-				return fmt.Errorf("uow: migrate: %w", err)
-			}
-			return backoff.Permanent(fmt.Errorf("uow: migrate: %w", err))
+		if _, err := schema.MigrateUpWithLock(ctx, conn, database,
+			schema.WithLockedPreparation(p.serverEndpoint, prepareBootstrap)); err != nil {
+			return classifyInitSchemaError(err)
 		}
 		return nil
 	}, backoff.WithContext(bo, ctx))

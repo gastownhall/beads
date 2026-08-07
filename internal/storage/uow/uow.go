@@ -15,7 +15,6 @@ type UnitOfWork interface {
 
 	ConfigUseCase() domain.ConfigUseCase
 	DoltRemoteUseCase() domain.DoltRemoteUseCase
-	BootstrapUseCase() domain.BootstrapUseCase
 
 	IssueUseCase() domain.IssueUseCase
 	DependencyUseCase() domain.DependencyUseCase
@@ -40,9 +39,8 @@ func NewUOW(ctx context.Context, p TxProvider) (UnitOfWork, error) {
 type baseUOW struct {
 	tx Tx
 
-	configUseCase    domain.ConfigUseCase
-	remoteUseCase    domain.DoltRemoteUseCase
-	bootstrapUseCase domain.BootstrapUseCase
+	configUseCase domain.ConfigUseCase
+	remoteUseCase domain.DoltRemoteUseCase
 
 	issueUseCase      domain.IssueUseCase
 	dependencyUseCase domain.DependencyUseCase
@@ -75,16 +73,6 @@ func (u *baseUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase {
 		u.remoteUseCase = domain.NewDoltRemoteUseCase(db.NewRemoteSQLRepository(u.tx.Runner()))
 	}
 	return u.remoteUseCase
-}
-
-func (u *baseUOW) BootstrapUseCase() domain.BootstrapUseCase {
-	if u.bootstrapUseCase == nil {
-		u.bootstrapUseCase = domain.NewBootstrapUseCase(
-			db.NewConfigSQLRepository(u.tx.Runner()),
-			u.DoltRemoteUseCase(),
-		)
-	}
-	return u.bootstrapUseCase
 }
 
 func (u *baseUOW) IssueUseCase() domain.IssueUseCase {

@@ -25,7 +25,7 @@ type BatchContext struct {
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
-func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOptions) (*BatchContext, error) {
+func NewBatchContext(ctx context.Context, tx DBTX, opts storage.BatchCreateOptions) (*BatchContext, error) {
 	customStatuses, err := GetCustomStatusesTx(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom statuses: %w", err)
@@ -50,7 +50,7 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	}, nil
 }
 
-func CreateIssueInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) error {
+func CreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
 	_, err := CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
 	return err
 }
@@ -92,7 +92,7 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 	return dst
 }
 
-func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
+func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
@@ -167,7 +167,7 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 	return result, nil
 }
 
-func assignCreateIssueIDInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) error {
+func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
 	if issue.ID == "" {
 		issueTable, _ := TableRouting(issue)
 		prefix := bc.ConfigPrefix
@@ -214,14 +214,14 @@ func (r *CreateIssuesResult) merge(changed map[string]bool) {
 	r.ChangedTables = mergeChangedTables(r.ChangedTables, changed)
 }
 
-func CreateIssuesInTx(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
+func CreateIssuesInTx(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	_, err := CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 	return err
 }
 
 // CreateIssuesInTxWithResult creates issues and reports tables whose writes are
 // only knowable after SQL reconciliation, such as child counter advances.
-func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssuesResult, error) {
+func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssuesResult, error) {
 	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)
 	if err != nil {
 		return CreateIssuesResult{}, err
@@ -388,7 +388,11 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
 			if targetInBatch && sourceIsWisp != targetIsWisp {
 				if !opts.SkipDependencyValidationErrors {
-					return nil, fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist", sourceID, dep.DependsOnID)
+					// Through the shared constructor, so the two bodies raise
+					// one message AND one sentinel: the role promises this
+					// refusal is the caller's fault, and an untyped error left
+					// callers classifying it by prose.
+					return nil, CrossPlaneBatchEdgeError(sourceID, dep.DependsOnID)
 				}
 				if !filteredDeps {
 					keptDeps = append([]*types.Dependency(nil), issue.Dependencies[:depIndex]...)
@@ -416,7 +420,7 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 	return issues, nil
 }
 
-func createBlockedRecomputeIDs(ctx context.Context, tx *sql.Tx, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
+func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
 	issueSeen := make(map[string]bool, len(issues))
 	wispSeen := make(map[string]bool, len(issues))
 	issueIDs := make([]string, 0, len(issues))
@@ -551,7 +555,7 @@ func AllWisps(issues []*types.Issue) bool {
 // Returns (skip=true, nil) if the issue should be skipped.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable string, handling storage.OrphanHandling) (skip bool, err error) {
+func CheckOrphan(ctx context.Context, tx DBTX, issue *types.Issue, issueTable string, handling storage.OrphanHandling) (skip bool, err error) {
 	if issue.ID == "" {
 		return false, nil
 	}
@@ -595,7 +599,7 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 // tolerant via GH#4163).
 //
 //nolint:gosec // G201: siblingTable is one of two hardcoded constants
-func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
+func checkCrossTableIDCollision(ctx context.Context, tx DBTX, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
 	if id == "" {
 		return false, nil
 	}
@@ -696,7 +700,7 @@ func InsertIssueStrictInTx(ctx context.Context, tx DBTX, table string, issue *ty
 	return nil
 }
 
-func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
+func PersistLabels(ctx context.Context, tx DBTX, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
 		return result, nil
@@ -749,7 +753,7 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 	return result, nil
 }
 
-func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (CreateIssueResult, error) {
+func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Comments) == 0 {
 		return result, nil
@@ -812,16 +816,16 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (Creat
 	return result, nil
 }
 
-func PersistDependencies(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string) error {
+func PersistDependencies(ctx context.Context, tx DBTX, issues []*types.Issue, actor string) error {
 	_, err := PersistDependenciesWithResult(ctx, tx, issues, actor)
 	return err
 }
 
-func PersistDependenciesWithResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string) (CreateIssueResult, error) {
+func PersistDependenciesWithResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string) (CreateIssueResult, error) {
 	return PersistDependenciesWithOptionsResult(ctx, tx, issues, actor, storage.BatchCreateOptions{})
 }
 
-func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
+func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	type pendingDependency struct {
 		dep      *types.Dependency
@@ -963,7 +967,7 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 	opts.OnSkippedDependency(issueID, dependsOnID, reason)
 }
 
-func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Issue) (map[string]bool, error) {
+func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
 	type bucket struct {
 		maxChild int
 		isWisp   bool

@@ -3,11 +3,16 @@ title: Azure DevOps (ADO) Integration Configuration
 description: Configuration reference for bd ado sync, which bidirectionally syncs beads issues with Azure DevOps work items
 ---
 
-Last reviewed: 2026-05-08
+Last reviewed: 2026-08-07
 
 Freshness source: `cmd/bd/ado*.go` and `internal/ado/`.
 
 This guide covers all configuration options for the `bd ado sync` command, which synchronizes beads issues with Azure DevOps work items.
+
+**Proxied-server mode:** `bd ado sync`, `bd ado status`, and `bd ado projects`
+are not supported when bd is connected to a proxied server (error:
+`ado sync is not supported in proxied-server mode`); run them from a
+workspace with direct database access.
 
 ## Quick Start
 
@@ -50,6 +55,9 @@ bd ado sync --dry-run
 ² At least one project must be configured via `ado.project` or `ado.projects`.
 
 **Config vs env var precedence:** Config keys (set via `bd config set`) take priority over environment variables.
+
+`ado.pat` is a secret key stored in `config.yaml` (per-repo or user-global),
+never the shared database, so the PAT cannot leak via `dolt push`.
 
 ### On-Premises ADO Server
 
@@ -249,9 +257,10 @@ When the same issue has been modified both locally and in ADO:
 | `--bootstrap-match` | Enable heuristic title matching for first sync |
 | `--reconcile` | Force reconciliation scan for deleted items |
 | `--issues` | Sync specific issues by bead ID or ADO work item ID |
+| `--parent` | Push only a bead and its descendants (push mode only; mutually exclusive with `--issues`) |
+| `--project` | Project name(s) for this run, repeatable — overrides `ado.project`/`ado.projects` |
 | `--states` | Filter by work item states (comma-separated) |
 | `--types` | Filter by work item types (comma-separated) |
-| `--issues` | Sync specific beads by ID |
 
 ## PAT Permissions
 
@@ -308,7 +317,7 @@ bd config set ado.pat "your-pat-here"
 export AZURE_DEVOPS_PAT="your-pat-here"
 ```
 
-**"ado.organization not configured"**
+**`ado.org not configured: set via 'bd config set ado.org <org>' or AZURE_DEVOPS_ORG env var`**
 ```bash
 bd config set ado.org "your-org"
 # or for on-prem:

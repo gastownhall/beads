@@ -66,15 +66,15 @@ type Issue struct {
 	// granting replica.
 	LeaseGrantedNode string `json:"lease_granted_node,omitempty"`
 
-	// ===== Concurrency (Go-only; never serialized) =====
+	// ===== Concurrency (generic Issue JSON/JSONL omits this field) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
 	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
 	// engine rewrites on every status/ownership-mutating write. It is
 	// EQUALITY-ONLY — compare it, never order or interpret it — and a change
 	// signals the row was mutated since you read it. It is json:"-" on purpose:
-	// row_lock is random per write, so serializing it would break stable bd
-	// --json goldens and bd export round-trips; a Go consumer reads
-	// issue.RowVersion directly instead.
+	// row_lock is random per write, so generic Issue serialization would break
+	// stable list/export round-trips. The detail-view DTO projects it explicitly
+	// as `revision` for guarded clients; Go consumers read RowVersion directly.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -111,6 +111,17 @@ type Issue struct {
 	SourceRepo     string `json:"-"` // Which repo owns this issue (multi-repo support)
 	IDPrefix       string `json:"-"` // Override prefix for ID generation (appends to config prefix)
 	PrefixOverride string `json:"-"` // Completely replace config prefix (for cross-rig creation)
+
+	// WispPlaneOverride, when non-nil, pins which storage plane this in-memory
+	// record routes to (true = wisps table, false = issues table), overriding
+	// the Ephemeral/NoHistory flag inference in issueops.IsWisp. Import sets it
+	// from the export stream's explicit "wisp" plane marker so a promoted
+	// no-history wisp — a durable issues-table row that (pre-fix, or in wild
+	// data) still carries no_history=true — is never re-planed into the wisps
+	// table, after which default export would treat it as wisp-plane state
+	// (bd-r9uce). Never serialized, never persisted; nil means "infer from
+	// flags", which is the behavior everywhere outside import.
+	WispPlaneOverride *bool `json:"-"`
 
 	// ===== Relational Data (populated for export/import) =====
 	Labels       []string      `json:"labels,omitempty"`
@@ -1176,11 +1187,20 @@ var AllDependencyTypes = []DependencyType{
 	DepDelegatedFrom,
 }
 
+// MaxDependencyTypeLen is the widest dependency type either dependency plane
+// can store: dependencies.type and wisp_dependencies.type are both VARCHAR(32)
+// (migrations 0002_create_dependencies and 0021_create_wisp_auxiliary), and no
+// later migration widens either. Validators bound the type here rather than at
+// some looser number of their own, so a type that passes validation is a type
+// an edge can actually carry — a longer one is refused up front instead of
+// becoming a filter that silently matches nothing.
+const MaxDependencyTypeLen = 32
+
 // IsValid checks if the dependency type value is valid.
-// Accepts any non-empty string up to 50 characters.
+// Accepts any non-empty string that fits the type column (MaxDependencyTypeLen).
 // Use IsWellKnown() to check if it's a built-in type.
 func (d DependencyType) IsValid() bool {
-	return len(d) > 0 && len(d) <= 50
+	return len(d) > 0 && len(d) <= MaxDependencyTypeLen
 }
 
 // WellKnownDependencyTypes returns the built-in dependency types accepted by
@@ -1807,6 +1827,15 @@ type IssueFilter struct {
 	// skipped and Issue.Labels is left nil (callers MUST treat as empty).
 	// Opt-in performance flag for the bd list --skip-labels code path.
 	SkipLabels bool
+
+	// SkipCounts suppresses cardinality hydration on the counts mega-query.
+	// When true the three aggregate joins behind DependencyCount,
+	// DependentCount and CommentCount are dropped and all three come back 0,
+	// which callers MUST read as unknown rather than as none. The rows, their
+	// order, Parent and Dependencies are unaffected. It is the counts-side
+	// twin of SkipLabels and is ignored by the paths that project no counts
+	// (SearchIssues, GetReadyWork).
+	SkipCounts bool
 
 	// Performance escape hatches
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)

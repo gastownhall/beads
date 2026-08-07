@@ -87,18 +87,39 @@ type ReadyRequest struct {
 	// stay distinguishable, which is what lets one constant serve both
 	// surfaces.
 	Limit *int
-	// Offset skips the first N matching rows, where the backend supports it.
+	// Offset skips the first N matching rows. It is honored by the
+	// unit-of-work implementation, which renders OFFSET; the store-backed one
+	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
+	// naming the operation and the backend. What it never does is silently
+	// return an unpaged answer, so a caller that sets it either gets the page
+	// it asked for or an error it can classify with errors.As.
+	//
+	// A ready request carries no keyset position, so there is no portable way
+	// to page ready work. A caller that must page across backends pages a
+	// ListRequest instead — see ListRequest.Offset.
 	Offset int
 }
 
 // ListRequest describes one issue-list query.
 //
-// Like ReadyRequest it is high-level: the default status/template/gate/infra
-// exclusions, type validation, status parsing and limit defaulting are all
-// applied inside.
+// Like ReadyRequest it is high-level: the default
+// status/pinned/template/gate/infra exclusions, type validation, status
+// parsing and limit defaulting are all applied inside.
+//
+// PINNED is TWO exclusions rather than one, because a row can be pinned two
+// unrelated ways and each is hidden by its own predicate. The `pinned` STATUS
+// is one of the statuses the default status exclusion covers, alongside
+// `closed`; the separate Pinned FLAG — a marker on a row of any status — is
+// hidden by a predicate of its own. A row carrying either is absent from a
+// default listing, and the knob that takes each back off is a different one:
+// see Status for the first and PinnedFlag for the second.
 type ListRequest struct {
 	// Status selects statuses; one name, or a comma-separated OR set. Setting
 	// it REPLACES the default exclusions rather than fighting them.
+	//
+	// It replaces the STATUS ones only. The pinned-flag predicate survives it,
+	// so `pinned` and `hooked` are the two spellings that also drop that
+	// predicate — every other status narrows to unflagged rows.
 	Status string
 	// IssueType is validated against the workspace vocabulary — unlike
 	// ReadyRequest.IssueType, which matches nothing rather than failing.
@@ -136,6 +157,22 @@ type ListRequest struct {
 	NoAssignee bool
 	NoLabels   bool
 	SkipLabels bool
+	// SkipCounts suppresses the CARDINALITY hydration exactly as SkipLabels
+	// suppresses the label one: DependencyCount, DependentCount and
+	// CommentCount come back ZERO, and a caller must read a zero as UNKNOWN
+	// rather than as none. Nothing else about the page moves — the rows, their
+	// order, Parent and the has-more verdict are what they would have been —
+	// because this chooses what is HYDRATED, never which rows match.
+	//
+	// It is here for the renderings that print a page without those three
+	// numbers. Each is its own aggregate join, and the reverse-blocker one is
+	// the expensive member: it joins on an expression the embedded engine's
+	// planner cannot index, which is the per-call cost that makes a counted
+	// page the wrong shape for a listing that shows no counts.
+	//
+	// Like SkipLabels it is NOT carried onto the ReadyFlag arm; the counts are
+	// hydrated there either way, which costs time and not correctness.
+	SkipCounts bool
 
 	// Priority is exact; PriorityMin and PriorityMax bound a range. All three
 	// are pointers for the same reason ReadyRequest.Priority is.
@@ -143,6 +180,21 @@ type ListRequest struct {
 	PriorityMin *int
 	PriorityMax *int
 
+	// PinnedFlag and NoPinnedFlag select on the Pinned FLAG, which is not the
+	// `pinned` status — see this type's own doc for why there are two of them.
+	//
+	// PinnedFlag answers with the FLAGGED rows and only them, at any status: it
+	// drops the default status exclusions on the way, so a closed pinned row —
+	// which a default listing hides twice over — is in that answer.
+	//
+	// NoPinnedFlag asks for the UNFLAGGED rows, which a default listing already
+	// answers with. Its work is holding that predicate in place where AllFlag
+	// or a pinned/hooked Status would otherwise have dropped it, so on a
+	// default listing it changes nothing and on those it narrows.
+	//
+	// On the ReadyFlag arm neither applies: that set decides pinned for itself,
+	// which is why PinnedFlag is refused there and NoPinnedFlag merely accepted
+	// (see AllFlag).
 	PinnedFlag       bool
 	NoPinnedFlag     bool
 	IncludeTemplates bool
@@ -165,8 +217,40 @@ type ListRequest struct {
 	MetadataFields map[string]string
 	HasMetadataKey string
 
-	// AllFlag drops the default status exclusions; ReadyFlag switches the
-	// query to blocker-aware ready work under the list vocabulary.
+	// AllFlag drops the default status exclusions.
+	//
+	// ReadyFlag switches the query to the blocker-aware ready set. It does NOT
+	// simply add a blocker predicate to this listing: that query reads a
+	// narrower filter vocabulary than this request can describe, and only part
+	// of the request reaches it.
+	//
+	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
+	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
+	// IncludeGates and IncludeInfra), Limit, Offset and the MaxRows cap with
+	// its attribution. SortBy and Reverse
+	// still apply, because the display order is applied to the page after the
+	// query rather than inside it. Status and AllFlag are resolved to "open"
+	// and have no further effect: ready work is open work.
+	//
+	// WHAT IT REFUSES: every other filter here is one the ready query cannot
+	// carry, so combining it with ReadyFlag returns ErrValidation naming the
+	// fields rather than answering a wider question than was asked. That is
+	// IDFilter, TitleSearch, SpecPrefix, the four *Contains fields,
+	// ExternalRef, every Created/Updated/Closed/Defer/Due bound, DeferredFlag,
+	// OverdueFlag, EmptyDesc, NoLabels, NoParent, PinnedFlag, PriorityMin,
+	// PriorityMax, and the keyset position. There is no fallback: no
+	// combination of the two silently widens the answer.
+	//
+	// TWO THINGS THE READY SET DECIDES FOR ITSELF, which no field here
+	// overrides. It never returns pinned issues, which is why NoPinnedFlag is
+	// accepted and PinnedFlag refused. And it applies no template predicate at
+	// all, so this request's default template exclusion does not reach it and
+	// IncludeTemplates changes nothing here: a template is left out of a
+	// ReadyFlag listing only when its issue type is one the ready query
+	// already excludes. SkipLabels and SkipCounts are likewise not carried —
+	// labels and cardinalities are hydrated either way, which costs time and
+	// not correctness.
 	AllFlag   bool
 	ReadyFlag bool
 
@@ -182,7 +266,17 @@ type ListRequest struct {
 	// is derived from it inside the implementation, together with the
 	// over-fetch that detects truncation.
 	Limit *int
-	// Offset skips the first N matching rows, where the backend supports it.
+	// Offset skips the first N matching rows. It is honored by the
+	// unit-of-work implementation, which renders OFFSET; the store-backed one
+	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
+	// naming the operation and the backend. What it never does is silently
+	// return an unpaged answer, so a caller that sets it either gets the page
+	// it asked for or an error it can classify with errors.As.
+	//
+	// THE PORTABLE WAY TO PAGE IS THE KEYSET POSITION below,
+	// AfterCreatedAt/AfterID: every implementation honors it, and it does not
+	// skip or repeat rows when the result set changes underneath a walk.
+	// Offset is here for the surfaces that already published it.
 	Offset int
 
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
@@ -190,6 +284,36 @@ type ListRequest struct {
 	// transport concern and never reaches this contract.
 	AfterCreatedAt *time.Time
 	AfterID        string
+
+	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
+	// the query may match before the whole answer is refused; 0 disables it.
+	// A request whose result set exceeds it comes back as
+	// *internal/storage/issueops.ErrTooManyRows — carrying the count observed,
+	// the cap, and MaxRowsSource's attribution — and NO PAGE. That is the
+	// difference from Limit, whose overflow is an ordinary truncated page with
+	// HasMore set. It is a circuit breaker for a caller that would rather fail
+	// than wait. The type is named here rather than left as "an error" so a
+	// caller can tell the cap firing from any other failure with errors.As;
+	// this leaf does not import it, and no answer depends on that.
+	//
+	// It is HONORED by the store-backed implementation and REFUSED by the
+	// unit-of-work one, with a typed *ErrUnsupported naming the operation and
+	// the backend. That is the exact INVERSE of Offset above, and for the same
+	// kind of reason: the unit-of-work query path threads no cap, so a body
+	// that accepted the field would answer an uncapped query to a caller who
+	// asked for a circuit breaker. What no implementation does is silently
+	// ignore it, so a caller either gets the cap it asked for or an error it
+	// can classify with errors.As. `bd list --max-rows --proxied-server`
+	// already refuses one layer up, in the CLI; this is the same refusal for
+	// the callers that are not the CLI.
+	//
+	// Unlike SkipCounts and SkipLabels it IS carried onto the ReadyFlag arm.
+	MaxRows int
+	// MaxRowsSource attributes the cap to whatever knob set it — "--max-rows",
+	// "BEADS_MAX_ROWS", or empty for a library caller — and that attribution is
+	// what the refusal text reads back. It decides no answer: a request is
+	// refused on MaxRows alone, and this only decides how the refusal reads.
+	MaxRowsSource string
 }
 
 // GetRequest describes one issue-detail lookup.
@@ -198,6 +322,45 @@ type GetRequest struct {
 	// resolution here: an interactive affordance that can resolve to a
 	// different issue than the caller named has no place on a contract two
 	// front doors share. The issue-to-wisp fallback DOES happen inside.
+	//
+	// THAT FALLBACK NEEDS NO PLANE ORDER, and this contract deliberately
+	// states none: no LOCAL WRITE PATH can make an id resident in both planes,
+	// so the state an order would arbitrate is not reachable by writing
+	// through this library. Every local write path closes it. A guarded create
+	// probes BOTH tables before inserting
+	// and answers ErrAlreadyExists for an id either one already holds. Every
+	// batch create — import, a graph apply, a cooked formula, a markdown
+	// import — refuses on top of that an id already resident in the SIBLING
+	// table, skipping the row rather than hard-failing only on the
+	// auto-import recovery path, which leaves the resident row alone.
+	// Promotion and demotion insert into the target plane and delete from the
+	// source inside ONE transaction, so their dual-presence window never
+	// commits. This is why the implementations are free to probe the planes in
+	// either order, and why they in fact differ — a documented non-issue
+	// rather than a latent divergence (bd-yby99.22).
+	//
+	// TWO CAVEATS ARE WORTH CARRYING, and the second is the load-bearing one.
+	//
+	// First: the graph-apply path served by a unit-of-work provider gets its
+	// refusal from a preflight ABOVE storage rather than from the create
+	// guard, so a future caller that reached the graph-apply use case directly
+	// would be the thing that made this reachable.
+	//
+	// Second, and NOT closed by anything here: REPLICATION. The durable plane
+	// merges from a remote on pull, the ephemeral tables are dolt-ignored and
+	// local-only, and no post-merge check reconciles the two — the collision
+	// guard is reachable only from the create path. So a clone holding a wisp
+	// whose id another clone promoted to durable receives that id into the
+	// issues plane while its own wisp row survives. That needs a deterministic
+	// id to collide at all, which explicit-id creates and the identically
+	// minted infra wisps supply. It is a REAL residual path, it is outside
+	// this library's reach, and the resulting state is worse than an
+	// unspecified plane order: the merge-based lookups behind ready and search
+	// hard-error for the whole store. A plane order here would not rescue it.
+	//
+	// So the honest statement is the scoped one — no local write path reaches
+	// dual residency, replication can, and a caller that hits it has a
+	// corrupt store rather than an ordering question (bd-yby99.22).
 	ID string
 	// IncludeDependents and IncludeComments populate the two expensive row
 	// lists. Both default off: the detail view carries counts, and a caller
@@ -245,7 +408,7 @@ type IssuePage struct {
 //
 //     The shared implementation behind the store accessor
 //     lives in internal/workapi/storereader, which the
-//     cmd-bd-reader-constructor depguard rule keeps out of cmd/bd: the
+//     cmd-bd-role-constructors depguard rule keeps out of cmd/bd: the
 //     accessor is where each storage decorator adds its layer, so a command
 //     that constructed a reader directly would get an unspanned one. `bd show`
 //     keeps its own id RESOLUTION — fuzzy ids, cross-repo routing, --current —
@@ -253,58 +416,73 @@ type IssuePage struct {
 //     affordance that can answer with a different issue than the caller named
 //     has no place on a contract an unattended HTTP client also calls.
 //
-//   - `bd ready` and `bd list` are NOT, on either route, and they will not be
-//     until there are more roles to route them through. They consume the
-//     FILTER itself for things this role does not express — the --max-rows
-//     cap, --claim, --gated, --explain, --mol, --watch, the hierarchical
-//     --parent tree, and the text renderings that want []*types.Issue rather
-//     than a counted page. Routing only their JSON paths through the role
-//     would fork each command in two, which is more drift, not less.
+//   - `bd list` IS, on both routes, for its PAGE — every output mode but the
+//     two named next. --json and every text rendering call List below and
+//     nothing else; --ready is not a route of its own on either side, it is
+//     ReadyFlag, and picking the ready query from it is this role's job.
+//     The two exceptions consume the FILTER as a VALUE and no page can express
+//     either: --watch re-runs it on a ticker, and the hierarchical --parent
+//     tree re-parents a copy of it at every level. What is NOT an exception,
+//     though it looks like one, is the whole-graph dependency-record load
+//     behind --format and the pretty tree: that is a different question from
+//     both this role's and BlockingAnnotator's, so those renderings take their
+//     page from here and load the graph beside it.
 //
-// WHAT THOSE TWO DO SHARE, stated exactly, because "not on the role" is not
+//     The other thing `bd list` used to do here was the per-page blocking
+//     decoration, which is issueops.BlockingAnnotator's on both routes now —
+//     its own role, because it is a DERIVED annotation over ids a page already
+//     chose rather than a page.
+//
+//   - `bd ready` is NOT, on either route, and will not be until there are more
+//     roles to route it through. It consumes the FILTER itself for --claim,
+//     --gated, --explain and --mol. Two of its questions HAVE left the filter
+//     behind, each for the role that owns it: --claim is ReadyClaimer's, and
+//     the published total is ReadyCounter's, on both routes.
+//
+// WHAT `bd ready` DOES SHARE, stated exactly, because "not on the role" is not
 // the same as "unprotected":
 //
-//   - CONSTRUCTION. Every route of both commands, and both implementations of
-//     this interface, build from these same request types through the same
-//     two builders in internal/workapi, which the builders' golden files pin.
-//   - EXECUTION, for `bd list` on both routes and in every mode but one: the
-//     sort, the trim to the page limit and the has-more verdict are
-//     workapi.FinishPage, the one function both implementations of List below
-//     also call. The exception is the hierarchical --parent tree under pretty
-//     output, which renders the recursive walk's own result and reaches no
-//     epilogue on either route. Where the epilogue does run, what is left
-//     differing between a CLI listing and an HTTP one is presentation and the
-//     --max-rows cap.
-//   - EXECUTION, for `bd ready`, on the PROXIED route only. The direct route
-//     keeps an epilogue of its own and cannot give it up: it answers the
-//     strictly larger question "how many rows did the limit hide" with a
-//     second counting query and publishes the total in its pagination meta,
-//     where this role answers only "were any hidden". Collapsing them would
-//     change one surface's published output.
+//   - CONSTRUCTION. Every route, and both implementations of this interface,
+//     build from these same request types through the same two builders in
+//     internal/workapi, which the builders' golden files pin.
+//   - EXECUTION, on the PROXIED route only. The direct route keeps an epilogue
+//     of its own and cannot give it up: it answers the strictly larger question
+//     "how many rows did the limit hide" and publishes the total in its
+//     pagination meta, where this role answers only "were any hidden".
+//     Collapsing them would change one surface's published output. That second
+//     question is not off-role, though — it is ReadyCounter's, which both
+//     routes now ask through their own accessor, over this same ReadyRequest;
+//     what stays outside this role is the PAGE's epilogue, not the count beside
+//     it.
 //
 // THE CLAIM, stated once and in full so it can be checked sentence by
 // sentence. SHARED: all three issue reads on the HTTP surface go through this
-// role, and so does `bd show --json`'s detail view on both its routes; `bd
-// list` and `bd ready` are not on it and share instead the request types
-// above, the two builders in internal/workapi that their golden files pin, and
-// workapi.FinishPage — `bd list` on both routes in every mode but the
-// hierarchical --parent tree, `bd ready` on its proxied route only. ENFORCED,
+// role, so does `bd show --json`'s detail view on both its routes, and so does
+// `bd list`'s page on both of its — in every mode but --watch and the
+// hierarchical --parent tree, which take the filter instead. `bd ready` is not
+// on it and shares instead the request types above, the two builders in
+// internal/workapi that their golden files pin, and workapi.FinishPage on its
+// proxied route only. ENFORCED,
 // and by what: depguard (httpapi-transport-boundary) denies internal/workapi
 // from every non-test file of internal/httpapi, so no builder is callable
 // there, and a forbidigo rule denies naming types.IssueFilter or
 // types.WorkFilter there at all, so no filter is writable there either — both
 // are directory-scoped with no per-file exception, so a file added to that
 // package tomorrow is covered the moment it exists. That same forbidigo rule
-// covers cmd/bd deny-by-default with 64 named exceptions, so the files
+// covers cmd/bd deny-by-default with 59 named exceptions, so the files
 // implementing `bd list` and `bd show` cannot write a filter, and neither can
 // a file they are split or renamed into unless the new name lands on that
 // list. NOT ENFORCED: the rule forbids NAMING those types, not holding a
 // value, so the property is "no filter is written there", not "every filter
 // there came from a builder"; test files are exempt from both rules, because
 // the oracles hold filters in order to inspect them; `bd ready`'s files are
-// among the 64, since its listing and --claim are handed the filter itself and
+// among the 59, since its listing and --claim are handed the filter itself and
 // the blocked-issue views in those files name one directly, so it is guarded by
 // the builder and the golden files and not by the linter;
+// cmd/bd/list_show_filter_modes.go is among them too and STAYS there — the
+// count did not drop with this flip, because that file is where `bd list`'s
+// two filter-consuming modes and `bd show --current` live and all three still
+// need to name the type;
 // GET /healthz and GET /v0/beads/context are not issue queries and are on no
 // role; `bd ready`'s direct route and `bd list`'s hierarchical tree run
 // epilogues of their own; and none of this is a merge gate — the rules run in

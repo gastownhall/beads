@@ -158,7 +158,7 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("swarm validate is not supported in proxied-server mode")
+			return runSwarmValidateProxiedServer(cmd, rootCtx, args)
 		}
 		evt := metrics.NewCommandEvent("swarm-validate")
 		defer func() {
@@ -665,7 +665,7 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("swarm status is not supported in proxied-server mode")
+			return runSwarmStatusProxiedServer(cmd, rootCtx, args)
 		}
 		evt := metrics.NewCommandEvent("swarm-status")
 		defer func() {

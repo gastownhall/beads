@@ -1,10 +1,14 @@
 package dolt
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
@@ -44,14 +48,64 @@ func rawClaim(t *testing.T, s *DoltStore, id, actor string) error {
 	})
 }
 
-// TestVerifiedClaimWriteConvertsAppliedIndeterminate: the wy-x543k direction —
-// the write actually landed but the connection died during commit and bd
-// printed an error. Verify-by-re-read must convert it into an accurate success.
-func TestVerifiedClaimWriteConvertsAppliedIndeterminate(t *testing.T) {
+func TestVerifiedClaimWriteDoesNotReplayDefiniteMySQLError(t *testing.T) {
+	cause := &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}
+	driver := &failureDriver{commitErrs: []error{cause}}
+	store := newFailureStore(driver)
+	store.serverMode = true
+	defer func() { _ = store.db.Close() }()
+
+	calls := 0
+	err := store.verifiedClaimWrite(context.Background(), "claim-target", claimedBy("alice"), func() error {
+		calls++
+		return store.withRetryTx(context.Background(), func(*sql.Tx) error { return nil })
+	})
+	if !errors.Is(err, cause) {
+		t.Fatalf("verifiedClaimWrite() error = %v, want %v", err, cause)
+	}
+	if calls != 1 {
+		t.Fatalf("definite MySQL response entered claim replay: calls = %d, want 1", calls)
+	}
+	if got := driver.prepares.Load(); got != 1 {
+		t.Fatalf("definite MySQL response entered claim verification: prepares = %d, want only the initial wisp lookup", got)
+	}
+}
+
+func TestVerifiedReadyClaimDoesNotReplayDefiniteMySQLError(t *testing.T) {
+	cause := &mysql.MySQLError{Number: 1105, Message: "connection lost while validating commit"}
+	driver := &failureDriver{commitErrs: []error{cause}}
+	store := newFailureStore(driver)
+	store.serverMode = true
+	defer func() { _ = store.db.Close() }()
+
+	calls := 0
+	claimed, err := store.verifiedReadyClaim(context.Background(), "alice", func() (*types.Issue, error) {
+		calls++
+		err := store.withRetryTx(context.Background(), func(*sql.Tx) error { return nil })
+		return &types.Issue{ID: "ready-target"}, err
+	})
+	if !errors.Is(err, cause) {
+		t.Fatalf("verifiedReadyClaim() error = %v, want %v", err, cause)
+	}
+	if claimed != nil {
+		t.Fatalf("verifiedReadyClaim() issue = %+v, want nil on definite error", claimed)
+	}
+	if calls != 1 {
+		t.Fatalf("definite MySQL response entered ready-claim replay: calls = %d, want 1", calls)
+	}
+	if got := driver.prepares.Load(); got != 0 {
+		t.Fatalf("definite MySQL response entered ready-claim verification: prepares = %d, want 0", got)
+	}
+}
+
+// TestVerifiedClaimWriteRetainsAppliedIndeterminate proves matching issue
+// fields alone do not prove the lease and actor-attributed event also landed.
+func TestVerifiedClaimWriteRetainsAppliedIndeterminate(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
 	defer cancel()
+	s.serverMode = true
 
 	id := claimVerifyTestIssue(t, s)
 	if err := rawClaim(t, s, id, "alice"); err != nil {
@@ -61,20 +115,19 @@ func TestVerifiedClaimWriteConvertsAppliedIndeterminate(t *testing.T) {
 	calls := 0
 	err := s.verifiedClaimWrite(ctx, id, claimedBy("alice"), func() error {
 		calls++
-		return fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
+		return fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", ErrCommitIndeterminate)
 	})
-	if err != nil {
-		t.Fatalf("expected applied-indeterminate to resolve to success, got: %v", err)
+	if !errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("applied-indeterminate error = %v, want ErrCommitIndeterminate", err)
 	}
 	if calls != 1 {
 		t.Fatalf("write must not be replayed when the re-read shows it applied; ran %d times", calls)
 	}
 }
 
-// TestVerifiedClaimWriteReplaysVerifiedRollback: the wy-ejph3 direction — the
-// connection died during commit AND the transaction rolled back. The re-read
-// proves nothing landed, so one replay is safe and must proceed.
-func TestVerifiedClaimWriteReplaysVerifiedRollback(t *testing.T) {
+// TestVerifiedClaimWriteDoesNotReplayIndeterminate pins the public no-replay
+// contract when the verified postcondition does not match.
+func TestVerifiedClaimWriteDoesNotReplayIndeterminate(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -83,27 +136,24 @@ func TestVerifiedClaimWriteReplaysVerifiedRollback(t *testing.T) {
 	id := claimVerifyTestIssue(t, s)
 
 	calls := 0
+	indeterminate := fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", ErrCommitIndeterminate)
 	err := s.verifiedClaimWrite(ctx, id, claimedBy("alice"), func() error {
 		calls++
-		if calls == 1 {
-			// First attempt: commit-phase connection loss, nothing landed.
-			return fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
-		}
-		return rawClaim(t, s, id, "alice")
+		return indeterminate
 	})
-	if err != nil {
-		t.Fatalf("expected verified-rollback replay to succeed, got: %v", err)
+	if err != indeterminate {
+		t.Fatalf("error = %v, want original indeterminate error %v", err, indeterminate)
 	}
-	if calls != 2 {
-		t.Fatalf("expected exactly one replay (2 write runs), got %d", calls)
+	if calls != 1 {
+		t.Fatalf("write runs = %d, want exactly one after indeterminate commit", calls)
 	}
 
 	assignee, status, err := s.readClaimState(ctx, id)
 	if err != nil {
 		t.Fatalf("read claim state: %v", err)
 	}
-	if assignee != "alice" || status != types.StatusInProgress {
-		t.Fatalf("replayed claim not in effect: assignee=%q status=%q", assignee, status)
+	if assignee != "" || status != types.StatusOpen {
+		t.Fatalf("claim was replayed: assignee=%q status=%q", assignee, status)
 	}
 }
 
@@ -129,10 +179,10 @@ func TestVerifiedClaimWriteFailsLoudlyOnLostWrite(t *testing.T) {
 	}
 }
 
-// TestVerifiedClaimWriteIndeterminateStaysIndeterminateTwice: a replay that
-// itself dies at commit phase with nothing landed must not loop forever — the
-// one-replay budget exhausts and the caller gets the verified-rollback error.
-func TestVerifiedClaimWriteIndeterminateStaysIndeterminateTwice(t *testing.T) {
+// TestVerifiedReadyClaimDoesNotReplayIndeterminate proves ready-claim does not
+// re-scan the ready front and possibly claim a different issue after an
+// indeterminate commit response.
+func TestVerifiedReadyClaimDoesNotReplayIndeterminate(t *testing.T) {
 	s, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -141,66 +191,30 @@ func TestVerifiedClaimWriteIndeterminateStaysIndeterminateTwice(t *testing.T) {
 	id := claimVerifyTestIssue(t, s)
 
 	calls := 0
-	err := s.verifiedClaimWrite(ctx, id, claimedBy("alice"), func() error {
-		calls++
-		return fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
-	})
-	if err == nil {
-		t.Fatal("expected failure after replay budget exhausted, got nil")
-	}
-	if calls != 2 {
-		t.Fatalf("expected exactly 2 write runs (original + one replay), got %d", calls)
-	}
-	if !strings.Contains(err.Error(), "did not land") {
-		t.Fatalf("error should report the verified rollback, got: %v", err)
-	}
-}
-
-// TestVerifiedReadyClaimReplayConvertsAppliedIndeterminate: the replay leg of
-// the bespoke ready-claim path must keep the wrapper's verify semantics (lion
-// review on PR #5006). First attempt: commit-phase loss, verified rolled back
-// (nothing landed) -> replay. The replay actually lands the claim but ALSO
-// reports commit-phase loss (the wy-x543k direction, now on attempt two). The
-// verify pass must convert that into an accurate success instead of returning
-// the raw indeterminate error — which would leave an applied claim orphaned
-// on an issue the caller was told it failed to claim.
-func TestVerifiedReadyClaimReplayConvertsAppliedIndeterminate(t *testing.T) {
-	s, cleanup := setupTestStore(t)
-	defer cleanup()
-	ctx, cancel := testContext(t)
-	defer cancel()
-
-	id := claimVerifyTestIssue(t, s)
-
-	calls := 0
+	indeterminate := fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", ErrCommitIndeterminate)
 	got, err := s.verifiedReadyClaim(ctx, "alice", func() (*types.Issue, error) {
 		calls++
-		if calls == 1 {
-			// Commit-phase loss, transaction rolled back: nothing landed.
-			return &types.Issue{ID: id}, fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
-		}
-		// Replay: the claim lands, but the connection dies during commit again.
-		if err := rawClaim(t, s, id, "alice"); err != nil {
-			return nil, err
-		}
-		return &types.Issue{ID: id}, fmt.Errorf("write commit result indeterminate after connection loss: i/o timeout (%w)", errCommitPhase)
+		return &types.Issue{ID: id}, indeterminate
 	})
-	if err != nil {
-		t.Fatalf("expected applied-indeterminate replay to resolve to success, got: %v", err)
+	if err != indeterminate {
+		t.Fatalf("error = %v, want original indeterminate error %v", err, indeterminate)
 	}
-	if got == nil || got.ID != id {
-		t.Fatalf("recovered success must return the claimed issue %s, got %+v", id, got)
+	if got != nil {
+		t.Fatalf("claimed issue = %+v, want nil", got)
 	}
-	if calls != 2 {
-		t.Fatalf("expected exactly one replay (2 write runs), got %d", calls)
+	if calls != 1 {
+		t.Fatalf("write runs = %d, want exactly one after indeterminate commit", calls)
 	}
 
 	assignee, status, verr := s.readClaimState(ctx, id)
 	if verr != nil {
 		t.Fatalf("read claim state: %v", verr)
 	}
-	if assignee != "alice" || status != types.StatusInProgress {
-		t.Fatalf("claim not in effect after recovered replay: assignee=%q status=%q", assignee, status)
+	if assignee != "" || status != types.StatusOpen {
+		t.Fatalf("ready claim was replayed: assignee=%q status=%q", assignee, status)
+	}
+	if !errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("error = %v, want ErrCommitIndeterminate", err)
 	}
 }
 

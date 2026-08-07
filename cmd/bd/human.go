@@ -120,6 +120,10 @@ Examples:
 
 		ctx := rootCtx
 
+		if usesProxiedServer() {
+			return runHumanListProxiedServer(ctx, status)
+		}
+
 		filter := types.IssueFilter{
 			Labels: []string{"human"},
 		}
@@ -214,6 +218,10 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
+		if usesProxiedServer() {
+			return runHumanRespondProxiedServer(ctx, issueID, response)
+		}
+
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("responding to human bead: %v", err)
@@ -297,6 +305,10 @@ Examples:
 		ctx := rootCtx
 		issueID := args[0]
 
+		if usesProxiedServer() {
+			return runHumanDismissProxiedServer(ctx, issueID, reason)
+		}
+
 		// Direct mode
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("dismissing human bead: %v", err)
@@ -372,6 +384,10 @@ Example:
 		}()
 
 		ctx := rootCtx
+
+		if usesProxiedServer() {
+			return runHumanStatsProxiedServer(ctx)
+		}
 
 		filter := types.IssueFilter{
 			Labels: []string{"human"},

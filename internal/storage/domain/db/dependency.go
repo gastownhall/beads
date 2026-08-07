@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func NewDependencySQLRepository(runner Runner) domain.DependencySQLRepository {
@@ -42,8 +43,15 @@ func pickDepTable(useWisps bool) string {
 	return "dependencies"
 }
 
-func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, dependsOnID string) (string, error) {
-	if strings.HasPrefix(dependsOnID, "external:") {
+// pickDepTargetColumn classifies an edge's target the same way the in-tx store
+// bodies do, through issueops.IsExternalDepTarget: a target this database
+// cannot hold — an "external:" reference or an issue belonging to another
+// repository — goes to depends_on_external, which carries no foreign key.
+// Only a target that could plausibly be local is probed against wisps and
+// otherwise treated as a local issue, where fk_dep_issue_target still refuses
+// an id that is genuinely missing.
+func (r *dependencySQLRepositoryImpl) pickDepTargetColumn(ctx context.Context, issueID, dependsOnID string) (string, error) {
+	if issueops.IsExternalDepTarget(issueID, dependsOnID) {
 		return "depends_on_external", nil
 	}
 	var probe int
@@ -127,7 +135,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		return fmt.Errorf("db: DependencySQLRepository.Insert: check existing: %w", err)
 	}
 
-	targetCol, err := r.pickDepTargetColumn(ctx, dep.DependsOnID)
+	targetCol, err := r.pickDepTargetColumn(ctx, dep.IssueID, dep.DependsOnID)
 	if err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
@@ -214,8 +222,7 @@ func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Cont
 	if dep == nil {
 		return errors.New("db: DependencySQLRepository.ValidateBlockingHierarchy: dep must not be nil")
 	}
-	if strings.HasPrefix(dep.DependsOnID, "external:") ||
-		types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID) {
+	if issueops.IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
 		return nil
 	}
 	return issueops.CheckBlockingHierarchyInTx(ctx, r.runner, dep, nil)
@@ -808,6 +815,27 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 	return out, nil
 }
 
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+	if err != nil {
+		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
+	}
+	return out, nil
+}
+
+// WalkDependencyTree runs the SHARED walk body, unwrapped.
+//
+// It does NOT wrap the error the way its siblings above do, and that is the one
+// thing to keep when editing it: the body publishes issueops.ErrValidation,
+// storage.ErrNotFound and *issueops.ErrTooManyRows as the role's own vocabulary,
+// and every one of those is classified by errors.Is/errors.As at both front
+// doors and in the HTTP problem mapping. A `fmt.Errorf("db: ...: %w")` would keep
+// them matchable but would also put this repository's name into the message a
+// user reads, which the direct route never does for the same refusal.
+func (r *dependencySQLRepositoryImpl) WalkDependencyTree(ctx context.Context, req publicops.WalkTreeRequest) (publicops.TreeResult, error) {
+	return issueops.WalkDependencyTreeInTx(ctx, r.runner, req)
+}
+
 func (r *dependencySQLRepositoryImpl) GetTree(ctx context.Context, rootID string, opts domain.DepTreeOpts) ([]*types.TreeNode, error) {
 	if rootID == "" {
 		return nil, errors.New("db: DependencySQLRepository.GetTree: rootID must not be empty")
@@ -839,6 +867,18 @@ func (r *dependencySQLRepositoryImpl) CycleThroughEdges(ctx context.Context, edg
 		return "", fmt.Errorf("db: DependencySQLRepository.CycleThroughEdges (wisps): %w", err)
 	}
 	return issueops.CycleThroughEdgesInGraph(graph, edges), nil
+}
+
+// WispSourceIDs classifies a batch of ids by plane in one scoped query. It is
+// the proxied twin of the in-tx probe the store-backed dependency editor runs,
+// and shares its implementation so the two answer the same question — down to
+// treating a missing wisps table as "no wisps" rather than an error.
+func (r *dependencySQLRepositoryImpl) WispSourceIDs(ctx context.Context, ids []string) (map[string]struct{}, error) {
+	set, err := issueops.WispIDSetInTx(ctx, r.runner, ids)
+	if err != nil {
+		return nil, fmt.Errorf("db: DependencySQLRepository.WispSourceIDs: %w", err)
+	}
+	return set, nil
 }
 
 func (r *dependencySQLRepositoryImpl) GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {

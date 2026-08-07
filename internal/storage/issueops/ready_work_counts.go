@@ -21,7 +21,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	out, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, wispDepsExist, false)
+	out, err := runReadyCountsInTx(ctx, tx, IssuesFilterTables, filter.Limit, issuePreds, wispDepsExist, sqlbuild.CountsHydration{})
 	if err != nil {
 		return nil, err
 	}
@@ -41,7 +41,7 @@ func GetReadyWorkWithCountsInTx(ctx context.Context, tx *sql.Tx, filter types.Wo
 	if err != nil {
 		return nil, err
 	}
-	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, false)
+	wisps, err := runReadyCountsInTx(ctx, tx, WispsFilterTables, filter.Limit, wispPreds, true, sqlbuild.CountsHydration{})
 	if err != nil {
 		if isTableNotExistError(err) {
 			return finishReadyWorkWithCounts(out, filter)
@@ -128,10 +128,15 @@ func finishReadyWorkWithCounts(items []*types.IssueWithCounts, filter types.Work
 // For limit <= 0 (unbounded) there is no page to push down, so it runs the
 // predicate-form mega-query unchanged.
 //
+// Both callers pass the ZERO hydration, so ready work is always fully
+// hydrated. types.WorkFilter carries neither opt-out — the projection that
+// builds it drops both — and issueops.ListRequest says so where a caller reads
+// it: SkipLabels and SkipCounts are not carried onto the ReadyFlag arm.
+//
 //nolint:gosec // G201: whereSQL/orderBySQL/limitSQL are hardcoded fragments; user input rides ? placeholders.
-func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps, skipLabels bool) ([]*types.IssueWithCounts, error) {
+func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, limit int, preds *readyWorkPredicates, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
 	if limit <= 0 {
-		return runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, skipLabels)
+		return runSearchQueryInTx(ctx, tx, tables, preds.whereSQL, preds.orderBySQL, preds.limitSQL, preds.args, includeWispReverseDeps, hyd)
 	}
 
 	idQuery := fmt.Sprintf("SELECT id FROM %s %s %s %s", tables.Main, preds.whereSQL, preds.orderBySQL, preds.limitSQL)
@@ -151,7 +156,7 @@ func runReadyCountsInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, li
 		if end > len(pageIDs) {
 			end = len(pageIDs)
 		}
-		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, skipLabels)
+		countsSQL, idArgs := sqlbuild.SearchCountsSQL(tables, pageIDs[start:end], "", "", "", includeWispReverseDeps, hyd)
 		rows, scanErr := scanCountsRowsInTx(ctx, tx, tables.Main, countsSQL, idArgs)
 		if scanErr != nil {
 			return nil, scanErr

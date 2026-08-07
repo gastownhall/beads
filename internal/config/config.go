@@ -324,6 +324,7 @@ func Initialize() error {
 
 	// AI configuration defaults
 	v.SetDefault("ai.model", "claude-haiku-4-5-20251001")
+	v.SetDefault("ai.base_url", "")
 
 	// List command defaults
 	v.SetDefault("list.limit", 50)
@@ -756,6 +757,80 @@ func Set(key string, value interface{}) {
 // Override via: bd config set ai.model "model-name" or BD_AI_MODEL=model-name
 func DefaultAIModel() string {
 	return GetString("ai.model")
+}
+
+// DefaultAIModelFor returns the model for Anthropic-compatible AI calls,
+// accounting for which provider the resolved key selects: an explicitly
+// configured ai.model always wins; otherwise a MiniMax-selected key gets a
+// MiniMax-served default (MINIMAX_MODEL env > MiniMaxDefaultModel), since
+// MiniMax does not serve the Claude default model.
+func DefaultAIModelFor(keySource AIAPIKeySource) string {
+	if GetValueSource("ai.model") != SourceDefault {
+		return GetString("ai.model")
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if m := os.Getenv("MINIMAX_MODEL"); m != "" {
+			return m
+		}
+		return MiniMaxDefaultModel
+	}
+	return GetString("ai.model")
+}
+
+// AIAPIKeySource identifies where the active Anthropic-compatible API key came from.
+type AIAPIKeySource string
+
+const (
+	AIAPIKeySourceNone         AIAPIKeySource = ""
+	AIAPIKeySourceAnthropicEnv AIAPIKeySource = "ANTHROPIC_API_KEY" //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceMiniMaxEnv   AIAPIKeySource = "MINIMAX_API_KEY"   //nolint:gosec // Environment variable name, not a credential.
+	AIAPIKeySourceConfig       AIAPIKeySource = "ai.api_key"
+	AIAPIKeySourceExplicit     AIAPIKeySource = "explicit"
+
+	MiniMaxDefaultBaseURL = "https://api.minimax.io/anthropic"
+
+	// MiniMaxDefaultModel is used when MINIMAX_API_KEY selected the key and
+	// the user did not configure ai.model: MiniMax's Anthropic-compatible
+	// endpoint does not serve the Claude default model, so key-only setup
+	// must route to a model MiniMax actually hosts. Override with
+	// MINIMAX_MODEL or ai.model.
+	MiniMaxDefaultModel = "MiniMax-M2"
+)
+
+// ResolveAIAPIKey returns the API key for Anthropic-compatible AI calls.
+//
+// Precedence: ANTHROPIC_API_KEY > MINIMAX_API_KEY > ai.api_key > explicit.
+func ResolveAIAPIKey(explicit string) (string, AIAPIKeySource) {
+	if envKey := os.Getenv("ANTHROPIC_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceAnthropicEnv
+	}
+	if envKey := os.Getenv("MINIMAX_API_KEY"); envKey != "" {
+		return envKey, AIAPIKeySourceMiniMaxEnv
+	}
+	if configKey := GetString("ai.api_key"); configKey != "" {
+		return configKey, AIAPIKeySourceConfig
+	}
+	if explicit != "" {
+		return explicit, AIAPIKeySourceExplicit
+	}
+	return "", AIAPIKeySourceNone
+}
+
+// DefaultAIBaseURL returns the configured base URL for Anthropic-compatible AI calls.
+//
+// Precedence: ai.base_url (or BD_AI_BASE_URL) > MINIMAX_BASE_URL > MiniMax default
+// when MINIMAX_API_KEY selected the key. Empty means use the SDK's Anthropic default.
+func DefaultAIBaseURL(keySource AIAPIKeySource) string {
+	if baseURL := GetString("ai.base_url"); baseURL != "" {
+		return baseURL
+	}
+	if keySource == AIAPIKeySourceMiniMaxEnv {
+		if baseURL := os.Getenv("MINIMAX_BASE_URL"); baseURL != "" {
+			return baseURL
+		}
+		return MiniMaxDefaultBaseURL
+	}
+	return ""
 }
 
 // AllSettings returns all configuration settings as a map

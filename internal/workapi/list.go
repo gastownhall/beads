@@ -184,6 +184,17 @@ func LoadUOWListConfig(ctx context.Context, uw UnitOfWork) (ListConfig, error) {
 // exclusions, the pinned and template defaults, and the gate, infra-type, and
 // wisp suppression that make the default listing show durable work only.
 func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter, error) {
+	// The --ready arm reaches its query through ReadyFilterFromIssueFilter,
+	// which carries only part of what this filter can express. A request that
+	// asks --ready to honor something the projection drops is refused here,
+	// at the one point every frontend and every implementation of
+	// issueops.Reader passes through, rather than answered with the wider set.
+	// The drop set and the refusal text live beside the promise they enforce,
+	// in issueops.
+	if err := issueops.ValidateReadyFlagScope(in); err != nil {
+		return types.IssueFilter{}, err
+	}
+
 	filter := types.IssueFilter{
 		Limit:          SQLLimit(in),
 		Offset:         in.Offset,
@@ -191,6 +202,14 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 		SortDesc:       in.Reverse,
 		AfterCreatedAt: in.AfterCreatedAt,
 		AfterID:        in.AfterID,
+		// The defensive cap travels ON the request, so this builder is the
+		// only writer of the filter's two cap fields. `bd list` used to stamp
+		// them onto the filter after the builder returned, which is the
+		// "build it, then reach in and change it" half-step the role exists to
+		// make unreachable — and it left the cap invisible to every
+		// implementation of Reader.List.
+		MaxRows:       in.MaxRows,
+		MaxRowsSource: in.MaxRowsSource,
 	}
 
 	if in.ReadyFlag {
@@ -294,6 +313,9 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 	if in.SkipLabels {
 		filter.SkipLabels = true
+	}
+	if in.SkipCounts {
+		filter.SkipCounts = true
 	}
 
 	if in.PriorityMin != nil {

@@ -177,9 +177,15 @@ func TestProxiedServerPrune(t *testing.T) {
 		if got := readDoltLogCountSince(t, db, before); got < 1 {
 			t.Errorf("prune should create a dolt commit, got %d new commits", got)
 		}
+		// The label is the ROLE's, not this command's: one sweep, one entry,
+		// naming the operation and the tier it cleared. It used to read
+		// "bd: prune N bead(s)" here and "bd: delete N issue(s)" on the direct
+		// route, which named neither the command nor the tier — the two front
+		// doors now write the same sentence, and so does an HTTP sweep, where
+		// there is no `bd prune` to name.
 		msg := readDoltLogTopMessage(t, db)
-		if !strings.HasPrefix(msg, "bd: prune ") {
-			t.Errorf("dolt commit message should begin with 'bd: prune ', got: %q", msg)
+		if !strings.HasPrefix(msg, "bd: sweep ") || !strings.Contains(msg, "durable") {
+			t.Errorf("dolt commit message should name the sweep and its tier, got: %q", msg)
 		}
 	})
 }

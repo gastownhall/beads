@@ -54,12 +54,23 @@ type MigrateLockOption func(*migrateLockOptions)
 
 type migrateLockOptions struct {
 	freshBootstrapHeal *freshBootstrapHealRequest
+	lockedPreparation  *lockedPreparationRequest
 }
 
 type freshBootstrapHealRequest struct {
 	capability *FreshBootstrapHealCapability
 	endpoint   string
 }
+
+type lockedPreparationRequest struct {
+	endpoint string
+	fn       LockedPreparation
+}
+
+// LockedPreparation performs bootstrap work under MigrateUpWithLock's pinned
+// connection and database-scoped migration lock. It may return a fresh
+// bootstrap heal capability to enable the existing guarded recovery path.
+type LockedPreparation func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error)
 
 // FreshBootstrapHealCapability is a one-shot authorization to discard an
 // interrupted bootstrap working set. It is bound to the exact endpoint,
@@ -149,6 +160,15 @@ func WithFreshBootstrapHeal(capability *FreshBootstrapHealCapability, endpoint s
 	}
 }
 
+// WithLockedPreparation configures bootstrap work that must execute after the
+// migration lock is acquired and before migrations run. A non-nil capability
+// returned by fn enables the existing fresh-bootstrap recovery path.
+func WithLockedPreparation(endpoint string, fn LockedPreparation) MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.lockedPreparation = &lockedPreparationRequest{endpoint: endpoint, fn: fn}
+	}
+}
+
 // MigrateUpWithLock serializes schema migrations for a single Dolt sql-server
 // database. conn must be a pinned *sql.Conn because MySQL/Dolt named locks are
 // session-scoped; GET_LOCK, migrations, and RELEASE_LOCK must run on the same
@@ -170,6 +190,18 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 			err = errors.Join(err, releaseErr)
 		}
 	}()
+	if o.lockedPreparation != nil && o.lockedPreparation.fn != nil {
+		capability, preparationErr := o.lockedPreparation.fn(ctx, conn)
+		if preparationErr != nil {
+			return 0, preparationErr
+		}
+		if capability != nil {
+			o.freshBootstrapHeal = &freshBootstrapHealRequest{
+				capability: capability,
+				endpoint:   o.lockedPreparation.endpoint,
+			}
+		}
+	}
 
 	applied, err = MigrateUp(ctx, conn)
 	var dirtyErr *DirtyTablesError

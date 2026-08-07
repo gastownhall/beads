@@ -84,6 +84,34 @@ func readReopenComment(t *testing.T, db *sql.DB, id string) string {
 	return got.String
 }
 
+// readDoltLogMessagesSince is the message-level sibling of
+// readDoltLogCountSince: a per-id history entry has to be read by its text, not
+// only counted, or a route writing N copies of one combined message would pass.
+func readDoltLogMessagesSince(t *testing.T, db *sql.DB, sinceHash string) []string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(),
+		"SELECT commit_hash, message FROM dolt_log ORDER BY date DESC")
+	if err != nil {
+		t.Fatalf("read dolt_log: %v", err)
+	}
+	defer rows.Close()
+	var messages []string
+	for rows.Next() {
+		var hash, message string
+		if err := rows.Scan(&hash, &message); err != nil {
+			t.Fatalf("scan dolt_log: %v", err)
+		}
+		if hash == sinceHash {
+			break
+		}
+		messages = append(messages, message)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iter dolt_log: %v", err)
+	}
+	return messages
+}
+
 func TestProxiedServerReopen(t *testing.T) {
 	requireSharedProxiedServer(t)
 	t.Parallel()
@@ -206,7 +234,10 @@ func TestProxiedServerReopen(t *testing.T) {
 		}
 	})
 
-	t.Run("batch_single_dolt_commit", func(t *testing.T) {
+	// Q2, adopted: a multi-id reopen writes ONE HISTORY ENTRY PER ID, naming
+	// that id, where this route used to write one combined "bd: reopen a, b".
+	// It is what the direct route has always written.
+	t.Run("batch_commits_once_per_id", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rosd")
 		a := bdProxiedCreate(t, bd, p.dir, "Batch A")
@@ -216,17 +247,71 @@ func TestProxiedServerReopen(t *testing.T) {
 		before := readDoltHead(t, db)
 		bdProxiedReopen(t, bd, p.dir, a.ID, b.ID)
 		count := readDoltLogCountSince(t, db, before)
-		if count != 1 {
-			t.Errorf("expected exactly 1 new dolt commit for batch reopen, got %d", count)
+		if count != 2 {
+			t.Errorf("expected one dolt commit per reopened id (2), got %d", count)
 		}
-		msg := readDoltLogTopMessage(t, db)
-		if !strings.HasPrefix(msg, "bd: reopen ") {
-			t.Errorf("commit message should begin with 'bd: reopen ', got: %q", msg)
-		}
+		messages := readDoltLogMessagesSince(t, db, before)
 		for _, id := range []string{a.ID, b.ID} {
-			if !strings.Contains(msg, id) {
-				t.Errorf("commit message %q should contain id %s", msg, id)
+			want := "bd: reopen " + id
+			found := false
+			for _, msg := range messages {
+				if msg == want {
+					found = true
+				}
 			}
+			if !found {
+				t.Errorf("commit messages %q do not include %q", messages, want)
+			}
+		}
+	})
+
+	// The defect this adoption fixes. A status configured into the done
+	// category is reopenable — the role speaks in terms of the category
+	// (issueops/issueops.go:417-420) — and this route used to compare against
+	// literal "closed" and refuse, so the same command answered differently on
+	// a team server than it did locally.
+	t.Run("reopens_configured_done_status", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rocds")
+		if out, err := bdProxiedRun(t, bd, p.dir, "config", "set", "status.custom", "shelved:done"); err != nil {
+			t.Fatalf("config set status.custom: %v\n%s", err, out)
+		}
+		issue := bdProxiedCreate(t, bd, p.dir, "Configured done reopen")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "shelved")
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got != types.Status("shelved") {
+			t.Fatalf("setup: status = %q, want shelved", got)
+		}
+		out := bdProxiedReopen(t, bd, p.dir, issue.ID)
+		if !strings.Contains(out, "Reopened") {
+			t.Errorf("expected 'Reopened' in stdout, got: %s", out)
+		}
+		if got := readStatus(t, db, issue.ID); got != types.StatusOpen {
+			t.Errorf("status: got %q, want open", got)
+		}
+	})
+
+	// The other side of the category rule, and the same line the direct route
+	// prints: a status that is neither done nor open is left alone and said so.
+	t.Run("non_done_status_reports_nothing_to_do", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "rontd")
+		issue := bdProxiedCreate(t, bd, p.dir, "In progress")
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "-s", "in_progress")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "reopen", issue.ID)
+		if err != nil {
+			t.Fatalf("non-done reopen should exit 0, got: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty (nothing was reopened)", stdout)
+		}
+		want := issue.ID + " is not closed (status: in_progress); nothing to do\n"
+		if stderr != want {
+			t.Errorf("stderr = %q, want %q", stderr, want)
+		}
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, issue.ID); got != types.StatusInProgress {
+			t.Errorf("status: got %q, want in_progress", got)
 		}
 	})
 

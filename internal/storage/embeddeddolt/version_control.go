@@ -112,17 +112,33 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // if anything else writes concurrently.
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
 	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if _, execErr := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); execErr != nil {
-			if tolerateEmpty && issueops.IsNothingToCommitError(execErr) {
-				committed = false
-				return nil
-			}
-			return fmt.Errorf("dolt commit: %w", execErr)
-		}
-		committed = true
-		return nil
+		var commitErr error
+		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
+		return commitErr
 	})
 	return committed, err
+}
+
+func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpty bool) (bool, error) {
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			if tolerateEmpty {
+				return false, nil
+			}
+			return false, fmt.Errorf("dolt commit: %w", err)
+		}
+		return false, wrapCommitIndeterminate("dolt commit", err)
+	}
+	return true, nil
+}
+
+// stageAndCommitAfterSQLCommit preserves the no-replay boundary for version
+// publication after an already-visible SQL mutation.
+func stageAndCommitAfterSQLCommit(ctx context.Context, db versioncontrolops.DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
+	if err := versioncontrolops.StageAndCommit(ctx, db, dirtyTables, commitMsg, author); err != nil {
+		return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
+	}
+	return nil
 }
 
 // Commit stages and commits the full working set. A clean working set is not
@@ -340,14 +356,12 @@ func (s *EmbeddedDoltStore) RecomputeBlockedAfterMerge(ctx context.Context, from
 func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
 	var changed int64
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		// Refuse to derive and commit is_blocked from a dirty graph (see
-		// DoltStore.RecomputeAllBlocked); checked inside the recompute tx so it
-		// sees the same working set the recompute will read (bd-6dnrw.37).
-		if e := issueops.GuardBlockedRecomputeWorkingSet(ctx, tx); e != nil {
-			return e
-		}
+		// One shared body across every mode: refuse to derive and commit
+		// is_blocked from a dirty graph (see DoltStore.RecomputeAllBlocked),
+		// checked inside the recompute tx so it sees the same working set the
+		// recompute will read (bd-6dnrw.37).
 		var e error
-		changed, e = issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+		changed, e = versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
 		return e
 	}); err != nil {
 		return 0, err
@@ -356,8 +370,9 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 		// Stage only issues (wisps are dolt_ignore'd), matching the post-pull
 		// recompute, so an unrelated dirty working set is not swept in.
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.StageAndCommit(ctx, db,
-				map[string]bool{"issues": true}, "bd: recompute is_blocked (full)", commitAuthor)
+			return stageAndCommitAfterSQLCommit(ctx, db,
+				versioncontrolops.BlockedRecomputeStagedTables(),
+				versioncontrolops.BlockedRecomputeCommitMsg, commitAuthor)
 		}); err != nil {
 			return int(changed), err
 		}
@@ -624,7 +639,7 @@ func (s *EmbeddedDoltStore) recomputeBlockedAfterPull(ctx context.Context, preHe
 		return err
 	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.StageAndCommit(ctx, db,
+		return stageAndCommitAfterSQLCommit(ctx, db,
 			map[string]bool{"issues": true}, "bd: recompute is_blocked after pull", commitAuthor)
 	})
 }

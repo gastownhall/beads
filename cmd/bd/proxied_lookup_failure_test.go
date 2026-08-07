@@ -241,7 +241,7 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "unclaim",
 		run: func(ctx context.Context) error {
-			return runUnclaimProxiedServer(ctx, []string{stubMissingID}, "", false)
+			return runUnclaimProxiedServer(ctx, []string{stubMissingID}, "", false, "")
 		},
 		wantNotFound: "Error resolving bd-missing: not found",
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",

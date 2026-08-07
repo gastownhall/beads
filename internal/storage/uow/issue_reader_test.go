@@ -44,6 +44,12 @@ func (f readerIssues) SearchIssuesWithCounts(context.Context, string, types.Issu
 	return domain.SearchCountsPage{Items: f.rows}, nil
 }
 
+// The ready arm's defer-wake sweep reaches this before the read; a workspace
+// with nothing expired is the steady state the fixture models.
+func (readerIssues) WakeExpiredDefers(context.Context) (issues, wisps int, err error) {
+	return 0, 0, nil
+}
+
 // readerConfig is a workspace with no custom vocabulary, which is all
 // BuildListFilter needs to run.
 type readerConfig struct{ domain.ConfigUseCase }
@@ -103,10 +109,14 @@ func TestBothReaderImplementationsAgreeOnTheListEpilogue(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			req := publicops.ListRequest{ReadyFlag: ready, SortBy: "id", Limit: &limit}
 
-			provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
+			uw := &mockUnitOfWork{
 				issueUseCase:  readerIssues{rows: readerRows()},
 				configUseCase: readerConfig{},
-			}}}
+			}
+			// The ready arm opens two units of work — the defer-wake
+			// sweep, then the read span — and the provider hands out
+			// zero-valued mocks once the pool runs dry.
+			provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw, uw}}
 			overUOW, err := NewIssueReader(provider)
 			if err != nil {
 				t.Fatalf("NewIssueReader: %v", err)

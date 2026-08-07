@@ -77,6 +77,37 @@ var routeTable = []route{
 		handler:     (*Server).handleReady,
 	},
 	{
+		op:     OpGetStats,
+		method: http.MethodGet,
+		// `stats`, not `status`: on an HTTP surface `status` reads as the
+		// server's own condition, which is /healthz. This one answers about the
+		// workspace and takes a database slot to do it.
+		pattern:     "/v0/beads/stats",
+		capability:  "stats.get",
+		implemented: true,
+		handler:     (*Server).handleStats,
+	},
+	{
+		op:          OpListDependencyCycles,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/dependencies/cycles",
+		capability:  "dependencies.cycles",
+		implemented: true,
+		handler:     (*Server).handleDependencyCycles,
+	},
+	{
+		op:     OpCountReadyWork,
+		method: http.MethodGet,
+		// A collection-level custom method, spelled the way the claim route's
+		// is. Unlike that one it needs no specPath declaration: the segment is
+		// a LITERAL, and only a wildcard segment is inexpressible as a ServeMux
+		// pattern, so the router registers the documented path itself.
+		pattern:     "/v0/beads/ready:count",
+		capability:  "ready.count",
+		implemented: true,
+		handler:     (*Server).handleCountReady,
+	},
+	{
 		op:          OpListIssues,
 		method:      http.MethodGet,
 		pattern:     "/v0/beads/issues",
@@ -85,12 +116,84 @@ var routeTable = []route{
 		handler:     (*Server).handleListIssues,
 	},
 	{
+		op:     OpQueryIssues,
+		method: http.MethodGet,
+		// A collection-level custom method, spelled as ready:count is.
+		pattern:     "/v0/beads/issues:query",
+		capability:  "issues.query",
+		implemented: true,
+		handler:     (*Server).handleQueryIssues,
+	},
+	{
 		op:          OpGetIssue,
 		method:      http.MethodGet,
 		pattern:     "/v0/beads/issues/{id}",
 		capability:  "issues.get",
 		implemented: true,
 		handler:     (*Server).handleGetIssue,
+	},
+	{
+		op:          OpListSettings,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/config",
+		capability:  "config.list",
+		implemented: true,
+		handler:     (*Server).handleListSettings,
+	},
+	{
+		op:          OpGetSetting,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.get",
+		implemented: true,
+		handler:     (*Server).handleGetSetting,
+	},
+	{
+		op:          OpListDependencies,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/dependencies",
+		capability:  "dependencies.list",
+		implemented: true,
+		handler:     (*Server).handleListDependencies,
+	},
+	{
+		op:     OpListBlockingAnnotations,
+		method: http.MethodGet,
+		// A literal path under the same collection as the stored-edge read. No
+		// wildcard is involved, so it cannot collide with /v0/beads/dependencies
+		// or /v0/beads/dependencies/cycles, both of which are literals too.
+		pattern:     "/v0/beads/dependencies/blocking",
+		capability:  "dependencies.blocking",
+		implemented: true,
+		handler:     (*Server).handleBlockingAnnotations,
+	},
+	{
+		op:     OpGetDependencyTree,
+		method: http.MethodGet,
+		// A sibling path under /dependencies rather than a mode of the row
+		// above: ServeMux matches the literal segment exactly, and the two
+		// operations answer different shapes from different roles.
+		pattern:     "/v0/beads/dependencies/tree",
+		capability:  "dependencies.tree",
+		implemented: true,
+		handler:     (*Server).handleDependencyTree,
+	},
+	{
+		op:     OpBatchCreateIssues,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way ready:count's is.
+		//
+		// It does not collide with the claim row's wide POST wildcard below.
+		// That pattern is /v0/beads/issues/{idop} and requires the separating
+		// slash; this path has none, so the two never match the same request.
+		//
+		// It also leaves POST /v0/beads/issues free. A collection POST is where
+		// a single create belongs when one is published, and squatting on it
+		// with a batch would have made that operation unnameable.
+		pattern:     "/v0/beads/issues:batchCreate",
+		capability:  "issues.batchCreate",
+		implemented: true,
+		handler:     (*Server).handleBatchCreate,
 	},
 	{
 		op:      OpClaimIssue,
@@ -114,6 +217,77 @@ var routeTable = []route{
 		capability:  "issues.claim",
 		implemented: true,
 		handler:     (*Server).handleClaim,
+	},
+	{
+		op:     OpSweepIssues,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way countReadyWork's is.
+		//
+		// It is registered AFTER the claim's `/v0/beads/issues/{idop}`, and
+		// ServeMux precedence is by specificity rather than by order, so the
+		// literal wins over the wildcard for this exact path. That is what
+		// keeps a sweep from being parsed as a claim of an issue called
+		// ":sweep"; TestSweepPathReachesItsHandler drives the documented path.
+		pattern:     "/v0/beads/issues:sweep",
+		capability:  "issues.sweep",
+		implemented: true,
+		handler:     (*Server).handleSweep,
+	},
+	{
+		op:     OpDeleteIssues,
+		method: http.MethodPost,
+		// A literal collection-level custom method, registered and preferred
+		// over the claim's wildcard for exactly the reason the sweep row above
+		// spells out; TestDeletePathReachesItsHandler drives the documented
+		// path.
+		pattern:     "/v0/beads/issues:delete",
+		capability:  "issues.delete",
+		implemented: true,
+		handler:     (*Server).handleDelete,
+	},
+	{
+		op:          OpListMemories,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.list",
+		implemented: true,
+		handler:     (*Server).handleListMemories,
+	},
+	{
+		op:     OpRememberMemory,
+		method: http.MethodPost,
+		// A plain collection POST, not a custom method: this creates one member
+		// of the collection the path names, which is what POST already means.
+		// The two destructive issue operations above are custom methods because
+		// they act on a SET the request describes; nothing here does.
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.remember",
+		implemented: true,
+		handler:     (*Server).handleRememberMemory,
+	},
+	{
+		op:     OpGetMemory,
+		method: http.MethodGet,
+		// A single-segment wildcard, so pattern and specPath agree and no
+		// declaration is needed. It cannot collide with the collection read
+		// above: ServeMux requires the separating slash, so `/memories` and
+		// `/memories/{key}` never match the same request.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.get",
+		implemented: true,
+		handler:     (*Server).handleGetMemory,
+	},
+	{
+		op:     OpForgetMemory,
+		method: http.MethodDelete,
+		// The surface's first DELETE. It shares a pattern with the read above
+		// and differs only in method, which is the whole argument for the
+		// method: one named resource, no body, no flags. ServeMux registers
+		// method and pattern together, so the two rows cannot collide.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.forget",
+		implemented: true,
+		handler:     (*Server).handleForgetMemory,
 	},
 }
 

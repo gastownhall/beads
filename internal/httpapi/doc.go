@@ -73,6 +73,19 @@
 // deletion and non-fast-forward, so no check is GitHub-required and a red gate
 // binds by convention.
 //
+// A THIRD rule closes the other way past the roles. Denying internal/workapi
+// stops a handler building a filter; it says nothing about a handler taking
+// uw.IssueUseCase() and calling the domain straight, which needs no filter and
+// no builder — and which is what the proxied CLI did for years. depguard
+// (httpapi-domain-boundary) therefore denies internal/storage/domain from this
+// package's non-test files, deny-by-default so a file added tomorrow is covered
+// the moment it exists. It has exactly two named holes, both for a VALUE the
+// embedder assembled rather than a use case: server.go, whose Config.Workspace
+// is the domain.ContextInfo startup snapshot it is handed, and handlers.go,
+// whose contextResponse projects that snapshot through domain.PublishedContext
+// — the same projection `bd context` publishes, and where the credential and
+// host-path exclusions live. reads.go and claim.go carry no exception.
+//
 // The claim OPERATION is the only mutation this surface has, and claim.go
 // states the two things a client must know before adopting it: the actor is
 // caller-asserted provenance rather than authenticated identity, and hooks do

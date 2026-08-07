@@ -43,7 +43,6 @@ func (m *mockUnitOfWork) SwitchDatabase(ctx context.Context, database string) er
 
 func (m *mockUnitOfWork) ConfigUseCase() domain.ConfigUseCase         { return m.configUseCase }
 func (m *mockUnitOfWork) DoltRemoteUseCase() domain.DoltRemoteUseCase { return nil }
-func (m *mockUnitOfWork) BootstrapUseCase() domain.BootstrapUseCase   { return nil }
 func (m *mockUnitOfWork) IssueUseCase() domain.IssueUseCase           { return m.issueUseCase }
 func (m *mockUnitOfWork) DependencyUseCase() domain.DependencyUseCase { return m.dependencyUseCase }
 func (m *mockUnitOfWork) LabelUseCase() domain.LabelUseCase           { return m.labelUseCase }

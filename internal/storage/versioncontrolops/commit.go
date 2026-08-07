@@ -38,6 +38,12 @@ func (t *DirtyTableTracker) DirtyTables() map[string]bool {
 //
 // If commitMsg is empty, no commit is created. "Nothing to commit" errors
 // are treated as benign (e.g., all writes were to dolt-ignored tables).
+//
+// An empty author omits --author entirely, leaving attribution to the connected
+// session. That is not a fallback for a missing identity but the proxied-server
+// plane's normal discipline: its every other commit (uow.Tx.Commit) is
+// unauthored, and passing an empty --author would be a malformed commit rather
+// than an unattributed one.
 func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
 	if commitMsg == "" || len(dirtyTables) == 0 {
 		return nil
@@ -49,7 +55,12 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 		}
 	}
 
-	_, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
+	var err error
+	if author == "" {
+		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
+	} else {
+		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)", commitMsg, author)
+	}
 	if err != nil && !issueops.IsNothingToCommitError(err) {
 		return fmt.Errorf("dolt commit: %w", err)
 	}

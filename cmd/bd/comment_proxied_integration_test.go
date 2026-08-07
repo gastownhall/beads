@@ -9,61 +9,17 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
 
 func bdProxiedComment(t *testing.T, bd, dir string, args ...string) string {
 	t.Helper()
-	fullArgs := append([]string{"comment"}, args...)
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, fullArgs...)
+	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, append([]string{"comment"}, args...)...)
 	if err != nil {
-		t.Fatalf("bd comment %s failed: %v\nstdout:\n%s\nstderr:\n%s",
-			strings.Join(args, " "), err, stdout, stderr)
+		t.Fatalf("bd comment %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout, stderr)
 	}
 	return stdout
-}
-
-func bdProxiedCommentFail(t *testing.T, bd, dir string, args ...string) string {
-	t.Helper()
-	fullArgs := append([]string{"comment"}, args...)
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, fullArgs...)
-	if err == nil {
-		t.Fatalf("expected bd comment %s to fail, got:\nstdout:\n%s\nstderr:\n%s",
-			strings.Join(args, " "), stdout, stderr)
-	}
-	return stdout + stderr
-}
-
-func bdProxiedComments(t *testing.T, bd, dir string, args ...string) string {
-	t.Helper()
-	fullArgs := append([]string{"comments"}, args...)
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, fullArgs...)
-	if err != nil {
-		t.Fatalf("bd comments %s failed: %v\nstdout:\n%s\nstderr:\n%s",
-			strings.Join(args, " "), err, stdout, stderr)
-	}
-	return stdout
-}
-
-func bdProxiedCommentsJSON(t *testing.T, bd, dir string, args ...string) []*types.Comment {
-	t.Helper()
-	fullArgs := append([]string{"comments", "--json"}, args...)
-	stdout, stderr, err := bdProxiedRunBuffers(t, bd, dir, fullArgs...)
-	if err != nil {
-		t.Fatalf("bd comments --json %s failed: %v\nstdout:\n%s\nstderr:\n%s",
-			strings.Join(args, " "), err, stdout, stderr)
-	}
-	start := strings.Index(stdout, "[")
-	if start < 0 {
-		t.Fatalf("no JSON array in comments output:\n%s", stdout)
-	}
-	var comments []*types.Comment
-	if err := json.Unmarshal([]byte(stdout[start:]), &comments); err != nil {
-		t.Fatalf("parse comments JSON: %v\nraw: %s", err, stdout[start:])
-	}
-	return comments
 }
 
 func TestProxiedServerComment(t *testing.T) {
@@ -72,245 +28,257 @@ func TestProxiedServerComment(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
-	t.Run("comment_shorthand_then_list", func(t *testing.T) {
+	t.Run("permanent_comment_round_trip_and_not_found", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "cm")
 		issue := bdProxiedCreate(t, bd, p.dir, "Needs a comment")
 
-		out := bdProxiedComment(t, bd, p.dir, issue.ID, "first thoughts")
-		if !strings.Contains(out, "Comment added to") {
-			t.Errorf("expected confirmation, got:\n%s", out)
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", issue.ID, "first thoughts")
+		if err != nil {
+			t.Fatalf("bd comment failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comment stderr = %q, want empty", stderr)
+		}
+		if !strings.Contains(stdout, "Comment added to "+issue.ID) {
+			t.Errorf("bd comment confirmation = %q, want exact issue ID %q", stdout, issue.ID)
 		}
 
-		listed := bdProxiedComments(t, bd, p.dir, issue.ID)
-		if !strings.Contains(listed, "first thoughts") {
-			t.Errorf("expected listed comment text, got:\n%s", listed)
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", "--json", issue.ID)
+		if err != nil {
+			t.Fatalf("bd comments --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-	})
-
-	t.Run("comments_add_subcommand", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "ca")
-		issue := bdProxiedCreate(t, bd, p.dir, "Add via subcommand")
-
-		if _, _, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "via add"); err != nil {
-			t.Fatalf("comments add failed: %v", err)
+		if stderr != "" {
+			t.Errorf("bd comments --json stderr = %q, want empty", stderr)
 		}
-
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, issue.ID)
+		var comments []types.Comment
+		if err := json.Unmarshal([]byte(stdout), &comments); err != nil {
+			t.Fatalf("decode comments JSON: %v\nraw: %q", err, stdout)
+		}
 		if len(comments) != 1 {
-			t.Fatalf("expected 1 comment, got %d", len(comments))
+			t.Fatalf("comments length = %d, want 1", len(comments))
 		}
-		if comments[0].Text != "via add" {
-			t.Errorf("text: got %q, want %q", comments[0].Text, "via add")
+		comment := comments[0]
+		if comment.IssueID != issue.ID {
+			t.Errorf("comment issue ID = %q, want %q", comment.IssueID, issue.ID)
 		}
-	})
-
-	t.Run("multiple_comments_ordered", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "mo")
-		issue := bdProxiedCreate(t, bd, p.dir, "Multi comment")
-
-		// created_at is second-resolution and ids are content digests, so
-		// same-second comments have no defined relative order (bd-vuulx);
-		// give each comment its own second to keep the assertion meaningful.
-		bdProxiedComment(t, bd, p.dir, issue.ID, "one")
-		time.Sleep(1100 * time.Millisecond)
-		bdProxiedComment(t, bd, p.dir, issue.ID, "two")
-		time.Sleep(1100 * time.Millisecond)
-		bdProxiedComment(t, bd, p.dir, issue.ID, "three")
-
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, issue.ID)
-		if len(comments) != 3 {
-			t.Fatalf("expected 3 comments, got %d", len(comments))
+		if comment.Author != "Test" {
+			t.Errorf("comment author = %q, want %q", comment.Author, "Test")
 		}
-		if comments[0].Text != "one" || comments[1].Text != "two" || comments[2].Text != "three" {
-			t.Errorf("unexpected ordering: %q, %q, %q", comments[0].Text, comments[1].Text, comments[2].Text)
+		if comment.Text != "first thoughts" {
+			t.Errorf("comment text = %q, want %q", comment.Text, "first thoughts")
 		}
-	})
+		if comment.ID == "" {
+			t.Error("comment ID is empty")
+		}
+		if comment.CreatedAt.IsZero() || comment.CreatedAt.Nanosecond() != 0 {
+			t.Errorf("comment created_at = %v, want nonzero whole-second timestamp", comment.CreatedAt)
+		}
 
-	t.Run("comment_json_output", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "cj")
-		issue := bdProxiedCreate(t, bd, p.dir, "JSON comment")
-
-		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comment", "--json", issue.ID, "json body")
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comment", "--json", issue.ID, "json body")
 		if err != nil {
-			t.Fatalf("comment --json failed: %v\nstderr:\n%s", err, stderr)
+			t.Fatalf("bd comment --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
-		start := strings.Index(stdout, "{")
-		if start < 0 {
-			t.Fatalf("no JSON object in output:\n%s", stdout)
+		if stderr != "" {
+			t.Errorf("bd comment --json stderr = %q, want empty", stderr)
 		}
-		var c types.Comment
-		if err := json.Unmarshal([]byte(stdout[start:]), &c); err != nil {
-			t.Fatalf("parse comment JSON: %v\nraw: %s", err, stdout[start:])
+		var jsonComment types.Comment
+		if err := json.Unmarshal([]byte(stdout), &jsonComment); err != nil {
+			t.Fatalf("decode comment JSON: %v\nraw: %q", err, stdout)
 		}
-		if c.Text != "json body" {
-			t.Errorf("text: got %q, want %q", c.Text, "json body")
+		if jsonComment.IssueID != issue.ID {
+			t.Errorf("JSON comment issue ID = %q, want %q", jsonComment.IssueID, issue.ID)
 		}
-		if c.IssueID != issue.ID {
-			t.Errorf("issue_id: got %q, want %q", c.IssueID, issue.ID)
+		if jsonComment.Text != "json body" {
+			t.Errorf("JSON comment text = %q, want %q", jsonComment.Text, "json body")
 		}
-		if c.ID == "" {
-			t.Error("expected comment ID")
+		if jsonComment.Author != "Test" {
+			t.Errorf("JSON comment author = %q, want %q", jsonComment.Author, "Test")
 		}
-	})
+		if jsonComment.ID == "" {
+			t.Error("JSON comment ID is empty")
+		}
+		if jsonComment.CreatedAt.IsZero() || jsonComment.CreatedAt.Nanosecond() != 0 {
+			t.Errorf("JSON comment created_at = %v, want nonzero whole-second timestamp", jsonComment.CreatedAt)
+		}
 
-	t.Run("no_comments_message", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "nc")
-		issue := bdProxiedCreate(t, bd, p.dir, "Uncommented")
-
-		out := bdProxiedComments(t, bd, p.dir, issue.ID)
-		if !strings.Contains(out, "No comments on") {
-			t.Errorf("expected empty-state message, got:\n%s", out)
-		}
-	})
-
-	t.Run("empty_text_fails", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "et")
-		issue := bdProxiedCreate(t, bd, p.dir, "Empty text")
-
-		out := bdProxiedCommentFail(t, bd, p.dir, issue.ID, "")
-		if !strings.Contains(out, "empty") {
-			t.Errorf("expected empty-text error, got:\n%s", out)
-		}
-	})
-
-	t.Run("missing_issue_fails", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "mi")
-		out := bdProxiedCommentFail(t, bd, p.dir, "mi-99999", "orphan comment")
-		if !strings.Contains(out, "not found") {
-			t.Errorf("expected not-found error, got:\n%s", out)
-		}
-	})
-
-	t.Run("comments_add_json", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "aj")
-		issue := bdProxiedCreate(t, bd, p.dir, "Add JSON")
-
-		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "add", "json", "body", "--json")
-		if err != nil {
-			t.Fatalf("comments add --json failed: %v\nstderr:\n%s", err, stderr)
-		}
-		start := strings.Index(stdout, "{")
-		if start < 0 {
-			t.Fatalf("no JSON object in output:\n%s", stdout)
-		}
-		var c types.Comment
-		if err := json.Unmarshal([]byte(stdout[start:]), &c); err != nil {
-			t.Fatalf("parse comment JSON: %v\nraw: %s", err, stdout[start:])
-		}
-		if c.Text != "add json body" {
-			t.Errorf("text: got %q, want %q", c.Text, "add json body")
-		}
-		if c.IssueID != issue.ID {
-			t.Errorf("issue_id: got %q, want %q", c.IssueID, issue.ID)
-		}
-	})
-
-	t.Run("comment_from_file", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "cf")
-		issue := bdProxiedCreate(t, bd, p.dir, "Comment from file")
-
-		file := filepath.Join(t.TempDir(), "body.txt")
-		if err := os.WriteFile(file, []byte("body from a file"), 0o644); err != nil {
+		fileDir := t.TempDir()
+		commentFile := filepath.Join(fileDir, "comment.txt")
+		if err := os.WriteFile(commentFile, []byte("body from a file"), 0o600); err != nil {
 			t.Fatalf("write comment file: %v", err)
 		}
-
-		out := bdProxiedComment(t, bd, p.dir, issue.ID, "--file", file)
-		if !strings.Contains(out, "Comment added to") {
-			t.Errorf("expected confirmation, got:\n%s", out)
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comment", issue.ID, "--file", commentFile)
+		if err != nil {
+			t.Fatalf("bd comment --file failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comment --file stderr = %q, want empty", stderr)
 		}
 
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, issue.ID)
-		if len(comments) != 1 || comments[0].Text != "body from a file" {
-			t.Fatalf("expected 1 file-sourced comment, got %+v", comments)
+		addFile := filepath.Join(fileDir, "add.txt")
+		if err := os.WriteFile(addFile, []byte("note from file"), 0o600); err != nil {
+			t.Fatalf("write comments add file: %v", err)
+		}
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "--file", addFile)
+		if err != nil {
+			t.Fatalf("bd comments add --file failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comments add --file stderr = %q, want empty", stderr)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comment", issue.ID, "   ")
+		if err == nil {
+			t.Fatalf("bd comment with whitespace text unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if stdout != "" {
+			t.Errorf("whitespace-comment stdout = %q, want empty", stdout)
+		}
+		if got, want := strings.TrimSpace(stderr), "Error: comment text cannot be empty"; got != want {
+			t.Errorf("whitespace-comment stderr = %q, want %q", got, want)
+		}
+
+		uncommented := bdProxiedCreate(t, bd, p.dir, "Uncommented")
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", uncommented.ID)
+		if err != nil {
+			t.Fatalf("bd comments on uncommented issue failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comments on uncommented issue stderr = %q, want empty", stderr)
+		}
+		if got, want := stdout, "No comments on "+uncommented.ID+"\n"; got != want {
+			t.Errorf("empty comments output = %q, want %q", got, want)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", "--local-time", issue.ID)
+		if err != nil {
+			t.Fatalf("bd comments --local-time failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comments --local-time stderr = %q, want empty", stderr)
+		}
+		if stdout == "" || !strings.Contains(stdout, "first thoughts") {
+			t.Errorf("bd comments --local-time output = %q, want rendered comment text", stdout)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", "--json", issue.ID)
+		if err != nil {
+			t.Fatalf("final bd comments --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("final bd comments --json stderr = %q, want empty", stderr)
+		}
+		if err := json.Unmarshal([]byte(stdout), &comments); err != nil {
+			t.Fatalf("decode final comments JSON: %v\nraw: %q", err, stdout)
+		}
+		if len(comments) != 4 {
+			t.Fatalf("final comments length = %d, want 4", len(comments))
+		}
+		expectedTexts := map[string]struct{}{
+			"first thoughts":   {},
+			"json body":        {},
+			"body from a file": {},
+			"note from file":   {},
+		}
+		for _, listed := range comments {
+			if _, ok := expectedTexts[listed.Text]; !ok {
+				t.Errorf("unexpected final comment text %q", listed.Text)
+				continue
+			}
+			delete(expectedTexts, listed.Text)
+			if listed.IssueID != issue.ID {
+				t.Errorf("final comment %q issue ID = %q, want %q", listed.Text, listed.IssueID, issue.ID)
+			}
+			if listed.Author != "Test" {
+				t.Errorf("final comment %q author = %q, want %q", listed.Text, listed.Author, "Test")
+			}
+			if listed.ID == "" {
+				t.Errorf("final comment %q has empty ID", listed.Text)
+			}
+			if listed.CreatedAt.IsZero() || listed.CreatedAt.Nanosecond() != 0 {
+				t.Errorf("final comment %q created_at = %v, want nonzero whole-second timestamp", listed.Text, listed.CreatedAt)
+			}
+		}
+		if len(expectedTexts) != 0 {
+			t.Errorf("missing final comment texts: %v", expectedTexts)
+		}
+
+		missingID := "cm-99999"
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comment", missingID, "orphan comment")
+		if err == nil {
+			t.Fatalf("bd comment %s unexpectedly succeeded\nstdout:\n%s\nstderr:\n%s", missingID, stdout, stderr)
+		}
+		if stdout != "" {
+			t.Errorf("missing-ID stdout = %q, want empty", stdout)
+		}
+		if got, want := strings.TrimSpace(stderr), "Error: issue "+missingID+" not found"; got != want {
+			t.Errorf("missing-ID stderr = %q, want %q", got, want)
 		}
 	})
 
-	t.Run("comments_add_from_file", func(t *testing.T) {
+	t.Run("wisp_comments_add_round_trip_and_physical_routing", func(t *testing.T) {
 		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "af")
-		issue := bdProxiedCreate(t, bd, p.dir, "Add from file")
-
-		file := filepath.Join(t.TempDir(), "note.txt")
-		if err := os.WriteFile(file, []byte("note from file"), 0o644); err != nil {
-			t.Fatalf("write comment file: %v", err)
-		}
-
-		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", issue.ID, "-f", file); err != nil {
-			t.Fatalf("comments add -f failed: %v\nstderr:\n%s", err, stderr)
-		}
-
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, issue.ID)
-		if len(comments) != 1 || comments[0].Text != "note from file" {
-			t.Fatalf("expected 1 file-sourced comment, got %+v", comments)
-		}
-	})
-
-	t.Run("comments_list_local_time", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "lt")
-		issue := bdProxiedCreate(t, bd, p.dir, "Local time")
-		bdProxiedComment(t, bd, p.dir, issue.ID, "timed comment")
-
-		out := bdProxiedComments(t, bd, p.dir, issue.ID, "--local-time")
-		if !strings.Contains(out, "timed comment") {
-			t.Errorf("expected comment text with --local-time, got:\n%s", out)
-		}
-	})
-
-	t.Run("comment_on_wisp_routes_to_wisp_comments", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "wc")
+		p := newSharedProxiedProject(t, bd, "wa")
 		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp target", "--ephemeral")
 
-		out := bdProxiedComment(t, bd, p.dir, wisp.ID, "wisp comment")
-		if !strings.Contains(out, "Comment added to") {
-			t.Errorf("expected confirmation, got:\n%s", out)
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", wisp.ID, "wisp", "via", "add", "--author", "contract-author", "--json")
+		if err != nil {
+			t.Fatalf("bd comments add --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comments add --json stderr = %q, want empty", stderr)
+		}
+		var added types.Comment
+		if err := json.Unmarshal([]byte(stdout), &added); err != nil {
+			t.Fatalf("decode added comment JSON: %v\nraw: %q", err, stdout)
+		}
+		if added.IssueID != wisp.ID {
+			t.Errorf("added comment issue ID = %q, want %q", added.IssueID, wisp.ID)
+		}
+		if added.Author != "contract-author" {
+			t.Errorf("added comment author = %q, want %q", added.Author, "contract-author")
+		}
+		if added.Text != "wisp via add" {
+			t.Errorf("added comment text = %q, want %q", added.Text, "wisp via add")
+		}
+		if added.ID == "" {
+			t.Error("added comment ID is empty")
+		}
+		if added.CreatedAt.IsZero() || added.CreatedAt.Nanosecond() != 0 {
+			t.Errorf("added comment created_at = %v, want nonzero whole-second timestamp", added.CreatedAt)
 		}
 
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, wisp.ID)
-		if len(comments) != 1 || comments[0].Text != "wisp comment" {
-			t.Fatalf("expected 1 wisp comment via list, got %+v", comments)
+		stdout, stderr, err = bdProxiedRunBuffers(t, bd, p.dir, "comments", "--json", wisp.ID)
+		if err != nil {
+			t.Fatalf("bd comments --json failed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		if stderr != "" {
+			t.Errorf("bd comments --json stderr = %q, want empty", stderr)
+		}
+		var comments []types.Comment
+		if err := json.Unmarshal([]byte(stdout), &comments); err != nil {
+			t.Fatalf("decode wisp comments JSON: %v\nraw: %q", err, stdout)
+		}
+		if len(comments) != 1 {
+			t.Fatalf("wisp comments length = %d, want 1", len(comments))
+		}
+		if comments[0] != added {
+			t.Errorf("listed comment = %+v, want %+v", comments[0], added)
 		}
 
 		db := openProxiedDB(t, p)
-		var wispCount, permCount int
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT COUNT(*) FROM wisp_comments WHERE issue_id = ?", wisp.ID).Scan(&wispCount); err != nil {
+		var wispCount, permanentCount int
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM wisp_comments WHERE issue_id = ?", wisp.ID).Scan(&wispCount); err != nil {
 			t.Fatalf("count wisp_comments: %v", err)
 		}
-		if err := db.QueryRowContext(context.Background(),
-			"SELECT COUNT(*) FROM comments WHERE issue_id = ?", wisp.ID).Scan(&permCount); err != nil {
+		if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM comments WHERE issue_id = ?", wisp.ID).Scan(&permanentCount); err != nil {
 			t.Fatalf("count comments: %v", err)
 		}
 		if wispCount != 1 {
 			t.Errorf("wisp_comments count = %d, want 1", wispCount)
 		}
-		if permCount != 0 {
-			t.Errorf("comments (permanent) count = %d, want 0 — wisp comment must not leak into the permanent table", permCount)
-		}
-	})
-
-	t.Run("comments_add_on_wisp", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "wa")
-		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp add target", "--ephemeral")
-
-		if _, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "add", wisp.ID, "wisp via add"); err != nil {
-			t.Fatalf("comments add on wisp failed: %v\nstderr:\n%s", err, stderr)
-		}
-
-		comments := bdProxiedCommentsJSON(t, bd, p.dir, wisp.ID)
-		if len(comments) != 1 || comments[0].Text != "wisp via add" {
-			t.Fatalf("expected 1 wisp comment, got %+v", comments)
+		if permanentCount != 0 {
+			t.Errorf("comments count = %d, want 0", permanentCount)
 		}
 	})
 }

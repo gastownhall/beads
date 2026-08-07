@@ -18,11 +18,14 @@ var searchCmd = &cobra.Command{
 	Use:     "search [query]",
 	GroupID: "issues",
 	Short:   "Search issues by text query",
-	Long: `Search issues across title and ID (excludes closed issues by default).
+	Long: `Search issues across title and ID (all statuses, including closed).
 
 ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
 Text queries search titles. Use --desc-contains for description search.
-Use --status all to include closed issues.
+Use --status open (etc.) to narrow; closed issues are included by default
+so "was this already filed/fixed?" cannot silently answer no. Matches
+beyond --limit are dropped status-blind, so when hunting live work in a
+large DB, narrow with --status open or raise --limit.
 
 Examples:
   bd search "authentication bug"
@@ -32,7 +35,7 @@ Examples:
   bd search "bd-5q" # Search by partial ID (fast prefix match)
   bd search "security" --priority-min 0 --priority-max 2
   bd search "bug" --created-after 2025-01-01
-  bd search "refactor" --status all  # Include closed issues
+  bd search "refactor" --status open  # Only open issues
   bd search "bug" --sort priority
   bd search "task" --sort created --reverse
   bd search "api" --desc-contains "endpoint"
@@ -116,13 +119,13 @@ Examples:
 			if err := workapi.ApplyStatusFilter(&filter, status, cfg.CustomStatusNames()); err != nil {
 				return HandleError("%v", err)
 			}
-		} else if status != "all" {
-			// Default: exclude closed issues to reduce scan scope (hq-319).
-			// With 12K+ issues, ~60-70% are closed — excluding them lets the
-			// query use the status index to skip the majority of rows.
-			// Use --status all to search everything including closed.
-			filter.ExcludeStatus = []types.Status{types.StatusClosed}
 		}
+		// Default (no --status) searches ALL statuses including closed
+		// (bd-t5yex): the dominant real-world query is "was this already
+		// found/filed/fixed?" — exactly where silently excluding closed
+		// issues produces a false "no". This reverses the hq-319 open-only
+		// default, which traded that correctness for scan scope; narrow
+		// explicitly (e.g. --status open) when performance matters.
 
 		if assignee != "" {
 			filter.Assignee = &assignee
@@ -355,7 +358,7 @@ func outputSearchResults(issues []*types.Issue, query string, longFormat bool) {
 
 func init() {
 	searchCmd.Flags().String("query", "", "Search query (alternative to positional argument)")
-	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default excludes closed; use 'all' to include closed. Note: dependency-blocked issues use 'bd blocked'")
+	searchCmd.Flags().StringP("status", "s", "", "Filter by stored status (comma-separated for OR; open, in_progress, blocked, deferred, closed, all). Default searches all statuses including closed. Note: dependency-blocked issues use 'bd blocked'")
 	searchCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
 	searchCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate)")
 	searchCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL)")

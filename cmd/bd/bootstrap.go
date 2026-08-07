@@ -184,6 +184,10 @@ Examples:
 			return HandleError("%s", activeWorkspaceNotFoundMessage())
 		}
 
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			return HandleError("%v", err)
+		}
+
 		// Load config from .beads/metadata.json. When the beadsDir was
 		// synthesized (fresh clone or rig with no local .beads), the file
 		// won't exist. In that case, walk up parent directories to find a
@@ -1019,11 +1023,14 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 
 	for dir := start; dir != "/" && dir != "."; {
 		candidate := filepath.Join(dir, ".beads")
-		cfg, err := configfile.Load(candidate)
+		cfg, err := configfile.LoadForDiscovery(candidate)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
 		}
 		if cfg != nil {
+			if err := guardLegacyUpgradeWorkspace(candidate); err != nil {
+				return nil, err
+			}
 			return cfg, nil
 		}
 

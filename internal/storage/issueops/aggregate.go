@@ -284,10 +284,30 @@ func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 			target[label] = struct{}{}
 		}
 	}
+	// An empty-string entry is DROPPED rather than written or refused
+	// (bd-yby99.29). A label row carrying '' is junk that renders as nothing
+	// and matches nothing, so the two useful answers were dropping it and
+	// refusing it; dropping keeps a stray empty entry from failing an
+	// otherwise-good multi-label edit.
+	//
+	// Skipping here rather than at the insert is what makes it a no-op instead
+	// of a silent partial write: an Add of only '' leaves target equal to
+	// existing, so the sameStringSet check below reports Changed false and
+	// writes nothing at all.
+	//
+	// Entries already in existing are deliberately untouched. A legacy '' row
+	// survives an Add/Remove patch and is cleared by a Replace that omits it,
+	// which is the ordinary set semantics rather than a migration.
 	for _, label := range patch.Replace.Value {
+		if label == "" {
+			continue
+		}
 		target[label] = struct{}{}
 	}
 	for _, label := range patch.Add {
+		if label == "" {
+			continue
+		}
 		target[label] = struct{}{}
 	}
 	for _, label := range patch.Remove {

@@ -227,8 +227,9 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
+	committed := false
 	defer func() {
-		err = errors.Join(err, cleanup())
+		err = joinTransactionCleanupError(err, cleanup(), committed)
 	}()
 
 	var tx *sql.Tx
@@ -248,11 +249,28 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
-	if cErr := tx.Commit(); cErr != nil {
-		err = fmt.Errorf("embeddeddolt: commit tx: %w", cErr)
+	if cErr := commitEmbeddedTx(tx); cErr != nil {
+		err = cErr
 		return
 	}
+	committed = true
 	return
+}
+
+// commitEmbeddedTx classifies an unconfirmed SQL commit response as
+// indeterminate: the engine may have applied it before the connection failed.
+func commitEmbeddedTx(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return wrapCommitIndeterminate("embeddeddolt: commit tx", err)
+	}
+	return nil
+}
+
+func joinTransactionCleanupError(operationErr, cleanupErr error, committed bool) error {
+	if committed && cleanupErr != nil {
+		cleanupErr = wrapCommitIndeterminate("embeddeddolt: cleanup after SQL commit", cleanupErr)
+	}
+	return errors.Join(operationErr, cleanupErr)
 }
 
 func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
@@ -927,6 +945,20 @@ func (s *EmbeddedDoltStore) PromoteFromEphemeral(ctx context.Context, id string,
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.PromoteFromEphemeralInTx(ctx, tx, id, actor)
 	})
+}
+
+// PartitionWispIDs reports which of ids currently live in the wisps table
+// (batched membership query; IDs absent from the wisps table are returned as
+// permanent). Export's plane-marker stamping uses this to tell an unpromoted
+// no-history wisp apart from a promoted one, which row flags cannot do
+// (bd-r9uce).
+func (s *EmbeddedDoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, permIDs []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var inErr error
+		wispIDs, permIDs, inErr = issueops.PartitionWispIDsInTx(ctx, tx, ids)
+		return inErr
+	})
+	return wispIDs, permIDs, err
 }
 
 // GetNextChildID is implemented in child_id.go.

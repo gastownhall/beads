@@ -659,6 +659,7 @@ jobs:
 
       - name: Test
         env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 

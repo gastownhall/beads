@@ -50,6 +50,10 @@ var _ publicops.Reader = (*issueReader)(nil)
 // detached rollback, so a caller that hangs up mid-response cannot burn a
 // pinned session.
 func (r *issueReader) Ready(ctx context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
+	// Wake expired dated defers before reading, in a write UOW of its own —
+	// this read's span never commits (see the doc comment above), so the
+	// sweep cannot live inside it.
+	WakeExpiredDefersAdvisory(ctx, r.provider)
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		filter, err := workapi.BuildReadyFilter(req)
 		if err != nil {
@@ -70,14 +74,38 @@ func (r *issueReader) Ready(ctx context.Context, req publicops.ReadyRequest) (pu
 	})
 }
 
+// listBackend names the backend a List refusal comes from: the provider seam
+// rather than the engine underneath it, because what cannot honor MaxRows is
+// the internal/storage/domain/db query path every provider reaches through.
+const listBackend = "uow-provider"
+
 func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publicops.IssuePage, error) {
+	// The MIRROR IMAGE of the store body's Offset refusal, one field over. The
+	// domain/db query path reads no MaxRows, so a request carrying a cap would
+	// come back as the FULL uncapped answer with no error on it — a caller who
+	// asked for a circuit breaker getting exactly the runaway query it was
+	// guarding against. Refusing is checked before the unit of work opens: a
+	// request that cannot be answered should not cost a transaction.
+	//
+	// `bd list --max-rows --proxied-server` already refuses one layer up
+	// (cmd/bd/max_rows.go, rejectMaxRowsUnderProxiedServer); this is the same
+	// refusal for the callers that are not the CLI.
+	if req.MaxRows != 0 {
+		return publicops.IssuePage{}, &publicops.ErrUnsupported{Op: "Reader.List(MaxRows)", Backend: listBackend}
+	}
+	// A --ready listing is the ready front by another door, so it wakes
+	// expired dated defers the same way Ready does — before the read span,
+	// which never commits.
+	if req.ReadyFlag {
+		WakeExpiredDefersAdvisory(ctx, r.provider)
+	}
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		// The config source comes from the unit of work this call already
 		// holds, so a caller reaching this method through the role has nothing
-		// to supply and no step to skip. (`bd list --proxied-server` opens its
-		// own unit of work and loads the same config directly — see
-		// issueops.Reader's doc comment for why those two paging commands are
-		// still off the role.)
+		// to supply and no step to skip. `bd list --proxied-server` gets its
+		// page this way in every mode but --watch and the hierarchical --parent
+		// tree; those two still open their own unit of work because they consume
+		// the FILTER rather than a page (see issueops.Reader's doc comment).
 		cfg, err := workapi.LoadUOWListConfig(ctx, uw)
 		if err != nil {
 			return publicops.IssuePage{}, err

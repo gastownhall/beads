@@ -233,7 +233,7 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("gate add-waiter is not supported in proxied-server mode")
+			return runGateAddWaiterProxiedServer(cmd, rootCtx, args)
 		}
 		CheckReadonly("gate add-waiter")
 
@@ -262,7 +262,7 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 
 		for _, w := range issue.Waiters {
 			if w == waiter {
-				fmt.Printf("Waiter already registered on gate %s\n", gateID)
+				renderGateWaiterAlready(gateID)
 				return nil
 			}
 		}
@@ -278,9 +278,19 @@ This is used by 'bd done --phase-complete' to register for gate wake notificatio
 
 		commandDidWrite.Store(true)
 
-		fmt.Printf("%s Added waiter to gate %s: %s\n", ui.RenderPass("✓"), gateID, waiter)
+		renderGateWaiterAdded(gateID, waiter)
 		return nil
 	},
+}
+
+// renderGateWaiterAlready and renderGateWaiterAdded are shared by the direct
+// and proxied-server routes so `bd gate add-waiter` prints identically on both.
+func renderGateWaiterAlready(gateID string) {
+	fmt.Printf("Waiter already registered on gate %s\n", gateID)
+}
+
+func renderGateWaiterAdded(gateID, waiter string) {
+	fmt.Printf("%s Added waiter to gate %s: %s\n", ui.RenderPass("✓"), gateID, waiter)
 }
 
 // gateCreateCmd creates an ad-hoc gate issue that blocks another issue
@@ -308,7 +318,7 @@ Examples:
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("gate create is not supported in proxied-server mode")
+			return runGateCreateProxiedServer(cmd, rootCtx)
 		}
 		CheckReadonly("gate create")
 
@@ -319,54 +329,19 @@ Examples:
 			}
 		}()
 
-		blocksID, _ := cmd.Flags().GetString("blocks")
-		gateType, _ := cmd.Flags().GetString("type")
-		reason, _ := cmd.Flags().GetString("reason")
-		awaitID, _ := cmd.Flags().GetString("await-id")
-		timeoutStr, _ := cmd.Flags().GetString("timeout")
-		titleFlag, _ := cmd.Flags().GetString("title")
+		in, err := gatherGateCreateInput(cmd)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		ctx := rootCtx
 
-		targetIssue, err := store.GetIssue(ctx, blocksID)
+		targetIssue, err := store.GetIssue(ctx, in.blocksID)
 		if err != nil {
-			return HandleErrorRespectJSON("issue not found: %s", blocksID)
+			return HandleErrorRespectJSON("issue not found: %s", in.blocksID)
 		}
 
-		var timeout time.Duration
-		if timeoutStr != "" {
-			parsed, err := time.ParseDuration(timeoutStr)
-			if err != nil {
-				return HandleErrorRespectJSON("invalid timeout: %v", err)
-			}
-			timeout = parsed
-		}
-
-		title := fmt.Sprintf("Gate: %s", gateType)
-		if awaitID != "" {
-			title = fmt.Sprintf("Gate: %s %s", gateType, awaitID)
-		}
-		if titleFlag != "" {
-			title = titleFlag
-		}
-
-		desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetIssue.ID)
-		if reason != "" {
-			desc = fmt.Sprintf("%s\n\nReason: %s", desc, reason)
-		}
-
-		gate := &types.Issue{
-			Title:       title,
-			Description: desc,
-			Status:      types.StatusOpen,
-			Priority:    2,
-			IssueType:   types.IssueType("gate"),
-			AwaitType:   gateType,
-			AwaitID:     awaitID,
-			Timeout:     timeout,
-			CreatedBy:   getActorWithGit(),
-			Owner:       getOwner(),
-		}
+		gate := buildGateIssue(in, targetIssue.ID)
 
 		if err := store.CreateIssue(ctx, gate, actor); err != nil {
 			return HandleErrorRespectJSON("creating gate: %v", err)
@@ -390,17 +365,84 @@ Examples:
 			return outputJSON(gate)
 		}
 
-		fmt.Printf("%s Created gate %s (type: %s)\n", ui.RenderPass("✓"), ui.RenderID(gate.ID), gateType)
-		fmt.Printf("  Blocks: %s (%s)\n", targetIssue.ID, targetIssue.Title)
-		if reason != "" {
-			fmt.Printf("  Reason: %s\n", reason)
-		}
-		if timeout > 0 {
-			fmt.Printf("  Timeout: %s\n", timeout)
-		}
-		fmt.Printf("\nResolve with: bd gate resolve %s\n", gate.ID)
+		renderGateCreated(gate, targetIssue, in)
 		return nil
 	},
+}
+
+// gateCreateInput carries `bd gate create`'s parsed flags. Both routes gather
+// it through gatherGateCreateInput so they cannot drift on flag semantics.
+type gateCreateInput struct {
+	blocksID  string
+	gateType  string
+	reason    string
+	awaitID   string
+	titleFlag string
+	timeout   time.Duration
+}
+
+func gatherGateCreateInput(cmd *cobra.Command) (gateCreateInput, error) {
+	in := gateCreateInput{}
+	in.blocksID, _ = cmd.Flags().GetString("blocks")
+	in.gateType, _ = cmd.Flags().GetString("type")
+	in.reason, _ = cmd.Flags().GetString("reason")
+	in.awaitID, _ = cmd.Flags().GetString("await-id")
+	in.titleFlag, _ = cmd.Flags().GetString("title")
+	timeoutStr, _ := cmd.Flags().GetString("timeout")
+	if timeoutStr != "" {
+		parsed, err := time.ParseDuration(timeoutStr)
+		if err != nil {
+			return in, fmt.Errorf("invalid timeout: %v", err)
+		}
+		in.timeout = parsed
+	}
+	return in, nil
+}
+
+// buildGateIssue constructs the ad-hoc gate issue exactly the way the direct
+// route always has; the proxied route reuses it for the same reason the
+// renderers are shared.
+func buildGateIssue(in gateCreateInput, targetID string) *types.Issue {
+	title := fmt.Sprintf("Gate: %s", in.gateType)
+	if in.awaitID != "" {
+		title = fmt.Sprintf("Gate: %s %s", in.gateType, in.awaitID)
+	}
+	if in.titleFlag != "" {
+		title = in.titleFlag
+	}
+
+	desc := fmt.Sprintf("Ad-hoc gate blocking %s", targetID)
+	if in.reason != "" {
+		desc = fmt.Sprintf("%s\n\nReason: %s", desc, in.reason)
+	}
+
+	return &types.Issue{
+		Title:       title,
+		Description: desc,
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.IssueType("gate"),
+		AwaitType:   in.gateType,
+		AwaitID:     in.awaitID,
+		Timeout:     in.timeout,
+		CreatedBy:   getActorWithGit(),
+		Owner:       getOwner(),
+	}
+}
+
+// renderGateCreated is shared by the direct and proxied-server routes; the
+// first line's "Created gate <id>" is parsed by downstream scripts, so both
+// routes must print it identically.
+func renderGateCreated(gate, targetIssue *types.Issue, in gateCreateInput) {
+	fmt.Printf("%s Created gate %s (type: %s)\n", ui.RenderPass("✓"), ui.RenderID(gate.ID), in.gateType)
+	fmt.Printf("  Blocks: %s (%s)\n", targetIssue.ID, targetIssue.Title)
+	if in.reason != "" {
+		fmt.Printf("  Reason: %s\n", in.reason)
+	}
+	if in.timeout > 0 {
+		fmt.Printf("  Timeout: %s\n", in.timeout)
+	}
+	fmt.Printf("\nResolve with: bd gate resolve %s\n", gate.ID)
 }
 
 // gateShowCmd shows a gate issue
@@ -415,7 +457,7 @@ This is similar to 'bd show' but validates that the issue is a gate.`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("gate show is not supported in proxied-server mode")
+			return runGateShowProxiedServer(cmd, rootCtx, args)
 		}
 		evt := metrics.NewCommandEvent("gate-show")
 		defer func() {
@@ -443,31 +485,38 @@ This is similar to 'bd show' but validates that the issue is a gate.`,
 			return outputJSON(issue)
 		}
 
-		statusSym := "○"
-		if issue.Status == types.StatusClosed {
-			statusSym = "●"
-		}
-
-		fmt.Printf("%s %s - %s\n", statusSym, ui.RenderID(issue.ID), issue.Title)
-		fmt.Printf("  Status: %s\n", issue.Status)
-		fmt.Printf("  Await Type: %s\n", issue.AwaitType)
-		if issue.AwaitID != "" {
-			fmt.Printf("  Await ID: %s\n", issue.AwaitID)
-		}
-		if issue.Timeout > 0 {
-			fmt.Printf("  Timeout: %s\n", issue.Timeout)
-		}
-		if len(issue.Waiters) > 0 {
-			fmt.Printf("  Waiters:\n")
-			for _, w := range issue.Waiters {
-				fmt.Printf("    - %s\n", w)
-			}
-		}
-		if issue.Description != "" {
-			fmt.Printf("  Description: %s\n", issue.Description)
-		}
+		renderGateShow(issue)
 		return nil
 	},
+}
+
+// renderGateShow is shared by the direct and proxied-server routes; downstream
+// scripts grep this plain-text output for markers, so both routes must print
+// it identically.
+func renderGateShow(issue *types.Issue) {
+	statusSym := "○"
+	if issue.Status == types.StatusClosed {
+		statusSym = "●"
+	}
+
+	fmt.Printf("%s %s - %s\n", statusSym, ui.RenderID(issue.ID), issue.Title)
+	fmt.Printf("  Status: %s\n", issue.Status)
+	fmt.Printf("  Await Type: %s\n", issue.AwaitType)
+	if issue.AwaitID != "" {
+		fmt.Printf("  Await ID: %s\n", issue.AwaitID)
+	}
+	if issue.Timeout > 0 {
+		fmt.Printf("  Timeout: %s\n", issue.Timeout)
+	}
+	if len(issue.Waiters) > 0 {
+		fmt.Printf("  Waiters:\n")
+		for _, w := range issue.Waiters {
+			fmt.Printf("    - %s\n", w)
+		}
+	}
+	if issue.Description != "" {
+		fmt.Printf("  Description: %s\n", issue.Description)
+	}
 }
 
 // gateResolveCmd manually closes a gate
@@ -483,7 +532,7 @@ Use --reason to provide context for why the gate was resolved.`,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if usesProxiedServer() {
-			return HandleErrorRespectJSON("gate resolve is not supported in proxied-server mode")
+			return runGateResolveProxiedServer(cmd, rootCtx, args)
 		}
 		CheckReadonly("gate resolve")
 
@@ -516,12 +565,18 @@ Use --reason to provide context for why the gate was resolved.`,
 
 		commandDidWrite.Store(true)
 
-		fmt.Printf("%s Gate resolved: %s\n", ui.RenderPass("✓"), gateID)
-		if reason != "" {
-			fmt.Printf("  Reason: %s\n", reason)
-		}
+		renderGateResolved(gateID, reason)
 		return nil
 	},
+}
+
+// renderGateResolved is shared by the direct and proxied-server routes so
+// `bd gate resolve` prints identically on both.
+func renderGateResolved(gateID, reason string) {
+	fmt.Printf("%s Gate resolved: %s\n", ui.RenderPass("✓"), gateID)
+	if reason != "" {
+		fmt.Printf("  Reason: %s\n", reason)
+	}
 }
 
 // gateCheckCmd evaluates gates and closes those that are resolved

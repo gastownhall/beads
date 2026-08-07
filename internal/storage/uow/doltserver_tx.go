@@ -24,7 +24,18 @@ func (t *doltServerTx) Commit(ctx context.Context, message string) error {
 	if t.done {
 		return errors.New("uow: commit: already done")
 	}
-	_, err := t.conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?);", message)
+	// An empty message selects the EPHEMERAL commit form (bd-aq0ql): a plain
+	// SQL COMMIT persists the transaction's writes into the working set
+	// without minting a Dolt commit or history. This exists for work that
+	// touches ONLY dolt_ignored state — today the leases table (bd-lrgn1),
+	// whose heartbeats must never create commits — and is only reachable via
+	// uow.RunTxEphemeral: RunTx/RunTxResult treat an empty commitMsg as
+	// "nothing to commit" and never call Commit at all.
+	stmt, args := "CALL DOLT_COMMIT('-Am', ?);", []interface{}{message}
+	if message == "" {
+		stmt, args = "COMMIT;", nil
+	}
+	_, err := t.conn.ExecContext(ctx, stmt, args...)
 	if err == nil {
 		t.done = true
 		t.releaseConn()

@@ -264,6 +264,12 @@ func (s *DoltStore) decryptPassword(encrypted []byte) (string, error) {
 // AddFederationPeer adds or updates a federation peer with credentials.
 // This stores credentials in the database and also adds the Dolt remote.
 func (s *DoltStore) AddFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.addFederationPeer(ctx, peer)
+	})
+}
+
+func (s *DoltStore) addFederationPeer(ctx context.Context, peer *storage.FederationPeer) error {
 	// Validate peer name
 	if err := validatePeerName(peer.Name); err != nil {
 		return fmt.Errorf("invalid peer name: %w", err)

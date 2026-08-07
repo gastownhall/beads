@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"os"
@@ -196,6 +197,268 @@ func fireProxiedUpdateHook(ctx context.Context, after *types.Issue) error {
 	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
 		return fmt.Errorf("on_update hook: %w", err)
 	}
+	return nil
+}
+
+// gateProxiedNotFound reports whether an issue lookup failed because the row
+// does not exist, as opposed to the read itself failing. The distinction is
+// what keeps `bd gate show` fail-closed: "no gate" and "could not read" must
+// not collapse into one message.
+func gateProxiedNotFound(err error) bool {
+	return errors.Is(err, storage.ErrNotFound) || errors.Is(err, sql.ErrNoRows)
+}
+
+func runGateShowProxiedServer(_ *cobra.Command, ctx context.Context, args []string) error {
+	evt := metrics.NewCommandEvent("gate-show")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	gateID := args[0]
+
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return err
+	}
+	defer uw.Close(ctx)
+
+	issue, err := uw.IssueUseCase().GetIssue(ctx, gateID)
+	if gateProxiedNotFound(err) {
+		return HandleErrorRespectJSON("gate not found: %s", gateID)
+	}
+	if err != nil {
+		// A failed read is not "no gate": it exits nonzero with its own
+		// message so a caller grepping the output cannot mistake an
+		// unreachable server for a missing gate.
+		return HandleErrorRespectJSON("reading gate %s: %v", gateID, err)
+	}
+
+	if issue.IssueType != "gate" {
+		return HandleErrorRespectJSON("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
+	}
+
+	if jsonOutput {
+		return outputJSON(issue)
+	}
+
+	renderGateShow(issue)
+	return nil
+}
+
+type gateAddWaiterApply struct {
+	already bool
+	after   *types.Issue
+}
+
+func runGateAddWaiterProxiedServer(_ *cobra.Command, ctx context.Context, args []string) error {
+	CheckReadonly("gate add-waiter")
+
+	evt := metrics.NewCommandEvent("gate-add-waiter")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	gateID := args[0]
+	waiter := args[1]
+
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
+
+	applied, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (gateAddWaiterApply, string, error) {
+		var out gateAddWaiterApply
+
+		issue, err := uw.IssueUseCase().GetIssue(ctx, gateID)
+		if gateProxiedNotFound(err) {
+			return out, "", fmt.Errorf("gate not found: %s", gateID)
+		}
+		if err != nil {
+			return out, "", fmt.Errorf("reading gate %s: %w", gateID, err)
+		}
+		if issue.IssueType != "gate" {
+			return out, "", fmt.Errorf("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
+		}
+
+		for _, w := range issue.Waiters {
+			if w == waiter {
+				out.already = true
+				// Empty commit message: a registered waiter is a no-op, and a
+				// no-op writes no Dolt commit.
+				return out, "", nil
+			}
+		}
+
+		newWaiters := append(issue.Waiters, waiter)
+		if err := uw.IssueUseCase().UpdateIssue(ctx, gateID, map[string]any{"waiters": newWaiters}, actor); err != nil {
+			return out, "", fmt.Errorf("updating gate: %w", err)
+		}
+		if after, getErr := uw.IssueUseCase().GetIssue(ctx, gateID); getErr == nil {
+			out.after = after
+		}
+		return out, fmt.Sprintf("bd: gate add-waiter %s", gateID), nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	if applied.already {
+		renderGateWaiterAlready(gateID)
+		return nil
+	}
+
+	if err := fireProxiedUpdateHook(ctx, applied.after); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", gateID, err)
+	}
+	commandDidWrite.Store(true)
+
+	renderGateWaiterAdded(gateID, waiter)
+	return nil
+}
+
+type gateCreateApply struct {
+	gate   *types.Issue
+	target *types.Issue
+}
+
+func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
+	CheckReadonly("gate create")
+
+	evt := metrics.NewCommandEvent("gate-create")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	in, err := gatherGateCreateInput(cmd)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
+
+	// One transaction, one Dolt commit for the whole invocation: the direct
+	// route's create + add-dependency + explicit store.Commit collapse into a
+	// single unit of work carrying the same commit message. Semantically
+	// equivalent, minus the window where the gate exists without its edge.
+	applied, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (gateCreateApply, string, error) {
+		var out gateCreateApply
+
+		target, err := uw.IssueUseCase().GetIssue(ctx, in.blocksID)
+		if err != nil {
+			// The direct route reports every target-lookup failure as
+			// not-found; keep that message for parity.
+			return out, "", fmt.Errorf("issue not found: %s", in.blocksID)
+		}
+
+		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: buildGateIssue(in, target.ID)}, actor)
+		if err != nil {
+			return out, "", fmt.Errorf("creating gate: %w", err)
+		}
+
+		dep := &types.Dependency{
+			IssueID:     target.ID,
+			DependsOnID: res.Issue.ID,
+			Type:        types.DepBlocks,
+		}
+		if err := uw.DependencyUseCase().AddDependency(ctx, dep, actor); err != nil {
+			return out, "", fmt.Errorf("adding blocking dependency: %w", err)
+		}
+
+		out.gate = res.Issue
+		out.target = target
+		return out, fmt.Sprintf("bd: create gate %s blocking %s", res.Issue.ID, target.ID), nil
+	})
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	commandDidWrite.Store(true)
+
+	if jsonOutput {
+		return outputJSON(applied.gate)
+	}
+
+	renderGateCreated(applied.gate, applied.target, in)
+	return nil
+}
+
+type gateResolveApply struct {
+	before    *types.Issue
+	after     *types.Issue
+	oldStatus string
+	closed    bool // CloseIssueResult.Closed: false when the gate was already closed
+}
+
+func runGateResolveProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
+	CheckReadonly("gate resolve")
+
+	evt := metrics.NewCommandEvent("gate-resolve")
+	defer func() {
+		if c := metrics.Global(); c != nil {
+			c.CloseEventAndAdd(evt)
+		}
+	}()
+
+	gateID := args[0]
+	reason, _ := cmd.Flags().GetString("reason")
+
+	if uowProvider == nil {
+		return HandleError("proxied-server UOW provider not initialized")
+	}
+
+	applied, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (gateResolveApply, string, error) {
+		var out gateResolveApply
+
+		issue, err := uw.IssueUseCase().GetIssue(ctx, gateID)
+		if gateProxiedNotFound(err) {
+			return out, "", fmt.Errorf("gate not found: %s", gateID)
+		}
+		if err != nil {
+			return out, "", fmt.Errorf("reading gate %s: %w", gateID, err)
+		}
+		if issue.IssueType != "gate" {
+			return out, "", fmt.Errorf("%s is not a gate issue (type=%s)", gateID, issue.IssueType)
+		}
+
+		res, err := uw.IssueUseCase().CloseIssue(ctx, gateID, domain.CloseIssueParams{Reason: reason}, actor)
+		if err != nil {
+			return out, "", fmt.Errorf("closing gate: %w", err)
+		}
+
+		out.before = issue
+		out.after = res.Issue
+		out.oldStatus = "open"
+		if issue.Status != "" {
+			out.oldStatus = string(issue.Status)
+		}
+		out.closed = res.Closed
+		return out, fmt.Sprintf("bd: gate resolve %s", gateID), nil
+	})
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	// Audit + hooks only when this invocation actually closed the gate —
+	// a double-resolve must not re-fire them (same guard as the o.closed
+	// check in close_proxied_server.go).
+	if applied.closed {
+		if applied.after != nil {
+			audit.LogFieldChange(applied.after.ID, "status", applied.oldStatus, "closed", actor, reason)
+		}
+		if err := fireProxiedCloseHooks(ctx, applied.before, applied.after); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", gateID, err)
+		}
+	}
+	commandDidWrite.Store(true)
+
+	renderGateResolved(gateID, reason)
 	return nil
 }
 

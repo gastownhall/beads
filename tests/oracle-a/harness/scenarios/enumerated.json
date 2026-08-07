@@ -2479,7 +2479,7 @@
     "--json"
    ]
   ],
-  "pins": "{\"error\":\"invalid dependency type \\\"\\\" (must be non-empty, max 50 chars); valid types: ...\"} on STDOUT; exit 1.",
+  "pins": "{\"error\":\"invalid dependency type \\\"\\\" (must be non-empty, max 32 chars); valid types: ...\"} on STDOUT; exit 1.",
   "deterministic": true
  },
  {
@@ -5381,7 +5381,7 @@
     "--json"
    ]
   ],
-  "pins": "Error 'invalid dependency type \"\": must be non-empty and at most 50 characters'; exit 1; JSON error envelope on stdout.",
+  "pins": "Error 'invalid dependency type \"\": must be non-empty and at most 32 characters'; exit 1; JSON error envelope on stdout.",
   "deterministic": true
  },
  {

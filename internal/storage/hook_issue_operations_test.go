@@ -51,6 +51,12 @@ func (r *recordingIssueOperationHooks) CompleteIssueOperationUpdate(*types.Issue
 func (r *recordingIssueOperationHooks) CompleteIssueOperationClose(*types.Issue) {
 	r.completions = append(r.completions, "close")
 }
+func (r *recordingIssueOperationHooks) CompleteIssueOperationDependency(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "dependency:"+issueID)
+}
+func (r *recordingIssueOperationHooks) CompleteIssueOperationComment(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "comment:"+issueID)
+}
 
 // lifecycleStore is a DoltStorage whose only real method is IssueLifecycle.
 type lifecycleStore struct {
@@ -112,6 +118,36 @@ func TestHookFiringStoreCompleteIssueOperationsFireOncePerCall(t *testing.T) {
 
 	if !reflect.DeepEqual(runner.events, []string{hooks.EventCreate, hooks.EventUpdate, hooks.EventClose}) {
 		t.Fatalf("hook events = %#v, want create/update/close", runner.events)
+	}
+}
+
+// TestHookFiringStoreCompleteIssueOperationsSnapshotIssue pins the clone at the
+// completion entry points: the real hook runner marshals the issue on its own
+// goroutine, and the CLI mutates the result object it handed in right after
+// completing (cmd/bd close/update/reopen nil out .Dependencies), so handing
+// the runner the caller's pointer is a data race with a nondeterministic
+// payload (bd-9wgv3).
+func TestHookFiringStoreCompleteIssueOperationsSnapshotIssue(t *testing.T) {
+	runner := &recordingHookRunner{}
+	store := &HookFiringStore{runner: runner}
+	issue := &types.Issue{ID: "hook-issue", Dependencies: []*types.Dependency{
+		{IssueID: "hook-issue", DependsOnID: "dep", Type: types.DepBlocks},
+	}}
+
+	store.CompleteIssueOperationUpdate(issue)
+	store.CompleteIssueOperationClose(issue)
+	issue.Dependencies = nil
+
+	if len(runner.issues) != 2 {
+		t.Fatalf("recorded issues = %d, want 2", len(runner.issues))
+	}
+	for i, got := range runner.issues {
+		if got == issue {
+			t.Fatalf("event %d received the caller's issue pointer; completion must hand the runner a clone", i)
+		}
+		if len(got.Dependencies) != 1 || got.Dependencies[0].DependsOnID != "dep" {
+			t.Fatalf("event %d dependencies = %#v, want the snapshot taken before the caller mutated the issue", i, got.Dependencies)
+		}
 	}
 }
 

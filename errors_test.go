@@ -8,9 +8,25 @@ import (
 
 	"github.com/steveyegge/beads"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func TestReExportCommitIndeterminate(t *testing.T) {
+	t.Parallel()
+
+	if beads.ErrCommitIndeterminate != storage.ErrCommitIndeterminate {
+		t.Error("beads.ErrCommitIndeterminate is not the shared storage sentinel value (identity broken)")
+	}
+	if dolt.ErrCommitIndeterminate != storage.ErrCommitIndeterminate {
+		t.Error("dolt.ErrCommitIndeterminate is not the shared storage sentinel value (identity broken)")
+	}
+	wrapped := fmt.Errorf("update issue: %w", storage.ErrCommitIndeterminate)
+	if !errors.Is(wrapped, beads.ErrCommitIndeterminate) {
+		t.Errorf("errors.Is(wrapped, beads.ErrCommitIndeterminate) = false; err = %v", wrapped)
+	}
+}
 
 // TestReExportCloseBlocked proves the public beads.ErrCloseBlocked alias is the
 // same value as the internal sentinel and composes through errors.Is when

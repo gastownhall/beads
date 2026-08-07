@@ -2,23 +2,146 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
 type depAddResult struct {
 	fromTitle string
 	toTitle   string
-	cycles    [][]*types.Issue
+	cycles    []issueops.Cycle
 	cycleErr  error
+}
+
+// proxiedDependencyEditor hands back the guarded dependency-edge surface for
+// the proxied-server provider, through the provider's OWN capability accessor
+// — the same two-step proxiedIssueReader and proxiedBatchCloser perform, and
+// for the same reason: the accessor is where each layer is added, so a command
+// that reached for the constructor would get an unlayered editor.
+func proxiedDependencyEditor() (issueops.DependencyEditor, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.DependencyEditorSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the dependency-edge surface", uowProvider)
+	}
+	return src.DependencyEditor()
+}
+
+// proxiedIssueRelations hands back the guarded neighbor-query surface for the
+// proxied-server provider, through the provider's own capability accessor.
+func proxiedIssueRelations() (issueops.Relations, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.RelationsSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the neighbor-query surface", uowProvider)
+	}
+	return src.IssueRelations()
+}
+
+// proxiedEdgeReader hands back the guarded stored-edge surface for the
+// proxied-server provider, through the provider's own capability accessor.
+func proxiedEdgeReader() (issueops.EdgeReader, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.EdgeReaderSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the stored-edge surface", uowProvider)
+	}
+	return src.EdgeReader()
+}
+
+// addDependencyEdgesProxied asserts edges through the DependencyEditor role.
+//
+// skipPerEdgeCycleCheck is a separate argument from the --no-cycle-check flag
+// on purpose. That flag has never turned the per-edge probe off for a single
+// edge on either route — it turns off the whole-graph sweep this command
+// prints warnings from. Only the bulk path trades the per-edge probe away, and
+// only because it always has.
+func addDependencyEdgesProxied(ctx context.Context, edges []issueops.DependencyEdge, skipPerEdgeCycleCheck bool) error {
+	editor, err := proxiedDependencyEditor()
+	if err != nil {
+		return err
+	}
+	_, err = editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
+		Actor:                 actor,
+		Edges:                 edges,
+		SkipPerEdgeCycleCheck: skipPerEdgeCycleCheck,
+	})
+	return err
+}
+
+// depEdgeFeedback gathers the cycle sweep and the titles the confirmation line
+// wants, once the edges have landed.
+//
+// Neither belongs in the write. The role's request IS the transaction, and a
+// cycle warning computed inside a transaction that has not committed describes
+// a graph nobody else can see; a title is presentation. Failing here cannot
+// fail the command either — the edges are already durable.
+//
+// THE SWEEP IS RESOLVED FIRST AND ASKED FOR SECOND, and only when checkCycles
+// is set: a provider that does not offer the cycle accessor must fail on the
+// sweep it was asked for, not on the two lookups beside it.
+func depEdgeFeedback(ctx context.Context, fromID, toID string, checkCycles bool) depAddResult {
+	var res depAddResult
+	if fromID == "" && toID == "" && !checkCycles {
+		return res
+	}
+	if checkCycles {
+		res.cycles, res.cycleErr = proxiedCycleReport(ctx)
+	}
+	if fromID == "" && toID == "" {
+		return res
+	}
+
+	if uowProvider == nil {
+		if res.cycleErr == nil {
+			res.cycleErr = errors.New("proxied-server UOW provider not initialized")
+		}
+		return res
+	}
+	uw, err := uowProvider.NewUOW(ctx)
+	if err != nil {
+		if res.cycleErr == nil {
+			res.cycleErr = fmt.Errorf("open unit of work: %w", err)
+		}
+		return res
+	}
+	defer uw.Close(ctx)
+
+	if fromID != "" {
+		res.fromTitle = proxiedLookupTitle(ctx, uw, fromID)
+	}
+	if toID != "" {
+		res.toTitle = proxiedLookupTitle(ctx, uw, toID)
+	}
+	return res
+}
+
+// proxiedCycleReport runs the post-write sweep on the proxied route through the
+// cycle role, which opens its own read-only unit of work.
+func proxiedCycleReport(ctx context.Context) ([]issueops.Cycle, error) {
+	detector, err := proxiedCycleDetector()
+	if err != nil {
+		return nil, err
+	}
+	report, err := detector.DetectCycles(ctx, issueops.DetectCyclesRequest{})
+	if err != nil {
+		return nil, err
+	}
+	return report.Cycles, nil
 }
 
 func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) string {
@@ -36,72 +159,18 @@ func proxiedLookupTitle(ctx context.Context, uw uow.UnitOfWork, id string) strin
 	return ""
 }
 
-func printCycleDetectionError(err error) {
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
-	}
-}
-
-func printCycleWarnings(cycles [][]*types.Issue) {
-	if len(cycles) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
-	fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
-	fmt.Fprintf(os.Stderr, "Cycle path:\n")
-	for _, cycle := range cycles {
-		for j, issue := range cycle {
-			if j == 0 {
-				fmt.Fprintf(os.Stderr, "  %s", issue.ID)
-			} else {
-				fmt.Fprintf(os.Stderr, " → %s", issue.ID)
-			}
-		}
-		if len(cycle) > 0 {
-			fmt.Fprintf(os.Stderr, " → %s", cycle[0].ID)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
-	}
-	fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
-}
-
 func runDepBlocksProxiedServer(cmd *cobra.Command, ctx context.Context, blockerID, blockedID string) error {
 	if isDisallowedHierarchicalDependency(blockedID, blockerID, types.DepBlocks) {
 		return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", blockedID, blockerID)
 	}
 
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
-		dep := &types.Dependency{
-			IssueID:     blockedID,
-			DependsOnID: blockerID,
-			Type:        types.DepBlocks,
-		}
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-			return depAddResult{}, "", err
-		}
-
-		var cycles [][]*types.Issue
-		var cycleErr error
-		if !noCycleCheck {
-			cycles, cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
-		}
-
-		return depAddResult{
-			fromTitle: proxiedLookupTitle(ctx, uw, blockedID),
-			toTitle:   proxiedLookupTitle(ctx, uw, blockerID),
-			cycles:    cycles,
-			cycleErr:  cycleErr,
-		}, fmt.Sprintf("bd: dep add %s %s", blockedID, blockerID), nil
-	})
-	if err != nil {
+	edge := issueops.DependencyEdge{IssueID: blockedID, DependsOnID: blockerID, Type: types.DepBlocks}
+	if err := addDependencyEdgesProxied(ctx, []issueops.DependencyEdge{edge}, false); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+	res := depEdgeFeedback(ctx, blockedID, blockerID, !noCycleCheck)
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
@@ -164,34 +233,13 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
-		dep := &types.Dependency{IssueID: fromID, DependsOnID: toID, Type: dt}
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-			return depAddResult{}, "", err
-		}
-
-		var cycles [][]*types.Issue
-		var cycleErr error
-		if !noCycleCheck {
-			cycles, cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
-		}
-
-		return depAddResult{
-			fromTitle: proxiedLookupTitle(ctx, uw, fromID),
-			toTitle:   proxiedLookupTitle(ctx, uw, toID),
-			cycles:    cycles,
-			cycleErr:  cycleErr,
-		}, fmt.Sprintf("bd: dep add %s %s", fromID, toID), nil
-	})
-	if err != nil {
+	edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: dt}
+	if err := addDependencyEdgesProxied(ctx, []issueops.DependencyEdge{edge}, false); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+	res := depEdgeFeedback(ctx, fromID, toID, !noCycleCheck)
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
@@ -223,7 +271,7 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 		return HandleErrorRespectJSON("no dependency edges found")
 	}
 
-	deps := make([]*types.Dependency, 0, len(edges))
+	depEdges := make([]issueops.DependencyEdge, 0, len(edges))
 	for _, edge := range edges {
 		if isDisallowedHierarchicalDependency(edge.IssueID, edge.DependsOnID, edge.Type) {
 			return HandleErrorRespectJSON("line %d: cannot add dependency: %s is already a child of %s", edge.Line, edge.IssueID, edge.DependsOnID)
@@ -233,62 +281,41 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 				return HandleErrorRespectJSON("line %d: %v", edge.Line, err)
 			}
 		}
-		deps = append(deps, &types.Dependency{
+		depEdges = append(depEdges, issueops.DependencyEdge{
 			IssueID:     edge.IssueID,
 			DependsOnID: edge.DependsOnID,
 			Type:        edge.Type,
 		})
 	}
 
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
 
-	type bulkResult struct {
-		cycles   [][]*types.Issue
-		cycleErr error
-	}
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (bulkResult, string, error) {
-		if _, err := uw.DependencyUseCase().AddDependencies(ctx, deps, actor, domain.BulkAddDepsOpts{
-			SkipPerEdgeCycleCheck: noCycleCheck,
-		}); err != nil {
-			return bulkResult{}, "", err
-		}
-
-		var r bulkResult
-		if !noCycleCheck {
-			r.cycles, r.cycleErr = uw.DependencyUseCase().DetectCycles(ctx)
-		}
-
-		return r, fmt.Sprintf("dependency: add %d edges", len(deps)), nil
-	})
-	if err != nil {
+	if err := addDependencyEdgesProxied(ctx, depEdges, noCycleCheck); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+	res := depEdgeFeedback(ctx, "", "", !noCycleCheck)
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
 
 	if jsonOutput {
-		out := make([]map[string]interface{}, 0, len(deps))
-		for _, dep := range deps {
+		out := make([]map[string]interface{}, 0, len(depEdges))
+		for _, edge := range depEdges {
 			out = append(out, map[string]interface{}{
-				"issue_id":      dep.IssueID,
-				"depends_on_id": dep.DependsOnID,
-				"type":          string(dep.Type),
+				"issue_id":      edge.IssueID,
+				"depends_on_id": edge.DependsOnID,
+				"type":          string(edge.Type),
 			})
 		}
 		_ = outputJSON(map[string]interface{}{
 			"status":       "added",
-			"count":        len(deps),
+			"count":        len(depEdges),
 			"dependencies": out,
 		})
 		return nil
 	}
 
-	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(deps))
+	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(depEdges))
 	return nil
 }
 
@@ -301,22 +328,21 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 		}
 	}
 
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
-		if err := uw.DependencyUseCase().RemoveDependency(ctx, fromID, toID, actor); err != nil {
-			return depAddResult{}, "", err
-		}
-		return depAddResult{
-			fromTitle: proxiedLookupTitle(ctx, uw, fromID),
-			toTitle:   proxiedLookupTitle(ctx, uw, toID),
-		}, fmt.Sprintf("bd: dep remove %s %s", fromID, toID), nil
-	})
+	editor, err := proxiedDependencyEditor()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+	// The role's Removed verdict is not printed. `bd dep remove` has always
+	// confirmed the same way whether or not an edge was there, and reporting
+	// the difference now would change what every existing script reads.
+	if _, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
+		Actor:       actor,
+		IssueID:     fromID,
+		DependsOnID: toID,
+	}); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	res := depEdgeFeedback(ctx, fromID, toID, false)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
@@ -341,80 +367,41 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		direction = "down"
 	}
 
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	depUC := uw.DependencyUseCase()
-
+	// The multi-id edge listing is a different question with a different
+	// answer shape — raw edge records keyed by source — and it is on the
+	// EdgeReader role.
 	if len(args) > 1 && direction == "down" {
-		depMap, err := depUC.GetIssueDependencyRecords(ctx, args)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		var allDeps []*types.Dependency
-		for _, id := range args {
-			for _, dep := range depMap[id] {
-				if typeFilter == "" || string(dep.Type) == typeFilter {
-					allDeps = append(allDeps, dep)
-				}
-			}
-		}
-		if jsonOutput {
-			if allDeps == nil {
-				allDeps = []*types.Dependency{}
-			}
-			_ = outputJSON(allDeps)
-			return nil
-		}
-		for _, id := range args {
-			deps := depMap[id]
-			if len(deps) == 0 {
-				fmt.Printf("\n%s has no dependencies\n", id)
-				continue
-			}
-			fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), id)
-			for _, dep := range deps {
-				if typeFilter != "" && string(dep.Type) != typeFilter {
-					continue
-				}
-				fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
-			}
-		}
-		fmt.Println()
-		return nil
+		return runDepListRecordsProxiedServer(ctx, args, typeFilter)
 	}
 
-	var allIssues []*types.IssueWithDependencyMetadata
-	listDirection := domain.DepDirectionOut
-	if direction == "up" {
-		listDirection = domain.DepDirectionIn
+	// Everything else is the neighbor query, and it is on the Relations role:
+	// one call per anchor, each with an explicit direction, because the role
+	// refuses to guess one.
+	rel, err := proxiedIssueRelations()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
+	request := issueops.RelatedRequest{Direction: issueops.RelationOut}
+	if direction == "up" {
+		request.Direction = issueops.RelationIn
+	}
+	if typeFilter != "" {
+		request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+
+	var allIssues []*issueops.RelatedIssue
 	for _, id := range args {
-		issues, err := depUC.ListWithIssueMetadata(ctx, id, domain.DepListFilter{Direction: listDirection})
+		request.ID = id
+		issues, err := rel.Related(ctx, request)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
-		}
-		if typeFilter != "" {
-			filtered := issues[:0]
-			for _, iss := range issues {
-				if string(iss.DependencyType) == typeFilter {
-					filtered = append(filtered, iss)
-				}
-			}
-			issues = filtered
 		}
 		allIssues = append(allIssues, issues...)
 	}
 
 	if jsonOutput {
 		if allIssues == nil {
-			allIssues = []*types.IssueWithDependencyMetadata{}
+			allIssues = []*issueops.RelatedIssue{}
 		}
 		_ = outputJSON(allIssues)
 		return nil
@@ -454,154 +441,28 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	return nil
 }
 
-func runDepTreeProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
-	fullID := args[0]
-	showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
-	maxDepth, _ := cmd.Flags().GetInt("max-depth")
-	reverse, _ := cmd.Flags().GetBool("reverse")
-	direction, _ := cmd.Flags().GetString("direction")
-	statusFilter, _ := cmd.Flags().GetString("status")
-	formatStr, _ := cmd.Flags().GetString("format")
-	if strings.EqualFold(formatStr, "json") {
-		jsonOutput = true
-		formatStr = ""
-	}
-	if direction == "" && reverse {
-		direction = "up"
-	} else if direction == "" {
-		direction = "down"
-	}
-	if direction != "down" && direction != "up" && direction != "both" {
-		return HandleErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
-	}
-	if maxDepth < 1 {
-		return HandleErrorRespectJSON("--max-depth must be >= 1")
-	}
-
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	depUC := uw.DependencyUseCase()
-	var tree []*types.TreeNode
-
-	if direction == "both" {
-		downTree, err := depUC.GetDependencyTree(ctx, fullID, domain.DepTreeOpts{
-			MaxDepth:     maxDepth,
-			ShowAllPaths: showAllPaths,
-			Direction:    domain.DepDirectionOut,
-		})
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		upTree, err := depUC.GetDependencyTree(ctx, fullID, domain.DepTreeOpts{
-			MaxDepth:     maxDepth,
-			ShowAllPaths: showAllPaths,
-			Direction:    domain.DepDirectionIn,
-		})
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		tree = mergeBidirectionalTrees(downTree, upTree, fullID)
-	} else {
-		treeDir := domain.DepDirectionOut
-		if direction == "up" {
-			treeDir = domain.DepDirectionIn
-		}
-		var err error
-		tree, err = depUC.GetDependencyTree(ctx, fullID, domain.DepTreeOpts{
-			MaxDepth:     maxDepth,
-			ShowAllPaths: showAllPaths,
-			Direction:    treeDir,
-		})
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-	}
-
-	if statusFilter != "" {
-		tree = filterTreeByStatus(tree, types.Status(statusFilter))
-	}
-
-	if formatStr == "mermaid" {
-		outputMermaidTree(tree, args[0])
-		return nil
-	}
-
-	if jsonOutput {
-		if tree == nil {
-			tree = []*types.TreeNode{}
-		}
-		_ = outputJSON(tree)
-		return nil
-	}
-
-	if len(tree) == 0 {
-		switch direction {
-		case "up":
-			fmt.Printf("\n%s has no dependents\n", fullID)
-		case "both":
-			fmt.Printf("\n%s has no dependencies or dependents\n", fullID)
-		default:
-			fmt.Printf("\n%s has no dependencies\n", fullID)
-		}
-		return nil
-	}
-
-	switch direction {
-	case "up":
-		fmt.Printf("\n%s Dependent tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-	case "both":
-		fmt.Printf("\n%s Full dependency graph for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-	default:
-		fmt.Printf("\n%s Dependency tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-	}
-
-	renderTree(tree, maxDepth, direction)
-	fmt.Println()
-	return nil
-}
-
-func runDepCyclesProxiedServer(_ *cobra.Command, ctx context.Context) error {
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-	uw, err := uowProvider.NewUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("open unit of work: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	cycles, err := uw.DependencyUseCase().DetectCycles(ctx)
+// runDepListRecordsProxiedServer answers `bd dep list a b c` with raw edge
+// records grouped by source, on the EdgeReader role.
+//
+// THIS ROUTE NOW REPORTS GHOST ANCHORS. It used to have no entry for an id
+// that names nothing, so a typo printed "<id> has no dependencies" and a script
+// read a clean graph. The role probes each anchor, so the same typo now prints
+// the warning the direct route has always printed.
+//
+// It still resolves NOTHING: an id is passed exactly as the caller spelled it,
+// because this route has never done partial-id resolution.
+func runDepListRecordsProxiedServer(ctx context.Context, args []string, typeFilter string) error {
+	reader, err := proxiedEdgeReader()
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-
-	if jsonOutput {
-		if cycles == nil {
-			cycles = [][]*types.Issue{}
-		}
-		_ = outputJSON(cycles)
-		return nil
+	request := issueops.EdgeReadRequest{IDs: args}
+	if typeFilter != "" {
+		request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
 	}
-
-	if len(cycles) == 0 {
-		fmt.Printf("\n%s No dependency cycles detected\n\n", ui.RenderPass("✓"))
-		return nil
+	result, err := reader.ReadEdges(ctx, request)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
-
-	fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(cycles))
-	for i, cycle := range cycles {
-		fmt.Printf("%d. Cycle involving:\n", i+1)
-		for _, issue := range cycle {
-			fmt.Printf("   - %s: %s\n", issue.ID, issue.Title)
-		}
-		fmt.Println()
-	}
-	return nil
+	return printDepListEdges(result.Anchors)
 }

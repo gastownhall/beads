@@ -72,8 +72,25 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-func ClassifyDepTarget(ctx context.Context, tx *sql.Tx, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if isCrossPrefix || strings.HasPrefix(dep.DependsOnID, "external:") {
+// IsExternalDepTarget reports whether a dependency target is one this database
+// cannot hold a row for. Two shapes qualify: an "external:" reference, which
+// names something outside beads entirely, and a target whose id prefix names
+// ANOTHER REPOSITORY, which lives in that rig's database and not this one.
+// Both belong in depends_on_external — the one target column carrying no
+// foreign key into issues — so this is the single rule every backend must
+// classify by, whether it writes through a tx (ClassifyDepTarget) or through
+// the domain repository (db.pickDepTargetColumn).
+func IsExternalDepTarget(sourceID, targetID string) bool {
+	return strings.HasPrefix(targetID, "external:") ||
+		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
+}
+
+// ClassifyDepTarget picks the typed target column for an edge. isCrossPrefix is
+// an override for callers that already know the answer from a cached prefix
+// set; leaving it false is safe, because IsExternalDepTarget re-derives the
+// same comparison from the edge itself.
+func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
 		return DepTargetExternal
 	}
 	if IsActiveWispInTx(ctx, tx, dep.DependsOnID) {

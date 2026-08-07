@@ -35,6 +35,13 @@ import (
 // back; and --current, which resolves an id from a deliberately BARE filter
 // that must not pick up the default listing's exclusions.
 //
+// The list is SHORTER by everything it no longer holds. `bd list`'s page is
+// issueops.Reader.List's on both routes, and the two filter-consuming modes
+// above are what is left over — so this file is now the exception's whole
+// remaining reason rather than one of several. It did not leave the config's
+// exception list with this commit, and the count in issueops/reader.go's claim
+// is unchanged for that reason: three modes here still name the type.
+//
 // Widening the hole is an edit in the config and a diff a reviewer sees.
 
 // getHierarchicalChildren handles the --tree --parent combination logic.

@@ -34,9 +34,9 @@ freshness source.
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
-| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml` and current lint output. |
+| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `scripts/ci/pr-lint.sh`, the `Makefile` wrapper, and CI workflow wiring. |
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
-| `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to CI audit, workflow files, package manifests, and maintainer decision review. |
+| `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
 
 Follow-up automation should replace marker-only checks with generated or
@@ -91,7 +91,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `INTERNALS.md` | Keep | Internal architecture/runtime deep dive. |
 | `JSON_SCHEMA.md` | Keep with freshness | JSON contract; marker tied to schema constant and tests. |
 | `LABELS.md` | Keep | User-facing label philosophy plus examples; generated CLI handles command reference. |
-| `LINTING.md` | Revise with freshness | Stale fixed-count wording removed; marker tied to current lint output. |
+| `LINTING.md` | Revise with freshness | Zero-issue wrapper contract and CI pin reviewed; marker tied to lint configuration, wrapper, and workflow wiring. |
 | `messaging.md` | Keep | Design doc for messaging issue types. |
 | `METADATA.md` | Keep | Behaviour doc for metadata field semantics. |
 | `MOLECULES.md` | Keep | User-facing workflow concept doc. |

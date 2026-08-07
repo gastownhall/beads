@@ -7,6 +7,7 @@ import (
 	"time"
 
 	types "github.com/steveyegge/beads/internal/types"
+	issueops "github.com/steveyegge/beads/issueops"
 )
 
 // Defines values for HealthStatus.
@@ -24,25 +25,158 @@ func (e HealthStatus) Valid() bool {
 	}
 }
 
+// Defines values for SweepRequestTier.
+const (
+	Durable   SweepRequestTier = "durable"
+	Ephemeral SweepRequestTier = "ephemeral"
+)
+
+// Valid indicates whether the value is a known member of the SweepRequestTier enum.
+func (e SweepRequestTier) Valid() bool {
+	switch e {
+	case Durable:
+		return true
+	case Ephemeral:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetDependencyTreeParamsDirection.
+const (
+	Both GetDependencyTreeParamsDirection = "both"
+	Down GetDependencyTreeParamsDirection = "down"
+	Up   GetDependencyTreeParamsDirection = "up"
+)
+
+// Valid indicates whether the value is a known member of the GetDependencyTreeParamsDirection enum.
+func (e GetDependencyTreeParamsDirection) Valid() bool {
+	switch e {
+	case Both:
+		return true
+	case Down:
+		return true
+	case Up:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for QueryIssuesParamsSort.
+const (
+	QueryIssuesParamsSortAssignee QueryIssuesParamsSort = "assignee"
+	QueryIssuesParamsSortClosed   QueryIssuesParamsSort = "closed"
+	QueryIssuesParamsSortCreated  QueryIssuesParamsSort = "created"
+	QueryIssuesParamsSortId       QueryIssuesParamsSort = "id"
+	QueryIssuesParamsSortPriority QueryIssuesParamsSort = "priority"
+	QueryIssuesParamsSortStatus   QueryIssuesParamsSort = "status"
+	QueryIssuesParamsSortTitle    QueryIssuesParamsSort = "title"
+	QueryIssuesParamsSortType     QueryIssuesParamsSort = "type"
+	QueryIssuesParamsSortUpdated  QueryIssuesParamsSort = "updated"
+)
+
+// Valid indicates whether the value is a known member of the QueryIssuesParamsSort enum.
+func (e QueryIssuesParamsSort) Valid() bool {
+	switch e {
+	case QueryIssuesParamsSortAssignee:
+		return true
+	case QueryIssuesParamsSortClosed:
+		return true
+	case QueryIssuesParamsSortCreated:
+		return true
+	case QueryIssuesParamsSortId:
+		return true
+	case QueryIssuesParamsSortPriority:
+		return true
+	case QueryIssuesParamsSortStatus:
+		return true
+	case QueryIssuesParamsSortTitle:
+		return true
+	case QueryIssuesParamsSortType:
+		return true
+	case QueryIssuesParamsSortUpdated:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListReadyWorkParamsSort.
 const (
-	Hybrid   ListReadyWorkParamsSort = "hybrid"
-	Oldest   ListReadyWorkParamsSort = "oldest"
-	Priority ListReadyWorkParamsSort = "priority"
+	ListReadyWorkParamsSortHybrid   ListReadyWorkParamsSort = "hybrid"
+	ListReadyWorkParamsSortOldest   ListReadyWorkParamsSort = "oldest"
+	ListReadyWorkParamsSortPriority ListReadyWorkParamsSort = "priority"
 )
 
 // Valid indicates whether the value is a known member of the ListReadyWorkParamsSort enum.
 func (e ListReadyWorkParamsSort) Valid() bool {
 	switch e {
-	case Hybrid:
+	case ListReadyWorkParamsSortHybrid:
 		return true
-	case Oldest:
+	case ListReadyWorkParamsSortOldest:
 		return true
-	case Priority:
+	case ListReadyWorkParamsSortPriority:
 		return true
 	default:
 		return false
 	}
+}
+
+// BatchCreateDependency defines model for BatchCreateDependency.
+type BatchCreateDependency struct {
+	// TargetId The far end of the edge: an issue this workspace holds, an item created earlier in the same request, an `external:` reference, or an id whose prefix belongs to another repository. Anything else is a `400` and nothing is created.
+	TargetId string `json:"target_id"`
+
+	// Type The edge type, from the same OPEN vocabulary `Dependency.type` carries. It is spelled `type` because that is the member an edge carries everywhere else on this surface.
+	Type string `json:"type"`
+}
+
+// BatchCreateItem defines model for BatchCreateItem.
+type BatchCreateItem struct {
+	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
+	Assignee           *string `json:"assignee,omitempty"`
+
+	// Dependencies The edges this issue is created carrying. They are written in the same transaction as the issue, so this operation never publishes an issue whose declared relationships are not there yet.
+	Dependencies *[]BatchCreateDependency `json:"dependencies,omitempty"`
+	Description  *string                  `json:"description,omitempty"`
+	Design       *string                  `json:"design,omitempty"`
+
+	// IssueType Issue type. Spelled `issue_type` rather than `type`, matching the member `Issue` carries, and validated against the built-ins plus the workspace's configured custom types — an unknown one is a `400`.
+	IssueType *string   `json:"issue_type,omitempty"`
+	Labels    *[]string `json:"labels,omitempty"`
+
+	// Priority 0 is P0/critical. Absent means the workspace default.
+	Priority *int   `json:"priority,omitempty"`
+	Title    string `json:"title"`
+}
+
+// BatchCreateRequest defines model for BatchCreateRequest.
+type BatchCreateRequest struct {
+	// Actor Who is creating the issues, under `ClaimRequest.actor`'s rules and for the same reasons: the server trims it, refuses an empty result, anything longer than 256 BYTES, and any control character including newline. It is attributed to every item and interpolated into the storage commit message.
+	Actor string `json:"actor"`
+
+	// Items The issues to create, in order. An empty array is a `400` rather than a successful no-op: a write request that writes nothing is a client bug, and answering it with a cheerful empty success is how a client whose own list filtered to nothing silently stops creating anything.
+	//
+	// The 100-item cap is a bound on how long one request may hold a write transaction, not a statement about batch semantics. Split a larger plan; each request is atomic on its own.
+	Items []BatchCreateItem `json:"items"`
+}
+
+// BatchCreateResponse defines model for BatchCreateResponse.
+type BatchCreateResponse struct {
+	// Items One entry per requested item, in REQUEST ORDER, each the stored issue with its generated id and its labels. Never null and never shorter than the request: a partial outcome does not exist on this operation.
+	//
+	// There is no `has_more` and no `next_cursor`. This is not a page — the client already knows how many items it sent — and publishing a paging envelope over a fixed-length answer would invite a client to look for a second page that can never exist.
+	Items []Issue `json:"items"`
+}
+
+// BlockingAnnotations The blocking decoration of the named issues. It is NOT a page: this operation has no limit and no cursor, because the number of issues asked about is what bounds it.
+type BlockingAnnotations struct {
+	// Items One entry per DISTINCT requested id, in the order the request first named it — so a client can zip this against the ids it sent. Empty array (never null) when the request named none.
+	//
+	// There is no `missing` beside it, unlike `DependencyEdges`: this operation probes no id's existence, so every requested id has an entry and an id that names nothing is simply bare.
+	Items []IssueBlocking `json:"items"`
 }
 
 // BondRef A constituent of a compound molecule.
@@ -80,7 +214,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `issues.list`, `issues.get`, `issues.claim`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	Capabilities []string `json:"capabilities"`
 
 	// Database Logical database name (not a host or a DSN).
@@ -99,8 +233,105 @@ type ContextResponse struct {
 	SchemaVersion int `json:"schema_version"`
 }
 
+// Cycle One circular blocking dependency: its members in EDGE ORDER, so `members[i]` blocks on `members[i+1]` and the last member blocks on the first. The closing edge is implied and is not repeated as a final member.
+//
+// The rotation is canonical — the lowest id comes first — which is what makes two snapshots of an unchanged workspace comparable.
+type Cycle = issueops.Cycle
+
+// CycleMember One node on a dependency cycle.
+//
+// `id` is always present, and its presence is what proves the node is on the cycle. `issue` is the row behind it, and is ABSENT — never null — when this workspace holds no record for that id: a target in another repository's namespace, an `external:` reference, or a row whose edges outlived it. That absence means the node cannot be DESCRIBED here, never that it is not really on the cycle.
+//
+// `issue` is spelled as a bare `$ref` with no sibling keywords, following the codegen note at the top of this document.
+type CycleMember = issueops.CycleMember
+
+// CyclesPage defines model for CyclesPage.
+type CyclesPage struct {
+	// HasMore Always false in v0: this operation takes no limit, so the report is never truncated. Present so that adding a bound later is additive.
+	HasMore bool `json:"has_more"`
+
+	// Items Empty array (never null) when the workspace has no cycles. Its LENGTH is the total: a cycle whose members this workspace cannot describe is still counted here, so the number cannot shrink because a row went missing.
+	Items []Cycle `json:"items"`
+}
+
+// DeleteIssuesRequest Which beads to erase, and what to do about the beads that point at them. There is no predicate here — no status, no cutoff, no glob — and that absence is the reason this operation needs no require-a-filter gate: a caller cannot spell "everything" without typing every id.
+//
+// `additionalProperties: false`, so an unknown member is a `400` naming the member. On this operation a silently ignored member is the difference between orphaning a dependent and deleting it.
+type DeleteIssuesRequest struct {
+	// Actor Caller-asserted attribution, under the same rules as `SweepRequest`'s `actor`: trimmed, refused when empty after trimming, over 256 BYTES, or carrying any control character. Optional — a deleted bead leaves no row to attribute the deletion on — but it does reach the SURVIVING beads whose text this operation rewrites, so a workspace that cares who rewrote a description sends one.
+	Actor *string `json:"actor,omitempty"`
+
+	// Cascade Also delete the transitive closure of everything that depends on the named beads. With `cascade` there is nothing left outside the set to orphan, so it makes `force` moot rather than conflicting with it: a request carrying both behaves as `cascade` and `orphaned` comes back empty.
+	Cascade *bool `json:"cascade,omitempty"`
+
+	// DryRun Report what the deletion WOULD do and change nothing. The counts and BOTH refusals are the ones the real request would produce, computed against the same snapshot, and nothing is recorded in history either.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// Force Delete the named beads and leave their dependents ORPHANED, reported in `orphaned`. Without it and without `cascade`, a named bead with a dependent the request did not name is refused.
+	//
+	// It defaults FALSE, which is the guarded mode, and the default is the protection: this surface has no authentication, so an omitted member must not silently choose the answer that changes another bead's graph.
+	Force *bool `json:"force,omitempty"`
+
+	// Ids The beads to delete, exact ids, in either plane. DUPLICATES COLLAPSE. An empty array is a `400` rather than a no-op — a caller whose id list came out empty because its own construction broke would read "deleted 0" and conclude the workspace was already clean.
+	//
+	// The cap is on the REQUEST rather than on what a cascade expands to: the whole delete is one transaction, so the practical bound is the backend's write timeout and no number here can promise it.
+	Ids []string `json:"ids"`
+}
+
+// DeleteIssuesResult What one delete did. Every number describes the SAME snapshot, because the guard, the deletion and the reference rewrite ran in one transaction.
+//
+// It is NOT `x-go-type`-pinned, for the reason `SweepResult` is not: there is no canonical Go struct whose JSON encoding is this contract. `bd delete --json` publishes these numbers under its own per-shape keys (`deleted_count`, `dependencies_removed`, and a scalar `deleted` on the single-id form), which are a stdout presentation rather than a wire type, so pinning would weld this body to one of them.
+type DeleteIssuesResult struct {
+	// Deleted How many beads were deleted, or under `dry_run` would be. Under `cascade` this counts the whole closure, so it is normally larger than `ids` and it — not the request length — is the number to show.
+	Deleted int `json:"deleted"`
+
+	// Dependencies Dependency edge rows removed with them, in either direction. Reported because a delete's visible effect is much larger than its bead count.
+	Dependencies int `json:"dependencies"`
+
+	// DryRun Echoes the request, so a result carries whether its numbers describe beads that are gone or beads that would go.
+	DryRun bool `json:"dry_run"`
+
+	// Events Event rows removed with the deleted beads.
+	Events int `json:"events"`
+
+	// Labels Label rows removed with the deleted beads.
+	Labels int `json:"labels"`
+
+	// Orphaned The surviving beads that depended on something this request deleted, in ascending id order. Present exactly when the request carried `force` without `cascade`, which is the only mode in which orphaning is possible; absent otherwise.
+	//
+	// DIRECT dependents only. A bead two edges away lost no edge.
+	Orphaned *[]string `json:"orphaned,omitempty"`
+
+	// ReferencesUpdated How many SURVIVING beads had their text rewritten — beads, not occurrences. Always 0 under `dry_run`, because a preview rewrites nothing.
+	ReferencesUpdated int `json:"references_updated"`
+}
+
 // Dependency A dependency edge between two issues.
 type Dependency = types.Dependency
+
+// DependencyEdges The stored edges of the named issues, plus the ids that named nothing. It is NOT a page: this operation has no limit and no cursor, because the number of issues asked about is what bounds it.
+type DependencyEdges struct {
+	// Items Every matching edge, flattened across the named issues rather than keyed by source — the same flat array `bd dep list a b c --json` emits, so the two surfaces are one compatibility domain. Group by `issue_id` to recover the per-source view. Empty array (never null) when nothing matches.
+	//
+	// The order is by the named issues in the order the request named them, and within each issue by target id.
+	Items []Dependency `json:"items"`
+
+	// Missing The requested `issue_id` values that name neither an issue nor a wisp, in the order they were named. Empty array (never null) when every named issue exists.
+	//
+	// An id here contributes no `items`, and the absence of an id here is NOT a claim that it has edges — an issue that exists and depends on nothing is in neither list.
+	Missing []string `json:"missing"`
+}
+
+// DependencyTreePage defines model for DependencyTreePage.
+type DependencyTreePage struct {
+	// HasMore Always false in v0: this operation takes no limit, so the walk is bounded by `max_depth` rather than truncated after the fact. Present so that adding a bound later is additive.
+	HasMore bool `json:"has_more"`
+
+	// Items The walked nodes in DEPTH-FIRST PRE-ORDER: a node appears before every node it led to, and a subtree is contiguous. Never null.
+	//
+	// It is empty only when a `status` filter matched nothing — the root is kept in a filtered answer solely as an ancestor of a match, never for its own sake. Without `status` the root is always the first element, which is what lets a client tell "this issue depends on nothing" from "this issue is not there" (a 404).
+	Items []TreeNode `json:"items"`
+}
 
 // Health defines model for Health.
 type Health struct {
@@ -112,6 +343,11 @@ type HealthStatus string
 
 // Issue A tracked work item. Property semantics documented here apply to every schema that repeats them below.
 type Issue = types.Issue
+
+// IssueBlocking One issue's derived blocking decoration.
+//
+// `blocked_by` and `blocks` are ASCENDING BY ID with repeats collapsed, and both are always present — an empty array, never null and never absent, so a client reads "nothing blocks this" from the answer rather than from a missing key. `parent` is absent when the issue has none and when the parent it has is closed.
+type IssueBlocking = issueops.IssueBlocking
 
 // IssueDetails An `Issue` with its labels, dependency edges and cardinalities — the body of `GET /v0/beads/issues/{id}`. `dependencies` and `dependents` carry FULL issue objects plus the edge type, not bare edges. Property semantics are documented on `Issue`.
 type IssueDetails = types.IssueDetails
@@ -131,6 +367,33 @@ type IssuesPage struct {
 
 	// NextCursor Present if and only if `has_more` is true. Pass it back verbatim as `cursor` to fetch the next page. Opaque and server-private.
 	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// MemoriesPage defines model for MemoriesPage.
+type MemoriesPage struct {
+	// HasMore Always false in v0: the whole plane is returned in one page. It is present so that a later revision can page this collection without changing the response shape.
+	HasMore bool `json:"has_more"`
+
+	// Items The stored memories, ordered by key. Empty array (never null) when the workspace holds none, or when `q` matched none.
+	Items []Memory `json:"items"`
+
+	// NextCursor Present if and only if `has_more` is true, which is never in v0.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// Memory One entry of the workspace's persistent memory plane.
+//
+// NOT `x-go-type`-PINNED, for the reason `Setting` is not: the CLI marshals an ad-hoc map per verb, so there is no canonical Go struct whose JSON encoding is this contract, and minting one to pin to would mean changing what `bd recall --json` prints in order to satisfy a rule about not changing it.
+//
+// IT HAS NO `redacted` MEMBER, and that is the deliberate difference from `Setting`. Redaction there is a decision about the KEY NAME, which works because settings keys are configured names; memory keys are derived from the content, so the same rule would withhold a memory about credentials and serve one containing a credential under an innocuous slug. This surface has no authentication and states the exposure rather than implying a protection it does not have.
+type Memory struct {
+	// Key The memory's key, echoed verbatim.
+	Key string `json:"key"`
+
+	// Value The stored content, verbatim: newlines, surrounding space and unicode as stored, never truncated and never withheld.
+	//
+	// Always present. It is the empty string only where a row was written out of band with an empty value, which `GET /v0/beads/memories/{key}` answers as a `404` and `GET /v0/beads/memories` enumerates.
+	Value string `json:"value"`
 }
 
 // Problem RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
@@ -166,6 +429,23 @@ type Problem struct {
 	Type *string `json:"type,omitempty"`
 }
 
+// QueryPage A page of query results. It is `ReadyPage`'s shape rather than `IssuesPage`'s, and the missing member is the point: a page of this operation carries no `next_cursor`, because a cursor is a keyset position in a database order and a predicate query's matching set is assembled outside the database.
+type QueryPage struct {
+	// HasMore True when `limit` truncated the result. It is exact for every expression, including the ones evaluated outside the database: those are matched against every candidate row, so the count of matches is known before the page is cut. There is no cursor — raise `limit` or narrow the expression.
+	HasMore bool `json:"has_more"`
+
+	// Items Empty array (never null) when the expression matched nothing.
+	Items []IssueWithCounts `json:"items"`
+}
+
+// ReadyCount The size of a ready set. It carries no items, no `has_more` and no cursor: this is a number about a set, and the operation that returns rows is `GET /v0/beads/ready`.
+//
+// It is NOT `x-go-type`-pinned, unlike the seven schemas above, and that is a decision rather than an omission: those seven are pinned because a canonical Go struct's JSON encoding IS the contract and a second wire struct would let the CLI's `--json` drift from these bodies. There is no canonical struct here — the CLI publishes this number inside its own stdout envelope's `pagination` member, which is not a wire type — so pinning would weld this body to a CLI presentation type instead of preventing a drift.
+type ReadyCount struct {
+	// Total How many items `GET /v0/beads/ready` would return for these filters with `limit=0`. Never negative; 0 when nothing is ready, which is a 200 rather than a 404 — a question about a set has an answer even when the set is empty.
+	Total int64 `json:"total"`
+}
+
 // ReadyPage defines model for ReadyPage.
 type ReadyPage struct {
 	// HasMore True when the limit truncated the result. There is no cursor on this operation; narrow the filters or raise the limit.
@@ -175,8 +455,175 @@ type ReadyPage struct {
 	Items []IssueWithCounts `json:"items"`
 }
 
+// RememberRequest What to remember, and optionally under what key.
+type RememberRequest struct {
+	// Content The memory itself, stored VERBATIM: newlines, surrounding space and unicode all survive. Flattening it to one line is what a front door does when it prints, not what this plane does when it stores.
+	//
+	// Empty after trimming is a `400`. So is content from which no key can be derived when `key` is omitted — `"!!!"` derives to nothing — and the recovery for that one is to send a `key`.
+	Content string `json:"content"`
+
+	// Key The key to store under. OMIT IT to have the server derive one from `content`; the response's `key` is then how the caller learns where the memory landed.
+	//
+	// Supplied, it is used verbatim — no trimming, no slugging, no charset restriction. A key carrying a control character is storable this way and by `bd remember --key`, and is then unreachable through `GET`/`DELETE /v0/beads/memories/{key}`, which refuse one: see those operations.
+	Key *string `json:"key,omitempty"`
+}
+
+// RememberedMemory One stored memory, plus whether storing it overwrote a previous value.
+//
+// It is `Memory`'s shape with `replaced` added rather than a composition of it, because this document repeats property lists instead of using `allOf` (see the note at the top of the file).
+type RememberedMemory struct {
+	// Key The key the memory now lives under: the one the request supplied, or the one derived from `content`. Recall it under exactly these bytes.
+	Key string `json:"key"`
+
+	// Replaced True when a previous value existed under `key` and this request overwrote it; false when the key was new. It is observed in the same transaction as the write, so it describes the row this request wrote.
+	//
+	// A previous value that was the EMPTY STRING reports true: the ROW existed, even though `GET /v0/beads/memories/{key}` would have answered `404` for it. That divergence is the storage seam's conflation showing through, and it is stated rather than smoothed over, because smoothing it would mean this member reporting "nothing was there" about a write that overwrote something.
+	Replaced bool `json:"replaced"`
+
+	// Value The stored content, echoed verbatim. Always present, and never withheld — this plane has no redaction; see the operation description.
+	Value string `json:"value"`
+}
+
+// Setting One entry of the workspace's stored settings plane.
+//
+// THIS SCHEMA IS DELIBERATELY NOT `x-go-type`-PINNED, and it is the only response component on this surface that is not. The seven pinned schemas above are pinned because a canonical Go struct already IS the contract — `types.Issue`'s JSON encoding is what `bd show --json` emits. A setting has no such struct: the CLI marshals an ad-hoc `map[string]string` per verb, so there is nothing to pin TO, and minting a type to pin to would mean changing what `bd config get --json` prints in order to satisfy a rule about not changing it.
+//
+// The two surfaces are still one shape where they overlap — `key` and `value` are spelled as the CLI spells them — and they diverge in exactly one deliberate place, `redacted`, which exists because this surface has no authentication and the CLI requires access to the database anyway.
+type Setting struct {
+	// Key The setting's key, echoed verbatim.
+	Key string `json:"key"`
+
+	// Redacted True when `value` is withheld because the KEY marks the setting as credential-bearing — the name contains `token`, `secret`, `password`, or an API-key spelling. It is a decision about the key alone: no value is inspected, so a credential stored under an innocuous name is NOT protected by this and must not be stored in this plane at all.
+	//
+	// Always present, including when false, so a client never has to infer redaction from an absent member.
+	Redacted bool `json:"redacted"`
+
+	// Value The stored value, verbatim.
+	//
+	// ABSENT MEANS ONE OF TWO THINGS, and `redacted` says which. With `redacted: false` the workspace stores nothing for this key OR stores the empty string; those are indistinguishable through this surface and through the CLI. With `redacted: true` a value may well be stored and is withheld.
+	//
+	// It is never emitted as an empty string and never transformed: a value that is not the stored value is omitted rather than masked, so a client can never mistake a placeholder for configuration.
+	Value *string `json:"value,omitempty"`
+}
+
+// SettingsPage defines model for SettingsPage.
+type SettingsPage struct {
+	// HasMore Always false in v0: the whole plane is returned in one page. It is present so that a later revision can page this collection without changing the response shape.
+	HasMore bool `json:"has_more"`
+
+	// Items The stored settings, ordered by key. Empty array (never null) when the workspace stores none.
+	Items []Setting `json:"items"`
+
+	// NextCursor Present if and only if `has_more` is true, which is never in v0.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// Statistics Workspace summary counts. Two of them are DEPENDENCY-AWARE and two are structurally always zero; both facts are stated on the properties themselves, because every number here is the same JSON type and nothing else on the wire distinguishes them.
+//
+// This is the struct `bd status --json` marshals under `summary`, pinned so the two surfaces are one compatibility domain.
+type Statistics = types.Statistics
+
+// StatsResponse The same envelope `bd status --json` prints, minus one member: the CLI also carries `recent_activity`, which every shipped code path leaves absent, so it is not published here.
+type StatsResponse struct {
+	// BlockedCountSkipped True when the summary came back without the blocked-set scan, which is exactly `summary.blocked_issues == null`. It is DERIVED from the answer rather than echoed from the request: `skip_blocked` is a hint, and a backend with no cheaper path answers with the full numbers and this flag false.
+	BlockedCountSkipped bool `json:"blocked_count_skipped"`
+
+	// Summary Workspace summary counts. Two of them are DEPENDENCY-AWARE and two are structurally always zero; both facts are stated on the properties themselves, because every number here is the same JSON type and nothing else on the wire distinguishes them.
+	//
+	// This is the struct `bd status --json` marshals under `summary`, pinned so the two surfaces are one compatibility domain.
+	Summary Statistics `json:"summary"`
+}
+
+// SweepRequest Which closed beads to clear. The predicate is FIXED at "closed beads of one tier" and the two narrowing members only narrow it: there is no status, no assignee, no label and no free-text query here, because every one of those would be another way to spell a destructive selection that a caller could get subtly wrong.
+//
+// `additionalProperties: false`, so an unknown member is a `400` naming the member — the same posture the query-parameter rule takes, and for the same reason: on this operation a silently ignored narrowing term widens what is erased.
+type SweepRequest struct {
+	// Actor Caller-asserted attribution for wherever the backend records it, under the same rules and for the same reasons as `ClaimRequest`'s `actor`: trimmed, refused when empty after trimming, over 256 BYTES, or carrying any control character. Optional — a deleted bead leaves no row to attribute the deletion on.
+	Actor *string `json:"actor,omitempty"`
+
+	// ClosedBefore Keep only beads closed STRICTLY BEFORE this instant (RFC 3339). A bead closed exactly at it is kept, which is the half-open interval every other time bound on this surface uses. `bd prune --older-than 30d` resolves the duration itself and sends the resulting instant.
+	ClosedBefore *time.Time `json:"closed_before,omitempty"`
+
+	// DryRun Report what the sweep WOULD do and delete nothing. The counts, the skips and the refusals are the same ones the real sweep would produce, computed against the same snapshot — and nothing is recorded in history either.
+	DryRun *bool `json:"dry_run,omitempty"`
+
+	// Pattern Keep only beads whose id matches this shell glob (`*`, `?`, `[...]`, `\` escapes; `*` also crosses `-` and `.`, since an id is not a path). Absent matches every bead in the tier. A MALFORMED glob is a `400`, never a pattern that matches nothing.
+	Pattern *string `json:"pattern,omitempty"`
+
+	// ProtectReferenced Skip candidates whose id is CITED — as a literal, at word boundaries — in the description, notes or comments of any bead that is not done, so a decision trail a live bead still points at is not deleted out from under it.
+	//
+	// It DEFAULTS ON here, unlike the library default, and that is deliberate. This surface has no authentication and this is its only destructive operation, so a caller that omits the member must not get weaker protection than the operator typing `bd prune`, which protects unless `--ignore-references`. The inverse — opt OUT locally, opt IN remotely — is the shape that lets a stray request delete a decision trail nothing brings back.
+	//
+	// It costs a full scan of the not-done set and its comments. Sending `protect_referenced: false` buys the cheaper sweep, and asking for it explicitly is the point: that is the request that should be the deliberate one.
+	ProtectReferenced *bool `json:"protect_referenced,omitempty"`
+
+	// Tier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
+	Tier SweepRequestTier `json:"tier"`
+}
+
+// SweepRequestTier Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and `durable` is the issue tier (`bd prune`). The two are DISJOINT: a sweep of one can never touch a bead of the other. Required, with no default — a caller handed the wrong tier has nothing to notice until the beads are gone.
+type SweepRequestTier string
+
+// SweepResult What one sweep did. Every number describes the SAME snapshot, because the selection and the deletion ran in one transaction.
+//
+// It is NOT `x-go-type`-pinned, for the reason `ReadyCount` is not: there is no canonical Go struct whose JSON encoding is this contract. The CLI publishes these numbers under its own per-command keys (`purged_count`, `pruned_count`), which are a stdout presentation rather than a wire type, so pinning would weld this body to one of them.
+type SweepResult struct {
+	// Dependencies Dependency edge rows removed with them. Reported because a sweep's visible effect is much larger than its bead count.
+	Dependencies int `json:"dependencies"`
+
+	// DryRun Echoes the request, so a result carries whether its numbers describe beads that are gone or beads that would go.
+	DryRun bool `json:"dry_run"`
+
+	// Events Event rows removed with the swept beads.
+	Events int `json:"events"`
+
+	// Labels Label rows removed with the swept beads.
+	Labels int `json:"labels"`
+
+	// ReferencedIds A BOUNDED SAMPLE of the ids `skipped.referenced` counts — at most 100, in the order the candidate query returned them. It is a sample, not the set: compare its length against 100 to tell a truncated one from a complete one. Absent when nothing was protected.
+	ReferencedIds *[]string `json:"referenced_ids,omitempty"`
+
+	// Skipped The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+	Skipped SweepSkips `json:"skipped"`
+
+	// Swept How many beads were deleted, or under `dry_run` would be.
+	Swept int `json:"swept"`
+}
+
+// SweepSkips The candidates a sweep declined to delete, bucketed by WHY. They are separate counters rather than one number because they mean different things: the first two are PROTECTIONS, and the last four are the sweep declining to trust its own input.
+type SweepSkips struct {
+	// ClosedAtOrAfterCutoff Candidates whose close timestamp did not satisfy `closed_before`. See `not_closed`.
+	ClosedAtOrAfterCutoff int `json:"closed_at_or_after_cutoff"`
+
+	// NotClosed Candidates the tier query returned that the recheck found were not closed. A NON-ZERO VALUE HERE IS A DEFENSE FIRING, not a normal outcome: the query asked for exactly the beads this excludes.
+	NotClosed int `json:"not_closed"`
+
+	// Pinned Candidates protected by the pinned flag. No request member overrides it — a caller who wants a pinned bead gone unpins it first.
+	Pinned int `json:"pinned"`
+
+	// Referenced Candidates protected by `protect_referenced`. Always 0 when that member is false or absent, so a 0 read without having asked says nothing about whether beads are cited.
+	Referenced int `json:"referenced"`
+
+	// UnknownClosedAt Closed candidates carrying no close timestamp. See `not_closed`.
+	UnknownClosedAt int `json:"unknown_closed_at"`
+
+	// Unreadable Rows the tier query returned as nothing at all. A defense of the same kind, on a shape rather than a value.
+	Unreadable int `json:"unreadable"`
+}
+
+// TreeNode One node of a walked dependency tree: a full issue plus where the walk reached it. Property semantics for the issue members are documented on `Issue`.
+//
+// The tree is FLAT. A node's place in it is read from `depth` and `parent_id`, not from nesting, and a subtree is contiguous in `items`.
+type TreeNode = types.TreeNode
+
 // IssueID defines model for IssueID.
 type IssueID = string
+
+// MemoryKey defines model for MemoryKey.
+type MemoryKey = string
+
+// SettingKey defines model for SettingKey.
+type SettingKey = string
 
 // InternalError RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type InternalError = Problem
@@ -189,6 +636,61 @@ type NotFound = Problem
 
 // Unavailable RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type Unavailable = Problem
+
+// ListDependenciesParams defines parameters for ListDependencies.
+type ListDependenciesParams struct {
+	// IssueId The issues to read edges for. Repeat the parameter; at least one is required and at most 100 are accepted, and either bound is a 400 `invalid_argument` with `param: "issue_id"`, `reason: "invalid_value"`.
+	//
+	// Each value must be an EXACT canonical issue id: there is no fuzzy, prefix or substring resolution on this surface, for the reason `GET /v0/beads/issues/{id}` gives. A value that matches nothing is reported in `missing` rather than refused. An empty value is a 400.
+	//
+	// Repeats collapse: an id named twice is one entry in `missing` at most once, and its edges appear once.
+	IssueId []string `form:"issue_id" json:"issue_id"`
+
+	// Type Edge types to include. Repeat the parameter. Empty means every type.
+	//
+	// The vocabulary is OPEN — a workspace configures its own edge types — so an unrecognized value is not an error here: it simply matches no edge. What IS refused, with a 400 `invalid_argument`, is a value no edge could ever carry: empty, or longer than the column.
+	//
+	// The filter narrows EDGES, never the named issues. An issue whose every edge the filter rejects is still not in `missing`.
+	Type *[]string `form:"type,omitempty" json:"type,omitempty"`
+}
+
+// ListBlockingAnnotationsParams defines parameters for ListBlockingAnnotations.
+type ListBlockingAnnotationsParams struct {
+	// IssueId The issues to annotate. Repeat the parameter; at least one is required and at most 100 are accepted, and either bound is a 400 `invalid_argument` with `param: "issue_id"`, `reason: "invalid_value"`.
+	//
+	// Each value must be an EXACT canonical issue id: there is no fuzzy, prefix or substring resolution on this surface, for the reason `GET /v0/beads/issues/{id}` gives. A value that matches nothing gets a bare entry rather than being refused. An empty value is a 400.
+	//
+	// Repeats collapse: an id named twice is one entry, at the position of its first mention.
+	IssueId []string `form:"issue_id" json:"issue_id"`
+}
+
+// GetDependencyTreeParams defines parameters for GetDependencyTree.
+type GetDependencyTreeParams struct {
+	// RootId The issue to walk from. It must be an EXACT canonical issue id: there is no fuzzy, prefix or substring resolution on this surface, for the reason `GET /v0/beads/issues/{id}` gives. An empty value is a 400 `invalid_argument`; a value that matches no issue and no wisp is a 404 `not_found`, because there is one anchor here and no other answer to preserve.
+	RootId string `form:"root_id" json:"root_id"`
+
+	// Direction Which way to follow edges. `down` (the default) walks what the root DEPENDS ON; `up` walks what depends ON it; `both` walks each way and returns one list.
+	//
+	// For `both` the two walks are independent and the answer is their concatenation: every up node except the root, then the whole down tree beginning with the root. The root appears once. The two halves may repeat a node between them — an issue that both blocks and is blocked by something in the other half — so a client aggregating `items` must not assume the ids are distinct. Both walks see ONE database state.
+	//
+	// Any other value is a 400 `invalid_argument`: the vocabulary is closed.
+	Direction *GetDependencyTreeParamsDirection `form:"direction,omitempty" json:"direction,omitempty"`
+
+	// MaxDepth How many LEVELS to descend, counting the root as level one: `max_depth=1` is the root alone. A node beyond the bound is ABSENT rather than present and flagged.
+	//
+	// Zero and negative values are a 400 `invalid_argument` rather than "unbounded": the answer to an unbounded recursive walk on a large workspace is the request that takes the database down.
+	MaxDepth *int `form:"max_depth,omitempty" json:"max_depth,omitempty"`
+
+	// Status Prune the walked tree to the nodes carrying this status AND the ancestor chain of each survivor, so the answer is still a tree.
+	//
+	// It is a POST-WALK PRUNE, not a filter on the walk, and the difference is observable: a matching node BEHIND a non-matching one is still reached, and the non-matcher is kept as its ancestor. A prune that matches nothing returns NO items at all, root included.
+	//
+	// The value is not checked against the workspace's status vocabulary; an unrecognized status simply matches nothing.
+	Status *string `form:"status,omitempty" json:"status,omitempty"`
+}
+
+// GetDependencyTreeParamsDirection defines parameters for GetDependencyTree.
+type GetDependencyTreeParamsDirection string
 
 // ListIssuesParams defines parameters for ListIssues.
 type ListIssuesParams struct {
@@ -252,6 +754,43 @@ type ListIssuesParams struct {
 	//
 	// One exception, and it is mode-dependent: when the server was started with `--allow-non-loopback`, `limit=0` is refused with 400 `invalid_argument`, `param: "limit"`, `reason: "invalid_value"` and detail "unlimited reads are loopback-only; pass an explicit limit". An unlimited read buffers the whole active set and its JSON encoding inside one shared process, which must not be reachable by arbitrary network peers. The bind mode is deliberately NOT advertised in `ContextResponse` — a client that wants an unlimited read asks for one and, on that 400, re-issues with an explicit limit (and pages with `cursor`); it is a client-side fix, never a retry.
 	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// QueryIssuesParams defines parameters for QueryIssues.
+type QueryIssuesParams struct {
+	// Q The query expression, e.g. `status=open AND priority>1` or `type=bug OR label=urgent`. Blank, unparseable, or naming a field or operator the language does not have is a 400 `invalid_argument` with `param: "q"` and `reason: "invalid_value"`.
+	//
+	// Relative date terms (`created>7d`) are resolved against the SERVER's clock at the moment the request is served.
+	Q string `form:"q" json:"q"`
+
+	// All Include closed issues. Without it closed issues are excluded — unless the expression itself compares `status`, in which case the expression's own opinion stands and this parameter changes nothing.
+	All *bool `form:"all,omitempty" json:"all,omitempty"`
+
+	// Sort Display order for the page. Absent leaves the rows in the order the query returned them, which is the same thing `bd query` without `--sort` does.
+	//
+	// WHAT IT ORDERS is the rows the query bounded, exactly as on the CLI: for an expression the database answered under `limit`, the page; for a predicate expression, which the database cannot bound, the whole matching set.
+	Sort *QueryIssuesParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Reverse Invert the display order. Ignored when `sort` is absent.
+	Reverse *bool `form:"reverse,omitempty" json:"reverse,omitempty"`
+
+	// Limit Maximum number of items to return. `0` means unlimited, exactly as `bd query --limit 0` does — the two surfaces read the same shared default (`workapi.DefaultQueryLimit`, the value `bd query --limit` registers) and the same zero semantics. A negative value is a 400.
+	//
+	// The same mode-dependent refusal the issue listing carries applies here: under `--allow-non-loopback`, `limit=0` is refused with 400 `invalid_argument`, `param: "limit"`, `reason: "invalid_value"`.
+	Limit *int `form:"limit,omitempty" json:"limit,omitempty"`
+}
+
+// QueryIssuesParamsSort defines parameters for QueryIssues.
+type QueryIssuesParamsSort string
+
+// ListMemoriesParams defines parameters for ListMemories.
+type ListMemoriesParams struct {
+	// Search Narrows the answer to memories that MATCH: a memory matches when the lowercase of its key, or the lowercase of its value, contains the lowercase of this term. Absent or empty means everything, and a term nothing matches is a `200` with an empty `items`.
+	//
+	// IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE, and it is spelled `search` rather than `q` FOR THAT REASON. On `GET /v0/beads/issues:query`, `q` is a boolean expression over issue fields that is refused when it does not parse; here there is nothing to parse, no vocabulary and no refusal — every string is a legal search term, `status=open` included, and it is matched literally. Two names because two questions: a client that sent this operation the other `q` would otherwise get a literal substring search back instead of an error.
+	//
+	// The term reaches the role UNFOLDED. Case folding is the role's, so that this surface and `bd memories` cannot come to disagree about what matching means; a client sends what its user typed.
+	Search *string `form:"search,omitempty" json:"search,omitempty"`
 }
 
 // ListReadyWorkParams defines parameters for ListReadyWork.
@@ -321,5 +860,80 @@ type ListReadyWorkParams struct {
 // ListReadyWorkParamsSort defines parameters for ListReadyWork.
 type ListReadyWorkParamsSort string
 
+// CountReadyWorkParams defines parameters for CountReadyWork.
+type CountReadyWorkParams struct {
+	// Assignee Only issues assigned to this actor.
+	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// Unassigned Only issues with no assignee.
+	Unassigned *bool `form:"unassigned,omitempty" json:"unassigned,omitempty"`
+
+	// Type Issue type, with the shorthand alias expansion and the match-nothing-rather-than-fail treatment `GET /v0/beads/ready` documents. Setting it drops the default type exclusions and makes `exclude_type` ignored, there and here alike.
+	Type *string `form:"type,omitempty" json:"type,omitempty"`
+
+	// ExcludeType Issue types to exclude. Repeat the parameter, or pass a comma-separated list. Ignored when `type` is set.
+	ExcludeType *[]string `form:"exclude_type,omitempty" json:"exclude_type,omitempty"`
+
+	// Label Labels that must ALL be present (AND).
+	Label *[]string `form:"label,omitempty" json:"label,omitempty"`
+
+	// LabelAny Labels of which at least one must be present (OR).
+	LabelAny *[]string `form:"label_any,omitempty" json:"label_any,omitempty"`
+
+	// ExcludeLabel Labels that must not be present.
+	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
+
+	// LabelPattern Glob matched against labels.
+	LabelPattern *string `form:"label_pattern,omitempty" json:"label_pattern,omitempty"`
+
+	// LabelRegex Regular expression matched against labels.
+	LabelRegex *string `form:"label_regex,omitempty" json:"label_regex,omitempty"`
+
+	// Priority Exact priority (0 is a real value, not "unset").
+	Priority *int `form:"priority,omitempty" json:"priority,omitempty"`
+
+	// Parent Restrict to recursive descendants of this issue.
+	Parent *string `form:"parent,omitempty" json:"parent,omitempty"`
+
+	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
+	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
+
+	// HasMetadataKey Only issues carrying this top-level metadata key.
+	HasMetadataKey *string `form:"has_metadata_key,omitempty" json:"has_metadata_key,omitempty"`
+
+	// IncludeEphemeral Include ephemeral (non-synced) rows, which the count merges exactly as the listing lists them.
+	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
+
+	// IncludeDeferred Include issues whose `defer_until` is still in the future.
+	IncludeDeferred *bool `form:"include_deferred,omitempty" json:"include_deferred,omitempty"`
+}
+
+// GetStatsParams defines parameters for GetStats.
+type GetStatsParams struct {
+	// Assignee Answer for ONE ACTOR instead of the workspace. Used as written: no trimming, no case folding, no alias expansion. An empty value is a 400 — the workspace-wide question is asked by OMITTING the parameter, and an empty assignee would otherwise select the rows with no assignee and report them as one actor's workload.
+	//
+	// IT CHANGES FOUR DEFINITIONS AT ONCE, and they are named on the `Statistics` properties rather than here: the set widens to include the ephemeral tier, `blocked_issues` counts the `blocked` STATUS instead of the dependency flag, `ready_issues` becomes the real ready-work count instead of a subtraction, and `pinned_issues` is always 0. An actor with no rows is a summary of zeros, not a 404.
+	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// SkipBlocked Ask for the answer WITHOUT the blocked-set scan, which is the expensive half of this query on a large workspace — the same request `bd status --no-blocked` makes.
+	//
+	// IT IS A HINT. When it is honored, `blocked_issues` and `ready_issues` are both null and `blocked_count_skipped` is true; when the backend has no cheaper path the full numbers come back and the flag is false. Nothing else in the summary changes either way, so a client that reads neither pointer cannot tell the difference.
+	//
+	// IGNORED when `assignee` is set: that answer computes both numbers by a route with no fast path, and it is not an error to ask.
+	SkipBlocked *bool `form:"skip_blocked,omitempty" json:"skip_blocked,omitempty"`
+}
+
 // ClaimIssueJSONRequestBody defines body for ClaimIssue for application/json ContentType.
 type ClaimIssueJSONRequestBody = ClaimRequest
+
+// BatchCreateIssuesJSONRequestBody defines body for BatchCreateIssues for application/json ContentType.
+type BatchCreateIssuesJSONRequestBody = BatchCreateRequest
+
+// DeleteIssuesJSONRequestBody defines body for DeleteIssues for application/json ContentType.
+type DeleteIssuesJSONRequestBody = DeleteIssuesRequest
+
+// SweepIssuesJSONRequestBody defines body for SweepIssues for application/json ContentType.
+type SweepIssuesJSONRequestBody = SweepRequest
+
+// RememberMemoryJSONRequestBody defines body for RememberMemory for application/json ContentType.
+type RememberMemoryJSONRequestBody = RememberRequest

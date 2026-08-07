@@ -10,6 +10,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type InsertIssueOpts struct {
@@ -38,6 +39,7 @@ type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
 	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
+	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
 	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
@@ -74,7 +76,10 @@ type IssueSQLRepository interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	UnclaimIssue(ctx context.Context, id, actor string, force bool) error
+	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 }
 
 type CloseRowParams struct {
@@ -106,13 +111,17 @@ type DeleteIssuesParams struct {
 	UpdateTextReferences bool
 
 	// EnforceCascadePolicy selects embedded-parity dependent handling
-	// (issueops.DeleteIssuesInTx). When false — the legacy default used by the
-	// proxied-server delete command, which always cascades — deletion expands to
-	// all transitive dependents regardless of Cascade/Force. When true,
-	// Cascade/Force choose the behavior:
+	// (issueops.DeleteIssuesInTx). When false — the legacy default kept for the
+	// wisp/mol/gc/purge proxied paths and the single-ID convenience wrappers —
+	// cascade expansion follows params.Cascade alone and Force is ignored. When
+	// true, Cascade/Force choose the behavior:
 	//   Cascade=true               → delete all transitive dependents
 	//   Cascade=false, Force=false → refuse if any external dependent exists
+	//                                (*DeleteBlockedError, naming the blockers)
 	//   Cascade=false, Force=true  → orphan external dependents (delete only IDs)
+	// One deliberate divergence from embedded: a wisp NAMED in IDs counts like
+	// any other issue here and can trip the refusal, where embedded partitions
+	// wisps out before the dependent check. Strictly safer; kept on purpose.
 	EnforceCascadePolicy bool
 	Force                bool
 }
@@ -123,9 +132,15 @@ type DeleteIssuesResult struct {
 	LabelsCount       int
 	EventsCount       int
 	ReferencesUpdated int
-	// OrphanedIssues lists external dependents left behind by a force delete
-	// (Cascade=false, Force=true), or the blocking dependents reported with the
-	// refusal error (Cascade=false, Force=false). Empty on the cascade path.
+	// OrphanedIssues is NOT POPULATED BY ANY PATH TODAY, and is kept only
+	// because `bd wisp gc --json` publishes it (always null) and this commit is
+	// not changing that command's wire shape.
+	//
+	// It once described a force-delete policy this layer never implemented: the
+	// two params that were supposed to select that policy were declared,
+	// documented in detail and never read. The policy now lives in
+	// issueops.Deleter, above the use case, and DeleteResult.Orphaned is where
+	// the answer comes out.
 	OrphanedIssues []string
 }
 
@@ -281,7 +296,10 @@ type IssueUseCase interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	Unclaim(ctx context.Context, id, actor string, force bool) error
+	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -317,6 +335,7 @@ type IssueUseCase interface {
 	GetNewlyUnblockedByCloseWisp(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ApplyWispGraph(ctx context.Context, plan GraphPlan, actor string) (GraphApplyResult, error)
 	ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error)
+	PromoteWisp(ctx context.Context, id, actor string) error
 }
 
 type CloseIssueParams struct {
@@ -552,23 +571,47 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
 		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
 	}
+	// The refusal carries the assignee and status the repository read back in
+	// THIS transaction, so a caller reports who won without parsing the
+	// message. The copy lives on the typed error, shared with the twin
+	// (issueops.ClaimIssueInTx) that used to restate it — that is what bd-at6rc
+	// asked for. The sentinel stays matchable through Unwrap, which the proxied
+	// batch exit code keys on.
+	//
+	// A pool-assigned issue only loses the CAS for a non-assignee reason
+	// (status changed underneath us), so it refuses on the status rather than
+	// with a misleading held-by refusal.
+	// Composed here rather than on the typed error, for the reason
+	// issueops.ClaimIssueInTx gives: ClaimConflictError passes its wrapped
+	// refusal through unchanged, so the fragments have to be in the wrapped
+	// error or beads.ParseClaimConflict recovers nothing. This is the
+	// domain-stack twin of that producer and must answer the same three ways
+	// (bd-at6rc).
+	refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, row.CurrentStatus)
 	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
-		// A pool-assigned issue only loses the CAS for a non-assignee
-		// reason (status changed underneath us): report the status, not a
-		// misleading held-by refusal (mirrors issueops.ClaimIssueInTx).
-		if row.CurrentAssigneeIsPool {
-			return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+		switch {
+		// Pool aliases refuse on the STATUS, checked first so a pool never
+		// reaches the holder-steering copy below.
+		case row.CurrentAssigneeIsPool:
+			// refusal already names the status.
+		case row.CurrentStatus == types.StatusOpen:
+			// Never name a release command here (wy-yuclk): copy that names
+			// one gets pattern-matched by batch agents into an unclaim+claim
+			// steamroller of live claims. bd reclaim is safe to name because
+			// it only recovers claims whose lease has already expired. The
+			// parseable " by <assignee>" tail is deliberately absent, so the
+			// holder is recovered from the typed field instead.
+			refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
+		default:
+			refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, row.CurrentAssignee)
 		}
-		if row.CurrentStatus == types.StatusOpen {
-			// Same guidance as issueops.ClaimIssueInTx's open-but-assigned
-			// refusal (bd-at6rc): steer toward the holder, never name an
-			// eviction command. Keep the %w wrap — the proxied batch exit
-			// code keys on errors.Is(err, ErrAlreadyClaimed).
-			return ClaimResult{}, fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
-		}
-		return ClaimResult{}, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, row.CurrentAssignee)
 	}
-	return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+	return ClaimResult{}, &publicops.ClaimConflictError{
+		IssueID:  id,
+		Assignee: row.CurrentAssignee,
+		Status:   row.CurrentStatus,
+		Err:      refusal,
+	}
 }
 
 func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error) {
@@ -719,6 +762,18 @@ func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error
 		return false, fmt.Errorf("probe wisps table: %w", err)
 	}
 	return found, nil
+}
+
+// PromoteWisp moves an active wisp to the Dolt-versioned issues plane,
+// preserving its id, wisp_type, labels, dependencies, events, and comments.
+// One-way: the promoted row is no longer ephemeral, so purge won't reclaim
+// it. The repository error passes through unwrapped — the CLI surfaces it
+// verbatim and its text is part of the classic error contract.
+func (u *issueUseCaseImpl) PromoteWisp(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("promote wisp: id must not be empty")
+	}
+	return u.issueRepo.PromoteFromEphemeral(ctx, id, actor)
 }
 
 func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error) {
@@ -1773,6 +1828,52 @@ func (u *issueUseCaseImpl) Unclaim(ctx context.Context, id, actor string, force 
 		return fmt.Errorf("Unclaim: %w", err)
 	}
 	return nil
+}
+
+// UnclaimIfAssignee is the compare-and-swap release: it clears the claim only
+// while the issue is still assigned to expectedAssignee, and otherwise returns
+// storage.ErrAssigneeMismatch having written nothing. It is the conditional
+// twin of Unclaim and runs the SAME transition (assignee cleared, status
+// reopened, started_at cleared, lease dropped, row_lock rewritten, "unclaimed"
+// event recorded) because both reach the one classic implementation in
+// issueops — which is what makes `bd unclaim --if-assignee` behave identically
+// on the proxied-server and embedded backends.
+func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+	if id == "" {
+		return fmt.Errorf("UnclaimIfAssignee: id must not be empty")
+	}
+	if err := u.issueRepo.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee); err != nil {
+		return fmt.Errorf("UnclaimIfAssignee: %w", err)
+	}
+	return nil
+}
+
+// Heartbeat refreshes the lease on an issue actor holds in_progress. The
+// write touches ONLY the ephemeral leases table (bd-lrgn1), so the caller
+// must run it under uow.RunTxEphemeral's no-Dolt-commit form — a heartbeat
+// mints no Dolt commit and no history in any mode (bd-aq0ql).
+func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("Heartbeat: id must not be empty")
+	}
+	if err := u.issueRepo.HeartbeatIssue(ctx, id, actor); err != nil {
+		return fmt.Errorf("Heartbeat: %w", err)
+	}
+	return nil
+}
+
+// WakeExpiredDefers returns every expired DATED defer to open (see
+// issueops.WakeExpiredDefersInTx) and reports how many permanent issues and
+// wisps woke. The caller owns persistence: commit with a wake message iff
+// issues > 0, and with the ephemeral plain-COMMIT form iff only wisps woke
+// (wisp tables are dolt_ignored, so their wake needs a SQL commit but must
+// mint no version commit).
+func (u *issueUseCaseImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	issues, wisps, err = u.issueRepo.WakeExpiredDefers(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("WakeExpiredDefers: %w", err)
+	}
+	return issues, wisps, nil
 }
 
 func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

@@ -24,9 +24,11 @@ import (
 	"golang.org/x/net/netutil"
 
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // APIVersion is the path major this package serves, reported as
@@ -119,6 +121,80 @@ type Config struct {
 	// Provider is where every database-touching handler opens its one unit of
 	// work per request.
 	Provider uow.UnitOfWorkProvider
+	// The fields below are the roles this server answers from, for a backend
+	// whose facade is a STORE rather than a unit-of-work provider. sourceRoles
+	// is the authoritative list.
+	//
+	// Set them ALL, and only when Provider is nil: together they are the other
+	// complete database source, not an override of one. Listen refuses every
+	// other combination, including a partial set — a server missing one role
+	// would bind, answer every other route, and fail that one with a nil
+	// dereference inside a handler on a live server, which is worse than not
+	// starting.
+	//
+	// A caller with a store takes them off the store's own accessors, and WHICH
+	// store value it takes them off is the whole question. Every decorator a
+	// store wears is on the value its accessor returns — that is what the
+	// accessors are for — and bd's chain is
+	// HookFiringStore -> InstrumentedStorage -> raw, so `store.IssueClaimer()`
+	// there returns a claimer that runs the workspace's on_update hook script
+	// for every claim it lands. That is precisely what this server documents it
+	// does not do (cmd/bd/serve.go). Take the roles from BENEATH the hook layer:
+	//
+	//	src := store
+	//	if hooked, ok := src.(*storage.HookFiringStore); ok {
+	//		src = hooked.Unwrap() // keeps the telemetry layer, drops the hooks
+	//	}
+	//	rd, err := src.IssueReader()
+	//	cl, err := src.IssueClaimer()
+	//	... one per field below, all off the same src ...
+	//	httpapi.Listen(httpapi.Config{Reader: rd, Claimer: cl, /* and the rest */})
+	//
+	// cmd/bd's serveIssueRoles is that loop, written out.
+	//
+	// Listen refuses a hook-firing role rather than trusting the paragraph
+	// above — see checkDatabaseSource.
+	//
+	// WHAT LISTEN CANNOT CHECK, and the caller therefore owns: each call must
+	// commit ON ITS OWN, atomically and durably. That is what this server's
+	// contract states per request, and nothing here can observe the commit
+	// protocol of the backend behind an interface — every check available would
+	// be a self-declaration by the same caller-supplied code being checked.
+	// Embedded Dolt is the backend that does not qualify (its commit runs
+	// outside the SQL transaction on a separate connection) and it is refused
+	// where the workspace is actually known: serveDatabaseSource in
+	// cmd/bd/serve.go.
+	//
+	// Unlike the provider path these are built ONCE, before Listen, rather than
+	// per request. The provider path rebuilds its roles per request for exactly
+	// one reason — so the units of work they open land in that request's uow_ms
+	// (see Server.reader) — and a role reached this way opens none through this
+	// server, so a rebuild would buy nothing.
+	Reader            issueops.Reader
+	Claimer           issueops.Claimer
+	Settings          issueops.WorkspaceConfig
+	Stats             issueops.StatsReporter
+	CycleDetector     issueops.CycleDetector
+	EdgeReader        issueops.EdgeReader
+	BlockingAnnotator issueops.BlockingAnnotator
+	TreeWalker        issueops.TreeWalker
+	ReadyCounter      issueops.ReadyCounter
+	Querier           issueops.Querier
+	// Sweeper is the DESTRUCTIVE one, required on the same terms as every other
+	// role rather than opt-in: whether this build erases beads is a decision
+	// for the operator who chose to run bd serve, not a consequence of whether
+	// a caller remembered a field.
+	Sweeper issueops.Sweeper
+	// Deleter is the OTHER destructive one, required for the same reason.
+	Deleter      issueops.Deleter
+	BatchCreator issueops.BatchCreator
+	// Memories is the workspace's persistent memory plane, and the one field
+	// here that is not an issueops role: memories are user data riding in the
+	// config table under their own merge class, not settings, so they have
+	// their own leaf package. Required on the same terms as every field above —
+	// a partial set is refused, so the field and the operations that reach it
+	// land together.
+	Memories memoryops.Memories
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.
@@ -141,6 +217,25 @@ type Config struct {
 type Server struct {
 	cfg      Config
 	provider uow.UnitOfWorkProvider
+
+	// The configured roles, set exactly when provider is nil. They are what
+	// reader(), claimer(), cycleDetector() and the rest of those accessors hand
+	// back on the store-shaped source; the field names differ from the method
+	// names because a struct cannot carry both.
+	issueReader       issueops.Reader
+	issueClaimer      issueops.Claimer
+	settings          issueops.WorkspaceConfig
+	issueStats        issueops.StatsReporter
+	issueCycles       issueops.CycleDetector
+	issueEdges        issueops.EdgeReader
+	issueBlocking     issueops.BlockingAnnotator
+	issueTree         issueops.TreeWalker
+	issueReadyCounter issueops.ReadyCounter
+	issueQuerier      issueops.Querier
+	issueSweeper      issueops.Sweeper
+	issueDeleter      issueops.Deleter
+	issueBatchCreator issueops.BatchCreator
+	workspaceMemories memoryops.Memories
 
 	listener net.Listener
 	http     *http.Server
@@ -215,8 +310,8 @@ func ValidateBindAddr(addr string, allowNonLoopback bool) (net.IP, error) {
 // exist — N instances simply run on N ports — which is why fixed ports are the
 // deployment recommendation.)
 func Listen(cfg Config) (*Server, error) {
-	if cfg.Provider == nil {
-		return nil, errors.New("httpapi: no unit-of-work provider")
+	if err := checkDatabaseSource(cfg); err != nil {
+		return nil, err
 	}
 	ip, err := ValidateBindAddr(cfg.Addr, cfg.AllowNonLoopback)
 	if err != nil {
@@ -235,8 +330,23 @@ func Listen(cfg Config) (*Server, error) {
 	}
 
 	s := &Server{
-		cfg:        cfg,
-		provider:   cfg.Provider,
+		cfg:               cfg,
+		provider:          cfg.Provider,
+		issueReader:       cfg.Reader,
+		issueClaimer:      cfg.Claimer,
+		settings:          cfg.Settings,
+		issueStats:        cfg.Stats,
+		issueCycles:       cfg.CycleDetector,
+		issueEdges:        cfg.EdgeReader,
+		issueBlocking:     cfg.BlockingAnnotator,
+		issueTree:         cfg.TreeWalker,
+		issueReadyCounter: cfg.ReadyCounter,
+		issueQuerier:      cfg.Querier,
+		issueSweeper:      cfg.Sweeper,
+		issueDeleter:      cfg.Deleter,
+		issueBatchCreator: cfg.BatchCreator,
+		workspaceMemories: cfg.Memories,
+
 		sem:        make(chan struct{}, maxInflight),
 		semTimeout: semAcquireTimeout,
 		semWarn:    saturationWarn,
@@ -268,15 +378,94 @@ func Listen(cfg Config) (*Server, error) {
 	// Bound what a burst of requests can open on the database. The knob is
 	// optional on the interface, so say so out loud when a provider does not
 	// carry it rather than silently running unbounded.
-	if tuner, ok := cfg.Provider.(uow.PoolTuner); ok {
-		tuner.SetPoolLimits(servePoolLimits)
-	} else {
-		s.event("pool_limits_unavailable", "provider", fmt.Sprintf("%T", cfg.Provider))
+	//
+	// Nothing to bound on the roles source: the pool belongs to whatever the
+	// backend is, and this server neither owns it nor can reach it. Saying the
+	// knob is "unavailable" there would report a missing capability for a
+	// provider that was never asked for.
+	if cfg.Provider != nil {
+		if tuner, ok := cfg.Provider.(uow.PoolTuner); ok {
+			tuner.SetPoolLimits(servePoolLimits)
+		} else {
+			s.event("pool_limits_unavailable", "provider", fmt.Sprintf("%T", cfg.Provider))
+		}
 	}
 
 	fmt.Fprintf(s.stdout, "bd serve: listening on http://%s\n", s.Addr())
 	s.logStartup()
 	return s, nil
+}
+
+// checkDatabaseSource enforces exactly one complete database source.
+//
+// There are two, and a Config carries one or the other: a unit-of-work
+// provider, or the roles this surface answers from (sourceRoles). A PARTIAL
+// set is refused with the same message as none at all, because it is the same
+// mistake and the failure it would otherwise produce is the worst shape
+// available — a Config missing one role binds, answers every other route, and
+// fails that one with a nil dereference in a handler on a live server.
+//
+// The set GROWS as this surface grows: every operation added here is an
+// operation a roles-backed deployment must be able to answer, so a role added
+// to the set turns "this build serves an operation your Config cannot answer"
+// into a startup error instead of a 500 on the first client that finds it.
+//
+// Both together is refused rather than resolved by precedence: a caller that
+// set both holds two different opinions about where this server reads from, and
+// silently honoring one of them leaves the other as configuration that looks
+// live and is not.
+//
+// The last refusal is the one a caller does not see coming. A store wears
+// decorators and its accessors hand them out — that is what the accessors are
+// FOR — so the obvious `store.IssueClaimer()` on bd's own storage chain returns
+// a claimer that fires the workspace's on_update hook for every claim it lands.
+// This server's contract says hooks do not fire (cmd/bd/serve.go), and a
+// contract broken by the caller's most natural line is not a contract. Refusing
+// at Listen is the difference between a startup error naming the store to take
+// roles from and a server that has been quietly running a user's subprocess per
+// claim since it booted.
+
+// sourceRoles is the store-shaped source's roles in ONE place, so the three
+// questions checkDatabaseSource asks — is any set, is any missing, does any
+// fire hooks — cannot drift apart as the set grows. An operation that reaches a
+// role this source does not yet carry adds a line here and a line to
+// roleSourceNames, and nothing else in this file.
+//
+// A role is compared against nil as an INTERFACE, which is what the caller
+// actually sets; a typed nil stored in one of these fields is a value as far as
+// this check is concerned.
+func sourceRoles(cfg Config) []any {
+	return []any{cfg.Reader, cfg.Claimer, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.Memories}
+}
+
+// roleSourceNames spells sourceRoles for the refusal message, in the same
+// order, so a caller reading the error learns the whole set it must pass.
+const roleSourceNames = "Reader, Claimer, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter, BatchCreator and Memories"
+
+func anyRoleSet(cfg Config) bool {
+	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
+}
+
+func everyRoleSet(cfg Config) bool {
+	return !slices.Contains(sourceRoles(cfg), nil)
+}
+
+func anyRoleFiresHooks(cfg Config) bool {
+	return slices.ContainsFunc(sourceRoles(cfg), storage.RoleFiresHooks)
+}
+
+func checkDatabaseSource(cfg Config) error {
+	switch {
+	case cfg.Provider != nil && anyRoleSet(cfg):
+		return errors.New("httpapi: both a unit-of-work provider and issue roles were set; pass exactly one database source")
+	case cfg.Provider == nil && !everyRoleSet(cfg):
+		return errors.New("httpapi: no database source: set Provider, or " + roleSourceNames + " together")
+	case anyRoleFiresHooks(cfg):
+		return errors.New("httpapi: a configured role fires this workspace's hooks; " +
+			"this server does not run hooks, so take the roles from the store beneath the hook decorator " +
+			"((*storage.HookFiringStore).Unwrap)")
+	}
+	return nil
 }
 
 // Addr is the bound address, which is the only way to discover the port under
@@ -347,21 +536,238 @@ func (s *Server) connState(_ net.Conn, state http.ConnState) {
 	}
 }
 
-// reader returns the issue-query surface for one request, obtained from the
-// provider's own capability accessor.
+// reader returns the issue-query surface for one request.
 //
-// It is built per request rather than once at startup so that the units of
-// work it opens are timed into THIS request's log line. That is the only
-// reason: the role itself is stateless, and the accessor is the API on this
-// seam exactly as it is on a store.
+// On the ROLES source it is the configured role. There is nothing to build: a
+// store's accessor already answered for its whole decorator chain when the
+// caller called it, and this server opens no units of work on that path.
+//
+// On the PROVIDER source it is built per request rather than once at startup so
+// that the units of work it opens are timed into THIS request's log line. That
+// is the only reason: the role itself is stateless, and the accessor is the API
+// on this seam exactly as it is on a store.
 //
 // The source is held by INTERFACE, not by the concrete wrapper. That is what
 // makes uow.IssueReaderSource load-bearing rather than decorative: this call
 // site type-checks against the accessor the provider seam publishes, so
 // renaming or dropping it is a compile error here.
+//
+// EITHER WAY it goes out through checkedReader, which is what makes
+// handleGetIssue's dereference of the detail view safe by construction again —
+// see roles.go.
 func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
+	if s.provider == nil {
+		return checkedReader{inner: s.issueReader}, nil
+	}
 	var src uow.IssueReaderSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
-	return src.IssueReader()
+	rd, err := src.IssueReader()
+	if err != nil {
+		return nil, err
+	}
+	return checkedReader{inner: rd}, nil
+}
+
+// statsReporter returns the guarded summary-statistics surface for one request.
+//
+// Same two sources as reader() and claimer(), for the same reasons, and held by
+// INTERFACE so uow.StatsReporterSource is load-bearing rather than decorative.
+// No checked wrapper: issueops.StatsResult carries a VALUE, so there is no
+// nil-with-nil-error answer for a handler to dereference. checkedReader exists
+// because Reader.Get hands back a pointer.
+func (s *Server) statsReporter(r *http.Request) (issueops.StatsReporter, error) {
+	if s.provider == nil {
+		return s.issueStats, nil
+	}
+	var src uow.StatsReporterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.StatsReporter()
+}
+
+// cycleDetector returns the guarded cycle-report surface for one request.
+//
+// Same two sources as reader() and claimer(), for the same reasons, and held by
+// INTERFACE so uow.CycleDetectorSource is load-bearing rather than decorative.
+// No checked wrapper: this report is a value whose slice a nil-safe range
+// walks, so there is no dereference for a misbehaving implementation to turn
+// into a panic.
+func (s *Server) cycleDetector(r *http.Request) (issueops.CycleDetector, error) {
+	if s.provider == nil {
+		return s.issueCycles, nil
+	}
+	var src uow.CycleDetectorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.CycleDetector()
+}
+
+// claimer returns the guarded atomic-claim surface for one request.
+//
+// It is the write-side twin of reader above, for all the same reasons: the
+// configured role on the roles source, and on the provider source one built per
+// request so its units of work are timed into THIS request's log line, held by
+// INTERFACE so uow.IssueClaimerSource is load-bearing rather than decorative —
+// and, from either source, wrapped in checkedClaimer.
+func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
+	if s.provider == nil {
+		return checkedClaimer{inner: s.issueClaimer}, nil
+	}
+	var src uow.IssueClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	cl, err := src.IssueClaimer()
+	if err != nil {
+		return nil, err
+	}
+	return checkedClaimer{inner: cl}, nil
+}
+
+// workspaceConfig returns the guarded workspace-settings surface for one
+// request.
+//
+// Same two sources as reader and claimer above, for the same reasons, and held
+// by INTERFACE so uow.WorkspaceConfigSource is load-bearing rather than
+// decorative. No checked wrapper: both settings handlers read VALUES out of the
+// result, so there is no pointer for a caller-supplied role to hand back nil
+// in.
+func (s *Server) workspaceConfig(r *http.Request) (issueops.WorkspaceConfig, error) {
+	if s.provider == nil {
+		return s.settings, nil
+	}
+	var src uow.WorkspaceConfigSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.WorkspaceConfig()
+}
+
+// edgeReader returns the guarded stored-edge surface for one request.
+//
+// Same two sources as reader() and claimer(), for the same reasons, and held by
+// INTERFACE so uow.EdgeReaderSource is load-bearing rather than decorative. No
+// checked wrapper: this role answers with a VALUE, so no handler dereferences a
+// pointer it returned — checkedReader exists for Get alone.
+func (s *Server) edgeReader(r *http.Request) (issueops.EdgeReader, error) {
+	if s.provider == nil {
+		return s.issueEdges, nil
+	}
+	var src uow.EdgeReaderSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.EdgeReader()
+}
+
+// blockingAnnotator returns the derived blocking-decoration surface for one
+// request, on the same terms as every role above and held by INTERFACE so
+// uow.BlockingAnnotatorSource is load-bearing rather than decorative. It goes
+// out UNWRAPPED for the reason edgeReader's answer does: this role answers with
+// a VALUE, and checkedReader exists for Get alone.
+func (s *Server) blockingAnnotator(r *http.Request) (issueops.BlockingAnnotator, error) {
+	if s.provider == nil {
+		return s.issueBlocking, nil
+	}
+	var src uow.BlockingAnnotatorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BlockingAnnotator()
+}
+
+// treeWalker returns the guarded dependency-tree surface for one request.
+//
+// Built the same two ways as its siblings and for the same reasons, held by
+// INTERFACE so uow.TreeWalkerSource is load-bearing rather than decorative. No
+// checked wrapper, for the reason cycleDetector gives: this role answers with a
+// VALUE whose slice a nil-safe range walks.
+func (s *Server) treeWalker(r *http.Request) (issueops.TreeWalker, error) {
+	if s.provider == nil {
+		return s.issueTree, nil
+	}
+	var src uow.TreeWalkerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.TreeWalker()
+}
+
+// readyCounter returns the ready-count surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.ReadyCounterSource is
+// load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED. checkedReader and checkedClaimer exist because their
+// handlers dereference a POINTER a role returned; CountReady answers with a
+// value, so a wrapper would be ceremony that reads like a guarantee.
+func (s *Server) readyCounter(r *http.Request) (issueops.ReadyCounter, error) {
+	if s.provider == nil {
+		return s.issueReadyCounter, nil
+	}
+	var src uow.ReadyCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.ReadyCounter()
+}
+
+// querier returns the boolean-query surface for one request, on the same terms
+// as every role above and held by INTERFACE so uow.QuerierSource is
+// load-bearing rather than decorative. It goes out UNWRAPPED, like the counter
+// and unlike checkedReader: a page is a value carrying a slice, so there is
+// nothing for a wrapper to make safe.
+func (s *Server) querier(r *http.Request) (issueops.Querier, error) {
+	if s.provider == nil {
+		return s.issueQuerier, nil
+	}
+	var src uow.QuerierSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Querier()
+}
+
+// sweeper returns the guarded bulk-clearance surface for one request, on the
+// same terms as every role above and held by INTERFACE so uow.SweeperSource is
+// load-bearing rather than decorative. It goes out unwrapped: SweepResult is a
+// VALUE, so there is no pointer for a caller-supplied role to hand back nil in.
+//
+// The role this returns is the ONLY thing standing between a POST body and a
+// mass delete — the require-a-filter gate, the pinned protection and the
+// closed_at recheck are all inside it — which is why the Config field it comes
+// from is required rather than optional.
+func (s *Server) sweeper(r *http.Request) (issueops.Sweeper, error) {
+	if s.provider == nil {
+		return s.issueSweeper, nil
+	}
+	var src uow.SweeperSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Sweeper()
+}
+
+// deleter returns the named-row erasure surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.DeleterSource is
+// load-bearing rather than decorative. It goes out unwrapped for the reason the
+// sweeper does: DeleteResult is a VALUE.
+//
+// The role this returns is the only thing standing between a POST body and an
+// orphaned dependency graph — the guard, the id resolution and the reference
+// rewrite are all inside it — which is why the Config field it comes from is
+// required rather than optional.
+func (s *Server) deleter(r *http.Request) (issueops.Deleter, error) {
+	if s.provider == nil {
+		return s.issueDeleter, nil
+	}
+	var src uow.DeleterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Deleter()
+}
+
+// batchCreator returns the batch-create surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.BatchCreatorSource is
+// load-bearing rather than decorative.
+//
+// It goes out CHECKED, unlike the ready counter. CreateBatchResult carries a
+// slice of POINTERS and the response body carries values, so the handler
+// dereferences every one of them — the checkedClaimer hazard, N times over.
+// See checkedBatchCreator.
+func (s *Server) batchCreator(r *http.Request) (issueops.BatchCreator, error) {
+	if s.provider == nil {
+		return checkedBatchCreator{inner: s.issueBatchCreator}, nil
+	}
+	var src uow.BatchCreatorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	creator, err := src.BatchCreator()
+	if err != nil {
+		return nil, err
+	}
+	return checkedBatchCreator{inner: creator}, nil
+}
+
+// memories returns the persistent-memory surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.MemoriesSource is
+// load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED: all four of this role's results are VALUES, so no
+// handler dereferences a pointer it returned, and a miss is a Found field
+// rather than a nil the wire would have to interpret.
+func (s *Server) memories(r *http.Request) (memoryops.Memories, error) {
+	if s.provider == nil {
+		return s.workspaceMemories, nil
+	}
+	var src uow.MemoriesSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Memories()
 }
 
 // WithUOW runs fn inside one unit of work and guarantees the rollback.
@@ -374,7 +780,14 @@ func (s *Server) reader(r *http.Request) (issueops.Reader, error) {
 // closing with the request's own canceled context would fail the ROLLBACK
 // immediately and burn one pinned session on every client disconnect. Reads
 // never commit.
+//
+// It is provider-only, and says so rather than dereferencing nil: a
+// roles-backed server has no unit of work to open, and the roles it does hold
+// own their own transactions.
 func (s *Server) WithUOW(ctx context.Context, rec *reqInfo, fn func(uow.UnitOfWork) error) error {
+	if s.provider == nil {
+		return errors.New("httpapi: this server has no unit-of-work provider; it answers from configured issue roles")
+	}
 	start := time.Now()
 	uw, err := s.provider.NewUOW(ctx)
 	if rec != nil {
@@ -856,22 +1269,47 @@ func (s *Server) logStartup() {
 	s.event("startup",
 		"addr", s.Addr(),
 		"mode", s.cfg.Mode,
+		"db", s.dbSource(),
 		"workspace", s.cfg.Workspace.RepoRoot,
 		"beads_dir", s.cfg.Workspace.BeadsDir,
 		"database", s.cfg.Workspace.Database,
 		"host_allowlist", s.hosts.label(),
 		"capabilities", strings.Join(s.ctxBody.Capabilities, ","),
 	)
-	s.event("limits",
+
+	limits := []any{
 		"max_inflight", maxInflight,
 		"max_conns", maxConns,
 		"sem_wait", semAcquireTimeout.String(),
 		"deadline", requestDeadline.String(),
-		"pool_max_open", servePoolLimits.MaxOpenConns,
-		"pool_max_idle", servePoolLimits.MaxIdleConns,
-		"pool_idle_time", servePoolLimits.ConnMaxIdleTime.String(),
-		"pool_lifetime", servePoolLimits.ConnMaxLifetime.String(),
-	)
+	}
+	// The pool bounds are this server's, applied to the provider above. On the
+	// roles source there is no pool here to bound, and printing the numbers
+	// anyway would report limits nothing enforces.
+	if s.provider != nil {
+		limits = append(limits,
+			"pool_max_open", servePoolLimits.MaxOpenConns,
+			"pool_max_idle", servePoolLimits.MaxIdleConns,
+			"pool_idle_time", servePoolLimits.ConnMaxIdleTime.String(),
+			"pool_lifetime", servePoolLimits.ConnMaxLifetime.String(),
+		)
+	}
+	s.event("limits", limits...)
+}
+
+// dbSource names which database source this server was built from, for the
+// startup line.
+//
+// It is there so uow_ms is attributable. That field means "how long this
+// request spent OBTAINING units of work", and a roles-backed server obtains
+// none — so every one of its request lines reads uow_ms=0.000, which is the
+// true value and is indistinguishable, on its own, from instrumentation that
+// broke. This is the line that tells them apart.
+func (s *Server) dbSource() string {
+	if s.provider != nil {
+		return "provider"
+	}
+	return "roles"
 }
 
 // event writes one structured stderr line. Values are quoted when they are not

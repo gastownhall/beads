@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Gateway mode: a configured credential command resolves its token into the
@@ -94,7 +95,7 @@ func TestApplyInitGatewayCredentialPresetWins(t *testing.T) {
 // Gateway with no server-provisioned issue_prefix is a provisioning-contract
 // violation: bd refuses to choose one for a hosted database.
 func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", nil)
+	value, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", nil)
 	if err == nil {
 		t.Fatal("expected a provisioning-contract error for a hosted db with no issue_prefix")
 	}
@@ -102,8 +103,8 @@ func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
 		!strings.Contains(err.Error(), "myhosteddb") {
 		t.Fatalf("error should name the db and the contract violation, got: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("nothing must be written on violation: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("nothing must be set on violation: value=%q", value)
 	}
 }
 
@@ -112,7 +113,7 @@ func TestResolveInitIssuePrefixGatewayMissing(t *testing.T) {
 // simply failed to read it.
 func TestResolveInitIssuePrefixGatewayReadError(t *testing.T) {
 	readErr := errors.New("dial tcp: connection refused")
-	value, write, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", readErr)
+	value, err := resolveInitIssuePrefix(true, "", "myhosteddb", "fallback", readErr)
 	if err == nil {
 		t.Fatal("expected the read error to be surfaced")
 	}
@@ -122,19 +123,19 @@ func TestResolveInitIssuePrefixGatewayReadError(t *testing.T) {
 	if strings.Contains(err.Error(), "provisioning-contract violation") {
 		t.Fatalf("a transient read error must not be reported as a contract violation, got: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("nothing must be written on a read error: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("nothing must be set on a read error: value=%q", value)
 	}
 }
 
 // Gateway with an already-provisioned issue_prefix: adopt it (no write).
 func TestResolveInitIssuePrefixGatewayAdopts(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(true, "hq", "myhosteddb", "fallback", nil)
+	value, err := resolveInitIssuePrefix(true, "hq", "myhosteddb", "fallback", nil)
 	if err != nil {
 		t.Fatalf("adoption must not error: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("adoption must not write: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("adoption must not set a prefix: value=%q", value)
 	}
 }
 
@@ -142,23 +143,23 @@ func TestResolveInitIssuePrefixGatewayAdopts(t *testing.T) {
 // This is the byte-identical legacy behavior — and a read error is ignored here,
 // exactly as legacy init ignored it (the guard is gateway-only).
 func TestResolveInitIssuePrefixNonGatewaySets(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(false, "", "mydb", "GPUPolynomials.jl", errors.New("ignored"))
+	value, err := resolveInitIssuePrefix(false, "", "mydb", "GPUPolynomials.jl", errors.New("ignored"))
 	if err != nil {
 		t.Fatalf("non-gateway set must not error even with a read error: %v", err)
 	}
-	if !write || value != "GPUPolynomials_jl" {
-		t.Fatalf("value=%q write=%v, want (GPUPolynomials_jl, true)", value, write)
+	if value != "GPUPolynomials_jl" {
+		t.Fatalf("value=%q, want GPUPolynomials_jl", value)
 	}
 }
 
 // Non-gateway with an existing prefix: no-op (do not clobber a shared db).
 func TestResolveInitIssuePrefixNonGatewayExisting(t *testing.T) {
-	value, write, err := resolveInitIssuePrefix(false, "existing", "mydb", "prefix", nil)
+	value, err := resolveInitIssuePrefix(false, "existing", "mydb", "prefix", nil)
 	if err != nil {
 		t.Fatalf("non-gateway existing must not error: %v", err)
 	}
-	if write || value != "" {
-		t.Fatalf("existing prefix must be preserved: value=%q write=%v", value, write)
+	if value != "" {
+		t.Fatalf("existing prefix must be preserved: value=%q", value)
 	}
 }
 
@@ -424,6 +425,53 @@ func TestShouldWriteInitDoltRemote(t *testing.T) {
 			if got != tt.want {
 				t.Fatalf("shouldWriteInitDoltRemote(%v, %q, %v, %v, %v, %v) = %v, want %v",
 					tt.gateway, tt.syncURL, tt.syncFromRemote, tt.syncURLFromConfig, tt.syncURLFromGitOrigin, tt.localOnly, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWarnHalfIdentifiedSubstrate pins that init SAYS SO when the database
+// carries one identity marker and not the other.
+//
+// Bootstrapper refuses to complete a half-identified substrate on purpose, so
+// init cannot fix this state — which makes silence the failure. With no
+// _project_id to adopt, every clone's init mints a different local one and the
+// first `bd doctor --fix` turns that divergence into a hard PROJECT IDENTITY
+// MISMATCH for every other clone, with recovery advice that names the wrong
+// cause.
+func TestWarnHalfIdentifiedSubstrate(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		found issueops.VerifyIdentityResult
+		want  []string
+	}{
+		{
+			name:  "prefix without a project identity",
+			found: issueops.VerifyIdentityResult{Prefix: "app"},
+			want:  []string{"no project identity", "app", "PROJECT IDENTITY MISMATCH", "bd doctor --fix"},
+		},
+		{
+			name:  "project identity without a prefix",
+			found: issueops.VerifyIdentityResult{ProjectID: "proj-xyz"},
+			want:  []string{"no issue prefix", "uninitialized", "bd config set issue_prefix"},
+		},
+		{
+			name:  "fully identified says nothing",
+			found: issueops.VerifyIdentityResult{Prefix: "app", ProjectID: "proj-xyz"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stderr := captureStderr(t, func() { warnHalfIdentifiedSubstrate(tc.found) })
+			if len(tc.want) == 0 {
+				if strings.TrimSpace(stderr) != "" {
+					t.Fatalf("an identified substrate warned anyway: %s", stderr)
+				}
+				return
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("warning does not mention %q:\n%s", want, stderr)
+				}
 			}
 		})
 	}

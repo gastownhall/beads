@@ -130,20 +130,30 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		}
 
 		if claimReady {
-			claimed, err := activeStore.ClaimReadyIssue(ctx, filter, actor)
+			// The claim is on the ReadyClaimer role, through the store's own
+			// accessor, so selection, the compare-and-set and the hydration
+			// that feeds --json all share one transaction. The listing below
+			// is not on a role and still builds the filter, for the reasons
+			// issueops.Reader's doc comment gives.
+			claimer, err := activeStore.ReadyClaimer()
 			if err != nil {
-				if capErr := handleMaxRowsError(err); capErr != nil {
-					return capErr
-				}
 				return HandleErrorRespectJSON("%v", err)
 			}
-			if claimed == nil {
+			res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
+			if err != nil {
+				// No handleMaxRowsError here, unlike the listing below: the
+				// request carries no cap, so ErrTooManyRows cannot come back.
+				// See claimNextRequest for why the cap never applied.
+				return HandleErrorRespectJSON("%v", err)
+			}
+			if res.Claimed == nil {
 				if jsonOutput {
 					return outputJSON([]*types.IssueWithCounts{})
 				}
 				fmt.Printf("\n%s No ready work to claim\n\n", ui.RenderWarn("○"))
 				return nil
 			}
+			claimed := res.Claimed
 			if err := commitPendingIfEmbedded(ctx, activeStore, actor, doltAutoCommitParams{
 				Command:  "ready",
 				IssueIDs: []string{claimed.ID},
@@ -152,7 +162,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			}
 			SetLastTouchedID(claimed.ID)
 			if jsonOutput {
-				return outputJSON(buildReadyIssueOutput(ctx, activeStore, []*types.Issue{claimed}))
+				return outputJSON([]*types.IssueWithCounts{claimed})
 			}
 			fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(claimed.ID, claimed.Title))
 			return nil
@@ -169,26 +179,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			totalReady := len(results)
 			truncated := false
 			if filter.Limit > 0 && len(results) == filter.Limit {
-				// The page is full, so there may be more ready work. Size the true
-				// total N over the same ready predicate, zeroing the limit so the
-				// count is the full ready set (byte-identical to
-				// len(GetReadyWorkWithCounts(Limit=0))). Prefer the cheap COUNT(*)
-				// capability; unwrap past decorators (e.g. HookFiringStore) so the
-				// assertion reaches the concrete store. Fall back to the unbounded
-				// mega-query only when a store predates ReadyWorkCounter.
-				countFilter := filter
-				countFilter.Limit = 0
-				if counter, ok := storage.UnwrapStore(activeStore).(storage.ReadyWorkCounter); ok {
-					if n, countErr := counter.CountReadyWork(ctx, countFilter); countErr == nil && n > len(results) {
-						totalReady = n
-						truncated = true
-					}
-				} else {
-					all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
-					if countErr == nil && len(all) > len(results) {
-						totalReady = len(all)
-						truncated = true
-					}
+				// The page is full, so there may be more ready work. The
+				// ReadyCounter role promises its answer equals
+				// len(Reader.Ready(Limit=0).Items), which is what makes this
+				// total describe the page above it.
+				if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(results) {
+					totalReady = n
+					truncated = true
 				}
 			}
 			if results == nil {
@@ -221,12 +218,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		totalReady := len(issues)
 		truncated := false
-		if !jsonOutput && filter.Limit > 0 && len(issues) == filter.Limit {
-			countFilter := filter
-			countFilter.Limit = 0
-			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
-			if countErr == nil && len(allIssues) > len(issues) {
-				totalReady = len(allIssues)
+		if filter.Limit > 0 && len(issues) == filter.Limit {
+			// The same question the --json branch asks, through the same role,
+			// so the "Showing X of N" a human reads and the total a script
+			// parses are one number.
+			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
+				totalReady = n
 				truncated = true
 			}
 		}
@@ -331,6 +328,28 @@ var blockedCmd = &cobra.Command{
 	},
 }
 
+// readyTotal sizes the whole ready set for the request `bd ready` just listed
+// a page of, through the store's own ReadyCounter accessor.
+//
+// BOTH OUTPUT MODES CALL IT and only when the page came back full, which is
+// the one situation where the answer can differ from what is already on
+// screen. The role has no --max-rows field to honor and needs none: the cap
+// bounds a page this machine materializes, and a count materializes no rows.
+//
+// A failed count is not a failed command — the page is already correct; all
+// that is lost is the "of N" beside it.
+func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {
+	counter, err := activeStore.ReadyCounter()
+	if err != nil {
+		return 0, err
+	}
+	result, err := counter.CountReady(ctx, readyRoleRequest(in))
+	if err != nil {
+		return 0, err
+	}
+	return int(result.Total), nil
+}
+
 // buildParentEpicMap builds a map from child issue ID to parent epic title.
 // Only includes parents that are epics.
 func buildParentEpicMap(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) map[string]string {
@@ -400,47 +419,6 @@ func displayReadyList(issues []*types.Issue, parentEpicMap map[string]string) {
 	fmt.Printf("Ready: %d issues with no active blockers\n", len(issues))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
-}
-
-func buildReadyIssueOutput(ctx context.Context, s storage.DoltStorage, issues []*types.Issue) []*types.IssueWithCounts {
-	if issues == nil {
-		issues = []*types.Issue{}
-	}
-	issueIDs := make([]string, len(issues))
-	for i, issue := range issues {
-		issueIDs[i] = issue.ID
-	}
-
-	depCounts, _ := s.GetDependencyCounts(ctx, issueIDs)
-	allDeps, _ := s.GetDependencyRecordsForIssues(ctx, issueIDs)
-	commentCounts, _ := s.GetCommentCounts(ctx, issueIDs)
-
-	for _, issue := range issues {
-		issue.Dependencies = allDeps[issue.ID]
-	}
-
-	issuesWithCounts := make([]*types.IssueWithCounts, len(issues))
-	for i, issue := range issues {
-		counts := depCounts[issue.ID]
-		if counts == nil {
-			counts = &types.DependencyCounts{DependencyCount: 0, DependentCount: 0}
-		}
-		var parent *string
-		for _, dep := range allDeps[issue.ID] {
-			if dep.Type == types.DepParentChild {
-				parent = &dep.DependsOnID
-				break
-			}
-		}
-		issuesWithCounts[i] = &types.IssueWithCounts{
-			Issue:           issue,
-			DependencyCount: counts.DependencyCount,
-			DependentCount:  counts.DependentCount,
-			CommentCount:    commentCounts[issue.ID],
-			Parent:          parent,
-		}
-	}
-	return issuesWithCounts
 }
 
 // readyExplainFilter is the filter both --explain routes run, derived from the

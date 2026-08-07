@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -18,6 +19,11 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("ExcludesDefaultTypes", s.readyExcludesDefaultTypes)
 	s.Run("FilterByPriority", s.readyFilterByPriority)
 	s.Run("FilterByAssignee", s.readyFilterByAssignee)
+	s.Run("FilterByType", s.readyFilterByType)
+	s.Run("FilterByParent", s.readyFilterByParent)
+	s.Run("FilterByMetadataEquality", s.readyFilterByMetadataEquality)
+	s.Run("FilterByMetadataKeyPresence", s.readyFilterByMetadataKeyPresence)
+	s.Run("ExcludesRequestedTypes", s.readyExcludesRequestedTypes)
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
@@ -158,6 +164,92 @@ func (s *testSuite) readyFilterByAssignee() {
 	got := issueIDsFrom(out)
 	s.Contains(got, "bd-rdy-as-mine")
 	s.NotContains(got, "bd-rdy-as-theirs")
+}
+
+func (s *testSuite) readyFilterByType() {
+	r := s.issueRepo()
+	bug := newTestIssue("bd-rdy-typ-bug", "bug")
+	bug.IssueType = types.TypeBug
+	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
+	task := newTestIssue("bd-rdy-typ-task", "task")
+	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Type: string(types.TypeBug)})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, bug.ID)
+	s.NotContains(got, task.ID)
+}
+
+func (s *testSuite) readyFilterByParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-par-root", "parent")
+	parent.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-par-child", "child")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	outside := newTestIssue("bd-rdy-par-outside", "outside")
+	s.Require().NoError(r.Insert(s.Ctx(), outside, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	parentID := parent.ID
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{ParentID: &parentID})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, child.ID)
+	s.NotContains(got, outside.ID)
+}
+
+func (s *testSuite) readyFilterByMetadataEquality() {
+	r := s.issueRepo()
+	match := newTestIssue("bd-rdy-meta-match", "matches metadata")
+	match.Metadata = json.RawMessage(`{"team":"platform"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), match, "tester", domain.InsertIssueOpts{}))
+	other := newTestIssue("bd-rdy-meta-other", "other metadata")
+	other.Metadata = json.RawMessage(`{"team":"frontend"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), other, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{MetadataFields: map[string]string{"team": "platform"}})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, match.ID)
+	s.NotContains(got, other.ID)
+}
+
+func (s *testSuite) readyFilterByMetadataKeyPresence() {
+	r := s.issueRepo()
+	withKey := newTestIssue("bd-rdy-metakey-yes", "has metadata key")
+	withKey.Metadata = json.RawMessage(`{"team":"platform"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), withKey, "tester", domain.InsertIssueOpts{}))
+	withoutKey := newTestIssue("bd-rdy-metakey-no", "missing metadata key")
+	withoutKey.Metadata = json.RawMessage(`{"area":"cli"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), withoutKey, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{HasMetadataKey: "team"})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, withKey.ID)
+	s.NotContains(got, withoutKey.ID)
+}
+
+func (s *testSuite) readyExcludesRequestedTypes() {
+	r := s.issueRepo()
+	task := newTestIssue("bd-rdy-excl-task", "task")
+	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
+	bug := newTestIssue("bd-rdy-excl-bug", "bug")
+	bug.IssueType = types.TypeBug
+	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
+	epic := newTestIssue("bd-rdy-excl-epic", "epic")
+	epic.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), epic, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{ExcludeTypes: []types.IssueType{types.TypeBug, types.TypeEpic}})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, task.ID)
+	s.NotContains(got, bug.ID)
+	s.NotContains(got, epic.ID)
 }
 
 func (s *testSuite) readyUnassigned() {

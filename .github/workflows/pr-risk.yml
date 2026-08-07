@@ -20,6 +20,13 @@ jobs:
     outputs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
+      shadow_embedded_cli: ${{ steps.shadow-selector.outputs.embedded_cli }}
+      shadow_proxied_cli: ${{ steps.shadow-selector.outputs.proxied_cli }}
+      shadow_embedded_storage: ${{ steps.shadow-selector.outputs.embedded_storage }}
+      shadow_embedded_conformance: ${{ steps.shadow-selector.outputs.embedded_conformance }}
+      shadow_server_conformance: ${{ steps.shadow-selector.outputs.server_conformance }}
+      shadow_full: ${{ steps.shadow-selector.outputs.full }}
+      shadow_reason: ${{ steps.shadow-selector.outputs.reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -31,6 +38,22 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/ci-embedded-tier.sh
+
+      - name: Shadow CI capability selector
+        id: shadow-selector
+        continue-on-error: true
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          selection="$(bash .github/scripts/ci-capability-selector.sh)"
+          printf '%s\n' "$selection"
+          {
+            echo '### Shadow CI capability selector'
+            printf '%s\n' "$selection" | sed 's/^/- `/' | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt

@@ -81,6 +81,75 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func TestResolveAIAPIKeyPrecedence(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("MINIMAX_API_KEY", "")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	Set("ai.api_key", "")
+
+	key, source := ResolveAIAPIKey("explicit-key")
+	if key != "explicit-key" || source != AIAPIKeySourceExplicit {
+		t.Fatalf("explicit fallback = (%q, %q), want explicit-key/%s", key, source, AIAPIKeySourceExplicit)
+	}
+
+	Set("ai.api_key", "config-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "config-key" || source != AIAPIKeySourceConfig {
+		t.Fatalf("config fallback = (%q, %q), want config-key/%s", key, source, AIAPIKeySourceConfig)
+	}
+
+	t.Setenv("MINIMAX_API_KEY", "minimax-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "minimax-key" || source != AIAPIKeySourceMiniMaxEnv {
+		t.Fatalf("MiniMax env = (%q, %q), want minimax-key/%s", key, source, AIAPIKeySourceMiniMaxEnv)
+	}
+
+	t.Setenv("ANTHROPIC_API_KEY", "anthropic-key")
+	key, source = ResolveAIAPIKey("explicit-key")
+	if key != "anthropic-key" || source != AIAPIKeySourceAnthropicEnv {
+		t.Fatalf("Anthropic env = (%q, %q), want anthropic-key/%s", key, source, AIAPIKeySourceAnthropicEnv)
+	}
+}
+
+func TestDefaultAIBaseURLPrecedence(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	t.Setenv("MINIMAX_BASE_URL", "")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error: %v", err)
+	}
+	Set("ai.base_url", "")
+
+	if got := DefaultAIBaseURL(AIAPIKeySourceAnthropicEnv); got != "" {
+		t.Fatalf("Anthropic base URL = %q, want SDK default", got)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != MiniMaxDefaultBaseURL {
+		t.Fatalf("MiniMax default base URL = %q, want %q", got, MiniMaxDefaultBaseURL)
+	}
+
+	t.Setenv("MINIMAX_BASE_URL", "https://minimax.example/anthropic")
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != "https://minimax.example/anthropic" {
+		t.Fatalf("MINIMAX_BASE_URL = %q, want custom MiniMax URL", got)
+	}
+
+	t.Setenv("BD_AI_BASE_URL", "https://proxy.example/anthropic")
+	if err := Initialize(); err != nil {
+		t.Fatalf("Initialize() returned error after BD_AI_BASE_URL: %v", err)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceMiniMaxEnv); got != "https://proxy.example/anthropic" {
+		t.Fatalf("BD_AI_BASE_URL MiniMax override = %q, want proxy URL", got)
+	}
+	if got := DefaultAIBaseURL(AIAPIKeySourceAnthropicEnv); got != "https://proxy.example/anthropic" {
+		t.Fatalf("BD_AI_BASE_URL Anthropic override = %q, want proxy URL", got)
+	}
+}
+
 func TestEnvironmentBinding(t *testing.T) {
 	// Test environment variable binding
 	tests := []struct {

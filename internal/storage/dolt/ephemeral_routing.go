@@ -174,6 +174,27 @@ func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[strin
 	return result
 }
 
+// PartitionWispIDs reports which of ids currently live in the wisps table
+// (single batched membership query; IDs absent from the wisps table are
+// returned as permanent). Export's plane-marker stamping uses this to tell an
+// unpromoted no-history wisp apart from a promoted one, which row flags
+// cannot do (bd-r9uce). batchWispExists tolerates a missing wisps table by
+// reporting no members, matching PartitionWispIDsInTx.
+func (s *DoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, permIDs []string, err error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	set := s.batchWispExists(ctx, ids)
+	for _, id := range ids {
+		if set[id] {
+			wispIDs = append(wispIDs, id)
+		} else {
+			permIDs = append(permIDs, id)
+		}
+	}
+	return wispIDs, permIDs, nil
+}
+
 // PromoteFromEphemeral copies an issue from the wisps table to the issues table,
 // clearing the Ephemeral flag. Used by bd promote and mol squash to crystallize wisps.
 //
@@ -299,6 +320,12 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 }
 
 func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
+	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
+	// for a later explicit commit point (bd dolt commit / CommitPending)
+	// instead of minting one Dolt version commit per write.
+	if issueops.VersionCommitDeferred(ctx) {
+		return nil
+	}
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
@@ -306,7 +333,7 @@ func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables
 	}
 	if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+		return wrapSQLCommitError("dolt commit", err)
 	}
 	return nil
 }

@@ -1,14 +1,17 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // validateCommentsArgs runs as cobra's Args validation for the parent
@@ -236,7 +239,7 @@ Examples:
 		defer result.Close()
 		issueID = result.ResolvedID
 
-		comment, err := result.Store.AddIssueComment(ctx, issueID, author, commentText)
+		comment, err := addCommentDirect(ctx, result.Store, issueID, author, commentText)
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
 		}
@@ -254,6 +257,50 @@ Examples:
 		fmt.Printf("Comment added to %s\n", issueID)
 		return nil
 	},
+}
+
+// addCommentDirect appends one comment through the Commenter role and returns
+// the stored comment. It is the direct-route sibling of addCommentProxied and
+// builds the SAME request, so the two front doors ask the storage layer one
+// question.
+//
+// The role is reached through the STORE's own accessor, never a constructor:
+// that accessor is where the store's decorator stack — hooks, telemetry — adds
+// its layer, so a comment written here fires the same hook a comment written
+// through the provider does. The store is the caller's rather than the global
+// one, because a prefix-routed write has to reach the role through the store
+// that actually holds the issue.
+//
+// The RESOLVE stays with the caller. On this route it is fuzzy, prefix-routed
+// and cross-repo, none of which belongs on a contract an unattended client also
+// calls, and the caller has already produced the canonical id. The role runs
+// the issue-then-wisp fallback itself, so the comment lands on the plane the id
+// actually names.
+//
+// The auto-commit policy is applied HERE rather than by each caller. The role
+// creates its Dolt version commit inside the storage layer, so
+// `--dolt-auto-commit batch` can only defer it by saying so on the context —
+// the reason issueOpsContext exists — and a caller that forgets writes exactly
+// the per-write commit batch mode is there to avoid. Both comment commands come
+// through this function, so the policy is stated once.
+func addCommentDirect(ctx context.Context, st storage.DoltStorage, issueID, author, text string) (*types.Comment, error) {
+	opsCtx, err := issueOpsContext(ctx)
+	if err != nil {
+		return nil, err
+	}
+	commenter, err := st.Commenter()
+	if err != nil {
+		return nil, err
+	}
+	result, err := commenter.AddComment(opsCtx, issueops.AddCommentRequest{
+		Author:  author,
+		IssueID: issueID,
+		Text:    text,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.Comment, nil
 }
 
 func init() {

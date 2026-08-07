@@ -155,6 +155,14 @@ knob. If it does not, `bd serve` says so at startup with
 `event=pool_limits_unavailable` and runs with an **unbounded** pool rather than
 silently pretending. Check for that line before trusting the arithmetic above.
 
+None of this arithmetic applies to a registered backend, which is served from
+the store the root command opened rather than from a unit-of-work provider
+(`db=roles` on the startup line, against `db=provider` for every Dolt topology).
+The pool belongs to that backend, `bd serve` neither owns it nor can reach it,
+and no `pool_limits_unavailable` line is emitted — a missing capability would be
+reported for a provider that was never asked for. Size that pool wherever the
+backend is configured.
+
 `maxConns = 64` bounds *accepted TCP connections*, which is a client-side limit
 and not part of the database budget. It exists because the semaphore does not
 bound connections: Go spawns a goroutine per connection, and one parked on a
@@ -245,7 +253,8 @@ gives the shape, the `request_error` line gives the cause.
 
 | Message | Cause |
 |---|---|
-| `bd serve requires a Dolt SQL server; this workspace uses embedded Dolt` | Permanent. There is no unit-of-work provider for the embedded backend and there will not be one. |
+| `bd serve requires a Dolt SQL server; this workspace uses embedded Dolt` | Permanent. The embedded backend commits outside the SQL transaction on a separate connection, so this server's per-request atomicity would be a lie there. Refused by `serveDatabaseSource`, which is the only thing refusing it — see "Workspace modes" in the design doc. |
+| `bd serve is unavailable under strict readonly` | `--readonly`, or `readonly` in config. Every server this command binds publishes the issue-claim operation and the advertised capability set is a property of the build, not of the flags on the process that started it — so the alternatives were a server advertising a claim it always fails (the store source, where the read-only open reaches the claimer) or a `--readonly` that quietly bought nothing (the provider source, which builds its own writable connection). Drop the flag to serve. |
 | `host must be a numeric IP literal, not a name — use 127.0.0.1 rather than localhost` | `--addr` was given a DNS name. |
 | `binds beyond loopback; bd serve has no authentication, so this requires --allow-non-loopback` | A non-loopback `--addr` without the flag. |
 | `address already in use` | The fixed-port mutual exclusion working as intended: a second server is already on that port. |

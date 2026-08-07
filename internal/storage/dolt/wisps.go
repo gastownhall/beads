@@ -196,7 +196,7 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 		return err
 	}
 
-	return wrapTransactionError("commit update wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit update wisp", tx)
 }
 
 // updateWispChecked updates a wisp with the optional atomic preconditions of
@@ -228,7 +228,7 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 		return err
 	}
 
-	return wrapTransactionError("commit update wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit update wisp", tx)
 }
 
 // closeWisp closes a wisp in the wisps table.
@@ -245,7 +245,7 @@ func (s *DoltStore) closeWisp(ctx context.Context, id string, reason string, act
 		return err
 	}
 
-	return wrapTransactionError("commit close wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit close wisp", tx)
 }
 
 // closeWispChecked closes a wisp with the is_blocked guard, mirroring closeWisp
@@ -276,10 +276,44 @@ func (s *DoltStore) closeWispChecked(ctx context.Context, id string, actor strin
 		return storage.CloseIssueResult{}, err
 	}
 
-	if err := wrapTransactionError("commit close wisp", tx.Commit()); err != nil {
+	if err := s.commitSQLTx(ctx, "commit close wisp", tx); err != nil {
 		return storage.CloseIssueResult{}, err
 	}
 	return storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}, nil
+}
+
+// wispAuxCascadeTables lists the wisp auxiliary tables a wisp delete must
+// also clean up, mirroring internal/storage/schema/cli_migrations.go:300-315.
+// wisp_child_counters is keyed on parent_id (a wisp can be a parent whose
+// children hold the counter row); the other three are keyed on issue_id.
+// Some deployed stores enforce this via FK ON DELETE CASCADE and some do not
+// (be-zdqyl: the migration adding those FKs was never promoted out of
+// migrations/ignored/), so the delete paths below must not rely on the
+// database to do it for them.
+var wispAuxCascadeTables = []struct{ table, column string }{
+	{"wisp_labels", "issue_id"},
+	{"wisp_events", "issue_id"},
+	{"wisp_comments", "issue_id"},
+	{"wisp_child_counters", "parent_id"},
+}
+
+// deleteWispAuxRowsInTx removes every row the given wisp ids own across
+// wispAuxCascadeTables. Shared by deleteWisp and deleteWispBatchTx so the
+// table set cannot drift between the two paths.
+func deleteWispAuxRowsInTx(ctx context.Context, tx *sql.Tx, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	inClause, args := doltBuildSQLInClause(ids)
+	for _, aux := range wispAuxCascadeTables {
+		//nolint:gosec // G201: aux.table/aux.column come from the fixed wispAuxCascadeTables literal; inClause contains only ? markers
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf("DELETE FROM %s WHERE %s IN (%s)", aux.table, aux.column, inClause),
+			args...); err != nil {
+			return fmt.Errorf("delete wisp aux rows from %s: %w", aux.table, err)
+		}
+	}
+	return nil
 }
 
 // deleteWisp permanently removes a wisp and its related data.
@@ -312,11 +346,15 @@ func (s *DoltStore) deleteWisp(ctx context.Context, id string) error {
 		return err
 	}
 
+	if err := deleteWispAuxRowsInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("delete wisp aux rows for %s: %w", id, err)
+	}
+
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after wisp delete for %s: %w", id, err)
 	}
 
-	return wrapTransactionError("commit delete wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit delete wisp", tx)
 }
 
 // deleteWispBatch permanently removes multiple wisps using one transaction per
@@ -383,12 +421,16 @@ func (s *DoltStore) deleteWispBatchTx(ctx context.Context, ids []string) (int, e
 		return 0, err
 	}
 
+	if err := deleteWispAuxRowsInTx(ctx, tx, ids); err != nil {
+		return 0, fmt.Errorf("delete wisp aux rows: %w", err)
+	}
+
 	if err := issueops.RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return 0, fmt.Errorf("recompute is_blocked after batched wisp delete: %w", err)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("failed to commit batch wisp delete: %w", err)
+	if err := s.commitSQLTx(ctx, "commit batch wisp delete", tx); err != nil {
+		return 0, err
 	}
 
 	return int(rowsAffected), nil
@@ -408,7 +450,7 @@ func (s *DoltStore) claimWisp(ctx context.Context, id string, actor string) erro
 		return err
 	}
 
-	return wrapTransactionError("commit claim wisp", tx.Commit())
+	return s.commitSQLTx(ctx, "commit claim wisp", tx)
 }
 
 // ListWisps returns ephemeral issues matching the filter.
@@ -603,7 +645,7 @@ func (s *DoltStore) addWispDependency(ctx context.Context, dep *types.Dependency
 		return err
 	}
 
-	return wrapTransactionError("commit add wisp dependency", tx.Commit())
+	return s.commitSQLTx(ctx, "commit add wisp dependency", tx)
 }
 
 // getWispDependencies retrieves issues that a wisp depends on.

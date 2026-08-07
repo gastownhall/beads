@@ -8,7 +8,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/conformance"
+	"github.com/steveyegge/beads/backend/conformance"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"

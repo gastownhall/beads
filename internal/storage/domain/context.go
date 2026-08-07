@@ -24,6 +24,12 @@ type RepoPaths struct {
 }
 
 type BackendConfig struct {
+	// Backend is the resolved storage backend name, spelled the way the store
+	// open resolves it (configfile.GetBackend): "dolt" for the Dolt family
+	// including the legacy empty value, and a registered backend's own name
+	// otherwise. It is what tells GetContextInfo whether the Dolt-derived
+	// members beside it describe this workspace at all.
+	Backend             string
 	DoltMode            string
 	Database            string
 	ProjectID           string
@@ -100,6 +106,42 @@ func PublishedContext(info ContextInfo) PublishedContextFields {
 	}
 }
 
+// SetBackendIdentity records which backend a workspace is on, and the
+// Dolt-derived identity ONLY when that backend is Dolt.
+//
+// It is a method rather than three assignments because there are two routes to
+// a snapshot — this package's use case, and `bd context`'s direct route, which
+// reads the config files itself so it can answer in degraded states where no
+// database opens — and one policy they both call is what keeps them from naming
+// one workspace two ways.
+//
+// The gate is load-bearing, not defensive, because both Dolt values DEFAULT
+// rather than fail: configfile reads an absent dolt_mode as "embedded" and an
+// absent dolt_database as "beads". So a workspace on a registered backend,
+// which configures neither, was described in confident detail as embedded Dolt
+// on database "beads" — on `bd context`, on `bd context --json`, and on GET
+// /v0/beads/context, which is the one endpoint automation is told to trust for
+// a server's identity.
+//
+// A non-Dolt backend reports the EMPTY string for both, and that is the only
+// value bd can assert. A registered backend's Open reads whatever it wants out
+// of the workspace; bd does not implement it and cannot know which logical
+// database it settled on, so any non-empty guess would be the same lie made
+// quieter. Both remain required strings on the wire — the shape is unchanged,
+// only the claim is dropped.
+//
+// The rest of the Dolt projection is gated already, one layer down:
+// IsDoltServerMode and IsDoltProxiedServerMode are false for any backend that
+// is not Dolt, so the bind endpoint and the proxied root were never published
+// for one. These two were the members with no such guard.
+func (info *ContextInfo) SetBackendIdentity(backend, doltMode, database string) {
+	info.Backend = backend
+	info.DoltMode, info.Database = "", ""
+	if backend == configfile.BackendDolt {
+		info.DoltMode, info.Database = doltMode, database
+	}
+}
+
 type ContextUseCase interface {
 	GetContextInfo(ctx context.Context) (ContextInfo, error)
 }
@@ -137,13 +179,11 @@ func (u *contextUseCaseImpl) GetContextInfo(ctx context.Context) (ContextInfo, e
 		CWDRepoRoot:  paths.CWDRepoRoot,
 		IsRedirected: paths.IsRedirected,
 		IsWorktree:   paths.IsWorktree,
-		Backend:      configfile.BackendDolt,
-		DoltMode:     backend.DoltMode,
-		Database:     backend.Database,
 		ProjectID:    backend.ProjectID,
 		DataDir:      backend.DataDir,
 		BdVersion:    u.version,
 	}
+	info.SetBackendIdentity(backend.Backend, backend.DoltMode, backend.Database)
 
 	if hasRole {
 		info.Role = role

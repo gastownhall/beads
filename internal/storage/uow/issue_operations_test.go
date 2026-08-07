@@ -656,7 +656,7 @@ func TestOperationIssueFallsBackOnlyAfterNotFoundWispRead(t *testing.T) {
 		},
 	}}
 
-	issue, isWisp, err := operationIssue(context.Background(), uw, "bd-durable")
+	issue, isWisp, err := operationIssue(context.Background(), uw, "bd-durable", false)
 	if err != nil {
 		t.Fatalf("operationIssue() error = %v", err)
 	}
@@ -677,7 +677,7 @@ func TestOperationIssueFallsBackToDurableAfterNoRowsWispRead(t *testing.T) {
 		},
 	}}
 
-	issue, isWisp, err := operationIssue(context.Background(), uw, "bd-durable")
+	issue, isWisp, err := operationIssue(context.Background(), uw, "bd-durable", false)
 	if err != nil {
 		t.Fatalf("operationIssue() error = %v", err)
 	}
@@ -692,7 +692,7 @@ func TestOperationIssueBothMissingMatchesPublicNotFound(t *testing.T) {
 		getIssue: func(context.Context, string) (*types.Issue, error) { return nil, sql.ErrNoRows },
 	}}
 
-	_, _, err := operationIssue(context.Background(), uw, "bd-missing")
+	_, _, err := operationIssue(context.Background(), uw, "bd-missing", false)
 	if !errors.Is(err, issueops.ErrNotFound) {
 		t.Fatalf("operationIssue() error = %v, want ErrNotFound", err)
 	}
@@ -711,7 +711,7 @@ func TestOperationIssuePropagatesWispReadFailure(t *testing.T) {
 		},
 	}}
 
-	_, _, err := operationIssue(context.Background(), uw, "bd-durable")
+	_, _, err := operationIssue(context.Background(), uw, "bd-durable", false)
 	if !errors.Is(err, wispReadErr) {
 		t.Fatalf("operationIssue() error = %v, want wisp read error", err)
 	}

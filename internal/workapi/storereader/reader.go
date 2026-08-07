@@ -8,7 +8,7 @@
 // store.IssueReader() from any front door — and one that silently skips the
 // telemetry decorator's reader-level spans, because a decorator adds its layer
 // in its own accessor. Down here the only importers are the two Dolt store
-// packages, and the cmd-bd-reader-constructor depguard rule in .golangci.yml
+// packages, and the cmd-bd-role-constructors depguard rule in .golangci.yml
 // makes a front door importing it a lint failure rather than a review comment.
 //
 // The accessor is the door. This is the thing behind it.
@@ -32,20 +32,19 @@ import (
 // execute" ritual: it has no way to reach the pieces.
 //
 // THE BOUNDARY, stated once here because this is where the constructor lives:
-// today the store-backed role answers `bd show --json` on the direct route,
-// and the HTTP surface and the proxied `bd show --json` reach the uow-backed
-// one. `bd ready` and `bd list` still call the workapi builders directly —
-// they consume the FILTER for the max-rows cap, --claim, --watch, the
-// hierarchical --parent tree and the text renderings — so Ready and List below
-// are reached only by tests until a front door moves. They are covered by
-// reader_test.go for exactly that reason, and their page epilogue is
-// workapi.FinishPage, which `bd list` DOES run in every mode but the
-// hierarchical --parent tree, so the untravelled path here is the query and
-// not the tail. See issueops.Reader's doc comment for why routing only those
-// commands' JSON paths through the role would be worse.
+// the store-backed role answers `bd show --json` and `bd list` on the DIRECT
+// route, and the HTTP surface and both commands' proxied routes reach the
+// uow-backed one. List below is therefore a traveled path on the most-run
+// command in the tree, which it was not before: `bd list` used to build the
+// filter and run this body's steps longhand.
+//
+// Ready below is still reached only by tests and by the HTTP surface. `bd
+// ready` calls the workapi builders directly because it consumes the FILTER
+// for --claim, --gated, --explain and --mol; see issueops.Reader's doc comment
+// for why routing only its JSON path through the role would be worse.
 func New(store storage.DoltStorage) (issueops.Reader, error) {
 	if store == nil {
-		return nil, &storage.ErrUnsupported{Op: "storereader.New", Backend: "nil"}
+		return nil, &issueops.ErrUnsupported{Op: "storereader.New", Backend: "nil"}
 	}
 	return &storeReader{store: store}, nil
 }
@@ -54,7 +53,28 @@ type storeReader struct{ store storage.DoltStorage }
 
 var _ issueops.Reader = (*storeReader)(nil)
 
+// offsetBackend names the backend an Offset refusal comes from. One name for
+// both engines on purpose: the server-backed and embedded stores hand back
+// THIS body, and it is the body — not the engine underneath it — that cannot
+// page by offset.
+const offsetBackend = "dolt-store"
+
+// refuseOffset is the shared refusal. The store seam renders LIMIT without
+// OFFSET (internal/storage/issueops/ready_work.go, search_counts.go), so a
+// request carrying one used to come back as the unpaged first page with no
+// error on it — a caller paging with Offset saw the same rows forever. The
+// field is not dead: `bd ready/list/query --offset` are real flags, and their
+// direct routes already reject a non-zero offset before reaching any of this
+// (cmd/bd/ready.go, list.go, query.go). This is the same refusal one layer
+// down, for the callers that are not the CLI.
+func refuseOffset(op string) error {
+	return &issueops.ErrUnsupported{Op: op, Backend: offsetBackend}
+}
+
 func (r *storeReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
+	if req.Offset != 0 {
+		return issueops.IssuePage{}, refuseOffset("Reader.Ready(Offset)")
+	}
 	filter, err := workapi.BuildReadyFilter(req)
 	if err != nil {
 		return issueops.IssuePage{}, err
@@ -77,7 +97,19 @@ func (r *storeReader) Ready(ctx context.Context, req issueops.ReadyRequest) (iss
 	return issueops.IssuePage{Items: items, HasMore: hasMore}, nil
 }
 
+// List answers one issue listing.
+//
+// The two knobs this body and its unit-of-work sibling answer differently sit
+// side by side here and point opposite ways. Offset is refused below because
+// this seam renders LIMIT without OFFSET. MaxRows is HONORED, and nothing
+// below mentions it: the cap rides on the filter the shared builder produces,
+// and the search path enforces it after the scan (internal/storage/issueops,
+// EnforceMaxRowsCap), so the answer is *ErrTooManyRows instead of a page. The
+// sibling refuses it, for the reason stated there.
 func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
+	if req.Offset != 0 {
+		return issueops.IssuePage{}, refuseOffset("Reader.List(Offset)")
+	}
 	cfg, err := workapi.LoadStoreListConfig(ctx, r.store)
 	if err != nil {
 		return issueops.IssuePage{}, err

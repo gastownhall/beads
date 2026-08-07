@@ -1,24 +1,20 @@
 package main
 
 import (
-	"context"
 	"fmt"
-	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// purgeScope parameterizes the shared purge/prune implementation so both
-// commands can share filter plumbing, preview/dry-run/force semantics, and
-// messaging without copying 200 lines of boilerplate.
+// purgeScope is what `bd purge` and `bd prune` still differ by once the
+// operation itself is behind issueops.Sweeper: a tier, a reference policy, and
+// the words each command prints.
 type purgeScope struct {
 	// cmdName is the user-visible command name (e.g. "purge", "prune").
 	// Used in messages and the suggested `--force` hint.
@@ -33,18 +29,17 @@ type purgeScope struct {
 	// (e.g. "closed ephemeral bead", "closed bead"). "(s)" is appended by
 	// the printer when multiple items are involved.
 	subjectNoun string
-	// ephemeralOnly restricts the filter to ephemeral beads when true.
-	// When false, restricts to non-ephemeral beads — the scopes are
-	// deliberately disjoint so `prune` never touches wisps that `purge`
-	// would handle, and vice versa.
-	ephemeralOnly bool
-	// requireFilter forces the user to pass --older-than or --pattern.
-	// Without this gate, `bd prune --force` would silently delete every
-	// closed non-ephemeral bead in the repo.
-	requireFilter bool
-	// ignoreReferences, when true, bypasses the reference-aware skip in prune.
-	// Always false for purge — ephemeral beads' references are themselves transient.
-	ignoreReferences bool
+	// tier is the plane this command sweeps. The two are DISJOINT: `prune`
+	// never touches a wisp that `purge` would handle, and vice versa.
+	tier issueops.SweepTier
+	// protectReferenced asks the role to skip candidates cited by a bead that
+	// is not done. `bd prune` asks unless --ignore-references; `bd purge`
+	// never does, because a wisp's citations are as transient as the wisp.
+	protectReferenced bool
+	// reportsReferences publishes the reference-skip keys under --json. It is
+	// separate from protectReferenced because `bd prune --ignore-references`
+	// still publishes them, as zeroes, which is the shipped shape.
+	reportsReferences bool
 }
 
 var purgeCmd = &cobra.Command{
@@ -87,138 +82,28 @@ EXAMPLES:
 			countKey:       "purged_count",
 			dryRunCountKey: "purge_count",
 			subjectNoun:    "closed ephemeral bead",
-			ephemeralOnly:  true,
-			requireFilter:  false,
+			tier:           issueops.SweepEphemeral,
 		})
 	},
 }
 
-// buildReferencedSet scans every non-closed bead's description, notes, and
-// comments for literal occurrences of any candidate ID and returns the set of
-// candidate IDs that were found. Uses a Statuses filter (not ExcludeStatus)
-// to avoid the PG ExcludeStatus coverage gap (be-jdeief).
-func buildReferencedSet(ctx context.Context, st storage.DoltStorage, candidateIDs map[string]bool) (map[string]bool, error) {
-	if len(candidateIDs) == 0 {
-		return nil, nil
+// openSweeper hands back the bulk-clearance role for whichever route this
+// invocation is on.
+func openSweeper() (issueops.Sweeper, error) {
+	if usesProxiedServer() {
+		return proxiedSweeper()
 	}
-	matcher := newCandidateIDMatcher(candidateIDs)
-
-	// Scan every non-done bead: built-in active statuses plus any configured
-	// custom statuses whose category is not "done". A repo can define custom
-	// statuses (status.custom) in active/wip/frozen categories; a bead in such
-	// a status that cites a closed bead must protect it from prune exactly like
-	// a built-in open bead does. Reading custom statuses is required, not
-	// best-effort: if we cannot enumerate them we must not under-scan and risk
-	// deleting a referenced bead, so the error propagates and aborts the prune.
-	notClosedStatuses := []types.Status{
-		types.StatusOpen,
-		types.StatusInProgress,
-		types.StatusBlocked,
-		types.StatusDeferred,
-		types.StatusPinned,
-		types.StatusHooked,
-	}
-	customStatuses, err := st.GetCustomStatusesDetailed(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("reading custom statuses for reference scan: %w", err)
-	}
-	for _, cs := range customStatuses {
-		if cs.Category != types.CategoryDone {
-			notClosedStatuses = append(notClosedStatuses, types.Status(cs.Name))
-		}
-	}
-	notClosed := types.IssueFilter{Statuses: notClosedStatuses}
-	openBeads, err := st.SearchIssues(ctx, "", notClosed)
-	if err != nil {
-		return nil, err
-	}
-
-	refSet := make(map[string]bool)
-	scanText := func(text string) {
-		matcher.findAll(text, refSet)
-	}
-
-	for _, iss := range openBeads {
-		scanText(iss.Description)
-		scanText(iss.Notes)
-		comments, err := st.GetIssueComments(ctx, iss.ID)
-		if err != nil {
+	if store == nil {
+		if err := ensureStoreActive(); err != nil {
 			return nil, err
 		}
-		for _, c := range comments {
-			scanText(c.Text)
-		}
 	}
-	return refSet, nil
+	return store.Sweeper()
 }
 
-type candidateIDMatcher struct {
-	byFirstByte map[byte][]string
-}
-
-func newCandidateIDMatcher(candidateIDs map[string]bool) candidateIDMatcher {
-	byFirstByte := make(map[byte][]string)
-	for id := range candidateIDs {
-		if id == "" {
-			continue
-		}
-		byFirstByte[id[0]] = append(byFirstByte[id[0]], id)
-	}
-	for first := range byFirstByte {
-		ids := byFirstByte[first]
-		sort.Slice(ids, func(i, j int) bool {
-			if len(ids[i]) == len(ids[j]) {
-				return ids[i] < ids[j]
-			}
-			return len(ids[i]) > len(ids[j])
-		})
-		byFirstByte[first] = ids
-	}
-	return candidateIDMatcher{byFirstByte: byFirstByte}
-}
-
-func (m candidateIDMatcher) findAll(text string, found map[string]bool) {
-	for i := 0; i < len(text); i++ {
-		ids := m.byFirstByte[text[i]]
-		if len(ids) == 0 || !isWordBoundaryAt(text, i) {
-			continue
-		}
-		for _, id := range ids {
-			end := i + len(id)
-			if end <= len(text) && strings.HasPrefix(text[i:], id) && isWordBoundaryAt(text, end) {
-				found[id] = true
-				break
-			}
-		}
-	}
-}
-
-func isWordBoundaryAt(s string, idx int) bool {
-	var before, after byte
-	if idx > 0 {
-		before = s[idx-1]
-	}
-	if idx < len(s) {
-		after = s[idx]
-	}
-	return isASCIIWordByte(before) != isASCIIWordByte(after)
-}
-
-func isASCIIWordByte(b byte) bool {
-	return b == '_' ||
-		('0' <= b && b <= '9') ||
-		('A' <= b && b <= 'Z') ||
-		('a' <= b && b <= 'z')
-}
-
-// runPurgeOrPrune implements the shared delete-closed-beads flow used by
-// both `bd purge` (ephemeral scope) and `bd prune` (non-ephemeral scope).
-// The caller's scope controls the filter, messaging, and safety gate.
+// runPurgeOrPrune implements the shared delete-closed-beads flow used by both
+// `bd purge` (ephemeral tier) and `bd prune` (durable tier), on both routes.
 func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
-	if usesProxiedServer() {
-		return runPurgeOrPruneProxied(cmd, scope)
-	}
-
 	CheckReadonly(scope.cmdName)
 
 	force, _ := cmd.Flags().GetBool("force")
@@ -226,7 +111,13 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 	olderThan, _ := cmd.Flags().GetString("older-than")
 	pattern, _ := cmd.Flags().GetString("pattern")
 
-	if scope.requireFilter && olderThan == "" && pattern == "" {
+	// The ROLE refuses an unfiltered durable sweep — that guard is
+	// workapi.ValidateSweepRequest, below every front door. This branch is here
+	// for the MESSAGE: the role's refusal names request fields, not the two
+	// flags a person who typed `bd prune --force` has to reach for. The contract
+	// case RunSweeperRefusesAnUnfilteredDurableSweep proves the guard survives
+	// this branch being deleted.
+	if scope.tier == issueops.SweepDurable && olderThan == "" && pattern == "" {
 		return HandleErrorWithHint(
 			fmt.Sprintf("bd %s requires --older-than or --pattern", scope.cmdName),
 			"Protects against accidental bulk deletion. Use `--pattern '*'` to\n"+
@@ -234,228 +125,191 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 				"  / `--pattern '<glob>'` to narrow the deletion.")
 	}
 
-	if store == nil {
-		if err := ensureStoreActive(); err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
+	request := issueops.SweepRequest{
+		Actor:             actor,
+		Tier:              scope.tier,
+		IDPattern:         pattern,
+		ProtectReferenced: scope.protectReferenced,
+		// A --dry-run and an UNCONFIRMED run ask the role the same question —
+		// "what would this do" — so both send DryRun. --force is this
+		// command's confirmation, not a request field.
+		DryRun: dryRun || !force,
 	}
-
-	ctx := rootCtx
-
-	statusClosed := types.StatusClosed
-	ephemeralFlag := scope.ephemeralOnly
-	filter := types.IssueFilter{
-		Status:    &statusClosed,
-		Ephemeral: &ephemeralFlag,
-	}
-
-	var cutoff *time.Time
 	if olderThan != "" {
 		days, err := parseHumanDuration(olderThan)
 		if err != nil {
 			return HandleErrorRespectJSON("invalid --older-than value %q: %v", olderThan, err)
 		}
-		cutoffTime := time.Now().UTC().AddDate(0, 0, -days)
-		cutoff = &cutoffTime
-		filter.ClosedBefore = cutoff
+		cutoff := time.Now().UTC().AddDate(0, 0, -days)
+		request.ClosedBefore = &cutoff
 	}
 
-	closedIssues, err := store.SearchIssues(ctx, "", filter)
+	sweeper, err := openSweeper()
 	if err != nil {
-		return HandleErrorRespectJSON("listing issues: %v", err)
+		return HandleErrorRespectJSON("%v", err)
 	}
-
-	if pattern != "" {
-		var matched []*types.Issue
-		for _, issue := range closedIssues {
-			if ok, _ := filepath.Match(pattern, issue.ID); ok {
-				matched = append(matched, issue)
-			}
-		}
-		closedIssues = matched
-	}
-
-	var safetyStats closedDeletionCandidateStats
-	closedIssues, safetyStats = filterClosedDeletionCandidates(closedIssues, cutoff)
-	pinnedCount := safetyStats.PinnedSkipped
-	warnClosedDeletionSafetySkips(safetyStats)
-
-	// Reference-aware skip (prune only): filter closed beads cited by open beads.
-	referencedCount := 0
-	var referencedSample []string
-	if scope.cmdName == "prune" && !scope.ignoreReferences {
-		candidateIDs := make(map[string]bool, len(closedIssues))
-		for _, iss := range closedIssues {
-			candidateIDs[iss.ID] = true
-		}
-		refSet, err := buildReferencedSet(ctx, store, candidateIDs)
-		if err != nil {
-			return HandleErrorRespectJSON("scanning open beads for references: %v", err)
-		}
-		nonReferenced := closedIssues[:0]
-		for _, iss := range closedIssues {
-			if refSet[iss.ID] {
-				referencedCount++
-				if len(referencedSample) < 100 {
-					referencedSample = append(referencedSample, iss.ID)
-				}
-			} else {
-				nonReferenced = append(nonReferenced, iss)
-			}
-		}
-		closedIssues = nonReferenced
-	}
-
-	if len(closedIssues) == 0 {
-		if jsonOutput {
-			stats := map[string]interface{}{
-				scope.countKey: 0,
-				"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
-			}
-			if scope.cmdName == "prune" {
-				stats["referenced_skipped"] = referencedCount
-				stats["referenced_count"] = referencedCount
-				if len(referencedSample) > 0 {
-					stats["referenced_ids_sample"] = referencedSample
-				}
-			}
-			return outputJSON(stats)
-		}
-		msg := fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName)
-		if olderThan != "" {
-			msg += fmt.Sprintf(" (older than %s)", olderThan)
-		}
-		if pattern != "" {
-			msg += fmt.Sprintf(" (matching %q)", pattern)
-		}
-		fmt.Println(msg)
-		if referencedCount > 0 {
-			fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
-				"  (%d closed bead(s) protected by open-bead references — use --ignore-references to override)",
-				referencedCount)))
-		}
-		return nil
-	}
-
-	issueIDs := make([]string, len(closedIssues))
-	for i, issue := range closedIssues {
-		issueIDs[i] = issue.ID
-	}
-
-	if dryRun {
-		result, err := store.DeleteIssues(ctx, issueIDs, false, false, true)
-		if jsonOutput {
-			stats := map[string]interface{}{
-				"dry_run":            true,
-				scope.dryRunCountKey: len(issueIDs),
-				"dependencies":       0,
-				"labels":             0,
-				"events":             0,
-			}
-			if err == nil {
-				stats["dependencies"] = result.DependenciesCount
-				stats["labels"] = result.LabelsCount
-				stats["events"] = result.EventsCount
-			}
-			if pinnedCount > 0 {
-				stats["pinned_skipped"] = pinnedCount
-			}
-			if scope.cmdName == "prune" {
-				stats["referenced_skipped"] = referencedCount
-				stats["referenced_count"] = referencedCount
-				if len(referencedSample) > 0 {
-					stats["referenced_ids_sample"] = referencedSample
-				}
-			}
-			return outputJSON(stats)
-		}
-		fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, len(issueIDs), scope.subjectNoun)
-		if err == nil {
-			fmt.Printf("  Dependencies: %d\n", result.DependenciesCount)
-			fmt.Printf("  Labels:       %d\n", result.LabelsCount)
-			fmt.Printf("  Events:       %d\n", result.EventsCount)
-		}
-		if pinnedCount > 0 {
-			fmt.Printf("  Pinned (skipped): %d\n", pinnedCount)
-		}
-		if referencedCount > 0 {
-			fmt.Printf("  %s   %d\n", ui.MutedStyle.Render("Referenced (skipped):"), referencedCount)
-			sample := referencedSample
-			if len(sample) > 5 {
-				sample = sample[:5]
-			}
-			idStrs := make([]string, len(sample))
-			for i, id := range sample {
-				idStrs[i] = ui.IDStyle.Render(id)
-			}
-			suffix := ""
-			if referencedCount > 5 {
-				suffix = ui.MutedStyle.Render(", ...")
-			}
-			fmt.Printf("  %s %s%s\n", ui.MutedStyle.Render("Referenced IDs (sample):"), strings.Join(idStrs, ", "), suffix)
-		}
-		fmt.Printf("\n(Dry-run mode — no changes made)\n")
-		return nil
-	}
-
-	if !force {
-		fmt.Printf("Found %d %s(s) to %s\n", len(issueIDs), scope.subjectNoun, scope.cmdName)
-		if pinnedCount > 0 {
-			fmt.Printf("Skipping %d pinned bead(s)\n", pinnedCount)
-		}
-		if referencedCount > 0 {
-			fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Skipping %d referenced bead(s)", referencedCount)))
-		}
-		hint := fmt.Sprintf("bd %s --force", scope.cmdName)
-		if olderThan != "" {
-			hint += " --older-than " + olderThan
-		}
-		if pattern != "" {
-			hint += " --pattern " + pattern
-		}
-		return HandleErrorWithHint(
-			fmt.Sprintf("would %s %d bead(s)", scope.cmdName, len(issueIDs)),
-			fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
-	}
-
-	result, err := store.DeleteIssues(ctx, issueIDs, false, true, false)
+	result, err := sweeper.Sweep(rootCtx, request)
 	if err != nil {
 		return HandleErrorRespectJSON("%s failed: %v", scope.cmdName, err)
 	}
 
-	commandDidWrite.Store(true)
-	if result.DeletedCount > 0 {
-		commandMayEmptyJSONLExport.Store(true)
+	warnSweepDefenseSkips(result.Skipped)
+
+	switch {
+	case result.Swept == 0:
+		return emitSweepEmpty(scope, olderThan, pattern, result)
+	case dryRun:
+		return emitSweepDryRun(scope, result)
+	case !force:
+		return emitSweepConfirm(scope, olderThan, pattern, result)
 	}
 
+	commandDidWrite.Store(true)
+	commandMayEmptyJSONLExport.Store(true)
+	return emitSweepResult(scope, result)
+}
+
+// warnSweepDefenseSkips reports the candidates the role's own recheck threw
+// out. A non-zero count means the tier query and the recheck disagreed about
+// which rows are closed, which earns a line on stderr in any output mode.
+func warnSweepDefenseSkips(skips issueops.SweepSkips) {
+	total := skips.Unreadable + skips.NotClosed + skips.UnknownClosedAt + skips.ClosedAtOrAfterCutoff
+	if total == 0 {
+		return
+	}
+	WarnError("skipped %d deletion candidate(s) after closed_at safety recheck (nil=%d, non_closed=%d, missing_closed_at=%d, too_recent=%d)",
+		total,
+		skips.Unreadable,
+		skips.NotClosed,
+		skips.UnknownClosedAt,
+		skips.ClosedAtOrAfterCutoff,
+	)
+}
+
+// addReferenceStats attaches the reference-skip members to a --json payload.
+// `bd prune` publishes them whether or not the protection was asked for, which
+// is the shipped shape; `bd purge` never does.
+func addReferenceStats(scope purgeScope, stats map[string]interface{}, result issueops.SweepResult) {
+	if !scope.reportsReferences {
+		return
+	}
+	stats["referenced_skipped"] = result.Skipped.Referenced
+	stats["referenced_count"] = result.Skipped.Referenced
+	if len(result.ReferencedIDs) > 0 {
+		stats["referenced_ids_sample"] = result.ReferencedIDs
+	}
+}
+
+func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops.SweepResult) error {
 	if jsonOutput {
 		stats := map[string]interface{}{
-			scope.countKey: result.DeletedCount,
-			"dependencies": result.DependenciesCount,
-			"labels":       result.LabelsCount,
-			"events":       result.EventsCount,
+			scope.countKey: 0,
+			"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 		}
-		if pinnedCount > 0 {
-			stats["pinned_skipped"] = pinnedCount
-		}
-		if scope.cmdName == "prune" {
-			stats["referenced_skipped"] = referencedCount
-			stats["referenced_count"] = referencedCount
-			if len(referencedSample) > 0 {
-				stats["referenced_ids_sample"] = referencedSample
-			}
-		}
+		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
-	fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.DeletedCount, scope.subjectNoun)
-	fmt.Printf("  Dependencies removed: %d\n", result.DependenciesCount)
-	fmt.Printf("  Labels removed:       %d\n", result.LabelsCount)
-	fmt.Printf("  Events removed:       %d\n", result.EventsCount)
-	if pinnedCount > 0 {
-		fmt.Printf("  Pinned (skipped):     %d\n", pinnedCount)
+	msg := fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName)
+	if olderThan != "" {
+		msg += fmt.Sprintf(" (older than %s)", olderThan)
 	}
-	if referencedCount > 0 {
-		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), referencedCount)
+	if pattern != "" {
+		msg += fmt.Sprintf(" (matching %q)", pattern)
+	}
+	fmt.Println(msg)
+	if result.Skipped.Referenced > 0 {
+		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
+			"  (%d closed bead(s) protected by open-bead references — use --ignore-references to override)",
+			result.Skipped.Referenced)))
+	}
+	return nil
+}
+
+func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
+	if jsonOutput {
+		stats := map[string]interface{}{
+			"dry_run":            true,
+			scope.dryRunCountKey: result.Swept,
+			"dependencies":       result.Dependencies,
+			"labels":             result.Labels,
+			"events":             result.Events,
+		}
+		if result.Skipped.Pinned > 0 {
+			stats["pinned_skipped"] = result.Skipped.Pinned
+		}
+		addReferenceStats(scope, stats, result)
+		return outputJSON(stats)
+	}
+	fmt.Printf("Would %s %d %s(s)\n", scope.cmdName, result.Swept, scope.subjectNoun)
+	fmt.Printf("  Dependencies: %d\n", result.Dependencies)
+	fmt.Printf("  Labels:       %d\n", result.Labels)
+	fmt.Printf("  Events:       %d\n", result.Events)
+	if result.Skipped.Pinned > 0 {
+		fmt.Printf("  Pinned (skipped): %d\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Referenced > 0 {
+		fmt.Printf("  %s   %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
+		sample := result.ReferencedIDs
+		if len(sample) > 5 {
+			sample = sample[:5]
+		}
+		idStrs := make([]string, len(sample))
+		for i, id := range sample {
+			idStrs[i] = ui.IDStyle.Render(id)
+		}
+		suffix := ""
+		if result.Skipped.Referenced > 5 {
+			suffix = ui.MutedStyle.Render(", ...")
+		}
+		fmt.Printf("  %s %s%s\n", ui.MutedStyle.Render("Referenced IDs (sample):"), strings.Join(idStrs, ", "), suffix)
+	}
+	fmt.Printf("\n(Dry-run mode — no changes made)\n")
+	return nil
+}
+
+func emitSweepConfirm(scope purgeScope, olderThan, pattern string, result issueops.SweepResult) error {
+	fmt.Printf("Found %d %s(s) to %s\n", result.Swept, scope.subjectNoun, scope.cmdName)
+	if result.Skipped.Pinned > 0 {
+		fmt.Printf("Skipping %d pinned bead(s)\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Referenced > 0 {
+		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Skipping %d referenced bead(s)", result.Skipped.Referenced)))
+	}
+	hint := fmt.Sprintf("bd %s --force", scope.cmdName)
+	if olderThan != "" {
+		hint += " --older-than " + olderThan
+	}
+	if pattern != "" {
+		hint += " --pattern " + pattern
+	}
+	return HandleErrorWithHint(
+		fmt.Sprintf("would %s %d bead(s)", scope.cmdName, result.Swept),
+		fmt.Sprintf("Use --force to confirm or --dry-run to preview.\n  %s", hint))
+}
+
+func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
+	if jsonOutput {
+		stats := map[string]interface{}{
+			scope.countKey: result.Swept,
+			"dependencies": result.Dependencies,
+			"labels":       result.Labels,
+			"events":       result.Events,
+		}
+		if result.Skipped.Pinned > 0 {
+			stats["pinned_skipped"] = result.Skipped.Pinned
+		}
+		addReferenceStats(scope, stats, result)
+		return outputJSON(stats)
+	}
+	fmt.Printf("%s %s %d %s(s)\n", ui.RenderPass("✓"), capitalize(scope.pastTense), result.Swept, scope.subjectNoun)
+	fmt.Printf("  Dependencies removed: %d\n", result.Dependencies)
+	fmt.Printf("  Labels removed:       %d\n", result.Labels)
+	fmt.Printf("  Events removed:       %d\n", result.Events)
+	if result.Skipped.Pinned > 0 {
+		fmt.Printf("  Pinned (skipped):     %d\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Referenced > 0 {
+		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
 	}
 	return nil
 }

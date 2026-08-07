@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cenkalti/backoff/v4"
+
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -59,29 +61,84 @@ func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Is
 	return t.CreateIssue(ctx, issue, actor)
 }
 
-// RunInTransaction executes a function within a database transaction.
-// The commitMsg is used for the DOLT_COMMIT that occurs inside the transaction,
-// making the write atomically visible in Dolt's version history.
-// Wisp routing is handled within individual transaction methods based on ID/Ephemeral flag.
+// RunInTransaction executes a function within a database transaction. Its
+// callback is invoked at most once per call; callers retry explicitly after a
+// callback has started when their operation is safe to repeat. The commitMsg is
+// used for the DOLT_COMMIT that makes regular writes visible in Dolt history.
+// Wisp routing is handled by individual transaction methods based on
+// ID/Ephemeral.
 func (s *DoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
-	return s.withRetry(ctx, func() error {
-		return s.runDoltTransaction(ctx, commitMsg, fn)
+	return s.runInTransaction(ctx, commitMsg, fn, s.runDoltTransaction)
+}
+
+func (s *DoltStore) runInTransaction(
+	ctx context.Context,
+	commitMsg string,
+	fn func(storage.Transaction) error,
+	run func(context.Context, string, func(storage.Transaction) error) error,
+) error {
+	return s.withTransactionSetupRetry(ctx, func() error {
+		invoked := false
+		var callbackErr error
+		err := run(ctx, commitMsg, func(tx storage.Transaction) error {
+			invoked = true
+			callbackErr = fn(tx)
+			return callbackErr
+		})
+		if invoked && err != nil {
+			// Callback failures are caller-owned and must not affect server
+			// health accounting. Infrastructure failures after a successful
+			// callback keep the at-most-once boundary too, except an explicitly
+			// indeterminate commit reaches withRetry so it can record the lost
+			// connection before stopping without replay.
+			if callbackErr == nil && errors.Is(err, ErrCommitIndeterminate) {
+				return err
+			}
+			return backoff.Permanent(err)
+		}
+		return err
 	})
 }
 
 // RunInIssueLifecycleTransaction runs a lifecycle transition and its durable
 // side effects through one SQL transaction and one Dolt commit attempt.
 func (s *DoltStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx storage.IssueLifecycleTransaction) error) error {
-	return s.withRetryTx(ctx, func(sqlTx *sql.Tx) error {
-		tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s, lifecycle: true}
-		if err := fn(tx); err != nil {
-			return err
+	return s.runInIssueLifecycleTransaction(ctx, commitMsg, fn, s.withWriteTx)
+}
+
+// runInIssueLifecycleTransaction retries only failures that occur before the
+// public callback starts. Once fn has run, its caller-owned work must never be
+// replayed, even when Dolt proves that the SQL transaction rolled back.
+func (s *DoltStore) runInIssueLifecycleTransaction(
+	ctx context.Context,
+	commitMsg string,
+	fn func(tx storage.IssueLifecycleTransaction) error,
+	run func(context.Context, func(*sql.Tx) error) error,
+) error {
+	return s.withTransactionSetupRetry(ctx, func() error {
+		invoked := false
+		var callbackErr error
+		err := run(ctx, func(sqlTx *sql.Tx) error {
+			invoked = true
+			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s, lifecycle: true}
+			if callbackErr = fn(tx); callbackErr != nil {
+				return callbackErr
+			}
+			tables := tx.dirtyTableNames()
+			if len(tables) == 0 {
+				return nil
+			}
+			return s.doltAddAndCommitInTx(ctx, sqlTx, tables, commitMsg)
+		})
+		if invoked && err != nil {
+			// An ambiguous commit reaches withRetry so connection failures still
+			// count toward the circuit breaker, but it is never replayed.
+			if callbackErr == nil && errors.Is(err, ErrCommitIndeterminate) {
+				return err
+			}
+			return backoff.Permanent(err)
 		}
-		tables := tx.dirtyTableNames()
-		if len(tables) == 0 {
-			return nil
-		}
-		return s.doltAddAndCommitInTx(ctx, sqlTx, tables, commitMsg)
+		return err
 	})
 }
 
@@ -159,18 +216,25 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		return err
 	}
 
-	if err := regularTx.Commit(); err != nil {
-		_ = ignoredTx.Rollback()
-		return fmt.Errorf("sql commit (regular): %w", err)
+	return s.finishDoltTransaction(ctx, conn, tx, commitMsg)
+}
+
+// finishDoltTransaction commits the regular SQL transaction, its associated
+// Dolt revision, and then the ignored-table transaction. Once the regular SQL
+// transaction succeeds, later failures have an indeterminate durable outcome.
+func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) error {
+	if err := tx.regularTx.Commit(); err != nil {
+		_ = tx.ignoredTx.Rollback()
+		return wrapSQLCommitError("sql commit (regular)", err)
 	}
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
-		_ = ignoredTx.Rollback()
-		return err
+		_ = tx.ignoredTx.Rollback()
+		return fmt.Errorf("stage and commit after regular SQL commit: %w: %w", err, ErrCommitIndeterminate)
 	}
 
-	if err := ignoredTx.Commit(); err != nil {
-		return fmt.Errorf("sql commit (ignored, regular already committed): %w", err)
+	if err := tx.ignoredTx.Commit(); err != nil {
+		return fmt.Errorf("sql commit (ignored, regular already committed): %w: %w", err, ErrCommitIndeterminate)
 	}
 	return nil
 }
