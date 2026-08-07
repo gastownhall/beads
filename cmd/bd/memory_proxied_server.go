@@ -8,8 +8,8 @@ import (
 )
 
 // Proxied-server handlers for the memory verbs that have not yet converged
-// onto memoryops.Memories (`bd remember`, `bd memories`, `bd forget`; `bd
-// recall` now reaches the role through openMemories, like every other
+// onto memoryops.Memories (`bd remember` and `bd forget`; `bd recall` and `bd
+// memories` now reach the role through openMemories, like every other
 // converged command). Memories are a thin prefix layer
 // (kv.memory.*) over the config table, so these mirror
 // config_proxied_server.go / kv_proxied_server.go: one RunTx per write
@@ -65,21 +65,6 @@ func runRememberProxiedServer(ctx context.Context, key, insight string) error {
 	}
 
 	return printRememberResult(verb, key, insight)
-}
-
-func runMemoriesProxiedServer(ctx context.Context, search string) error {
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
-	allConfig, err := uow.RunTxRead(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (map[string]string, error) {
-		return uw.ConfigUseCase().GetAllConfig(ctx)
-	})
-	if err != nil {
-		return HandleErrorRespectJSON("listing memories: %v", err)
-	}
-
-	return printMemoriesResult(memoriesFromConfig(allConfig, search), search)
 }
 
 func runForgetProxiedServer(ctx context.Context, key string) error {

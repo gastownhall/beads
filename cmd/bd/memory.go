@@ -384,24 +384,27 @@ Examples:
 
 		var search string
 		if len(args) > 0 {
-			search = strings.ToLower(args[0])
+			search = args[0]
 		}
 
-		if usesProxiedServer() {
-			return runMemoriesProxiedServer(rootCtx, search)
-		}
-
-		if err := ensureDirectMode("memories requires direct database access"); err != nil {
+		memories, err := openMemories("memories requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		ctx := rootCtx
-		allConfig, err := store.GetAllConfig(ctx)
+		// The term goes to the role RAW. Case folding is List's, so the two
+		// routes cannot come to disagree about what matches — which is the
+		// whole reason the filter moved down.
+		result, err := memories.List(rootCtx, memoryops.ListRequest{Search: search})
 		if err != nil {
 			return HandleErrorRespectJSON("listing memories: %v", err)
 		}
 
-		return printMemoriesResult(memoriesFromConfig(allConfig, search), search)
+		// The ECHO, on the other hand, has always been lowercased: `bd memories
+		// FOO` prints `No memories matching "foo"`. It is a wart — a front door
+		// should say back what the user typed — but it is shipped output, and
+		// this commit is a convergence, not a change. Fixing it is a one-liner
+		// with its own test, like truncateMemory's rune splitting.
+		return printMemoriesResult(result.Memories, strings.ToLower(search))
 	},
 }
 
