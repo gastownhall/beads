@@ -245,6 +245,18 @@ var routeTable = []route{
 		implemented: true,
 		handler:     (*Server).handleDelete,
 	},
+	{
+		op:     OpRememberMemory,
+		method: http.MethodPost,
+		// A plain collection POST, not a custom method: this creates one member
+		// of the collection the path names, which is what POST already means.
+		// The two destructive issue operations above are custom methods because
+		// they act on a SET the request describes; nothing here does.
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.remember",
+		implemented: true,
+		handler:     (*Server).handleRememberMemory,
+	},
 }
 
 // specPathOf is the document path for a route, defaulting to the router

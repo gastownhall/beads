@@ -181,6 +181,11 @@ const (
 	OpDeleteIssues = "deleteIssues"
 	// OpBatchCreateIssues creates many issues as one transaction, or none.
 	OpBatchCreateIssues = "batchCreateIssues"
+	// OpRememberMemory stores one memory, behind memoryops.Memories. It is the
+	// first operation on this surface that reaches a role outside issueops: the
+	// memory plane is user data riding in the config table, not settings, and
+	// the two have different merge semantics and a different miss contract.
+	OpRememberMemory = "rememberMemory"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -270,6 +275,11 @@ var operationCodes = map[string][]Code{
 	// item can collide with a stored row and the role's ErrAlreadyExists is
 	// unreachable from the wire.
 	OpBatchCreateIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No 404 and no conflict code: this is an UPSERT with a server-derivable
+	// key, so there is no resource it can fail to address and no row it can
+	// collide with. Its 400 is the body vocabulary plus the ROLE's two
+	// refusals — empty content, and content no key can be derived from.
+	OpRememberMemory: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
 }
 
 // Result is a problem response ready to be written: the envelope plus the

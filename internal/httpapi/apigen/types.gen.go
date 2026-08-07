@@ -214,7 +214,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.remember`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	Capabilities []string `json:"capabilities"`
 
 	// Database Logical database name (not a host or a DSN).
@@ -426,6 +426,35 @@ type ReadyPage struct {
 
 	// Items Empty array (never null) when nothing is ready.
 	Items []IssueWithCounts `json:"items"`
+}
+
+// RememberRequest What to remember, and optionally under what key.
+type RememberRequest struct {
+	// Content The memory itself, stored VERBATIM: newlines, surrounding space and unicode all survive. Flattening it to one line is what a front door does when it prints, not what this plane does when it stores.
+	//
+	// Empty after trimming is a `400`. So is content from which no key can be derived when `key` is omitted — `"!!!"` derives to nothing — and the recovery for that one is to send a `key`.
+	Content string `json:"content"`
+
+	// Key The key to store under. OMIT IT to have the server derive one from `content`; the response's `key` is then how the caller learns where the memory landed.
+	//
+	// Supplied, it is used verbatim — no trimming, no slugging, no charset restriction. A key carrying a control character is storable this way and by `bd remember --key`, and is then unreachable through `GET`/`DELETE /v0/beads/memories/{key}`, which refuse one: see those operations.
+	Key *string `json:"key,omitempty"`
+}
+
+// RememberedMemory One stored memory, plus whether storing it overwrote a previous value.
+//
+// It is `Memory`'s shape with `replaced` added rather than a composition of it, because this document repeats property lists instead of using `allOf` (see the note at the top of the file).
+type RememberedMemory struct {
+	// Key The key the memory now lives under: the one the request supplied, or the one derived from `content`. Recall it under exactly these bytes.
+	Key string `json:"key"`
+
+	// Replaced True when a previous value existed under `key` and this request overwrote it; false when the key was new. It is observed in the same transaction as the write, so it describes the row this request wrote.
+	//
+	// A previous value that was the EMPTY STRING reports true: the ROW existed, even though `GET /v0/beads/memories/{key}` would have answered `404` for it. That divergence is the storage seam's conflation showing through, and it is stated rather than smoothed over, because smoothing it would mean this member reporting "nothing was there" about a write that overwrote something.
+	Replaced bool `json:"replaced"`
+
+	// Value The stored content, echoed verbatim. Always present, and never withheld — this plane has no redaction; see the operation description.
+	Value string `json:"value"`
 }
 
 // Setting One entry of the workspace's stored settings plane.
@@ -865,3 +894,6 @@ type DeleteIssuesJSONRequestBody = DeleteIssuesRequest
 
 // SweepIssuesJSONRequestBody defines body for SweepIssues for application/json ContentType.
 type SweepIssuesJSONRequestBody = SweepRequest
+
+// RememberMemoryJSONRequestBody defines body for RememberMemory for application/json ContentType.
+type RememberMemoryJSONRequestBody = RememberRequest

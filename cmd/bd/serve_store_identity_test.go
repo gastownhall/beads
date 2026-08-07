@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // TestServeAnswersFromTheStoreTheRootCommandOpened pins the one property this
@@ -204,8 +205,11 @@ func (*serveIdentityStore) Deleter() (issueops.Deleter, error) { return serveIde
 func (*serveIdentityStore) BatchCreator() (issueops.BatchCreator, error) {
 	return serveIdentityRole{}, nil
 }
+func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
+	return serveIdentityRole{}, nil
+}
 
-// serveIdentityRole satisfies all eleven at once, which it can because no two
+// serveIdentityRole satisfies all twelve at once, which it can because no two
 // of those interfaces declare a method of the same name. If a future role
 // collides, split this into one type per role — the embedded method would stop
 // being promoted and the build would say so.
@@ -221,6 +225,7 @@ type serveIdentityRole struct {
 	issueops.Sweeper
 	issueops.Deleter
 	issueops.BatchCreator
+	memoryops.Memories
 }
 
 type serveIdentityReader struct{ id string }

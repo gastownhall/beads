@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // These tests cover the OTHER database source: a backend whose facade is a
@@ -251,6 +252,73 @@ func (c *roleBatchCreator) createRequests() []issueops.CreateBatchRequest {
 	return append([]issueops.CreateBatchRequest(nil), c.requests...)
 }
 
+// roleMemories is the store-shaped source's persistent-memory role — the one
+// role of the set that is not an issueops role.
+//
+// It records the request each method was handed, because what is worth
+// asserting at this seam is that the WIRE's parameters reach the role
+// unrewritten: the key derivation, the search folding and the plane filtering
+// all belong to the conformance contract, not to a handler test.
+type roleMemories struct {
+	remembered memoryops.RememberResult
+	recalled   memoryops.RecallResult
+	forgotten  memoryops.ForgetResult
+	listed     memoryops.ListResult
+	err        error
+
+	mu       sync.Mutex
+	remember []memoryops.RememberRequest
+	recall   []memoryops.RecallRequest
+	forget   []memoryops.ForgetRequest
+	list     []memoryops.ListRequest
+}
+
+func (m *roleMemories) Remember(_ context.Context, req memoryops.RememberRequest) (memoryops.RememberResult, error) {
+	m.mu.Lock()
+	m.remember = append(m.remember, req)
+	m.mu.Unlock()
+	if m.err != nil {
+		return memoryops.RememberResult{}, m.err
+	}
+	return m.remembered, nil
+}
+
+func (m *roleMemories) Recall(_ context.Context, req memoryops.RecallRequest) (memoryops.RecallResult, error) {
+	m.mu.Lock()
+	m.recall = append(m.recall, req)
+	m.mu.Unlock()
+	if m.err != nil {
+		return memoryops.RecallResult{}, m.err
+	}
+	return m.recalled, nil
+}
+
+func (m *roleMemories) Forget(_ context.Context, req memoryops.ForgetRequest) (memoryops.ForgetResult, error) {
+	m.mu.Lock()
+	m.forget = append(m.forget, req)
+	m.mu.Unlock()
+	if m.err != nil {
+		return memoryops.ForgetResult{}, m.err
+	}
+	return m.forgotten, nil
+}
+
+func (m *roleMemories) List(_ context.Context, req memoryops.ListRequest) (memoryops.ListResult, error) {
+	m.mu.Lock()
+	m.list = append(m.list, req)
+	m.mu.Unlock()
+	if m.err != nil {
+		return memoryops.ListResult{}, m.err
+	}
+	return m.listed, nil
+}
+
+func (m *roleMemories) rememberRequests() []memoryops.RememberRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]memoryops.RememberRequest(nil), m.remember...)
+}
+
 type roleClaimer struct {
 	result issueops.ClaimResult
 	err    error
@@ -401,6 +469,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.BatchCreator == nil {
 		cfg.BatchCreator = &roleBatchCreator{}
+	}
+	if cfg.Memories == nil {
+		cfg.Memories = &roleMemories{}
 	}
 	return cfg
 }
@@ -645,6 +716,25 @@ func TestListenRequiresExactlyOneDatabaseSource(t *testing.T) {
 		{
 			name:    "a provider and a batch creator",
 			cfg:     Config{Provider: &fakeProvider{}, BatchCreator: &roleBatchCreator{}},
+			wantErr: "exactly one database source",
+		},
+		{
+			// The role that is not an issueops role. It is in the same
+			// all-or-nothing set for the same reason: without it the server
+			// binds, advertises the memory operations, and nil-dereferences on
+			// the first request that reaches one.
+			name:    "no memories role",
+			cfg:     rolesConfigWithout(func(c *Config) { c.Memories = nil }),
+			wantErr: "no database source",
+		},
+		{
+			name:    "a memories role alone",
+			cfg:     Config{Memories: &roleMemories{}},
+			wantErr: "no database source",
+		},
+		{
+			name:    "a provider and a memories role",
+			cfg:     Config{Provider: &fakeProvider{}, Memories: &roleMemories{}},
 			wantErr: "exactly one database source",
 		},
 		{

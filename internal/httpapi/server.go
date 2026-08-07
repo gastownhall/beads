@@ -28,6 +28,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // APIVersion is the path major this package serves, reported as
@@ -187,6 +188,13 @@ type Config struct {
 	// Deleter is the OTHER destructive one, required for the same reason.
 	Deleter      issueops.Deleter
 	BatchCreator issueops.BatchCreator
+	// Memories is the workspace's persistent memory plane, and the one field
+	// here that is not an issueops role: memories are user data riding in the
+	// config table under their own merge class, not settings, so they have
+	// their own leaf package. Required on the same terms as every field above —
+	// a partial set is refused, so the field and the operations that reach it
+	// land together.
+	Memories memoryops.Memories
 	// Workspace is the startup snapshot GET /v0/beads/context answers from.
 	// Only the allowlisted fields are ever serialized — see contextResponse,
 	// which names the whole set and the reasons for the exclusions.
@@ -227,6 +235,7 @@ type Server struct {
 	issueSweeper      issueops.Sweeper
 	issueDeleter      issueops.Deleter
 	issueBatchCreator issueops.BatchCreator
+	workspaceMemories memoryops.Memories
 
 	listener net.Listener
 	http     *http.Server
@@ -336,6 +345,7 @@ func Listen(cfg Config) (*Server, error) {
 		issueSweeper:      cfg.Sweeper,
 		issueDeleter:      cfg.Deleter,
 		issueBatchCreator: cfg.BatchCreator,
+		workspaceMemories: cfg.Memories,
 
 		sem:        make(chan struct{}, maxInflight),
 		semTimeout: semAcquireTimeout,
@@ -425,12 +435,12 @@ func Listen(cfg Config) (*Server, error) {
 // actually sets; a typed nil stored in one of these fields is a value as far as
 // this check is concerned.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator}
+	return []any{cfg.Reader, cfg.Claimer, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.Memories}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter and BatchCreator"
+const roleSourceNames = "Reader, Claimer, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter, BatchCreator and Memories"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -743,6 +753,21 @@ func (s *Server) batchCreator(r *http.Request) (issueops.BatchCreator, error) {
 		return nil, err
 	}
 	return checkedBatchCreator{inner: creator}, nil
+}
+
+// memories returns the persistent-memory surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.MemoriesSource is
+// load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED: all four of this role's results are VALUES, so no
+// handler dereferences a pointer it returned, and a miss is a Found field
+// rather than a nil the wire would have to interpret.
+func (s *Server) memories(r *http.Request) (memoryops.Memories, error) {
+	if s.provider == nil {
+		return s.workspaceMemories, nil
+	}
+	var src uow.MemoriesSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Memories()
 }
 
 // WithUOW runs fn inside one unit of work and guarantees the rollback.
