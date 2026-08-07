@@ -26,6 +26,9 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseRefusalsCarryTheirTypesAndWriteNothing", func(t *testing.T) {
 		conformance.RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t, ctx, fixture)
 	})
+	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
 	})

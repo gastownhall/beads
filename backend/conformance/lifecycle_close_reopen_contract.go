@@ -133,6 +133,92 @@ func RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t *testing.T, ctx c
 	}
 }
 
+// RunLifecycleCloseAdmitsATransitivelyBlockedTarget pins the adjective in the
+// blocker refusal. The leaf says a crossing "with a LIVE DIRECT blocker returns
+// ErrCloseBlocked" (issueops/issueops.go:415-416), and the shared store body
+// spells the predicate out — blocked && len(blockers) > 0, refusing only when
+// the denormalized is_blocked column is set AND at least one live direct
+// blocker exists (internal/storage/issueops/close.go:44-54).
+//
+// The case above seeds a DIRECT blocker, so it passes just as well against a
+// guard that refuses on the bare column. This one seeds the other half: a
+// parent-child child of a blocked parent carries is_blocked = 1 with no direct
+// blocker of its own, and closes unforced. That is the historical `bd close`
+// behavior, and the same seeding is what a stale is_blocked column looks like
+// after its blockers close — a guard reading the column instead of the live
+// list makes both unclosable without Force.
+//
+// The two raw-row preconditions are load-bearing. Without the is_blocked read
+// the case passes on a backend that never denormalizes transitively, and
+// without the direct-edge count it passes on one that seeded no block at all;
+// either way it would be asserting nothing. The control at the end is the third
+// leg: it fails if the refusal was deleted outright rather than narrowed.
+func RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-lcr-transitive-blocker"
+	parent := fixture.IssuePrefix + "-lcr-transitive-parent"
+	child := fixture.IssuePrefix + "-lcr-transitive-child"
+	for _, id := range []string{blocker, parent, child} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, parent, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, parent, types.DepParentChild)
+
+	if got := lifecycleCloseReopenIsBlocked(t, ctx, fixture, child); got != 1 {
+		t.Fatalf("%s is_blocked = %d, want 1: the case needs the transitive block the parent's blocker propagates", child, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, child); got != 0 {
+		t.Fatalf("%s carries %d direct blocks edges, want 0: the whole point is a blocked row with no blocker of its own", child, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, parent); got != 1 {
+		t.Fatalf("%s carries %d direct blocks edges, want the 1 this case seeded", parent, got)
+	}
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: child})
+	if err != nil {
+		t.Fatalf("unforced close of transitively blocked %s: err = %v, want it to close — the refusal answers to a LIVE DIRECT blocker", child, err)
+	}
+	if !closed.Changed || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("unforced close of %s = %#v, want a committed close", child, closed)
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, child); types.Status(row.Status) != types.StatusClosed {
+		t.Errorf("stored status for %s = %q, want %q", child, row.Status, types.StatusClosed)
+	}
+
+	// The control: the parent DOES hold a live direct blocker, and its only
+	// child is now closed, so nothing else can be producing the refusal.
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent}); !errors.Is(err, publicops.ErrCloseBlocked) {
+		t.Fatalf("unforced close of directly blocked %s: err = %v, want ErrCloseBlocked — the refusal must still be armed", parent, err)
+	}
+}
+
+// lifecycleCloseReopenIsBlocked reads the denormalized blocked column. It is
+// CAST to SIGNED because the three fixtures disagree on whether a TINYINT comes
+// back as a number, a byte slice or a bool.
+func lifecycleCloseReopenIsBlocked(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) int {
+	t.Helper()
+	var blocked int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT CAST(COALESCE(is_blocked, 0) AS SIGNED) FROM issues WHERE id = ?", []any{id}, &blocked); err != nil {
+		t.Fatalf("read is_blocked for %s: %v", id, err)
+	}
+	return blocked
+}
+
+// lifecycleCloseReopenDirectBlockerEdges counts the outgoing blocks edges that
+// make a target's block DIRECT rather than inherited.
+func lifecycleCloseReopenDirectBlockerEdges(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) int {
+	t.Helper()
+	var edges int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = ?",
+		[]any{id, string(types.DepBlocks)}, &edges); err != nil {
+		t.Fatalf("count direct blocker edges for %s: %v", id, err)
+	}
+	return edges
+}
+
 // RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose pins what a second Close
 // of an already-closed issue does. issueops/issueops.go:354-359 promises
 // Changed "is false for an idempotent re-close" and that OpenChildren "is
