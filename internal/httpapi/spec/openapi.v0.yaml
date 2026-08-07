@@ -1821,8 +1821,8 @@ paths:
       operationId: listMemories
       summary: List the workspace's stored memories
       description: >-
-        Every memory this workspace holds, optionally narrowed by `q`. It is the
-        plane `bd memories` reads.
+        Every memory this workspace holds, optionally narrowed by `search`. It
+        is the plane `bd memories` reads.
 
 
         ONLY THE MEMORY PLANE. Memories ride in the same database table as the
@@ -1857,7 +1857,7 @@ paths:
         are ordered by key, which makes a keyset cursor expressible later
         without a breaking change.
       parameters:
-        - name: q
+        - name: search
           in: query
           description: >-
             Narrows the answer to memories that MATCH: a memory matches when the
@@ -1866,13 +1866,15 @@ paths:
             nothing matches is a `200` with an empty `items`.
 
 
-            IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE.
-            This surface spells two different questions `q`, and they are not
-            the same parameter: on `GET /v0/beads/issues:query` it is a boolean
-            expression over issue fields, refused when it does not parse; here
-            there is nothing to parse, no vocabulary and no refusal — every
-            string is a legal search term, `status=open` included, and it is
-            matched literally.
+            IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE,
+            and it is spelled `search` rather than `q` FOR THAT REASON. On `GET
+            /v0/beads/issues:query`, `q` is a boolean expression over issue
+            fields that is refused when it does not parse; here there is nothing
+            to parse, no vocabulary and no refusal — every string is a legal
+            search term, `status=open` included, and it is matched literally.
+            Two names because two questions: a client that sent this operation
+            the other `q` would otherwise get a literal substring search back
+            instead of an error.
 
 
             The term reaches the role UNFOLDED. Case folding is the role's, so
@@ -1889,8 +1891,10 @@ paths:
                 $ref: '#/components/schemas/MemoriesPage'
         '400':
           description: >-
-            Invalid request: an unknown query parameter, or a repeated `q`.
-            `q` is the only parameter this operation accepts.
+            Invalid request: an unknown query parameter, or a repeated
+            `search`. `search` is the only parameter this operation accepts —
+            `q` is NOT one of them, and is refused as unknown rather than
+            treated as a search term.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:

@@ -76,12 +76,16 @@ func (s *Server) handleRememberMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 // memorySearchParam is the one query parameter this surface's memory plane
-// takes. It is spelled `q` and it is NOT the `q` of GET /v0/beads/issues:query:
-// that one is a boolean expression over issue fields with a vocabulary and a
-// parse refusal, this one is a substring match with neither. The document says
-// so on the parameter, because a client that assumed the other meaning would
-// send `status=open` and get a literal search rather than an error.
-const memorySearchParam = "q"
+// takes, and it is deliberately NOT spelled `q`.
+//
+// `q` on GET /v0/beads/issues:query is a boolean expression over issue fields,
+// with a vocabulary and a parse refusal; this is a substring match with
+// neither. Spelling both `q` would let a client that assumed the other meaning
+// send `status=open` and receive a literal search over memory text instead of
+// an error — one surface answering two different questions to the same name.
+// Under the second name that request is an unknown parameter, which is what it
+// actually is.
+const memorySearchParam = "search"
 
 // handleListMemories answers GET /v0/beads/memories.
 func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
@@ -91,9 +95,9 @@ func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
 	// what was read and refuses what was not, so the allowlist is the parameter
 	// table itself rather than a second copy of it that can drift.
 	q := newQuery(r.URL.Query())
-	// str, not list: a repeated `q` is refused rather than silently resolved to
-	// one of its values, because a client that sent two terms asked a question
-	// this operation cannot answer and must not be told it did.
+	// str, not list: a repeated `search` is refused rather than silently
+	// resolved to one of its values, because a client that sent two terms asked
+	// a question this operation cannot answer and must not be told it did.
 	search := q.str(memorySearchParam)
 	if !s.acceptQuery(w, r, q) {
 		return
@@ -150,11 +154,13 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A MISS IS A 404 HERE, and this is the one operation on this surface where
-	// that diverges from its settings counterpart. getSetting has no 404
-	// because an absent key and a key stored empty are one answer `bd config
-	// get` prints identically; on this plane `bd recall` already distinguishes a
-	// miss by exit code and the role answers Found rather than a value, so the
-	// status reports a distinction that exists rather than inventing one.
+	// that diverges from its settings counterpart. The rule both follow is that
+	// the status reports the distinctions the FRONT DOOR already reports, and
+	// the two front doors differ: `bd config get` on an absent key prints
+	// "(not set)" and exits 0, so getSetting has no 404 to give; `bd recall` on
+	// a miss prints to stderr and exits 1 (printRecallResult in cmd/bd, via
+	// SilentExit), and the role answers Found rather than a bare value, so the
+	// status here reports a distinction that exists rather than inventing one.
 	//
 	// A row stored as the EMPTY STRING falls on the miss side of it, because
 	// that is where the role puts it — the storage seam cannot tell it from an

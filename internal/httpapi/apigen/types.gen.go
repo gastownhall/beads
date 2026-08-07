@@ -785,12 +785,12 @@ type QueryIssuesParamsSort string
 
 // ListMemoriesParams defines parameters for ListMemories.
 type ListMemoriesParams struct {
-	// Q Narrows the answer to memories that MATCH: a memory matches when the lowercase of its key, or the lowercase of its value, contains the lowercase of this term. Absent or empty means everything, and a term nothing matches is a `200` with an empty `items`.
+	// Search Narrows the answer to memories that MATCH: a memory matches when the lowercase of its key, or the lowercase of its value, contains the lowercase of this term. Absent or empty means everything, and a term nothing matches is a `200` with an empty `items`.
 	//
-	// IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE. This surface spells two different questions `q`, and they are not the same parameter: on `GET /v0/beads/issues:query` it is a boolean expression over issue fields, refused when it does not parse; here there is nothing to parse, no vocabulary and no refusal — every string is a legal search term, `status=open` included, and it is matched literally.
+	// IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE, and it is spelled `search` rather than `q` FOR THAT REASON. On `GET /v0/beads/issues:query`, `q` is a boolean expression over issue fields that is refused when it does not parse; here there is nothing to parse, no vocabulary and no refusal — every string is a legal search term, `status=open` included, and it is matched literally. Two names because two questions: a client that sent this operation the other `q` would otherwise get a literal substring search back instead of an error.
 	//
 	// The term reaches the role UNFOLDED. Case folding is the role's, so that this surface and `bd memories` cannot come to disagree about what matching means; a client sends what its user typed.
-	Q *string `form:"q,omitempty" json:"q,omitempty"`
+	Search *string `form:"search,omitempty" json:"search,omitempty"`
 }
 
 // ListReadyWorkParams defines parameters for ListReadyWork.

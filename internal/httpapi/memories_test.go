@@ -599,7 +599,7 @@ func TestListMemoriesPassesTheSearchTermUnfolded(t *testing.T) {
 	memories := &roleMemories{}
 	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
 
-	resp := ts.get(t, memoriesPath+"?q=Dolt%20PHANTOMS")
+	resp := ts.get(t, memoriesPath+"?search=Dolt%20PHANTOMS")
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -637,7 +637,7 @@ func TestListMemoriesTreatsAnAbsentTermAsEverything(t *testing.T) {
 // parameter at all, so it is the only one that goes through the query DECODER
 // rather than through requireNoQuery — and that decoder's allowlist is the set
 // of names the handler actually read, so a handler reading nothing accepts
-// nothing while one reading `q` accepts exactly `q`.
+// nothing while one reading `search` accepts exactly `search`.
 //
 // Silently ignoring an unrecognized parameter is what this prevents. On a
 // filtering operation it WIDENS the answer, so a client one version ahead of
@@ -652,9 +652,17 @@ func TestListMemoriesRefusesAnUnknownQueryParameter(t *testing.T) {
 		reason    Reason
 	}{
 		{
-			name:      "a parameter this operation does not have",
-			query:     "?search=dolt",
-			wantParam: "search",
+			// `q` SPECIFICALLY, which is the whole reason this operation's
+			// parameter is not called that. On GET /v0/beads/issues:query, `q`
+			// is a boolean expression over issue fields; a client carrying that
+			// habit here has asked a question this operation does not answer,
+			// and the one useful reply is that the name is unknown. Were the
+			// parameter spelled `q`, `?q=status:open` would come back as a
+			// literal substring search over memory text — a wrong answer with
+			// a 200 on it.
+			name:      "the other operation's q",
+			query:     "?q=status:open",
+			wantParam: "q",
 			reason:    ReasonUnknownParameter,
 		},
 		{
@@ -662,17 +670,17 @@ func TestListMemoriesRefusesAnUnknownQueryParameter(t *testing.T) {
 			// limit and no cursor, and accepting one silently would promise
 			// paging that does not happen.
 			name:      "a parameter another operation does have",
-			query:     "?q=dolt&limit=10",
+			query:     "?search=dolt&limit=10",
 			wantParam: "limit",
 			reason:    ReasonUnknownParameter,
 		},
 		{
-			// A repeated `q` is two search terms, which is a question this
+			// A repeated `search` is two search terms, which is a question this
 			// operation cannot answer. Resolving it to one of them silently
 			// would answer a different question from the one asked.
-			name:      "a repeated q",
-			query:     "?q=one&q=two",
-			wantParam: "q",
+			name:      "a repeated search",
+			query:     "?search=one&search=two",
+			wantParam: "search",
 			reason:    ReasonInvalidValue,
 		},
 		{
@@ -714,14 +722,14 @@ func TestListMemoriesRefusesAnUnknownQueryParameter(t *testing.T) {
 	}
 }
 
-// TestListMemoriesAcceptsQAndNothingElse states the other half of the rule as a
-// positive: `q` is accepted, so the refusals above are about the OTHER names
-// rather than about a decoder that refuses everything.
-func TestListMemoriesAcceptsQAndNothingElse(t *testing.T) {
+// TestListMemoriesAcceptsSearchAndNothingElse states the other half of the rule
+// as a positive: `search` is accepted, so the refusals above are about the
+// OTHER names rather than about a decoder that refuses everything.
+func TestListMemoriesAcceptsSearchAndNothingElse(t *testing.T) {
 	memories := &roleMemories{}
 	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
 
-	if resp := ts.get(t, memoriesPath+"?q=dolt"); resp.StatusCode != http.StatusOK {
+	if resp := ts.get(t, memoriesPath+"?search=dolt"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d for the one parameter this operation takes, want 200: %s",
 			resp.StatusCode, readAll(t, resp))
 	}
