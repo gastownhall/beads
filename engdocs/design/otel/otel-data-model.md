@@ -310,7 +310,7 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.ai.batch_size` | int | Candidate pairs evaluated (`find_duplicates` only) |
 | `bd.ai.duration_ms` | float | Request duration in ms (`find_duplicates` only; `compact` records the `bd.ai.request.duration` metric instead) |
 
-**Retry policy**: exponential backoff, up to 4 attempts (1 initial + up to 3 retries, `maxRetries = 3`), on HTTP 429, 5xx, and network timeout errors.
+**Retry policy** (compact only; `find_duplicates` makes a single unretried call): exponential backoff, up to 4 attempts (1 initial + up to 3 retries, `maxRetries = 3`), on HTTP 429, 5xx, and network timeout errors.
 
 ---
 
@@ -331,7 +331,7 @@ One span per Anthropic API call. The `bd.ai.operation` attribute distinguishes t
 | `bd.db.conn_acquire_ms` | Histogram | — | ✅ Implemented |
 | `bd.db.pool_wait_count` | Counter | — | ✅ Implemented |
 | `bd.db.pool_wait_ms` | Histogram | — | ✅ Implemented |
-| `bd.claim_verify_lost_total` | Counter | `op` (`claim` \| `unclaim`) | ✅ Implemented |
+| `bd.claim_verify_lost_total` | Counter | `op` (`claim` \| `unclaim` \| `guarded-update` \| `ready-claim`) | ✅ Implemented |
 | `bd.claim_verify_recovered_total` | Counter | `op`, `outcome` | 🔲 Registered, not recorded |
 | `bd.ai.input_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
 | `bd.ai.output_tokens` | Counter | `bd.ai.model` | ✅ Implemented (compact only) |
