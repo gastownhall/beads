@@ -740,74 +740,14 @@ func (createIssueUseCaseStub) GetIssue(_ context.Context, id string) (*types.Iss
 	return &types.Issue{ID: id}, nil
 }
 
-type lifecycleIssueUseCaseStub struct {
-	domain.IssueUseCase
-	applyUpdate func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error)
-	getIssue    func(context.Context, string) (*types.Issue, error)
-	getWisp     func(context.Context, string) (*types.Issue, error)
-}
-
-func (s lifecycleIssueUseCaseStub) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
-	return s.applyUpdate(ctx, id, spec, actor)
-}
-
-func (s lifecycleIssueUseCaseStub) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	return s.getIssue(ctx, id)
-}
-
-func (s lifecycleIssueUseCaseStub) GetWisp(ctx context.Context, id string) (*types.Issue, error) {
-	return s.getWisp(ctx, id)
-}
-
-func TestIssueOperationsCloseMissingIssueReturnsPublicNotFoundBeforeVersionCheck(t *testing.T) {
-	calledApply := false
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
-		issueUseCase: lifecycleIssueUseCaseStub{
-			applyUpdate: func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error) {
-				calledApply = true
-				return nil, errors.New("version check ran before lookup")
-			},
-			getWisp:  func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-			getIssue: func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-		},
-	}}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-
-	_, err = operations.Close(context.Background(), issueops.CloseRequest{Actor: "actor", IssueID: "bd-missing"})
-	if !errors.Is(err, issueops.ErrNotFound) {
-		t.Fatalf("Close() error = %v, want ErrNotFound", err)
-	}
-	if calledApply {
-		t.Fatal("Close() checked version before resolving the issue")
-	}
-}
-
-func TestIssueOperationsReopenMissingIssueReturnsPublicNotFoundBeforeVersionCheck(t *testing.T) {
-	calledApply := false
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
-		issueUseCase: lifecycleIssueUseCaseStub{
-			applyUpdate: func(context.Context, string, domain.UpdateSpec, string) (*types.Issue, error) {
-				calledApply = true
-				return nil, errors.New("version check ran before lookup")
-			},
-			getWisp:  func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-			getIssue: func(context.Context, string) (*types.Issue, error) { return nil, storage.ErrNotFound },
-		},
-	}}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-
-	_, err = operations.Reopen(context.Background(), issueops.ReopenRequest{Actor: "actor", IssueID: "bd-missing"})
-	if !errors.Is(err, issueops.ErrNotFound) {
-		t.Fatalf("Reopen() error = %v, want ErrNotFound", err)
-	}
-	if calledApply {
-		t.Fatal("Reopen() checked version before resolving the issue")
-	}
-}
+// The two stub cases that used to sit here — Close and Reopen at a missing id
+// answering ErrNotFound rather than ErrVersionMismatch — are now
+// RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps, which names an id that
+// was never created both with and without a precondition and asserts the
+// sentinel on all three backends. Their second assertion, that no row-level
+// update was ATTEMPTED, went with them: the flag never caught the reorder it
+// was written for, because the requests carried no ExpectedVersion and so never
+// entered the guarded branch a version-first body would hoist.
 
 func TestIssueOperationsCreateRetriesOnSerializationSQLStates(t *testing.T) {
 	for _, state := range []string{"40001", "40P01"} {

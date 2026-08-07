@@ -2368,7 +2368,7 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 	if !restated.Changed {
 		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restatingID)
 	}
-	assertLiveAssignee(t, ctx, fixture, restatingID, "claimant")
+	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, restatingID, "claimant", types.StatusInProgress)
 
 	// The other edge, on the row the first shape left open and unassigned. A
 	// first claim grants the lease and counts.
