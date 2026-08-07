@@ -12,6 +12,45 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
+// validateNoteArgs runs as cobra's Args validation for "note", before RunE
+// and (on the local/embedded path) before the id ever reaches
+// ResolvePartialID's fuzzy/substring matching. Mirror of validateCommentArgs
+// (#5369): "note" has no subcommands of its own — its only job is "append a
+// note to <id>" — so when the id positional argument is exactly a reserved
+// word that is a common subcommand-shaped typo ("list", "add"), the near-
+// certain explanation is not that a bead is genuinely named "list" or "add"
+// (real ids always carry a prefix+hyphen — see looksLikePrefixedID). Left
+// unguarded, that word silently resolves via ResolvePartialID's
+// substring/prefix fallback to whatever existing bead or wisp id happens to
+// contain it, and the note lands on the WRONG issue with no error. (GH#5370)
+func validateNoteArgs(cmd *cobra.Command, args []string) error {
+	if err := cobra.MinimumNArgs(1)(cmd, args); err != nil {
+		return err
+	}
+	switch args[0] {
+	case "list":
+		return HandleErrorRespectJSON(`"bd note list ..." is not valid — "note" takes an issue id first and has no "list" subcommand.
+
+To append a note:
+  bd note <issue-id> "text"
+
+To read notes on an issue:
+  bd show <issue-id>
+
+See: bd note --help`)
+	case "add":
+		return HandleErrorRespectJSON(`"bd note add ..." is not valid — "note" already means "append a note" and takes an issue id first, not the word "add".
+
+To append a note:
+  bd note <issue-id> "text"
+
+(Equivalent long form: bd update <issue-id> --append-notes "text".)
+
+See: bd note --help`)
+	}
+	return nil
+}
+
 var noteCmd = &cobra.Command{
 	Use:     "note <id> [text...]",
 	GroupID: "issues",
@@ -24,8 +63,11 @@ Examples:
   bd note gt-abc "Fixed the flaky test"
   bd note gt-abc Fixed the flaky test
   echo "note from pipe" | bd note gt-abc --stdin
-  bd note gt-abc --file notes.txt`,
-	Args:          cobra.MinimumNArgs(1),
+  bd note gt-abc --file notes.txt
+
+Note: "note" only appends a note — it has no "list" or "add" subcommand.
+To read notes on an issue, use: bd show <id>`,
+	Args:          validateNoteArgs,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
