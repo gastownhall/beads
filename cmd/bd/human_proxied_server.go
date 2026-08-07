@@ -19,16 +19,10 @@ import (
 // of work; each write invocation is exactly ONE RunTx with a real commit
 // message, per the proxied write convention.
 
-// proxiedHumanSearch runs the shared human-label query and hands back the
-// issues, inside the caller's unit of work.
-func proxiedHumanSearch(ctx context.Context, uw uow.UnitOfWork, status string) ([]*types.Issue, error) {
-	filter := types.IssueFilter{
-		Labels: []string{"human"},
-	}
-	if status != "" {
-		s := types.Status(status)
-		filter.Status = &s
-	}
+// proxiedHumanSearch runs a human-label query and hands back the issues,
+// inside the caller's unit of work. The filter comes from the caller: the list
+// and the stats do not ask the same question about closed beads.
+func proxiedHumanSearch(ctx context.Context, uw uow.UnitOfWork, filter types.IssueFilter) ([]*types.Issue, error) {
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 	if err != nil {
 		return nil, err
@@ -43,7 +37,7 @@ func runHumanListProxiedServer(ctx context.Context, status string) error {
 	}
 	defer uw.Close(ctx)
 
-	issues, err := proxiedHumanSearch(ctx, uw, status)
+	issues, err := proxiedHumanSearch(ctx, uw, humanListFilter(status))
 	if err != nil {
 		return HandleErrorRespectJSON("listing human beads: %v", err)
 	}
@@ -77,7 +71,7 @@ func runHumanStatsProxiedServer(ctx context.Context) error {
 	}
 	defer uw.Close(ctx)
 
-	issues, err := proxiedHumanSearch(ctx, uw, "")
+	issues, err := proxiedHumanSearch(ctx, uw, humanStatsFilter())
 	if err != nil {
 		return HandleErrorRespectJSON("getting human bead stats: %v", err)
 	}
@@ -105,7 +99,7 @@ func proxiedHumanCloseTarget(ctx context.Context, uw uow.UnitOfWork, issueID str
 
 	labelsMap, _ := uw.LabelUseCase().GetLabelsForIssues(ctx, []string{issueID})
 	for _, label := range labelsMap[issueID] {
-		if label == "human" {
+		if label == types.LabelHuman {
 			return true, nil
 		}
 	}

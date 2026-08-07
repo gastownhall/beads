@@ -143,6 +143,32 @@ func TestEmbeddedHuman(t *testing.T) {
 		if !strings.Contains(string(showOut2), "Dismissed: Not needed") {
 			t.Errorf("expected dismiss reason in output:\n%s", showOut2)
 		}
+
+		// sk-1pc: neither close cleared the 'human' label, so both beads used
+		// to stay in the operator's decision queue as though they were still
+		// pending. A resolved decision is not a pending one.
+		listAfter := bdHuman(t, bd, dir, "list")
+		for _, closed := range []string{id, id2} {
+			if strings.Contains(listAfter, closed) {
+				t.Errorf("closed bead %s must not remain in the pending human list:\n%s", closed, listAfter)
+			}
+		}
+
+		// They are omitted, not hidden: --status closed still reaches them,
+		// and the stats still count them as resolved.
+		closedOut := bdHuman(t, bd, dir, "list", "--status", "closed")
+		for _, closed := range []string{id, id2} {
+			if !strings.Contains(closedOut, closed) {
+				t.Errorf("expected %s under --status closed:\n%s", closed, closedOut)
+			}
+		}
+		statsOut := bdHuman(t, bd, dir, "stats")
+		if !strings.Contains(statsOut, "Pending:    0") {
+			t.Errorf("expected zero pending decisions after both closes:\n%s", statsOut)
+		}
+		if !strings.Contains(statsOut, "Responded:  1") || !strings.Contains(statsOut, "Dismissed:  1") {
+			t.Errorf("stats must still count the closed beads it can only see via the label:\n%s", statsOut)
+		}
 	})
 }
 

@@ -120,3 +120,50 @@ func TestHumanListHasStatusFlag(t *testing.T) {
 		t.Fatal("list command should have --status flag")
 	}
 }
+
+// sk-1pc: closing a bead does not clear its 'human' label, so resolved beads
+// kept showing up in the operator's decision queue until someone stripped the
+// label by hand. The default listing must drop them; an explicit --status must
+// still reach any status, closed included.
+func TestHumanListFilterExcludesClosed(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default excludes closed", func(t *testing.T) {
+		t.Parallel()
+		filter := humanListFilter("")
+		if got := filter.ExcludeStatus; len(got) != 1 || got[0] != types.StatusClosed {
+			t.Errorf("ExcludeStatus = %v, want [%s]", got, types.StatusClosed)
+		}
+		if filter.Status != nil {
+			t.Errorf("Status = %v, want nil (every non-closed status is still pending)", *filter.Status)
+		}
+		if len(filter.Labels) != 1 || filter.Labels[0] != "human" {
+			t.Errorf("Labels = %v, want [human]", filter.Labels)
+		}
+	})
+
+	t.Run("explicit status wins, including closed", func(t *testing.T) {
+		t.Parallel()
+		for _, status := range []string{"closed", "open", "in_progress"} {
+			filter := humanListFilter(status)
+			if filter.Status == nil || string(*filter.Status) != status {
+				t.Errorf("humanListFilter(%q).Status = %v, want %q", status, filter.Status, status)
+			}
+			if len(filter.ExcludeStatus) != 0 {
+				t.Errorf("humanListFilter(%q).ExcludeStatus = %v, want empty", status, filter.ExcludeStatus)
+			}
+		}
+	})
+
+	// The stats are the reason the label survives a close: Responded and
+	// Dismissed are counts of closed beads, so that query must not inherit
+	// the list's exclusion.
+	t.Run("stats still sees closed", func(t *testing.T) {
+		t.Parallel()
+		filter := humanStatsFilter()
+		if len(filter.ExcludeStatus) != 0 || filter.Status != nil {
+			t.Errorf("humanStatsFilter must not constrain status, got Status=%v ExcludeStatus=%v",
+				filter.Status, filter.ExcludeStatus)
+		}
+	})
+}

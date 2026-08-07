@@ -201,5 +201,23 @@ func TestProxiedServerHuman(t *testing.T) {
 		if strings.Contains(listOut, responded.ID) || strings.Contains(listOut, dismissed.ID) {
 			t.Errorf("closed beads leaked into open human list:\n%s", listOut)
 		}
+
+		// sk-1pc: and out of the DEFAULT list, which took no --status and so
+		// showed every bead that had ever carried the label — responding to
+		// one or dismissing it left it sitting in the queue as though the
+		// decision were still owed. This is the proxied twin of the direct
+		// route's coverage in human_embedded_test.go.
+		defaultOut, _ := bdProxiedHuman(t, bd, p.dir, "list")
+		if !strings.Contains(defaultOut, pending.ID) {
+			t.Errorf("expected %s in default human list:\n%s", pending.ID, defaultOut)
+		}
+		if strings.Contains(defaultOut, responded.ID) || strings.Contains(defaultOut, dismissed.ID) {
+			t.Errorf("resolved beads must not remain pending in the default human list:\n%s", defaultOut)
+		}
+		// Omitted, not hidden.
+		closedOut, _ := bdProxiedHuman(t, bd, p.dir, "list", "--status", "closed")
+		if !strings.Contains(closedOut, responded.ID) || !strings.Contains(closedOut, dismissed.ID) {
+			t.Errorf("expected both closed beads under --status closed:\n%s", closedOut)
+		}
 	})
 }

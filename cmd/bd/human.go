@@ -94,17 +94,41 @@ SUBCOMMANDS:
 	},
 }
 
+// humanListFilter is the query behind `bd human list`: beads carrying the
+// 'human' label, minus the closed ones, since closing never clears the label.
+// An explicit --status still reaches any status, closed included.
+func humanListFilter(status string) types.IssueFilter {
+	filter := types.IssueFilter{Labels: []string{types.LabelHuman}}
+	if status != "" {
+		s := types.Status(status)
+		filter.Status = &s
+		return filter
+	}
+	filter.ExcludeStatus = []types.Status{types.StatusClosed}
+	return filter
+}
+
+// humanStatsFilter is `bd human stats`'s query. Unlike the list it must keep
+// closed beads: Responded and Dismissed are counts of closed ones.
+func humanStatsFilter() types.IssueFilter {
+	return types.IssueFilter{Labels: []string{types.LabelHuman}}
+}
+
 // human list command
 var humanListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all human-needed beads",
-	Long: `List all issues labeled with 'human' tag.
+	Long: `List all open issues labeled with 'human' tag.
 
 These are issues that require human intervention or input.
+
+Closed issues are omitted: a decision that has been made is no longer pending,
+and closing does not clear the label. Pass --status=closed to see them.
 
 Examples:
   bd human list
   bd human list --status=open
+  bd human list --status=closed
   bd human list --json`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -124,14 +148,7 @@ Examples:
 			return runHumanListProxiedServer(ctx, status)
 		}
 
-		filter := types.IssueFilter{
-			Labels: []string{"human"},
-		}
-
-		if status != "" {
-			s := types.Status(status)
-			filter.Status = &s
-		}
+		filter := humanListFilter(status)
 
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("listing human beads: %v", err)
@@ -251,7 +268,7 @@ Examples:
 		labelsMap, _ := targetStore.GetLabelsForIssues(ctx, []string{resolvedID})
 		hasHumanLabel := false
 		for _, label := range labelsMap[resolvedID] {
-			if label == "human" {
+			if label == types.LabelHuman {
 				hasHumanLabel = true
 				break
 			}
@@ -338,7 +355,7 @@ Examples:
 		labelsMap, _ := targetStore.GetLabelsForIssues(ctx, []string{resolvedID})
 		hasHumanLabel := false
 		for _, label := range labelsMap[resolvedID] {
-			if label == "human" {
+			if label == types.LabelHuman {
 				hasHumanLabel = true
 				break
 			}
@@ -389,9 +406,7 @@ Example:
 			return runHumanStatsProxiedServer(ctx)
 		}
 
-		filter := types.IssueFilter{
-			Labels: []string{"human"},
-		}
+		filter := humanStatsFilter()
 
 		if err := ensureStoreActive(); err != nil {
 			return HandleErrorRespectJSON("getting human bead stats: %v", err)
