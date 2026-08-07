@@ -33,16 +33,26 @@ func openMemories(directRequirement string) (memoryops.Memories, error) {
 	return store.Memories()
 }
 
-// proxiedMemories hands back the guarded persistent-memory surface for the
-// proxied-server provider, through the provider's OWN capability accessor — the
-// same two-step proxiedWorkspaceConfig performs.
+// proxiedMemories hands back the guarded persistent-memory surface for this
+// invocation's proxied-server provider, through the provider's OWN capability
+// accessor — the same two-step proxiedWorkspaceConfig performs.
 func proxiedMemories() (memoryops.Memories, error) {
 	if uowProvider == nil {
 		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-	src, ok := uowProvider.(uow.MemoriesSource)
+	return memoriesFromProvider(uowProvider)
+}
+
+// memoriesFromProvider is that accessor step for a provider the caller names.
+//
+// It takes the provider rather than reading the global one because `bd prime`
+// opens a provider SCOPED to its read — prime is in noDbCommands, so the root
+// pre-run opens nothing — and one spelling of "ask this provider for the memory
+// surface" is the whole point of having an accessor at all.
+func memoriesFromProvider(provider uow.UnitOfWorkProvider) (memoryops.Memories, error) {
+	src, ok := provider.(uow.MemoriesSource)
 	if !ok {
-		return nil, fmt.Errorf("proxied-server provider %T does not offer the persistent-memory surface", uowProvider)
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the persistent-memory surface", provider)
 	}
 	return src.Memories()
 }
@@ -135,34 +145,6 @@ func printRememberResult(verb, key, insight string) error {
 	}
 	fmt.Printf("%s [%s]: %s\n", verb, key, truncateMemory(insight, 80))
 	return nil
-}
-
-// memoriesFromConfig filters a full config map down to the kv.memory.*
-// namespace (stripping the prefix), optionally filtered by a lowercase
-// search term matched against key or value.
-//
-// Its last caller is `bd prime`; the four memory commands read the plane
-// through memoryops.Memories.List, which owns this narrowing now.
-func memoriesFromConfig(allConfig map[string]string, search string) map[string]string {
-	fullPrefix := kvkeys.MemoryConfigKeyPrefix
-	memories := make(map[string]string)
-	for k, v := range allConfig {
-		if strings.HasPrefix(k, fullPrefix) {
-			userKey := strings.TrimPrefix(k, fullPrefix)
-			memories[userKey] = v
-		}
-	}
-	if search != "" {
-		filtered := make(map[string]string)
-		for k, v := range memories {
-			if strings.Contains(strings.ToLower(k), search) ||
-				strings.Contains(strings.ToLower(v), search) {
-				filtered[k] = v
-			}
-		}
-		memories = filtered
-	}
-	return memories
 }
 
 // printMemoriesResult renders the `bd memories` output.
