@@ -307,6 +307,21 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		in.Offset = offset
 	}
 
+	// The defensive cap is part of the REQUEST, not something stamped onto the
+	// filter after the builder has produced it (issueops.ListRequest.MaxRows).
+	//
+	// Resolving it HERE also means it is resolved exactly once per invocation.
+	// resolveMaxRowsEnvOnly warns on a malformed BEADS_MAX_ROWS every time it
+	// runs, so runListCore's proxied-server refusal reads the value this
+	// resolved (rejectResolvedMaxRowsUnderProxiedServer) rather than resolving
+	// a second time and warning twice.
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return in, err
+	}
+	in.MaxRows = maxRows
+	in.MaxRowsSource = maxRowsSource
+
 	in.repoOverride, _ = cmd.Flags().GetString("repo")
 	in.repoOverrideSet = cmd.Flags().Changed("repo")
 

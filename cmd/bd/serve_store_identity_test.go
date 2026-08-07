@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // TestServeAnswersFromTheStoreTheRootCommandOpened pins the one property this
@@ -173,6 +174,59 @@ func (s *serveIdentityStore) IssueClaimer() (issueops.Claimer, error) {
 // Close is the one lifecycle method that is reached: the test harness closes a
 // store it finds left behind. There is nothing to release.
 func (s *serveIdentityStore) Close() error { return nil }
+
+// The rest of the roles httpapi.Config requires. This test drives one route,
+// but Listen refuses a partial role set, so the server does not bind at all
+// without them.
+//
+// They hand back serveIdentityRole, which satisfies each interface by
+// EMBEDDING it rather than implementing it: non-nil, so the set is complete,
+// while an actual call panics naming the method it reached.
+func (*serveIdentityStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) StatsReporter() (issueops.StatsReporter, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) CycleDetector() (issueops.CycleDetector, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) EdgeReader() (issueops.EdgeReader, error) { return serveIdentityRole{}, nil }
+func (*serveIdentityStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) TreeWalker() (issueops.TreeWalker, error) { return serveIdentityRole{}, nil }
+func (*serveIdentityStore) ReadyCounter() (issueops.ReadyCounter, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) Querier() (issueops.Querier, error) { return serveIdentityRole{}, nil }
+func (*serveIdentityStore) Sweeper() (issueops.Sweeper, error) { return serveIdentityRole{}, nil }
+func (*serveIdentityStore) Deleter() (issueops.Deleter, error) { return serveIdentityRole{}, nil }
+func (*serveIdentityStore) BatchCreator() (issueops.BatchCreator, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
+	return serveIdentityRole{}, nil
+}
+
+// serveIdentityRole satisfies all twelve at once, which it can because no two
+// of those interfaces declare a method of the same name. If a future role
+// collides, split this into one type per role — the embedded method would stop
+// being promoted and the build would say so.
+type serveIdentityRole struct {
+	issueops.WorkspaceConfig
+	issueops.StatsReporter
+	issueops.CycleDetector
+	issueops.EdgeReader
+	issueops.BlockingAnnotator
+	issueops.TreeWalker
+	issueops.ReadyCounter
+	issueops.Querier
+	issueops.Sweeper
+	issueops.Deleter
+	issueops.BatchCreator
+	memoryops.Memories
+}
 
 type serveIdentityReader struct{ id string }
 

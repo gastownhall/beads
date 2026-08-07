@@ -260,6 +260,13 @@ func TestServeNamesOneDatabaseSourcePerServerItBuilds(t *testing.T) {
 			if !ok {
 				continue
 			}
+			// NOTE: Reader+Claimer is the ROLES-SOURCE SIGNAL, not the whole
+			// role set — Config also carries Settings, Stats, CycleDetector,
+			// ReadyCounter, Sweeper, EdgeReader, BatchCreator and more. That is
+			// sound for what this test asks (which database source did this
+			// Config name), but the pair is hand-maintained: a future source
+			// signal that is not Reader+Claimer would read as "no database
+			// source". Deriving it is bd-lidlu's territory.
 			for _, lit := range httpapiConfigLiterals(fn) {
 				attributed++
 				keys := configLiteralKeys(lit)

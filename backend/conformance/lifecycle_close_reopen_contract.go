@@ -639,6 +639,17 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 	}
 }
 
+// SPEC-GAP bd-yby99.31: which PLANE a Reopen id resolves against. The verb is
+// documented entirely in terms of status (issueops/issueops.go:417-420) and
+// names no plane, while every neighboring role states its answer outright —
+// BatchCloser admits a wisp id "exactly as Lifecycle.Close resolves one"
+// (issueops/batchcloser.go:35-36) and Claimer refuses one (claimer.go:63). All
+// three implementations do resolve both planes today and both `bd reopen`
+// routes now depend on it, but no assertion is written here: the doc makes no
+// promise to assert against, and inventing one is what bd-yby99's policy
+// forbids. The case seeds through the fixture kit's CreateWisp hook the day the
+// clause exists.
+
 // lifecycleCloseReopenCountHistory counts version-control entries carrying an
 // EXACT message, which is the only way to tell the caller's spelling from the
 // implementation's default. It is read as a delta by every caller: these

@@ -4,160 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"strings"
-	"sync/atomic"
 	"testing"
-	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-// TestBuildUpdateSpecForIssue_RoutesMergeOpsAsOperations locks in the
-// lost-update fix on the proxied-server route: metadata edits and note
-// appends must flow into spec.Fields as merge OPERATION keys, never as values
-// pre-merged from `current` (a read from this unit of work's MVCC snapshot —
-// merging there erased keys a concurrent writer committed after the snapshot).
-func TestBuildUpdateSpecForIssue_RoutesMergeOpsAsOperations(t *testing.T) {
-	current := &types.Issue{
-		ID:       "bd-spec-1",
-		Status:   types.StatusOpen,
-		Notes:    "existing notes",
-		Metadata: json.RawMessage(`{"existing":"yes"}`),
-	}
-
-	t.Run("append_notes", func(t *testing.T) {
-		in := &updateInput{
-			fields:         map[string]any{},
-			hasAppendNotes: true,
-			appendNotes:    "appended",
-		}
-		spec := buildUpdateSpecForIssue(current, in)
-		if got, ok := spec.Fields[issueops.OpAppendNotes]; !ok || got != "appended" {
-			t.Errorf("Fields[%s] = %v (ok=%v), want the raw append text", issueops.OpAppendNotes, got, ok)
-		}
-		if merged, ok := spec.Fields["notes"]; ok {
-			t.Errorf("Fields[notes] = %v: notes must NOT be pre-merged from the snapshot", merged)
-		}
-	})
-
-	t.Run("merge_metadata", func(t *testing.T) {
-		in := &updateInput{
-			fields:          map[string]any{},
-			mergeMetadataIn: json.RawMessage(`{"new":"key"}`),
-		}
-		spec := buildUpdateSpecForIssue(current, in)
-		raw, ok := spec.Fields[issueops.OpMergeMetadata].(json.RawMessage)
-		if !ok || string(raw) != `{"new":"key"}` {
-			t.Errorf("Fields[%s] = %v, want the raw incoming JSON", issueops.OpMergeMetadata, spec.Fields[issueops.OpMergeMetadata])
-		}
-		if merged, ok := spec.Fields["metadata"]; ok {
-			t.Errorf("Fields[metadata] = %v: metadata must NOT be pre-merged from the snapshot", merged)
-		}
-	})
-
-	t.Run("set_and_unset_metadata", func(t *testing.T) {
-		in := &updateInput{
-			fields:        map[string]any{},
-			setMetadata:   []string{"tier=gold"},
-			unsetMetadata: []string{"existing"},
-		}
-		spec := buildUpdateSpecForIssue(current, in)
-		set, _ := spec.Fields[issueops.OpSetMetadata].([]string)
-		unset, _ := spec.Fields[issueops.OpUnsetMetadata].([]string)
-		if len(set) != 1 || set[0] != "tier=gold" {
-			t.Errorf("Fields[%s] = %v, want [tier=gold]", issueops.OpSetMetadata, spec.Fields[issueops.OpSetMetadata])
-		}
-		if len(unset) != 1 || unset[0] != "existing" {
-			t.Errorf("Fields[%s] = %v, want [existing]", issueops.OpUnsetMetadata, spec.Fields[issueops.OpUnsetMetadata])
-		}
-		if merged, ok := spec.Fields["metadata"]; ok {
-			t.Errorf("Fields[metadata] = %v: metadata must NOT be pre-merged from the snapshot", merged)
-		}
-	})
-
-	t.Run("clear_defer_status_still_resolved_from_current", func(t *testing.T) {
-		deferred := &types.Issue{ID: "bd-spec-2", Status: types.StatusDeferred}
-		in := &updateInput{fields: map[string]any{}, clearDeferStatus: true}
-		spec := buildUpdateSpecForIssue(deferred, in)
-		if got := spec.Fields["status"]; got != string(types.StatusOpen) {
-			t.Errorf("Fields[status] = %v, want open (clearDeferStatus on a deferred issue)", got)
-		}
-	})
-}
-
-// --- fakes for the whole-attempt retry tests ---
-
-type fakeUpdateIssueUC struct {
-	domain.IssueUseCase // unimplemented methods panic; the attempt path must not call them
-	issue               *types.Issue
-}
-
-func (f *fakeUpdateIssueUC) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	return f.issue, nil
-}
-
-func (f *fakeUpdateIssueUC) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
-	return f.issue, nil
-}
-
-type fakeUOW struct {
-	issueUC domain.IssueUseCase
-	commit  func() error
-}
-
-func (f *fakeUOW) Close(ctx context.Context)                                 {}
-func (f *fakeUOW) Commit(ctx context.Context, message string) error          { return f.commit() }
-func (f *fakeUOW) SwitchDatabase(ctx context.Context, database string) error { return nil }
-func (f *fakeUOW) ConfigUseCase() domain.ConfigUseCase                       { return nil }
-func (f *fakeUOW) DoltRemoteUseCase() domain.DoltRemoteUseCase               { return nil }
-func (f *fakeUOW) BootstrapUseCase() domain.BootstrapUseCase                 { return nil }
-func (f *fakeUOW) IssueUseCase() domain.IssueUseCase                         { return f.issueUC }
-func (f *fakeUOW) DependencyUseCase() domain.DependencyUseCase               { return nil }
-func (f *fakeUOW) LabelUseCase() domain.LabelUseCase                         { return nil }
-func (f *fakeUOW) CommentUseCase() domain.CommentUseCase                     { return nil }
-func (f *fakeUOW) RawSQLUseCase() domain.RawSQLUseCase                       { return nil }
-
-type fakeUOWProvider struct {
-	uows   atomic.Int64
-	newUOW func(attempt int64) error
-	commit func(attempt int64) error
-	issue  *types.Issue
-}
-
-func (p *fakeUOWProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
-	n := p.uows.Add(1)
-	if p.newUOW != nil {
-		if err := p.newUOW(n); err != nil {
-			return nil, err
-		}
-	}
-	return &fakeUOW{
-		issueUC: &fakeUpdateIssueUC{issue: p.issue},
-		commit:  func() error { return p.commit(n) },
-	}, nil
-}
-
-func (p *fakeUOWProvider) Close(ctx context.Context) error { return nil }
-
-func withFakeProxiedUpdateEnv(t *testing.T, p *fakeUOWProvider) {
-	t.Helper()
-	oldProvider := uowProvider
-	oldHookRunner := hookRunner
-	uowProvider = p
-	hookRunner = hooks.NewRunner(t.TempDir()) // no hooks installed: RunSync no-ops
-	t.Cleanup(func() {
-		uowProvider = oldProvider
-		hookRunner = oldHookRunner
-	})
-}
+// The plain proxied update joined the claim on issueops.Lifecycle, so these pin
+// the same three things its sibling in update_claim_proxied_test.go pins: the
+// request this surface makes, the roles it reaches them through, and the fact
+// that it opens no unit of work of its own.
 
 func captureStderrDuring(t *testing.T, fn func()) string {
 	t.Helper()
@@ -185,241 +48,263 @@ func serializationFailure() error {
 	return &mysql.MySQLError{Number: 1213, Message: "serialization failure, transaction rolled back"}
 }
 
-// TestApplyUpdateProxiedOne_RetriesWholeAttemptOnConflict proves a Dolt
-// serialization failure at commit time redoes the WHOLE read-merge-write in a
-// fresh unit of work — not just the commit. Re-committing the rolled-back
-// session was the old behavior; the server had already discarded the writes,
-// so the retry could only report "nothing to commit" and the update vanished.
-func TestApplyUpdateProxiedOne_RetriesWholeAttemptOnConflict(t *testing.T) {
-	issue := &types.Issue{ID: "bd-retry-1", Status: types.StatusOpen}
-	provider := &fakeUOWProvider{
-		issue: issue,
-		commit: func(attempt int64) error {
-			if attempt <= 2 {
-				return serializationFailure()
-			}
-			return nil
-		},
-	}
-	withFakeProxiedUpdateEnv(t, provider)
+func TestProxiedUpdateRunsOnTheLifecycleContract(t *testing.T) {
+	before := &types.Issue{ID: "bd-1", Status: types.StatusOpen, Title: "Original"}
+	after := &types.Issue{ID: "bd-1", Status: types.StatusOpen, Title: "Renamed", Labels: []string{"keep"}}
+	p := claimRoleFixture(t, before, issueops.UpdateResult{Issue: after, Changed: true}, nil)
 
-	in := &updateInput{fields: map[string]any{"title": "renamed"}}
-	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-1", in)
-	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne: %v", err)
+	oldActor := actor
+	actor = "agent"
+	t.Cleanup(func() { actor = oldActor })
+
+	in := &updateInput{fields: map[string]any{"title": "Renamed"}}
+	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-1", in)
+	if err != nil || fail != nil {
+		t.Fatalf("applyUpdateProxiedOne: err = %v, fail = %+v", err, fail)
 	}
-	if fail != nil {
-		t.Fatalf("expected update to succeed after conflict retries, got failure: %s", fail.Error)
+	if got == nil || got.Title != "Renamed" {
+		t.Fatalf("updated issue = %+v, want the renamed row", got)
 	}
-	if got == nil || got.ID != "bd-retry-1" {
-		t.Fatalf("updated issue = %v, want bd-retry-1", got)
+	// Only the claim strips labels, to keep its published response shape; a
+	// plain update carries them, as the direct route's does.
+	if len(got.Labels) != 1 || got.Labels[0] != "keep" {
+		t.Errorf("labels = %v, wanted the contract's hydrated labels kept on a plain update", got.Labels)
 	}
-	if n := provider.uows.Load(); n != 3 {
-		t.Errorf("unit-of-work attempts = %d, want 3 (each conflict must redo the whole read-merge-write)", n)
+
+	req := p.lifecycle.request
+	if req.Claim {
+		t.Error("a plain update reached the contract as a claim")
+	}
+	if req.Actor != "agent" || req.IssueID != "bd-1" || !req.Patch.Title.Set || req.Patch.Title.Value != "Renamed" {
+		t.Errorf("request = %+v, want a title edit of bd-1 by agent", req)
+	}
+	// The commit message this path has always written, carried on the request
+	// instead of being spelled at the commit site.
+	if req.Provenance != "bd: update bd-1" {
+		t.Errorf("Provenance = %q, want the message the proxied update has always written", req.Provenance)
+	}
+	// A CLI update resolves either plane; only the HTTP surface restricts it.
+	if req.IssuePlaneOnly {
+		t.Error("the CLI update restricted the plane; `bd update` has always resolved a wisp id")
+	}
+	if p.uows != 0 {
+		t.Errorf("the update path opened %d units of work; the contract owns the transaction", p.uows)
 	}
 }
 
-// TestApplyUpdateProxiedOne_ExhaustedConflictsFailLoudly proves a write that
-// never lands cannot exit as a success: when every attempt loses Dolt's
-// commit-time merge, the command reports the failure instead of printing
-// "✓ Updated" (a non-empty failReason suppresses the success line and drives
-// the non-zero exit via reportUpdateFailures in runUpdateProxiedServer).
-func TestApplyUpdateProxiedOne_ExhaustedConflictsFailLoudly(t *testing.T) {
-	oldMax := proxiedUpdateRetryMaxElapsed
-	proxiedUpdateRetryMaxElapsed = 150 * time.Millisecond
-	t.Cleanup(func() { proxiedUpdateRetryMaxElapsed = oldMax })
-
-	issue := &types.Issue{ID: "bd-retry-2", Status: types.StatusOpen}
-	provider := &fakeUOWProvider{
-		issue:  issue,
-		commit: func(int64) error { return serializationFailure() },
+// TestProxiedUpdatePatchRoutesMergeOpsAsOperations locks in the lost-update fix
+// on the proxied-server route: metadata edits and note appends must reach the
+// contract as merge OPERATIONS, never as values pre-merged from the pre-read
+// row (a read from an earlier transaction — merging there erased keys a
+// concurrent writer committed after it).
+func TestProxiedUpdatePatchRoutesMergeOpsAsOperations(t *testing.T) {
+	current := &types.Issue{
+		ID:       "bd-spec-1",
+		Status:   types.StatusOpen,
+		Notes:    "existing notes",
+		Metadata: json.RawMessage(`{"existing":"yes"}`),
 	}
-	withFakeProxiedUpdateEnv(t, provider)
 
-	var got *types.Issue
-	var fail *updateIDFailure
-	var err error
+	t.Run("append_notes", func(t *testing.T) {
+		patch := mustProxiedUpdatePatch(t, &updateInput{
+			fields:         map[string]any{},
+			hasAppendNotes: true,
+			appendNotes:    "appended",
+		}, current)
+		if !patch.AppendNotes.Set || patch.AppendNotes.Value != "appended" {
+			t.Errorf("AppendNotes = %+v, want the raw append text", patch.AppendNotes)
+		}
+		if patch.Notes.Set {
+			t.Errorf("Notes = %+v: notes must NOT be pre-merged from the pre-read row", patch.Notes)
+		}
+	})
+
+	t.Run("merge_metadata", func(t *testing.T) {
+		patch := mustProxiedUpdatePatch(t, &updateInput{
+			fields:          map[string]any{},
+			mergeMetadataIn: json.RawMessage(`{"new":"key"}`),
+		}, current)
+		if !patch.Metadata.Merge.Set || string(patch.Metadata.Merge.Value) != `{"new":"key"}` {
+			t.Errorf("Metadata.Merge = %+v, want the raw incoming JSON", patch.Metadata.Merge)
+		}
+		if patch.Metadata.Replace.Set {
+			t.Errorf("Metadata.Replace = %+v: metadata must NOT be pre-merged from the pre-read row", patch.Metadata.Replace)
+		}
+	})
+
+	t.Run("set_and_unset_metadata", func(t *testing.T) {
+		patch := mustProxiedUpdatePatch(t, &updateInput{
+			fields:        map[string]any{},
+			setMetadata:   []string{"tier=gold"},
+			unsetMetadata: []string{"existing"},
+		}, current)
+		if got := string(patch.Metadata.Set["tier"]); got != `"gold"` {
+			t.Errorf("Metadata.Set[tier] = %s, want the JSON string value", got)
+		}
+		if len(patch.Metadata.Unset) != 1 || patch.Metadata.Unset[0] != "existing" {
+			t.Errorf("Metadata.Unset = %v, want [existing]", patch.Metadata.Unset)
+		}
+		if patch.Metadata.Replace.Set {
+			t.Errorf("Metadata.Replace = %+v: metadata must NOT be pre-merged from the pre-read row", patch.Metadata.Replace)
+		}
+	})
+
+	t.Run("clear_defer_status_resolved_from_the_pre_read_row", func(t *testing.T) {
+		deferred := &types.Issue{ID: "bd-spec-2", Status: types.StatusDeferred}
+		patch := mustProxiedUpdatePatch(t, &updateInput{fields: map[string]any{}, clearDeferStatus: true}, deferred)
+		if !patch.Status.Set || patch.Status.Value != types.StatusOpen {
+			t.Errorf("Status = %+v, want open (clearDeferStatus on a deferred issue)", patch.Status)
+		}
+		open := &types.Issue{ID: "bd-spec-3", Status: types.StatusBlocked}
+		if patch := mustProxiedUpdatePatch(t, &updateInput{fields: map[string]any{}, clearDeferStatus: true}, open); patch.Status.Set {
+			t.Errorf("Status = %+v, want unset: --defer=\"\" must not clobber a non-deferred status", patch.Status)
+		}
+	})
+}
+
+func mustProxiedUpdatePatch(t *testing.T, in *updateInput, before *types.Issue) issueops.IssuePatch {
+	t.Helper()
+	patch, err := proxiedUpdatePatch(in, before)
+	if err != nil {
+		t.Fatalf("proxiedUpdatePatch: %v", err)
+	}
+	return patch
+}
+
+// TestProxiedUpdateCarriesForce pins the proxied path's translation of
+// `--force`. An earlier attempt was reverted for exactly this missing mapping:
+// the proxied caller built a request that never carried the override, so a
+// shared policy check refused the close with no way for the user to say
+// otherwise. The assignee half only applies to an assignee edit, so
+// `--force -s closed` asks for the close-policy half alone.
+func TestProxiedUpdateCarriesForce(t *testing.T) {
+	closing := map[string]any{"status": string(types.StatusClosed)}
+
+	forced := recordProxiedUpdateRequest(t, &updateInput{fields: closing, force: true})
+	if !forced.ForceClosePolicy {
+		t.Error("ForceClosePolicy = false with --force")
+	}
+	if forced.ForceAssigneeTransfer {
+		t.Error("ForceAssigneeTransfer = true without an assignee edit to authorize")
+	}
+
+	unforced := recordProxiedUpdateRequest(t, &updateInput{fields: closing})
+	if unforced.ForceClosePolicy {
+		t.Error("ForceClosePolicy = true without --force")
+	}
+
+	transfer := recordProxiedUpdateRequest(t, &updateInput{
+		fields: map[string]any{"assignee": "thief"}, force: true,
+	})
+	if !transfer.ForceAssigneeTransfer || !transfer.ForceClosePolicy {
+		t.Errorf("request = %+v, want --force to carry both halves on an assignee edit", transfer)
+	}
+}
+
+// TestProxiedUpdateCarriesConditionalGuards pins the bd-wsqvw guards onto the
+// request. The contract runs the compare-and-set inside the mutation
+// transaction, the only place it can be atomic with the write it gates.
+func TestProxiedUpdateCarriesConditionalGuards(t *testing.T) {
+	holder, status := "alice", string(types.StatusInProgress)
+	req := recordProxiedUpdateRequest(t, &updateInput{
+		fields:     map[string]any{"priority": 0},
+		ifAssignee: &holder,
+		ifStatus:   &status,
+	})
+	if req.ExpectedAssignee == nil || *req.ExpectedAssignee != "alice" {
+		t.Errorf("ExpectedAssignee = %v, want alice", req.ExpectedAssignee)
+	}
+	if req.ExpectedStatus == nil || *req.ExpectedStatus != types.StatusInProgress {
+		t.Errorf("ExpectedStatus = %v, want in_progress", req.ExpectedStatus)
+	}
+}
+
+func recordProxiedUpdateRequest(t *testing.T, in *updateInput) issueops.UpdateRequest {
+	t.Helper()
+	before := &types.Issue{ID: "bd-1", Status: types.StatusOpen}
+	p := claimRoleFixture(t, before, issueops.UpdateResult{Issue: before, Changed: true}, nil)
+	if _, fail, err := applyUpdateProxiedOne(context.Background(), "bd-1", in); err != nil || fail != nil {
+		t.Fatalf("applyUpdateProxiedOne: err = %v, fail = %+v", err, fail)
+	}
+	return p.lifecycle.request
+}
+
+// TestProxiedUpdateExhaustedConflictsFailLoudly proves a write that never lands
+// cannot exit as a success: when the contract spends its retry budget losing
+// Dolt's commit-time merge, the command reports the failure instead of printing
+// "✓ Updated" (a recorded failure suppresses the success line and drives the
+// non-zero exit via reportUpdateFailures in runUpdateProxiedServer).
+func TestProxiedUpdateExhaustedConflictsFailLoudly(t *testing.T) {
+	before := &types.Issue{ID: "bd-retry-2", Status: types.StatusOpen}
+	claimRoleFixture(t, before, issueops.UpdateResult{}, serializationFailure())
+
+	var (
+		got  *types.Issue
+		fail *updateIDFailure
+		err  error
+	)
 	stderr := captureStderrDuring(t, func() {
 		in := &updateInput{fields: map[string]any{"title": "never lands"}}
 		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-retry-2", in)
 	})
 	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne returned hard error: %v", err)
+		t.Fatalf("applyUpdateProxiedOne returned a hard error: %v", err)
 	}
 	if fail == nil || got != nil {
 		t.Fatalf("fail=%v issue=%v: a write that never landed must be reported as a failure", fail, got)
 	}
 	if fail.GuardMismatch {
-		t.Errorf("exhausted conflicts must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
+		t.Error("exhausted conflicts must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
 	}
 	if !strings.Contains(stderr, "retries exhausted") {
 		t.Errorf("stderr = %q, want a loud retries-exhausted failure", stderr)
 	}
-	if n := provider.uows.Load(); n < 2 {
-		t.Errorf("unit-of-work attempts = %d, want at least 2 before giving up", n)
-	}
 }
 
-// TestApplyUpdateProxiedOne_NothingToCommitWithoutConflictSucceeds preserves
-// the one legitimate nothing-to-commit case: wisp-only updates write to
-// dolt_ignored tables, so a successful ApplyUpdate can leave the Dolt commit
-// layer with nothing to do. That is a success, not a lost write — no
-// serialization failure preceded it.
-func TestApplyUpdateProxiedOne_NothingToCommitWithoutConflictSucceeds(t *testing.T) {
-	issue := &types.Issue{ID: "bd-retry-3", Status: types.StatusOpen}
-	provider := &fakeUOWProvider{
-		issue:  issue,
-		commit: func(int64) error { return errors.New("nothing to commit") },
-	}
-	withFakeProxiedUpdateEnv(t, provider)
+// TestProxiedUpdateGuardMismatchExitsThirteen keeps the one failure class that
+// gets its own exit code: a stale --if-assignee/--if-status wrote nothing and
+// retrying is pointless, so the batch must exit 13 rather than 1.
+func TestProxiedUpdateGuardMismatchExitsThirteen(t *testing.T) {
+	before := &types.Issue{ID: "bd-guard-1", Status: types.StatusOpen}
+	claimRoleFixture(t, before, issueops.UpdateResult{},
+		fmt.Errorf("%w: bd-guard-1 has status %q, expected %q", storage.ErrStatusMismatch, "open", "in_progress"))
 
-	in := &updateInput{fields: map[string]any{"title": "wisp-shaped"}}
-	got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-retry-3", in)
-	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne: %v", err)
-	}
-	if fail != nil || got == nil {
-		t.Fatalf("fail=%v issue=%v: empty-working-set commit on an unconflicted attempt is a success", fail, got)
-	}
-	if n := provider.uows.Load(); n != 1 {
-		t.Errorf("unit-of-work attempts = %d, want 1 (nothing-to-commit must not trigger retries)", n)
-	}
-}
-
-// TestApplyUpdateProxiedOne_NewUOWFailureIsPerIDFailure pins the stage the
-// error came from when the provider cannot hand out a unit of work at all:
-// the attempt never ran, so the ID fails with an "opening unit of work"
-// verdict and NO hard error — a multi-ID batch keeps going and still exits
-// non-zero through reportUpdateFailures. Returning a hard error here instead
-// would abort the batch and drop the failures already collected.
-func TestApplyUpdateProxiedOne_NewUOWFailureIsPerIDFailure(t *testing.T) {
-	provider := &fakeUOWProvider{
-		issue:  &types.Issue{ID: "bd-uow-1", Status: types.StatusOpen},
-		newUOW: func(int64) error { return errors.New("dial dolt: connection refused") },
-	}
-	withFakeProxiedUpdateEnv(t, provider)
-
-	var got *types.Issue
+	stale := string(types.StatusInProgress)
 	var fail *updateIDFailure
-	var err error
 	stderr := captureStderrDuring(t, func() {
-		in := &updateInput{fields: map[string]any{"title": "no session"}}
-		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-uow-1", in)
+		_, fail, _ = applyUpdateProxiedOne(context.Background(), "bd-guard-1", &updateInput{
+			fields: map[string]any{"priority": 0}, ifStatus: &stale,
+		})
 	})
-	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a provider failure is a per-ID verdict, not a batch abort", err)
+	if fail == nil || !fail.GuardMismatch {
+		t.Fatalf("fail = %+v, want a guard-mismatch verdict", fail)
 	}
-	if fail == nil || got != nil {
-		t.Fatalf("fail=%v issue=%v: an update that never opened a unit of work must be reported as a failure", fail, got)
+	if !strings.Contains(fail.Error, "precondition failed") {
+		t.Errorf("fail.Error = %q, want it named as a precondition failure", fail.Error)
 	}
-	if !strings.Contains(fail.Error, "opening unit of work") {
-		t.Errorf("fail.Error = %q, want it attributed to opening the unit of work", fail.Error)
-	}
-	if fail.GuardMismatch {
-		t.Error("a provider failure must not masquerade as a guard mismatch (that would exit 13 and tell scripts not to retry)")
-	}
-	if !strings.Contains(stderr, "Error opening unit of work for bd-uow-1") {
-		t.Errorf("stderr = %q, want the provider failure named on stderr", stderr)
-	}
-	if n := provider.uows.Load(); n != 1 {
-		t.Errorf("unit-of-work attempts = %d, want 1 (a permanent provider failure must not be retried)", n)
+	if !strings.Contains(stderr, "status mismatch") {
+		t.Errorf("stderr = %q, want the machine-greppable sentinel text", stderr)
 	}
 }
 
-// TestApplyUpdateProxiedOne_CommitFailureIsPerIDFailure pins the other
-// terminal stage: a commit that fails for a reason that is neither a
-// serialization conflict nor an empty working set. The write did not land, so
-// the ID fails with a "committing" verdict, once — no retry, no batch abort.
-func TestApplyUpdateProxiedOne_CommitFailureIsPerIDFailure(t *testing.T) {
-	provider := &fakeUOWProvider{
-		issue:  &types.Issue{ID: "bd-commit-1", Status: types.StatusOpen},
-		commit: func(int64) error { return errors.New("dolt: disk full") },
-	}
-	withFakeProxiedUpdateEnv(t, provider)
+// TestProxiedUpdateAbortsTheBatchOnCancellation is the plain-update half of the
+// claim's own cancellation rule: SIGINT cancels bd's root context, every
+// remaining id would fail the same way, so the loop aborts instead of recording
+// one "context canceled" failure per id.
+func TestProxiedUpdateAbortsTheBatchOnCancellation(t *testing.T) {
+	for _, cancellation := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(cancellation.Error(), func(t *testing.T) {
+			before := &types.Issue{ID: "bd-1", Status: types.StatusOpen}
+			claimRoleFixture(t, before, issueops.UpdateResult{}, fmt.Errorf("update bd-1: %w", cancellation))
 
-	var got *types.Issue
-	var fail *updateIDFailure
-	var err error
-	stderr := captureStderrDuring(t, func() {
-		in := &updateInput{fields: map[string]any{"title": "never commits"}}
-		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-commit-1", in)
-	})
-	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a commit failure is a per-ID verdict, not a batch abort", err)
-	}
-	if fail == nil || got != nil {
-		t.Fatalf("fail=%v issue=%v: a write whose commit failed must be reported as a failure", fail, got)
-	}
-	if !strings.Contains(fail.Error, "committing:") {
-		t.Errorf("fail.Error = %q, want it attributed to the commit", fail.Error)
-	}
-	if !strings.Contains(stderr, "Error committing bd-commit-1") {
-		t.Errorf("stderr = %q, want the commit failure named on stderr", stderr)
-	}
-	if n := provider.uows.Load(); n != 1 {
-		t.Errorf("unit-of-work attempts = %d, want 1 (a permanent commit failure must not be retried)", n)
-	}
-}
-
-// TestApplyUpdateProxiedOne_CommitCanceledStaysPerIDFailure guards the seam
-// between "the commit failed" and "the retry loop was cut short". Both surface
-// as a context error, but they are different verdicts: a commit that fails
-// while the process is tearing down on SIGINT is still one ID's commit
-// failure, and must be recorded as one so reportUpdateFailures still runs for
-// the whole batch — including any earlier guard mismatch, whose exit 13 tells
-// scripts not to retry. Only cancellation BETWEEN attempts aborts the batch.
-func TestApplyUpdateProxiedOne_CommitCanceledStaysPerIDFailure(t *testing.T) {
-	provider := &fakeUOWProvider{
-		issue:  &types.Issue{ID: "bd-commit-2", Status: types.StatusOpen},
-		commit: func(int64) error { return context.Canceled },
-	}
-	withFakeProxiedUpdateEnv(t, provider)
-
-	var got *types.Issue
-	var fail *updateIDFailure
-	var err error
-	stderr := captureStderrDuring(t, func() {
-		in := &updateInput{fields: map[string]any{"title": "commit interrupted"}}
-		got, fail, err = applyUpdateProxiedOne(context.Background(), "bd-commit-2", in)
-	})
-	if err != nil {
-		t.Fatalf("applyUpdateProxiedOne returned hard error %v: a commit that failed with a context error is still a per-ID verdict", err)
-	}
-	if fail == nil || got != nil {
-		t.Fatalf("fail=%v issue=%v: a write whose commit failed must be reported as a failure", fail, got)
-	}
-	if !strings.Contains(fail.Error, "committing:") {
-		t.Errorf("fail.Error = %q, want it attributed to the commit", fail.Error)
-	}
-	if !strings.Contains(stderr, "Error committing bd-commit-2") {
-		t.Errorf("stderr = %q, want the commit failure named on stderr", stderr)
-	}
-}
-
-// TestApplyUpdateProxiedOne_CanceledBetweenAttemptsAbortsBatch is the other
-// side of that seam: when cancellation lands between two conflict retries the
-// retry loop reports the context's own error, no stage failed, and no verdict
-// was reached for this ID. Abort the batch rather than inventing a per-ID
-// failure for a write whose outcome nobody observed.
-func TestApplyUpdateProxiedOne_CanceledBetweenAttemptsAbortsBatch(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-
-	provider := &fakeUOWProvider{
-		issue: &types.Issue{ID: "bd-cancel-1", Status: types.StatusOpen},
-		commit: func(int64) error {
-			cancel() // SIGINT lands while this attempt is losing Dolt's merge
-			return serializationFailure()
-		},
-	}
-	withFakeProxiedUpdateEnv(t, provider)
-
-	in := &updateInput{fields: map[string]any{"title": "interrupted"}}
-	got, fail, err := applyUpdateProxiedOne(ctx, "bd-cancel-1", in)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want the context error so the batch aborts", err)
-	}
-	if fail != nil || got != nil {
-		t.Fatalf("fail=%v issue=%v: an unobserved outcome is not a per-ID verdict", fail, got)
+			got, fail, err := applyUpdateProxiedOne(context.Background(), "bd-1",
+				&updateInput{fields: map[string]any{"title": "interrupted"}})
+			if !errors.Is(err, cancellation) {
+				t.Fatalf("err = %v, want %v returned so the batch aborts", err, cancellation)
+			}
+			if got != nil || fail != nil {
+				t.Errorf("issue = %+v, fail = %+v: cancellation is not a per-id verdict", got, fail)
+			}
+		})
 	}
 }

@@ -36,7 +36,7 @@ import (
 // The vocabulary is a one-way door: renaming or removing a documented
 // status+code pair breaks the wire. Adding one does not, which is why clients
 // are told to default-branch on unknown codes within a status class. Keep it
-// at what the six v0 operations actually need.
+// at what the v0 operations actually need.
 type Code string
 
 // The v0 code vocabulary. Every value here is documented in the spec, and
@@ -143,12 +143,63 @@ var ErrBusy = errors.New("server busy")
 
 // Operation ids, matching the spec's operationId values exactly.
 const (
-	OpHealth        = "health"
-	OpGetContext    = "getContext"
-	OpListReadyWork = "listReadyWork"
-	OpListIssues    = "listIssues"
-	OpGetIssue      = "getIssue"
-	OpClaimIssue    = "claimIssue"
+	OpHealth               = "health"
+	OpGetContext           = "getContext"
+	OpListReadyWork        = "listReadyWork"
+	OpGetStats             = "getStats"
+	OpListIssues           = "listIssues"
+	OpGetIssue             = "getIssue"
+	OpClaimIssue           = "claimIssue"
+	OpListSettings         = "listSettings"
+	OpGetSetting           = "getSetting"
+	OpListDependencyCycles = "listDependencyCycles"
+	// OpListDependencies reads STORED EDGE ROWS for several issues at once.
+	// It is a separate operation from getIssue's embedded `dependencies`
+	// member because it answers per named issue, reports the ids that named
+	// nothing, and returns edges whose target this database holds no row for.
+	OpListDependencies = "listDependencies"
+	// OpListBlockingAnnotations reads the DERIVED blocking decoration for
+	// several issues at once — open blockers, issues blocked, and the parent.
+	// It is separate from listDependencies because it answers a summary over
+	// two edge types with a status rule applied, where that one returns the
+	// stored rows and applies nothing.
+	OpListBlockingAnnotations = "listBlockingAnnotations"
+	// OpGetDependencyTree walks the dependency graph from ONE root. It is
+	// separate from listDependencies because that one answers raw edge rows for
+	// many anchors at one hop, and this one recurses from a single anchor with a
+	// depth, a cycle policy and a node shape of its own.
+	OpGetDependencyTree = "getDependencyTree"
+	OpCountReadyWork    = "countReadyWork"
+	OpQueryIssues       = "queryIssues"
+	// OpSweepIssues is one of the two DESTRUCTIVE operations on this surface:
+	// bulk clearance of closed beads from one tier, behind issueops.Sweeper.
+	OpSweepIssues = "sweepIssues"
+	// OpDeleteIssues is the other DESTRUCTIVE operation: erasure of beads the
+	// request NAMES, behind issueops.Deleter. It is the one operation here whose
+	// refusals include a question about the GRAPH — a named bead with a
+	// dependent the request did not name.
+	OpDeleteIssues = "deleteIssues"
+	// OpBatchCreateIssues creates many issues as one transaction, or none.
+	OpBatchCreateIssues = "batchCreateIssues"
+	// OpRememberMemory stores one memory, behind memoryops.Memories. It is the
+	// first operation on this surface that reaches a role outside issueops: the
+	// memory plane is user data riding in the config table, not settings, and
+	// the two have different merge semantics and a different miss contract.
+	OpRememberMemory = "rememberMemory"
+	// OpGetMemory reads one memory by key. It is the ONE operation on this
+	// surface that answers a miss with a 404 where its settings counterpart
+	// deliberately does not: see its operationCodes row.
+	OpGetMemory = "getMemory"
+	// OpForgetMemory is the THIRD destructive operation on this surface, and the
+	// only one that is a DELETE method: it names one memory by path, carries no
+	// body and takes no flags, which is what that method already means. The two
+	// destructive issue operations are collection-level custom methods because
+	// they act on a set the request describes.
+	OpForgetMemory = "forgetMemory"
+	// OpListMemories enumerates the memory plane, narrowed by one search term.
+	// It is the operation that makes stored memories DISCOVERABLE rather than
+	// merely readable by a caller who already knows a key.
+	OpListMemories = "listMemories"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -161,8 +212,8 @@ const (
 // /healthz — the Host-header middleware, and the unknown-query-parameter
 // refusal every decoder performs — and both are deliberately absent from every
 // row here. They are uniform rules, not per-operation behavior, and the spec
-// documents them once at the document level rather than repeating them on all
-// six operations; these rows carry what an operation produces beyond them.
+// documents them once at the document level rather than repeating them on
+// every operation; these rows carry what an operation produces beyond them.
 // Keep the two documents in step: a row here and the document-level prose are
 // the only two places that carve-out exists.
 var operationCodes = map[string][]Code{
@@ -175,10 +226,92 @@ var operationCodes = map[string][]Code{
 	OpListReadyWork: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
 	OpListIssues:    {CodeInvalidArgument, CodeInvalidCursor, CodeBusy, CodeDBUnavailable, CodeInternal},
 	OpGetIssue:      {CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No 400 of its own: the operation takes no parameters, so the only
+	// invalid_argument it can raise is the document-level unknown-query-key
+	// rule this table deliberately omits.
+	OpListSettings: {CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No 404: a key nothing stored and a key stored as the empty string are one
+	// answer on this surface, so the only refusal a key can earn is the 400
+	// that says it was not a key.
+	OpGetSetting: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The 400 here is this operation's own, not the document-level
+	// unknown-parameter rule: a malformed `skip_blocked`, and the EMPTY
+	// `assignee` the document refuses rather than answering with the rows that
+	// have no assignee.
+	OpGetStats: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The cycle sweep takes no parameters at all, so it has no 400 of its own:
+	// the two uniform ones above are the whole of its invalid-argument story.
+	OpListDependencyCycles: {CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No not_found here, deliberately: an id that names nothing is reported in
+	// the response's `missing` member, so a batch keeps the answers for the ids
+	// that were found. A 404 would discard them.
+	OpListDependencies: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The same vocabulary as the stored-edge read beside it, and no not_found
+	// for a stronger version of the same reason: this operation probes no id's
+	// existence at all, so there is nothing it could 404 on.
+	OpListBlockingAnnotations: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The 404 is the difference from the row above: this operation has ONE
+	// anchor, so there is no other answer to preserve by reporting the miss in
+	// the body. Its 400 is its own — an empty root, a direction outside the
+	// closed set, a non-positive max_depth — all three the ROLE's ErrValidation
+	// reaching the wire.
+	OpGetDependencyTree: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The same vocabulary as the listing it sizes: it takes the same filters
+	// and can refuse them the same way. limit=0's mode-dependent refusal has no
+	// analog here because there is no limit to pass.
+	OpCountReadyWork: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The listing's vocabulary minus the cursor: this operation has none, so
+	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
+	// invalid_argument on `q` rather than a code of its own — a client's
+	// recovery is the same as for any other malformed parameter value.
+	OpQueryIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The 400 here is the widest on this surface, and most of it is not this
+	// handler's: the unfiltered durable sweep, the unrecognized tier and the
+	// malformed glob are all the ROLE's ErrValidation reaching the wire through
+	// failSweepErr. No 404 — this operation names no id — and no 409: a bead
+	// another sweep already took is simply not in the set.
+	OpSweepIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// CodeNotFound is the one this operation has and the sweep does not: a
+	// sweep describes a set that can legitimately be empty, while a delete
+	// names beads and an id that resolves to nothing is a caller mistake.
+	OpDeleteIssues: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	OpClaimIssue: {
 		CodeInvalidArgument, CodeNotFound, CodeAlreadyClaimed, CodeNotClaimable,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
+	// No not_found. The role refuses an edge whose target names nothing, and
+	// that refusal is about the REQUEST BODY the client sent, not about a
+	// resource this operation was asked to address — there is no id in the path
+	// to have missed. A 404 here would tell a client its request went to the
+	// wrong place.
+	//
+	// No conflict code either: this operation publishes no `id` member, so no
+	// item can collide with a stored row and the role's ErrAlreadyExists is
+	// unreachable from the wire.
+	OpBatchCreateIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// No 404 and no conflict code: this is an UPSERT with a server-derivable
+	// key, so there is no resource it can fail to address and no row it can
+	// collide with. Its 400 is the body vocabulary plus the ROLE's two
+	// refusals — empty content, and content no key can be derived from.
+	OpRememberMemory: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// THE 404 IS THE DIVERGENCE, and it is deliberate. OpGetSetting has none
+	// because on that plane an absent key and a key stored empty are one answer
+	// the CLI itself prints identically, so a 404 would publish an invented
+	// distinction. Here the CLI already distinguishes a miss — `bd recall` has
+	// an exit-code contract for it — and the role answers Found rather than a
+	// value, so the 404 reports a distinction that exists. The stored-empty row
+	// falls on the miss side of it, which the document states.
+	OpGetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The read's vocabulary exactly, because the two operations address the same
+	// resource the same way and this one's Found false is the same answer: a key
+	// nothing stored is a 404 and nothing was removed. No 409 — a memory another
+	// caller already forgot is simply not there, which is what the 404 says.
+	OpForgetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The 400 here IS this operation's own, unlike listSettings' absent row: it
+	// has one parameter, and a repeated `q` is refused rather than resolved to
+	// one of its values. No 404 — a search matching nothing is an empty page,
+	// because a question about a set has an answer even when the set is empty.
+	OpListMemories: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
 }
 
 // Result is a problem response ready to be written: the envelope plus the
@@ -267,6 +400,18 @@ func InvalidCursor() Result {
 // apart would be probing which ids are well-formed.
 func NotFound() Result {
 	return newResult(CodeNotFound, "no issue or wisp with that id")
+}
+
+// MemoryNotFound builds the 404 for a key this workspace holds no memory under.
+//
+// A separate constructor rather than a detail argument on NotFound, because the
+// two say different things: that one is about the issue id space, and reusing
+// its sentence here would tell a client its memory key was an issue id. The
+// detail deliberately does NOT distinguish an absent row from one stored as the
+// empty string — the role cannot see the difference, so the wire must not claim
+// to.
+func MemoryNotFound() Result {
+	return newResult(CodeNotFound, "this workspace holds no memory under that key")
 }
 
 // ClassifyError maps an error from the storage seam onto the wire. The caller

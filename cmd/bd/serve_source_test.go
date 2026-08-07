@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // TestServeDatabaseSourceClassifiesTheWorkspace drives the one decision point
@@ -106,10 +107,11 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		t.Fatal("the store's own accessor no longer returns a hook-firing claimer; this test proves nothing")
 	}
 
-	reader, claimer, err := serveIssueRoles(chained)
+	roles, err := serveIssueRoles(chained)
 	if err != nil {
 		t.Fatalf("serveIssueRoles: %v", err)
 	}
+	reader, claimer := roles.reader, roles.claimer
 	// The same predicate httpapi.Listen refuses on, so a regression here is a
 	// server that refuses to boot rather than one that runs hooks silently.
 	if storage.RoleFiresHooks(claimer) {
@@ -126,20 +128,20 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		// BD_NO_HOOKS=1 wires no hook decorator at all, so the roles are the
 		// store's own and the peel must be conditional.
 		bare := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), true)
-		reader, claimer, err := serveIssueRoles(bare)
+		roles, err := serveIssueRoles(bare)
 		if err != nil {
 			t.Fatalf("serveIssueRoles: %v", err)
 		}
-		if claimer != issueops.Claimer(middle.claimer) || reader != issueops.Reader(middle.reader) {
+		if roles.claimer != issueops.Claimer(middle.claimer) || roles.reader != issueops.Reader(middle.reader) {
 			t.Error("serveIssueRoles peeled a layer that was not there")
 		}
 	})
 
 	t.Run("no open store is an error, not a nil source", func(t *testing.T) {
-		// httpapi.Listen refuses a half-set pair, but a nil store reaching it
-		// as two nil roles would report "no database source" — true, and
+		// httpapi.Listen refuses a partial role set, but a nil store reaching
+		// it as an all-nil set would report "no database source" — true, and
 		// useless. Name the real condition here.
-		if _, _, err := serveIssueRoles(nil); err == nil {
+		if _, err := serveIssueRoles(nil); err == nil {
 			t.Fatal("serveIssueRoles(nil) = nil error; want a refusal naming the missing store")
 		}
 	})
@@ -176,8 +178,14 @@ func writeBrokenBeadsConfig(t *testing.T, beadsDir string) {
 // serveRolesStore is the smallest DoltStorage the role extraction can be
 // pointed at: it publishes its own roles and unwraps to an inner store with
 // different ones, so a peel of the wrong depth lands on identifiably wrong
-// values. The embedded DoltStorage is nil because nothing here reaches past
-// the three methods below.
+// values. The embedded DoltStorage is nil, so an accessor serveIssueRoles
+// starts calling without a stub here panics rather than passing quietly.
+//
+// Only the reader and the claimer carry identifiable values. That is enough to
+// pin the peel DEPTH, which is the whole property under test: serveIssueRoles
+// peels once and then calls every accessor on that one store value, so no role
+// can come from a different layer than these two did. The rest return nil
+// because the extraction does not inspect them.
 type serveRolesStore struct {
 	storage.DoltStorage
 	reader  *serveStubReader
@@ -188,6 +196,19 @@ type serveRolesStore struct {
 func (s *serveRolesStore) IssueReader() (issueops.Reader, error)   { return s.reader, nil }
 func (s *serveRolesStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
 func (s *serveRolesStore) Unwrap() storage.DoltStorage             { return s.inner }
+
+func (*serveRolesStore) WorkspaceConfig() (issueops.WorkspaceConfig, error)     { return nil, nil }
+func (*serveRolesStore) StatsReporter() (issueops.StatsReporter, error)         { return nil, nil }
+func (*serveRolesStore) CycleDetector() (issueops.CycleDetector, error)         { return nil, nil }
+func (*serveRolesStore) EdgeReader() (issueops.EdgeReader, error)               { return nil, nil }
+func (*serveRolesStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) { return nil, nil }
+func (*serveRolesStore) TreeWalker() (issueops.TreeWalker, error)               { return nil, nil }
+func (*serveRolesStore) ReadyCounter() (issueops.ReadyCounter, error)           { return nil, nil }
+func (*serveRolesStore) Querier() (issueops.Querier, error)                     { return nil, nil }
+func (*serveRolesStore) Sweeper() (issueops.Sweeper, error)                     { return nil, nil }
+func (*serveRolesStore) Deleter() (issueops.Deleter, error)                     { return nil, nil }
+func (*serveRolesStore) BatchCreator() (issueops.BatchCreator, error)           { return nil, nil }
+func (*serveRolesStore) Memories() (memoryops.Memories, error)                  { return nil, nil }
 
 type serveStubReader struct{}
 

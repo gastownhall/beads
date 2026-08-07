@@ -162,8 +162,13 @@ func runPruneSweep(t *testing.T, r cascadeRunner) pruneSweepOutcome {
 // would have left alone" — on the two shapes it actually runs:
 // wh-gate-sweep's gate purge, and the wisp-decay close+purge pair.
 //
-// Both scenarios are replayed against a classic embedded workspace and a
-// proxied one and the outcomes compared, so a divergence is reported as a
+// It was written while the answer was YES: proxied `bd delete` passed
+// Cascade:true unconditionally and refused the --cascade flag outright.
+// bd-x82so put both routes on issueops.Deleter with the flag the caller typed,
+// so every scenario here now pins ONE outcome for both modes.
+//
+// Both scenarios are still replayed against a classic embedded workspace and a
+// proxied one and the outcomes compared, so a re-divergence is reported as a
 // divergence rather than as one mode's test failing alone.
 func TestProxiedServerCascadeParity(t *testing.T) {
 	requireSharedProxiedServer(t)
@@ -185,6 +190,8 @@ func TestProxiedServerCascadeParity(t *testing.T) {
 		classicDir, _, _ := bdInit(t, bd, "--prefix", "cgc")
 		classic := runGateDeliveryLedger(t, classicCascadeRunner(t, bd, classicDir))
 
+		// One expectation, both modes: an unforced-cascade delete of the gate
+		// removes the gate and leaves everything it was gating alive.
 		wantClassic := gateDeliveryLedgerOutcome{
 			gateGone: true, targetSurvives: true, siblingSurvives: true,
 		}

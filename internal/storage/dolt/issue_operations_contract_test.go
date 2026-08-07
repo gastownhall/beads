@@ -19,6 +19,18 @@ func TestIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T) {
 	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, fixture)
 }
 
+func TestIssueOperationsCreateRefusesAnOccupiedID(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateRefusesAnOccupiedID(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateInheritsParentLabels(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, fixture)
+}
+
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
@@ -35,6 +47,12 @@ func TestIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
 	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {

@@ -3,6 +3,8 @@ package issueops
 import (
 	"errors"
 	"fmt"
+
+	"github.com/steveyegge/beads/beadserrors"
 )
 
 // ErrAlreadyClaimed is returned when attempting to claim an issue that is already
@@ -41,27 +43,16 @@ func (e *ClaimConflictError) Error() string { return e.Err.Error() }
 // Unwrap makes ClaimConflictError match the refusal it carries.
 func (e *ClaimConflictError) Unwrap() error { return e.Err }
 
-// ErrUnsupported reports something the caller asked for that this backend
-// cannot serve — a capability accessor it does not implement, or a request
-// field it will not honor. It is a TYPE rather than a sentinel because the
-// two facts a caller needs are which operation refused and which backend
-// refused it, and neither survives a formatted string.
+// ErrUnsupported reports a capability this backend does not serve. It is an
+// alias of beadserrors.ErrUnsupported — the same type, so one errors.As arm
+// matches it under either name — and it is re-exported here because a caller
+// holding an issueops role should not have to discover a second package to
+// classify the refusal.
 //
-// A backend returns it instead of quietly doing something narrower. The case
-// that made that rule explicit is Reader's Offset: the store-backed body
-// rendered LIMIT without OFFSET, so a caller that paged with it received the
-// first page over and over with no error to notice.
-//
-// It lives here so a caller holding only a role interface can classify the
-// refusal with errors.As without importing internal/storage.
-type ErrUnsupported struct {
-	Op      string // method name, e.g. "AddLabel" or "Transaction.CreateIssues"
-	Backend string // e.g. "dolt-server"
-}
-
-func (e *ErrUnsupported) Error() string {
-	return fmt.Sprintf("operation %q not supported by the %s backend", e.Op, e.Backend)
-}
+// It is declared there rather than here because the capability shell is not an
+// issue concept: a memory role can go unimplemented by a backend exactly as a
+// Reader can.
+type ErrUnsupported = beadserrors.ErrUnsupported
 
 // ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
 // current assignee does not match the expected assignee (including when the
@@ -69,15 +60,23 @@ func (e *ErrUnsupported) Error() string {
 // stale; the issue is left untouched.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
-// ErrNotFound is returned when a requested entity does not exist in the database.
-var ErrNotFound = errors.New("not found")
-
-// ErrValidation classifies deterministic request-validation failures.
-var ErrValidation = errors.New("validation failed")
-
-// ErrNotInitialized is returned when the database has not been initialized
-// (e.g., issue_prefix config is missing).
-var ErrNotInitialized = errors.New("database not initialized")
+// The namespace-neutral part of this vocabulary is declared by beadserrors and
+// re-exported here. These are ALIASES, so they are the same values: every
+// existing issueops.ErrX reference and every errors.Is site keeps matching the
+// identical error, and a leaf that never imports issueops still matches it too.
+//
+// They live down there because none of them names an issue: a request can be
+// invalid, a row can be missing and a database can be uninitialized on any
+// plane. The refusals BELOW that name issue concepts stay here.
+var (
+	// ErrNotFound is returned when a requested entity does not exist in the database.
+	ErrNotFound = beadserrors.ErrNotFound
+	// ErrValidation classifies deterministic request-validation failures.
+	ErrValidation = beadserrors.ErrValidation
+	// ErrNotInitialized is returned when the database has not been initialized
+	// (e.g., issue_prefix config is missing).
+	ErrNotInitialized = beadserrors.ErrNotInitialized
+)
 
 // ErrPrefixMismatch is returned when an issue ID does not match the configured prefix.
 var ErrPrefixMismatch = errors.New("prefix mismatch")
@@ -110,6 +109,44 @@ func (e *CloseOpenChildrenError) Unwrap() error {
 // ErrAlreadyExists is returned when a create operation is given an ID that is
 // already occupied. The issue and wisp tables share one ID space.
 var ErrAlreadyExists = errors.New("issue already exists")
+
+// ErrAlreadyIdentified is returned by Bootstrapper.Bootstrap when the substrate
+// already carries a workspace identity. It is its own sentinel rather than
+// ErrAlreadyExists because that one is about an occupied ISSUE ID in a shared
+// id space, and a caller that classifies the two together would answer a
+// re-init with advice about `bd update`.
+var ErrAlreadyIdentified = errors.New("workspace already identified")
+
+// AlreadyIdentifiedError reports the identity a substrate was found carrying
+// when a bootstrap was refused, read inside the same transaction that would
+// have written over it.
+//
+// It carries the pair rather than formatting it away because the two things a
+// caller does next both need the values: adopting the identity needs them, and
+// telling a COMPLETE identity apart from a half-written one — the state a
+// bootstrap that failed partway leaves on a substrate with no transactions —
+// means looking at which of the two is empty.
+type AlreadyIdentifiedError struct {
+	// Prefix is the issue prefix found, or "" when the substrate carried none.
+	Prefix string
+	// ProjectID is the project identity found, or "" when the substrate
+	// carried none.
+	ProjectID string
+}
+
+func (e *AlreadyIdentifiedError) Error() string {
+	switch {
+	case e.Prefix != "" && e.ProjectID != "":
+		return fmt.Sprintf("workspace already identified as prefix %q, project %s", e.Prefix, e.ProjectID)
+	case e.Prefix != "":
+		return fmt.Sprintf("workspace already identified as prefix %q with no project id", e.Prefix)
+	default:
+		return fmt.Sprintf("workspace already identified as project %s with no issue prefix", e.ProjectID)
+	}
+}
+
+// Unwrap makes AlreadyIdentifiedError match ErrAlreadyIdentified.
+func (e *AlreadyIdentifiedError) Unwrap() error { return ErrAlreadyIdentified }
 
 // ErrVersionMismatch is returned by a *Checked op given an ExpectedVersion that
 // no longer matches the row's current version (row_lock) — an optimistic

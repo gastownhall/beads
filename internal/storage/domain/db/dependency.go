@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func NewDependencySQLRepository(runner Runner) domain.DependencySQLRepository {
@@ -812,6 +813,27 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 		return nil, fmt.Errorf("db: DependencySQLRepository.DetectCycles: %w", err)
 	}
 	return out, nil
+}
+
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+	if err != nil {
+		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
+	}
+	return out, nil
+}
+
+// WalkDependencyTree runs the SHARED walk body, unwrapped.
+//
+// It does NOT wrap the error the way its siblings above do, and that is the one
+// thing to keep when editing it: the body publishes issueops.ErrValidation,
+// storage.ErrNotFound and *issueops.ErrTooManyRows as the role's own vocabulary,
+// and every one of those is classified by errors.Is/errors.As at both front
+// doors and in the HTTP problem mapping. A `fmt.Errorf("db: ...: %w")` would keep
+// them matchable but would also put this repository's name into the message a
+// user reads, which the direct route never does for the same refusal.
+func (r *dependencySQLRepositoryImpl) WalkDependencyTree(ctx context.Context, req publicops.WalkTreeRequest) (publicops.TreeResult, error) {
+	return issueops.WalkDependencyTreeInTx(ctx, r.runner, req)
 }
 
 func (r *dependencySQLRepositoryImpl) GetTree(ctx context.Context, rootID string, opts domain.DepTreeOpts) ([]*types.TreeNode, error) {

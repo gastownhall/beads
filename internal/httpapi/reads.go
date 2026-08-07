@@ -50,38 +50,17 @@ import (
 func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	q := newQuery(r.URL.Query())
 
-	req := issueops.ReadyRequest{
-		Assignee:     q.str("assignee"),
-		Unassigned:   q.boolean("unassigned"),
-		IssueType:    q.str("type"),
-		ExcludeTypes: q.list("exclude_type"),
+	req := readyFilters(q)
 
-		Labels:        q.list("label"),
-		LabelsAny:     q.list("label_any"),
-		ExcludeLabels: q.list("exclude_label"),
-		LabelPattern:  q.str("label_pattern"),
-		LabelRegex:    q.str("label_regex"),
-
-		Priority: q.integer("priority"),
-		ParentID: q.str("parent"),
-
-		MetadataFields: q.metadataFields("metadata_field"),
-		HasMetadataKey: q.str("has_metadata_key"),
-
-		IncludeEphemeral: q.boolean("include_ephemeral"),
-		IncludeDeferred:  q.boolean("include_deferred"),
-
-		// EXPLICIT, always. The storage layer maps an EMPTY sort policy to
-		// hybrid, and forwarding an absent `sort` as "" would silently adopt
-		// that fallback while the document still read `default: priority`.
-		// It is not a cosmetic difference: hybrid demotes older high-priority
-		// work, so the item SET changes as soon as `limit` truncates — and
-		// only for the clients this API exists to migrate off `bd ready`,
-		// whose flag registers a concrete default and never sends empty.
-		Sort: q.oneOf("sort", readySortDefault, "hybrid", "priority", "oldest"),
-
-		Limit: q.limit(),
-	}
+	// EXPLICIT, always. The storage layer maps an EMPTY sort policy to hybrid,
+	// and forwarding an absent `sort` as "" would silently adopt that fallback
+	// while the document still read `default: priority`. It is not a cosmetic
+	// difference: hybrid demotes older high-priority work, so the item SET
+	// changes as soon as `limit` truncates — and only for the clients this API
+	// exists to migrate off `bd ready`, whose flag registers a concrete default
+	// and never sends empty.
+	req.Sort = q.oneOf("sort", readySortDefault, "hybrid", "priority", "oldest")
+	req.Limit = q.limit()
 
 	if !s.acceptQuery(w, r, q) {
 		return
@@ -104,6 +83,73 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 		Items:   wireItems(page.Items),
 		HasMore: page.HasMore,
 	})
+}
+
+// readyFilters decodes the ready-work filter vocabulary the two ready
+// operations share — everything except the PAGE, which only the listing has,
+// and the ORDER, which only the listing needs.
+//
+// It is one function because the two operations must admit exactly the same
+// filters: countReadyWork answers with the size of the set listReadyWork
+// returns, and a parameter one of them decoded and the other did not would
+// make that identity false for any client that sent it.
+func readyFilters(q *query) issueops.ReadyRequest {
+	return issueops.ReadyRequest{
+		Assignee:     q.str("assignee"),
+		Unassigned:   q.boolean("unassigned"),
+		IssueType:    q.str("type"),
+		ExcludeTypes: q.list("exclude_type"),
+
+		Labels:        q.list("label"),
+		LabelsAny:     q.list("label_any"),
+		ExcludeLabels: q.list("exclude_label"),
+		LabelPattern:  q.str("label_pattern"),
+		LabelRegex:    q.str("label_regex"),
+
+		Priority: q.integer("priority"),
+		ParentID: q.str("parent"),
+
+		MetadataFields: q.metadataFields("metadata_field"),
+		HasMetadataKey: q.str("has_metadata_key"),
+
+		IncludeEphemeral: q.boolean("include_ephemeral"),
+		IncludeDeferred:  q.boolean("include_deferred"),
+	}
+}
+
+// handleCountReady answers GET /v0/beads/ready:count.
+//
+// THE REQUEST IS THE LISTING'S REQUEST with the page taken off, which is what
+// makes the answer the size of the page the listing would return. It is not
+// assembled here beyond that: the role refuses a Limit and an Offset itself
+// (issueops.ReadyCounter.CountReady), so this handler could not smuggle a
+// bounded count past it even if a parameter for one existed.
+//
+// THE SORT IS SENT ANYWAY, and the operation publishes no parameter for it. A
+// count has no order, but the request still has to be one the builder accepts,
+// and sending "" would adopt the storage layer's hybrid fallback that no front
+// door relies on.
+func (s *Server) handleCountReady(w http.ResponseWriter, r *http.Request) {
+	q := newQuery(r.URL.Query())
+
+	req := readyFilters(q)
+	req.Sort = readySortDefault
+
+	if !s.acceptQuery(w, r, q) {
+		return
+	}
+
+	counter, err := s.readyCounter(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	result, err := counter.CountReady(r.Context(), req)
+	if err != nil {
+		s.failReadErr(w, r, err)
+		return
+	}
+	writeJSON(w, apigen.ReadyCount{Total: result.Total})
 }
 
 // readySortDefault is the ordering this operation applies when `sort` is
@@ -197,6 +243,56 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, body)
 }
+
+// handleQueryIssues answers GET /v0/beads/issues:query.
+//
+// The EXPRESSION IS NOT PARSED HERE. Parsing, evaluation, the predicate
+// decision and the scan bound all live inside the role, so this handler cannot
+// make the truncating one: it reads five parameters and hands the sentence
+// over.
+func (s *Server) handleQueryIssues(w http.ResponseWriter, r *http.Request) {
+	q := newQuery(r.URL.Query())
+
+	req := issueops.QueryRequest{
+		Expression:    q.str("q"),
+		IncludeClosed: q.boolean("all"),
+		SortBy:        q.oneOf("sort", "", querySorts...),
+		Reverse:       q.boolean("reverse"),
+		Limit:         q.limit(),
+		// No Offset. The document publishes no parameter for one, because the
+		// two database sources this server can be built on disagree about
+		// whether they can honor it — see issueops.QueryRequest.Offset.
+	}
+
+	if !s.acceptQuery(w, r, q) {
+		return
+	}
+	if !s.allowUnlimited(w, r, req.Limit) {
+		return
+	}
+
+	qr, err := s.querier(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	page, err := qr.Query(r.Context(), req)
+	if err != nil {
+		s.failReadErr(w, r, err)
+		return
+	}
+	writeJSON(w, apigen.QueryPage{
+		Items:   wireItems(page.Items),
+		HasMore: page.HasMore,
+	})
+}
+
+// querySorts is the display-order vocabulary this operation publishes, in the
+// document's order. It is the set workapi.CompareIssuesBy can order by; a value
+// outside it is refused here rather than accepted and ignored, because a page
+// returned unordered under a sort the caller named is indistinguishable from
+// one whose order the caller does not understand.
+var querySorts = []string{"priority", "created", "updated", "closed", "status", "id", "title", "type", "assignee"}
 
 // handleGetIssue answers GET /v0/beads/issues/{id}.
 func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
@@ -309,6 +405,10 @@ func invalidFilterParam(err error) (string, bool) {
 		return "metadata_field", true
 	case strings.HasPrefix(msg, "invalid metadata key filter"):
 		return "has_metadata_key", true
+	// The query role's refusal. It is the caller's SENTENCE being wrong, which
+	// is a 400 on `q` rather than the 500 an unclassified error would give.
+	case strings.HasPrefix(msg, "invalid query expression"):
+		return "q", true
 	}
 	return "", false
 }

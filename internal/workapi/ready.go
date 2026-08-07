@@ -96,6 +96,30 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 	return filter, nil
 }
 
+// BuildReadyCountFilter turns a ready request into the storage-level filter a
+// COUNT of the ready set runs against: BuildReadyFilter's filter with the page
+// removed, and the single definition of what `bd ready`'s published total means.
+//
+// It refuses a request carrying a page. issueops.ReadyCounter.CountReady
+// promises its answer equals len(Reader.Ready(r with Limit=0).Items), and a
+// Limit would make that "how many of the first N" while an Offset would
+// subtract the rows it skipped from the size of a set that still holds them.
+//
+// The zeroed limit is set on a LOCAL copy: a nil Limit means the shared ready
+// default at BuildReadyFilter, so an unlimited count has to say so explicitly.
+func BuildReadyCountFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
+	if in.Limit != nil {
+		return types.WorkFilter{}, fmt.Errorf("%w: a ready count does not take a limit", issueops.ErrValidation)
+	}
+	if in.Offset != 0 {
+		return types.WorkFilter{}, fmt.Errorf("%w: a ready count does not take an offset", issueops.ErrValidation)
+	}
+	unlimited := 0
+	counted := in
+	counted.Limit = &unlimited
+	return BuildReadyFilter(counted)
+}
+
 // normalizeExcludeTypes splits comma-separated exclusions and expands type
 // aliases, so --exclude-type=mr,epic and --exclude-type mr --exclude-type epic
 // mean the same thing.

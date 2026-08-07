@@ -611,10 +611,10 @@ func TestClaimRejectsMalformedRequests(t *testing.T) {
 // rather than over a socket: a megabyte in flight makes the assertion about
 // timing instead of about the rule.
 func TestClaimBodyCapIsEnforcedWhileReading(t *testing.T) {
-	oversized := `{"actor":"` + strings.Repeat("x", maxClaimBodyBytes) + `"}`
+	oversized := `{"actor":"` + strings.Repeat("x", maxJSONBodyBytes) + `"}`
 	r := httptest.NewRequest(http.MethodPost, claimPath, strings.NewReader(oversized))
 
-	members, res := decodeClaimBody(httptest.NewRecorder(), r)
+	members, res := decodeJSONObjectBody(httptest.NewRecorder(), r)
 	if res == nil {
 		t.Fatalf("a %d-byte body was accepted (%d members)", len(oversized), len(members))
 	}

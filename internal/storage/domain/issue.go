@@ -79,6 +79,7 @@ type IssueSQLRepository interface {
 	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 }
 
 type CloseRowParams struct {
@@ -131,9 +132,15 @@ type DeleteIssuesResult struct {
 	LabelsCount       int
 	EventsCount       int
 	ReferencesUpdated int
-	// OrphanedIssues lists external dependents left behind by a force delete
-	// (Cascade=false, Force=true), or the blocking dependents reported with the
-	// refusal error (Cascade=false, Force=false). Empty on the cascade path.
+	// OrphanedIssues is NOT POPULATED BY ANY PATH TODAY, and is kept only
+	// because `bd wisp gc --json` publishes it (always null) and this commit is
+	// not changing that command's wire shape.
+	//
+	// It once described a force-delete policy this layer never implemented: the
+	// two params that were supposed to select that policy were declared,
+	// documented in detail and never read. The policy now lives in
+	// issueops.Deleter, above the use case, and DeleteResult.Orphaned is where
+	// the answer comes out.
 	OrphanedIssues []string
 }
 
@@ -292,6 +299,7 @@ type IssueUseCase interface {
 	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -1852,6 +1860,20 @@ func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) erro
 		return fmt.Errorf("Heartbeat: %w", err)
 	}
 	return nil
+}
+
+// WakeExpiredDefers returns every expired DATED defer to open (see
+// issueops.WakeExpiredDefersInTx) and reports how many permanent issues and
+// wisps woke. The caller owns persistence: commit with a wake message iff
+// issues > 0, and with the ephemeral plain-COMMIT form iff only wisps woke
+// (wisp tables are dolt_ignored, so their wake needs a SQL commit but must
+// mint no version commit).
+func (u *issueUseCaseImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	issues, wisps, err = u.issueRepo.WakeExpiredDefers(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("WakeExpiredDefers: %w", err)
+	}
+	return issues, wisps, nil
 }
 
 func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

@@ -202,6 +202,14 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 		SortDesc:       in.Reverse,
 		AfterCreatedAt: in.AfterCreatedAt,
 		AfterID:        in.AfterID,
+		// The defensive cap travels ON the request, so this builder is the
+		// only writer of the filter's two cap fields. `bd list` used to stamp
+		// them onto the filter after the builder returned, which is the
+		// "build it, then reach in and change it" half-step the role exists to
+		// make unreachable — and it left the cap invisible to every
+		// implementation of Reader.List.
+		MaxRows:       in.MaxRows,
+		MaxRowsSource: in.MaxRowsSource,
 	}
 
 	if in.ReadyFlag {
@@ -305,6 +313,9 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 	if in.SkipLabels {
 		filter.SkipLabels = true
+	}
+	if in.SkipCounts {
+		filter.SkipCounts = true
 	}
 
 	if in.PriorityMin != nil {

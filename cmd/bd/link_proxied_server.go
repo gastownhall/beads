@@ -30,25 +30,24 @@ func runLinkProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
 
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (depAddResult, string, error) {
+	if err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		dep := &types.Dependency{IssueID: id1, DependsOnID: id2, Type: dt}
 		// Source-routed, like the direct twin's store.AddDependencyWithOptions:
 		// `bd link` takes whatever id the caller names, and a wisp source has no
 		// row in the issues plane for the edge to hang off.
 		if _, err := uw.DependencyUseCase().AddDependencies(ctx, []*types.Dependency{dep}, actor, domain.BulkAddDepsOpts{}); err != nil {
-			return depAddResult{}, "", err
+			return "", err
 		}
-		cycles, cycleErr := uw.DependencyUseCase().DetectCycles(ctx)
-		return depAddResult{
-			fromTitle: proxiedLookupTitle(ctx, uw, id1),
-			toTitle:   proxiedLookupTitle(ctx, uw, id2),
-			cycles:    cycles,
-			cycleErr:  cycleErr,
-		}, fmt.Sprintf("bd: link %s %s", id1, id2), nil
-	})
-	if err != nil {
+		return fmt.Sprintf("bd: link %s %s", id1, id2), nil
+	}); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
+
+	// The sweep and the titles come AFTER the write commits, for the reason
+	// depEdgeFeedback gives: a cycle warning computed inside a transaction that
+	// has not committed describes a graph nobody else can see. This route used
+	// to run both inside the write.
+	res := depEdgeFeedback(ctx, id1, id2, true)
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)

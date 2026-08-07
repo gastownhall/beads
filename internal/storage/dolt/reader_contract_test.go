@@ -38,6 +38,21 @@ func TestReaderOffsetIsHonoredOrRefused(t *testing.T) {
 	conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
 }
 
+// The store-backed body is the arm that HONORS MaxRows: the cap rides the
+// filter the shared builder produces and the search path enforces it after the
+// scan. The refusing arm is the unit-of-work wiring.
+func TestReaderListMaxRowsIsHonoredOrRefused(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListMaxRowsIsHonoredOrRefused(t, ctx, fixture)
+}
+
+func TestReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
+}
+
 func TestReaderReadySortPoliciesOrderTheSameRows(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()

@@ -117,16 +117,51 @@ func IsYamlOnlyKey(key string) bool {
 	return false
 }
 
-// secretKeyPatterns are substrings that identify a yaml-only key as containing
-// sensitive material that should not be written to git-tracked files.
-var secretKeyPatterns = []string{"api_key", "api-key", "secret", "token", "password"}
+// secretKeyPatterns are substrings that identify a key as carrying sensitive
+// material. Matched anywhere in the key, so they must be long enough that a
+// substring hit is never an accident.
+var secretKeyPatterns = []string{
+	"api_key", "api-key", "apikey", "secret", "token", "password", "passwd",
+	"credential", "private_key", "privatekey", "privkey",
+}
 
-// IsSecretKey returns true if the given config key holds sensitive material
-// (API keys, tokens, passwords) that should not be committed to git.
+// secretKeySegments are whole segments — split on `.`, `_` and `-` — that mark
+// a key as sensitive.
+//
+// They are matched as SEGMENTS rather than as substrings because every one of
+// them is a prefix of an ordinary word: as a substring, "pat" would redact
+// `issue.path` and `export.pattern`, "auth" would redact `commit.author`, and
+// "key" would redact `sort.keyword`. As a segment, `github.pat` and
+// `commit.author` are told apart correctly.
+var secretKeySegments = map[string]bool{
+	"key": true, "keys": true, "apikey": true, "pwd": true, "pat": true,
+	"auth": true, "bearer": true, "cert": true, "credential": true,
+	"credentials": true, "secret": true, "token": true, "password": true,
+}
+
+// IsSecretKey reports whether a config key holds sensitive material.
+//
+// IT IS A SECURITY CONTROL, not only a lint. Two callers depend on it: the
+// `bd config set` guard that refuses to write a credential into a git-tracked
+// file, and — since the settings surface went on the wire — the redaction in
+// internal/httpapi that decides whether GET /v0/beads/config publishes a
+// value. `bd serve` has no authentication, so a spelling missing from this
+// predicate is a credential served in cleartext.
+//
+// It errs toward over-redacting for that reason: a key wrongly withheld is an
+// operator asking why, and a key wrongly published cannot be recalled. The
+// decision is about the KEY alone; no value is ever inspected.
 func IsSecretKey(key string) bool {
 	lower := strings.ToLower(key)
 	for _, pattern := range secretKeyPatterns {
 		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	for _, segment := range strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	}) {
+		if secretKeySegments[segment] {
 			return true
 		}
 	}

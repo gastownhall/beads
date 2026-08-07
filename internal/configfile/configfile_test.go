@@ -73,6 +73,33 @@ func TestLoadCorruptIsError(t *testing.T) {
 	}
 }
 
+func TestLoadForDiscoveryNeverMigratesLegacyConfig(t *testing.T) {
+	beadsDir := t.TempDir()
+	legacyPath := filepath.Join(beadsDir, "config.json")
+	legacy := []byte(`{"backend":"dolt","dolt_mode":"server"}`)
+	if err := os.WriteFile(legacyPath, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadForDiscovery(beadsDir)
+	if err != nil {
+		t.Fatalf("LoadForDiscovery() failed: %v", err)
+	}
+	if cfg == nil || cfg.DoltMode != DoltModeServer {
+		t.Fatalf("LoadForDiscovery() = %#v, want legacy server config", cfg)
+	}
+	if _, err := os.Stat(ConfigPath(beadsDir)); !os.IsNotExist(err) {
+		t.Fatalf("LoadForDiscovery created metadata.json: %v", err)
+	}
+	after, err := os.ReadFile(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(legacy) {
+		t.Fatalf("LoadForDiscovery rewrote legacy config: got %q, want %q", after, legacy)
+	}
+}
+
 func TestDatabasePath(t *testing.T) {
 	beadsDir := "/home/user/project/.beads"
 	// DatabasePath always returns dolt path regardless of Database field

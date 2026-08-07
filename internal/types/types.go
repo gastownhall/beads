@@ -1828,6 +1828,15 @@ type IssueFilter struct {
 	// Opt-in performance flag for the bd list --skip-labels code path.
 	SkipLabels bool
 
+	// SkipCounts suppresses cardinality hydration on the counts mega-query.
+	// When true the three aggregate joins behind DependencyCount,
+	// DependentCount and CommentCount are dropped and all three come back 0,
+	// which callers MUST read as unknown rather than as none. The rows, their
+	// order, Parent and Dependencies are unaffected. It is the counts-side
+	// twin of SkipLabels and is ignored by the paths that project no counts
+	// (SearchIssues, GetReadyWork).
+	SkipCounts bool
+
 	// Performance escape hatches
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0

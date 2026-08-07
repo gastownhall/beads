@@ -179,26 +179,13 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			totalReady := len(results)
 			truncated := false
 			if filter.Limit > 0 && len(results) == filter.Limit {
-				// The page is full, so there may be more ready work. Size the true
-				// total N over the same ready predicate, zeroing the limit so the
-				// count is the full ready set (byte-identical to
-				// len(GetReadyWorkWithCounts(Limit=0))). Prefer the cheap COUNT(*)
-				// capability; unwrap past decorators (e.g. HookFiringStore) so the
-				// assertion reaches the concrete store. Fall back to the unbounded
-				// mega-query only when a store predates ReadyWorkCounter.
-				countFilter := filter
-				countFilter.Limit = 0
-				if counter, ok := storage.UnwrapStore(activeStore).(storage.ReadyWorkCounter); ok {
-					if n, countErr := counter.CountReadyWork(ctx, countFilter); countErr == nil && n > len(results) {
-						totalReady = n
-						truncated = true
-					}
-				} else {
-					all, countErr := activeStore.GetReadyWorkWithCounts(ctx, countFilter)
-					if countErr == nil && len(all) > len(results) {
-						totalReady = len(all)
-						truncated = true
-					}
+				// The page is full, so there may be more ready work. The
+				// ReadyCounter role promises its answer equals
+				// len(Reader.Ready(Limit=0).Items), which is what makes this
+				// total describe the page above it.
+				if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(results) {
+					totalReady = n
+					truncated = true
 				}
 			}
 			if results == nil {
@@ -231,12 +218,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		totalReady := len(issues)
 		truncated := false
-		if !jsonOutput && filter.Limit > 0 && len(issues) == filter.Limit {
-			countFilter := filter
-			countFilter.Limit = 0
-			allIssues, countErr := activeStore.GetReadyWork(ctx, countFilter)
-			if countErr == nil && len(allIssues) > len(issues) {
-				totalReady = len(allIssues)
+		if filter.Limit > 0 && len(issues) == filter.Limit {
+			// The same question the --json branch asks, through the same role,
+			// so the "Showing X of N" a human reads and the total a script
+			// parses are one number.
+			if n, countErr := readyTotal(ctx, activeStore, in); countErr == nil && n > len(issues) {
+				totalReady = n
 				truncated = true
 			}
 		}
@@ -339,6 +326,28 @@ var blockedCmd = &cobra.Command{
 		}
 		return nil
 	},
+}
+
+// readyTotal sizes the whole ready set for the request `bd ready` just listed
+// a page of, through the store's own ReadyCounter accessor.
+//
+// BOTH OUTPUT MODES CALL IT and only when the page came back full, which is
+// the one situation where the answer can differ from what is already on
+// screen. The role has no --max-rows field to honor and needs none: the cap
+// bounds a page this machine materializes, and a count materializes no rows.
+//
+// A failed count is not a failed command — the page is already correct; all
+// that is lost is the "of N" beside it.
+func readyTotal(ctx context.Context, activeStore storage.DoltStorage, in readyInput) (int, error) {
+	counter, err := activeStore.ReadyCounter()
+	if err != nil {
+		return 0, err
+	}
+	result, err := counter.CountReady(ctx, readyRoleRequest(in))
+	if err != nil {
+		return 0, err
+	}
+	return int(result.Total), nil
 }
 
 // buildParentEpicMap builds a map from child issue ID to parent epic title.

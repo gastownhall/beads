@@ -17,9 +17,15 @@ import (
 // is recorded — that stays a question about what the mutation wrote.
 //
 // Every guarded mutation whose request carries a label calls this. Create is
-// the one that does not: no surface has ever named the created issue in its
-// commit message, so CreateRequest carries no label to spell and adding one
-// would be a field with no caller.
+// the one that does not, and the reason is NOT that no surface names the
+// created issue — several do (internal/storage/dolt/issues.go writes
+// "bd: create <id>", reached from cmd/bd/create_atomic.go). It is that
+// CreateRequest has no Provenance field for a caller to set, so there is no
+// label for this function to prefer. That is a gap rather than a principle:
+// the proxied route's create message changed from "bd: create <id>" to
+// "create issue" for exactly this reason, and closing it means either giving
+// CreateRequest the field or having the role compose an id-bearing default the
+// way BatchCloser and ClaimNext do. Tracked as its own decision.
 func HistoryEntry(provenance, fallback string) string {
 	if provenance != "" {
 		return provenance

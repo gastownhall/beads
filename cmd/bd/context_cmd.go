@@ -96,7 +96,7 @@ Examples:
 			snapshot.Role = string(role)
 		}
 
-		cfg, err := configfile.Load(rc.BeadsDir)
+		cfg, err := configfile.LoadForDiscovery(rc.BeadsDir)
 		if err != nil {
 			cfg = configfile.DefaultConfig()
 		}

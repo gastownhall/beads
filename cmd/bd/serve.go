@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/contextinfo"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // serveCmdName is the command name, shared with the root command's post-run
@@ -86,7 +87,17 @@ WHAT THIS DOES NOT DO
   Every server it binds publishes the issue-claim operation, and the capability
   set it advertises is a property of the build rather than of the flags on the
   process that started it — so a read-only server would advertise a write it
-  could never land.`,
+  could never land.
+
+DESTRUCTIVE OPERATIONS
+
+  POST /v0/beads/issues:sweep deletes closed beads in bulk — the operation
+  behind bd purge and bd prune — and nothing it deletes comes back. It shares
+  the library surface those commands call, so it inherits their guards: pinned
+  beads are never swept, and a durable sweep with neither a cutoff nor an id
+  pattern is refused rather than clearing every closed bead in the workspace.
+  Combined with the trust model above, that means anyone who can reach this
+  address can erase closed work; bind it accordingly.`,
 	Args: cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runServe()
@@ -142,7 +153,8 @@ func runServe() error {
 	if serveAllowNonLoopback {
 		fmt.Fprintf(os.Stderr,
 			"bd serve: WARNING: --allow-non-loopback binds %s beyond loopback. "+
-				"This API has no authentication and no TLS: any peer that can reach it can read every issue and claim work as any actor.\n",
+				"This API has no authentication and no TLS: any peer that can reach it can read every issue, claim work as any actor, "+
+				"bulk-delete closed beads, and delete any bead it can name.\n",
 			serveAddr)
 	}
 
@@ -159,18 +171,30 @@ func runServe() error {
 		// runs after this function returns, which is after the server has
 		// fully drained, so no request can reach a closed store. runServe must
 		// not close it.
-		reader, claimer, err := serveIssueRoles(store)
+		roles, err := serveIssueRoles(store)
 		if err != nil {
 			return HandleError("bd serve: %v", err)
 		}
 		return serveListen(httpapi.Config{
-			Addr:             serveAddr,
-			AllowNonLoopback: serveAllowNonLoopback,
-			Reader:           reader,
-			Claimer:          claimer,
-			Workspace:        info,
-			SchemaVersion:    JSONSchemaVersion,
-			Mode:             serveResolvedMode(info, db),
+			Addr:              serveAddr,
+			AllowNonLoopback:  serveAllowNonLoopback,
+			Reader:            roles.reader,
+			Claimer:           roles.claimer,
+			Settings:          roles.settings,
+			Stats:             roles.stats,
+			CycleDetector:     roles.cycles,
+			EdgeReader:        roles.edges,
+			BlockingAnnotator: roles.blocking,
+			TreeWalker:        roles.tree,
+			ReadyCounter:      roles.readyCounter,
+			Querier:           roles.querier,
+			Sweeper:           roles.sweeper,
+			Deleter:           roles.deleter,
+			BatchCreator:      roles.batchCreator,
+			Memories:          roles.memories,
+			Workspace:         info,
+			SchemaVersion:     JSONSchemaVersion,
+			Mode:              serveResolvedMode(info, db),
 		})
 	}
 
@@ -253,9 +277,9 @@ const (
 	// request, timed into that request's uow_ms and drawn from a pool bd serve
 	// bounds itself. Every Dolt SQL-server topology takes it.
 	serveSourceProvider serveSource = iota
-	// serveSourceStore is the two issue roles, taken off the store the root
-	// command already opened. A registered backend's facade is a store rather
-	// than a unit-of-work provider, so this is the source it has.
+	// serveSourceStore is the role set, taken off the store the root command
+	// already opened. A registered backend's facade is a store rather than a
+	// unit-of-work provider, so this is the source it has.
 	serveSourceStore
 )
 
@@ -300,7 +324,7 @@ type serveDatabase struct {
 // be a lie there. That is a property of the backend rather than of what has
 // been built so far, which is also why no unit-of-work provider for it exists
 // or will. Nothing downstream will catch a bypass: internal/httpapi cannot see
-// the backend behind a role, and every store publishes both role accessors
+// the backend behind a role, and every store publishes every role accessor
 // whatever it is. TestServeNamesOneDatabaseSourcePerServerItBuilds pins that
 // the roles are only ever reached through here.
 func serveDatabaseSource(beadsDir string) (serveDatabase, error) {
@@ -371,8 +395,8 @@ func errServeEmbedded() error {
 		&storage.ErrUnsupported{Op: "serve", Backend: "embedded-dolt"})
 }
 
-// serveIssueRoles takes the two issue roles this server answers from off the
-// store the root command already opened.
+// serveIssueRoles takes the roles this server answers from off the store the
+// root command already opened.
 //
 // ONE PEEL, and never storage.UnwrapStore. bd's chain is
 // HookFiringStore -> InstrumentedStorage -> raw, and every decorator publishes
@@ -386,24 +410,72 @@ func errServeEmbedded() error {
 //
 // The assertion is conditional because a BD_NO_HOOKS=1 workspace has no hook
 // layer to peel.
-func serveIssueRoles(src storage.DoltStorage) (issueops.Reader, issueops.Claimer, error) {
+//
+// It returns the WHOLE set httpapi.Config requires; Listen refuses a partial
+// set (see checkDatabaseSource), so a role missing here is a startup failure
+// rather than a nil dereference on the first request that reaches it.
+func serveIssueRoles(src storage.DoltStorage) (serveRoles, error) {
+	var roles serveRoles
 	if src == nil {
-		// Two nil roles would reach Listen as "no database source" — true, and
-		// useless. Name the condition that actually happened.
-		return nil, nil, errors.New("no store is open for this workspace")
+		// A set of nil roles would reach Listen as "no database source" —
+		// true, and useless. Name the condition that actually happened.
+		return roles, errors.New("no store is open for this workspace")
 	}
 	if hooked, ok := src.(*storage.HookFiringStore); ok {
 		src = hooked.Unwrap()
 	}
-	reader, err := src.IssueReader()
-	if err != nil {
-		return nil, nil, fmt.Errorf("issue reader: %w", err)
+
+	// Each entry binds one Config field to the accessor that fills it, and
+	// names itself in the failure.
+	type binding struct {
+		name string
+		get  func() error
 	}
-	claimer, err := src.IssueClaimer()
-	if err != nil {
-		return nil, nil, fmt.Errorf("issue claimer: %w", err)
+	for _, b := range []binding{
+		{"issue reader", func() (err error) { roles.reader, err = src.IssueReader(); return }},
+		{"issue claimer", func() (err error) { roles.claimer, err = src.IssueClaimer(); return }},
+		{"workspace config", func() (err error) { roles.settings, err = src.WorkspaceConfig(); return }},
+		{"stats reporter", func() (err error) { roles.stats, err = src.StatsReporter(); return }},
+		{"cycle detector", func() (err error) { roles.cycles, err = src.CycleDetector(); return }},
+		{"edge reader", func() (err error) { roles.edges, err = src.EdgeReader(); return }},
+		{"blocking annotator", func() (err error) { roles.blocking, err = src.BlockingAnnotator(); return }},
+		{"tree walker", func() (err error) { roles.tree, err = src.TreeWalker(); return }},
+		{"ready counter", func() (err error) { roles.readyCounter, err = src.ReadyCounter(); return }},
+		{"querier", func() (err error) { roles.querier, err = src.Querier(); return }},
+		{"sweeper", func() (err error) { roles.sweeper, err = src.Sweeper(); return }},
+		{"deleter", func() (err error) { roles.deleter, err = src.Deleter(); return }},
+		{"batch creator", func() (err error) { roles.batchCreator, err = src.BatchCreator(); return }},
+		{"memories", func() (err error) { roles.memories, err = src.Memories(); return }},
+	} {
+		if err := b.get(); err != nil {
+			return serveRoles{}, fmt.Errorf("%s: %w", b.name, err)
+		}
 	}
-	return reader, claimer, nil
+	return roles, nil
+}
+
+// serveRoles is the store-shaped database source, assembled once before Listen.
+// It is deliberately NOT an httpapi.Config: the gate test in serve_test.go
+// requires every httpapi.Config literal in this package to sit in a function
+// that consulted serveDatabaseSource.
+type serveRoles struct {
+	reader       issueops.Reader
+	claimer      issueops.Claimer
+	settings     issueops.WorkspaceConfig
+	stats        issueops.StatsReporter
+	cycles       issueops.CycleDetector
+	edges        issueops.EdgeReader
+	blocking     issueops.BlockingAnnotator
+	tree         issueops.TreeWalker
+	readyCounter issueops.ReadyCounter
+	querier      issueops.Querier
+	sweeper      issueops.Sweeper
+	deleter      issueops.Deleter
+	batchCreator issueops.BatchCreator
+	// memories is the one role here that is not an issueops role: the memory
+	// plane is user data riding in the config table under its own merge class,
+	// so it has its own leaf package.
+	memories memoryops.Memories
 }
 
 // serveResolvedMode labels the topology for the startup log line. Cosmetic —

@@ -41,6 +41,31 @@ func IsTableNotExist(err error) bool {
 		unquotedTableMissingPattern.MatchString(s)
 }
 
+// IsAccessDenied reports whether err is a MySQL/Dolt privilege refusal: the
+// connected user lacks the right to run the statement. Covers 1044
+// (ER_DBACCESS_DENIED_ERROR), 1045 (ER_ACCESS_DENIED_ERROR), 1142
+// (ER_TABLEACCESS_DENIED_ERROR), 1143 (ER_COLUMNACCESS_DENIED_ERROR) and
+// 1227 (ER_SPECIFIC_ACCESS_DENIED_ERROR). Callers use it to classify a
+// deliberately read-only-privileged client, which is a configuration, not a
+// fault worth repeating warnings about.
+func IsAccessDenied(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		switch mysqlErr.Number {
+		case 1044, 1045, 1142, 1143, 1227:
+			return true
+		}
+		return false
+	}
+
+	s := strings.ToLower(err.Error())
+	return strings.Contains(s, "access denied") || strings.Contains(s, "command denied")
+}
+
 // IsMissingForeignKeyTarget reports whether err is the integrity-constraint
 // violation a write hits when it references a row that does not exist: MySQL
 // 1452 (ER_NO_REFERENCED_ROW_2) and its older 1216 (ER_NO_REFERENCED_ROW).

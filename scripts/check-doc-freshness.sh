@@ -25,7 +25,8 @@ DOCS=(
     "docs/reference/json-schema.md|cmd/bd/output.go;cmd/bd/errors.go;cmd/bd/protocol/json_contract_test.go"
     "docs/recovery/init-safety.md|cmd/bd/init.go;cmd/bd/init_safety.go;cmd/bd/init_safety_test.go"
     "engdocs/ERROR_HANDLING.md|cmd/bd/*.go;cmd/bd/errors.go"
-    "engdocs/LINTING.md|.golangci.yml"
+    "engdocs/LINTING.md|.golangci.yml;scripts/ci/pr-lint.sh;Makefile;.github/workflows/pr.yml;.github/workflows/main.yml"
+    "engdocs/CI_CLEANUP_PLAN.md|engdocs/CI_TEST_SURFACE_AUDIT.md;.github/workflows/*.yml;.buildflags;.golangci.yml;scripts/ci/pr-lint.sh;Makefile"
     "engdocs/design/otel/otel-data-model.md|internal/telemetry/;internal/storage/dolt/store.go;internal/compact/haiku.go;cmd/bd/find_duplicates.go;internal/hooks/"
 )
 

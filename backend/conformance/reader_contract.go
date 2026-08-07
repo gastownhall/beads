@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -758,6 +759,180 @@ func RunReaderListEmptyPageIsWellFormed(t *testing.T, ctx context.Context, fixtu
 	}
 }
 
+// RunReaderListMaxRowsIsHonoredOrRefused pins what every implementation owes on
+// ListRequest.MaxRows (reader.go:288-308): a non-zero cap over a result set
+// that exceeds it is either HONORED — no page, an error — or REFUSED with a
+// typed *ErrUnsupported, and never SILENTLY IGNORED.
+//
+// It is the MIRROR of RunReaderOffsetIsHonoredOrRefused above. Which body
+// honors and which refuses is a per-backend fact asserted at the wirings, not
+// here: the two disagree by design, so the shared assertion is the weaker one.
+//
+// The never-silently clause is the whole value. A cap is a CIRCUIT BREAKER: a
+// caller sets it because it would rather fail than wait, so a body that accepts
+// the field and answers the unbounded query hands that caller the runaway
+// result it was guarding against.
+//
+// The complement is asserted too: the SAME request under a cap the result set
+// fits inside must come back as an ordinary page everywhere. Without it a body
+// that refused every non-zero MaxRows out of hand would pass.
+func RunReaderListMaxRowsIsHonoredOrRefused(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	var ids []string
+	for _, tag := range []string{"a", "b", "c"} {
+		id := readerID(fixture, "maxrows", tag)
+		ids = append(ids, id)
+		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, ""))
+	}
+	idScope := readerIDFilter(ids...)
+
+	// A cap the three seeded rows fit inside. Answered as an ordinary page by
+	// the body that honors caps, and refused by the body that honors none.
+	const roomyWhat = "List under a cap the result set fits inside"
+	roomy, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", MaxRows: len(ids) + 1, MaxRowsSource: "--max-rows",
+	})
+	if err != nil {
+		assertReaderUnsupported(t, roomyWhat, err)
+	} else {
+		assertReaderPageIDSet(t, roomyWhat, roomy, ids)
+	}
+
+	// A cap the result set exceeds. Honored means an error carrying the cap;
+	// refused means *ErrUnsupported; a PAGE means the field was ignored.
+	tight, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", MaxRows: len(ids) - 1, MaxRowsSource: "--max-rows",
+	})
+	if err == nil {
+		t.Fatalf("List under MaxRows=%d over %d matching rows returned the page %v and no error: the cap was silently ignored",
+			len(ids)-1, len(ids), readerPageIDs(tight))
+	}
+	var unsupported *publicops.ErrUnsupported
+	if errors.As(err, &unsupported) {
+		assertReaderUnsupported(t, "List under a cap the result set exceeds", err)
+		return
+	}
+	// The honoring branch. The leaf names the answer — *ErrTooManyRows — so a
+	// caller can tell "the cap fired" from any other failure without reading
+	// error text.
+	var tooMany *storageops.ErrTooManyRows
+	if !errors.As(err, &tooMany) {
+		t.Fatalf("List honored MaxRows and failed with %v; an honored cap has to answer with *ErrTooManyRows a caller can classify", err)
+	}
+	if tooMany.Cap != len(ids)-1 {
+		t.Errorf("the cap error reports Cap = %d, want the %d the request asked for", tooMany.Cap, len(ids)-1)
+	}
+	if tooMany.Found <= tooMany.Cap {
+		t.Errorf("the cap error reports Found = %d against Cap = %d; a cap that fired saw more rows than it allows", tooMany.Found, tooMany.Cap)
+	}
+	// The whole job of MaxRowsSource (reader.go:309-313): the attribution the
+	// request supplied comes back on the refusal, so the caller that set the
+	// cap can say which of its own knobs did.
+	if tooMany.Source != "--max-rows" {
+		t.Errorf("the cap error reports Source = %q, want the %q the request supplied: MaxRowsSource decides nothing else",
+			tooMany.Source, "--max-rows")
+	}
+}
+
+// RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse pins
+// ListRequest.SkipCounts (reader.go:160-175). Two halves, and the second is
+// the load-bearing one:
+//
+//   - the three cardinalities come back ZERO on a row that genuinely has each
+//     of them, so the knob demonstrably reached the query rather than being
+//     accepted and dropped; and
+//   - NOTHING ELSE MOVES. Same rows, same order, same Parent, same has-more
+//     verdict as the identical request without the knob. The aggregates hang
+//     off outer joins, so an implementation that made one of them inner would
+//     answer with a strict subset and still look like it had "skipped the
+//     counts".
+//
+// Zero is asserted rather than "unknown" because zero is what the wire and the
+// struct can carry; the doc's instruction to READ it as unknown is a promise to
+// the caller.
+func RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "skipcounts", "subject")
+	blocker := readerID(fixture, "skipcounts", "blocker")
+	dependent := readerID(fixture, "skipcounts", "dependent")
+	parent := readerID(fixture, "skipcounts", "parent")
+	for _, id := range []string{subject, blocker, dependent, parent} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, ""))
+	}
+	// One outgoing blocks edge, one incoming one, and a parent-child edge, so
+	// the subject row carries a nonzero DependencyCount, DependentCount and
+	// Parent at once. Parent rides the same mega-query as the counts and is NOT
+	// a count: it is the tripwire for a knob that suppressed too much.
+	for _, edge := range []*types.Dependency{
+		{IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: dependent, DependsOnID: subject, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: parent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	if err := fixture.AddComment(ctx, subject, "seed", "so the comment count is nonzero"); err != nil {
+		t.Fatalf("seed the comment: %v", err)
+	}
+
+	idScope := readerIDFilter(subject, blocker, dependent, parent)
+	req := publicops.ListRequest{IDFilter: idScope, SortBy: "created"}
+
+	hydrated, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with the counts hydrated: %v", err)
+	}
+	hydratedRow := readerRowByID(t, "List with the counts hydrated", hydrated, subject)
+	if hydratedRow == nil {
+		return
+	}
+	// The premise. If the seeded row has no counts to suppress and no parent to
+	// keep, the second half of this case proves nothing either way.
+	if hydratedRow.DependencyCount == 0 || hydratedRow.DependentCount == 0 || hydratedRow.CommentCount == 0 {
+		t.Fatalf("the seeded subject came back with counts (%d, %d, %d); this case needs all three nonzero before it can assert they are suppressed",
+			hydratedRow.DependencyCount, hydratedRow.DependentCount, hydratedRow.CommentCount)
+	}
+	if hydratedRow.Parent == nil {
+		t.Fatalf("the seeded subject came back with no Parent; this case needs one before Parent can be the tripwire for a knob that suppressed too much")
+	}
+
+	req.SkipCounts = true
+	skipped, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with SkipCounts: %v", err)
+	}
+	skippedRow := readerRowByID(t, "List with SkipCounts", skipped, subject)
+	if skippedRow == nil {
+		return
+	}
+	for _, got := range []struct {
+		what  string
+		count int
+	}{
+		{"DependencyCount", skippedRow.DependencyCount},
+		{"DependentCount", skippedRow.DependentCount},
+		{"CommentCount", skippedRow.CommentCount},
+	} {
+		if got.count != 0 {
+			t.Errorf("List with SkipCounts returned %s = %d, want 0: the knob was accepted and the aggregate computed anyway", got.what, got.count)
+		}
+	}
+
+	// Nothing else moves.
+	if !slices.Equal(readerPageIDs(skipped), readerPageIDs(hydrated)) {
+		t.Errorf("List with SkipCounts returned %v, want the same page as without it, %v: this knob chooses what is hydrated, never which rows match",
+			readerPageIDs(skipped), readerPageIDs(hydrated))
+	}
+	if skipped.HasMore != hydrated.HasMore {
+		t.Errorf("List with SkipCounts reported HasMore = %v, want %v", skipped.HasMore, hydrated.HasMore)
+	}
+	if !readerSameParent(skippedRow.Parent, hydratedRow.Parent) {
+		t.Errorf("List with SkipCounts returned Parent = %v, want %v: Parent is not a cardinality and rides the same query",
+			readerParentText(skippedRow.Parent), readerParentText(hydratedRow.Parent))
+	}
+}
+
 // RunReaderGetResolvesTheExactIDAcrossBothPlanes pins GetRequest.ID
 // (reader.go:273-276): the id is exact and canonical, the issue-to-wisp fallback
 // happens inside, and there is no fuzzy, prefix or substring resolution. The
@@ -1321,6 +1496,50 @@ func readerIDFilter(ids ...string) string {
 }
 
 func readerLimit(n int) *int { return &n }
+
+// readerRowByID picks one row out of a page by id, failing the case rather than
+// returning a zero row: an assertion about a row that is not there would
+// otherwise read as an assertion that passed.
+func readerRowByID(t *testing.T, what string, page publicops.IssuePage, id string) *types.IssueWithCounts {
+	t.Helper()
+	for _, item := range page.Items {
+		if item != nil && item.Issue != nil && item.ID == id {
+			return item
+		}
+	}
+	t.Errorf("%s returned %v, which does not contain %s", what, readerPageIDs(page), id)
+	return nil
+}
+
+// assertReaderUnsupported is the refusal shape every "honored or refused" case
+// accepts: a typed *ErrUnsupported naming both the operation and the backend,
+// so a caller can classify it with errors.As and knows where to go next.
+func assertReaderUnsupported(t *testing.T, what string, err error) {
+	t.Helper()
+	var unsupported *publicops.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Errorf("%s failed with %v; a refusal has to be a typed *ErrUnsupported a caller can classify", what, err)
+		return
+	}
+	if unsupported.Op == "" || unsupported.Backend == "" {
+		t.Errorf("%s refused with Op=%q Backend=%q; a refusal naming neither the operation nor the backend leaves the caller nowhere to go",
+			what, unsupported.Op, unsupported.Backend)
+	}
+}
+
+func readerSameParent(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func readerParentText(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
 
 func readerPageIDs(page publicops.IssuePage) []string {
 	out := make([]string, 0, len(page.Items))

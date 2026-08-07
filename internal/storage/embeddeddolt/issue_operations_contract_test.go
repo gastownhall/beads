@@ -24,6 +24,20 @@ func TestEmbeddedIssueOperationsCreateRejectsMissingDependencyTargets(t *testing
 	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "skipdep"))
 }
 
+func TestEmbeddedIssueOperationsCreateRefusesAnOccupiedID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "occupied")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateRefusesAnOccupiedID(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "occupied"))
+}
+
+func TestEmbeddedIssueOperationsCreateInheritsParentLabels(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "inherit")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "inherit"))
+}
+
 func TestEmbeddedIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "metaevent")
@@ -43,6 +57,13 @@ func TestEmbeddedIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
 	te := newTestEnv(t, "xferfence")
 	ctx := t.Context()
 	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "xferfence"))
+}
+
+func TestEmbeddedIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "guardgate")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "guardgate"))
 }
 
 func TestEmbeddedIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {

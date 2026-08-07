@@ -388,7 +388,11 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
 			if targetInBatch && sourceIsWisp != targetIsWisp {
 				if !opts.SkipDependencyValidationErrors {
-					return nil, fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist", sourceID, dep.DependsOnID)
+					// Through the shared constructor, so the two bodies raise
+					// one message AND one sentinel: the role promises this
+					// refusal is the caller's fault, and an untyped error left
+					// callers classifying it by prose.
+					return nil, CrossPlaneBatchEdgeError(sourceID, dep.DependsOnID)
 				}
 				if !filteredDeps {
 					keptDeps = append([]*types.Dependency(nil), issue.Dependencies[:depIndex]...)

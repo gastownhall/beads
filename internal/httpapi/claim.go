@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 const (
@@ -34,9 +35,10 @@ const (
 	// maxActorBytes is the document's cap on `actor`. The schema's maxLength
 	// counts characters; this byte limit is the binding one.
 	maxActorBytes = 256
-	// maxClaimBodyBytes bounds the request body. The only member is an actor of
-	// at most a few hundred bytes, so this is pure refusal of the absurd.
-	maxClaimBodyBytes = 1 << 20
+	// maxJSONBodyBytes bounds every request body on this surface. The largest
+	// documented one is a handful of short members, so this is pure refusal of
+	// the absurd.
+	maxJSONBodyBytes = 1 << 20
 	// claimContentType is the one media type this operation accepts, and
 	// refusing anything else is a CSRF control, not pedantry: a JSON content
 	// type is not CORS-"simple", so a cross-origin claim always triggers a
@@ -175,7 +177,7 @@ func (s *Server) requireJSONContent(w http.ResponseWriter, r *http.Request) bool
 // assignee column AND interpolated into the storage commit message — where an
 // unvalidated newline forges audit-trail lines that look like separate commits.
 func (s *Server) claimActor(w http.ResponseWriter, r *http.Request) (string, bool) {
-	members, res := decodeClaimBody(w, r)
+	members, res := decodeJSONObjectBody(w, r)
 	if res != nil {
 		s.fail(w, r, *res)
 		return "", false
@@ -223,12 +225,15 @@ func (s *Server) claimActor(w http.ResponseWriter, r *http.Request) (string, boo
 	return trimmed, true
 }
 
-// decodeClaimBody reads the body as a JSON object of raw members. Decoding the
-// members rather than the generated struct is what makes the schema's
+// decodeJSONObjectBody reads the body as a JSON object of raw members. Decoding
+// the members rather than the generated struct is what makes the schema's
 // additionalProperties: false enforceable by NAME: encoding/json's
 // DisallowUnknownFields reports the offender only inside an error string, and
-// this endpoint exists to let clients stop parsing prose.
-func decodeClaimBody(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, *Result) {
+// these endpoints exist to let clients stop parsing prose.
+//
+// Shared with the sweep, which has the same posture and the same reason for
+// it; the member vocabulary each operation accepts is its own.
+func decodeJSONObjectBody(w http.ResponseWriter, r *http.Request) (map[string]json.RawMessage, *Result) {
 	// A body with no nameable part: `param` is documented absent on exactly
 	// this case and present on every other 400.
 	unparseable := func(detail string) *Result {
@@ -237,11 +242,11 @@ func decodeClaimBody(w http.ResponseWriter, r *http.Request) (map[string]json.Ra
 	}
 
 	var members map[string]json.RawMessage
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxClaimBodyBytes))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxJSONBodyBytes))
 	if err := dec.Decode(&members); err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return nil, unparseable(fmt.Sprintf("request body is larger than %d bytes", maxClaimBodyBytes))
+			return nil, unparseable(fmt.Sprintf("request body is larger than %d bytes", maxJSONBodyBytes))
 		}
 		return nil, unparseable("request body must be a JSON object")
 	}
@@ -350,13 +355,26 @@ type timedProvider struct {
 // provider it holds for the role — the same two-step a CLI command performs on
 // a store — instead of reaching past it to a constructor.
 var (
-	_ uow.IssueReaderSource  = timedProvider{}
-	_ uow.IssueClaimerSource = timedProvider{}
+	_ uow.IssueReaderSource       = timedProvider{}
+	_ uow.IssueClaimerSource      = timedProvider{}
+	_ uow.WorkspaceConfigSource   = timedProvider{}
+	_ uow.StatsReporterSource     = timedProvider{}
+	_ uow.CycleDetectorSource     = timedProvider{}
+	_ uow.EdgeReaderSource        = timedProvider{}
+	_ uow.BlockingAnnotatorSource = timedProvider{}
+	_ uow.TreeWalkerSource        = timedProvider{}
+	_ uow.ReadyCounterSource      = timedProvider{}
+	_ uow.QuerierSource           = timedProvider{}
+	_ uow.SweeperSource           = timedProvider{}
+	_ uow.DeleterSource           = timedProvider{}
+	_ uow.BatchCreatorSource      = timedProvider{}
+	_ uow.MemoriesSource          = timedProvider{}
 )
 
 // IssueReader builds the reader OVER THIS WRAPPER rather than delegating to the
-// wrapped provider's own accessor, and this and IssueClaimer below are the two
-// places where a constructor is the right call: the whole purpose of the wrapper is
+// wrapped provider's own accessor. Every accessor on timedProvider does this,
+// and this type is the ONE place in the codebase where a constructor is the
+// right call rather than an accessor: the whole purpose of the wrapper is
 // that every unit of work the reader opens goes through NewUOW below and lands
 // in this request's uow_ms. `p.inner.IssueReader()` would return a reader
 // bound to the untimed provider and the measurement would silently read zero.
@@ -369,6 +387,9 @@ var (
 // suite passes with that change and every read route logs uow_ms=0.000
 // forever. TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens is the assertion
 // that fails instead.
+//
+// That pin is per-route and there are thirteen accessors here, so
+// TestEveryTimedProviderAccessorBindsToTheWrapper covers the rest structurally.
 //
 // The cost is that a provider whose own accessor decorated its reader would be
 // bypassed here. There is one provider (doltSQLProvider) and its accessor is
@@ -385,6 +406,80 @@ func (p timedProvider) IssueReader() (issueops.Reader, error) {
 // instead of the recursion looking correct.
 func (p timedProvider) IssueClaimer() (issueops.Claimer, error) {
 	return uow.NewIssueClaimer(p)
+}
+
+// WorkspaceConfig builds the settings role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as the two above.
+func (p timedProvider) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return uow.NewWorkspaceConfig(p)
+}
+
+// StatsReporter builds the summary role OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) StatsReporter() (issueops.StatsReporter, error) {
+	return uow.NewStatsReporter(p)
+}
+
+// CycleDetector builds the detector OVER THIS WRAPPER, for the same reason and
+// with the same hazard as IssueReader.
+func (p timedProvider) CycleDetector() (issueops.CycleDetector, error) {
+	return uow.NewCycleDetector(p)
+}
+
+// EdgeReader builds the stored-edge reader OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) EdgeReader() (issueops.EdgeReader, error) {
+	return uow.NewEdgeReader(p)
+}
+
+// BlockingAnnotator builds the blocking-decoration role OVER THIS WRAPPER, for
+// the same reason and with the same hazard as IssueReader.
+func (p timedProvider) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
+	return uow.NewBlockingAnnotator(p)
+}
+
+// TreeWalker builds the dependency-tree walker OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) TreeWalker() (issueops.TreeWalker, error) {
+	return uow.NewTreeWalker(p)
+}
+
+// ReadyCounter builds the ready counter OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) ReadyCounter() (issueops.ReadyCounter, error) {
+	return uow.NewReadyCounter(p)
+}
+
+// Querier builds the boolean-query role OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueReader.
+func (p timedProvider) Querier() (issueops.Querier, error) {
+	return uow.NewQuerier(p)
+}
+
+// Sweeper builds the sweeper OVER THIS WRAPPER, for the same reason and with
+// the same hazard as IssueReader.
+func (p timedProvider) Sweeper() (issueops.Sweeper, error) {
+	return uow.NewSweeper(p)
+}
+
+// Deleter builds the deleter OVER THIS WRAPPER, for the same reason and with
+// the same hazard as IssueReader.
+func (p timedProvider) Deleter() (issueops.Deleter, error) {
+	return uow.NewDeleter(p)
+}
+
+// BatchCreator builds the batch creator OVER THIS WRAPPER, for the same reason
+// as the roles above. It is the one role here that opens a WRITE unit of work
+// per call.
+func (p timedProvider) BatchCreator() (issueops.BatchCreator, error) {
+	return uow.NewBatchCreator(p)
+}
+
+// Memories builds the persistent-memory role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader. It is the one accessor here
+// whose role is not an issueops role; the binding rule is the same.
+func (p timedProvider) Memories() (memoryops.Memories, error) {
+	return uow.NewMemories(p)
 }
 
 func (p timedProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {

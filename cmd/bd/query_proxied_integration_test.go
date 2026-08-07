@@ -179,17 +179,36 @@ func TestProxiedServerQuery(t *testing.T) {
 		}
 	})
 
-	t.Run("offset_rejected_for_predicate_query", func(t *testing.T) {
-		out := bdProxiedQueryFail(t, bd, p, "type=bug OR type=feature", "--offset", "1")
-		if !strings.Contains(out, "--offset is not supported with OR/predicate queries") {
-			t.Errorf("expected predicate+offset rejection, got: %s", out)
+	// This used to be offset_rejected_for_predicate_query. The refusal existed
+	// because an offset into a window that had already dropped matches meant
+	// nothing; the window is gone, the predicate now sees every candidate row,
+	// and the offset skips MATCHES. An error became an answer.
+	t.Run("offset_pages_a_predicate_query", func(t *testing.T) {
+		// A BOUNDED limit on both calls, deliberately: an unlimited request
+		// carrying an offset renders SQL the engine answers with a recovered
+		// panic, which predates this role (see RunQuerierOffsetIsHonoredOrRefused).
+		full := bdProxiedQueryJSON(t, bd, p, "type=bug OR type=feature", "--limit", "20")
+		if len(full) < 2 {
+			t.Fatalf("fixture should match >= 2 rows for (bug OR feature), got %d", len(full))
+		}
+		page := bdProxiedQueryJSON(t, bd, p, "type=bug OR type=feature", "--limit", "20", "--offset", "1")
+		if len(page) != len(full)-1 {
+			t.Fatalf("--offset 1 returned %d rows, want %d — the tail of the same answer", len(page), len(full)-1)
+		}
+		for i, iwc := range page {
+			if iwc.ID != full[1+i].ID {
+				t.Errorf("position %d: paged returned %s; unpaged had %s at index %d", i, iwc.ID, full[1+i].ID, 1+i)
+			}
 		}
 	})
 
+	// The sort refusal survives, and it moved: the ROLE makes it now, for every
+	// caller, because the display order is applied to the rows the query bounded
+	// and each page of an offset walk would be sorted for itself.
 	t.Run("offset_rejected_with_sort", func(t *testing.T) {
 		for _, sortField := range []string{"priority", "created", "id"} {
 			out := bdProxiedQueryFail(t, bd, p, "priority>=0", "--all", "--sort", sortField, "--offset", "1")
-			if !strings.Contains(out, "--offset is not supported with --sort") {
+			if !strings.Contains(out, "an offset cannot be combined with a display order") {
 				t.Errorf("expected --sort %s + offset rejection, got: %s", sortField, out)
 			}
 		}
@@ -328,9 +347,12 @@ func TestProxiedServerQuery(t *testing.T) {
 		}
 	})
 
+	// The wording is the ROLE's now, on both routes: the expression is parsed
+	// inside issueops.Querier, so the refusal a caller reads is the library's
+	// rather than one of two the front doors each wrote.
 	t.Run("invalid_expression_fails", func(t *testing.T) {
 		out := bdProxiedQueryFail(t, bd, p, "===invalid===")
-		if !strings.Contains(out, "parsing query") {
+		if !strings.Contains(out, "invalid query expression") {
 			t.Errorf("expected parse error for invalid expression, got: %s", out)
 		}
 	})

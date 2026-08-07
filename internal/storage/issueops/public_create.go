@@ -62,7 +62,14 @@ func PreparePublicCreateRequest(request publicops.CreateRequest, context PublicC
 		issue.Status = types.StatusOpen
 	}
 	if issue.ID != "" && !request.ForceIDPrefix {
-		if err := ValidateIssueIDPrefix(issue.ID, strings.TrimSuffix(context.IssuePrefix, "-"), context.AllowedPrefixes); err != nil {
+		// The caller's prefix wins when it supplied one; see
+		// CreateRequest.IDPrefix for why a front door may know better than the
+		// substrate does.
+		prefix := context.IssuePrefix
+		if request.IDPrefix != "" {
+			prefix = request.IDPrefix
+		}
+		if err := ValidateIssueIDPrefix(issue.ID, strings.TrimSuffix(prefix, "-"), context.AllowedPrefixes); err != nil {
 			return publicops.CreateRequest{}, publicCreateValidationError(err)
 		}
 	}

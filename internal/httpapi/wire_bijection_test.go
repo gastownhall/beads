@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // pinnedSchemas are the schemas welded to canonical Go structs with x-go-type.
@@ -21,19 +22,37 @@ import (
 // least surface in the byte-pinned CLI protocol corpus. internal/httpapi/
 // pinning.go proves those three are aliases; only this test proves the document
 // still describes them.
+// The import path is per-entry rather than one constant, because the canonical
+// structs do not all live in one package: nine are internal/types, and the
+// three that are not — the cycle pair and IssueBlocking — live in the role
+// package issueops, where the results of issueops.CycleDetector and
+// issueops.BlockingAnnotator are declared. Asserting the declared path per
+// schema keeps the pin's TARGET checked, which is what a bare x-go-type name
+// would not do.
 var pinnedSchemas = []struct {
-	name   string
-	goType string
-	value  any
+	name       string
+	goType     string
+	importPath string
+	value      any
 }{
-	{"Issue", "types.Issue", types.Issue{}},
-	{"IssueWithCounts", "types.IssueWithCounts", types.IssueWithCounts{}},
-	{"IssueDetails", "types.IssueDetails", types.IssueDetails{}},
-	{"IssueWithDependencyMetadata", "types.IssueWithDependencyMetadata", types.IssueWithDependencyMetadata{}},
-	{"Dependency", "types.Dependency", types.Dependency{}},
-	{"Comment", "types.Comment", types.Comment{}},
-	{"BondRef", "types.BondRef", types.BondRef{}},
+	{"Issue", "types.Issue", canonicalTypesImport, types.Issue{}},
+	{"IssueWithCounts", "types.IssueWithCounts", canonicalTypesImport, types.IssueWithCounts{}},
+	{"IssueDetails", "types.IssueDetails", canonicalTypesImport, types.IssueDetails{}},
+	{"IssueWithDependencyMetadata", "types.IssueWithDependencyMetadata", canonicalTypesImport, types.IssueWithDependencyMetadata{}},
+	{"TreeNode", "types.TreeNode", canonicalTypesImport, types.TreeNode{}},
+	{"Dependency", "types.Dependency", canonicalTypesImport, types.Dependency{}},
+	{"Comment", "types.Comment", canonicalTypesImport, types.Comment{}},
+	{"BondRef", "types.BondRef", canonicalTypesImport, types.BondRef{}},
+	{"Statistics", "types.Statistics", canonicalTypesImport, types.Statistics{}},
+	{"Cycle", "issueops.Cycle", canonicalRolesImport, issueops.Cycle{}},
+	{"CycleMember", "issueops.CycleMember", canonicalRolesImport, issueops.CycleMember{}},
+	{"IssueBlocking", "issueops.IssueBlocking", canonicalRolesImport, issueops.IssueBlocking{}},
 }
+
+const (
+	canonicalTypesImport = "github.com/steveyegge/beads/internal/types"
+	canonicalRolesImport = "github.com/steveyegge/beads/issueops"
+)
 
 // omittedProperties lists JSON field names a pinned schema deliberately does
 // not document, keyed by schema name. It STARTS EMPTY and must stay that way
@@ -64,8 +83,8 @@ func TestWireTagBijection(t *testing.T) {
 				t.Fatalf("x-go-type = %q, want %q", got, pinned.goType)
 			}
 			imp := mapAt(t, schema, "x-go-type-import")
-			if got, _ := imp["path"].(string); got != "github.com/steveyegge/beads/internal/types" {
-				t.Fatalf("x-go-type-import.path = %q, want the canonical types package", got)
+			if got, _ := imp["path"].(string); got != pinned.importPath {
+				t.Fatalf("x-go-type-import.path = %q, want %q", got, pinned.importPath)
 			}
 
 			specProps := schemaProperties(t, doc, schema)

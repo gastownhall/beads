@@ -55,12 +55,15 @@ info:
       outside its own parameter table with `400` / `code: invalid_argument` /
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations with no parameters at all (`GET /healthz`,
-      `GET /v0/beads/context`, `GET /v0/beads/issues/{id}`,
-      `POST /v0/beads/issues/{id}:claim`) reject every query key the same way.
+      `GET /v0/beads/context`, `GET /v0/beads/dependencies/cycles`,
+      `GET /v0/beads/issues/{id}`, `POST /v0/beads/issues/{id}:claim`,
+      `POST /v0/beads/issues:sweep`, `POST /v0/beads/issues:delete`,
+      `GET /v0/beads/config`,
+      `GET /v0/beads/config/{key}`) reject every query key the same way.
 
 
     Both are uniform rules, reachable on EVERY route including `GET /healthz`,
-    and are stated here instead of being repeated on all six operations. The
+    and are stated here instead of being repeated on every operation. The
     per-operation `responses` below therefore list what an operation produces
     BEYOND these two: a generated client must treat `400 invalid_argument` as
     possible everywhere, including on the operations whose documented statuses
@@ -97,12 +100,13 @@ info:
 
 
     `Issue`, `IssueWithCounts`, `IssueDetails`,
-    `IssueWithDependencyMetadata`, `Dependency`, `Comment` and `BondRef` are
+    `IssueWithDependencyMetadata`, `TreeNode`, `Dependency`, `Comment`,
+    `BondRef`, `Statistics`, `Cycle`, `CycleMember` and `IssueBlocking` are
     pinned to the canonical Go structs (`x-go-type`), so the CLI's `--json`
     output and these response bodies are one compatibility domain and cannot
     drift apart. Changes to them are limited to NEW optional fields, and each
     addition must land with its entry in this document in the same change — a
-    two-way JSON-tag bijection test, covering all seven, fails CI otherwise. A
+    two-way JSON-tag bijection test, covering all twelve, fails CI otherwise. A
     breaking change to those shapes requires cutting `/v1`, not editing `/v0`.
 
 
@@ -416,6 +420,413 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/stats:
+    get:
+      operationId: getStats
+      summary: Workspace summary statistics
+      description: >-
+        The counts `bd status` prints and its `bd stats` alias reprints: rows by
+        status across the durable plane, plus the two DEPENDENCY-AWARE numbers —
+        the blocked count and the readiness derived from it — that make this a
+        different question from a filtered count.
+
+
+        It is `stats` rather than `status` in the path deliberately. `status`
+        on an HTTP surface reads as the SERVER's condition, which is `/healthz`;
+        this operation answers about the WORKSPACE and touches the database to
+        do it.
+
+
+        THE WISP TIER IS NOT INCLUDED in the workspace-wide answer, so a
+        workspace whose work lives in ephemeral rows reports zeros here.
+        Supplying `assignee` changes that, along with three other definitions —
+        see the parameter.
+
+
+        THERE IS NO PREDICATE and there will not be one. A count of a set the
+        caller describes is a different question with a different answer shape;
+        this operation is the summary or it is nothing.
+      parameters:
+        - name: assignee
+          in: query
+          description: >-
+            Answer for ONE ACTOR instead of the workspace. Used as written: no
+            trimming, no case folding, no alias expansion. An empty value is a
+            400 — the workspace-wide question is asked by OMITTING the
+            parameter, and an empty assignee would otherwise select the rows
+            with no assignee and report them as one actor's workload.
+
+
+            IT CHANGES FOUR DEFINITIONS AT ONCE, and they are named on the
+            `Statistics` properties rather than here: the set widens to include
+            the ephemeral tier, `blocked_issues` counts the `blocked` STATUS
+            instead of the dependency flag, `ready_issues` becomes the real
+            ready-work count instead of a subtraction, and `pinned_issues` is
+            always 0. An actor with no rows is a summary of zeros, not a 404.
+          schema:
+            type: string
+        - name: skip_blocked
+          in: query
+          description: >-
+            Ask for the answer WITHOUT the blocked-set scan, which is the
+            expensive half of this query on a large workspace — the same request
+            `bd status --no-blocked` makes.
+
+
+            IT IS A HINT. When it is honored, `blocked_issues` and
+            `ready_issues` are both null and `blocked_count_skipped` is true;
+            when the backend has no cheaper path the full numbers come back and
+            the flag is false. Nothing else in the summary changes either way,
+            so a client that reads neither pointer cannot tell the difference.
+
+
+            IGNORED when `assignee` is set: that answer computes both numbers by
+            a route with no fast path, and it is not an error to ask.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: The workspace summary.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StatsResponse'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/dependencies/cycles:
+    get:
+      operationId: listDependencyCycles
+      summary: List dependency cycles
+      description: >-
+        Every circular blocking dependency in the workspace, the same sweep
+        `bd dep cycles` performs. Items are `Cycle` — the element type that
+        command's `--json` emits — so the two surfaces carry one shape.
+
+
+        THE ANSWER IS CANONICAL: each cycle's members are rotated so the lowest
+        id comes first, and the cycles are sorted against each other, so two
+        calls against an unchanged workspace return the same bytes. A client may
+        diff two snapshots and read a difference as a real change.
+
+
+        EDGES ARE NARROWER THAN THEY ARE AT WRITE TIME. The walk follows
+        `blocks` and `conditional-blocks` only: `waits-for` is gate semantics, so
+        a mutual wait is not a deadlock, and `parent-child` is walked by the
+        refusal a dependency WRITE performs but not by this report. A workspace
+        this operation calls clean can therefore still refuse an edge.
+
+
+        Both dependency planes — durable and ephemeral — are one graph here, so
+        a cycle that runs issue → wisp → issue is reported.
+
+
+        THERE IS NO `limit` AND NO CURSOR, and `has_more` is therefore always
+        false in v0. Truncating would shrink the count, and the count is the
+        number an operator acts on; the response is bounded by the number of
+        cycles in the workspace, which in a healthy one is zero. `has_more` is
+        present so that adding a bound later is additive rather than a new
+        envelope.
+      responses:
+        '200':
+          description: Every dependency cycle, canonically ordered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CyclesPage'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/dependencies/tree:
+    get:
+      operationId: getDependencyTree
+      summary: Walk the dependency tree of one issue
+      description: >-
+        The dependency graph walked recursively from ONE root — the answer
+        `bd dep tree` renders, and the same `TreeNode` elements that command's
+        `--json` emits.
+
+
+        THE ANSWER IS FLAT. Each element carries `depth` and `parent_id`, and a
+        client rebuilds the shape from those two; the elements are in
+        depth-first pre-order, so a subtree is contiguous.
+
+
+        EVERY NODE APPEARS AT MOST ONCE PER WALK, at the depth and parent of the
+        first path that reached it. That single rule is both the cycle policy
+        and the diamond policy: a cycle TERMINATES rather than failing the call
+        or being reported (`GET /v0/beads/dependencies/cycles` is where a cycle
+        is an answer), and a shared subtree is shown under one parent only, with
+        no option to show it twice.
+
+
+        EDGES ARE WIDER THAN THEY ARE ON THE CYCLE REPORT. This walk follows
+        every dependency type except `relates-to`, which is symmetric annotation
+        — following it would make the "tree" the connected component. The cycle
+        report follows `blocks` and `conditional-blocks` only, because it is
+        about scheduling deadlock. Note that `related` and `relates-to` are two
+        different types and only the second is excluded.
+
+
+        Both dependency planes — durable and ephemeral — are one graph here, so
+        an ephemeral step in the middle of a chain does not end the picture.
+
+
+        A NODE THIS DATABASE CANNOT DESCRIBE ENDS THAT BRANCH. A `TreeNode` IS
+        an issue, so there is no shape for "on the tree and undescribable": an
+        edge whose target is an `external:` reference or an id in another
+        repository's namespace contributes no node, and nothing in the answer
+        says a branch stopped for that reason rather than because it ended. That
+        is the one place this operation is less honest than the cycle report,
+        whose `CycleMember` can carry a bare id.
+
+
+        THERE IS NO `limit` AND NO CURSOR. The walk is bounded by `max_depth`
+        instead, which bounds the DESCENT rather than truncating the answer;
+        `has_more` is therefore always false in v0. There is also no `max_rows`:
+        the CLI's defensive cap is a circuit breaker for a caller that would
+        rather fail than wait, and refusing a whole answer is not something this
+        surface offers a remote client.
+      parameters:
+        - name: root_id
+          in: query
+          required: true
+          description: >-
+            The issue to walk from. It must be an EXACT canonical issue id:
+            there is no fuzzy, prefix or substring resolution on this surface,
+            for the reason `GET /v0/beads/issues/{id}` gives. An empty value is a
+            400 `invalid_argument`; a value that matches no issue and no wisp is
+            a 404 `not_found`, because there is one anchor here and no other
+            answer to preserve.
+          schema:
+            type: string
+        - name: direction
+          in: query
+          description: >-
+            Which way to follow edges. `down` (the default) walks what the root
+            DEPENDS ON; `up` walks what depends ON it; `both` walks each way and
+            returns one list.
+
+
+            For `both` the two walks are independent and the answer is their
+            concatenation: every up node except the root, then the whole down
+            tree beginning with the root. The root appears once. The two halves
+            may repeat a node between them — an issue that both blocks and is
+            blocked by something in the other half — so a client aggregating
+            `items` must not assume the ids are distinct. Both walks see ONE
+            database state.
+
+
+            Any other value is a 400 `invalid_argument`: the vocabulary is
+            closed.
+          schema:
+            type: string
+            enum: [down, up, both]
+            default: down
+        - name: max_depth
+          in: query
+          description: >-
+            How many LEVELS to descend, counting the root as level one:
+            `max_depth=1` is the root alone. A node beyond the bound is ABSENT
+            rather than present and flagged.
+
+
+            Zero and negative values are a 400 `invalid_argument` rather than
+            "unbounded": the answer to an unbounded recursive walk on a large
+            workspace is the request that takes the database down.
+          schema:
+            type: integer
+            minimum: 1
+            default: 50
+        - name: status
+          in: query
+          description: >-
+            Prune the walked tree to the nodes carrying this status AND the
+            ancestor chain of each survivor, so the answer is still a tree.
+
+
+            It is a POST-WALK PRUNE, not a filter on the walk, and the difference
+            is observable: a matching node BEHIND a non-matching one is still
+            reached, and the non-matcher is kept as its ancestor. A prune that
+            matches nothing returns NO items at all, root included.
+
+
+            The value is not checked against the workspace's status vocabulary;
+            an unrecognized status simply matches nothing.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The walked tree, flat, in depth-first pre-order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DependencyTreePage'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/ready:count:
+    get:
+      operationId: countReadyWork
+      summary: Count ready work
+      description: >-
+        How many items `GET /v0/beads/ready` would return for the same filters
+        with `limit=0`. That is an identity, not an estimate: the two
+        operations answer from one role over one predicate
+        (`issueops.ReadyCounter`), so a client may page the listing and print
+        this number beside it — which is exactly what `bd ready` does when it
+        reports "showing 100 of 412".
+
+
+        THERE IS NO `limit` AND NO `sort` PARAMETER, and both absences are
+        deliberate. A cardinality has no page: a limit here would answer "how
+        many of the first N", which breaks the identity above, so the role
+        refuses one rather than accepting it and dropping it. A cardinality has
+        no order either — this operation counts the same set the listing
+        returns under ANY sort policy — so there is nothing for a `sort`
+        parameter to change and it is not published. Every other parameter of
+        the listing is here and means exactly what it means there, including
+        the default type exclusions and the way `type` drops them.
+
+
+        It costs a query of its own. A client that only needs to know whether
+        MORE work exists should read `has_more` on the listing instead; this
+        operation is for the client that needs the number.
+      parameters:
+        - name: assignee
+          in: query
+          description: Only issues assigned to this actor.
+          schema:
+            type: string
+        - name: unassigned
+          in: query
+          description: Only issues with no assignee.
+          schema:
+            type: boolean
+        - name: type
+          in: query
+          description: >-
+            Issue type, with the shorthand alias expansion and the
+            match-nothing-rather-than-fail treatment `GET /v0/beads/ready`
+            documents. Setting it drops the default type exclusions and makes
+            `exclude_type` ignored, there and here alike.
+          schema:
+            type: string
+        - name: exclude_type
+          in: query
+          description: >-
+            Issue types to exclude. Repeat the parameter, or pass a
+            comma-separated list. Ignored when `type` is set.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label
+          in: query
+          description: Labels that must ALL be present (AND).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label_any
+          in: query
+          description: Labels of which at least one must be present (OR).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: exclude_label
+          in: query
+          description: Labels that must not be present.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: label_pattern
+          in: query
+          description: Glob matched against labels.
+          schema:
+            type: string
+        - name: label_regex
+          in: query
+          description: Regular expression matched against labels.
+          schema:
+            type: string
+        - name: priority
+          in: query
+          description: Exact priority (0 is a real value, not "unset").
+          schema:
+            type: integer
+        - name: parent
+          in: query
+          description: Restrict to recursive descendants of this issue.
+          schema:
+            type: string
+        - name: metadata_field
+          in: query
+          description: >-
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: has_metadata_key
+          in: query
+          description: Only issues carrying this top-level metadata key.
+          schema:
+            type: string
+        - name: include_ephemeral
+          in: query
+          description: >-
+            Include ephemeral (non-synced) rows, which the count merges exactly
+            as the listing lists them.
+          schema:
+            type: boolean
+            default: false
+        - name: include_deferred
+          in: query
+          description: Include issues whose `defer_until` is still in the future.
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: The size of the ready set.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReadyCount'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues:
     get:
       operationId: listIssues
@@ -647,6 +1058,125 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/issues:query:
+    get:
+      operationId: queryIssues
+      summary: Query issues with a boolean expression
+      description: >-
+        The `bd query` expression language over HTTP: field comparisons
+        combined with `AND`, `OR`, `NOT` and parentheses. It is the one
+        operation on this surface that takes a DISJUNCTION — every filter
+        parameter of `GET /v0/beads/issues` narrows the answer, and no
+        combination of them expresses `type=bug OR label=urgent`.
+
+
+        IT IS NOT A SQL PASSTHROUGH, and the shape of the language is what
+        makes that true rather than a promise about validation: there are no
+        table names, no joins and no way to name a column the vocabulary does
+        not publish. The vocabulary is the one `bd query --help` documents, and
+        an expression outside it is a 400 rather than an empty page.
+
+
+        EVERY MATCH IS IN SCOPE, which has not always been true and is the
+        reason this operation exists in the shape it does. An expression the
+        storage filter cannot express is answered by evaluating the predicate
+        over every candidate row and then cutting the page, so `has_more` means
+        what it says. The CLI used to bound that scan at a few hundred rows and
+        filter what came back, which silently dropped matches from an `OR`
+        query and reported the result as complete. The cost is stated rather
+        than hidden: a broad expression over a large workspace is a large read,
+        and `limit` bounds the RESPONSE rather than the scan.
+
+
+        THERE IS NO CURSOR AND NO `offset`. A cursor is a keyset position in a
+        database order, and the matching set of a predicate query is assembled
+        outside the database, so there is no position to encode; `offset` is
+        absent because the two database sources this server can be built on
+        disagree about whether they can honor one, and a parameter that works
+        under one deployment topology and refuses under another is worse on a
+        wire than an absent one. Raise `limit`, or narrow the expression.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: >-
+            The query expression, e.g. `status=open AND priority>1` or
+            `type=bug OR label=urgent`. Blank, unparseable, or naming a field
+            or operator the language does not have is a 400 `invalid_argument`
+            with `param: "q"` and `reason: "invalid_value"`.
+
+
+            Relative date terms (`created>7d`) are resolved against the
+            SERVER's clock at the moment the request is served.
+          schema:
+            type: string
+        - name: all
+          in: query
+          description: >-
+            Include closed issues. Without it closed issues are excluded —
+            unless the expression itself compares `status`, in which case the
+            expression's own opinion stands and this parameter changes nothing.
+          schema:
+            type: boolean
+            default: false
+        - name: sort
+          in: query
+          description: >-
+            Display order for the page. Absent leaves the rows in the order the
+            query returned them, which is the same thing `bd query` without
+            `--sort` does.
+
+
+            WHAT IT ORDERS is the rows the query bounded, exactly as on the
+            CLI: for an expression the database answered under `limit`, the
+            page; for a predicate expression, which the database cannot bound,
+            the whole matching set.
+          schema:
+            type: string
+            enum: [priority, created, updated, closed, status, id, title, type, assignee]
+        - name: reverse
+          in: query
+          description: Invert the display order. Ignored when `sort` is absent.
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          description: >-
+            Maximum number of items to return. `0` means unlimited, exactly as
+            `bd query --limit 0` does — the two surfaces read the same shared
+            default (`workapi.DefaultQueryLimit`, the value `bd query --limit`
+            registers) and the same zero semantics. A negative value is a 400.
+
+
+            The same mode-dependent refusal the issue listing carries applies
+            here: under `--allow-non-loopback`, `limit=0` is refused with 400
+            `invalid_argument`, `param: "limit"`, `reason: "invalid_value"`.
+          schema:
+            type: integer
+            minimum: 0
+            default: 50
+      responses:
+        '200':
+          description: A page of the issues the expression matched.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueryPage'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, a malformed parameter
+            value, or an expression this server cannot parse or evaluate.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues/{id}:
     get:
       operationId: getIssue
@@ -742,9 +1272,892 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+  /v0/beads/issues:sweep:
+    post:
+      operationId: sweepIssues
+      summary: Delete closed beads in bulk
+      description: >-
+        Bulk clearance of CLOSED beads from ONE tier: the operation behind
+        `bd purge` (`tier: ephemeral`) and `bd prune` (`tier: durable`). It is
+        one of the two DESTRUCTIVE operations on this surface — the other is
+        `issues:delete` — and nothing it deletes comes back.
+
+
+        A collection-level custom method rather than `DELETE
+        /v0/beads/issues?...`: this describes a SET and acts on it, and a
+        `DELETE` with a filtering query string is the shape where a dropped
+        parameter widens what is erased. Sending a body makes every narrowing
+        term a member the server refuses by name if it does not know it.
+
+
+        ## What it selects, in order
+
+
+        The closed rows of `tier`, then `pattern`, then the two protections —
+        pinned beads are never swept and `protect_referenced` holds back beads
+        another live bead cites. The ORDER is part of the answer: `skipped`
+        counts what the request actually reached, so a pinned bead the pattern
+        excluded is not counted as protected.
+
+
+        ## The safety gate is the ROLE'S, not this handler's
+
+
+        A `durable` sweep with neither `closed_before` nor `pattern` is
+        refused with `400` / `invalid_argument`. That refusal comes from the
+        same library surface `bd prune` calls, not from a check written here,
+        which is what makes this endpoint incapable of erasing every closed
+        bead in a workspace by omission. A caller that really means everything
+        closed sends `pattern: "*"`.
+
+
+        ## One transaction
+
+
+        The selection and the deletion share one transaction, so the set the
+        response describes IS the set that was deleted. The cost is that a
+        sweep is all-or-nothing: one large enough to exceed the backend's write
+        timeout fails whole and deletes nothing. Narrow the request rather than
+        expecting progress.
+
+
+        `dry_run: true` answers the same question and changes nothing —
+        including history. Ask it first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SweepRequest'
+      responses:
+        '200':
+          description: >-
+            The sweep ran (or, under `dry_run`, was costed). A request that
+            matched nothing is a 200 with `swept: 0`, not a 404 — an empty set
+            of closed beads is the steady state of a swept workspace.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SweepResult'
+        '400':
+          description: >-
+            Invalid request: an unparseable or oversized body, an unknown body
+            member, a `tier` outside the enum, a malformed `pattern`, an
+            unparseable `closed_before`, an `actor` that is empty after
+            trimming or carries control characters — or an unfiltered
+            `durable` sweep, which the library surface refuses as a safety
+            invariant.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues:delete:
+    post:
+      operationId: deleteIssues
+      summary: Delete named beads
+      description: >-
+        Erases the beads this request NAMES, and — under `cascade` — everything
+        that depends on them. It is the operation behind `bd delete`, the other
+        DESTRUCTIVE operation on this surface alongside `issues:sweep`, and
+        nothing it deletes comes back.
+
+
+        It is a different operation from `POST /v0/beads/issues:sweep`, not a
+        narrower spelling of it. A sweep DESCRIBES a set and lets the server
+        resolve it; this one is handed ids. That difference is what decides
+        where each one's safety lives: a description can be accidentally too
+        wide, so the sweep carries a require-a-filter refusal, while a list of
+        ids cannot be, so this one's guard is about the GRAPH instead.
+
+
+        A collection-level custom method rather than `DELETE
+        /v0/beads/issues/{id}`: this acts on a SET, its behaviour turns on
+        three flags, and a `DELETE` carrying those in a query string is the
+        shape where a dropped parameter changes what is erased. Sending a body
+        makes every one of them a member the server refuses by name if it does
+        not know it.
+
+
+        ## The three modes
+
+
+        With neither `cascade` nor `force`, a named bead that some bead OUTSIDE
+        the request depends on is REFUSED with `400` / `invalid_argument`, and
+        nothing is deleted. `force` deletes the named beads and leaves those
+        dependents ORPHANED — they keep their rows, lose their edges, and come
+        back in `orphaned`. `cascade` deletes the transitive closure instead,
+        so nothing is left outside it to orphan; a request carrying both
+        behaves as `cascade`.
+
+
+        The refusal is the LIBRARY's, not this handler's — the same surface
+        `bd delete` calls — which is what makes this endpoint incapable of
+        orphaning a workspace's graph by omission.
+
+
+        ## Every id must resolve
+
+
+        An id naming no stored bead is a `404` and NOTHING is deleted, not even
+        the ids beside it that did resolve. There is no prefix matching here:
+        ids are exact, because resolving an ambiguous prefix to a bead and then
+        deleting it is the one place that convenience is not one.
+
+
+        ## One transaction
+
+
+        The guard, the deletion and the rewrite of surviving beads' text
+        references all share one transaction, so the set the response describes
+        IS the set that was deleted and no bead is left citing an id that no
+        longer exists. The cost is that a delete is all-or-nothing: one whose
+        neighbourhood is large enough to exceed the backend's write timeout
+        fails whole. Split the request rather than expecting progress.
+
+
+        `dry_run: true` answers the same question and changes nothing —
+        including history, and including the two refusals, which a preview
+        reports exactly where the real request would. Ask it first.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DeleteIssuesRequest'
+      responses:
+        '200':
+          description: >-
+            The beads were deleted (or, under `dry_run`, costed).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteIssuesResult'
+        '400':
+          description: >-
+            Invalid request: an unparseable or oversized body, an unknown body
+            member, an empty or over-long `ids`, a blank id, an `actor` that is
+            empty after trimming or carries control characters — or a named
+            bead with a dependent the request did not name and neither
+            `cascade` nor `force` to say what to do about it, which the library
+            surface refuses as a safety invariant.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: >-
+            At least one id named no stored bead, and nothing was deleted.
+            `detail` is this surface's fixed not-found sentence and does NOT
+            name which ids missed: a client able to tell a well-formed miss
+            from a malformed id would be probing the id space. `bd delete`
+            names them, because it is answering the person who typed them.
+          x-bd-codes: [not_found]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues:batchCreate:
+    post:
+      operationId: batchCreateIssues
+      summary: Create many issues as one act
+      description: >-
+        Creates every item in the request, or none of them. There is no partial
+        outcome and no per-item status: the whole request is one transaction, so
+        a client that gets a 4xx knows nothing was written and can fix its
+        payload and resend it unchanged.
+
+
+        That is the OPPOSITE of what a batch close would do, and it is the right
+        default here for one reason: half a created plan cannot be re-sent
+        without duplicating the half that landed, and nothing in the response
+        would say which half that was.
+
+
+        THE SERVER ASSIGNS EVERY ID. There is no `id` member on an item, so this
+        operation can never adopt or overwrite a stored row — `bd import` is the
+        upsert surface and it is not published here. The generated ids come back
+        in `items`, in request order, which is the only place a client can learn
+        them.
+
+
+        A dependency target may name an issue this workspace holds, an item
+        created EARLIER IN THE SAME REQUEST, an `external:` reference, or an id
+        belonging to another repository. A target that is none of those is a
+        `400` and nothing is created — an edge silently dropped from a created
+        issue is a relationship the client has no way to discover is missing.
+
+
+        Hooks do not fire and the per-command auto-commit machinery does not
+        run, exactly as for `POST /v0/beads/issues/{id}:claim`. The only durable
+        effect is the single storage commit the role makes in its own
+        transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BatchCreateRequest'
+      responses:
+        '200':
+          description: >-
+            Every item was created. `items` carries the stored issues in request
+            order.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BatchCreateResponse'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member at any level, an `actor` that
+            is empty after trimming, longer than 256 bytes or carrying control
+            characters, an empty or over-long `items` array, an item the
+            workspace's own validation refuses, or a dependency target that
+            names nothing this workspace holds. Nothing is created in any of
+            these cases.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/config:
+    get:
+      operationId: listSettings
+      summary: List the workspace's stored settings
+      description: >-
+        The SETTINGS stored in the workspace database, which is the plane
+        `bd config list` reads. It is not the effective configuration: values
+        that reach a running `bd` from `config.yaml`, from environment
+        variables or from git config are absent and cannot be here, because
+        they are files and variables on the CLIENT's machine and this server
+        answers for the database. `bd config show` is the multi-source view and
+        has no HTTP operation for the same reason.
+
+
+        IT IS NOT EVERY ROW OF THAT TABLE. Keys under `kv.` are omitted — the
+        generic `bd kv` namespace and the `bd remember` memories nested under
+        it. Those rows are USER DATA that rides in the settings table because
+        there is one table, not because they are settings, and enumerating them
+        here published a workspace's memories, key and value, to anything that
+        could reach this port. `bd config list` omits them too: the exclusion is
+        in the shared role both doors call, so the two cannot drift.
+
+        `getSetting` still answers a `kv.` key NAMED EXACTLY, and this
+        operation is where it stopped being discoverable.
+
+
+        SETTINGS WHOSE KEY MARKS THEM AS CREDENTIAL-BEARING ARE WITHHELD. Their
+        entry is present with `redacted: true` and no `value`, so a client can
+        see that the key is configured without the surface handing a secret to
+        every process that can reach the port — this API has no
+        authentication. See `Setting`.
+
+
+        The envelope is the paginated one and `has_more` is always false today:
+        settings are a keyed namespace a workspace holds tens of, not a
+        collection to scan, so the whole plane is returned in one page. The
+        envelope is used anyway because entries are ordered by key, which makes
+        a keyset cursor expressible later without a breaking change.
+      responses:
+        '200':
+          description: The stored settings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsPage'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/config/{key}:
+    get:
+      operationId: getSetting
+      summary: Get one stored setting
+      description: >-
+        The value stored for one key, used verbatim: there is no namespace
+        completion, no case folding and no dash/underscore equivalence.
+
+
+        THERE IS NO 404 ON THIS OPERATION, deliberately. A key nothing stored
+        and a key stored as the empty string are the same answer here — 200
+        with `value` absent — because the storage seam behind it cannot tell
+        them apart and neither can `bd config get`, which prints "(not set)"
+        for both. Answering 404 for one of them would publish a distinction
+        this server would have to invent.
+      parameters:
+        - $ref: '#/components/parameters/SettingKey'
+      responses:
+        '200':
+          description: The setting.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Setting'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is
+            empty after trimming or carries a control character.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/dependencies:
+    get:
+      operationId: listDependencies
+      summary: List the stored dependency edges of several issues
+      description: >-
+        The STORED EDGE ROWS whose source is each named issue — the answer
+        `bd dep list a b c` gives, and the same `Dependency` elements that
+        command's `--json` emits.
+
+
+        THESE ARE ROWS, NOT NEIGHBOURS, and that is the difference from the
+        `dependencies` member of `GET /v0/beads/issues/{id}`'s issue body. A
+        dependency target may be an `external:` reference or an id belonging to
+        another repository, and this database holds no issue for either; such
+        an edge is returned here with its target spelled exactly as stored, and
+        nothing is looked up on the far end. The `id` member of each element is
+        absent: the read behind this operation does not select the row's
+        surrogate key, so the `(issue_id, depends_on_id, type)` triple is what
+        identifies an edge on this surface.
+
+
+        THE DIRECTION IS OUTGOING ONLY — what each issue depends on. There is
+        no direction parameter: the inbound bulk read is a different read
+        against a different key with its own de-duplication rule across the two
+        dependency tables, and adding it later is additive.
+
+
+        A NAMED ISSUE THAT DOES NOT EXIST IS NOT A 404. It is listed in
+        `missing`, and the edges of the issues that do exist are still
+        returned: a batch that failed on one absent id would throw away the
+        answers for the ids that were found. An issue that exists and depends
+        on nothing is absent from `missing` and contributes no `items`, which
+        is the distinction this operation exists to publish — an empty edge
+        list is otherwise indistinguishable from a typo, and the empty list is
+        the common case.
+
+
+        THERE IS NO `limit` AND NO CURSOR. `bd dep list` has no limit either,
+        so one here would make the two surfaces answer differently by default;
+        instead the QUESTION is bounded — at most 100 `issue_id` values per
+        call — which bounds the answer without truncating it. Each issue's
+        edges are unbounded, exactly as the `dependencies` member of
+        `GET /v0/beads/issues/{id}` already is.
+      parameters:
+        - name: issue_id
+          in: query
+          description: >-
+            The issues to read edges for. Repeat the parameter; at least one is
+            required and at most 100 are accepted, and either bound is a 400
+            `invalid_argument` with `param: "issue_id"`, `reason:
+            "invalid_value"`.
+
+
+            Each value must be an EXACT canonical issue id: there is no fuzzy,
+            prefix or substring resolution on this surface, for the reason
+            `GET /v0/beads/issues/{id}` gives. A value that matches nothing is
+            reported in `missing` rather than refused. An empty value is a 400.
+
+
+            Repeats collapse: an id named twice is one entry in `missing` at
+            most once, and its edges appear once.
+          style: form
+          explode: true
+          required: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            items:
+              type: string
+        - name: type
+          in: query
+          description: >-
+            Edge types to include. Repeat the parameter. Empty means every
+            type.
+
+
+            The vocabulary is OPEN — a workspace configures its own edge types
+            — so an unrecognized value is not an error here: it simply matches
+            no edge. What IS refused, with a 400 `invalid_argument`, is a value
+            no edge could ever carry: empty, or longer than the column.
+
+
+            The filter narrows EDGES, never the named issues. An issue whose
+            every edge the filter rejects is still not in `missing`.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+      responses:
+        '200':
+          description: The stored edges of the named issues.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DependencyEdges'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/dependencies/blocking:
+    get:
+      operationId: listBlockingAnnotations
+      summary: Read the blocking decoration of several issues
+      description: >-
+        The DERIVED blocking summary `bd list` prints beside each row —
+        `(parent: X, blocked by: Y, blocks: Z)` — for the issues named here.
+
+
+        IT IS DERIVED, NOT STORED, and that is the whole difference from
+        `GET /v0/beads/dependencies` next door. That operation returns the edge
+        ROWS: every edge type, targets spelled exactly as stored, nothing looked
+        up. This one answers a summary over TWO of those types with a rule
+        applied: a `blocks` edge counts only while its blocker is open, and a
+        `parent-child` edge becomes `parent` rather than a blocker. A client
+        that wants the rows asks the other operation; a client that wants the
+        decoration a listing shows asks this one.
+
+
+        A CLOSED BLOCKER IS NOT A BLOCKER, in either direction. An issue whose
+        every blocker is closed comes back with an empty `blocked_by`, and a
+        CLOSED issue blocks nothing — its `blocks` is empty even where the edges
+        still exist. `parent` follows the same rule: a closed parent is absent.
+
+
+        A BLOCKER THIS WORKSPACE HOLDS NO ROW FOR STILL BLOCKS. An `external:`
+        reference, an id in another repository's namespace and an id whose issue
+        was deleted out from under its edges are all statuses this database
+        cannot read, and an unreadable status is not `closed`. Hiding such a
+        blocker would report work as unblocked on the strength of a row that was
+        never found, so it is reported.
+
+
+        THERE IS NO `missing` MEMBER, unlike `GET /v0/beads/dependencies`. This
+        operation runs no existence probe: an id that names nothing and an id
+        with no live blocking edges decorate identically, so the probe would be
+        a read whose answer no client could act on. A client that needs to know
+        whether an id exists calls `GET /v0/beads/issues/{id}`, which answers
+        `404`. Every requested id gets an entry here either way.
+
+
+        THERE IS NO `limit` AND NO CURSOR, for the reason
+        `GET /v0/beads/dependencies` has none: the QUESTION is bounded instead,
+        at 100 `issue_id` values per call, which bounds the answer without
+        truncating it.
+      parameters:
+        - name: issue_id
+          in: query
+          description: >-
+            The issues to annotate. Repeat the parameter; at least one is
+            required and at most 100 are accepted, and either bound is a 400
+            `invalid_argument` with `param: "issue_id"`, `reason:
+            "invalid_value"`.
+
+
+            Each value must be an EXACT canonical issue id: there is no fuzzy,
+            prefix or substring resolution on this surface, for the reason
+            `GET /v0/beads/issues/{id}` gives. A value that matches nothing gets
+            a bare entry rather than being refused. An empty value is a 400.
+
+
+            Repeats collapse: an id named twice is one entry, at the position of
+            its first mention.
+          style: form
+          explode: true
+          required: true
+          schema:
+            type: array
+            minItems: 1
+            maxItems: 100
+            items:
+              type: string
+      responses:
+        '200':
+          description: The blocking decoration of the named issues.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/BlockingAnnotations'
+        '400':
+          $ref: '#/components/responses/InvalidArgument'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/memories:
+    get:
+      operationId: listMemories
+      summary: List the workspace's stored memories
+      description: >-
+        Every memory this workspace holds, optionally narrowed by `search`. It
+        is the plane `bd memories` reads.
+
+
+        ONLY THE MEMORY PLANE. Memories ride in the same database table as the
+        workspace's settings and as the generic `bd kv` namespace, and neither
+        of those appears here, whatever it contains — including a memory whose
+        key SHADOWS a settings name: a memory called `issue_prefix` is a memory,
+        and the workspace's real issue prefix is not one. That separation is the
+        role's, pinned by its conformance contract, not a filter applied to this
+        answer.
+
+
+        MEMORY CONTENT IS SERVED IN FULL and this API has no authentication.
+        Every entry carries its value verbatim; there is no `redacted` member
+        and nothing is withheld. See `POST /v0/beads/memories` for why a
+        key-name heuristic would be worse here than no promise at all. This is
+        the operation that makes stored memories DISCOVERABLE rather than merely
+        readable by a caller who already knows a key — an operator binding
+        beyond loopback is accepting exactly that.
+
+
+        A memory stored as the EMPTY STRING is enumerated here, because its key
+        exists, while `GET /v0/beads/memories/{key}` answers `404` for it. That
+        asymmetry is the one way a client can tell a row stored empty from a row
+        that is not there, and it is the storage seam's conflation showing
+        through rather than a rule this surface invented.
+
+
+        The envelope is the paginated one and `has_more` is ALWAYS false:
+        memories are a keyed namespace a workspace holds tens of, not a
+        collection to scan, so the whole plane comes back in one page. There is
+        no `limit` and no cursor. The envelope is used anyway because entries
+        are ordered by key, which makes a keyset cursor expressible later
+        without a breaking change.
+      parameters:
+        - name: search
+          in: query
+          description: >-
+            Narrows the answer to memories that MATCH: a memory matches when the
+            lowercase of its key, or the lowercase of its value, contains the
+            lowercase of this term. Absent or empty means everything, and a term
+            nothing matches is a `200` with an empty `items`.
+
+
+            IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE,
+            and it is spelled `search` rather than `q` FOR THAT REASON. On `GET
+            /v0/beads/issues:query`, `q` is a boolean expression over issue
+            fields that is refused when it does not parse; here there is nothing
+            to parse, no vocabulary and no refusal — every string is a legal
+            search term, `status=open` included, and it is matched literally.
+            Two names because two questions: a client that sent this operation
+            the other `q` would otherwise get a literal substring search back
+            instead of an error.
+
+
+            The term reaches the role UNFOLDED. Case folding is the role's, so
+            that this surface and `bd memories` cannot come to disagree about
+            what matching means; a client sends what its user typed.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The stored memories, ordered by key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoriesPage'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a repeated
+            `search`. `search` is the only parameter this operation accepts —
+            `q` is NOT one of them, and is refused as unknown rather than
+            treated as a search term.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    post:
+      operationId: rememberMemory
+      summary: Store one memory
+      description: >-
+        Stores one memory in the workspace's persistent memory plane — the
+        operation behind `bd remember`. It is an UPSERT: a key that already
+        holds a memory is overwritten, and `replaced` in the response reports
+        which of the two happened.
+
+
+        `key` is OPTIONAL, and omitting it is the normal case. The server then
+        derives the key from `content` using the one derivation `bd remember`
+        has used since it shipped, and the response's `key` is where the caller
+        learns what to recall. A `key` that IS supplied is used verbatim: no
+        trimming, no slugging, no charset restriction, because a stored key has
+        to stay recallable under the exact bytes the caller used.
+
+
+        MEMORY CONTENT IS SERVED IN FULL, here and on every other operation of
+        this plane, and this API has no authentication. There is no `redacted`
+        member and no value withholding: the settings surface's redaction is a
+        heuristic over the KEY NAME, and memory keys are derived from the
+        content, so the same rule would withhold a memory ABOUT tokens while
+        serving one that CONTAINS a token under an innocuous slug. A promise
+        that cannot be kept is not made. Do not store credentials in this plane.
+
+
+        There is no `201`/`200` split. `replaced` already says whether a row
+        existed, saying it twice in a second vocabulary would add nothing, and
+        an upsert whose key the server may derive has no stable `Location` to
+        point at.
+
+
+        Hooks do not fire and the per-command auto-commit machinery does not
+        run, exactly as for the other write operations on this surface. The
+        only durable effect is the single storage commit the role makes in its
+        own transaction — which also observes whether a previous value existed,
+        so `replaced` is a statement about the row this request wrote rather
+        than about a row some earlier read happened to see.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RememberRequest'
+      responses:
+        '200':
+          description: >-
+            The memory was stored. `key` is where it lives, derived or verbatim.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RememberedMemory'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, a missing or non-string
+            `content`, a `content` that is empty after trimming, or a `content`
+            from which no key can be derived when none was supplied — the last
+            two the ROLE's refusals, reaching the wire with its own sentences.
+            Nothing is stored in any of these cases.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/memories/{key}:
+    get:
+      operationId: getMemory
+      summary: Get one stored memory
+      description: >-
+        The memory stored under one key, used verbatim: no namespace completion,
+        no case folding, no dash/underscore equivalence. It is the operation
+        behind `bd recall`.
+
+
+        THIS OPERATION HAS A REAL 404, and it is the one place this surface
+        diverges from `GET /v0/beads/config/{key}`, which deliberately has none.
+        The planes genuinely differ. On the settings plane a key nothing stored
+        and a key stored empty are one answer that `bd config get` prints
+        identically, so a 404 would publish a distinction the server would have
+        to invent. On this plane `bd recall` ALREADY distinguishes a miss, by
+        exit code, and the role answers a miss as a result rather than a value
+        — so a 404 reports a distinction that exists rather than minting one.
+
+
+        A MEMORY STORED AS THE EMPTY STRING IS A 404 TOO. No front door can
+        create one — storing empty content is refused — but an out-of-band write
+        to the config table can, and the role does not invent a distinction the
+        storage seam beneath it cannot see. `GET /v0/beads/memories` DOES
+        enumerate such a row, because its key exists, and that asymmetry is the
+        one way a client can tell the two apart.
+
+
+        MEMORY CONTENT IS SERVED IN FULL and this API has no authentication:
+        `Memory` carries no `redacted` member and withholds nothing. See
+        `POST /v0/beads/memories` for why a key-name heuristic would be worse
+        than no promise at all.
+
+
+        KEYS THIS OPERATION CANNOT REACH. `bd remember --key` accepts any
+        string, so a stored key may carry a control character — and `key` is one
+        path segment, percent-decoded once, so such a key would arrive here as a
+        decoded control character in a path. This operation refuses it with a
+        `400` rather than looking it up, exactly as `getSetting` does. The ROLE
+        stays verbatim: breaking `bd recall` of an odd key someone already
+        stored, to tidy a wire rule, would be the tail wagging the dog. Such a
+        memory is reachable from the CLI and from `GET /v0/beads/memories`, and
+        not by path.
+      parameters:
+        - $ref: '#/components/parameters/MemoryKey'
+      responses:
+        '200':
+          description: The stored memory.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is
+            empty after trimming or carries a control character.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: >-
+            This workspace holds no memory under that key — or holds one stored
+            as the empty string, which answers the same way. `detail` says which
+            plane was asked, not which of those two it was.
+          x-bd-codes: [not_found]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+    delete:
+      operationId: forgetMemory
+      summary: Forget one stored memory
+      description: >-
+        Removes the memory stored under one key and answers with what it held —
+        the operation behind `bd forget`. IT IS DESTRUCTIVE and nothing it
+        removes comes back, on a surface that has NO AUTHENTICATION: every
+        process that can reach the port can erase any memory whose key it knows,
+        exactly as `issues:sweep` and `issues:delete` state for beads. The
+        recovery is the workspace's version control, not this API.
+
+
+        THE FIRST `DELETE` METHOD ON THIS SURFACE, and the shape is why. The two
+        destructive issue operations are collection-level custom methods because
+        they act on a SET the request describes and carry flags that change what
+        is erased — a query string is exactly where a dropped parameter widens a
+        deletion. This one names ONE resource by path, carries no body and takes
+        no flags, which is what the `DELETE` method already means. The
+        alternative spelling `POST /v0/beads/memories/{key}:forget` would in
+        addition recreate the claim route's wildcard contortion, since
+        `{key}:forget` is not a router pattern, for no gain.
+
+
+        REMOVING EXACTLY THE NAMED ROW is the ROLE's promise, pinned by its
+        conformance contract rather than restated here: the memory plane shares
+        one table with the workspace's settings and with the generic `bd kv`
+        namespace, and a memory called `issue_prefix` is not the workspace's
+        issue prefix.
+
+
+        Forgetting a key nothing stored is a `404` and removes nothing.
+        Forgetting the same key twice is therefore a `200` and then a `404`,
+        which is what a retrying client actually sees; the second answer is not
+        a failure to act, it is the same fact reported after the act.
+
+
+        The same keys are unreachable here as on the `GET` beside it: a stored
+        key carrying a control character is refused with a `400` rather than
+        looked up, while the role stays verbatim, so such a memory can be
+        forgotten from the CLI and not through this operation.
+
+
+        Hooks do not fire, as for every write on this surface. There is no
+        `dry_run`: one named row is not a set to cost first.
+      parameters:
+        - $ref: '#/components/parameters/MemoryKey'
+      responses:
+        '200':
+          description: >-
+            The memory was removed. The body carries what it held, read in the
+            same transaction as the deletion — so it is what was actually
+            removed rather than what an earlier read happened to see.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is
+            empty after trimming or carries a control character. Nothing is
+            removed in either case.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: >-
+            This workspace holds no memory under that key — or holds one stored
+            as the empty string, which answers the same way — and NOTHING WAS
+            REMOVED.
+          x-bd-codes: [not_found]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
 components:
 
   parameters:
+    SettingKey:
+      name: key
+      in: path
+      required: true
+      description: >-
+        Exact setting key, used verbatim. Keys routinely contain dots
+        (`status.custom`); they occupy one path segment and are
+        percent-decoded once.
+      schema:
+        type: string
+        minLength: 1
+    MemoryKey:
+      name: key
+      in: path
+      required: true
+      description: >-
+        Exact memory key, used verbatim. It occupies one path segment and is
+        percent-decoded once. Keys may contain spaces, dots and unicode — the
+        plane stores what `bd remember --key` was given — and a key carrying a
+        CONTROL character is refused here rather than looked up; see the
+        operation description.
+      schema:
+        type: string
+        minLength: 1
     IssueID:
       name: id
       in: path
@@ -804,7 +2217,7 @@ components:
     # ---------------------------------------------------------------------
     # Pinned schemas.
     #
-    # Each of the seven below is `x-go-type`-pinned to the canonical Go struct,
+    # Each of the twelve below is `x-go-type`-pinned to the canonical Go struct,
     # so the generator emits a type ALIAS and no mirror struct exists anywhere.
     # `types.Issue`'s JSON encoding IS this contract; the CLI's `--json`, the
     # JSONL interchange and these bodies all marshal the same struct.
@@ -815,6 +2228,11 @@ components:
     # TestWireTagBijection (internal/httpapi/wire_bijection_test.go): a field
     # added to the Go struct without an entry here fails CI, and an entry here
     # with no Go field fails CI.
+    #
+    # Nine of the twelve are pinned to `internal/types`; `Cycle`, `CycleMember`
+    # and `IssueBlocking`, which appear after `BondRef`, are pinned to the role
+    # package `issueops` instead, because that is where those canonical structs
+    # live.
     # ---------------------------------------------------------------------
 
     Issue:
@@ -1298,6 +2716,116 @@ components:
             The edge type, e.g. `blocks`, `parent-child`, `related`,
             `discovered-from`. Not a closed vocabulary.
 
+    TreeNode:
+      type: object
+      description: >-
+        One node of a walked dependency tree: a full issue plus where the walk
+        reached it. Property semantics for the issue members are documented on
+        `Issue`.
+
+
+        The tree is FLAT. A node's place in it is read from `depth` and
+        `parent_id`, not from nesting, and a subtree is contiguous in `items`.
+      x-go-type: types.TreeNode
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required: [id, title, priority, created_at, updated_at, depth, parent_id, truncated]
+      properties:
+        # --- repeated from Issue (see the pinned-schema note above) ---
+        id: { type: string }
+        title: { type: string }
+        description: { type: string }
+        design: { type: string }
+        acceptance_criteria: { type: string }
+        notes: { type: string }
+        spec_id: { type: string }
+        status: { type: string }
+        priority: { type: integer }
+        issue_type: { type: string }
+        assignee: { type: string }
+        owner: { type: string }
+        estimated_minutes: { type: integer }
+        created_at: { type: string, format: date-time }
+        created_by: { type: string }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        closed_at: { type: string, format: date-time }
+        close_reason: { type: string }
+        closed_by_session: { type: string }
+        lease_expires_at: { type: string, format: date-time }
+        heartbeat_at: { type: string, format: date-time }
+        lease_granted_node: { type: string }
+        due_at: { type: string, format: date-time }
+        defer_until: { type: string, format: date-time }
+        external_ref: { type: string }
+        source_system: { type: string }
+        metadata: { type: object, additionalProperties: true }
+        compaction_level: { type: integer }
+        compacted_at: { type: string, format: date-time }
+        compacted_at_commit: { type: string }
+        original_size: { type: integer }
+        labels: { type: array, items: { type: string } }
+        dependencies:
+          type: array
+          items: { $ref: '#/components/schemas/Dependency' }
+        comments:
+          type: array
+          items: { $ref: '#/components/schemas/Comment' }
+        sender: { type: string }
+        ephemeral: { type: boolean }
+        no_history: { type: boolean }
+        wisp_type: { type: string }
+        storage_class: { type: string }
+        pinned: { type: boolean }
+        is_template: { type: boolean }
+        bonded_from:
+          type: array
+          items: { $ref: '#/components/schemas/BondRef' }
+        await_type: { type: string }
+        await_id: { type: string }
+        timeout: { type: integer, format: int64 }
+        waiters: { type: array, items: { type: string } }
+        source_formula: { type: string }
+        source_location: { type: string }
+        mol_type: { type: string }
+        work_type: { type: string }
+        event_kind: { type: string }
+        actor: { type: string }
+        target: { type: string }
+        payload: { type: string }
+        # --- added by TreeNode ---
+        depth:
+          type: integer
+          description: >-
+            How far the walk was from the root when it reached this node. The
+            root is 0.
+
+
+            For a `both` walk each half measures its own depth from the root, so
+            a depth does not say which half a node came from and nothing else
+            on the node does either.
+        parent_id:
+          type: string
+          description: >-
+            The node this one was reached FROM, empty on the root. A node is
+            reached ONCE per walk, by the first path that got there, so a shared
+            child of two parents names only the first of them here and the
+            second has no visible edge to it.
+        edge_from_parent:
+          type: string
+          description: >-
+            The dependency type of the edge that led here, e.g. `blocks`,
+            `parent-child`, `discovered-from`. Absent on the root. Not a closed
+            vocabulary.
+        truncated:
+          type: boolean
+          description: >-
+            ALWAYS FALSE. No implementation sets it: a node beyond `max_depth`
+            is ABSENT from the answer rather than present and flagged, so a
+            client cannot tell a tree that ended from one that was cut. It is
+            documented rather than removed because it is on the wire today.
+
     Dependency:
       type: object
       description: A dependency edge between two issues.
@@ -1346,6 +2874,206 @@ components:
         source_id: { type: string }
         bond_type: { type: string }
         bond_point: { type: string }
+
+    Statistics:
+      type: object
+      description: >-
+        Workspace summary counts. Two of them are DEPENDENCY-AWARE and two are
+        structurally always zero; both facts are stated on the properties
+        themselves, because every number here is the same JSON type and nothing
+        else on the wire distinguishes them.
+
+
+        This is the struct `bd status --json` marshals under `summary`, pinned
+        so the two surfaces are one compatibility domain.
+      x-go-type: types.Statistics
+      x-go-type-import:
+        name: types
+        path: github.com/steveyegge/beads/internal/types
+      required:
+        - total_issues
+        - open_issues
+        - in_progress_issues
+        - closed_issues
+        - blocked_issues
+        - deferred_issues
+        - ready_issues
+        - pinned_issues
+        - epics_eligible_for_closure
+        - average_lead_time_hours
+      properties:
+        total_issues:
+          type: integer
+          description: >-
+            Every row in the workspace-wide answer's scan, INCLUDING closed and
+            pinned ones. The status counts below do not sum to it: a row whose
+            status is none of the four falls into no bucket, and `pinned_issues`
+            counts a flag that overlaps all of them.
+        open_issues:
+          type: integer
+        in_progress_issues:
+          type: integer
+        closed_issues:
+          type: integer
+        deferred_issues:
+          type: integer
+        blocked_issues:
+          type: integer
+          nullable: true
+          description: >-
+            Rows the dependency graph blocks — the transitive is_blocked flag,
+            NOT the count of rows whose status is `blocked`. An open row with an
+            unfinished blocker is counted here and its status is still `open`.
+
+
+            NULL when `skip_blocked` was honored, always together with
+            `ready_issues`. The two are nil together or populated together;
+            there is no state in which one is knowable and the other is not.
+
+
+            When `assignee` is set this is a different number: the count of that
+            actor's rows whose STATUS is `blocked`, and never null.
+        ready_issues:
+          type: integer
+          nullable: true
+          description: >-
+            ARITHMETIC, not a query: `open_issues` minus `blocked_issues`,
+            clamped at zero. It is NOT the cardinality of `GET /v0/beads/ready`,
+            which applies type exclusions, the deferral window and a limit that
+            none of this touches.
+
+
+            NULL under the same conditions as `blocked_issues`.
+
+
+            When `assignee` is set this is the real ready-work count for that
+            actor, and never null.
+        pinned_issues:
+          type: integer
+          description: >-
+            Rows carrying the pinned flag, overlapping every status bucket.
+            Always 0 when `assignee` is set: that answer tallies the five
+            statuses and nothing else.
+        epics_eligible_for_closure:
+          type: integer
+          description: >-
+            ALWAYS 0. No implementation computes it, on any backend or either
+            surface. It is documented rather than dropped because this schema is
+            pinned to the struct both surfaces marshal, and a caller reading a 0
+            here is reading an absent computation rather than an answer.
+        average_lead_time_hours:
+          type: number
+          description: ALWAYS 0, for the reason above.
+    # The two cycle schemas are pinned like the seven above, and to the same end,
+    # but to the canonical types in `issueops` rather than in `internal/types`:
+    # the role's own result IS the CLI's `--json` element, so `bd dep cycles`
+    # and this operation cannot drift apart. TestWireTagBijection covers them on
+    # the same terms and reads each schema's declared import path.
+
+    CycleMember:
+      type: object
+      description: >-
+        One node on a dependency cycle.
+
+
+        `id` is always present, and its presence is what proves the node is on
+        the cycle. `issue` is the row behind it, and is ABSENT — never null —
+        when this workspace holds no record for that id: a target in another
+        repository's namespace, an `external:` reference, or a row whose edges
+        outlived it. That absence means the node cannot be DESCRIBED here, never
+        that it is not really on the cycle.
+
+
+        `issue` is spelled as a bare `$ref` with no sibling keywords, following
+        the codegen note at the top of this document.
+      x-go-type: issueops.CycleMember
+      x-go-type-import:
+        name: issueops
+        path: github.com/steveyegge/beads/issueops
+      required: [id]
+      properties:
+        id:
+          type: string
+        issue:
+          $ref: '#/components/schemas/Issue'
+
+    Cycle:
+      type: object
+      description: >-
+        One circular blocking dependency: its members in EDGE ORDER, so
+        `members[i]` blocks on `members[i+1]` and the last member blocks on the
+        first. The closing edge is implied and is not repeated as a final member.
+
+
+        The rotation is canonical — the lowest id comes first — which is what
+        makes two snapshots of an unchanged workspace comparable.
+      x-go-type: issueops.Cycle
+      x-go-type-import:
+        name: issueops
+        path: github.com/steveyegge/beads/issueops
+      required: [members, partial]
+      properties:
+        members:
+          type: array
+          description: The nodes, in edge order, starting at the lowest id. Never empty.
+          items:
+            $ref: '#/components/schemas/CycleMember'
+        partial:
+          type: boolean
+          description: >-
+            True when at least one member has no `issue`. It is always present,
+            including when false: a consumer must be able to read "this path is
+            complete" from the answer rather than from the absence of a key.
+
+
+            `members` is complete either way. This flag says the DESCRIPTIONS
+            beside the ids are not.
+
+    # Pinned to `issueops` for the reason the cycle pair is: the role's own
+    # result IS what the CLI renders, so `bd list`'s decoration and this
+    # operation cannot drift apart. TestWireTagBijection covers it on the same
+    # terms and reads this schema's declared import path.
+    IssueBlocking:
+      type: object
+      description: >-
+        One issue's derived blocking decoration.
+
+
+        `blocked_by` and `blocks` are ASCENDING BY ID with repeats collapsed,
+        and both are always present — an empty array, never null and never
+        absent, so a client reads "nothing blocks this" from the answer rather
+        than from a missing key. `parent` is absent when the issue has none and
+        when the parent it has is closed.
+      x-go-type: issueops.IssueBlocking
+      x-go-type-import:
+        name: issueops
+        path: github.com/steveyegge/beads/issueops
+      required: [id, blocked_by, blocks]
+      properties:
+        id:
+          type: string
+          description: The annotated id, spelled exactly as the request spelled it.
+        blocked_by:
+          type: array
+          description: >-
+            The OPEN issues this one is blocked by: the targets of its `blocks`
+            edges whose own status is not closed.
+          items:
+            type: string
+        blocks:
+          type: array
+          description: >-
+            The issues this one blocks. Empty when this issue is itself closed,
+            which is the same rule `blocked_by` applies from the other end.
+          items:
+            type: string
+        parent:
+          type: string
+          description: >-
+            This issue's parent id. AT MOST ONE is reported; where an issue
+            carries several `parent-child` edges, which one appears here is not
+            specified. A client that needs every structural edge reads them from
+            `GET /v0/beads/dependencies`.
 
     # ---------------------------------------------------------------------
     # Envelope schemas. These have no canonical Go type behind them: they are
@@ -1418,12 +3146,357 @@ components:
           type: array
           description: >-
             The operations this server actually implements, derived from its
-            route table. v0's vocabulary is `ready.list`, `issues.list`,
-            `issues.get`, `issues.claim`; it grows additively, and an operation
-            never appears here unless it is fully implemented. This is how a
-            client checks for an operation — never the version string.
+            route table. v0's vocabulary is `ready.list`, `ready.count`,
+            `issues.list`, `issues.query`, `issues.get`, `issues.claim`,
+            `issues.sweep`, `issues.delete`, `issues.batchCreate`,
+            `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
+            `dependencies.list`, `dependencies.blocking`, `dependencies.tree`,
+            `memories.list`, `memories.get`, `memories.remember`,
+            `memories.forget`;
+            it grows additively, and an operation never
+            appears here unless it is fully implemented. This is how a client
+            checks for an operation — never the version string.
           items:
             type: string
+
+    ReadyCount:
+      type: object
+      required: [total]
+      properties:
+        total:
+          type: integer
+          format: int64
+          description: >-
+            How many items `GET /v0/beads/ready` would return for these filters
+            with `limit=0`. Never negative; 0 when nothing is ready, which is a
+            200 rather than a 404 — a question about a set has an answer even
+            when the set is empty.
+      description: >-
+        The size of a ready set. It carries no items, no `has_more` and no
+        cursor: this is a number about a set, and the operation that returns
+        rows is `GET /v0/beads/ready`.
+
+
+        It is NOT `x-go-type`-pinned, unlike the seven schemas above, and that
+        is a decision rather than an omission: those seven are pinned because a
+        canonical Go struct's JSON encoding IS the contract and a second wire
+        struct would let the CLI's `--json` drift from these bodies. There is
+        no canonical struct here — the CLI publishes this number inside its own
+        stdout envelope's `pagination` member, which is not a wire type — so
+        pinning would weld this body to a CLI presentation type instead of
+        preventing a drift.
+
+    DeleteIssuesRequest:
+      type: object
+      additionalProperties: false
+      required: [ids]
+      description: >-
+        Which beads to erase, and what to do about the beads that point at
+        them. There is no predicate here — no status, no cutoff, no glob — and
+        that absence is the reason this operation needs no require-a-filter
+        gate: a caller cannot spell "everything" without typing every id.
+
+
+        `additionalProperties: false`, so an unknown member is a `400` naming
+        the member. On this operation a silently ignored member is the
+        difference between orphaning a dependent and deleting it.
+      properties:
+        ids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          description: >-
+            The beads to delete, exact ids, in either plane. DUPLICATES
+            COLLAPSE. An empty array is a `400` rather than a no-op — a caller
+            whose id list came out empty because its own construction broke
+            would read "deleted 0" and conclude the workspace was already
+            clean.
+
+
+            The cap is on the REQUEST rather than on what a cascade expands to:
+            the whole delete is one transaction, so the practical bound is the
+            backend's write timeout and no number here can promise it.
+          items:
+            type: string
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+          description: >-
+            Caller-asserted attribution, under the same rules as
+            `SweepRequest`'s `actor`: trimmed, refused when empty after
+            trimming, over 256 BYTES, or carrying any control character.
+            Optional — a deleted bead leaves no row to attribute the deletion
+            on — but it does reach the SURVIVING beads whose text this
+            operation rewrites, so a workspace that cares who rewrote a
+            description sends one.
+        cascade:
+          type: boolean
+          default: false
+          description: >-
+            Also delete the transitive closure of everything that depends on
+            the named beads. With `cascade` there is nothing left outside the
+            set to orphan, so it makes `force` moot rather than conflicting
+            with it: a request carrying both behaves as `cascade` and
+            `orphaned` comes back empty.
+        force:
+          type: boolean
+          default: false
+          description: >-
+            Delete the named beads and leave their dependents ORPHANED,
+            reported in `orphaned`. Without it and without `cascade`, a named
+            bead with a dependent the request did not name is refused.
+
+
+            It defaults FALSE, which is the guarded mode, and the default is
+            the protection: this surface has no authentication, so an omitted
+            member must not silently choose the answer that changes another
+            bead's graph.
+        dry_run:
+          type: boolean
+          default: false
+          description: >-
+            Report what the deletion WOULD do and change nothing. The counts
+            and BOTH refusals are the ones the real request would produce,
+            computed against the same snapshot, and nothing is recorded in
+            history either.
+
+    DeleteIssuesResult:
+      type: object
+      required: [dry_run, deleted, dependencies, labels, events, references_updated]
+      description: >-
+        What one delete did. Every number describes the SAME snapshot, because
+        the guard, the deletion and the reference rewrite ran in one
+        transaction.
+
+
+        It is NOT `x-go-type`-pinned, for the reason `SweepResult` is not:
+        there is no canonical Go struct whose JSON encoding is this contract.
+        `bd delete --json` publishes these numbers under its own per-shape keys
+        (`deleted_count`, `dependencies_removed`, and a scalar `deleted` on the
+        single-id form), which are a stdout presentation rather than a wire
+        type, so pinning would weld this body to one of them.
+      properties:
+        dry_run:
+          type: boolean
+          description: >-
+            Echoes the request, so a result carries whether its numbers
+            describe beads that are gone or beads that would go.
+        deleted:
+          type: integer
+          description: >-
+            How many beads were deleted, or under `dry_run` would be. Under
+            `cascade` this counts the whole closure, so it is normally larger
+            than `ids` and it — not the request length — is the number to show.
+        dependencies:
+          type: integer
+          description: >-
+            Dependency edge rows removed with them, in either direction.
+            Reported because a delete's visible effect is much larger than its
+            bead count.
+        labels:
+          type: integer
+          description: Label rows removed with the deleted beads.
+        events:
+          type: integer
+          description: Event rows removed with the deleted beads.
+        references_updated:
+          type: integer
+          description: >-
+            How many SURVIVING beads had their text rewritten — beads, not
+            occurrences. Always 0 under `dry_run`, because a preview rewrites
+            nothing.
+        orphaned:
+          type: array
+          description: >-
+            The surviving beads that depended on something this request
+            deleted, in ascending id order. Present exactly when the request
+            carried `force` without `cascade`, which is the only mode in which
+            orphaning is possible; absent otherwise.
+
+
+            DIRECT dependents only. A bead two edges away lost no edge.
+          items:
+            type: string
+
+    SweepRequest:
+      type: object
+      additionalProperties: false
+      required: [tier]
+      description: >-
+        Which closed beads to clear. The predicate is FIXED at "closed beads of
+        one tier" and the two narrowing members only narrow it: there is no
+        status, no assignee, no label and no free-text query here, because
+        every one of those would be another way to spell a destructive
+        selection that a caller could get subtly wrong.
+
+
+        `additionalProperties: false`, so an unknown member is a `400` naming
+        the member — the same posture the query-parameter rule takes, and for
+        the same reason: on this operation a silently ignored narrowing term
+        widens what is erased.
+      properties:
+        tier:
+          type: string
+          enum: [ephemeral, durable]
+          description: >-
+            Which plane to clear. `ephemeral` is the wisp tier (`bd purge`) and
+            `durable` is the issue tier (`bd prune`). The two are DISJOINT: a
+            sweep of one can never touch a bead of the other. Required, with no
+            default — a caller handed the wrong tier has nothing to notice
+            until the beads are gone.
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+          description: >-
+            Caller-asserted attribution for wherever the backend records it,
+            under the same rules and for the same reasons as `ClaimRequest`'s
+            `actor`: trimmed, refused when empty after trimming, over 256
+            BYTES, or carrying any control character. Optional — a deleted bead
+            leaves no row to attribute the deletion on.
+        closed_before:
+          type: string
+          format: date-time
+          description: >-
+            Keep only beads closed STRICTLY BEFORE this instant (RFC 3339). A
+            bead closed exactly at it is kept, which is the half-open interval
+            every other time bound on this surface uses. `bd prune
+            --older-than 30d` resolves the duration itself and sends the
+            resulting instant.
+        pattern:
+          type: string
+          description: >-
+            Keep only beads whose id matches this shell glob (`*`, `?`,
+            `[...]`, `\` escapes; `*` also crosses `-` and `.`, since an id is
+            not a path). Absent matches every bead in the tier. A MALFORMED
+            glob is a `400`, never a pattern that matches nothing.
+        protect_referenced:
+          type: boolean
+          default: true
+          description: >-
+            Skip candidates whose id is CITED — as a literal, at word
+            boundaries — in the description, notes or comments of any bead that
+            is not done, so a decision trail a live bead still points at is not
+            deleted out from under it.
+
+
+            It DEFAULTS ON here, unlike the library default, and that is
+            deliberate. This surface has no authentication and this is its only
+            destructive operation, so a caller that omits the member must not
+            get weaker protection than the operator typing `bd prune`, which
+            protects unless `--ignore-references`. The inverse — opt OUT
+            locally, opt IN remotely — is the shape that lets a stray request
+            delete a decision trail nothing brings back.
+
+
+            It costs a full scan of the not-done set and its comments. Sending
+            `protect_referenced: false` buys the cheaper sweep, and asking for
+            it explicitly is the point: that is the request that should be the
+            deliberate one.
+        dry_run:
+          type: boolean
+          default: false
+          description: >-
+            Report what the sweep WOULD do and delete nothing. The counts, the
+            skips and the refusals are the same ones the real sweep would
+            produce, computed against the same snapshot — and nothing is
+            recorded in history either.
+
+    SweepResult:
+      type: object
+      required: [dry_run, swept, dependencies, labels, events, skipped]
+      description: >-
+        What one sweep did. Every number describes the SAME snapshot, because
+        the selection and the deletion ran in one transaction.
+
+
+        It is NOT `x-go-type`-pinned, for the reason `ReadyCount` is not: there
+        is no canonical Go struct whose JSON encoding is this contract. The CLI
+        publishes these numbers under its own per-command keys (`purged_count`,
+        `pruned_count`), which are a stdout presentation rather than a wire
+        type, so pinning would weld this body to one of them.
+      properties:
+        dry_run:
+          type: boolean
+          description: >-
+            Echoes the request, so a result carries whether its numbers
+            describe beads that are gone or beads that would go.
+        swept:
+          type: integer
+          description: How many beads were deleted, or under `dry_run` would be.
+        dependencies:
+          type: integer
+          description: >-
+            Dependency edge rows removed with them. Reported because a sweep's
+            visible effect is much larger than its bead count.
+        labels:
+          type: integer
+          description: Label rows removed with the swept beads.
+        events:
+          type: integer
+          description: Event rows removed with the swept beads.
+        skipped:
+          $ref: '#/components/schemas/SweepSkips'
+        referenced_ids:
+          type: array
+          description: >-
+            A BOUNDED SAMPLE of the ids `skipped.referenced` counts — at most
+            100, in the order the candidate query returned them. It is a
+            sample, not the set: compare its length against 100 to tell a
+            truncated one from a complete one. Absent when nothing was
+            protected.
+          items:
+            type: string
+
+    SweepSkips:
+      type: object
+      required:
+        - pinned
+        - referenced
+        - not_closed
+        - unknown_closed_at
+        - closed_at_or_after_cutoff
+        - unreadable
+      description: >-
+        The candidates a sweep declined to delete, bucketed by WHY. They are
+        separate counters rather than one number because they mean different
+        things: the first two are PROTECTIONS, and the last four are the sweep
+        declining to trust its own input.
+      properties:
+        pinned:
+          type: integer
+          description: >-
+            Candidates protected by the pinned flag. No request member
+            overrides it — a caller who wants a pinned bead gone unpins it
+            first.
+        referenced:
+          type: integer
+          description: >-
+            Candidates protected by `protect_referenced`. Always 0 when that
+            member is false or absent, so a 0 read without having asked says
+            nothing about whether beads are cited.
+        not_closed:
+          type: integer
+          description: >-
+            Candidates the tier query returned that the recheck found were not
+            closed. A NON-ZERO VALUE HERE IS A DEFENSE FIRING, not a normal
+            outcome: the query asked for exactly the beads this excludes.
+        unknown_closed_at:
+          type: integer
+          description: Closed candidates carrying no close timestamp. See `not_closed`.
+        closed_at_or_after_cutoff:
+          type: integer
+          description: >-
+            Candidates whose close timestamp did not satisfy `closed_before`.
+            See `not_closed`.
+        unreadable:
+          type: integer
+          description: >-
+            Rows the tier query returned as nothing at all. A defense of the
+            same kind, on a shape rather than a value.
 
     ReadyPage:
       type: object
@@ -1439,6 +3512,50 @@ components:
           description: >-
             True when the limit truncated the result. There is no cursor on
             this operation; narrow the filters or raise the limit.
+
+    CyclesPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: >-
+            Empty array (never null) when the workspace has no cycles. Its
+            LENGTH is the total: a cycle whose members this workspace cannot
+            describe is still counted here, so the number cannot shrink because
+            a row went missing.
+          items:
+            $ref: '#/components/schemas/Cycle'
+        has_more:
+          type: boolean
+          description: >-
+            Always false in v0: this operation takes no limit, so the report is
+            never truncated. Present so that adding a bound later is additive.
+
+    DependencyTreePage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: >-
+            The walked nodes in DEPTH-FIRST PRE-ORDER: a node appears before
+            every node it led to, and a subtree is contiguous. Never null.
+
+
+            It is empty only when a `status` filter matched nothing — the root
+            is kept in a filtered answer solely as an ancestor of a match, never
+            for its own sake. Without `status` the root is always the first
+            element, which is what lets a client tell "this issue depends on
+            nothing" from "this issue is not there" (a 404).
+          items:
+            $ref: '#/components/schemas/TreeNode'
+        has_more:
+          type: boolean
+          description: >-
+            Always false in v0: this operation takes no limit, so the walk is
+            bounded by `max_depth` rather than truncated after the fact. Present
+            so that adding a bound later is additive.
 
     IssuesPage:
       type: object
@@ -1456,6 +3573,433 @@ components:
           description: >-
             Present if and only if `has_more` is true. Pass it back verbatim as
             `cursor` to fetch the next page. Opaque and server-private.
+
+    QueryPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: Empty array (never null) when the expression matched nothing.
+          items:
+            $ref: '#/components/schemas/IssueWithCounts'
+        has_more:
+          type: boolean
+          description: >-
+            True when `limit` truncated the result. It is exact for every
+            expression, including the ones evaluated outside the database:
+            those are matched against every candidate row, so the count of
+            matches is known before the page is cut. There is no cursor —
+            raise `limit` or narrow the expression.
+      description: >-
+        A page of query results. It is `ReadyPage`'s shape rather than
+        `IssuesPage`'s, and the missing member is the point: a page of this
+        operation carries no `next_cursor`, because a cursor is a keyset
+        position in a database order and a predicate query's matching set is
+        assembled outside the database.
+
+    Setting:
+      type: object
+      description: >-
+        One entry of the workspace's stored settings plane.
+
+
+        THIS SCHEMA IS DELIBERATELY NOT `x-go-type`-PINNED, and it is the only
+        response component on this surface that is not. The seven pinned
+        schemas above are pinned because a canonical Go struct already IS the
+        contract — `types.Issue`'s JSON encoding is what `bd show --json`
+        emits. A setting has no such struct: the CLI marshals an ad-hoc
+        `map[string]string` per verb, so there is nothing to pin TO, and
+        minting a type to pin to would mean changing what `bd config get
+        --json` prints in order to satisfy a rule about not changing it.
+
+
+        The two surfaces are still one shape where they overlap — `key` and
+        `value` are spelled as the CLI spells them — and they diverge in
+        exactly one deliberate place, `redacted`, which exists because this
+        surface has no authentication and the CLI requires access to the
+        database anyway.
+      required: [key, redacted]
+      properties:
+        key:
+          type: string
+          description: The setting's key, echoed verbatim.
+        value:
+          type: string
+          description: >-
+            The stored value, verbatim.
+
+
+            ABSENT MEANS ONE OF TWO THINGS, and `redacted` says which. With
+            `redacted: false` the workspace stores nothing for this key OR
+            stores the empty string; those are indistinguishable through this
+            surface and through the CLI. With `redacted: true` a value may well
+            be stored and is withheld.
+
+
+            It is never emitted as an empty string and never transformed: a
+            value that is not the stored value is omitted rather than masked,
+            so a client can never mistake a placeholder for configuration.
+        redacted:
+          type: boolean
+          description: >-
+            True when `value` is withheld because the KEY marks the setting as
+            credential-bearing — the name contains `token`, `secret`,
+            `password`, or an API-key spelling. It is a decision about the key
+            alone: no value is inspected, so a credential stored under an
+            innocuous name is NOT protected by this and must not be stored in
+            this plane at all.
+
+
+            Always present, including when false, so a client never has to
+            infer redaction from an absent member.
+
+    Memory:
+      type: object
+      required: [key, value]
+      description: >-
+        One entry of the workspace's persistent memory plane.
+
+
+        NOT `x-go-type`-PINNED, for the reason `Setting` is not: the CLI
+        marshals an ad-hoc map per verb, so there is no canonical Go struct
+        whose JSON encoding is this contract, and minting one to pin to would
+        mean changing what `bd recall --json` prints in order to satisfy a rule
+        about not changing it.
+
+
+        IT HAS NO `redacted` MEMBER, and that is the deliberate difference from
+        `Setting`. Redaction there is a decision about the KEY NAME, which works
+        because settings keys are configured names; memory keys are derived from
+        the content, so the same rule would withhold a memory about credentials
+        and serve one containing a credential under an innocuous slug. This
+        surface has no authentication and states the exposure rather than
+        implying a protection it does not have.
+      properties:
+        key:
+          type: string
+          description: The memory's key, echoed verbatim.
+        value:
+          type: string
+          description: >-
+            The stored content, verbatim: newlines, surrounding space and
+            unicode as stored, never truncated and never withheld.
+
+
+            Always present. It is the empty string only where a row was written
+            out of band with an empty value, which
+            `GET /v0/beads/memories/{key}` answers as a `404` and
+            `GET /v0/beads/memories` enumerates.
+
+    MemoriesPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: >-
+            The stored memories, ordered by key. Empty array (never null) when
+            the workspace holds none, or when `q` matched none.
+          items:
+            $ref: '#/components/schemas/Memory'
+        has_more:
+          type: boolean
+          description: >-
+            Always false in v0: the whole plane is returned in one page. It is
+            present so that a later revision can page this collection without
+            changing the response shape.
+        next_cursor:
+          type: string
+          description: >-
+            Present if and only if `has_more` is true, which is never in v0.
+
+    RememberRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      description: >-
+        What to remember, and optionally under what key.
+      properties:
+        content:
+          type: string
+          description: >-
+            The memory itself, stored VERBATIM: newlines, surrounding space and
+            unicode all survive. Flattening it to one line is what a front door
+            does when it prints, not what this plane does when it stores.
+
+
+            Empty after trimming is a `400`. So is content from which no key can
+            be derived when `key` is omitted — `"!!!"` derives to nothing — and
+            the recovery for that one is to send a `key`.
+        key:
+          type: string
+          description: >-
+            The key to store under. OMIT IT to have the server derive one from
+            `content`; the response's `key` is then how the caller learns where
+            the memory landed.
+
+
+            Supplied, it is used verbatim — no trimming, no slugging, no charset
+            restriction. A key carrying a control character is storable this way
+            and by `bd remember --key`, and is then unreachable through
+            `GET`/`DELETE /v0/beads/memories/{key}`, which refuse one: see those
+            operations.
+
+    RememberedMemory:
+      type: object
+      required: [key, value, replaced]
+      description: >-
+        One stored memory, plus whether storing it overwrote a previous value.
+
+
+        It is `Memory`'s shape with `replaced` added rather than a composition
+        of it, because this document repeats property lists instead of using
+        `allOf` (see the note at the top of the file).
+      properties:
+        key:
+          type: string
+          description: >-
+            The key the memory now lives under: the one the request supplied, or
+            the one derived from `content`. Recall it under exactly these bytes.
+        value:
+          type: string
+          description: >-
+            The stored content, echoed verbatim. Always present, and never
+            withheld — this plane has no redaction; see the operation
+            description.
+        replaced:
+          type: boolean
+          description: >-
+            True when a previous value existed under `key` and this request
+            overwrote it; false when the key was new. It is observed in the same
+            transaction as the write, so it describes the row this request
+            wrote.
+
+
+            A previous value that was the EMPTY STRING reports true: the ROW
+            existed, even though `GET /v0/beads/memories/{key}` would have
+            answered `404` for it. That divergence is the storage seam's
+            conflation showing through, and it is stated rather than smoothed
+            over, because smoothing it would mean this member reporting
+            "nothing was there" about a write that overwrote something.
+
+    SettingsPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: >-
+            The stored settings, ordered by key. Empty array (never null) when
+            the workspace stores none.
+          items:
+            $ref: '#/components/schemas/Setting'
+        has_more:
+          type: boolean
+          description: >-
+            Always false in v0: the whole plane is returned in one page. It is
+            present so that a later revision can page this collection without
+            changing the response shape.
+        next_cursor:
+          type: string
+          description: >-
+            Present if and only if `has_more` is true, which is never in v0.
+    StatsResponse:
+      type: object
+      required: [summary, blocked_count_skipped]
+      description: >-
+        The same envelope `bd status --json` prints, minus one member: the CLI
+        also carries `recent_activity`, which every shipped code path leaves
+        absent, so it is not published here.
+      properties:
+        summary:
+          $ref: '#/components/schemas/Statistics'
+        blocked_count_skipped:
+          type: boolean
+          description: >-
+            True when the summary came back without the blocked-set scan, which
+            is exactly `summary.blocked_issues == null`. It is DERIVED from the
+            answer rather than echoed from the request: `skip_blocked` is a
+            hint, and a backend with no cheaper path answers with the full
+            numbers and this flag false.
+    DependencyEdges:
+      type: object
+      description: >-
+        The stored edges of the named issues, plus the ids that named nothing.
+        It is NOT a page: this operation has no limit and no cursor, because
+        the number of issues asked about is what bounds it.
+      required: [items, missing]
+      properties:
+        items:
+          type: array
+          description: >-
+            Every matching edge, flattened across the named issues rather than
+            keyed by source — the same flat array `bd dep list a b c --json`
+            emits, so the two surfaces are one compatibility domain. Group by
+            `issue_id` to recover the per-source view. Empty array (never null)
+            when nothing matches.
+
+
+            The order is by the named issues in the order the request named
+            them, and within each issue by target id.
+          items:
+            $ref: '#/components/schemas/Dependency'
+        missing:
+          type: array
+          description: >-
+            The requested `issue_id` values that name neither an issue nor a
+            wisp, in the order they were named. Empty array (never null) when
+            every named issue exists.
+
+
+            An id here contributes no `items`, and the absence of an id here is
+            NOT a claim that it has edges — an issue that exists and depends on
+            nothing is in neither list.
+          items:
+            type: string
+
+    BlockingAnnotations:
+      type: object
+      description: >-
+        The blocking decoration of the named issues. It is NOT a page: this
+        operation has no limit and no cursor, because the number of issues asked
+        about is what bounds it.
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: >-
+            One entry per DISTINCT requested id, in the order the request first
+            named it — so a client can zip this against the ids it sent. Empty
+            array (never null) when the request named none.
+
+
+            There is no `missing` beside it, unlike `DependencyEdges`: this
+            operation probes no id's existence, so every requested id has an
+            entry and an id that names nothing is simply bare.
+          items:
+            $ref: '#/components/schemas/IssueBlocking'
+
+    BatchCreateRequest:
+      type: object
+      additionalProperties: false
+      required: [actor, items]
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F]+$'
+          description: >-
+            Who is creating the issues, under `ClaimRequest.actor`'s rules and
+            for the same reasons: the server trims it, refuses an empty result,
+            anything longer than 256 BYTES, and any control character including
+            newline. It is attributed to every item and interpolated into the
+            storage commit message.
+        items:
+          type: array
+          minItems: 1
+          maxItems: 100
+          description: >-
+            The issues to create, in order. An empty array is a `400` rather
+            than a successful no-op: a write request that writes nothing is a
+            client bug, and answering it with a cheerful empty success is how a
+            client whose own list filtered to nothing silently stops creating
+            anything.
+
+
+            The 100-item cap is a bound on how long one request may hold a write
+            transaction, not a statement about batch semantics. Split a larger
+            plan; each request is atomic on its own.
+          items:
+            $ref: '#/components/schemas/BatchCreateItem'
+
+    BatchCreateItem:
+      type: object
+      additionalProperties: false
+      required: [title]
+      properties:
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+        description:
+          type: string
+        design:
+          type: string
+        acceptance_criteria:
+          type: string
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: 0 is P0/critical. Absent means the workspace default.
+        issue_type:
+          type: string
+          description: >-
+            Issue type. Spelled `issue_type` rather than `type`, matching the
+            member `Issue` carries, and validated against the built-ins plus the
+            workspace's configured custom types — an unknown one is a `400`.
+        assignee:
+          type: string
+          maxLength: 255
+        labels:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+        dependencies:
+          type: array
+          maxItems: 100
+          description: >-
+            The edges this issue is created carrying. They are written in the
+            same transaction as the issue, so this operation never publishes an
+            issue whose declared relationships are not there yet.
+          items:
+            $ref: '#/components/schemas/BatchCreateDependency'
+
+    BatchCreateDependency:
+      type: object
+      additionalProperties: false
+      required: [target_id, type]
+      properties:
+        target_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            The far end of the edge: an issue this workspace holds, an item
+            created earlier in the same request, an `external:` reference, or an
+            id whose prefix belongs to another repository. Anything else is a
+            `400` and nothing is created.
+        type:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            The edge type, from the same OPEN vocabulary `Dependency.type`
+            carries. It is spelled `type` because that is the member an edge
+            carries everywhere else on this surface.
+
+    BatchCreateResponse:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          description: >-
+            One entry per requested item, in REQUEST ORDER, each the stored
+            issue with its generated id and its labels. Never null and never
+            shorter than the request: a partial outcome does not exist on this
+            operation.
+
+
+            There is no `has_more` and no `next_cursor`. This is not a page —
+            the client already knows how many items it sent — and publishing a
+            paging envelope over a fixed-length answer would invite a client to
+            look for a second page that can never exist.
+          items:
+            $ref: '#/components/schemas/Issue'
 
     ClaimRequest:
       type: object

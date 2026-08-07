@@ -221,14 +221,22 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 		}
 		// The handshake advertises exactly what this build implements. A client
 		// that gates on capabilities is then correct without knowing which
-		// release it hit. With the read endpoints landed that is the whole v0
-		// vocabulary; the assertion is on the derived list, not on a count, so
-		// the next operation to arrive stubbed still fails here.
+		// release it hit. The assertion is on the derived list, not on a count,
+		// so the next operation to arrive stubbed still fails here — which is
+		// what it did when the facade programme took this from four operations
+		// to sixteen. Update it deliberately when you add one.
 		caps, ok := body["capabilities"].([]any)
 		if !ok {
 			t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
 		}
-		want := []any{"issues.claim", "issues.get", "issues.list", "ready.list"}
+		want := []any{
+			"config.get", "config.list",
+			"dependencies.blocking", "dependencies.cycles", "dependencies.list", "dependencies.tree",
+			"issues.batchCreate", "issues.claim", "issues.delete", "issues.get", "issues.list",
+			"issues.query", "issues.sweep",
+			"memories.forget", "memories.get", "memories.list", "memories.remember",
+			"ready.count", "ready.list", "stats.get",
+		}
 		if !reflect.DeepEqual(caps, want) {
 			t.Errorf("capabilities = %v, want %v", caps, want)
 		}

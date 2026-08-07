@@ -38,6 +38,15 @@ func TestReaderContract(t *testing.T) {
 	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
 		conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
 	})
+	// The REFUSING arm of MaxRows, and the mirror image of the wiring above:
+	// this body honors Offset and refuses the cap, the store-backed one honors
+	// the cap and refuses Offset. Neither answers a question it cannot answer.
+	t.Run("ListMaxRowsIsHonoredOrRefused", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsIsHonoredOrRefused(t, ctx, fixture)
+	})
+	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
+	})
 	t.Run("ReadySortPoliciesOrderTheSameRows", func(t *testing.T) {
 		conformance.RunReaderReadySortPoliciesOrderTheSameRows(t, ctx, fixture)
 	})
