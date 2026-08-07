@@ -214,7 +214,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	Capabilities []string `json:"capabilities"`
 
 	// Database Logical database name (not a host or a DSN).
@@ -369,6 +369,33 @@ type IssuesPage struct {
 	NextCursor *string `json:"next_cursor,omitempty"`
 }
 
+// MemoriesPage defines model for MemoriesPage.
+type MemoriesPage struct {
+	// HasMore Always false in v0: the whole plane is returned in one page. It is present so that a later revision can page this collection without changing the response shape.
+	HasMore bool `json:"has_more"`
+
+	// Items The stored memories, ordered by key. Empty array (never null) when the workspace holds none, or when `q` matched none.
+	Items []Memory `json:"items"`
+
+	// NextCursor Present if and only if `has_more` is true, which is never in v0.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// Memory One entry of the workspace's persistent memory plane.
+//
+// NOT `x-go-type`-PINNED, for the reason `Setting` is not: the CLI marshals an ad-hoc map per verb, so there is no canonical Go struct whose JSON encoding is this contract, and minting one to pin to would mean changing what `bd recall --json` prints in order to satisfy a rule about not changing it.
+//
+// IT HAS NO `redacted` MEMBER, and that is the deliberate difference from `Setting`. Redaction there is a decision about the KEY NAME, which works because settings keys are configured names; memory keys are derived from the content, so the same rule would withhold a memory about credentials and serve one containing a credential under an innocuous slug. This surface has no authentication and states the exposure rather than implying a protection it does not have.
+type Memory struct {
+	// Key The memory's key, echoed verbatim.
+	Key string `json:"key"`
+
+	// Value The stored content, verbatim: newlines, surrounding space and unicode as stored, never truncated and never withheld.
+	//
+	// Always present. It is the empty string only where a row was written out of band with an empty value, which `GET /v0/beads/memories/{key}` answers as a `404` and `GET /v0/beads/memories` enumerates.
+	Value string `json:"value"`
+}
+
 // Problem RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type Problem struct {
 	// Assignee With `already_claimed`: the actor currently holding the issue.
@@ -426,6 +453,35 @@ type ReadyPage struct {
 
 	// Items Empty array (never null) when nothing is ready.
 	Items []IssueWithCounts `json:"items"`
+}
+
+// RememberRequest What to remember, and optionally under what key.
+type RememberRequest struct {
+	// Content The memory itself, stored VERBATIM: newlines, surrounding space and unicode all survive. Flattening it to one line is what a front door does when it prints, not what this plane does when it stores.
+	//
+	// Empty after trimming is a `400`. So is content from which no key can be derived when `key` is omitted — `"!!!"` derives to nothing — and the recovery for that one is to send a `key`.
+	Content string `json:"content"`
+
+	// Key The key to store under. OMIT IT to have the server derive one from `content`; the response's `key` is then how the caller learns where the memory landed.
+	//
+	// Supplied, it is used verbatim — no trimming, no slugging, no charset restriction. A key carrying a control character is storable this way and by `bd remember --key`, and is then unreachable through `GET`/`DELETE /v0/beads/memories/{key}`, which refuse one: see those operations.
+	Key *string `json:"key,omitempty"`
+}
+
+// RememberedMemory One stored memory, plus whether storing it overwrote a previous value.
+//
+// It is `Memory`'s shape with `replaced` added rather than a composition of it, because this document repeats property lists instead of using `allOf` (see the note at the top of the file).
+type RememberedMemory struct {
+	// Key The key the memory now lives under: the one the request supplied, or the one derived from `content`. Recall it under exactly these bytes.
+	Key string `json:"key"`
+
+	// Replaced True when a previous value existed under `key` and this request overwrote it; false when the key was new. It is observed in the same transaction as the write, so it describes the row this request wrote.
+	//
+	// A previous value that was the EMPTY STRING reports true: the ROW existed, even though `GET /v0/beads/memories/{key}` would have answered `404` for it. That divergence is the storage seam's conflation showing through, and it is stated rather than smoothed over, because smoothing it would mean this member reporting "nothing was there" about a write that overwrote something.
+	Replaced bool `json:"replaced"`
+
+	// Value The stored content, echoed verbatim. Always present, and never withheld — this plane has no redaction; see the operation description.
+	Value string `json:"value"`
 }
 
 // Setting One entry of the workspace's stored settings plane.
@@ -562,6 +618,9 @@ type TreeNode = types.TreeNode
 
 // IssueID defines model for IssueID.
 type IssueID = string
+
+// MemoryKey defines model for MemoryKey.
+type MemoryKey = string
 
 // SettingKey defines model for SettingKey.
 type SettingKey = string
@@ -724,6 +783,16 @@ type QueryIssuesParams struct {
 // QueryIssuesParamsSort defines parameters for QueryIssues.
 type QueryIssuesParamsSort string
 
+// ListMemoriesParams defines parameters for ListMemories.
+type ListMemoriesParams struct {
+	// Q Narrows the answer to memories that MATCH: a memory matches when the lowercase of its key, or the lowercase of its value, contains the lowercase of this term. Absent or empty means everything, and a term nothing matches is a `200` with an empty `items`.
+	//
+	// IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE. This surface spells two different questions `q`, and they are not the same parameter: on `GET /v0/beads/issues:query` it is a boolean expression over issue fields, refused when it does not parse; here there is nothing to parse, no vocabulary and no refusal — every string is a legal search term, `status=open` included, and it is matched literally.
+	//
+	// The term reaches the role UNFOLDED. Case folding is the role's, so that this surface and `bd memories` cannot come to disagree about what matching means; a client sends what its user typed.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+}
+
 // ListReadyWorkParams defines parameters for ListReadyWork.
 type ListReadyWorkParams struct {
 	// Assignee Only issues assigned to this actor.
@@ -865,3 +934,6 @@ type DeleteIssuesJSONRequestBody = DeleteIssuesRequest
 
 // SweepIssuesJSONRequestBody defines body for SweepIssues for application/json ContentType.
 type SweepIssuesJSONRequestBody = SweepRequest
+
+// RememberMemoryJSONRequestBody defines body for RememberMemory for application/json ContentType.
+type RememberMemoryJSONRequestBody = RememberRequest

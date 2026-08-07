@@ -331,6 +331,58 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 	}
 }
 
+// capabilityToken matches one backticked capability token in the
+// `capabilities` description. The shape — a lowercase resource, a dot, a
+// lowerCamel verb — is what every token on this surface is, and it is narrow
+// enough that no other backticked word in that paragraph can be mistaken for
+// one.
+var capabilityToken = regexp.MustCompile("`([a-z]+\\.[a-zA-Z]+)`")
+
+// TestSpecCapabilityVocabularyMatchesTheRouteTable is the gate for the ONE
+// piece of per-operation plumbing that had no gate.
+//
+// The `capabilities` description enumerates every token explicitly, in prose,
+// and prose is not generated from anything: an operation could land with its
+// route row, its handler, its problem codes and its spec path all correct and
+// still never appear in the list a client is told to check. Nothing would fail.
+// The document would simply be wrong about the one member it tells clients to
+// dispatch on, and the drift would be discovered by a client, not by CI.
+//
+// Set equality both ways: a token in the prose with no implemented route is a
+// capability advertised to readers and not to clients, and a route whose token
+// the prose omits is an operation the document forgets it has.
+//
+// ORDER IS NOT CHECKED. The prose groups tokens by resource for a reader;
+// Capabilities() sorts them for a client. Both are deliberate, and pinning one
+// to the other would be a rule about paragraph layout.
+func TestSpecCapabilityVocabularyMatchesTheRouteTable(t *testing.T) {
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ContextResponse")
+	caps := mapAt(t, mapAt(t, schema, "properties"), "capabilities")
+	desc, _ := caps["description"].(string)
+	if desc == "" {
+		t.Fatal("the capabilities property has no description; it is where the token vocabulary is published")
+	}
+
+	documented := map[string]bool{}
+	for _, m := range capabilityToken.FindAllStringSubmatch(desc, -1) {
+		documented[m[1]] = true
+	}
+	served := map[string]bool{}
+	for _, token := range Capabilities() {
+		served[token] = true
+	}
+
+	if missing := diff(served, documented); len(missing) > 0 {
+		t.Errorf("this build serves capabilities the document does not enumerate: %v\n"+
+			"add them to the `capabilities` description in internal/httpapi/spec/openapi.v0.yaml — "+
+			"that paragraph is the vocabulary a client is told to check", missing)
+	}
+	if extra := diff(documented, served); len(extra) > 0 {
+		t.Errorf("the document enumerates capabilities no implemented route contributes: %v", extra)
+	}
+}
+
 func specParam(t *testing.T, so specOp, name string) map[string]any {
 	t.Helper()
 	raw, ok := so.op["parameters"].([]any)

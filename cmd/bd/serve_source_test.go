@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // TestServeDatabaseSourceClassifiesTheWorkspace drives the one decision point
@@ -207,6 +208,7 @@ func (*serveRolesStore) Querier() (issueops.Querier, error)                     
 func (*serveRolesStore) Sweeper() (issueops.Sweeper, error)                     { return nil, nil }
 func (*serveRolesStore) Deleter() (issueops.Deleter, error)                     { return nil, nil }
 func (*serveRolesStore) BatchCreator() (issueops.BatchCreator, error)           { return nil, nil }
+func (*serveRolesStore) Memories() (memoryops.Memories, error)                  { return nil, nil }
 
 type serveStubReader struct{}
 

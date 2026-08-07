@@ -245,6 +245,50 @@ var routeTable = []route{
 		implemented: true,
 		handler:     (*Server).handleDelete,
 	},
+	{
+		op:          OpListMemories,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.list",
+		implemented: true,
+		handler:     (*Server).handleListMemories,
+	},
+	{
+		op:     OpRememberMemory,
+		method: http.MethodPost,
+		// A plain collection POST, not a custom method: this creates one member
+		// of the collection the path names, which is what POST already means.
+		// The two destructive issue operations above are custom methods because
+		// they act on a SET the request describes; nothing here does.
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.remember",
+		implemented: true,
+		handler:     (*Server).handleRememberMemory,
+	},
+	{
+		op:     OpGetMemory,
+		method: http.MethodGet,
+		// A single-segment wildcard, so pattern and specPath agree and no
+		// declaration is needed. It cannot collide with the collection read
+		// above: ServeMux requires the separating slash, so `/memories` and
+		// `/memories/{key}` never match the same request.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.get",
+		implemented: true,
+		handler:     (*Server).handleGetMemory,
+	},
+	{
+		op:     OpForgetMemory,
+		method: http.MethodDelete,
+		// The surface's first DELETE. It shares a pattern with the read above
+		// and differs only in method, which is the whole argument for the
+		// method: one named resource, no body, no flags. ServeMux registers
+		// method and pattern together, so the two rows cannot collide.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.forget",
+		implemented: true,
+		handler:     (*Server).handleForgetMemory,
+	},
 }
 
 // specPathOf is the document path for a route, defaulting to the router

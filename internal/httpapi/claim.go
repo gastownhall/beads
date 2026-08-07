@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 const (
@@ -367,6 +368,7 @@ var (
 	_ uow.SweeperSource           = timedProvider{}
 	_ uow.DeleterSource           = timedProvider{}
 	_ uow.BatchCreatorSource      = timedProvider{}
+	_ uow.MemoriesSource          = timedProvider{}
 )
 
 // IssueReader builds the reader OVER THIS WRAPPER rather than delegating to the
@@ -471,6 +473,13 @@ func (p timedProvider) Deleter() (issueops.Deleter, error) {
 // per call.
 func (p timedProvider) BatchCreator() (issueops.BatchCreator, error) {
 	return uow.NewBatchCreator(p)
+}
+
+// Memories builds the persistent-memory role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader. It is the one accessor here
+// whose role is not an issueops role; the binding rule is the same.
+func (p timedProvider) Memories() (memoryops.Memories, error) {
+	return uow.NewMemories(p)
 }
 
 func (p timedProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
