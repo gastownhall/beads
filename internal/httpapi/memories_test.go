@@ -22,6 +22,20 @@ func (ts *testServer) remember(t *testing.T, body string) *http.Response {
 	return ts.claimRequest(t, memoriesPath, "application/json", body)
 }
 
+func (ts *testServer) forget(t *testing.T, path string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodDelete, ts.base+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := ts.client.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE %s: %v", path, err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
 // TestRememberForwardsBothDocumentedMembers is the operation's central pin:
 // `content` and `key` reach the role's request unchanged, key VERBATIM.
 //
@@ -359,5 +373,144 @@ func TestGetMemoryRefusesAQueryString(t *testing.T) {
 	}
 	if n := len(memories.recallRequests()); n != 0 {
 		t.Errorf("the role was called %d times for a refused request, want 0", n)
+	}
+}
+
+// TestForgetMemoryRemovesTheNamedKeyAndReportsWhatItHeld: the surface's first
+// DELETE. The path segment reaches the role verbatim and the 200 body carries
+// what was removed, which is what `bd forget` prints.
+//
+// WHICH ROW WAS REMOVED IS NOT ASSERTED HERE and must not be: the memory plane
+// shares one table with the workspace's settings and the generic kv namespace,
+// and "exactly the named row" is the role's promise, pinned by its conformance
+// contract against three backends. A handler test with a fake role could only
+// restate what the fake was told to do.
+func TestForgetMemoryRemovesTheNamedKeyAndReportsWhatItHeld(t *testing.T) {
+	memories := &roleMemories{forgotten: memoryops.ForgetResult{
+		Key: "Has Spaces.✓", Value: "  what it held  ", Found: true,
+	}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.forget(t, memoriesPath+"/Has%20Spaces.%E2%9C%93")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	reqs := memories.forgetRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d forgets, want 1", len(reqs))
+	}
+	if reqs[0].Key != "Has Spaces.✓" {
+		t.Errorf("role received key %q, want the decoded segment verbatim", reqs[0].Key)
+	}
+
+	body := decodeBody(t, resp)
+	if got := body["key"]; got != "Has Spaces.✓" {
+		t.Errorf("key = %v, want the forgotten key", got)
+	}
+	if got := body["value"]; got != "  what it held  " {
+		t.Errorf("value = %q, want what the memory held, verbatim", got)
+	}
+}
+
+// TestForgetMemoryOfAnAbsentKeyIs404AndRemovesNothing: Found false is the
+// role's answer and NOTHING WAS REMOVED, which is a 404 rather than a 200 with
+// an empty body — a client that retried a forget has to be able to tell "I
+// removed this" from "there was nothing to remove".
+func TestForgetMemoryOfAnAbsentKeyIs404AndRemovesNothing(t *testing.T) {
+	memories := &roleMemories{forgotten: memoryops.ForgetResult{Key: "gone"}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.forget(t, memoriesPath+"/gone")
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if got := body["code"]; got != string(CodeNotFound) {
+		t.Errorf("code = %v, want %q", got, CodeNotFound)
+	}
+	if body["request_id"] == nil {
+		t.Error("no request_id on the problem body")
+	}
+	// The role was still called: whether a key holds a memory is a question for
+	// storage, and a handler that answered 404 without asking would be guessing.
+	if n := len(memories.forgetRequests()); n != 1 {
+		t.Errorf("the role was called %d times, want 1", n)
+	}
+}
+
+// TestForgetMemoryRefusesAKeyItCannotAddress: the door refuses the same keys
+// the read refuses, and the role is never reached — which on a DESTRUCTIVE
+// operation is the half that matters. A stored key carrying a control
+// character is therefore forgettable from the CLI and not through this
+// operation, with the role still verbatim.
+func TestForgetMemoryRefusesAKeyItCannotAddress(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{name: "empty after trimming", path: memoriesPath + "/%20%20"},
+		{name: "control character", path: memoriesPath + "/bad%0Akey"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memories := &roleMemories{forgotten: memoryops.ForgetResult{Found: true}}
+			ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+			resp := ts.forget(t, tc.path)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if got := body["param"]; got != "key" {
+				t.Errorf("param = %v, want \"key\"", got)
+			}
+			if n := len(memories.forgetRequests()); n != 0 {
+				t.Errorf("the role was called %d times for a key the door refused, want 0 — this operation deletes", n)
+			}
+		})
+	}
+}
+
+// TestForgetMemoryRefusesAQueryString: this operation takes no parameters, and
+// on a destructive one an ignored parameter is the shape where a client
+// believes it narrowed what it erased.
+func TestForgetMemoryRefusesAQueryString(t *testing.T) {
+	memories := &roleMemories{forgotten: memoryops.ForgetResult{Found: true}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.forget(t, memoriesPath+"/k?dry_run=true")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+	}
+	body := decodeBody(t, resp)
+	if got := body["param"]; got != "dry_run" {
+		t.Errorf("param = %v, want \"dry_run\"", got)
+	}
+	if got := body["reason"]; got != string(ReasonUnknownParameter) {
+		t.Errorf("reason = %v, want %q", got, ReasonUnknownParameter)
+	}
+	if n := len(memories.forgetRequests()); n != 0 {
+		t.Errorf("the role was called %d times for a refused request, want 0", n)
+	}
+}
+
+// TestDeleteOnTheMemoryCollectionIsNotRouted: the DELETE row is registered for
+// `/v0/beads/memories/{key}`, and ServeMux requires the separating slash — so
+// the collection path has no DELETE and answers the catch-all's 404.
+//
+// Worth a case because this is the surface's first DELETE method: a pattern
+// that had swallowed the collection would be an undocumented way to ask for a
+// bulk erase, and the parity test compares path STRINGS rather than probing
+// what the router matches.
+func TestDeleteOnTheMemoryCollectionIsNotRouted(t *testing.T) {
+	memories := &roleMemories{forgotten: memoryops.ForgetResult{Found: true}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.forget(t, memoriesPath)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if n := len(memories.forgetRequests()); n != 0 {
+		t.Errorf("the role was called %d times for the collection path, want 0", n)
 	}
 }

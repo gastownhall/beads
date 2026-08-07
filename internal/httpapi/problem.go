@@ -190,6 +190,12 @@ const (
 	// surface that answers a miss with a 404 where its settings counterpart
 	// deliberately does not: see its operationCodes row.
 	OpGetMemory = "getMemory"
+	// OpForgetMemory is the THIRD destructive operation on this surface, and the
+	// only one that is a DELETE method: it names one memory by path, carries no
+	// body and takes no flags, which is what that method already means. The two
+	// destructive issue operations are collection-level custom methods because
+	// they act on a set the request describes.
+	OpForgetMemory = "forgetMemory"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -292,6 +298,11 @@ var operationCodes = map[string][]Code{
 	// value, so the 404 reports a distinction that exists. The stored-empty row
 	// falls on the miss side of it, which the document states.
 	OpGetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The read's vocabulary exactly, because the two operations address the same
+	// resource the same way and this one's Found false is the same answer: a key
+	// nothing stored is a 404 and nothing was removed. No 409 — a memory another
+	// caller already forgot is simply not there, which is what the 404 says.
+	OpForgetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 }
 
 // Result is a problem response ready to be written: the envelope plus the

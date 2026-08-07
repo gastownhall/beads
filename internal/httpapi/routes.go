@@ -269,6 +269,18 @@ var routeTable = []route{
 		implemented: true,
 		handler:     (*Server).handleGetMemory,
 	},
+	{
+		op:     OpForgetMemory,
+		method: http.MethodDelete,
+		// The surface's first DELETE. It shares a pattern with the read above
+		// and differs only in method, which is the whole argument for the
+		// method: one named resource, no body, no flags. ServeMux registers
+		// method and pattern together, so the two rows cannot collide.
+		pattern:     "/v0/beads/memories/{key}",
+		capability:  "memories.forget",
+		implemented: true,
+		handler:     (*Server).handleForgetMemory,
+	},
 }
 
 // specPathOf is the document path for a route, defaulting to the router

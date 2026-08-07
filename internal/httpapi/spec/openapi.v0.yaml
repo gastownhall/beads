@@ -1951,6 +1951,86 @@ paths:
           $ref: '#/components/responses/InternalError'
         '503':
           $ref: '#/components/responses/Unavailable'
+    delete:
+      operationId: forgetMemory
+      summary: Forget one stored memory
+      description: >-
+        Removes the memory stored under one key and answers with what it held —
+        the operation behind `bd forget`. IT IS DESTRUCTIVE and nothing it
+        removes comes back, on a surface that has NO AUTHENTICATION: every
+        process that can reach the port can erase any memory whose key it knows,
+        exactly as `issues:sweep` and `issues:delete` state for beads. The
+        recovery is the workspace's version control, not this API.
+
+
+        THE FIRST `DELETE` METHOD ON THIS SURFACE, and the shape is why. The two
+        destructive issue operations are collection-level custom methods because
+        they act on a SET the request describes and carry flags that change what
+        is erased — a query string is exactly where a dropped parameter widens a
+        deletion. This one names ONE resource by path, carries no body and takes
+        no flags, which is what the `DELETE` method already means. The
+        alternative spelling `POST /v0/beads/memories/{key}:forget` would in
+        addition recreate the claim route's wildcard contortion, since
+        `{key}:forget` is not a router pattern, for no gain.
+
+
+        REMOVING EXACTLY THE NAMED ROW is the ROLE's promise, pinned by its
+        conformance contract rather than restated here: the memory plane shares
+        one table with the workspace's settings and with the generic `bd kv`
+        namespace, and a memory called `issue_prefix` is not the workspace's
+        issue prefix.
+
+
+        Forgetting a key nothing stored is a `404` and removes nothing.
+        Forgetting the same key twice is therefore a `200` and then a `404`,
+        which is what a retrying client actually sees; the second answer is not
+        a failure to act, it is the same fact reported after the act.
+
+
+        The same keys are unreachable here as on the `GET` beside it: a stored
+        key carrying a control character is refused with a `400` rather than
+        looked up, while the role stays verbatim, so such a memory can be
+        forgotten from the CLI and not through this operation.
+
+
+        Hooks do not fire, as for every write on this surface. There is no
+        `dry_run`: one named row is not a set to cost first.
+      parameters:
+        - $ref: '#/components/parameters/MemoryKey'
+      responses:
+        '200':
+          description: >-
+            The memory was removed. The body carries what it held, read in the
+            same transaction as the deletion — so it is what was actually
+            removed rather than what an earlier read happened to see.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Memory'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is
+            empty after trimming or carries a control character. Nothing is
+            removed in either case.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: >-
+            This workspace holds no memory under that key — or holds one stored
+            as the empty string, which answers the same way — and NOTHING WAS
+            REMOVED.
+          x-bd-codes: [not_found]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
 
 components:
 
@@ -2972,7 +3052,7 @@ components:
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
             `dependencies.list`, `dependencies.blocking`, `dependencies.tree`,
-            `memories.get`, `memories.remember`;
+            `memories.get`, `memories.remember`, `memories.forget`;
             it grows additively, and an operation never
             appears here unless it is fully implemented. This is how a client
             checks for an operation — never the version string.

@@ -114,6 +114,49 @@ func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, apigen.Memory{Key: result.Key, Value: result.Value})
 }
 
+// handleForgetMemory answers DELETE /v0/beads/memories/{key} — the third
+// DESTRUCTIVE operation on this surface, and the only one that is a DELETE.
+//
+// WHAT THIS HANDLER DOES NOT DO is the point, as for the sweep and the delete.
+// It does not assemble a storage key, does not decide which rows belong to the
+// memory plane, and does not read the value it reports: all of that is inside
+// memoryops.Memories, whose implementation removes exactly the named row in the
+// same transaction that reads it. The memory plane shares one table with the
+// workspace's settings and with the generic `bd kv` namespace, so a delete
+// written here would be one prefix-length mistake away from erasing a
+// workspace's issue prefix — which is why the role's conformance contract owns
+// that promise and this file does not restate it.
+func (s *Server) handleForgetMemory(w http.ResponseWriter, r *http.Request) {
+	if !s.requireNoQuery(w, r) {
+		return
+	}
+	key, ok := s.memoryKey(w, r)
+	if !ok {
+		return
+	}
+
+	memories, err := s.memories(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	result, err := memories.Forget(r.Context(), memoryops.ForgetRequest{Key: key})
+	if err != nil {
+		s.failMemoryErr(w, r, err)
+		return
+	}
+	// Found false means NOTHING WAS REMOVED, which is a 404 on the same terms
+	// as the read beside it. It is a status rather than a 200 with an empty
+	// body because a client that retried a forget has to be able to tell "I
+	// removed this" from "there was nothing to remove", and the role already
+	// answers the difference.
+	if !result.Found {
+		s.fail(w, r, MemoryNotFound())
+		return
+	}
+	writeJSON(w, apigen.Memory{Key: result.Key, Value: result.Value})
+}
+
 // memoryKey validates the path parameter and reports whether the request may
 // proceed. It is settingKey's rules, deliberately unchanged, so the two keyed
 // planes refuse the same shapes with the same `param` and the same `reason`.
