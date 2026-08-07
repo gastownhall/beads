@@ -50,6 +50,24 @@ func parseIssueID(input string, prefix string) string {
 // - No issue found matching the ID
 // - Multiple issues match (ambiguous prefix)
 func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
+	return resolvePartialID(ctx, store, input, true)
+}
+
+// ResolvePartialIDExact resolves an issue ID like ResolvePartialID, but never
+// falls back to leading-prefix abbreviation matching (e.g. "a3f8" ->
+// "a3f8e9...", or a wisp's stripped hash "list" -> "list3t0") — only a full
+// exact ID or exact hash match (with or without a "wisp-" infix) succeeds.
+//
+// Intended for write paths where a mistyped or coincidentally-prefix-matching
+// argument must return "not found" instead of silently mutating an unrelated
+// issue (e.g. `bd comment list <id>`, a typo for `bd comments list`, was
+// silently fuzzy-resolving "list" to a wisp whose hash happened to start with
+// "list" and writing the rest of the command line to it as a comment).
+func ResolvePartialIDExact(ctx context.Context, store PartialIDResolverStore, input string) (string, error) {
+	return resolvePartialID(ctx, store, input, false)
+}
+
+func resolvePartialID(ctx context.Context, store PartialIDResolverStore, input string, allowAbbrev bool) (string, error) {
 	if store == nil {
 		return "", fmt.Errorf("cannot resolve issue ID %q: storage is nil", input)
 	}
@@ -163,10 +181,12 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 		if issueHash == hashPart {
 			exactMatch = id
 			// Don't break - keep searching in case there's a full ID match
-		} else if strings.HasPrefix(issueHash, hashPart) {
+		} else if allowAbbrev && strings.HasPrefix(issueHash, hashPart) {
 			// Leading-prefix abbreviation (documented UX, e.g. "a3f8" -> "a3f8e9...").
 			// HasPrefix rather than Contains: reject interior-substring matches
-			// like "kt8" inside "j0kt8" (GH#4234).
+			// like "kt8" inside "j0kt8" (GH#4234). Exact-only callers (allowAbbrev
+			// false) skip this branch entirely — a non-exact candidate must never
+			// silently become the resolution.
 			matches = append(matches, id)
 		}
 	}
@@ -201,7 +221,7 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 				wispHash := strings.TrimPrefix(wHash, "wisp-")
 				if wHash == hashPart || wispHash == hashPart {
 					exactMatch = wID
-				} else if strings.HasPrefix(wispHash, hashPart) {
+				} else if allowAbbrev && strings.HasPrefix(wispHash, hashPart) {
 					matches = append(matches, wID)
 				}
 			}
