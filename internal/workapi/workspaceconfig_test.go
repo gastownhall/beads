@@ -102,3 +102,64 @@ func TestValidateSettingWriteReturnsTheValueUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// TestFilterSettingsEnumerationDropsTheWholeKVPrefix is the machine half of the
+// enumeration exclusion. The conformance contract pins it through a real
+// backend at all three wirings; what is checkable here is the prefix boundary
+// itself, which is where the plausible mistakes are — the narrower memory
+// constant, a match that is not anchored, a "kv" that is not "kv.".
+func TestFilterSettingsEnumerationDropsTheWholeKVPrefix(t *testing.T) {
+	stored := map[string]string{
+		"issue_prefix":                 "bd",
+		"custom.thing":                 "kept",
+		"status.custom":                "awaiting_review",
+		"kv.deploy-token":              "a generic bd kv row",
+		"kv.memory.architecture":       "the deploy token is sk-live-000",
+		"kv.memory.issue_prefix":       "a memory shadowing a settings name",
+		"kvetch":                       "not the prefix: kv. carries the dot",
+		"memory.not-under-kv":          "not the prefix either",
+		"custom.mentions.kv.somewhere": "the prefix has to be at the front",
+	}
+	want := map[string]string{
+		"issue_prefix":                 "bd",
+		"custom.thing":                 "kept",
+		"status.custom":                "awaiting_review",
+		"kvetch":                       "not the prefix: kv. carries the dot",
+		"memory.not-under-kv":          "not the prefix either",
+		"custom.mentions.kv.somewhere": "the prefix has to be at the front",
+	}
+
+	got := FilterSettingsEnumeration(stored)
+	if len(got) != len(want) {
+		t.Fatalf("FilterSettingsEnumeration returned %d keys %v, want %d %v", len(got), got, len(want), want)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("FilterSettingsEnumeration()[%q] = %q, want %q", key, got[key], value)
+		}
+	}
+	// The argument belongs to the caller, and one body passes the map its store
+	// handed back: filtering in place would empty the store's own answer.
+	if len(stored) != 9 {
+		t.Errorf("FilterSettingsEnumeration mutated its argument: %d keys left, want 9", len(stored))
+	}
+}
+
+// TestFilterSettingsEnumerationIsEmptyNeverNil pins the half of the promise the
+// two bodies used to make separately: ListSettingsResult.Settings can be ranged
+// over without a guard, and at least one store path answers nil.
+func TestFilterSettingsEnumerationIsEmptyNeverNil(t *testing.T) {
+	for name, stored := range map[string]map[string]string{
+		"nil":          nil,
+		"empty":        {},
+		"only kv rows": {"kv.memory.a": "1", "kv.b": "2"},
+	} {
+		got := FilterSettingsEnumeration(stored)
+		if got == nil {
+			t.Errorf("FilterSettingsEnumeration(%s) returned a nil map, want an empty one", name)
+		}
+		if len(got) != 0 {
+			t.Errorf("FilterSettingsEnumeration(%s) = %v, want empty", name, got)
+		}
+	}
+}

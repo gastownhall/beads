@@ -44,17 +44,15 @@ func (c *storeWorkspaceConfig) GetSetting(ctx context.Context, req issueops.GetS
 }
 
 func (c *storeWorkspaceConfig) ListSettings(ctx context.Context, _ issueops.ListSettingsRequest) (issueops.ListSettingsResult, error) {
-	settings, err := c.store.GetAllConfig(ctx)
+	stored, err := c.store.GetAllConfig(ctx)
 	if err != nil {
 		return issueops.ListSettingsResult{}, err
 	}
-	if settings == nil {
-		// Empty, never nil: ListSettingsResult.Settings promises a caller can
-		// range over the answer without a guard, and this seam returns a nil
-		// map on at least one path that finds no rows.
-		settings = map[string]string{}
-	}
-	return issueops.ListSettingsResult{Settings: settings}, nil
+	// The store hands back the whole config table, which holds the KV plane as
+	// well as the settings plane. What may be enumerated is workapi's to say,
+	// shared with the unit-of-work body so the two doors cannot drift; it also
+	// gives the empty-never-nil map the result promises.
+	return issueops.ListSettingsResult{Settings: workapi.FilterSettingsEnumeration(stored)}, nil
 }
 
 // Set writes one setting through the store's own config verb.

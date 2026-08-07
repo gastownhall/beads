@@ -3,8 +3,10 @@ package conformance
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
@@ -139,6 +141,55 @@ func RunWorkspaceConfigListsEveryStoredSetting(t *testing.T, ctx context.Context
 			t.Fatalf("ListSettings[%q] = %q (present=%v), want %q", key, got, ok, want)
 		}
 	}
+}
+
+// RunWorkspaceConfigListExcludesTheKVPlane pins workspaceconfig.go's
+// ListSettings: no key under `kv.` is enumerated, and the asymmetry that stops
+// the exclusion there — GetSetting still answers each of those keys by name.
+//
+// The two planes share one table, so this is the case that tells a body
+// filtering the SETTINGS plane from one that just happens to hold no memories.
+// Both probes are written THROUGH the role, because SetSetting still accepts
+// them: a write that lands and an enumeration that omits it is the whole claim,
+// and seeding out of band would leave the write half untested.
+//
+// The generic key and the memory key are both here because the exclusion is the
+// whole prefix. A body that reached for kvkeys.MemoryConfigKeyPrefix — the
+// narrower constant, and the tempting one — passes on the memory and fails on
+// the generic row.
+//
+// The value on the memory probe is shaped like a credential on purpose. That is
+// what the exclusion is for: the HTTP surface's redaction decides on the KEY
+// name, so a memory whose content is a secret under an innocuous slug was
+// served verbatim by an unauthenticated GET /v0/beads/config.
+func RunWorkspaceConfigListExcludesTheKVPlane(t *testing.T, ctx context.Context, fixture WorkspaceConfigFixture) {
+	t.Helper()
+	setting := workspaceConfigKey(fixture, "kv-neighbor")
+	generic := kvkeys.Prefix + fixture.IssuePrefix + "-generic"
+	memory := kvkeys.MemoryConfigKeyPrefix + fixture.IssuePrefix + "-slug"
+
+	setWorkspaceConfigSetting(t, ctx, fixture, setting, "settings row")
+	setWorkspaceConfigSetting(t, ctx, fixture, generic, "kv row")
+	setWorkspaceConfigSetting(t, ctx, fixture, memory, "the deploy token is sk-live-000")
+
+	settings := listWorkspaceConfigSettings(t, ctx, fixture)
+	// The settings row FIRST: an enumeration that dropped everything would
+	// satisfy the exclusion and mean nothing.
+	if got, ok := settings[setting]; !ok || got != "settings row" {
+		t.Fatalf("ListSettings[%q] = %q (present=%v), want %q — the settings plane must survive the exclusion",
+			setting, got, ok, "settings row")
+	}
+	for key := range settings {
+		if strings.HasPrefix(key, kvkeys.Prefix) {
+			t.Fatalf("ListSettings carries %q: the kv plane is user data riding in the settings table, not a setting", key)
+		}
+	}
+
+	// And the stated asymmetry: the exclusion is on the ENUMERATION only, so a
+	// caller naming an exact key still gets it. Removing this half would not
+	// fail any other case — it is pinned here or nowhere.
+	assertWorkspaceConfigValue(t, ctx, fixture, generic, "kv row")
+	assertWorkspaceConfigValue(t, ctx, fixture, memory, "the deploy token is sk-live-000")
 }
 
 // RunWorkspaceConfigUnsetRemovesTheSetting pins that a removed key is gone from

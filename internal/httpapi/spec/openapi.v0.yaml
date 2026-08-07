@@ -1542,13 +1542,25 @@ paths:
       operationId: listSettings
       summary: List the workspace's stored settings
       description: >-
-        Every setting stored in the workspace DATABASE, which is the plane
+        The SETTINGS stored in the workspace database, which is the plane
         `bd config list` reads. It is not the effective configuration: values
         that reach a running `bd` from `config.yaml`, from environment
         variables or from git config are absent and cannot be here, because
         they are files and variables on the CLIENT's machine and this server
         answers for the database. `bd config show` is the multi-source view and
         has no HTTP operation for the same reason.
+
+
+        IT IS NOT EVERY ROW OF THAT TABLE. Keys under `kv.` are omitted — the
+        generic `bd kv` namespace and the `bd remember` memories nested under
+        it. Those rows are USER DATA that rides in the settings table because
+        there is one table, not because they are settings, and enumerating them
+        here published a workspace's memories, key and value, to anything that
+        could reach this port. `bd config list` omits them too: the exclusion is
+        in the shared role both doors call, so the two cannot drift.
+
+        `getSetting` still answers a `kv.` key NAMED EXACTLY, and this
+        operation is where it stopped being discoverable.
 
 
         SETTINGS WHOSE KEY MARKS THEM AS CREDENTIAL-BEARING ARE WITHHELD. Their

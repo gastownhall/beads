@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
 )
 
 // The single definition of what a write to the workspace's durable settings
-// plane is allowed to be, beside BuildListFilter and BuildCountFilter.
+// plane is allowed to be and of what an enumeration of it may carry, beside
+// BuildListFilter and BuildCountFilter.
 //
 // It lives here for the reason those do: three implementations of
 // issueops.WorkspaceConfig have to agree about it, and it is checkable without
@@ -60,4 +62,50 @@ func ValidateSettingWrite(key, value string) (string, error) {
 		}
 	}
 	return value, nil
+}
+
+// FilterSettingsEnumeration takes the rows a store handed back and returns the
+// ones the settings enumeration is allowed to carry: everything except the KV
+// plane.
+//
+// THE KV PLANE RIDES IN THE SAME TABLE AND IS NOT SETTINGS. Generic `bd kv`
+// keys and the `bd remember` memories nested under them are USER DATA stored as
+// config rows beneath kvkeys.Prefix, and an enumeration that returned them
+// published that data on `bd config list` and on GET /v0/beads/config alike —
+// the latter unauthenticated, and redacting on the KEY NAME while a memory's
+// content is in the VALUE. `bd config list` carrying kv rows was never a
+// design; it fell out of one storage table holding two planes.
+//
+// THE WHOLE PREFIX GOES, not just kv.memory.: "settings minus one user-data
+// namespace but including the other" is not a rule anyone could state in a doc
+// comment. Nothing is lost by it — the purpose-built views over those rows
+// (`bd kv list`, `bd memories`) read the store directly and never come through
+// this role.
+//
+// IT IS APPLIED HERE, beside the validators, because both WorkspaceConfig
+// bodies call it and two doors onto one plane must answer the same. Filtering
+// in the HTTP handler instead would leave `bd config list` printing memories
+// into every terminal and transcript while the HTTP door claimed they were not
+// settings.
+//
+// AND IT IS AN ENUMERATION EXCLUSION, NOT A FIREWALL. GetSetting still answers
+// a verbatim kv.* key and SetSetting/UnsetSetting still write one; see
+// issueops/workspaceconfig.go for why that asymmetry is deliberate. A caller
+// who already knows the exact key is in a different class from one who
+// discovers it by listing. Making it a wall is one more refusal in this
+// function and nothing else changes.
+//
+// The result is always a fresh map, empty rather than nil, because
+// ListSettingsResult.Settings promises a caller can range over the answer
+// without a guard and at least one store path returns a nil map when it finds
+// no rows.
+func FilterSettingsEnumeration(stored map[string]string) map[string]string {
+	settings := make(map[string]string, len(stored))
+	for key, value := range stored {
+		if strings.HasPrefix(key, kvkeys.Prefix) {
+			continue
+		}
+		settings[key] = value
+	}
+	return settings
 }
