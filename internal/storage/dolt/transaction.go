@@ -192,13 +192,17 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		return fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
-	ignoredDB, ignoredConn, ignoredTx, err := s.beginIgnoredTxOnBranch(ctx, currentBranch)
+	// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only the
+	// FIRST acquisition (the regular conn). A borrow inside beginIgnoredTxOnBranch
+	// that has to wait increments the pool's global WaitCount, which the NEXT
+	// transaction's delta then misattributes. Rare given the InUse pre-check in
+	// borrowConnForIgnoredTx; not worth restructuring the metrics for.
+	ignoredCleanup, ignoredTx, err := s.beginIgnoredTxOnBranch(ctx, currentBranch)
 	if err != nil {
 		_ = regularTx.Rollback()
 		return err
 	}
-	defer ignoredDB.Close()
-	defer ignoredConn.Close()
+	defer ignoredCleanup()
 
 	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s}
 
@@ -239,38 +243,137 @@ func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, t
 	return nil
 }
 
-func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (*sql.DB, *sql.Conn, *sql.Tx, error) {
-	// Use an independent single-connection pool for ignored tables. Reusing the
-	// main pool can deadlock when MaxOpenConns=1, and each Dolt SQL session has
-	// its own active branch. This intentionally pays one extra connection setup
-	// for mixed regular/ignored writes so the ignored transaction can be checked
-	// out to the regular transaction's branch before writes.
+// ignoredTxBorrowTimeout bounds how long a borrow of a second warm connection
+// from the main pool may wait before falling back to a dedicated fresh dial. It
+// keeps the second acquisition from ever waiting unboundedly while the caller
+// already holds the first (regular-tx) connection, which is what makes deadlock
+// impossible by construction on the borrow path.
+const ignoredTxBorrowTimeout = 250 * time.Millisecond
+
+// beginIgnoredTxOnBranch starts the ignored-tables transaction, checked out to
+// the regular transaction's branch. It borrows a second warm connection from the
+// main pool when one is safely available — the hosted-gateway churn fix: once the
+// pool is warm this costs zero new MySQL handshakes and zero Dolt session-setup
+// round-trips per write. It falls back to a dedicated single-connection pool when
+// borrowing could deadlock (MaxOpenConns==1, the documented case that every
+// branch-isolated test exercises) or when the pool is exhausted or a borrowed
+// connection turns out to be stale.
+//
+// The returned cleanup closure releases whichever acquisition path was taken, so
+// the caller does not need to know which one ran.
+func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (cleanup func(), tx *sql.Tx, err error) {
+	// Borrow fast path: reuse an already-open pooled connection. Unlike the
+	// fallback below, this path never switches the session's branch — see
+	// beginBorrowedTx for the pool invariant it preserves.
+	if conn := s.borrowConnForIgnoredTx(ctx); conn != nil {
+		tx, err := beginBorrowedTx(ctx, conn, branch)
+		if err == nil {
+			return func() { _ = conn.Close() }, tx, nil
+		}
+		// A stale pooled connection or a session on another branch: a fresh
+		// dial always worked before, so discard this one (its session state is
+		// untouched) and fall through to the fallback.
+		_ = conn.Close()
+	}
+
+	// Fallback: a dedicated single-connection pool, paying the fresh dial the
+	// borrow path exists to avoid.
+	doltMetrics.ignoredTxFreshPool.Add(ctx, 1)
 	db, err := sql.Open("mysql", s.connStr)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to acquire ignored tx connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to acquire ignored tx connection: %w", err)
 	}
 
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-		_ = conn.Close()
-		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
-	}
-
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err = beginTxOnConn(ctx, conn, branch)
 	if err != nil {
 		_ = conn.Close()
 		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+		return nil, nil, err
 	}
 
-	return db, conn, tx, nil
+	return func() { _ = conn.Close(); _ = db.Close() }, tx, nil
+}
+
+// borrowConnForIgnoredTx returns a second connection borrowed from the main pool
+// for the ignored-tables transaction, or nil if borrowing is unsafe or would
+// block. The caller falls back to a dedicated single-connection pool on nil.
+func (s *DoltStore) borrowConnForIgnoredTx(ctx context.Context) *sql.Conn {
+	st := s.db.Stats()
+	// MaxOpenConns==1: the caller already pinned the pool's only connection for
+	// the regular tx, so a borrow would deadlock. Preserve today's behavior.
+	if st.MaxOpenConnections == 1 {
+		return nil
+	}
+	// Exhausted pool: skip the wait and go straight to the fallback.
+	// MaxOpenConnections==0 means unlimited — always safe to grow.
+	if st.MaxOpenConnections > 0 && st.InUse >= st.MaxOpenConnections {
+		return nil
+	}
+
+	bctx, cancel := context.WithTimeout(ctx, ignoredTxBorrowTimeout)
+	defer cancel()
+	conn, err := s.db.Conn(bctx)
+	if err != nil {
+		// Lost a stats/Conn race, parent ctx canceled, or a slow dial exceeded
+		// the borrow timeout — fall back to a fresh dial.
+		return nil
+	}
+	return conn
+}
+
+// beginBorrowedTx begins the ignored-tables transaction on a connection
+// borrowed from the main pool, without ever changing that session's branch.
+//
+// Pool invariant: DOLT_CHECKOUT is session-level, and the borrow cleanup
+// returns the connection to the pool as-is — so switching its branch here
+// would leak a foreign branch into the pool for an unrelated later caller.
+// Every other production checkout site (federation staging, compact, flatten)
+// restores the branch before releasing the connection; the borrow path
+// preserves the same invariant by refusing instead of switching. Today no
+// shipped flow diverges a pool session's branch from the regular tx's branch
+// (DoltStore.Checkout has no non-test callers), so this is defense in depth
+// for future Checkout callers and for multi-connection tests.
+//
+// Instead of an unconditional checkout it verifies the session is already on
+// the requested branch — the overwhelmingly common case — and sends the
+// caller to the fresh-dial fallback otherwise. Same round-trip count as the
+// checkout it replaces (one statement), so the borrow fast path stays free.
+func beginBorrowedTx(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+		return nil, fmt.Errorf("failed to read borrowed conn's active branch: %w", err)
+	}
+	if active != branch {
+		return nil, fmt.Errorf("borrowed conn is on branch %q, want %q: refusing to switch a pooled session's branch", active, branch)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+	}
+	return tx, nil
+}
+
+// beginTxOnConn checks a connection out to branch and begins a transaction on
+// it. Only the fallback path uses it: the fallback owns a dedicated
+// single-connection pool, so checking its session out is safe. Every Dolt SQL
+// session has its own active branch, so the explicit checkout is required on
+// a fresh dial.
+func beginTxOnConn(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+		return nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+	}
+	return tx, nil
 }
 
 // isDoltNothingToCommit returns true if the error indicates there were no
