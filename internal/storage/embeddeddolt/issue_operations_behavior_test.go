@@ -201,19 +201,6 @@ func TestEmbeddedIssueOperationsCloseAndReopenAWisp(t *testing.T) {
 	}
 }
 
-// embeddedIssueParentIDs joins a result issue's parent edges. The ParentID
-// cases that used to live here moved to the three-backend contract, but
-// issue_operations_staging_test.go still reads a result's parents through it.
-func embeddedIssueParentIDs(issue *types.Issue) string {
-	parents := make([]string, 0)
-	for _, dependency := range issue.Dependencies {
-		if dependency.Type == types.DepParentChild {
-			parents = append(parents, dependency.DependsOnID)
-		}
-	}
-	return strings.Join(parents, ",")
-}
-
 func sameEmbeddedMetadataJSON(left, right json.RawMessage) bool {
 	var leftValue, rightValue any
 	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)

@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -13,6 +14,20 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
+
+// embeddedIssueParentIDs joins a result issue's parent edges. It lives beside
+// its only caller: the ParentID cases that used to share it moved to the
+// three-backend contract, and leaving it in the file they vacated meant the
+// next deletion there would break this file for a reason nothing states.
+func embeddedIssueParentIDs(issue *types.Issue) string {
+	parents := make([]string, 0)
+	for _, dependency := range issue.Dependencies {
+		if dependency.Type == types.DepParentChild {
+			parents = append(parents, dependency.DependsOnID)
+		}
+	}
+	return strings.Join(parents, ",")
+}
 
 func TestEmbeddedIssueOperationsUpdateClaimPatchAppliesAfterClaim(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)

@@ -33,9 +33,6 @@
 5 5 TestCreateIssues
 5 1 TestCreateIssuesRejectStaleUpserts
 5 2 TestCreateRejectsCrossTableIDCollision
-5 3 TestEmbeddedCloseIssueChecked
-5 4 TestEmbeddedCloseIssueCheckedTransitiveBlockedCloses
-5 5 TestEmbeddedCloseIssueCheckedVersionCAS
 5 1 TestEmbeddedConfigCommitStagesConfig
 5 2 TestEmbeddedDirtyTablesGate_BlocksReopenThenWorkingSetReconcileRecovers
 5 3 TestEmbeddedGetMergeBlockersOnAQuietStore
@@ -62,8 +59,6 @@
 5 4 TestEmbeddedRecomputeAllBlockedWiring
 5 5 TestEmbeddedRemoteMigrateGate_BlocksReopen
 5 1 TestEmbeddedSyncCommitsConfigBeforeMerge
-5 2 TestEmbeddedUpdateIssueCheckedFieldGuards
-5 3 TestEmbeddedUpdateIssueCheckedVersionCAS
 5 4 TestEventsSinceEmbedded
 5 5 TestGetDependentRecordsEmbedded
 5 1 TestGetDependentRecordsForIssuesEmbedded
