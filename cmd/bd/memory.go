@@ -47,6 +47,26 @@ func proxiedMemories() (memoryops.Memories, error) {
 	return src.Memories()
 }
 
+// noteDirectMemoryWrite marks the invocation as having written, which is what
+// the auto-commit epilogue in main.go keys on.
+//
+// It is DIRECT-ROUTE ONLY, and both halves of that matter. A direct memory
+// write lands in the Dolt working set and nothing else commits it, so a verb
+// that forgets to call this stores a memory that exists until the process exits
+// and then sits uncommitted — visible to the session that wrote it and to
+// nothing after. A proxied write already committed inside the role's unit of
+// work, so flagging it there would ask the epilogue to commit a second time on
+// a route with nothing outstanding.
+//
+// The RunEs cannot make that distinction themselves: openMemories hides which
+// route they are on, which is the point. So the guard lives here, once, the way
+// noteDirectConfigWrite does for the settings plane.
+func noteDirectMemoryWrite() {
+	if !usesProxiedServer() {
+		commandDidWrite.Store(true)
+	}
+}
+
 // memoryPrefix is prepended (after kvPrefix) to all memory keys.
 const memoryPrefix = kvkeys.MemoryPrefix
 
@@ -433,31 +453,23 @@ Examples:
 			}
 		}()
 
-		key := args[0]
-
-		if usesProxiedServer() {
-			return runForgetProxiedServer(rootCtx, key)
-		}
-
-		if err := ensureDirectMode("forget requires direct database access"); err != nil {
+		memories, err := openMemories("forget requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		storageKey := kvPrefix + memoryPrefix + key
-
-		ctx := rootCtx
-
-		existing, _ := store.GetConfig(ctx, storageKey)
-		if existing == "" {
-			return printForgetNotFound(key)
-		}
-
-		if err := store.DeleteConfig(ctx, storageKey); err != nil {
+		// No pre-read here, deliberately: the value printed below is the one
+		// the role's transaction actually deleted, not the one an earlier read
+		// happened to see.
+		result, err := memories.Forget(rootCtx, memoryops.ForgetRequest{Key: args[0]})
+		if err != nil {
 			return HandleErrorRespectJSON("forgetting memory: %v", err)
 		}
-		commandDidWrite.Store(true)
+		if !result.Found {
+			return printForgetNotFound(result.Key)
+		}
+		noteDirectMemoryWrite()
 
-		return printForgetResult(key, existing)
+		return printForgetResult(result.Key, result.Value)
 	},
 }
 

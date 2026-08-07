@@ -7,10 +7,10 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// Proxied-server handlers for the memory verbs that have not yet converged
-// onto memoryops.Memories (`bd remember` and `bd forget`; `bd recall` and `bd
-// memories` now reach the role through openMemories, like every other
-// converged command). Memories are a thin prefix layer
+// The last proxied-server handler for the memory surface: `bd remember`. The
+// other three verbs now reach memoryops.Memories through openMemories, like
+// every other converged command, and this one follows in W5 — at which point
+// there is nothing left in this file. Memories are a thin prefix layer
 // (kv.memory.*) over the config table, so these mirror
 // config_proxied_server.go / kv_proxied_server.go: one RunTx per write
 // invocation with a real commit message, RunTxRead for reads. Validation and
@@ -65,30 +65,4 @@ func runRememberProxiedServer(ctx context.Context, key, insight string) error {
 	}
 
 	return printRememberResult(verb, key, insight)
-}
-
-func runForgetProxiedServer(ctx context.Context, key string) error {
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
-	storageKey := kvPrefix + memoryPrefix + key
-
-	// Classic path ignores the existence-check error; mirror that.
-	existing, _ := memoryGetProxied(ctx, storageKey)
-	if existing == "" {
-		return printForgetNotFound(key)
-	}
-
-	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		if err := uw.ConfigUseCase().DeleteConfig(ctx, storageKey); err != nil {
-			return "", err
-		}
-		return fmt.Sprintf("bd: forget %s", key), nil
-	})
-	if err != nil {
-		return HandleErrorRespectJSON("forgetting memory: %v", err)
-	}
-
-	return printForgetResult(key, existing)
 }
