@@ -300,10 +300,13 @@ func readyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 func readyWorkWispIssueFilter(filter types.WorkFilter) types.IssueFilter {
 	pinnedFalse := false
 	wispFilter := types.IssueFilter{
-		Priority:       filter.Priority,
-		Labels:         filter.Labels,
-		LabelsAny:      filter.LabelsAny,
-		ExcludeLabels:  filter.ExcludeLabels,
+		Priority:  filter.Priority,
+		Labels:    filter.Labels,
+		LabelsAny: filter.LabelsAny,
+		// Not filter.ExcludeLabels: this branch reaches the wisps table
+		// through BuildLabelDrivenSearch rather than BuildReadyWorkWhere, so
+		// it must apply the default ready-work label exclusions itself.
+		ExcludeLabels:  sqlbuild.ReadyWorkExcludeLabels(filter),
 		Limit:          filter.Limit,
 		MolType:        filter.MolType,
 		WispType:       filter.WispType,

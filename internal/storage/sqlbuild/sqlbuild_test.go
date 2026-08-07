@@ -138,12 +138,108 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+	// "id NOT IN (?" is the deferred-children shape specifically; the label
+	// exclusion emits "id NOT IN (SELECT ..." and is counted separately.
+	if got := strings.Count(where, "id NOT IN (?"); got != 2 {
 		t.Errorf("expected 2 batched NOT IN clauses for %d IDs, got %d", len(ids), got)
 	}
-	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
+	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil)) + len(ReadyWorkExcludeLabels(types.WorkFilter{}))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+// sk-1pc: a bead labeled 'human' is waiting on an operator ruling, and used to
+// sit in `bd human list` and `bd ready` at once — so a worker could claim and
+// work a question that was simultaneously awaiting a decision. Ready work must
+// exclude the label by default, on every table family, alongside whatever the
+// caller excluded.
+func TestReadyWorkExcludeLabels(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		filter types.WorkFilter
+		want   []string
+	}{
+		{
+			name:   "bare filter excludes the human label",
+			filter: types.WorkFilter{},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			name:   "caller exclusions are kept and the human label appended",
+			filter: types.WorkFilter{ExcludeLabels: []string{"wontfix"}},
+			want:   []string{"wontfix", types.LabelHuman},
+		},
+		{
+			name:   "an explicit --exclude-label human is not duplicated",
+			filter: types.WorkFilter{ExcludeLabels: []string{types.LabelHuman}},
+			want:   []string{types.LabelHuman},
+		},
+		{
+			// Asking for the queue by name is an opt-in, not a
+			// contradiction that returns nothing.
+			name:   "--label human opts back in",
+			filter: types.WorkFilter{Labels: []string{types.LabelHuman}},
+			want:   nil,
+		},
+		{
+			name:   "--label-any human opts back in",
+			filter: types.WorkFilter{LabelsAny: []string{"lane-a", types.LabelHuman}},
+			want:   nil,
+		},
+		{
+			// Only this exact spelling is the operator queue; a near
+			// miss is an ordinary label.
+			name:   "a near-miss label does not opt in",
+			filter: types.WorkFilter{Labels: []string{"needs-human"}},
+			want:   []string{types.LabelHuman},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := ReadyWorkExcludeLabels(tt.filter)
+			if len(got) != len(tt.want) {
+				t.Fatalf("ReadyWorkExcludeLabels = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("ReadyWorkExcludeLabels = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+// The exclusion has to reach the SQL, not just the helper: BuildReadyWorkWhere
+// is the one place both stacks render ready semantics from.
+func TestBuildReadyWorkWhereExcludesHumanLabel(t *testing.T) {
+	t.Parallel()
+
+	for _, tables := range []FilterTables{IssuesFilterTables, WispsFilterTables} {
+		where, args, err := BuildReadyWorkWhere(types.WorkFilter{}, tables, ReadyWorkWhereInputs{})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		wantClause := "id NOT IN (SELECT issue_id FROM " + tables.Labels + " WHERE label IN (?))"
+		if !strings.Contains(where, wantClause) {
+			t.Errorf("human-label exclusion missing.\n where = %s\n want substring = %s", where, wantClause)
+		}
+		if len(args) == 0 || args[len(args)-1] != types.LabelHuman {
+			t.Errorf("args tail = %v, want last arg %q", args, types.LabelHuman)
+		}
+	}
+
+	// ...and is dropped when the caller names the label.
+	where, _, err := BuildReadyWorkWhere(types.WorkFilter{Labels: []string{types.LabelHuman}}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(where, "NOT IN (SELECT issue_id FROM "+IssuesFilterTables.Labels) {
+		t.Errorf("--label human must not also exclude the label: %s", where)
 	}
 }
 
@@ -180,9 +276,10 @@ func TestBuildReadyWorkWhereLabelsAny(t *testing.T) {
 		t.Errorf("parent filter clause missing when combined with labels.\n where = %s", where)
 	}
 	// The label + parent args land in filter order (AND labels, then LabelsAny
-	// values, then the parent LIKE arg) as the tail of the arg list — the
-	// default issue_type exclusion prepends its own args.
-	wantTail := []interface{}{"tier:opus", "lane-a", "lane-c", parent}
+	// values, then the default 'human' exclusion, then the parent LIKE arg) as
+	// the tail of the arg list — the default issue_type exclusion prepends its
+	// own args.
+	wantTail := []interface{}{"tier:opus", "lane-a", "lane-c", types.LabelHuman, parent}
 	if len(args) < len(wantTail) {
 		t.Fatalf("args = %v, want at least %d trailing values %v", args, len(wantTail), wantTail)
 	}

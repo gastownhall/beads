@@ -25,6 +25,11 @@ var readyCmd = &cobra.Command{
 Excludes in_progress, blocked, deferred, and hooked issues. This uses the
 GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
 
+Also excludes issues labeled 'human': they are queued for an operator decision
+(see 'bd human list'), not for dispatch, so they are not claimable work. They
+stay visible in 'bd list' and 'bd show'. To see them here anyway, ask for the
+label by name: 'bd ready --label human'.
+
 Note: 'bd list --ready' uses the same blocker-aware ready-work semantics.
 
 Use --mol to filter to a specific molecule's steps:

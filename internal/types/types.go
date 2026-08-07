@@ -684,6 +684,16 @@ const (
 	TypeMilestone IssueType = "milestone" // Marks completion of a set of related issues (no work itself)
 )
 
+// LabelHuman marks a bead as awaiting an operator decision: it is what puts
+// the bead in `bd human list`, and what keeps it OUT of ready work, since a
+// question waiting on a ruling is not claimable work (see
+// sqlbuild.ReadyWorkExcludeLabels).
+//
+// Only this exact spelling means that. A near miss like "needs-human" is an
+// ordinary label to every surface in bd — it neither joins the operator queue
+// nor leaves the dispatch queue.
+const LabelHuman = "human"
+
 // TypeEvent is a system-internal type used by set-state for audit trail beads.
 // Originally an orchestrator type, promoted to built-in internal type. It is not a
 // core work type (not in IsValid) but is accepted by IsValidWithCustom /

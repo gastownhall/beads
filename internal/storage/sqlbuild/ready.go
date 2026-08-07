@@ -37,6 +37,33 @@ func ReadyWorkExcludeTypes(extra []types.IssueType) []types.IssueType {
 	return out
 }
 
+// ReadyWorkExcludeLabels returns the labels ready work excludes by default,
+// plus the caller's own --exclude-label set: a bead carrying types.LabelHuman
+// is queued for an operator decision, not for dispatch.
+//
+// Naming the label in Labels or LabelsAny opts back in, so `bd ready --label
+// human` returns that queue rather than the empty set an unconditional
+// exclusion would produce.
+func ReadyWorkExcludeLabels(filter types.WorkFilter) []string {
+	out := append([]string(nil), filter.ExcludeLabels...)
+	for _, label := range filter.Labels {
+		if label == types.LabelHuman {
+			return out
+		}
+	}
+	for _, label := range filter.LabelsAny {
+		if label == types.LabelHuman {
+			return out
+		}
+	}
+	for _, label := range out {
+		if label == types.LabelHuman {
+			return out
+		}
+	}
+	return append(out, types.LabelHuman)
+}
+
 // ReadyWorkOrder is an ORDER BY fragment plus any args its CASE expressions
 // need (the hybrid policy parameterizes a recency cutoff).
 type ReadyWorkOrder struct {
@@ -164,9 +191,9 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
 	}
-	if len(filter.ExcludeLabels) > 0 {
-		placeholders := make([]string, len(filter.ExcludeLabels))
-		for i, label := range filter.ExcludeLabels {
+	if excludeLabels := ReadyWorkExcludeLabels(filter); len(excludeLabels) > 0 {
+		placeholders := make([]string, len(excludeLabels))
+		for i, label := range excludeLabels {
 			placeholders[i] = "?"
 			args = append(args, label)
 		}

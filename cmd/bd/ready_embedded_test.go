@@ -203,6 +203,56 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
+	// sk-1pc: a bead labeled 'human' is queued for an operator decision and
+	// used to stay in the dispatch queue too, so a worker could claim and work
+	// a question that was simultaneously awaiting a ruling.
+	t.Run("ready_excludes_human_label", func(t *testing.T) {
+		flagged := bdCreate(t, bd, dir, "Awaiting an operator ruling", "--type", "task", "--label", "sk1pc-ready")
+		nearMiss := bdCreate(t, bd, dir, "Near miss label", "--type", "task", "--label", "sk1pc-ready")
+
+		cmd := exec.Command(bd, "label", "add", flagged.ID, "human")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add human failed: %v\n%s", err, out)
+		}
+		cmd = exec.Command(bd, "label", "add", nearMiss.ID, "needs-human")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("label add needs-human failed: %v\n%s", err, out)
+		}
+
+		bdReady := func(t *testing.T, args ...string) string {
+			t.Helper()
+			cmd := exec.Command(bd, append([]string{"ready"}, args...)...)
+			cmd.Dir = dir
+			cmd.Env = bdEnv(dir)
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd ready %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+					strings.Join(args, " "), err, stdout.String(), stderr.String())
+			}
+			return stdout.String()
+		}
+
+		out := bdReady(t, "--label", "sk1pc-ready")
+		if strings.Contains(out, flagged.ID) {
+			t.Errorf("bead %s is flagged for a human and must not appear in bd ready:\n%s", flagged.ID, out)
+		}
+		// Only the exact label is the operator queue.
+		if !strings.Contains(out, nearMiss.ID) {
+			t.Errorf("'needs-human' is an ordinary label and %s must stay ready:\n%s", nearMiss.ID, out)
+		}
+		// Removed from dispatch, not from sight.
+		if listOut := bdHuman(t, bd, dir, "list"); !strings.Contains(listOut, flagged.ID) {
+			t.Errorf("expected %s in the human decision queue:\n%s", flagged.ID, listOut)
+		}
+		if named := bdReady(t, "--label", "human"); !strings.Contains(named, flagged.ID) {
+			t.Errorf("bd ready --label human must return the human queue:\n%s", named)
+		}
+	})
+
 	// ===== -C flag =====
 
 	t.Run("ready_with_C_flag", func(t *testing.T) {
