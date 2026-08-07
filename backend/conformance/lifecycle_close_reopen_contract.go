@@ -89,7 +89,7 @@ const (
 // the typed identity the leaf names, carrying the count a CLI renders — and
 // with the row and the event stream untouched.
 //
-// issueops/issueops.go:406-409 promises "An unforced close with open children
+// issueops/issueops.go:424-427 promises "An unforced close with open children
 // returns CloseOpenChildrenError without mutation" and that "Force bypasses
 // blocker and open-child policy"; errors.go:105-128 declares the sentinel pair
 // and the struct's IssueID/OpenChildren fields and its Unwrap to
@@ -216,7 +216,7 @@ func RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t *testing.T, ctx context
 }
 
 // RunLifecycleCloseCountsOpenChildrenInBothPlanes pins the SHAPE of the count
-// behind the open-child refusal. issueops/issueops.go:406-409 promises the
+// behind the open-child refusal. issueops/issueops.go:424-427 promises the
 // unforced refusal and that Force "reports OpenChildren", and CloseResult's own
 // doc calls it "the number of open children observed" — a number, not a
 // per-plane number, so an ephemeral child is one of them.
@@ -377,7 +377,7 @@ func RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t *testing.T,
 // second Close of an already-closed issue is the no-op CloseResult.Changed
 // describes", and Close's own doc enumerates the two things that can still
 // refuse one — ExpectedVersion, "checked first, including for an idempotent
-// close", and open children (issueops/issueops.go:364-365, 406-409). A blocker
+// close", and open children (issueops/issueops.go:423-425). A blocker
 // is not on that list, so a re-close that met one would be a refusal the
 // contract does not permit.
 //
@@ -493,9 +493,9 @@ func lifecycleCloseReopenDirectBlockerEdges(t *testing.T, ctx context.Context, f
 }
 
 // RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose pins what a second Close
-// of an already-closed issue does. issueops/issueops.go:354-359 promises
+// of an already-closed issue does. issueops/issueops.go:372-377 promises
 // Changed "is false for an idempotent re-close" and that OpenChildren "is
-// reported even for an idempotent re-close"; :406-409 promises the unforced
+// reported even for an idempotent re-close"; :424-425 promises the unforced
 // open-child refusal without qualifying it to open targets, and the shared
 // store body reads the target's closed state precisely so a closed parent with
 // open children still refuses (internal/storage/issueops/close.go:70-73).
@@ -602,9 +602,9 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 }
 
 // RunLifecycleReopenLeavesNonDoneStatusesUnchanged pins the Reopen no-op.
-// issueops/issueops.go:411-413 promises Reopen "moves literal StatusClosed and
+// issueops/issueops.go:429-432 promises Reopen "moves literal StatusClosed and
 // configured done statuses to StatusOpen; non-done statuses unchanged", and
-// :368-370 promises Changed "is false when non-done statuses are unchanged".
+// :386-387 promises Changed "is false when non-done statuses are unchanged".
 //
 // "Non-done" is wider than "already open", and that is the whole point of the
 // case: a wip built-in and a configured ACTIVE custom status are both left
@@ -654,7 +654,7 @@ func RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T, ctx context.
 			}
 			events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, tc.id)
 			// A Reason rides along: a status the verb leaves alone records
-			// nothing, Reason or not (issueops.go:310-313).
+			// nothing, Reason or not (issueops.go:322-330).
 			result, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{
 				Actor: "writer", IssueID: tc.id, Reason: "ignored",
 			})
@@ -675,8 +675,8 @@ func RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T, ctx context.
 
 // RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory pins that both verbs
 // speak in terms of the configured done CATEGORY, not the literal closed
-// status. issueops/issueops.go:403-405 promises Close "moves the issue to
-// literal StatusClosed, including from a configured done status"; :370-372
+// status. issueops/issueops.go:422-423 promises Close "moves the issue to
+// literal StatusClosed, including from a configured done status"; :430-431
 // promises Reopen moves "literal StatusClosed and configured done statuses" to
 // StatusOpen. Both are a real move — a caller that treated a configured done
 // status as already-final would report Changed = false and leave the row on a
@@ -866,8 +866,8 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 
 // RunLifecycleResultsAreHydratedPostStateSnapshots pins the shape both results
 // promise: CloseResult.Issue and ReopenResult.Issue are "a detached post-state
-// snapshot with labels and dependency records" (issueops/issueops.go:348-353,
-// 362-367). A result that returned the bare row would leave a caller rendering
+// snapshot with labels and dependency records" (issueops/issueops.go:369-370,
+// 383-384). A result that returned the bare row would leave a caller rendering
 // an issue with no labels and no edges, and the two per-backend detachment
 // tests only prove the snapshot does not ALIAS store state — not that it
 // carries anything.
@@ -904,7 +904,7 @@ func RunLifecycleResultsAreHydratedPostStateSnapshots(t *testing.T, ctx context.
 // validation floor both verbs sit on. The Lifecycle doc states "Deterministic
 // request validation failures match ErrValidation" and "Refusals and
 // deterministic validation failures leave persistent state unchanged"
-// (issueops/issueops.go:375-376, 385-386); the shared store body spells the
+// (issueops/issueops.go:393-394, 403-404); the shared store body spells the
 // same two fields at internal/storage/issueops/execution.go:255-258, 281-284.
 //
 // The empty-Actor legs are the ones with teeth: the id names a real row, so an
@@ -947,7 +947,7 @@ func RunLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T, ctx context.
 }
 
 // RunLifecycleReopenProvenanceLabelsHistory pins both halves of
-// ReopenRequest.Provenance (issueops/issueops.go:317-326): a spelled label is
+// ReopenRequest.Provenance (issueops/issueops.go:335-344): a spelled label is
 // what the recorded entry reads, and the field "NEVER changes WHETHER history
 // is recorded — only how the entry reads".
 //
@@ -999,7 +999,7 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 }
 
 // SPEC-GAP bd-yby99.31: which PLANE a Reopen id resolves against. The verb is
-// documented entirely in terms of status (issueops/issueops.go:417-420) and
+// documented entirely in terms of status (issueops/issueops.go:429-432) and
 // names no plane, while every neighboring role states its answer outright —
 // BatchCloser admits a wisp id "exactly as Lifecycle.Close resolves one"
 // (issueops/batchcloser.go:35-36) and Claimer refuses one (claimer.go:63). All
