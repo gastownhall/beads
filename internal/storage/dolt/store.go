@@ -3102,6 +3102,12 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 // already committed its SQL mutation, so any publication failure here has an
 // indeterminate durable outcome and must not be replayed.
 func (s *DoltStore) doltAddAndCommit(ctx context.Context, tables []string, commitMsg string) error {
+	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
+	// for a later explicit commit point (bd dolt commit / CommitPending),
+	// matching doltAddAndCommitInTx.
+	if issueops.VersionCommitDeferred(ctx) {
+		return nil
+	}
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		conn, err := s.db.Conn(ctx)
 		if err != nil {

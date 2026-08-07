@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--dolt-auto-commit batch`/`off` now actually defer version commits in
+  SQL-server mode** (bd-4wamg). The mode was silently inert there: the CLI's
+  auto-commit policy was embedded-only, and the storage layer minted one Dolt
+  commit inside every write transaction regardless — measured at one commit
+  per write through all five configuration paths (flag, config.yaml, env,
+  `bd config set`, no-daemon). The write verbs now thread the batch/off
+  deferral to the storage layer's commit sites, which leave writes in the
+  working set for an explicit commit point (`bd dolt commit`), in server and
+  embedded mode alike. The server-mode **default** changes spelling, not
+  behavior: it used to resolve to `off` (while behaving like `on`); it now
+  resolves to `on`, naming what a default server-mode write has always done.
+  The `--dolt-auto-commit` help also stops claiming `Default: off`. On a
+  shared server, staging is table-level, so an `on`-mode writer's commit may
+  sweep up another client's deferred rows — deferral bounds who *creates*
+  commits, not commit contents.
+
+
 - **`bd delete --cascade` no longer marks LIVE issues as deleted in other
   issues' text** (bd-x82so). When the deletion named a wisp, the set used to
   rewrite `[deleted:<id>]` citations was computed differently from the set that

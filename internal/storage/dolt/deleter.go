@@ -74,6 +74,11 @@ func (s *deleter) Delete(ctx context.Context, req issueops.DeleteRequest) (issue
 		if result.Deleted == 0 {
 			return nil
 		}
+		// Batch/off auto-commit (bd-4wamg): defer the version commit to an
+		// explicit commit point, matching doltAddAndCommitInTx.
+		if storeops.VersionCommitDeferred(ctx) {
+			return nil
+		}
 		// The same tables a sweep stages; the neighbor rewrite lands in
 		// `issues`, which is already on the list.
 		for _, table := range sweptTables {
