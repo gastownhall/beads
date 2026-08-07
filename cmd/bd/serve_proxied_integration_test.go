@@ -234,6 +234,7 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 			"dependencies.blocking", "dependencies.cycles", "dependencies.list", "dependencies.tree",
 			"issues.batchCreate", "issues.claim", "issues.delete", "issues.get", "issues.list",
 			"issues.query", "issues.sweep",
+			"memories.forget", "memories.get", "memories.list", "memories.remember",
 			"ready.count", "ready.list", "stats.get",
 		}
 		if !reflect.DeepEqual(caps, want) {
