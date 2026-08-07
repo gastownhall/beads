@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -73,8 +75,24 @@ func (s *DoltStore) wakeExpiredDefers(ctx context.Context) {
 		})
 	})
 	if err != nil && !errors.Is(err, ErrCircuitOpen) && !errors.Is(err, ErrStoreClosed) {
-		fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
+		warnDeferWakeSweepSkipped(err)
 	}
+}
+
+// deferWakeAccessDeniedOnce rate-limits the access-denied advisory to one
+// warning per process: a read-only-privileged SQL user hits it on every
+// ready-front read, and repeating a configuration fact on each `bd ready`
+// is noise, not signal.
+var deferWakeAccessDeniedOnce sync.Once
+
+func warnDeferWakeSweepSkipped(err error) {
+	if dberrors.IsAccessDenied(err) {
+		deferWakeAccessDeniedOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped (SQL user lacks write privileges; expired defers will not auto-wake from this client): %v\n", err)
+		})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
 }
 
 func (s *DoltStore) GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error) {

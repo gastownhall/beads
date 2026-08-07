@@ -138,6 +138,28 @@ func TestEmbeddedDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("expired_dated_defer_wakes_wisp", func(t *testing.T) {
+		// Wisps ride the same defer/wake contract through dolt_ignored tables,
+		// which take a different persistence path (SQL commit, no version
+		// commit) — the seam where the uow stack once rolled wisp wakes back.
+		issue := bdCreate(t, bd, dir, "Wisp snooze", "--type", "task", "--ephemeral", "--wisp-type", "heartbeat")
+		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")
+		status, _ := showDeferState(t, bd, dir, issue.ID)
+		if status != "deferred" {
+			t.Fatalf("precondition: expected status=deferred, got %q", status)
+		}
+
+		_ = wakeReadyIDs(t, bd, dir) // trigger the sweep
+
+		status, deferUntil := showDeferState(t, bd, dir, issue.ID)
+		if status != "open" {
+			t.Errorf("expected wisp status=open after wake, got %q", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("expected wisp defer_until cleared after wake, got %v", deferUntil)
+		}
+	})
+
 	t.Run("expired_dated_defer_claimable", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Claimable after snooze", "--type", "task", "--labels", "wake-claim-test")
 		bdDefer(t, bd, dir, issue.ID, "--until", "2020-01-01")

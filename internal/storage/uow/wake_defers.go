@@ -3,9 +3,11 @@ package uow
 import (
 	"fmt"
 	"os"
+	"sync"
 
 	"context"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
@@ -20,24 +22,53 @@ import (
 // that rolls back — a sweep inside those spans would be silently discarded.
 // Sequencing is what matters: sweep first, then read, and the read sees the
 // woken rows.
+//
+// A WISP-only wake takes a third path: wisp tables are dolt_ignored, so the
+// wake-message form (DOLT_COMMIT) would find nothing to commit and the
+// transaction would roll back, silently discarding the wisp wakes — every
+// subsequent ready read would then redo and re-discard the same writes
+// forever. Those wakes persist via uw.Commit(ctx, "") — the ephemeral
+// plain-COMMIT form RunTxEphemeral keeps for dolt_ignored state (bd-lrgn1) —
+// issued inside the work func; a serialization failure from it surfaces as
+// the closure's error and retries against a fresh unit of work, exactly like
+// a commit issued by RunTxResult itself.
 func WakeExpiredDefers(ctx context.Context, p UnitOfWorkProvider) (int, error) {
 	return RunTxResult(ctx, p, func(ctx context.Context, uw UnitOfWork) (int, string, error) {
-		n, err := uw.IssueUseCase().WakeExpiredDefers(ctx)
+		issues, wisps, err := uw.IssueUseCase().WakeExpiredDefers(ctx)
 		if err != nil {
 			return 0, "", err
 		}
-		if n == 0 {
-			return 0, "", nil
+		if issues > 0 {
+			return issues, storageissueops.WakeDefersCommitMessage(issues), nil
 		}
-		return n, storageissueops.WakeDefersCommitMessage(n), nil
+		if wisps > 0 {
+			if err := uw.Commit(ctx, ""); err != nil {
+				return 0, "", err
+			}
+		}
+		return 0, "", nil
 	})
 }
 
+// advisoryAccessDeniedOnce rate-limits the access-denied advisory to one
+// warning per process: a read-only-privileged SQL user hits it on every
+// ready-front read, and repeating a configuration fact on each `bd ready`
+// is noise, not signal.
+var advisoryAccessDeniedOnce sync.Once
+
 // WakeExpiredDefersAdvisory is WakeExpiredDefers under the read paths'
 // contract: a ready listing must never fail because the sweep could not run,
-// so errors are reduced to a stderr warning.
+// so errors are reduced to a stderr warning (warn-once for access-denied).
 func WakeExpiredDefersAdvisory(ctx context.Context, p UnitOfWorkProvider) {
-	if _, err := WakeExpiredDefers(ctx, p); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
+	_, err := WakeExpiredDefers(ctx, p)
+	if err == nil {
+		return
 	}
+	if dberrors.IsAccessDenied(err) {
+		advisoryAccessDeniedOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped (SQL user lacks write privileges; expired defers will not auto-wake from this client): %v\n", err)
+		})
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: defer-wake sweep skipped: %v\n", err)
 }

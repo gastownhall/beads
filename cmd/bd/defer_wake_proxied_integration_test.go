@@ -84,6 +84,34 @@ func TestProxiedServerDeferAutoWake(t *testing.T) {
 		}
 	})
 
+	t.Run("expired_dated_defer_wakes_wisp", func(t *testing.T) {
+		// The uow stack's wisp seam: wisp tables are dolt_ignored, so a
+		// wisp-only sweep mints no wake commit and must persist through the
+		// ephemeral plain-COMMIT form instead — the path that once rolled
+		// wisp wakes back, leaving expired wisp defers deferred forever in
+		// proxied/serve mode while embedded mode woke them (parity break).
+		id := bdProxiedCreateSilent(t, bd, p.dir, "Wisp snooze proxied", "--type", "task", "--ephemeral", "--wisp-type", "heartbeat")
+		if out, err := bdProxiedRun(t, bd, p.dir, "defer", id, "--until", "2020-01-01"); err != nil {
+			t.Fatalf("defer wisp: %v\n%s", err, out)
+		}
+		status, _ := showState(t, id)
+		if status != string(types.StatusDeferred) {
+			t.Fatalf("precondition: wisp status = %s, want deferred", status)
+		}
+
+		if out, err := bdProxiedRun(t, bd, p.dir, "ready", "--json"); err != nil {
+			t.Fatalf("ready: %v\n%s", err, out)
+		}
+
+		status, deferUntil := showState(t, id)
+		if status != string(types.StatusOpen) {
+			t.Errorf("wisp status = %s, want open after wake (parity break vs embedded)", status)
+		}
+		if deferUntil != nil {
+			t.Errorf("wisp defer_until should be cleared after wake, got %v", deferUntil)
+		}
+	})
+
 	t.Run("dateless_defer_never_wakes", func(t *testing.T) {
 		a := bdProxiedCreate(t, bd, p.dir, "Indefinite icebox proxied", "--type", "task")
 		if out, err := bdProxiedRun(t, bd, p.dir, "defer", a.ID); err != nil {
