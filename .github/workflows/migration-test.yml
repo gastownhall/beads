@@ -8,6 +8,8 @@ on:
       - 'website/**'
   push:
     tags: ['v*']
+  schedule:
+    - cron: '17 3 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -21,6 +23,7 @@ env:
 
 jobs:
   historical-upgrades:
+    if: github.event_name != 'schedule'
     name: Historical ${{ matrix.version }} → candidate
     # v0.55.4 is dynamically linked against the ICU version shipped here.
     # Pin the image so a runner alias update cannot invalidate the fixture.
@@ -58,6 +61,8 @@ jobs:
             cache-identity: v1.1.2-a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -112,3 +117,89 @@ jobs:
           HISTORICAL_VERSION: ${{ matrix.version }}
         run: |
           ./scripts/migration-test/run.sh --version "$HISTORICAL_VERSION"
+
+  exhaustive-census:
+    name: Regenerate exhaustive schema census
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Restore independent census-1 cache lane
+        id: census-cache-1-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/beads-schema-census-cache/census-1
+          key: schema-census-lane-1-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            schema-census-lane-1-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-
+
+      - name: Restore independent census-2 cache lane
+        id: census-cache-2-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/beads-schema-census-cache/census-2
+          key: schema-census-lane-2-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            schema-census-lane-2-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-
+
+      - name: Regenerate and compare sealed census
+        env:
+          CENSUS_CACHE: ${{ runner.temp }}/beads-schema-census-cache
+          CENSUS_OUTPUT: ${{ runner.temp }}/beads-schema-census-output
+          # Two 155-minute caps leave time in this 360-minute job to upload
+          # evidence and save only a cache whose integrity checks completed.
+          CENSUS_GENERATE_TIMEOUT: 155m
+        run: |
+          ./scripts/migration-test/census/run-container.sh
+
+      - name: Check independent cache lanes
+        id: census-integrity
+        if: always()
+        env:
+          CENSUS_OUTPUT: ${{ runner.temp }}/beads-schema-census-output
+        run: |
+          test -f "$CENSUS_OUTPUT/census-1-cache-safe" && echo 'lane_1=true' >> "$GITHUB_OUTPUT" || echo 'lane_1=false' >> "$GITHUB_OUTPUT"
+          test -f "$CENSUS_OUTPUT/census-2-cache-safe" && echo 'lane_2=true' >> "$GITHUB_OUTPUT" || echo 'lane_2=false' >> "$GITHUB_OUTPUT"
+
+      - name: Save independent census-1 cache lane
+        if: always() && steps.census-integrity.outputs.lane_1 == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/beads-schema-census-cache/census-1
+          key: schema-census-lane-1-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save independent census-2 cache lane
+        if: always() && steps.census-integrity.outputs.lane_2 == 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/beads-schema-census-cache/census-2
+          key: schema-census-lane-2-v4-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/migration-test/release-catalog.json', 'scripts/migration-test/census/Dockerfile', 'scripts/migration-test/census/*.go', 'go.mod', 'go.sum') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Upload sealed census outputs
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runtime-schema-census-sealed-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/beads-schema-census-output/runtime-schema-census.json.gz
+            ${{ runner.temp }}/beads-schema-census-output/runtime-schema-routes.json
+            ${{ runner.temp }}/beads-schema-census-output/runtime-schema-routes.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload validated census failure evidence
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: runtime-schema-census-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/beads-schema-census-output/census-1.json
+            ${{ runner.temp }}/beads-schema-census-output/census-2.json
+            ${{ runner.temp }}/beads-schema-census-output/census-1-diagnostic.json
+            ${{ runner.temp }}/beads-schema-census-output/census-2-diagnostic.json
+          if-no-files-found: warn
+          retention-days: 14
