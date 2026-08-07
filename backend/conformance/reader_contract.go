@@ -605,13 +605,25 @@ func RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder(t *testing.T, ct
 // side of it and IDFilter is not. The DROPPED half — and the refusal that
 // replaced the silent widening — is
 // RunReaderListReadyFlagRefusesAFilterItCannotCarry.
+//
+// THREE READY IDS, not two, and the reason is the regression's other half. With
+// only bd-1 and bd-10 in the set, natural-numeric order, lexical order and the
+// order the query returns them in all read the same, so an arm that skipped the
+// display order entirely still answered correctly and the case could only see
+// the missing TRIM. bd-1 / bd-2 / bd-10 separates them: natural order is
+// 1, 2, 10, lexical is 1, 10, 2, and the seed order below is neither. `--sort
+// id` is the sort SQL cannot express, so on this arm as on the other one the
+// epilogue is the only thing that can produce it (ListRequest.SortBy, "the
+// display order is applied to the page after the query rather than inside it").
 func RunReaderListReadyFlagAnswersTheBlockerAwareSet(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope := readerLabel(fixture, "lsready")
 	blocker := readerID(fixture, "lsready", "1")
-	blocked := readerID(fixture, "lsready", "2")
+	alsoFree := readerID(fixture, "lsready", "2")
+	blocked := readerID(fixture, "lsready", "3")
 	free := readerID(fixture, "lsready", "10")
-	for _, id := range []string{blocker, blocked, free} {
+	// Seeded in an order that is neither the natural order nor the lexical one.
+	for _, id := range []string{free, blocked, alsoFree, blocker} {
 		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, scope))
 	}
 	if err := fixture.AddDependency(ctx, &types.Dependency{
@@ -626,7 +638,7 @@ func RunReaderListReadyFlagAnswersTheBlockerAwareSet(t *testing.T, ctx context.C
 	if err != nil {
 		t.Fatalf("List --ready: %v", err)
 	}
-	assertReaderPageIDs(t, "List --ready", page, []string{blocker, free})
+	assertReaderPageIDs(t, "List --ready --sort id", page, []string{blocker, alsoFree, free})
 
 	// The same arm, under a sort the database cannot express and a limit: the
 	// epilogue has to sort AND trim here, and report the truncation.

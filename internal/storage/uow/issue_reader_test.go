@@ -17,6 +17,15 @@ import (
 // only one of them cannot see the failure this file exists for: an epilogue
 // (sort, then trim) applied on one implementation's branch and not the other's.
 // So these run one request through both and compare.
+//
+// WHAT MOVED TO THE CONTRACT. The --ready arm's display order is now pinned at
+// all three backends by conformance.RunReaderListReadyFlagAnswersTheBlockerAware-
+// Set, against real rows; so is the never-nil page, by
+// RunReaderListEmptyPageIsWellFormed. What stays here is the thing no
+// single-implementation suite can see: both bodies answering the SAME request
+// from the SAME stub rows in the SAME order, with the database taken out of the
+// comparison. A contract leg asserts one implementation against one engine's
+// row order; this asserts the two implementations against each other.
 
 // readerRows is the fixture: three ids whose natural-numeric order (bd-1, bd-2,
 // bd-10) differs from both their input order and their lexical order, so an
@@ -150,29 +159,5 @@ func TestBothReaderImplementationsAgreeOnTheListEpilogue(t *testing.T) {
 				t.Errorf("HasMore: uow = %v, store = %v; the trim removed a row on both", fromUOW.HasMore, fromStore.HasMore)
 			}
 		})
-	}
-}
-
-// TestReaderPagesAreNeverNil: an empty page is an empty array on every surface
-// that serializes one, so no caller has to tell null from empty to learn that
-// nothing matched.
-func TestReaderPagesAreNeverNil(t *testing.T) {
-	provider := &mockUnitOfWorkProvider{uows: []*mockUnitOfWork{{
-		issueUseCase:  readerIssues{},
-		configUseCase: readerConfig{},
-	}}}
-	rd, err := NewIssueReader(provider)
-	if err != nil {
-		t.Fatalf("NewIssueReader: %v", err)
-	}
-	page, err := rd.List(context.Background(), publicops.ListRequest{})
-	if err != nil {
-		t.Fatalf("List: %v", err)
-	}
-	if page.Items == nil {
-		t.Error("List returned a nil Items on an empty result")
-	}
-	if page.HasMore {
-		t.Error("HasMore is true on an empty page")
 	}
 }
