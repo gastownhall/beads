@@ -40,6 +40,11 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 		return issueops.ClaimNextResult{}, err
 	}
 
+	// Wake expired dated defers before selecting, so a bead whose snooze just
+	// ended is claimable the moment its date passes. Advisory, in a write tx
+	// of its own: a failed sweep must not cost the claim.
+	c.store.wakeExpiredDefers(ctx)
+
 	var result issueops.ClaimNextResult
 	err = c.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
 		attempt, tables, err := storageissueops.ExecuteClaimNext(ctx, tx, request.Actor, filter)

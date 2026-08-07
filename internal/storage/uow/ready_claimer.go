@@ -52,6 +52,11 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request publicops.ClaimNex
 	if err != nil {
 		return publicops.ClaimNextResult{}, err
 	}
+	// Wake expired dated defers before selecting, so a bead whose snooze just
+	// ended is claimable the moment its date passes rather than after some
+	// other session lists the front. Advisory, in a UOW of its own: a failed
+	// sweep must not cost the claim.
+	WakeExpiredDefersAdvisory(ctx, c.provider)
 	return RunTxResult(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ClaimNextResult, string, error) {
 		claimed, err := ClaimNextInUOW(ctx, uw, request.Actor, filter)
 		if err != nil {

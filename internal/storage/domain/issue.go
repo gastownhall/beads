@@ -79,6 +79,7 @@ type IssueSQLRepository interface {
 	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (int, error)
 }
 
 type CloseRowParams struct {
@@ -298,6 +299,7 @@ type IssueUseCase interface {
 	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
 	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (int, error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -1858,6 +1860,17 @@ func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) erro
 		return fmt.Errorf("Heartbeat: %w", err)
 	}
 	return nil
+}
+
+// WakeExpiredDefers returns every expired DATED defer to open (see
+// issueops.WakeExpiredDefersInTx) and reports how many permanent issues woke.
+// The caller owns Dolt versioning: commit with a wake message iff n > 0.
+func (u *issueUseCaseImpl) WakeExpiredDefers(ctx context.Context) (int, error) {
+	n, err := u.issueRepo.WakeExpiredDefers(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("WakeExpiredDefers: %w", err)
+	}
+	return n, nil
 }
 
 func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

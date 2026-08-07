@@ -44,6 +44,11 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 		return issueops.ClaimNextResult{}, err
 	}
 
+	// Wake expired dated defers before selecting, so a bead whose snooze just
+	// ended is claimable the moment its date passes. Advisory, in a write tx
+	// of its own: a failed sweep must not cost the claim.
+	c.store.wakeExpiredDefers(ctx)
+
 	// The write and its verify sit under withCircuitWrite so terminal circuit
 	// success is recorded once at the boundary, only after verifiedReadyClaim
 	// returns nil — matching the store's own ClaimReadyIssue. write is defined

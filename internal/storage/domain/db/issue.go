@@ -1157,6 +1157,19 @@ func (r *issueSQLRepositoryImpl) HeartbeatIssue(ctx context.Context, id, actor s
 	return nil
 }
 
+// WakeExpiredDefers runs the shared lazy defer-wake body against this
+// repository's runner (the same DBTX-shaped seam ReclaimExpiredLeases uses)
+// and reports how many PERMANENT issues woke — the number that decides whether
+// the transaction's owner mints a dolt commit. Wisp wakes ride along silently:
+// wisp tables are dolt_ignored.
+func (r *issueSQLRepositoryImpl) WakeExpiredDefers(ctx context.Context) (int, error) {
+	out, err := issueops.WakeExpiredDefersInTx(ctx, r.runner)
+	if err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.WakeExpiredDefers: %w", err)
+	}
+	return len(out.Issues), nil
+}
+
 func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {
 	cutoff := time.Now().UTC().Add(-olderThan)
 	out, err := issueops.ReclaimExpiredLeasesInTx(ctx, r.runner, cutoff, filter, actor)

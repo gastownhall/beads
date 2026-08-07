@@ -63,6 +63,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   disable the fallback everywhere). Explicit IDs and `bd show --current` are
   unaffected.
 
+- **A dated defer now means what it says: the issue returns to the ready front
+  when the date passes** (bd-i8qx8). `bd defer --until` and `bd update --defer`
+  set `status=deferred` plus a `defer_until` timestamp, but nothing ever
+  flipped the status back — so an expired defer stayed invisible to `bd ready`
+  forever until a human ran `bd undefer`. One deployment measured 241 issues
+  (including P1s) silently dark this way, regenerating daily from
+  correct-looking automation.
+
+  Ready-front reads and claims (`bd ready`, `bd ready --claim`, `bd list
+  --ready`, and the serve/proxied Reader roles) now run a lazy wake sweep
+  first: every issue (and wisp) with `status=deferred` and `defer_until <=
+  now` flips to `status=open, defer_until=NULL` — byte-identical to what `bd
+  undefer` writes, so a later dateless re-defer cannot inherit a stale past
+  date. Each wake records a `status_changed` event (actor `bd-defer-wake`).
+
+  What does NOT change: a **dateless** defer (`bd defer` with no `--until`,
+  `defer_until` NULL) is the indefinite icebox and never auto-wakes — `bd
+  undefer` remains its only exit. The sweep is a no-op when nothing has
+  expired (no dolt commit is minted), advisory by contract (a ready listing
+  never fails because the sweep could not run — strict `--readonly` skips it),
+  and identical in embedded, server, and proxied-server modes.
 
 - **`bd delete --cascade` no longer marks LIVE issues as deleted in other
   issues' text** (bd-x82so). When the deletion named a wisp, the set used to

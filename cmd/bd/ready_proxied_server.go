@@ -45,6 +45,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return runReadyProxiedClaim(ctx, in)
 	}
 
+	// Wake expired dated defers before the read below. The unit of work this
+	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
+	// in a committing UOW of its own first; the claim route above gets the
+	// same sweep from its role (uow.readyClaimer.ClaimNext).
+	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("open unit of work: %v", err)

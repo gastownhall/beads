@@ -50,6 +50,10 @@ var _ publicops.Reader = (*issueReader)(nil)
 // detached rollback, so a caller that hangs up mid-response cannot burn a
 // pinned session.
 func (r *issueReader) Ready(ctx context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
+	// Wake expired dated defers before reading, in a write UOW of its own —
+	// this read's span never commits (see the doc comment above), so the
+	// sweep cannot live inside it.
+	WakeExpiredDefersAdvisory(ctx, r.provider)
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		filter, err := workapi.BuildReadyFilter(req)
 		if err != nil {
@@ -88,6 +92,12 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 	// refusal for the callers that are not the CLI.
 	if req.MaxRows != 0 {
 		return publicops.IssuePage{}, &publicops.ErrUnsupported{Op: "Reader.List(MaxRows)", Backend: listBackend}
+	}
+	// A --ready listing is the ready front by another door, so it wakes
+	// expired dated defers the same way Ready does — before the read span,
+	// which never commits.
+	if req.ReadyFlag {
+		WakeExpiredDefersAdvisory(ctx, r.provider)
 	}
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		// The config source comes from the unit of work this call already
