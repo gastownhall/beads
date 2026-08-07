@@ -2283,11 +2283,39 @@ func issueOperationsTypeRequest(id string, issueType publicops.IssueType) public
 // It is a different line from the history promise in
 // RunIssueOperationsUpdateProvenanceLabelsHistory: that one decides whether an
 // entry is recorded, this one decides what the result says.
+//
+// THE TWO BACKEND SHAPES NEED OPPOSITE PATCHES, which is why this case carries
+// both. The two stores claim FIRST and then diff the patch against the row the
+// claim left, so a patch that RESTORES the pre-claim state is a genuine write
+// there and would report Changed with the claim accounting removed entirely.
+// The unit-of-work backend applies one spec and compares the post-state to the
+// PRE-claim snapshot, so a patch that RESTATES the post-claim state is the one
+// it would report Changed for anyway. Each patch isolates the claim on the
+// backends the other one masks.
+//
+// Both rows are seeded WITH a started_at. A claim stamps that column on the
+// first transition into in_progress, and a stamp landing on an empty column is
+// a field difference of its own — enough to report Changed on every backend
+// with the claim accounting gone. The precondition is read back from the raw
+// row rather than assumed, because a seed hook that dropped it would leave this
+// case unable to fail on its own claim.
 func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
-	id := fixture.IssuePrefix + "-claimrestore"
-	seedClosePolicyIssue(t, ctx, fixture, id, publicops.CreateRequest{})
+	startedAt := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	restoringID := fixture.IssuePrefix + "-claimrestore"
+	restatingID := fixture.IssuePrefix + "-claimrestate"
+	for _, id := range []string{restoringID, restatingID} {
+		if err := fixture.CreateIssue(ctx, &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+			StartedAt: &startedAt,
+		}, "seed"); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+		assertIssueOperationsScalarValue(t, ctx, fixture, "seeded started_at for "+id,
+			startedAt.Format(issueOperationsStoredTimeLayout),
+			"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{id})
+	}
 
 	// Open and unassigned is the seeded state, so this patch restores it.
 	restoring := publicops.IssuePatch{
@@ -2295,51 +2323,74 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 		Assignee: publicops.Field[string]{Set: true, Value: ""},
 	}
 
-	control, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: id, Patch: restoring})
+	control, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Patch: restoring})
 	if err != nil {
-		t.Fatalf("restating %s's status and assignee: %v", id, err)
+		t.Fatalf("restating %s's status and assignee: %v", restoringID, err)
 	}
 	if control.Changed {
-		t.Fatalf("restating %s's status and assignee reported Changed = true, want a no-op: the claim below has to be the only difference", id)
+		t.Fatalf("restating %s's status and assignee reported Changed = true, want a no-op: the claim below has to be the only difference", restoringID)
 	}
 
 	claiming, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "claimant", IssueID: id, Claim: true, Patch: restoring,
+		Actor: "claimant", IssueID: restoringID, Claim: true, Patch: restoring,
 	})
 	if err != nil {
-		t.Fatalf("claiming update of %s with a restoring patch: %v", id, err)
+		t.Fatalf("claiming update of %s with a restoring patch: %v", restoringID, err)
 	}
 	if !claiming.Changed {
-		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", id)
+		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restoringID)
 	}
 	if claiming.Issue.Status != types.StatusOpen || claiming.Issue.Assignee != "" {
 		t.Errorf("claiming update of %s = status %q assignee %q, want the restored open/unassigned state",
-			id, claiming.Issue.Status, claiming.Issue.Assignee)
+			restoringID, claiming.Issue.Status, claiming.Issue.Assignee)
 	}
 	// The row says the same thing, which is what makes Changed above an answer
 	// about the claim rather than about a field the patch failed to restore.
-	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, id, "", types.StatusOpen)
+	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, restoringID, "", types.StatusOpen)
+	assertIssueOperationsScalarValue(t, ctx, fixture, "started_at after the restoring claim",
+		startedAt.Format(issueOperationsStoredTimeLayout),
+		"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{restoringID})
 
-	// The other edge. A first claim grants the lease and counts.
-	granted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: id, Claim: true})
+	// The mirror shape. There is no control for it — the same patch without a
+	// claim moves an unclaimed row for real — so it leans on the control above
+	// for the "reports Changed for everything" direction and carries only the
+	// claim's own arm.
+	restating := publicops.IssuePatch{
+		Status:   publicops.Field[publicops.Status]{Set: true, Value: types.StatusInProgress},
+		Assignee: publicops.Field[string]{Set: true, Value: "claimant"},
+	}
+	restated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "claimant", IssueID: restatingID, Claim: true, Patch: restating,
+	})
 	if err != nil {
-		t.Fatalf("claim %s: %v", id, err)
+		t.Fatalf("claiming update of %s with a restating patch: %v", restatingID, err)
+	}
+	if !restated.Changed {
+		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restatingID)
+	}
+	assertLiveAssignee(t, ctx, fixture, restatingID, "claimant")
+
+	// The other edge, on the row the first shape left open and unassigned. A
+	// first claim grants the lease and counts.
+	granted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Claim: true})
+	if err != nil {
+		t.Fatalf("claim %s: %v", restoringID, err)
 	}
 	if !granted.Changed {
-		t.Errorf("claiming unclaimed %s reported Changed = false, want a committed claim", id)
+		t.Errorf("claiming unclaimed %s reported Changed = false, want a committed claim", restoringID)
 	}
-	assertLiveAssignee(t, ctx, fixture, id, "claimant")
+	assertLiveAssignee(t, ctx, fixture, restoringID, "claimant")
 
 	// The same actor re-claiming its own live claim grants nothing, so it does
 	// not count.
-	regranted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: id, Claim: true})
+	regranted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Claim: true})
 	if err != nil {
-		t.Fatalf("re-claim %s: %v", id, err)
+		t.Fatalf("re-claim %s: %v", restoringID, err)
 	}
 	if regranted.Changed {
-		t.Errorf("re-claiming %s as its own holder reported Changed = true, want a no-op", id)
+		t.Errorf("re-claiming %s as its own holder reported Changed = true, want a no-op", restoringID)
 	}
-	assertLiveAssignee(t, ctx, fixture, id, "claimant")
+	assertLiveAssignee(t, ctx, fixture, restoringID, "claimant")
 }
 
 // issueOperationsStoredTimeLayout is how Dolt renders a DATETIME cast to CHAR.
