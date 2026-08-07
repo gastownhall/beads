@@ -7,7 +7,9 @@ new accessor. Never append a method to an existing role.** That rule is why
 What the rule does not say is what a new role COSTS. This page is the measured
 answer, derived from `issueops.Counter` — the first role added under the rule,
 and the one every later role commit follows. Nothing here is aspirational: each
-item names a file that exists in that commit.
+item names a file that exists in that commit. The last section is for the rarer
+case: a capability that does not belong in `issueops` at all, which
+`memoryops` was the first of.
 
 ## Is it a role at all?
 
@@ -278,3 +280,123 @@ MEANS, and the parts every later reader trusts.
 - **Three wirings are not three votes.** dolt and embeddeddolt share step 3.
   Say "two independent bodies plus an engine check" in the commit message, not
   "three backends agree".
+
+## The second namespace
+
+`memoryops.Memories` is the first role in a leaf that is NOT `issueops`: the
+`kv.memory.*` plane behind `bd remember`, `bd recall`, `bd forget`,
+`bd memories` and `bd prime`'s injection. Steps 1-11 transferred without
+argument — same accessor on `storage.Storage`, same two decorators declared
+rather than inherited, same three wirings over two independent bodies. What
+follows is only where the second namespace had to DECIDE instead of copy,
+because that is the list a third one inherits, and each of these reads like a
+convention until you notice it was situational.
+
+**Alias the sentinels; do not mint a second vocabulary.** `memoryops/errors.go`
+is one line of declaration — `var ErrValidation = issueops.ErrValidation`
+(:16) — and the IDENTITY is the entire point. `errors.Is` against that one
+value is what the HTTP problem classifier, `cmd/bd`'s error handling and every
+conformance contract already do. A `memoryops`-flavored twin would be a
+different value meaning the same thing, so all of those sites would have to
+match both forever; and the cost is not the double-match, it is the site that
+adds only the first arm and classifies a validation refusal as an internal
+error. Re-exporting rather than telling callers to reach through `issueops` is
+the other half: code holding only `Memories` can classify a refusal without
+knowing the issue package exists.
+
+That import is the leaf's only non-stdlib one, and it makes step 1's rule
+NARROWER here rather than wider — a memory is a string under a string key, so
+nothing in `internal/types` is needed and importing it would invite
+issue-shaped types into a plane that has none. Say that in the package doc,
+along with the fact that `internal/types` still arrives transitively through
+`issueops` (`memoryops/doc.go:27-35`): it looks like a dependency, it is an
+artifact of the alias, and the obvious "fix" for it is to copy the sentinel.
+
+The open question is a THIRD namespace's to answer, not to inherit. Two
+namespaces sharing one vocabulary by alias is right. At three, the shared
+sentinels probably want their own tiny leaf that all of them re-export from —
+and that move is CHEAP BEFORE the third namespace exists and expensive after,
+because by then every `errors.Is` site in the tree points at the `issueops`
+value and either the new leaf aliases backwards or every site moves at once.
+
+**No `.golangci.yml` entry, and that is not an omission.** `memoryops` adds
+nothing to the `cmd-bd-role-constructors` deny list because there is nothing to
+deny: the role needs one transaction for probe-and-act, so step 3 moved DOWN
+into `internal/storage/memoryops`, where every function takes a `*sql.Tx` that
+no front door holds (`internal/storage/memoryops/memories.go:15-18`). Step 3's
+address is what decides the entry, so a namespace of tx-level bodies has no
+entries at all, and the absence has to be readable as a decision rather than as
+a step someone skipped.
+
+The test: **does step 3 have an exported constructor returning the role
+interface, in a package a `cmd/bd` file can import?**
+`internal/workapi/store<role>` does, so it gets an entry. A `…InTx` function
+does not. What the test is NOT is "does the namespace have a package below the
+role" — `internal/memoryapi` is exactly that, holds `DeriveKey`, the two
+refusals and the search filter, and is deliberately importable from `cmd/bd`
+(`internal/memoryapi/memoryapi.go:7-13`),
+because the `bd remember` front door has to derive a key to recognize the
+bare-slug case before it knows which method to call. Denying the meaning layer
+would be denying step 2, which every role depends on being reachable.
+Constructors are the boundary; meaning functions are not.
+
+**A miss is a RESULT FIELD, not `ErrNotFound`, because of a fact about the
+substrate.** `RecallResult.Found` and `ForgetResult.Found` carry the miss and
+the front doors translate — the CLI to its SilentExit contract, HTTP to its 404
+(`memoryops/errors.go:18-29`). The reason is checkable and it is not taste: the
+config table this plane rides in CANNOT DISTINGUISH AN ABSENT ROW FROM A ROW
+STORED AS THE EMPTY STRING, which `issueops/workspaceconfig.go:42-46` already
+states for settings over the same seam. A role answering `ErrNotFound` would be
+minting an error out of a distinction it cannot see, and the first out-of-band
+empty write turns that error into a lie. The honest, weaker promise is what
+shipped: `Found` is `Value != ""`, an empty row and no row are the same answer,
+and `List` still enumerates the empty row because its KEY exists — the one way
+a caller can tell them apart, stated at `memoryops/memories.go:63-72` and
+pinned by a case.
+
+The next namespace should re-run the check rather than copy the conclusion: ask
+whether YOUR seam can tell absent from zero-valued. If it can — a NOT NULL
+column, a distinct id, a row a delete actually removes — then `ErrNotFound` is
+honest and a result-carried `Found` is just a second spelling of it. The shape
+follows the substrate, and the substrate is the thing to cite.
+
+**One promise the contract declares UNPINNABLE rather than faking.** Every
+implementation promises that the existence probe and the act it qualifies
+happen in ONE transaction; that is why step 3 moved down, and it is what makes
+`Replaced` and the value `bd forget` prints true statements instead of hopeful
+ones. The contract does not test it, and SAYS SO, in the file header beside the
+vote count (`backend/conformance/memories_contract.go:51-57`).
+
+The promise is structural, not black-box observable. A single-threaded case
+cannot falsify it — one transaction and two produce identical answers when
+nothing else is writing — and a concurrent case would be flaky at three
+engines, which buys a red suite people learn to re-run rather than a guarantee.
+What pins it instead is the SHAPE of the bodies: there is no two-call
+composition to regress into without deleting the `…InTx` functions. A green
+single-threaded case named after the promise would have been strictly worse
+than nothing, because a reviewer greps for the promise, finds a test named for
+it, and stops looking. So state the promise in the contract's coverage
+paragraph, name the mechanism that actually holds it, and name the probe that
+would upgrade it (here: a transaction-counting seam on the fixture kit). Do not
+fake it with sleeps.
+
+**And one trap the second namespace hit that a third will.**
+`memoryops.Memories.List` and `issueops.Reader.List` are ONE METHOD NAME WITH
+TWO SIGNATURES, so no single Go type satisfies both, and the shared sentinel
+that stood in for every role in both `role_accessor_decorator_test.go` files
+could not implement the new one. Each file needed a second sentinel type
+(`internal/storage/role_accessor_decorator_test.go:302`,
+`internal/telemetry/role_accessor_decorator_test.go:252`). That part is
+mechanical and the compiler drives it.
+
+What is not mechanical is what the split does to the telemetry table, whose
+rows fail on `surface == test.inner` — the accessor that recurses
+(`return s.Unwrap().Memories()`) instead of wrapping, dropping every span and
+timing on the role. Every row compared against one implied sentinel, so a
+memories row written the same way would have compared the memory surface
+against the ISSUE sentinel: a value it can never equal, wrapped or not. Green
+forever, including against the exact regression the table exists for. The rows
+now carry a per-row `inner` comparand naming the surface each one must not be
+(`internal/telemetry/role_accessor_decorator_test.go:279-282`). **A shared test
+fixture a new namespace cannot satisfy is a signal: the row you add beside it
+may be a row that cannot fail.**
