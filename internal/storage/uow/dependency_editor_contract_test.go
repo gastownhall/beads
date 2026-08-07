@@ -50,6 +50,10 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "RemovesOnlyTheNamedEdge", run: conformance.RunDependencyEditorRemovesOnlyTheNamedEdge},
 		{name: "SkipPerEdgeCycleCheckDropsOnlyTheProbe", run: conformance.RunDependencyEditorSkipPerEdgeCycleCheckDropsOnlyTheProbe},
 		{name: "RecordsOneHistoryEntryForAMixedPlaneRequest", run: conformance.RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest},
+		{name: "WritesTheTargetIntoItsTypedColumn", run: conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn},
+		{name: "RefusesBlockingEdgeAcrossAWispHierarchy", run: conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy},
+		{name: "RefusesACycleThroughAParentChildHop", run: conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop},
+		{name: "RefusesASamePlaneEdgeClosingACrossPlaneCycle", run: conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

@@ -169,6 +169,30 @@ func TestDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *testing.
 	conformance.RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t, ctx, fixture)
 }
 
+func TestDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "tcol")
+	defer cleanup()
+	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, ctx, fixture)
+}
+
+func TestDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "whier")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t, ctx, fixture)
+}
+
+func TestDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "pchop")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop(t, ctx, fixture)
+}
+
+func TestDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "splane")
+	defer cleanup()
+	conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t, ctx, fixture)
+}
+
 // newDoltDependencyEditorFixture composes the backend's role fixture kit with
 // the accessor under test. Every hook but the accessor comes from the kit, so
 // the seeding and scalar-query plumbing stays identical to the other roles'.

@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -1113,6 +1114,317 @@ func RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *testing.T
 		"a request spanning both planes is one transaction with one versioned half, so it is ONE history entry")
 }
 
+// RunDependencyEditorWritesTheTargetIntoItsTypedColumn pins the target
+// CLASSIFICATION (issueops.ClassifyDepTarget) that dependencyeditor.go:150-156
+// only describes from the outside. A dependency row holds its target in one of
+// three typed columns — depends_on_issue_id, depends_on_wisp_id,
+// depends_on_external — and which one it is is not cosmetic: only
+// depends_on_issue_id carries fk_dep_issue_target into issues(id)
+// (internal/storage/schema/cli_migrations.go:141,155,168), so a wisp or a
+// foreign id filed there is a write that fails, and a local issue filed
+// anywhere else is an edge no foreign key protects from a later delete.
+//
+// EVERY OTHER CASE IN THIS FILE IS BLIND TO THIS. They read the target through
+// COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external), which
+// resolves to the same id whichever column holds it — so a body that filed a
+// wisp target as external passes all of them and fails only here.
+//
+// Both source planes are exercised because routing the SOURCE (which table the
+// row lands in) and classifying the TARGET (which column inside it) are
+// independent decisions, and a wisp-sourced edge is where they are easiest to
+// conflate.
+func RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	issue := fixture.IssuePrefix + "-tcol-issue"
+	wisp := fixture.IssuePrefix + "-tcol-wisp"
+	issueTarget := fixture.IssuePrefix + "-tcol-issuetgt"
+	wispTarget := fixture.IssuePrefix + "-tcol-wisptgt"
+	const external = "external:https://example.invalid/tracker/61"
+	const foreign = "othertcol-9001"
+	seedDependencyEditorIssue(t, ctx, fixture, issue)
+	seedDependencyEditorIssue(t, ctx, fixture, issueTarget)
+	seedDependencyEditorWisp(t, ctx, fixture, wisp)
+	seedDependencyEditorWisp(t, ctx, fixture, wispTarget)
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: issue, DependsOnID: issueTarget, Type: publicops.DepBlocks},
+			{IssueID: issue, DependsOnID: wispTarget, Type: publicops.DepRelated},
+			{IssueID: issue, DependsOnID: external, Type: publicops.DepRelated},
+			{IssueID: issue, DependsOnID: foreign, Type: publicops.DepRelated},
+			{IssueID: wisp, DependsOnID: wispTarget, Type: publicops.DepBlocks},
+			{IssueID: wisp, DependsOnID: issueTarget, Type: publicops.DepRelated},
+		},
+	}); err != nil {
+		t.Fatalf("AddDependencies over the four target classes: %v", err)
+	}
+
+	for _, want := range []struct {
+		table  string
+		source string
+		target string
+		column string
+		why    string
+	}{
+		{"dependencies", issue, issueTarget, "depends_on_issue_id",
+			"a local issue is the one target class the foreign key can hold"},
+		{"dependencies", issue, wispTarget, "depends_on_wisp_id",
+			"a wisp has no row in issues, so the issue-keyed column would fail its foreign key"},
+		{"dependencies", issue, external, "depends_on_external",
+			"an external: reference names something outside this database entirely"},
+		{"dependencies", issue, foreign, "depends_on_external",
+			"another repository's id lives in that rig's database, not this one"},
+		{"wisp_dependencies", wisp, wispTarget, "depends_on_wisp_id",
+			"the ephemeral plane classifies its targets by the same rule"},
+		{"wisp_dependencies", wisp, issueTarget, "depends_on_issue_id",
+			"a wisp-sourced edge onto a durable issue still files the target as an issue"},
+	} {
+		assertDependencyEditorTargetColumn(t, ctx, fixture, want.table, want.source, want.target, want.column, want.why)
+	}
+}
+
+// RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy is the EPHEMERAL
+// half of dependencyeditor.go:146-148.
+//
+// RunDependencyEditorRefusesBlockingEdgeAcrossItsOwnHierarchy seeds durable
+// issues, and the hierarchy walk it exercises reads a UNION of both dependency
+// tables. A body that read only the durable one passes that case and fails this
+// one, and the deadlock it lets through is real: a wisp gated on its own
+// ancestor never becomes ready, because the ancestor inherits the descendant's
+// blocked state.
+//
+// The last arm is the boundary the walk deliberately does not cross. It climbs
+// child → parent only, so two children of one wisp parent share a hierarchy
+// COMPONENT but not a hierarchy LINE, and an ordering edge between them stays
+// legal.
+func RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	parent := fixture.IssuePrefix + "-whier-parent"
+	child := fixture.IssuePrefix + "-whier-child"
+	sibling := fixture.IssuePrefix + "-whier-sibling"
+	for _, id := range []string{parent, child, sibling} {
+		seedDependencyEditorWisp(t, ctx, fixture, id)
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: child, DependsOnID: parent, Type: publicops.DepParentChild},
+			{IssueID: sibling, DependsOnID: parent, Type: publicops.DepParentChild},
+		},
+	}); err != nil {
+		t.Fatalf("seed the wisp hierarchy: %v", err)
+	}
+
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: parent, DependsOnID: child, Type: publicops.DepBlocks}},
+	})
+	var descendant *publicops.DependencyHierarchyConflictError
+	if !errors.As(err, &descendant) {
+		t.Fatalf("gating a wisp parent on its own child: error = %v, want *DependencyHierarchyConflictError", err)
+	}
+	if descendant.BlockerIsAncestor {
+		t.Errorf("conflict = %#v, want BlockerIsAncestor false: the blocker is the DESCENDANT here", descendant)
+	}
+
+	_, err = fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		// conditional-blocks rather than blocks: the guard covers the whole
+		// scheduling set, and this type has no constant in the public sample.
+		Edges: []publicops.DependencyEdge{{IssueID: child, DependsOnID: parent, Type: types.DepConditionalBlocks}},
+	})
+	var ancestor *publicops.DependencyHierarchyConflictError
+	if !errors.As(err, &ancestor) {
+		t.Fatalf("gating a wisp child on its own parent: error = %v, want *DependencyHierarchyConflictError", err)
+	}
+	if !ancestor.BlockerIsAncestor {
+		t.Errorf("conflict = %#v, want BlockerIsAncestor true", ancestor)
+	}
+	// The hierarchy refusal beats the type conflict the pair already carries:
+	// the pair has a parent-child row, and a body checking the existing edge
+	// first would report the wrong reason for the right refusal.
+	var conflict *publicops.DependencyTypeConflictError
+	if errors.As(err, &conflict) {
+		t.Errorf("error = %#v, want the hierarchy conflict: the deadlock is the reason, not the pre-existing row", conflict)
+	}
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: sibling, DependsOnID: child, Type: publicops.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("ordering two children of one wisp parent: %v — siblings share a component, not a line", err)
+	}
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "wisp_dependencies", sibling, child, string(publicops.DepBlocks), 1)
+}
+
+// RunDependencyEditorRefusesACycleThroughAParentChildHop pins the edge set the
+// ADD-TIME gate walks, which is NOT the set DetectCycles walks.
+// cycle_detector_contract.go says so from the other side — `parent-child` is
+// outside the report's walk, "which the ADD-time gate does walk" — and nothing
+// pinned the half that sentence asserts.
+//
+// It matters because a blocked parent propagates its blocked state to its
+// children, so a loop alternating `blocks` and `parent-child` hops is a
+// livelock in which nothing ever becomes ready, even though no `blocks` cycle
+// exists anywhere in it. Every other cycle case in this file closes a loop made
+// of blocking edges only, so a body narrowed to those passes all of them.
+//
+// Both closing orientations are asserted because they enter the gate
+// differently: a blocking closing edge is checked by the per-edge probe on its
+// own type, and a parent-child closing edge is one whose OWN type the walk has
+// to include to see the loop at all.
+//
+// The last arm is the false-positive guard, and it is the reason this is one
+// case rather than two: a body that treated every parent-child hop as a cycle
+// would pass both refusals and refuse the ordinary shape — a chain of tasks
+// each gating an epic it does not belong to — that the refusals exist to
+// distinguish from.
+func RunDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	// A closing BLOCKS edge: parentA -> childA -> parentB -> childB -> parentA,
+	// alternating parent-child and blocks hops.
+	parentA := fixture.IssuePrefix + "-pchop-b-pa"
+	parentB := fixture.IssuePrefix + "-pchop-b-pb"
+	childA := fixture.IssuePrefix + "-pchop-b-ca"
+	childB := fixture.IssuePrefix + "-pchop-b-cb"
+	for _, id := range []string{parentA, parentB, childA, childB} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: childA, DependsOnID: parentA, Type: publicops.DepParentChild},
+			{IssueID: childB, DependsOnID: parentB, Type: publicops.DepParentChild},
+			{IssueID: parentB, DependsOnID: childA, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the combined graph: %v", err)
+	}
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: parentA, DependsOnID: childB, Type: publicops.DepBlocks}},
+	})
+	if !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("a blocking edge closing a loop through parent-child hops: error = %v, want ErrDependencyCycle", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, parentA)
+
+	// The same loop, with the PARENT-CHILD edge as the one that closes it.
+	pcParentA := fixture.IssuePrefix + "-pchop-p-pa"
+	pcParentB := fixture.IssuePrefix + "-pchop-p-pb"
+	pcChildA := fixture.IssuePrefix + "-pchop-p-ca"
+	pcChildB := fixture.IssuePrefix + "-pchop-p-cb"
+	for _, id := range []string{pcParentA, pcParentB, pcChildA, pcChildB} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: pcChildA, DependsOnID: pcParentA, Type: publicops.DepParentChild},
+			{IssueID: pcParentB, DependsOnID: pcChildA, Type: publicops.DepBlocks},
+			{IssueID: pcParentA, DependsOnID: pcChildB, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the combined graph for the parent-child closing edge: %v", err)
+	}
+	_, err = fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: pcChildB, DependsOnID: pcParentB, Type: publicops.DepParentChild}},
+	})
+	if !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("a parent-child edge closing a loop through blocking hops: error = %v, want ErrDependencyCycle", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, pcChildB)
+
+	// The acyclic shape the two refusals must not also refuse: each child gates
+	// an epic it does not belong to, and belongs to the next one along.
+	const levels = 4
+	chain := make([]publicops.DependencyEdge, 0, 2*levels)
+	for i := 0; i < levels; i++ {
+		parent := fmt.Sprintf("%s-pchop-chain-p%d", fixture.IssuePrefix, i)
+		child := fmt.Sprintf("%s-pchop-chain-c%d", fixture.IssuePrefix, i)
+		seedDependencyEditorIssue(t, ctx, fixture, parent)
+		seedDependencyEditorIssue(t, ctx, fixture, child)
+		chain = append(chain, publicops.DependencyEdge{IssueID: parent, DependsOnID: child, Type: publicops.DepBlocks})
+		if i > 0 {
+			previous := fmt.Sprintf("%s-pchop-chain-c%d", fixture.IssuePrefix, i-1)
+			chain = append(chain, publicops.DependencyEdge{IssueID: previous, DependsOnID: parent, Type: publicops.DepParentChild})
+		}
+	}
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{Actor: "writer", Edges: chain}); err != nil {
+		t.Fatalf("an acyclic chain alternating blocking and parent-child hops: %v — the walk must not read every hierarchy as a loop", err)
+	}
+}
+
+// RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle is the half
+// of bd-xe27 that RunDependencyEditorRefusesCrossPlaneCycle cannot reach.
+//
+// There, the edge under test CROSSES the planes itself, so a gate that decided
+// to merge the two tables from the edge in front of it still refuses. Here both
+// endpoints of the new edge live in ONE plane and only the INTERIOR of the loop
+// leaves it — so the gate has to merge the tables unconditionally, from the
+// graph rather than from the edge. That distinction was a real defect: the
+// merged two-session check ran only when the closing edge crossed tiers, and a
+// same-tier closing edge saw one session and let the cycle commit.
+//
+// Both orientations are asserted, because "the plane the endpoints share" and
+// "the plane the interior visits" swap between them and the two tables are not
+// symmetric — only one of them is versioned.
+func RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	// Durable endpoints, the interior hop through the ephemeral plane:
+	// issueA -> issueB (new) with issueB -> wisp -> issueA already stored.
+	issueA := fixture.IssuePrefix + "-splane-issue-a"
+	issueB := fixture.IssuePrefix + "-splane-issue-b"
+	throughWisp := fixture.IssuePrefix + "-splane-via-wisp"
+	seedDependencyEditorIssue(t, ctx, fixture, issueA)
+	seedDependencyEditorIssue(t, ctx, fixture, issueB)
+	seedDependencyEditorWisp(t, ctx, fixture, throughWisp)
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: issueB, DependsOnID: throughWisp, Type: publicops.DepBlocks},
+			{IssueID: throughWisp, DependsOnID: issueA, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the path that leaves the durable plane and comes back: %v", err)
+	}
+	_, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: issueA, DependsOnID: issueB, Type: publicops.DepBlocks}},
+	})
+	if !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("a durable edge closing a loop whose interior runs through the wisp plane: error = %v, want ErrDependencyCycle", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, issueA)
+
+	// Ephemeral endpoints, the interior hop through the durable plane.
+	wispA := fixture.IssuePrefix + "-splane-wisp-a"
+	wispB := fixture.IssuePrefix + "-splane-wisp-b"
+	throughIssue := fixture.IssuePrefix + "-splane-via-issue"
+	seedDependencyEditorWisp(t, ctx, fixture, wispA)
+	seedDependencyEditorWisp(t, ctx, fixture, wispB)
+	seedDependencyEditorIssue(t, ctx, fixture, throughIssue)
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: wispB, DependsOnID: throughIssue, Type: publicops.DepBlocks},
+			{IssueID: throughIssue, DependsOnID: wispA, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the path that leaves the ephemeral plane and comes back: %v", err)
+	}
+	_, err = fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: wispA, DependsOnID: wispB, Type: publicops.DepBlocks}},
+	})
+	if !errors.Is(err, publicops.ErrDependencyCycle) {
+		t.Fatalf("an ephemeral edge closing a loop whose interior runs through the durable plane: error = %v, want ErrDependencyCycle", err)
+	}
+	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, wispA)
+}
+
 func seedDependencyEditorIssue(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string) {
 	t.Helper()
 	if err := fixture.CreateIssue(ctx, dependencyEditorSeed(id, false), "seed"); err != nil {
@@ -1167,6 +1479,31 @@ func assertDependencyEdgeTypedCount(t *testing.T, ctx context.Context, fixture D
 	}
 	if got != want {
 		t.Errorf("%s %s edges %s -> %s = %d, want %d", table, depType, source, target, got, want)
+	}
+}
+
+// assertDependencyEditorTargetColumn checks WHICH typed target column holds an
+// edge's target, which assertDependencyEdgeCount's COALESCE deliberately cannot
+// see. It asserts the whole triple rather than the wanted column alone: a body
+// that wrote the id into two columns would satisfy the positive check and still
+// hold a row no reader can classify.
+func assertDependencyEditorTargetColumn(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, table, source, target, wantColumn, why string) {
+	t.Helper()
+	for _, column := range []string{"depends_on_issue_id", "depends_on_wisp_id", "depends_on_external"} {
+		want := 0
+		if column == wantColumn {
+			want = 1
+		}
+		var got int
+		//nolint:gosec // G201: table is one of the contract's two hardcoded names, column one of the three above.
+		query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ? AND " + column + " = ?"
+		if err := fixture.QueryScalar(ctx, query, []any{source, target}, &got); err != nil {
+			t.Fatalf("count %s.%s rows %s -> %s: %v", table, column, source, target, err)
+		}
+		if got != want {
+			t.Errorf("%s.%s rows %s -> %s = %d, want %d: the target belongs in %s — %s",
+				table, column, source, target, got, want, wantColumn, why)
+		}
 	}
 }
 

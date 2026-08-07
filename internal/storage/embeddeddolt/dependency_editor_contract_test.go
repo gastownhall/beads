@@ -171,6 +171,30 @@ func TestEmbeddedDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *
 	conformance.RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "mixhist"))
 }
 
+func TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "tcol"))
+}
+
+func TestEmbeddedDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "whier"))
+}
+
+func TestEmbeddedDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "pchop"))
+}
+
+func TestEmbeddedDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "splane"))
+}
+
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit
 // with the accessor under test. Every hook but the accessor comes from the kit,
 // so the seeding and scalar-query plumbing stays identical to the other roles'.
