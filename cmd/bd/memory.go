@@ -4,12 +4,12 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/memoryapi"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -73,31 +73,6 @@ const memoryPrefix = kvkeys.MemoryPrefix
 // memoryKeyFlag allows explicit key override for bd remember.
 var memoryKeyFlag string
 
-// slugify converts a string to a URL-friendly slug for use as a memory key.
-// Takes the first ~8 words, lowercases, replaces non-alphanumeric with hyphens.
-func slugify(s string) string {
-	s = strings.ToLower(s)
-	// Replace non-alphanumeric chars with hyphens
-	re := regexp.MustCompile(`[^a-z0-9]+`)
-	s = re.ReplaceAllString(s, "-")
-	s = strings.Trim(s, "-")
-
-	// Limit to first ~8 "words" (hyphen-separated segments)
-	parts := strings.SplitN(s, "-", 10)
-	if len(parts) > 8 {
-		parts = parts[:8]
-	}
-	slug := strings.Join(parts, "-")
-
-	// Cap total length
-	if len(slug) > 60 {
-		slug = slug[:60]
-		// Don't end on a hyphen
-		slug = strings.TrimRight(slug, "-")
-	}
-	return slug
-}
-
 // matchesKnownCommand reports whether insight is a single bare word that
 // matches the name or an alias of a top-level bd command. It is used to catch
 // `bd remember <subcommand>` mistakes before they become accidental memories.
@@ -123,9 +98,9 @@ func matchesKnownCommand(cmd *cobra.Command, insight string) (string, bool) {
 
 // rememberBareKeyPath implements the desire-path / footgun guard for
 // `bd remember <bare-slug>` (no --key): a bare slug naming an EXISTING memory
-// is recalled instead of stored; a bare slug naming nothing is refused.
-// Shared by the classic and proxied-server paths. The caller only invokes it
-// when memoryKeyFlag == "" and slugify(insight) == insight.
+// is recalled instead of stored; a bare slug naming nothing is refused. The
+// caller only invokes it when memoryKeyFlag == "" and the insight round-trips
+// through memoryapi.DeriveKey unchanged, having already read the key.
 func rememberBareKeyPath(key, insight, existing string) error {
 	if existing != "" {
 		if jsonOutput {
@@ -149,8 +124,7 @@ func rememberBareKeyPath(key, insight, existing string) error {
 		key, insight, key)
 }
 
-// printRememberResult renders the `bd remember` success output. Shared by
-// the classic and proxied-server paths.
+// printRememberResult renders the `bd remember` success output.
 func printRememberResult(verb, key, insight string) error {
 	if jsonOutput {
 		return outputJSON(map[string]string{
@@ -165,8 +139,10 @@ func printRememberResult(verb, key, insight string) error {
 
 // memoriesFromConfig filters a full config map down to the kv.memory.*
 // namespace (stripping the prefix), optionally filtered by a lowercase
-// search term matched against key or value. Shared by the classic and
-// proxied-server paths.
+// search term matched against key or value.
+//
+// Its last caller is `bd prime`; the four memory commands read the plane
+// through memoryops.Memories.List, which owns this narrowing now.
 func memoriesFromConfig(allConfig map[string]string, search string) map[string]string {
 	fullPrefix := kvkeys.MemoryConfigKeyPrefix
 	memories := make(map[string]string)
@@ -189,8 +165,7 @@ func memoriesFromConfig(allConfig map[string]string, search string) map[string]s
 	return memories
 }
 
-// printMemoriesResult renders the `bd memories` output. Shared by the
-// classic and proxied-server paths.
+// printMemoriesResult renders the `bd memories` output.
 func printMemoriesResult(memories map[string]string, search string) error {
 	if jsonOutput {
 		return outputJSON(memories)
@@ -225,7 +200,7 @@ func printMemoriesResult(memories map[string]string, search string) error {
 }
 
 // printForgetNotFound renders the `bd forget` missing-key output (including
-// the SilentExit contract). Shared by the classic and proxied-server paths.
+// the SilentExit contract).
 func printForgetNotFound(key string) error {
 	if jsonOutput {
 		if jerr := outputJSON(map[string]string{
@@ -240,8 +215,7 @@ func printForgetNotFound(key string) error {
 	return SilentExit()
 }
 
-// printForgetResult renders the `bd forget` success output. Shared by the
-// classic and proxied-server paths.
+// printForgetResult renders the `bd forget` success output.
 func printForgetResult(key, existing string) error {
 	if jsonOutput {
 		return outputJSON(map[string]string{
@@ -254,7 +228,7 @@ func printForgetResult(key, existing string) error {
 }
 
 // printRecallResult renders the `bd recall` output (including the not-found
-// SilentExit contract). Shared by the classic and proxied-server paths.
+// SilentExit contract).
 func printRecallResult(key, value string) error {
 	if jsonOutput {
 		if jerr := outputJSON(map[string]interface{}{
@@ -311,9 +285,6 @@ Examples:
 		}()
 
 		insight := args[0]
-		if strings.TrimSpace(insight) == "" {
-			return HandleErrorRespectJSON("memory content cannot be empty")
-		}
 
 		// Guard against a subcommand-like first argument being silently stored
 		// as memory content. `bd remember` is a leaf command, so a mistaken
@@ -322,6 +293,11 @@ Examples:
 		// intended (GH#4401). A genuine insight is a phrase, so only a single
 		// bare word that matches a known command is treated as suspect, and an
 		// explicit --key signals deliberate intent and bypasses the guard.
+		//
+		// It stays at the FRONT DOOR and stays FIRST: it reads the cobra command
+		// tree, which no role can see, and it must answer before any storage is
+		// opened so that `bd remember list` in a directory with no workspace
+		// still says "looks like a command".
 		if memoryKeyFlag == "" {
 			if name, ok := matchesKnownCommand(cmd, insight); ok {
 				return HandleErrorWithHintRespectJSON(
@@ -331,52 +307,63 @@ Examples:
 			}
 		}
 
-		// Generate or use provided key
-		key := memoryKeyFlag
-		if key == "" {
-			key = slugify(insight)
-		}
-		if key == "" {
-			return HandleErrorRespectJSON("could not generate key from content; use --key to specify one")
-		}
-
-		if usesProxiedServer() {
-			return runRememberProxiedServer(rootCtx, key, insight)
-		}
-
-		if err := ensureDirectMode("remember requires direct database access"); err != nil {
+		memories, err := openMemories("remember requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
-		}
-
-		storageKey := kvPrefix + memoryPrefix + key
-
-		ctx := rootCtx
-
-		existing, _ := store.GetConfig(ctx, storageKey)
-		verb := "Remembered"
-		if existing != "" {
-			verb = "Updated"
 		}
 
 		// Desire path + footgun guard: `bd remember <x>` is a WRITE whose positional arg is
 		// the CONTENT, not a key -- but "remember X" reads as a getter in English, so agents
 		// routinely type `bd remember some-key` meaning "do you remember X?". The tell-tale of
-		// a mistyped read is content that round-trips through slugify unchanged (a bare slug);
-		// real prose insights never do. When that happens and no explicit --key was given:
+		// a mistyped read is content that round-trips through the key derivation unchanged (a
+		// bare slug); real prose insights never do. When that happens and no explicit --key was
+		// given:
 		//   - the key EXISTS  -> pave the desire path: recall it instead of writing
 		//   - no such key     -> refuse; storing a key-like token as its own content would
 		//                        create a junk memory that hides the mistake
 		// Passing --key states write intent and bypasses both branches.
-		if memoryKeyFlag == "" && slugify(insight) == insight {
-			return rememberBareKeyPath(key, insight, existing)
+		//
+		// It stays ABOVE the role because it decides WHETHER TO WRITE AT ALL, and
+		// because it exists to disambiguate English: an HTTP POST is not ambiguous
+		// and must not inherit it. The read below is a plain Recall, so this whole
+		// branch touches nothing.
+		//
+		// `derived != ""` is load-bearing and is not decoration: DeriveKey("")
+		// is "", so without it every empty or unslugifiable insight would satisfy
+		// derived == insight and be routed into a "recall" of the empty key. The
+		// shipped code was saved from that by an empty-content check that ran
+		// first; that check is the role's now, so the condition has to say it.
+		derived := memoryapi.DeriveKey(insight)
+		if memoryKeyFlag == "" && derived != "" && derived == insight {
+			recalled, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: derived})
+			if err != nil {
+				return HandleErrorRespectJSON("recalling memory: %v", err)
+			}
+			return rememberBareKeyPath(derived, insight, recalled.Value)
 		}
 
-		if err := store.SetConfig(ctx, storageKey, insight); err != nil {
+		result, err := memories.Remember(rootCtx, memoryops.RememberRequest{Key: memoryKeyFlag, Content: insight})
+		if err != nil {
+			// The role's two refusals ARE this command's shipped sentences —
+			// "memory content cannot be empty" and "could not generate key from
+			// content; use --key to specify one" — so they print as themselves.
+			// Wrapping would reword output an agent may be matching on into
+			// "storing memory: validation failed: ..." to say the same thing.
+			if errors.Is(err, memoryops.ErrValidation) {
+				return HandleErrorRespectJSON("%s", strings.TrimPrefix(err.Error(), memoryops.ErrValidation.Error()+": "))
+			}
 			return HandleErrorRespectJSON("storing memory: %v", err)
 		}
-		commandDidWrite.Store(true)
+		noteDirectMemoryWrite()
 
-		return printRememberResult(verb, key, insight)
+		// Remembered versus Updated is Replaced, observed in the SAME
+		// transaction as the write. The shipped code read the row first and
+		// described a moment that had already passed.
+		verb := "Remembered"
+		if result.Replaced {
+			verb = "Updated"
+		}
+		return printRememberResult(verb, result.Key, result.Value)
 	},
 }
 
