@@ -13,6 +13,15 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// NOTHING HERE IS DUPLICATED BY A CONFORMANCE CONTRACT, because the
+// issueops.Claimer role does not have one. backend/conformance holds 23
+// *_contract.go files and none of them is Claimer's; backend/conformance/claim.go
+// is the two-leg audit suite over storage.DoltStorage.ClaimIssue, one layer
+// below the role, and a unit-of-work provider can never satisfy its Factory.
+// The role's other two implementations
+// (internal/storage/{dolt,embeddeddolt}/issue_claimer.go) have no tests at all,
+// so this file is the only place the guarded claim's promises are written down.
+
 // claimerIssues answers the two calls the claim makes: the CAS and the
 // same-transaction read-back. Everything else panics rather than returning a
 // zero value.
