@@ -417,3 +417,67 @@ now carry a per-row `inner` comparand naming the surface each one must not be
 (`internal/telemetry/role_accessor_decorator_test.go:279-282`). **A shared test
 fixture a new namespace cannot satisfy is a signal: the row you add beside it
 may be a row that cannot fail.**
+
+## Retiring a test against a contract
+
+Once a role has a contract, the ad-hoc tests that predate it start to look
+redundant. Some are. A four-slice pass over ~78k LOC of backend tests retired
+about 700 lines net and, in the process, its adversarial reviews found **nine
+coverage losses and four tests that could not fail**. Every one of those was
+green under `go build`, `go vet`, `go test` and `golangci-lint`. The rules
+below are what the reviews actually caught, each stated as the check that would
+have caught it earlier.
+
+**A mutation verdict is only true of the body you mutated.** This produced three
+of the nine losses, in three different slices, independently. A test is broken,
+the contract goes red on the same break, the verdict reads REDUNDANT — and the
+deleted test was watching a different body. `uow` runs its own bodies under
+`internal/storage/domain/` where the two store backends share others; a store
+wrapper composes shared functions *itself* while the role path reaches the same
+functions through `runTransaction` and never calls the wrapper at all. Before
+accepting red/red: **name the body the deleted assertion observes, and confirm
+your mutation was in it.** Nothing automates this.
+
+**A wrapper is a composition, and the contract cannot see it.** `DoltStore` and
+`EmbeddedDoltStore` expose `UpdateIssueChecked`, `CloseIssueChecked` and
+`ClaimIssue` — published on `storage.DoltStorage`, with option types in
+`beads.go` — which assemble the shared bodies on their own. Deleting their only
+observers left `ExpectedStatus` routed on no branch at all, and disabling a
+wrapper's compare-and-set passed **all 136 contract cases**. When a wrapper has
+no other caller, keep a narrow routing residue: see
+`internal/storage/dolt/checked_wrapper_smoke_test.go`.
+
+**Write a residue from the decision surface, not from the mutants you ran.**
+The slice that kept that residue still lost six things, because it wrote the
+file from the two breaks it had already measured. A review broke eight more.
+Half were POSITIVE assertions — a wrapper that refuses correctly and *never
+writes* passed the entire suite. Refusal-only coverage of a guarded write is
+half a test. Enumerate each branch and each option, and ask of each whether
+anything would notice it going away.
+
+**Ask what the fixture makes unobservable.** All four cannot-fail tests were
+fixture defects, not assertion defects. One seeded `is_blocked=1` with no
+blocker edge, so the guard short-circuited and the case could never fail on the
+term it was named for. One used ready ids `1` and `10`, whose natural, lexical
+and query orders are identical, so it could not see a dropped sort. One
+collided a key in two patch stages that a *later* stage removed — and a key any
+later stage removes cannot witness the order of the stages before it. Every
+case earns its place by going red against a mutation of its own subject.
+
+**Never let a role-answer assertion replace a raw-row one.** Reading a value
+back through the role is exactly the check that passes on a corrupted table.
+`is_blocked` is derived *and persisted*, so raw-column assertions about it are
+load-bearing and no contract case currently reads it.
+
+**Cite promises by symbol, not by line.** Two sweeps had to re-resolve 23 stale
+`file.go:line` citations across two contract files, drifted by growth above the
+cited region. Wrong ones look exactly like right ones, so a slice copied one
+into new prose and minted a second beside it. `memoryops` cites by symbol name
+and its citations still resolve.
+
+`scripts/mutation-equivalence.sh` runs the red/red comparison in a disposable
+worktree and refuses the four ways this measurement lies: a `-run` matching
+nothing (`go test -run NoSuchTest` exits 0), a mutation changing no bytes, a
+baseline that is not green, and a result grep that over-anchors leading
+whitespace — `go test -v` indents subtests by four and nested subtests by
+eight.
