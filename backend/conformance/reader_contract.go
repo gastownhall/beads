@@ -73,7 +73,7 @@ import (
 //     default listing suppresses, not a reconfigured vocabulary.
 //
 //   - THE NEVER-MUTATE-CALLER-REQUEST RULE, beyond the single tripwire
-//     RunReaderDoesNotMutateTheCallerRequest. reader.go:326 makes it a promise,
+//     RunReaderDoesNotMutateTheCallerRequest. reader.go:392 makes it a promise,
 //     so it gets one case for the whole role; it is a property of the shared
 //     implementation, not of each method, and asserting it per method would
 //     triple the cost for no new information.
@@ -199,7 +199,7 @@ func RunReaderReadyDeferredAndEphemeralGates(t *testing.T, ctx context.Context, 
 }
 
 // RunReaderReadyLimitBoundary walks the whole Limit vocabulary
-// (reader.go:85-100) against the page shape it produces (reader.go:310-315).
+// (reader.go:85-100) against the page shape it produces (reader.go:376-381).
 //
 // This is the one case that exercises a genuine two-implementation seam rather
 // than one body twice. The store-backed body has no has-more of its own, so it
@@ -546,7 +546,7 @@ func RunReaderListNaturalNumericIDSortTrimsAfterTheFetch(t *testing.T, ctx conte
 }
 
 // RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder pins the decoded
-// cursor (reader.go:264-268). The position is a PAIR, and both halves matter:
+// cursor (reader.go:277-286). The position is a PAIR, and both halves matter:
 // rows older than the cursor's timestamp are returned, and rows sharing that
 // timestamp are returned only when their id sorts after the cursor's. A seam
 // that compared the timestamp alone would drop the same-second row, which is
@@ -744,7 +744,7 @@ func RunReaderListReadyFlagRefusesAFilterItCannotCarry(t *testing.T, ctx context
 }
 
 // RunReaderListEmptyPageIsWellFormed pins the page shape when nothing matches
-// (reader.go:310-315). Items is never nil for a successful call, so no caller
+// (reader.go:376-381). Items is never nil for a successful call, so no caller
 // has to tell null from empty to learn that nothing matched, and an empty page
 // hid nothing.
 func RunReaderListEmptyPageIsWellFormed(t *testing.T, ctx context.Context, fixture ReaderFixture) {
@@ -946,7 +946,7 @@ func RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T, ct
 }
 
 // RunReaderGetResolvesTheExactIDAcrossBothPlanes pins GetRequest.ID
-// (reader.go:273-276): the id is exact and canonical, the issue-to-wisp fallback
+// (reader.go:364): the id is exact and canonical, the issue-to-wisp fallback
 // happens inside, and there is no fuzzy, prefix or substring resolution. The
 // prefix probe is the half that matters — an affordance that can answer with a
 // different issue than the caller named has no place on a contract an
@@ -982,7 +982,7 @@ func RunReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T, ctx context.Co
 }
 
 // RunReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay pins both halves of
-// Get's error promise (reader.go:420-423). A miss on BOTH planes is ErrNotFound;
+// Get's error promise (reader.go:500-503). A miss on BOTH planes is ErrNotFound;
 // a backend failure passes through unchanged and never decays into not-found.
 //
 // The decay half needs a fixture that can induce a backend error without
@@ -1015,7 +1015,7 @@ func RunReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay(t *testing.T, ctx c
 }
 
 // RunReaderGetOptionalRowListsAreOffByDefault pins the two DetailOptions
-// (reader.go:300-303): the detail view carries counts either way, the expensive
+// (reader.go:365-369): the detail view carries counts either way, the expensive
 // row lists are absent until asked for, and a positive comment count with no
 // rows says so rather than reading as "no comments".
 func RunReaderGetOptionalRowListsAreOffByDefault(t *testing.T, ctx context.Context, fixture ReaderFixture) {
@@ -1070,7 +1070,7 @@ func RunReaderGetOptionalRowListsAreOffByDefault(t *testing.T, ctx context.Conte
 }
 
 // RunReaderGetDetailShapeMatchesTheSeededIssue pins the shape of the detail view
-// against what was actually stored (reader.go:15, reader.go:272-304): the
+// against what was actually stored (reader.go:15, reader.go:364-369): the
 // issue's own fields, its labels, its OUTGOING edges with their types, and the
 // three cardinalities. The direction split is the part worth pinning — an
 // implementation that answered Dependencies with the incoming edges would still
@@ -1119,7 +1119,7 @@ func RunReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T, ctx context.Cont
 }
 
 // RunReaderDoesNotMutateTheCallerRequest is the role's single request-snapshot
-// tripwire (reader.go:326-327). One case for the whole role, not one per
+// tripwire (reader.go:392-393). One case for the whole role, not one per
 // method: the promise is a property of the shared implementation, and every
 // method is driven here through the same request values so a normalization
 // written in place is caught wherever it lives.
@@ -1178,7 +1178,7 @@ func RunReaderDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, f
 }
 
 // RunReaderListLimitBoundaryUnderASortTheDatabaseCanExpress walks
-// ListRequest.Limit's vocabulary at the page boundary (reader.go:246-250) under
+// ListRequest.Limit's vocabulary at the page boundary (reader.go:264-272) under
 // a display order SQL CAN express, which is the only way to reach the seam this
 // case exists for.
 //
@@ -1189,7 +1189,7 @@ func RunReaderDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, f
 // the over-fetch. Under `--sort created` the limit is pushed into the query
 // instead, and the two bodies detect truncation by genuinely different
 // mechanisms: the store body asks the query for one row past the page
-// (workapi.WithFetchOneExtra, storereader/reader.go:118) and lets the extra
+// (workapi.WithFetchOneExtra, storereader/reader.go:124,126) and lets the extra
 // row's presence be the answer, while the unit-of-work body renders LIMIT n+1
 // itself and reports the verdict natively (domain/db/issue_search.go:511-529).
 // An off-by-one in either one shows here and nowhere else in this file:
@@ -1338,7 +1338,7 @@ func RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions(t *testing.T, ctx 
 }
 
 // RunReaderListReadyFlagCarriesTheAssigneeAndPriorityFilters pins three more
-// entries from the --ready arm's CARRIED list (reader.go:211-217): Assignee,
+// entries from the --ready arm's CARRIED list (reader.go:226-232): Assignee,
 // NoAssignee and the exact Priority.
 //
 // RunReaderListReadyFlagAnswersTheBlockerAwareSet pins that list for Labels
@@ -1578,7 +1578,7 @@ func readerDependencyIDs(rows []*types.IssueWithDependencyMetadata) []string {
 }
 
 // assertReaderPageNotNil is the half of the page shape every assertion owes:
-// Items is never nil for a successful call (reader.go:310-315).
+// Items is never nil for a successful call (reader.go:376-381).
 func assertReaderPageNotNil(t *testing.T, what string, page publicops.IssuePage) {
 	t.Helper()
 	if page.Items == nil {
