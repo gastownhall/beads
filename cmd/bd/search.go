@@ -23,7 +23,9 @@ var searchCmd = &cobra.Command{
 ID-like queries (e.g., "bd-123", "hq-319") use fast exact/prefix matching.
 Text queries search titles. Use --desc-contains for description search.
 Use --status open (etc.) to narrow; closed issues are included by default
-so "was this already filed/fixed?" cannot silently answer no.
+so "was this already filed/fixed?" cannot silently answer no. Matches
+beyond --limit are dropped status-blind, so when hunting live work in a
+large DB, narrow with --status open or raise --limit.
 
 Examples:
   bd search "authentication bug"
