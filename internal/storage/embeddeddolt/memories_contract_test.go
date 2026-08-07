@@ -72,6 +72,9 @@ func TestMemoriesContract(t *testing.T) {
 	t.Run("ListReturnsOnlyTheMemoryPlane", func(t *testing.T) {
 		conformance.RunMemoriesListReturnsOnlyTheMemoryPlane(t, ctx, fixture)
 	})
+	t.Run("ListSearchMatchesTheUserKeyNotTheStorageKey", func(t *testing.T) {
+		conformance.RunMemoriesListSearchMatchesTheUserKeyNotTheStorageKey(t, ctx, fixture)
+	})
 	t.Run("ListSearchMatchesKeyOrValueCaseInsensitively", func(t *testing.T) {
 		conformance.RunMemoriesListSearchMatchesKeyOrValueCaseInsensitively(t, ctx, fixture)
 	})

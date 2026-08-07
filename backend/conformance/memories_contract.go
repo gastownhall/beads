@@ -502,7 +502,7 @@ func RunMemoriesForgetNeverTouchesTheSettingsPlane(t *testing.T, ctx context.Con
 // same transaction as the delete.
 func RunMemoriesForgetReportsTheForgottenValue(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
 	t.Helper()
-	seedMemoriesAllFourClasses(t, ctx, fixture)
+	neighbors := seedMemoriesAllFourClasses(t, ctx, fixture)
 	key := fixture.IssuePrefix + "-reported"
 	const content = "the value the caller is about to be shown"
 
@@ -514,6 +514,14 @@ func RunMemoriesForgetReportsTheForgottenValue(t *testing.T, ctx context.Context
 	if !result.Found || result.Value != content {
 		t.Fatalf("Forget(%q) = %+v, want Found true with value %q", key, result, content)
 	}
+	// The row really went, and nothing beside it did. This is the only
+	// forget-after-Remember sequence in the suite — every other forget case
+	// removes an out-of-band seed — so it is the one place a delete whose
+	// storage key came from the PRECEDING write could do collateral damage.
+	// Without these two lines the next case's seed rewrites all four neighbour
+	// rows and repairs the damage before anything observes it.
+	assertMemoriesRawAbsent(t, ctx, fixture, "kv.memory."+key)
+	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
 	assertMemoriesRecall(t, ctx, fixture, key, "", false)
 }
 
@@ -617,6 +625,35 @@ func RunMemoriesListReturnsOnlyTheMemoryPlane(t *testing.T, ctx context.Context,
 		if strings.HasPrefix(key, "kv.") || strings.HasPrefix(key, "memory.") || strings.HasPrefix(key, "custom.") {
 			t.Fatalf("List carries %q: the keys are USER keys, so a storage prefix in one means the "+
 				"answer was narrowed or trimmed at the wrong boundary", key)
+		}
+	}
+}
+
+// RunMemoriesListSearchMatchesTheUserKeyNotTheStorageKey pins WHICH STRING the
+// search folds over, which no other case can see.
+//
+// ListRequest.Search promises a match against the USER key. Every term the
+// case below uses is a substring of the user key exactly when it is a substring
+// of the storage key, so a body that filtered BEFORE stripping the prefix —
+// one transposed line — passes all of them. A term that appears only in the
+// storage form separates the two: "kv." matches every row before the strip and
+// none after it.
+//
+// The failure it catches is route-dependent answers: `bd memories memory` would
+// return the ENTIRE plane on the leg that folded over storage keys, because
+// every storage key contains "kv.memory.", while the other leg returned genuine
+// matches. That is the wrong-boundary bug family this file's own header names.
+func RunMemoriesListSearchMatchesTheUserKeyNotTheStorageKey(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
+	t.Helper()
+	seedMemoriesAllFourClasses(t, ctx, fixture)
+	rememberMemory(t, ctx, fixture, memoryops.RememberRequest{
+		Key: fixture.IssuePrefix + "-plain", Content: "nothing prefix-shaped in here",
+	})
+
+	for _, term := range []string{"kv.", "kv.memory.", "memory."} {
+		if got := listMemories(t, ctx, fixture, term); len(got) != 0 {
+			t.Errorf("List(search %q) matched %d memories, want 0: the fold is over the USER key, "+
+				"and %q appears only in the storage form", term, len(got), term)
 		}
 	}
 }
