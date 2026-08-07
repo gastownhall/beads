@@ -289,6 +289,47 @@ func RunMemoriesRememberRefusesEmptyContent(t *testing.T, ctx context.Context, f
 	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
 }
 
+// RunMemoriesRememberRefusesAWhitespaceOnlyKey pins the rule Remember shares
+// with Recall and Forget, over the quadrant that had no case.
+//
+// Recall and Forget refuse a key that is empty after trimming — cases 8 and 13
+// pin that. Remember used to accept any non-empty string, so `--key "   "`
+// minted a row no memory operation could ever name again: enumerated by List
+// forever, unrecallable, unforgettable, reachable only through
+// `bd config unset` on the raw storage key. The write door accepted what every
+// read door refused, and the HTTP surface inherited the split exactly — POST
+// accepted the key that GET and DELETE answered 400 for.
+//
+// The surviving half is asserted too, because the rule is that a key must NAME
+// something and not that it must be tidy: a key with surrounding space is
+// stored and recalled byte for byte.
+func RunMemoriesRememberRefusesAWhitespaceOnlyKey(t *testing.T, ctx context.Context, fixture MemoriesFixture) {
+	t.Helper()
+	neighbors := seedMemoriesAllFourClasses(t, ctx, fixture)
+
+	for _, key := range []string{" ", "   ", "\t"} {
+		_, err := fixture.Memories.Remember(ctx, memoryops.RememberRequest{Key: key, Content: "content"})
+		if !errors.Is(err, memoryops.ErrValidation) {
+			t.Fatalf("Remember(key %q) error = %v, want ErrValidation: a key no read can name must not be writable", key, err)
+		}
+		assertMemoriesRawAbsent(t, ctx, fixture, "kv.memory."+key)
+	}
+
+	// Surrounding space survives: this is a trim REFUSAL, not a trim.
+	spaced := " " + fixture.IssuePrefix + "-spaced "
+	if _, err := fixture.Memories.Remember(ctx, memoryops.RememberRequest{Key: spaced, Content: "kept"}); err != nil {
+		t.Fatalf("Remember(key %q) error = %v, want it stored verbatim", spaced, err)
+	}
+	got, err := fixture.Memories.Recall(ctx, memoryops.RecallRequest{Key: spaced})
+	if err != nil {
+		t.Fatalf("Recall(%q) error = %v", spaced, err)
+	}
+	if !got.Found || got.Value != "kept" {
+		t.Errorf("Recall(%q) = %+v, want the value under the exact bytes written", spaced, got)
+	}
+	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
+}
+
 // RunMemoriesRememberRefusesAnUnderivableKey pins the second refusal: content
 // with nothing to derive from, and no key to fall back on.
 //

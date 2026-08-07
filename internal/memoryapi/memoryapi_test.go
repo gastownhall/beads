@@ -228,3 +228,35 @@ func TestFilterMemoriesDoesNotAliasItsArgument(t *testing.T) {
 		t.Fatalf("FilterMemories mutated its argument: %v, want %v", all, before)
 	}
 }
+
+// TestResolveKeyRefusesAWhitespaceOnlyExplicitKey pins the rule Remember shares
+// with Recall and Forget.
+//
+// ValidateKey refuses a key that is empty after trimming, and Recall and Forget
+// both run it. ResolveKey used to accept any non-empty string, so
+// `--key "   "` minted a row that no memory operation could name again:
+// enumerable by List forever, unrecallable, unforgettable, reachable only
+// through `bd config unset` on the raw storage key. Four separate review lenses
+// found it independently.
+//
+// The keys that SURVIVE matter as much as the ones refused: surrounding space
+// is preserved, because the rule is that a key must name something, not that it
+// must be tidy.
+func TestResolveKeyRefusesAWhitespaceOnlyExplicitKey(t *testing.T) {
+	const content = "some content that derives fine"
+	for _, key := range []string{" ", "   ", "\t", "\n", " \t\n "} {
+		if _, err := ResolveKey(key, content); !errors.Is(err, memoryops.ErrValidation) {
+			t.Errorf("ResolveKey(%q) error = %v, want ErrValidation: a key no read can name must not be writable", key, err)
+		}
+	}
+	for _, key := range []string{" leading", "trailing ", " both ", "has space"} {
+		got, err := ResolveKey(key, content)
+		if err != nil {
+			t.Errorf("ResolveKey(%q) error = %v, want the key verbatim", key, err)
+			continue
+		}
+		if got != key {
+			t.Errorf("ResolveKey(%q) = %q, want it byte for byte: surrounding space is preserved", key, got)
+		}
+	}
+}

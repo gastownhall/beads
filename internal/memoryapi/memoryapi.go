@@ -112,7 +112,17 @@ func ResolveKey(key, content string) (string, error) {
 		return "", err
 	}
 	if key != "" {
-		return key, nil
+		// THE SAME RULE READS AND WRITES USE. ValidateKey — which Recall and
+		// Forget run — refuses a key that is empty after trimming, so accepting
+		// one here mints a row that no memory operation can ever name again:
+		// enumerable by List forever, unrecallable, unforgettable, reachable
+		// only through `bd config unset` on the raw storage key. The HTTP
+		// surface inherits the same split, so POST would accept what GET and
+		// DELETE refuse.
+		//
+		// Surrounding space is still preserved on keys that survive this: the
+		// rule is that a key must NAME something, not that it must be tidy.
+		return ValidateKey(key)
 	}
 	derived := DeriveKey(content)
 	if derived == "" {

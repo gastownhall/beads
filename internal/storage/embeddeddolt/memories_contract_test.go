@@ -42,6 +42,9 @@ func TestMemoriesContract(t *testing.T) {
 	t.Run("RememberRefusesEmptyContent", func(t *testing.T) {
 		conformance.RunMemoriesRememberRefusesEmptyContent(t, ctx, fixture)
 	})
+	t.Run("RememberRefusesAWhitespaceOnlyKey", func(t *testing.T) {
+		conformance.RunMemoriesRememberRefusesAWhitespaceOnlyKey(t, ctx, fixture)
+	})
 	t.Run("RememberRefusesAnUnderivableKey", func(t *testing.T) {
 		conformance.RunMemoriesRememberRefusesAnUnderivableKey(t, ctx, fixture)
 	})
