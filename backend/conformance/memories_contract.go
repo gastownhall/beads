@@ -518,7 +518,7 @@ func RunMemoriesForgetReportsTheForgottenValue(t *testing.T, ctx context.Context
 	// forget-after-Remember sequence in the suite — every other forget case
 	// removes an out-of-band seed — so it is the one place a delete whose
 	// storage key came from the PRECEDING write could do collateral damage.
-	// Without these two lines the next case's seed rewrites all four neighbour
+	// Without these two lines the next case's seed rewrites all four neighbor
 	// rows and repairs the damage before anything observes it.
 	assertMemoriesRawAbsent(t, ctx, fixture, "kv.memory."+key)
 	assertMemoriesNeighborsSurvived(t, ctx, fixture, neighbors)
