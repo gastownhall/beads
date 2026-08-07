@@ -32,6 +32,16 @@ func TestIssueOperationsCreateInheritsParentLabels(t *testing.T) {
 	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
+func TestIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsCreateRefusesAForeignIDPrefix(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, newUOWIssueOperationsFixture(t, ctx))

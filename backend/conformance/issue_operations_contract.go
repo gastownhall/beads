@@ -253,6 +253,145 @@ func assertIssueOperationsAlreadyExists(t *testing.T, err error, label, id strin
 	}
 }
 
+// RunIssueOperationsCreateRefusesAForeignIDPrefix pins the guard
+// CreateRequest.ForceIDPrefix exists to lift: the flag "permits an explicit ID
+// outside the configured prefix" (issueops/issueops.go:208-209), so without it
+// such an ID is ErrPrefixMismatch — "returned when an issue ID does not match
+// the configured prefix" (issueops/errors.go:81-82) — under Create's standing
+// promise that "a refusal or validation error also leaves no partial persistent
+// state".
+//
+// Every other create case in this file sets ForceIDPrefix, which is what makes
+// this one necessary: the flag is asserted only from the side that bypasses the
+// check, so nothing here says the check exists. The refusal is TYPED because
+// both front doors decide whether to re-offer the create with --force from
+// errors.Is rather than from the message, and it is checked on BOTH planes
+// because an ephemeral create routes to a different table and could plausibly
+// skip a guard the durable one applies.
+func RunIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	// A prefix no fixture configures, so the ID is foreign whatever this
+	// workspace calls itself.
+	foreign := "lcrforeign-" + fixture.IssuePrefix + "-1"
+	foreignWisp := "lcrforeign-" + fixture.IssuePrefix + "-2"
+
+	for _, tc := range []struct {
+		name      string
+		id        string
+		ephemeral bool
+		table     string
+	}{
+		{name: "durable", id: foreign, table: "issues"},
+		{name: "ephemeral", id: foreignWisp, ephemeral: true, table: "wisps"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+				Actor: "writer",
+				Issue: &types.Issue{
+					ID: tc.id, Title: tc.name, Status: types.StatusOpen,
+					Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral,
+				},
+			})
+			if !errors.Is(err, publicops.ErrPrefixMismatch) {
+				t.Fatalf("unforced create at the foreign ID %q: err = %v, want ErrPrefixMismatch", tc.id, err)
+			}
+			assertIssueOperationsRowCount(t, ctx, fixture, "issues", tc.id, 0)
+			assertIssueOperationsRowCount(t, ctx, fixture, "wisps", tc.id, 0)
+
+			// The same request with the flag lands, which is what makes the
+			// refusal a policy the caller can override rather than a hard limit.
+			forced, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+				Actor: "writer", ForceIDPrefix: true,
+				Issue: &types.Issue{
+					ID: tc.id, Title: tc.name, Status: types.StatusOpen,
+					Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral,
+				},
+			})
+			if err != nil {
+				t.Fatalf("forced create at the foreign ID %q: %v", tc.id, err)
+			}
+			if forced.Issue.ID != tc.id {
+				t.Errorf("forced create result ID = %q, want the requested %q", forced.Issue.ID, tc.id)
+			}
+			assertIssueOperationsRowCount(t, ctx, fixture, tc.table, tc.id, 1)
+		})
+	}
+}
+
+// RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset pins the sentence
+// MetadataPatch opens with: "Replace is mutually exclusive with Merge, Set, and
+// Unset. Without Replace, operations apply Merge, then Set keys in
+// deterministic order, then Unset" (issueops/issueops.go:83-86).
+//
+// The order is only observable when the three edits COLLIDE, so every key here
+// appears in more than one of them: a key merged in and then set and then unset
+// must end up absent, and one merged in and unset must not survive because the
+// merge ran later. A body applying Unset before Set leaves the same document
+// looking plausible — it just carries a key the caller asked to remove — which
+// is why the existing metadata cases, none of which collide, cannot see it.
+//
+// The exclusivity half is asserted through the stored document rather than the
+// error alone: a body that refused the combination AFTER applying the Replace
+// would return the right sentinel over a rewritten row.
+func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-metadata-order"
+	if err := fixture.CreateIssue(ctx, &types.Issue{
+		ID: id, Title: "metadata order", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Metadata: json.RawMessage(`{"keep":"seeded","drop":"seeded"}`),
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+
+	ordered, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
+		Metadata: publicops.MetadataPatch{
+			Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"keep":"merged","merged":true}`)},
+			Set:   map[string]json.RawMessage{"added": json.RawMessage(`"set"`), "keep": json.RawMessage(`"set"`)},
+			Unset: []string{"keep", "drop"},
+		},
+	}})
+	if err != nil {
+		t.Fatalf("ordered metadata patch on %s: %v", id, err)
+	}
+	if !ordered.Changed {
+		t.Errorf("ordered metadata patch on %s reported Changed = false, want a committed edit", id)
+	}
+	// "keep" was merged, then set, then unset — removal is last, so it is gone.
+	// "drop" was seeded and unset. "merged" and "added" are what survives.
+	assertIssueOperationsMetadata(t, "ordered metadata patch", ordered.Issue.Metadata, `{"added":"set","merged":true}`)
+	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after the ordered metadata patch", `{"added":"set","merged":true}`)
+
+	// Replace beside any incremental edit is refused, and the document the
+	// replacement would have written never lands.
+	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
+	for name, patch := range map[string]publicops.MetadataPatch{
+		"replace with set": {
+			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
+			Set:     map[string]json.RawMessage{"must_not_persist": json.RawMessage(`true`)},
+		},
+		"replace with merge": {
+			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
+			Merge:   publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"must_not_persist":true}`)},
+		},
+		"replace with unset": {
+			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
+			Unset:   []string{"added"},
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+				Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{Metadata: patch},
+			}); !errors.Is(err, publicops.ErrValidation) {
+				t.Fatalf("%s: err = %v, want ErrValidation", name, err)
+			}
+			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after "+name, `{"added":"set","merged":true}`)
+		})
+	}
+	events.assert(t, "refused replace-plus-incremental patches", 0, nil)
+}
+
 // RunIssueOperationsCreateInheritsParentLabels pins
 // CreateRequest.InheritLabelsFromParent — "copies the parent's labels at
 // creation" — against CreateRequest.Issue's own "Labels are authoritative"

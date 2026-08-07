@@ -31,6 +31,20 @@ func TestEmbeddedIssueOperationsCreateRefusesAnOccupiedID(t *testing.T) {
 	conformance.RunIssueOperationsCreateRefusesAnOccupiedID(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "occupied"))
 }
 
+func TestEmbeddedIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "foreignpfx")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateRefusesAForeignIDPrefix(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "foreignpfx"))
+}
+
+func TestEmbeddedIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "metaorder")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "metaorder"))
+}
+
 func TestEmbeddedIssueOperationsCreateInheritsParentLabels(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "inherit")

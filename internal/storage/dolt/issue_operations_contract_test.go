@@ -31,10 +31,22 @@ func TestIssueOperationsCreateInheritsParentLabels(t *testing.T) {
 	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, fixture)
 }
 
+func TestIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateRefusesAForeignIDPrefix(t, ctx, fixture)
+}
+
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateClosePolicy(t *testing.T) {
