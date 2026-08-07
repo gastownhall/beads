@@ -21,14 +21,6 @@ import (
 )
 
 const (
-	// claimPathValue names the ServeMux wildcard the claim route registers. The
-	// route table builds its pattern from this constant and claimSuffix below
-	// splits the custom method back off it, so the two halves of the one path
-	// exception cannot drift apart.
-	claimPathValue = "idop"
-	// claimSuffix is the custom method the document spells on the id segment:
-	// POST /v0/beads/issues/{id}:claim.
-	claimSuffix = ":claim"
 	// claimActorMember is the only member ClaimRequest carries. The schema is
 	// additionalProperties: false, so anything else is refused by name.
 	claimActorMember = "actor"
@@ -73,10 +65,9 @@ const (
 // refusal vocabulary — belongs to issueops.Claimer, reached through the
 // provider's own accessor.
 func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
-	id, ok := s.claimTarget(w, r)
-	if !ok {
-		return
-	}
+	// The custom-method dispatcher split the id off the segment and bounded it
+	// before this handler was chosen at all; see customMethodTarget.
+	id := r.PathValue(customMethodIDValue)
 	if !s.requireNoQuery(w, r) {
 		return
 	}
@@ -104,40 +95,6 @@ func (s *Server) handleClaim(w http.ResponseWriter, r *http.Request) {
 		Issue:          *result.Issue,
 		AlreadyClaimed: !result.Changed,
 	})
-}
-
-// claimTarget splits the custom method off the segment the router matched, and
-// reports whether the request may proceed.
-//
-// ServeMux wildcards match a whole path segment, so `{id}:claim` is not
-// expressible as a pattern: the route registers `POST /v0/beads/issues/{idop}`
-// and the parse lands here. A segment that does not end in the custom method is
-// NOT an id — the only documented POST on this surface is this operation — so
-// it gets the same 404 the catch-all gives any other unrouted path. That is
-// what keeps POST on the issue-detail path, which the document declares
-// GET-only, from being answered as a claim of the issue named there.
-//
-// The id itself is bounded HERE, for the same reason the actor is: this is the
-// last point before a request buys a concurrency slot and two database round
-// trips. `issues.id` is VARCHAR(255) and the document calls the parameter an
-// exact canonical id, so a longer one — or one carrying a control character,
-// which a percent-escape in the path decodes to — names no row that can exist.
-// Answering it from the edge costs the server nothing and tells the caller
-// exactly what a read would have: 404.
-func (s *Server) claimTarget(w http.ResponseWriter, r *http.Request) (string, bool) {
-	id, ok := strings.CutSuffix(r.PathValue(claimPathValue), claimSuffix)
-	if !ok || id == "" {
-		s.fail(w, r, newResult(CodeNotFound, "no such route on this server"))
-		return "", false
-	}
-	if types.CheckFieldLen("id", id) != nil || strings.ContainsFunc(id, isControlChar) {
-		// The SAME 404 a real miss gets. A distinct refusal here would let a
-		// caller map the server's notion of a well-formed id, and there is
-		// nothing to learn from it: no such row exists either way.
-		s.fail(w, r, NotFound())
-		return "", false
-	}
-	return id, true
 }
 
 // requireJSONContent enforces the request media type. It reports whether the
@@ -352,6 +309,7 @@ type timedProvider struct {
 var (
 	_ uow.IssueReaderSource       = timedProvider{}
 	_ uow.IssueClaimerSource      = timedProvider{}
+	_ uow.IssueLifecycleSource    = timedProvider{}
 	_ uow.WorkspaceConfigSource   = timedProvider{}
 	_ uow.StatsReporterSource     = timedProvider{}
 	_ uow.CycleDetectorSource     = timedProvider{}
@@ -401,6 +359,14 @@ func (p timedProvider) IssueReader() (issueops.Reader, error) {
 // instead of the recursion looking correct.
 func (p timedProvider) IssueClaimer() (issueops.Claimer, error) {
 	return uow.NewIssueClaimer(p)
+}
+
+// IssueLifecycle builds the guarded-mutation role OVER THIS WRAPPER, for the
+// same reason and with the same hazard as IssueClaimer: this role opens the
+// longest write transactions on the surface, so a claimer-style recursion here
+// would report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) IssueLifecycle() (issueops.Lifecycle, error) {
+	return uow.NewIssueOperations(p)
 }
 
 // WorkspaceConfig builds the settings role OVER THIS WRAPPER, for the same

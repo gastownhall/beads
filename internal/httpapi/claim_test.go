@@ -110,9 +110,10 @@ func newClaimServer(t *testing.T, issues *fakeIssues) (*testServer, *fakeProvide
 
 const claimPath = "/v0/beads/issues/bd-1:claim"
 
-// claimRequest posts a body with an explicit media type, because the media type
-// is part of what this endpoint checks.
-func (ts *testServer) claimRequest(t *testing.T, path, contentType, body string) *http.Response {
+// postBody posts a body with an explicit media type, because the media type is
+// part of what every body-carrying endpoint checks. Shared by the operations
+// that take one; the claim's own wrapper below fills in the ordinary type.
+func (ts *testServer) postBody(t *testing.T, path, contentType, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, ts.base+path, strings.NewReader(body))
 	if err != nil {
@@ -131,7 +132,7 @@ func (ts *testServer) claimRequest(t *testing.T, path, contentType, body string)
 
 func (ts *testServer) claim(t *testing.T, path, body string) *http.Response {
 	t.Helper()
-	return ts.claimRequest(t, path, "application/json", body)
+	return ts.postBody(t, path, "application/json", body)
 }
 
 // TestClaimWritesOnceAndAnswersWithTheRowItWrote is the happy path and the two
@@ -585,7 +586,7 @@ func TestClaimRejectsMalformedRequests(t *testing.T) {
 			if path == "" {
 				path = claimPath
 			}
-			resp := ts.claimRequest(t, path, tc.contentType, tc.body)
+			resp := ts.postBody(t, path, tc.contentType, tc.body)
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 			}
@@ -629,18 +630,29 @@ func TestClaimBodyCapIsEnforcedWhileReading(t *testing.T) {
 	}
 }
 
-// TestClaimNarrowsThePOSTSurface. ServeMux wildcards match a whole segment, so
-// the claim route's pattern is POST /v0/beads/issues/{idop} and every POST under
-// that prefix reaches this handler. The issue-detail path is documented
-// GET-only, and a POST to it must NOT be read as a claim of the issue named
-// there: it is an unrouted path, and it gets the unrouted path's answer.
-func TestClaimNarrowsThePOSTSurface(t *testing.T) {
+// TestCustomMethodsNarrowThePOSTSurface. ServeMux wildcards match a whole
+// segment, so the single-resource custom methods share one pattern —
+// POST /v0/beads/issues/{idop} — and every POST under that prefix reaches the
+// dispatcher. The issue-detail path is documented GET-only, and a POST to it
+// must NOT be read as an operation on the issue named there: it is an unrouted
+// path, and it gets the unrouted path's answer.
+//
+// The generalization from the claim's own version is the point. A dispatcher
+// that fell back to its first row for an unrecognized suffix would turn every
+// probe of this prefix into a claim, and the suite would stay green because the
+// claim's happy path still worked.
+func TestCustomMethodsNarrowThePOSTSurface(t *testing.T) {
 	for _, path := range []string{
 		"/v0/beads/issues/bd-1",           // the GET-only detail path
-		"/v0/beads/issues/:claim",         // the custom method with no id
+		"/v0/beads/issues/:claim",         // a custom method with no id
+		"/v0/beads/issues/:close",         // the same, on the newer verb
 		"/v0/beads/issues/bd-1:CLAIM",     // the custom method is not a spelling
+		"/v0/beads/issues/bd-1:Close",     // nor is this one
 		"/v0/beads/issues/bd-1:claim-not", // a suffix that merely starts the same
+		"/v0/beads/issues/bd-1:close-not",
 		"/v0/beads/issues/bd-1:unclaim",
+		"/v0/beads/issues/bd-1:reopen", // a verb this build does not serve
+		"/v0/beads/issues/bd-1:delete",
 	} {
 		t.Run(path, func(t *testing.T) {
 			issues := &fakeIssues{issue: seededIssue("bd-1", "alice", types.StatusInProgress)}

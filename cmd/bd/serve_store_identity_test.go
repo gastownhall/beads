@@ -182,6 +182,9 @@ func (s *serveIdentityStore) Close() error { return nil }
 // They hand back serveIdentityRole, which satisfies each interface by
 // EMBEDDING it rather than implementing it: non-nil, so the set is complete,
 // while an actual call panics naming the method it reached.
+func (*serveIdentityStore) IssueLifecycle() (issueops.Lifecycle, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return serveIdentityRole{}, nil
 }
@@ -209,11 +212,12 @@ func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
 	return serveIdentityRole{}, nil
 }
 
-// serveIdentityRole satisfies all twelve at once, which it can because no two
+// serveIdentityRole satisfies all thirteen at once, which it can because no two
 // of those interfaces declare a method of the same name. If a future role
 // collides, split this into one type per role — the embedded method would stop
 // being promoted and the build would say so.
 type serveIdentityRole struct {
+	issueops.Lifecycle
 	issueops.WorkspaceConfig
 	issueops.StatsReporter
 	issueops.CycleDetector

@@ -361,6 +361,50 @@ func (c *roleClaimer) claimRequests() []issueops.ClaimRequest {
 	return append([]issueops.ClaimRequest(nil), c.claims...)
 }
 
+// roleLifecycle is the store-shaped source's guarded-mutation role. Every case
+// hands Listen a COMPLETE source, so this exists partly to be a placeholder —
+// but the close tests drive it directly, which is what the claim precedent
+// calls the wire edge on a fake role: the path split, the media type, the body
+// rules and the problem shapes, with the transaction and the policy left to the
+// integration test against real Dolt.
+type roleLifecycle struct {
+	closeResult issueops.CloseResult
+	closeErr    error
+
+	mu     sync.Mutex
+	closes []issueops.CloseRequest
+}
+
+func (l *roleLifecycle) Create(_ context.Context, _ issueops.CreateRequest) (issueops.CreateResult, error) {
+	return issueops.CreateResult{}, errors.New("create is not published on this surface")
+}
+
+func (l *roleLifecycle) Update(_ context.Context, _ issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	return issueops.UpdateResult{}, errors.New("update is not published on this surface")
+}
+
+func (l *roleLifecycle) Close(_ context.Context, req issueops.CloseRequest) (issueops.CloseResult, error) {
+	l.mu.Lock()
+	l.closes = append(l.closes, req)
+	l.mu.Unlock()
+	if l.closeErr != nil {
+		return issueops.CloseResult{}, l.closeErr
+	}
+	return l.closeResult, nil
+}
+
+func (l *roleLifecycle) Reopen(_ context.Context, _ issueops.ReopenRequest) (issueops.ReopenResult, error) {
+	return issueops.ReopenResult{}, errors.New("reopen is not published on this surface")
+}
+
+// closeRequests is how a case asserts that a refusal happened at the wire edge:
+// an empty list means nothing reached the role.
+func (l *roleLifecycle) closeRequests() []issueops.CloseRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.CloseRequest(nil), l.closes...)
+}
+
 type roleSettings struct {
 	value    string
 	settings map[string]string
@@ -454,6 +498,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.Claimer == nil {
 		cfg.Claimer = &roleClaimer{}
+	}
+	if cfg.Lifecycle == nil {
+		cfg.Lifecycle = &roleLifecycle{}
 	}
 	if cfg.Settings == nil {
 		cfg.Settings = &roleSettings{}

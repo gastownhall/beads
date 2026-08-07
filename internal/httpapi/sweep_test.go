@@ -19,7 +19,7 @@ const sweepPath = "/v0/beads/issues:sweep"
 
 func (ts *testServer) sweep(t *testing.T, body string) *http.Response {
 	t.Helper()
-	return ts.claimRequest(t, sweepPath, "application/json", body)
+	return ts.postBody(t, sweepPath, "application/json", body)
 }
 
 // TestSweepPathReachesItsHandler: the sweep path is a LITERAL segment
@@ -292,7 +292,7 @@ func TestSweepRefusesAForeignMediaType(t *testing.T) {
 	sweeper := &roleSweeper{}
 	ts := newTestServer(t, rolesConfig(Config{Sweeper: sweeper}))
 
-	resp := ts.claimRequest(t, sweepPath, "text/plain", `{"tier":"ephemeral"}`)
+	resp := ts.postBody(t, sweepPath, "text/plain", `{"tier":"ephemeral"}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -309,7 +309,7 @@ func TestSweepRefusesAForeignMediaType(t *testing.T) {
 func TestSweepPublishesNoQueryParameters(t *testing.T) {
 	ts := newTestServer(t, rolesConfig(Config{Sweeper: &roleSweeper{}}))
 
-	resp := ts.claimRequest(t, sweepPath+"?tier=durable", "application/json", `{"tier":"durable","pattern":"*"}`)
+	resp := ts.postBody(t, sweepPath+"?tier=durable", "application/json", `{"tier":"durable","pattern":"*"}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}

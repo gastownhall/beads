@@ -56,7 +56,8 @@ info:
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations with no parameters at all (`GET /healthz`,
       `GET /v0/beads/context`, `GET /v0/beads/dependencies/cycles`,
-      `POST /v0/beads/issues/{id}:claim`, `POST /v0/beads/issues:sweep`,
+      `POST /v0/beads/issues/{id}:claim`,
+      `POST /v0/beads/issues/{id}:close`, `POST /v0/beads/issues:sweep`,
       `POST /v0/beads/issues:delete`, `GET /v0/beads/config`,
       `GET /v0/beads/config/{key}`) reject every query key the same way.
 
@@ -1297,6 +1298,102 @@ paths:
             `assignee` extension member) or is not in a claimable state
             (`not_claimable`, with the `issue_status` extension member).
           x-bd-codes: [already_claimed, not_claimable]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues/{id}:close:
+    post:
+      operationId: closeIssue
+      summary: Close one issue
+      description: >-
+        Closes the issue this path names, moving it to the literal `closed`
+        status including from a configured done status. It is the half of the
+        agent loop — claim, work, close — that this surface did not serve
+        before.
+
+
+        A named lifecycle action rather than a status patch, because the close
+        carries semantics a patch has nowhere to put: the reason and session
+        under first-close-wins, the done-status normalization, and the close
+        POLICY vocabulary below.
+
+
+        THE FIRST CLOSE WINS. A re-close of an already-closed issue is
+        idempotent — 200 with `already_closed: true` — and writes neither
+        `reason` nor `session`, so a replayed close cannot rewrite the record of
+        why the work ended. The stored pair keeps what the first close gave it
+        until a reopen clears both.
+
+
+        ## Close policy
+
+
+        An unforced close is refused with `409` / `not_closable` when the issue
+        has open children (the refusal carries `open_children`, the count the
+        refusing transaction observed) or a live blocker (no such member). The
+        MEMBER'S PRESENCE is the discriminator, so telling the two apart never
+        requires reading `detail`. Both refusals are the ROLE's, so `force`
+        bypasses those two and nothing else — this endpoint cannot skip a guard
+        by forgetting one exists.
+
+
+        ## Planes
+
+
+        The id resolves across BOTH planes, unlike
+        `POST /v0/beads/issues/{id}:claim`. A close whose target is a wisp lands
+        on the unversioned plane and records no durable history entry.
+
+
+        ## Hooks and auto-commit
+
+
+        Hooks do not fire and the per-command auto-commit machinery does not
+        run, exactly as for `POST /v0/beads/issues/{id}:claim`. The only durable
+        effect is the single storage commit the role makes in its own
+        transaction.
+      parameters:
+        - $ref: '#/components/parameters/IssueID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloseIssueRequest'
+      responses:
+        '200':
+          description: The issue is closed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloseIssueResponse'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, an `actor` that is empty
+            after trimming, longer than 256 bytes, or carrying control
+            characters — or a `reason` or `session` longer than the column
+            holds or carrying control characters.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            Close policy refused an unforced close (`not_closable`): the issue
+            has open children — carrying the `open_children` extension member —
+            or a live blocker, which carries none. Resend with `force: true` to
+            bypass both. Nothing was written.
+          x-bd-codes: [not_closable]
           content:
             application/problem+json:
               schema:
@@ -3180,6 +3277,7 @@ components:
             The operations this server actually implements, derived from its
             route table. v0's vocabulary is `ready.list`, `ready.count`,
             `issues.list`, `issues.query`, `issues.get`, `issues.claim`,
+            `issues.close`,
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
             `dependencies.list`, `dependencies.blocking`, `dependencies.tree`,
@@ -4072,6 +4170,70 @@ components:
             nothing — the idempotent re-claim. A claim held by a DIFFERENT
             actor is a 409, not a 200 with this flag.
 
+    CloseIssueRequest:
+      type: object
+      additionalProperties: false
+      required: [actor]
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$'
+          description: >-
+            Who is closing the issue. `ClaimRequest.actor`'s rules exactly: the
+            server trims it, then refuses an empty result, anything longer than
+            256 BYTES (the `maxLength` above counts characters — the byte limit
+            is the binding one), and any control character including newline.
+            The value reaches stored columns, event-stream attribution and the
+            storage commit message, so an unvalidated newline would forge
+            audit-trail lines.
+        reason:
+          type: string
+          maxLength: 255
+          description: >-
+            Why the issue is closed. Stored on the issue and read back as
+            `close_reason`. THE FIRST CLOSE WINS: an idempotent re-close writes
+            neither this nor `session`, so a replayed close cannot rewrite the
+            record of why the work ended. Refused for control characters, and
+            bounded by what the column holds rather than by the number above.
+        session:
+          type: string
+          maxLength: 255
+          description: >-
+            The working session that closed the issue, stored and read back as
+            `closed_by_session`, under the same first-close-wins rule and the
+            same bounds as `reason`.
+        force:
+          type: boolean
+          default: false
+          description: >-
+            Bypass close policy — the open-children refusal and the
+            live-blocker refusal — and nothing else. The refusals are the
+            ROLE's, so this endpoint cannot skip a guard by forgetting one
+            exists. A forced close still reports `open_children`.
+
+    CloseIssueResponse:
+      type: object
+      required: [issue, already_closed, open_children]
+      properties:
+        issue:
+          $ref: '#/components/schemas/Issue'
+        already_closed:
+          type: boolean
+          description: >-
+            True when the issue was already closed and this call changed
+            nothing — the idempotent re-close, mirroring
+            `ClaimResponse.already_claimed`. The response still carries the
+            row, and `reason`/`session` were not rewritten.
+        open_children:
+          type: integer
+          description: >-
+            How many open children the close observed. Reported by a FORCED
+            close — including an idempotent re-close — because a caller that
+            bypassed the guard is exactly the caller that wants the number. An
+            unforced close that got this far had none, so it reports 0.
+
     Problem:
       type: object
       description: >-
@@ -4103,7 +4265,8 @@ components:
             may dispatch on. v0's vocabulary: `invalid_argument` (400, also
             emitted by the Host-header middleware on any route),
             `invalid_cursor` (400), `not_found` (404), `already_claimed` (409),
-            `not_claimable` (409), `busy` (503), `db_unavailable` (503),
+            `not_claimable` (409), `not_closable` (409), `busy` (503),
+            `db_unavailable` (503),
             `internal` (500). Renaming or removing a status+code pair is a
             breaking change; ADDING one is not, so clients MUST default-branch
             on unknown values and fall back to the status class (unknown 4xx →
@@ -4143,6 +4306,18 @@ components:
           description: >-
             With `already_claimed` or `not_claimable`: the issue's status at
             the moment of refusal.
+        open_children:
+          type: integer
+          description: >-
+            With `not_closable`: how many open children the transaction that
+            refused the close observed, read inside that transaction rather
+            than parsed out of `detail`.
+
+
+            PRESENT ONLY for the open-children refusal. The other
+            `not_closable` refusal is a live blocker and carries no such
+            member, so member presence — not prose — is how a client tells the
+            two apart. Both are bypassed by `force`.
         request_id:
           type: string
           description: >-

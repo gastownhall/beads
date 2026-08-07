@@ -92,8 +92,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	// peeling all of them (storage.UnwrapStore) is the mistake that looks
 	// identical on a single-layer chain. The middle store stands in for the
 	// telemetry layer bd wires there, which is an Unwrapper too.
-	inner := &serveRolesStore{reader: &serveStubReader{}, claimer: &serveStubClaimer{}}
-	middle := &serveRolesStore{reader: &serveStubReader{}, claimer: &serveStubClaimer{}, inner: inner}
+	inner := &serveRolesStore{reader: &serveStubReader{}, claimer: &serveStubClaimer{}, lifecycle: &serveStubLifecycle{}}
+	middle := &serveRolesStore{reader: &serveStubReader{}, claimer: &serveStubClaimer{}, lifecycle: &serveStubLifecycle{}, inner: inner}
 	chained := wireStorageDecorators(middle, hooks.NewRunner(t.TempDir()), false)
 
 	if _, ok := chained.(*storage.HookFiringStore); !ok {
@@ -105,6 +105,16 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	}
 	if !storage.RoleFiresHooks(fromTheStore) {
 		t.Fatal("the store's own accessor no longer returns a hook-firing claimer; this test proves nothing")
+	}
+	// Same precondition for the lifecycle: RoleFiresHooks has to KNOW about the
+	// decorator's lifecycle wrapper, or the peel assertion below would pass on a
+	// predicate that answers false for everything.
+	lifecycleFromTheStore, err := chained.IssueLifecycle()
+	if err != nil {
+		t.Fatalf("IssueLifecycle: %v", err)
+	}
+	if !storage.RoleFiresHooks(lifecycleFromTheStore) {
+		t.Fatal("the store's own accessor no longer returns a hook-firing lifecycle; this test proves nothing")
 	}
 
 	roles, err := serveIssueRoles(chained)
@@ -122,6 +132,16 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	}
 	if reader != issueops.Reader(middle.reader) {
 		t.Errorf("reader came from %p, want the layer directly beneath the hooks (%p)", reader, middle.reader)
+	}
+
+	// The lifecycle is the OTHER role the hook decorator wraps, and it wraps
+	// four verbs rather than one — so an unpeeled lifecycle would run this
+	// workspace's on_create, on_update and close hooks for every HTTP mutation.
+	if storage.RoleFiresHooks(roles.lifecycle) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP lifecycle mutation")
+	}
+	if roles.lifecycle != issueops.Lifecycle(middle.lifecycle) {
+		t.Errorf("lifecycle came from %p, want the layer directly beneath the hooks (%p)", roles.lifecycle, middle.lifecycle)
 	}
 
 	t.Run("a workspace with hooks disabled has no layer to peel", func(t *testing.T) {
@@ -188,14 +208,21 @@ func writeBrokenBeadsConfig(t *testing.T, beadsDir string) {
 // because the extraction does not inspect them.
 type serveRolesStore struct {
 	storage.DoltStorage
-	reader  *serveStubReader
-	claimer *serveStubClaimer
-	inner   storage.DoltStorage
+	reader    *serveStubReader
+	claimer   *serveStubClaimer
+	lifecycle *serveStubLifecycle
+	inner     storage.DoltStorage
 }
 
 func (s *serveRolesStore) IssueReader() (issueops.Reader, error)   { return s.reader, nil }
 func (s *serveRolesStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
 func (s *serveRolesStore) Unwrap() storage.DoltStorage             { return s.inner }
+
+// IssueLifecycle carries an identifiable value for the same reason the reader
+// and the claimer do: it is the OTHER role the hook decorator wraps, so a peel
+// of the wrong depth would hand bd serve a lifecycle that runs the workspace's
+// hooks on every close.
+func (s *serveRolesStore) IssueLifecycle() (issueops.Lifecycle, error) { return s.lifecycle, nil }
 
 func (*serveRolesStore) WorkspaceConfig() (issueops.WorkspaceConfig, error)     { return nil, nil }
 func (*serveRolesStore) StatsReporter() (issueops.StatsReporter, error)         { return nil, nil }
@@ -228,4 +255,22 @@ type serveStubClaimer struct{}
 
 func (*serveStubClaimer) Claim(context.Context, issueops.ClaimRequest) (issueops.ClaimResult, error) {
 	return issueops.ClaimResult{}, errors.ErrUnsupported
+}
+
+type serveStubLifecycle struct{}
+
+func (*serveStubLifecycle) Create(context.Context, issueops.CreateRequest) (issueops.CreateResult, error) {
+	return issueops.CreateResult{}, errors.ErrUnsupported
+}
+
+func (*serveStubLifecycle) Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	return issueops.UpdateResult{}, errors.ErrUnsupported
+}
+
+func (*serveStubLifecycle) Close(context.Context, issueops.CloseRequest) (issueops.CloseResult, error) {
+	return issueops.CloseResult{}, errors.ErrUnsupported
+}
+
+func (*serveStubLifecycle) Reopen(context.Context, issueops.ReopenRequest) (issueops.ReopenResult, error) {
+	return issueops.ReopenResult{}, errors.ErrUnsupported
 }

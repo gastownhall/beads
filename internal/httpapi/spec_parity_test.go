@@ -665,6 +665,84 @@ func TestClaimRequestMembersMatchTheHandler(t *testing.T) {
 	}
 }
 
+// TestCloseRequestMembersMatchTheHandler is TestClaimRequestMembersMatchTheHandler
+// for the close body, and it exists for the same reason: the handler decodes
+// raw members so it can name the offending one, which makes the schema's
+// additionalProperties: false enforceable by a client that has stopped parsing
+// prose — at the cost of a hand-rolled copy of the member list with nothing
+// tying it to the document. A spec revision adding an optional member would
+// otherwise leave `make api-check` and every other spec test green while the
+// server refused the newly documented member as unknown_parameter.
+func TestCloseRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range closeRequestMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.CloseIssueRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated CloseIssueRequest declares members the close handler refuses as unknown: %v\n"+
+			"teach closeRequest to honor them, or the document promises a member the server turns down", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the close handler accepts members CloseIssueRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "CloseIssueRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the CloseIssueRequest schema documents members the close handler refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the close handler accepts members the CloseIssueRequest schema does not document: %v", missing)
+	}
+}
+
+// TestCustomMethodRowsDeclareTheirDocumentedPath bounds the routing exception
+// from the side TestSpecRouteParity cannot see. That test compares DECLARED
+// spec paths, so it stays green whatever the customMethod field says; the
+// dispatcher, meanwhile, chooses a row purely by that field. If the two
+// disagree — a row whose specPath ends in `:close` while its customMethod is
+// `:reopen` — the documented path would reach the wrong operation with every
+// gate passing.
+//
+// It also pins the invariant the dispatcher depends on: no two rows on one
+// pattern may claim the same suffix, and a row that shares a pattern must
+// declare one.
+func TestCustomMethodRowsDeclareTheirDocumentedPath(t *testing.T) {
+	claimed := map[string]string{}
+	patterns := map[string]int{}
+	for _, rt := range routeTable {
+		patterns[rt.method+" "+rt.pattern]++
+	}
+	for _, rt := range routeTable {
+		key := rt.method + " " + rt.pattern
+		if rt.customMethod == "" {
+			if patterns[key] > 1 {
+				t.Errorf("%s shares the pattern %q with another row but declares no customMethod; "+
+					"the dispatcher has no way to choose between them", rt.op, rt.pattern)
+			}
+			continue
+		}
+		if rt.specPath == "" {
+			t.Errorf("%s declares customMethod %q but no specPath; the router cannot spell the documented path, "+
+				"so it must be declared", rt.op, rt.customMethod)
+			continue
+		}
+		if !strings.HasSuffix(rt.specPath, rt.customMethod) {
+			t.Errorf("%s: documented path %q does not end in the customMethod %q the dispatcher matches on; "+
+				"the documented path would reach a different operation",
+				rt.op, rt.specPath, rt.customMethod)
+		}
+		if prev, dup := claimed[key+rt.customMethod]; dup {
+			t.Errorf("%s and %s both claim the suffix %q on %q; the dispatcher would hand every such request to the first",
+				prev, rt.op, rt.customMethod, rt.pattern)
+		}
+		claimed[key+rt.customMethod] = rt.op
+	}
+}
+
 func toStrings(t *testing.T, v any) []string {
 	t.Helper()
 	if v == nil {

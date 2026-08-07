@@ -180,6 +180,7 @@ func runServe() error {
 			AllowNonLoopback:  serveAllowNonLoopback,
 			Reader:            roles.reader,
 			Claimer:           roles.claimer,
+			Lifecycle:         roles.lifecycle,
 			Settings:          roles.settings,
 			Stats:             roles.stats,
 			CycleDetector:     roles.cycles,
@@ -434,6 +435,7 @@ func serveIssueRoles(src storage.DoltStorage) (serveRoles, error) {
 	for _, b := range []binding{
 		{"issue reader", func() (err error) { roles.reader, err = src.IssueReader(); return }},
 		{"issue claimer", func() (err error) { roles.claimer, err = src.IssueClaimer(); return }},
+		{"issue lifecycle", func() (err error) { roles.lifecycle, err = src.IssueLifecycle(); return }},
 		{"workspace config", func() (err error) { roles.settings, err = src.WorkspaceConfig(); return }},
 		{"stats reporter", func() (err error) { roles.stats, err = src.StatsReporter(); return }},
 		{"cycle detector", func() (err error) { roles.cycles, err = src.CycleDetector(); return }},
@@ -461,6 +463,7 @@ func serveIssueRoles(src storage.DoltStorage) (serveRoles, error) {
 type serveRoles struct {
 	reader       issueops.Reader
 	claimer      issueops.Claimer
+	lifecycle    issueops.Lifecycle
 	settings     issueops.WorkspaceConfig
 	stats        issueops.StatsReporter
 	cycles       issueops.CycleDetector

@@ -18,7 +18,7 @@ const deletePath = "/v0/beads/issues:delete"
 
 func (ts *testServer) delete(t *testing.T, body string) *http.Response {
 	t.Helper()
-	return ts.claimRequest(t, deletePath, "application/json", body)
+	return ts.postBody(t, deletePath, "application/json", body)
 }
 
 // TestDeletePathReachesItsHandler is the sweep row's twin: a LITERAL segment
@@ -257,7 +257,7 @@ func TestDeleteRefusesAForeignMediaType(t *testing.T) {
 	deleter := &roleDeleter{}
 	ts := newTestServer(t, rolesConfig(Config{Deleter: deleter}))
 
-	resp := ts.claimRequest(t, deletePath, "text/plain", `{"ids":["bd-1"]}`)
+	resp := ts.postBody(t, deletePath, "text/plain", `{"ids":["bd-1"]}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}
@@ -274,7 +274,7 @@ func TestDeleteRefusesAForeignMediaType(t *testing.T) {
 func TestDeletePublishesNoQueryParameters(t *testing.T) {
 	ts := newTestServer(t, rolesConfig(Config{Deleter: &roleDeleter{}}))
 
-	resp := ts.claimRequest(t, deletePath+"?force=true", "application/json", `{"ids":["bd-1"]}`)
+	resp := ts.postBody(t, deletePath+"?force=true", "application/json", `{"ids":["bd-1"]}`)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 	}

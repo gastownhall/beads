@@ -86,6 +86,12 @@ func RoleFiresHooks(role any) bool {
 	switch role.(type) {
 	case *hookIssueClaimer:
 		return true
+	// The lifecycle role fires on_create, on_update and the close hooks for
+	// every mutation it lands (hook_issue_operations.go), so it is the same
+	// value the network server must refuse — and a wider one than the claimer,
+	// because it carries four verbs rather than one.
+	case *hookIssueOperations:
+		return true
 	}
 	return false
 }

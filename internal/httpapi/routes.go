@@ -3,7 +3,65 @@ package httpapi
 import (
 	"net/http"
 	"slices"
+	"strings"
+
+	"github.com/steveyegge/beads/internal/types"
 )
+
+const (
+	// customMethodPathValue names the ServeMux wildcard the single-resource
+	// custom methods share. The route rows build their pattern from it and
+	// customMethodTarget splits the custom method back off the segment it
+	// matched, so the two halves of the one path exception cannot drift apart.
+	customMethodPathValue = "idop"
+	// customMethodPattern is that one registration. Every row carrying a
+	// customMethod declares it, and s.handler collapses them into a single
+	// ServeMux entry.
+	customMethodPattern = "/v0/beads/issues/{" + customMethodPathValue + "}"
+	// customMethodIDValue is where the dispatcher leaves the id it split out,
+	// so a handler reads its target exactly as one on a literal `{id}` pattern
+	// does rather than re-deriving the split.
+	customMethodIDValue = "id"
+)
+
+// customMethodTarget splits the custom method off the segment the router
+// matched, and reports the row that claims it.
+//
+// ServeMux wildcards match a whole path segment, so `{id}:claim` is not
+// expressible as a pattern: the rows register one shared wildcard and the parse
+// lands here. A segment that ends in no REGISTERED suffix is not an addressable
+// resource on this surface — POST on the issue-detail path is documented
+// nowhere — so it gets the same 404 the catch-all gives any other unrouted
+// path. That is what keeps the wide pattern a routing detail rather than
+// undocumented surface.
+//
+// The id itself is bounded HERE, once for every operation on the pattern, for
+// the same reason the actor is bounded at the edge: this is the last point
+// before a request buys a concurrency slot and two database round trips.
+// `issues.id` is VARCHAR(255) and the document calls the parameter an exact
+// canonical id, so a longer one — or one carrying a control character, which a
+// percent-escape in the path decodes to — names no row that can exist.
+func customMethodTarget(rows []route, segment string) (route, string, *Result) {
+	unrouted := func() *Result {
+		res := newResult(CodeNotFound, "no such route on this server")
+		return &res
+	}
+	for _, rt := range rows {
+		id, ok := strings.CutSuffix(segment, rt.customMethod)
+		if !ok || id == "" {
+			continue
+		}
+		if types.CheckFieldLen("id", id) != nil || strings.ContainsFunc(id, isControlChar) {
+			// The SAME 404 a real miss gets. A distinct refusal here would let
+			// a caller map the server's notion of a well-formed id, and there
+			// is nothing to learn from it: no such row exists either way.
+			res := NotFound()
+			return route{}, "", &res
+		}
+		return rt, id, nil
+	}
+	return route{}, "", unrouted()
+}
 
 // route is one row of the surface: an operation, where it lives in the
 // document, where it lives in the router, and what the request lifecycle owes
@@ -21,8 +79,21 @@ type route struct {
 	pattern string
 	// specPath is the path as the DOCUMENT spells it. Declared, never derived
 	// from pattern, because the two genuinely differ for the custom-method
-	// claim route and a derivation would have to encode that exception.
+	// rows below and a derivation would have to encode that exception.
 	specPath string
+	// customMethod is the `:verb` this row answers on a SHARED wildcard
+	// pattern, or "" for a row the router can spell literally.
+	//
+	// ServeMux wildcards match a whole segment, so `{id}:close` is not
+	// expressible as a pattern — and the single-resource custom methods
+	// COLLIDE: three rows cannot each register POST /v0/beads/issues/{idop}.
+	// Rows carrying this field share one registration; the dispatcher splits
+	// the trailing suffix off the matched segment and hands the request to the
+	// row that claims it (see customMethodTarget).
+	//
+	// A row with a customMethod must declare its specPath, because the whole
+	// point is that the router cannot spell the documented path.
+	customMethod string
 	// capability is the token this operation contributes to
 	// ContextResponse.capabilities, or "" for operations outside that
 	// vocabulary. A stub contributes nothing whatever this says.
@@ -198,25 +269,40 @@ var routeTable = []route{
 	{
 		op:      OpClaimIssue,
 		method:  http.MethodPost,
-		pattern: "/v0/beads/issues/{" + claimPathValue + "}",
-		// The one row where pattern and specPath differ. ServeMux wildcards
+		pattern: customMethodPattern,
+		// One of the rows where pattern and specPath differ. ServeMux wildcards
 		// match a whole path segment, so `{id}:claim` is not expressible as a
-		// pattern: the handler takes the segment whole and splits the custom
-		// method off itself (claimTarget). Declaring specPath here keeps the
-		// parity test honest instead of teaching it this exception;
-		// TestSpecRouteParity bounds the exception's shape and
-		// TestClaimPathReachesItsHandler drives the documented path.
+		// pattern: the rows sharing this pattern register once and the
+		// dispatcher splits the custom method off the matched segment
+		// (customMethodTarget). Declaring specPath here keeps the parity test
+		// honest instead of teaching it this exception; TestSpecRouteParity
+		// bounds the exception's shape and TestClaimPathReachesItsHandler
+		// drives the documented path.
 		//
 		// The wildcard therefore matches every POST under /v0/beads/issues/,
 		// including the issue-detail path the document declares GET-only.
-		// claimTarget answers 404 — the same answer the catch-all gives any
-		// other unrouted path — for a segment that does not end in the custom
-		// method, so the wide pattern stays a routing detail rather than
-		// undocumented surface. TestClaimNarrowsThePOSTSurface pins it.
-		specPath:    "/v0/beads/issues/{id}:claim",
-		capability:  "issues.claim",
-		implemented: true,
-		handler:     (*Server).handleClaim,
+		// The dispatcher answers 404 — the same answer the catch-all gives any
+		// other unrouted path — for a segment that ends in no registered
+		// suffix, so the wide pattern stays a routing detail rather than
+		// undocumented surface. TestCustomMethodsNarrowThePOSTSurface pins it.
+		specPath:     "/v0/beads/issues/{id}:claim",
+		customMethod: ":claim",
+		capability:   "issues.claim",
+		implemented:  true,
+		handler:      (*Server).handleClaim,
+	},
+	{
+		op:     OpCloseIssue,
+		method: http.MethodPost,
+		// The second row on the shared wildcard, and the reason the dispatcher
+		// exists: two rows cannot each register this pattern. Everything the
+		// claim row says about the wildcard's width holds here unchanged.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:close",
+		customMethod: ":close",
+		capability:   "issues.close",
+		implemented:  true,
+		handler:      (*Server).handleClose,
 	},
 	{
 		op:     OpSweepIssues,

@@ -93,7 +93,7 @@ func (s *Server) batchCreateRequest(w http.ResponseWriter, r *http.Request) (iss
 		return issueops.CreateBatchRequest{}, false
 	}
 
-	actor, ok := s.batchCreateActor(w, r, members)
+	actor, ok := s.bodyActor(w, r, members)
 	if !ok {
 		return issueops.CreateBatchRequest{}, false
 	}
@@ -102,30 +102,6 @@ func (s *Server) batchCreateRequest(w http.ResponseWriter, r *http.Request) (iss
 		return issueops.CreateBatchRequest{}, false
 	}
 	return issueops.CreateBatchRequest{Actor: actor, Items: items}, true
-}
-
-// batchCreateActor validates `actor` under the claim's rules, shared rather
-// than restated: the value lands in the same columns and the same storage
-// commit message, so a newline forges the same audit-trail lines.
-func (s *Server) batchCreateActor(w http.ResponseWriter, r *http.Request, members map[string]json.RawMessage) (string, bool) {
-	raw, ok := members[claimActorMember]
-	if !ok {
-		s.fail(w, r, InvalidArgument(claimActorMember, ReasonInvalidValue, "`"+claimActorMember+"` is required"))
-		return "", false
-	}
-	// Through a POINTER so that `null` reaches the type-mismatch branch, for
-	// the reason claimActor gives.
-	var actor *string
-	if err := json.Unmarshal(raw, &actor); err != nil || actor == nil {
-		s.fail(w, r, InvalidArgument(claimActorMember, ReasonInvalidValue, "`"+claimActorMember+"` must be a string"))
-		return "", false
-	}
-	trimmed, res := validateActor(*actor)
-	if res != nil {
-		s.fail(w, r, *res)
-		return "", false
-	}
-	return trimmed, true
 }
 
 // batchCreateItems validates `items` and projects it onto the role's items.

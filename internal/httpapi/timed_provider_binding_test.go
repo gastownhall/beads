@@ -79,8 +79,8 @@ func TestEveryTimedProviderAccessorBindsToTheWrapper(t *testing.T) {
 
 	// The count is asserted so that deleting accessors, or renaming the type,
 	// cannot make this pass by having nothing to check.
-	if checked < 13 {
-		t.Errorf("checked %d timedProvider accessors, want at least 13: the roles this surface answers from "+
+	if checked < 14 {
+		t.Errorf("checked %d timedProvider accessors, want at least 14: the roles this surface answers from "+
 			"all bind here, so a smaller number means some are no longer being read", checked)
 	}
 }

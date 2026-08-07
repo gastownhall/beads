@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/httpapi/apigen"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // Every non-2xx byte this server emits is an RFC 9457 problem+json document
@@ -58,6 +59,17 @@ const (
 	// sentinel's message text.
 	CodeAlreadyClaimed Code = "already_claimed"
 	CodeNotClaimable   Code = "not_claimable"
+	// CodeNotClosable is close policy refusing an unforced close: open
+	// children, or a live blocker. The open-children refusal carries the count
+	// in the `open_children` extension member, read inside the refusing
+	// transaction — never parsed out of the sentinel's message text — and its
+	// PRESENCE is how a client tells the two refusals apart without prose.
+	//
+	// A 409 rather than the delete precedent's 400: this is a statement about
+	// the current state of one named resource, so the same request succeeds or
+	// fails on state the client cannot see without reading it. That is the
+	// not_claimable situation and it gets the not_claimable answer.
+	CodeNotClosable Code = "not_closable"
 	// CodeBusy is retryable contention: the transaction retry budget was
 	// exhausted, or the in-flight request limit was saturated.
 	CodeBusy Code = "busy"
@@ -82,6 +94,7 @@ var codeStatus = map[Code]int{
 	CodeNotFound:        http.StatusNotFound,
 	CodeAlreadyClaimed:  http.StatusConflict,
 	CodeNotClaimable:    http.StatusConflict,
+	CodeNotClosable:     http.StatusConflict,
 	CodeBusy:            http.StatusServiceUnavailable,
 	CodeDBUnavailable:   http.StatusServiceUnavailable,
 	CodeInternal:        http.StatusInternalServerError,
@@ -143,13 +156,19 @@ var ErrBusy = errors.New("server busy")
 
 // Operation ids, matching the spec's operationId values exactly.
 const (
-	OpHealth               = "health"
-	OpGetContext           = "getContext"
-	OpListReadyWork        = "listReadyWork"
-	OpGetStats             = "getStats"
-	OpListIssues           = "listIssues"
-	OpGetIssue             = "getIssue"
-	OpClaimIssue           = "claimIssue"
+	OpHealth        = "health"
+	OpGetContext    = "getContext"
+	OpListReadyWork = "listReadyWork"
+	OpGetStats      = "getStats"
+	OpListIssues    = "listIssues"
+	OpGetIssue      = "getIssue"
+	OpClaimIssue    = "claimIssue"
+	// OpCloseIssue is the second half of the agent loop this surface exists to
+	// serve: claim, work, close. It is a named lifecycle action rather than a
+	// status patch because Close carries semantics a patch has nowhere to put —
+	// the reason and session under first-close-wins, the done-status
+	// normalization, and the close policy vocabulary.
+	OpCloseIssue           = "closeIssue"
 	OpListSettings         = "listSettings"
 	OpGetSetting           = "getSetting"
 	OpListDependencyCycles = "listDependencyCycles"
@@ -283,6 +302,15 @@ var operationCodes = map[string][]Code{
 		CodeInvalidArgument, CodeNotFound, CodeAlreadyClaimed, CodeNotClaimable,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
+	// The 409 is close POLICY, and it is the only conflict this operation has:
+	// an unforced close refused for open children or for a live blocker. There
+	// is no already_claimed here — closing work somebody else holds is not a
+	// refusal on this surface — and the idempotent re-close is a 200 carrying
+	// `already_closed`, the claim's answer to the same question.
+	OpCloseIssue: {
+		CodeInvalidArgument, CodeNotFound, CodeNotClosable,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
 	// No not_found. The role refuses an edge whose target names nothing, and
 	// that refusal is about the REQUEST BODY the client sent, not about a
 	// resource this operation was asked to address — there is no id in the path
@@ -338,6 +366,19 @@ func (r Result) WithAssignee(assignee string) Result {
 // status at the moment of refusal). Same rule as WithAssignee.
 func (r Result) WithIssueStatus(status string) Result {
 	r.Problem.IssueStatus = &status
+	return r
+}
+
+// WithOpenChildren attaches the `open_children` extension member (how many open
+// children the transaction that refused a close observed). Same rule as
+// WithAssignee: it comes from the typed error's own field, read inside that
+// transaction, never from parsing the refusal's prose.
+//
+// Its PRESENCE is load-bearing. It is attached for the open-children refusal
+// and withheld for the live-blocker one, which is how a client tells the two
+// apart without reading `detail`.
+func (r Result) WithOpenChildren(n int) Result {
+	r.Problem.OpenChildren = &n
 	return r
 }
 
@@ -441,6 +482,17 @@ func ClassifyError(err error) Result {
 
 	case errors.Is(err, storage.ErrNotClaimable):
 		return newResult(CodeNotClaimable, "issue is not in a claimable state")
+
+	// The two close-policy refusals share one code. They are the same statement
+	// to a client — the close was refused for the state of the graph around
+	// this issue, and `force` is the bypass for both — and what distinguishes
+	// them on the wire is the `open_children` member failClose attaches, not a
+	// second vocabulary entry.
+	case errors.Is(err, issueops.ErrCloseOpenChildren):
+		return newResult(CodeNotClosable, "issue has open children; close them first or close with force")
+
+	case errors.Is(err, issueops.ErrCloseBlocked):
+		return newResult(CodeNotClosable, "issue is blocked; clear the blocker or close with force")
 
 	case errors.Is(err, ErrBusy):
 		res := newResult(CodeBusy, "")

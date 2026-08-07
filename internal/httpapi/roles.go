@@ -91,6 +91,50 @@ func (c checkedBatchCreator) CreateBatch(ctx context.Context, req issueops.Creat
 	return result, nil
 }
 
+// checkedLifecycle is the lifecycle role every mutation handler is handed.
+//
+// Close is the whole reason the type exists on this slice: handleClose writes
+// *result.Issue, which is checkedClaimer's hazard exactly. Create, Update and
+// Reopen pass through because no handler on this surface reaches them yet; each
+// grows a guard in the change that publishes its operation, rather than one
+// written speculatively against a body nobody marshals.
+type checkedLifecycle struct{ inner issueops.Lifecycle }
+
+// Create passes the request through unchanged: this surface publishes no
+// create-one operation (batchCreateIssues reaches issueops.BatchCreator).
+func (c checkedLifecycle) Create(ctx context.Context, req issueops.CreateRequest) (issueops.CreateResult, error) {
+	return c.inner.Create(ctx, req)
+}
+
+// Update passes the request through unchanged; updateIssue is not published on
+// this surface yet.
+func (c checkedLifecycle) Update(ctx context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {
+	return c.inner.Update(ctx, req)
+}
+
+// Close refuses a result that reports success without the row the response body
+// is built from.
+//
+// There is no wire code for it and there must not be one: `already_closed` says
+// the issue was closed earlier and the response still carries the row, and a
+// 404 would tell a client the issue does not exist when nothing here knows
+// that. It is a broken implementation, so it is the generic 500 — with the
+// fault in the log as an error and a request_error line beside it, which is
+// what the panic it replaces did not produce.
+func (c checkedLifecycle) Close(ctx context.Context, req issueops.CloseRequest) (issueops.CloseResult, error) {
+	result, err := c.inner.Close(ctx, req)
+	if err == nil && result.Issue == nil {
+		return issueops.CloseResult{}, fmt.Errorf("close %q: the lifecycle reported success without an issue", req.IssueID)
+	}
+	return result, err
+}
+
+// Reopen passes the request through unchanged; reopenIssue is not published on
+// this surface yet.
+func (c checkedLifecycle) Reopen(ctx context.Context, req issueops.ReopenRequest) (issueops.ReopenResult, error) {
+	return c.inner.Reopen(ctx, req)
+}
+
 // checkedClaimer is the claimer the claim handler is handed.
 type checkedClaimer struct{ inner issueops.Claimer }
 
