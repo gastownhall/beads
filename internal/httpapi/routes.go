@@ -246,6 +246,14 @@ var routeTable = []route{
 		handler:     (*Server).handleDelete,
 	},
 	{
+		op:          OpListMemories,
+		method:      http.MethodGet,
+		pattern:     "/v0/beads/memories",
+		capability:  "memories.list",
+		implemented: true,
+		handler:     (*Server).handleListMemories,
+	},
+	{
 		op:     OpRememberMemory,
 		method: http.MethodPost,
 		// A plain collection POST, not a custom method: this creates one member
@@ -261,9 +269,9 @@ var routeTable = []route{
 		op:     OpGetMemory,
 		method: http.MethodGet,
 		// A single-segment wildcard, so pattern and specPath agree and no
-		// declaration is needed. It cannot collide with the collection path
-		// above: ServeMux requires the separating slash, and nothing is
-		// registered for GET on the bare collection until listMemories lands.
+		// declaration is needed. It cannot collide with the collection read
+		// above: ServeMux requires the separating slash, so `/memories` and
+		// `/memories/{key}` never match the same request.
 		pattern:     "/v0/beads/memories/{key}",
 		capability:  "memories.get",
 		implemented: true,

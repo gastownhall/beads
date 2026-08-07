@@ -1805,6 +1805,89 @@ paths:
           $ref: '#/components/responses/Unavailable'
 
   /v0/beads/memories:
+    get:
+      operationId: listMemories
+      summary: List the workspace's stored memories
+      description: >-
+        Every memory this workspace holds, optionally narrowed by `q`. It is the
+        plane `bd memories` reads.
+
+
+        ONLY THE MEMORY PLANE. Memories ride in the same database table as the
+        workspace's settings and as the generic `bd kv` namespace, and neither
+        of those appears here, whatever it contains — including a memory whose
+        key SHADOWS a settings name: a memory called `issue_prefix` is a memory,
+        and the workspace's real issue prefix is not one. That separation is the
+        role's, pinned by its conformance contract, not a filter applied to this
+        answer.
+
+
+        MEMORY CONTENT IS SERVED IN FULL and this API has no authentication.
+        Every entry carries its value verbatim; there is no `redacted` member
+        and nothing is withheld. See `POST /v0/beads/memories` for why a
+        key-name heuristic would be worse here than no promise at all. This is
+        the operation that makes stored memories DISCOVERABLE rather than merely
+        readable by a caller who already knows a key — an operator binding
+        beyond loopback is accepting exactly that.
+
+
+        A memory stored as the EMPTY STRING is enumerated here, because its key
+        exists, while `GET /v0/beads/memories/{key}` answers `404` for it. That
+        asymmetry is the one way a client can tell a row stored empty from a row
+        that is not there, and it is the storage seam's conflation showing
+        through rather than a rule this surface invented.
+
+
+        The envelope is the paginated one and `has_more` is ALWAYS false:
+        memories are a keyed namespace a workspace holds tens of, not a
+        collection to scan, so the whole plane comes back in one page. There is
+        no `limit` and no cursor. The envelope is used anyway because entries
+        are ordered by key, which makes a keyset cursor expressible later
+        without a breaking change.
+      parameters:
+        - name: q
+          in: query
+          description: >-
+            Narrows the answer to memories that MATCH: a memory matches when the
+            lowercase of its key, or the lowercase of its value, contains the
+            lowercase of this term. Absent or empty means everything, and a term
+            nothing matches is a `200` with an empty `items`.
+
+
+            IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE.
+            This surface spells two different questions `q`, and they are not
+            the same parameter: on `GET /v0/beads/issues:query` it is a boolean
+            expression over issue fields, refused when it does not parse; here
+            there is nothing to parse, no vocabulary and no refusal — every
+            string is a legal search term, `status=open` included, and it is
+            matched literally.
+
+
+            The term reaches the role UNFOLDED. Case folding is the role's, so
+            that this surface and `bd memories` cannot come to disagree about
+            what matching means; a client sends what its user typed.
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The stored memories, ordered by key.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MemoriesPage'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a repeated `q`.
+            `q` is the only parameter this operation accepts.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
     post:
       operationId: rememberMemory
       summary: Store one memory
@@ -3052,7 +3135,8 @@ components:
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
             `dependencies.list`, `dependencies.blocking`, `dependencies.tree`,
-            `memories.get`, `memories.remember`, `memories.forget`;
+            `memories.list`, `memories.get`, `memories.remember`,
+            `memories.forget`;
             it grows additively, and an operation never
             appears here unless it is fully implemented. This is how a client
             checks for an operation — never the version string.
@@ -3590,6 +3674,28 @@ components:
             out of band with an empty value, which
             `GET /v0/beads/memories/{key}` answers as a `404` and
             `GET /v0/beads/memories` enumerates.
+
+    MemoriesPage:
+      type: object
+      required: [items, has_more]
+      properties:
+        items:
+          type: array
+          description: >-
+            The stored memories, ordered by key. Empty array (never null) when
+            the workspace holds none, or when `q` matched none.
+          items:
+            $ref: '#/components/schemas/Memory'
+        has_more:
+          type: boolean
+          description: >-
+            Always false in v0: the whole plane is returned in one page. It is
+            present so that a later revision can page this collection without
+            changing the response shape.
+        next_cursor:
+          type: string
+          description: >-
+            Present if and only if `has_more` is true, which is never in v0.
 
     RememberRequest:
       type: object

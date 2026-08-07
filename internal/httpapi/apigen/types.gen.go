@@ -214,7 +214,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.get`, `memories.remember`, `memories.forget`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	Capabilities []string `json:"capabilities"`
 
 	// Database Logical database name (not a host or a DSN).
@@ -366,6 +366,18 @@ type IssuesPage struct {
 	Items []IssueWithCounts `json:"items"`
 
 	// NextCursor Present if and only if `has_more` is true. Pass it back verbatim as `cursor` to fetch the next page. Opaque and server-private.
+	NextCursor *string `json:"next_cursor,omitempty"`
+}
+
+// MemoriesPage defines model for MemoriesPage.
+type MemoriesPage struct {
+	// HasMore Always false in v0: the whole plane is returned in one page. It is present so that a later revision can page this collection without changing the response shape.
+	HasMore bool `json:"has_more"`
+
+	// Items The stored memories, ordered by key. Empty array (never null) when the workspace holds none, or when `q` matched none.
+	Items []Memory `json:"items"`
+
+	// NextCursor Present if and only if `has_more` is true, which is never in v0.
 	NextCursor *string `json:"next_cursor,omitempty"`
 }
 
@@ -770,6 +782,16 @@ type QueryIssuesParams struct {
 
 // QueryIssuesParamsSort defines parameters for QueryIssues.
 type QueryIssuesParamsSort string
+
+// ListMemoriesParams defines parameters for ListMemories.
+type ListMemoriesParams struct {
+	// Q Narrows the answer to memories that MATCH: a memory matches when the lowercase of its key, or the lowercase of its value, contains the lowercase of this term. Absent or empty means everything, and a term nothing matches is a `200` with an empty `items`.
+	//
+	// IT IS A SUBSTRING MATCH, NOT THE `issues:query` EXPRESSION LANGUAGE. This surface spells two different questions `q`, and they are not the same parameter: on `GET /v0/beads/issues:query` it is a boolean expression over issue fields, refused when it does not parse; here there is nothing to parse, no vocabulary and no refusal — every string is a legal search term, `status=open` included, and it is matched literally.
+	//
+	// The term reaches the role UNFOLDED. Case folding is the role's, so that this surface and `bd memories` cannot come to disagree about what matching means; a client sends what its user typed.
+	Q *string `form:"q,omitempty" json:"q,omitempty"`
+}
 
 // ListReadyWorkParams defines parameters for ListReadyWork.
 type ListReadyWorkParams struct {

@@ -331,6 +331,12 @@ func (m *roleMemories) forgetRequests() []memoryops.ForgetRequest {
 	return append([]memoryops.ForgetRequest(nil), m.forget...)
 }
 
+func (m *roleMemories) listRequests() []memoryops.ListRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]memoryops.ListRequest(nil), m.list...)
+}
+
 type roleClaimer struct {
 	result issueops.ClaimResult
 	err    error

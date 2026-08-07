@@ -196,6 +196,10 @@ const (
 	// destructive issue operations are collection-level custom methods because
 	// they act on a set the request describes.
 	OpForgetMemory = "forgetMemory"
+	// OpListMemories enumerates the memory plane, narrowed by one search term.
+	// It is the operation that makes stored memories DISCOVERABLE rather than
+	// merely readable by a caller who already knows a key.
+	OpListMemories = "listMemories"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -303,6 +307,11 @@ var operationCodes = map[string][]Code{
 	// nothing stored is a 404 and nothing was removed. No 409 — a memory another
 	// caller already forgot is simply not there, which is what the 404 says.
 	OpForgetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The 400 here IS this operation's own, unlike listSettings' absent row: it
+	// has one parameter, and a repeated `q` is refused rather than resolved to
+	// one of its values. No 404 — a search matching nothing is an empty page,
+	// because a question about a set has an answer even when the set is empty.
+	OpListMemories: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
 }
 
 // Result is a problem response ready to be written: the envelope plus the

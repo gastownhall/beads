@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -512,5 +513,219 @@ func TestDeleteOnTheMemoryCollectionIsNotRouted(t *testing.T) {
 	}
 	if n := len(memories.forgetRequests()); n != 0 {
 		t.Errorf("the role was called %d times for the collection path, want 0", n)
+	}
+}
+
+// TestListMemoriesAnswersThePlaneOrderedByKey: the collection read. The order
+// is what makes the paginated envelope honest — a keyset cursor over it is
+// expressible later without changing what a client already receives — and
+// `has_more` is always false because the whole plane comes back in one page.
+func TestListMemoriesAnswersThePlaneOrderedByKey(t *testing.T) {
+	memories := &roleMemories{listed: memoryops.ListResult{Memories: map[string]string{
+		"zebra":        "last by key",
+		"alpha":        "first by key",
+		"Has Spaces.✓": "an explicit key",
+		// A row written out of band with an empty value. It is enumerated here
+		// — its KEY exists — while GET /v0/beads/memories/{key} answers 404 for
+		// it, and that asymmetry is the one way a client tells a row stored
+		// empty from a row that is not there.
+		"stored-empty": "",
+	}}}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.get(t, memoriesPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	body := decodeBody(t, resp)
+	if got := body["has_more"]; got != false {
+		t.Errorf("has_more = %v, want false: the whole plane comes back in one page", got)
+	}
+	if _, ok := body["next_cursor"]; ok {
+		t.Error("next_cursor is present; it is documented as present if and only if has_more is true")
+	}
+	items, _ := body["items"].([]any)
+	var gotKeys []string
+	for _, item := range items {
+		entry, _ := item.(map[string]any)
+		key, _ := entry["key"].(string)
+		gotKeys = append(gotKeys, key)
+	}
+	wantKeys := []string{"Has Spaces.✓", "alpha", "stored-empty", "zebra"}
+	if !slices.Equal(gotKeys, wantKeys) {
+		t.Errorf("keys = %v, want %v (ordered by key)", gotKeys, wantKeys)
+	}
+
+	values := map[string]any{}
+	for _, item := range items {
+		entry, _ := item.(map[string]any)
+		key, _ := entry["key"].(string)
+		values[key] = entry["value"]
+	}
+	if got := values["stored-empty"]; got != "" {
+		t.Errorf("the empty-valued row's value = %v, want the empty string: `value` is required on Memory", got)
+	}
+	if got := values["alpha"]; got != "first by key" {
+		t.Errorf("value = %v, want the stored content", got)
+	}
+}
+
+// TestListMemoriesOfAnEmptyPlaneIsAnEmptyArray: never null. A client must not
+// have to tell an absent array from an empty one to learn that nothing is
+// stored.
+func TestListMemoriesOfAnEmptyPlaneIsAnEmptyArray(t *testing.T) {
+	ts := newTestServer(t, rolesConfig(Config{Memories: &roleMemories{}}))
+
+	resp := ts.get(t, memoriesPath)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	raw := readAll(t, resp)
+	if !strings.Contains(raw, `"items":[]`) {
+		t.Errorf("body = %s, want an empty items array rather than null", raw)
+	}
+}
+
+// TestListMemoriesPassesTheSearchTermUnfolded: the term reaches the role as the
+// client sent it.
+//
+// Case folding is the ROLE's — it owns what matching means, so that this
+// surface and `bd memories` cannot come to disagree — and a handler that
+// lowercased on the way past would be the second definition. Asserted on the
+// REQUEST the role received for that reason: a response says nothing about
+// which term was searched for.
+func TestListMemoriesPassesTheSearchTermUnfolded(t *testing.T) {
+	memories := &roleMemories{}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	resp := ts.get(t, memoriesPath+"?q=Dolt%20PHANTOMS")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+
+	reqs := memories.listRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d lists, want 1", len(reqs))
+	}
+	if reqs[0].Search != "Dolt PHANTOMS" {
+		t.Errorf("role received search %q, want the term verbatim", reqs[0].Search)
+	}
+}
+
+// TestListMemoriesTreatsAnAbsentTermAsEverything: absent `q` is the empty
+// search, which the role reads as "everything" — not as a filter that matches
+// only memories containing "".
+func TestListMemoriesTreatsAnAbsentTermAsEverything(t *testing.T) {
+	memories := &roleMemories{}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	if resp := ts.get(t, memoriesPath); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	reqs := memories.listRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d lists, want 1", len(reqs))
+	}
+	if reqs[0].Search != "" {
+		t.Errorf("role received search %q for an absent parameter, want the empty string", reqs[0].Search)
+	}
+}
+
+// TestListMemoriesRefusesAnUnknownQueryParameter is the pin the design asked
+// for by name: it is the only operation on the memory plane that takes a
+// parameter at all, so it is the only one that goes through the query DECODER
+// rather than through requireNoQuery — and that decoder's allowlist is the set
+// of names the handler actually read, so a handler reading nothing accepts
+// nothing while one reading `q` accepts exactly `q`.
+//
+// Silently ignoring an unrecognized parameter is what this prevents. On a
+// filtering operation it WIDENS the answer, so a client one version ahead of
+// the server would receive memories it believed it had filtered out — and on
+// this plane a widened answer is a disclosure. It is also a client's only
+// per-parameter capability probe, since `capabilities` is operation-level.
+func TestListMemoriesRefusesAnUnknownQueryParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		query     string
+		wantParam string
+		reason    Reason
+	}{
+		{
+			name:      "a parameter this operation does not have",
+			query:     "?search=dolt",
+			wantParam: "search",
+			reason:    ReasonUnknownParameter,
+		},
+		{
+			// The paging vocabulary of the issue reads. This operation has no
+			// limit and no cursor, and accepting one silently would promise
+			// paging that does not happen.
+			name:      "a parameter another operation does have",
+			query:     "?q=dolt&limit=10",
+			wantParam: "limit",
+			reason:    ReasonUnknownParameter,
+		},
+		{
+			// A repeated `q` is two search terms, which is a question this
+			// operation cannot answer. Resolving it to one of them silently
+			// would answer a different question from the one asked.
+			name:      "a repeated q",
+			query:     "?q=one&q=two",
+			wantParam: "q",
+			reason:    ReasonInvalidValue,
+		},
+		{
+			// The degenerate spelling: a parameter whose NAME is empty. The
+			// document promises `param` on every 400 but an unparseable body,
+			// so it is named rather than omitted.
+			name:      "the empty parameter name",
+			query:     "?=1",
+			wantParam: "",
+			reason:    ReasonUnknownParameter,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memories := &roleMemories{}
+			ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+			resp := ts.get(t, memoriesPath+tc.query)
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if got := body["code"]; got != string(CodeInvalidArgument) {
+				t.Errorf("code = %v, want %q", got, CodeInvalidArgument)
+			}
+			param, ok := body["param"]
+			if !ok {
+				t.Fatalf("no `param` on the refusal; the document promises one on every 400 but an unparseable body")
+			}
+			if param != tc.wantParam {
+				t.Errorf("param = %v, want %q", param, tc.wantParam)
+			}
+			if got := body["reason"]; got != string(tc.reason) {
+				t.Errorf("reason = %v, want %q", got, tc.reason)
+			}
+			if n := len(memories.listRequests()); n != 0 {
+				t.Errorf("the role was called %d times for a refused request, want 0", n)
+			}
+		})
+	}
+}
+
+// TestListMemoriesAcceptsQAndNothingElse states the other half of the rule as a
+// positive: `q` is accepted, so the refusals above are about the OTHER names
+// rather than about a decoder that refuses everything.
+func TestListMemoriesAcceptsQAndNothingElse(t *testing.T) {
+	memories := &roleMemories{}
+	ts := newTestServer(t, rolesConfig(Config{Memories: memories}))
+
+	if resp := ts.get(t, memoriesPath+"?q=dolt"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d for the one parameter this operation takes, want 200: %s",
+			resp.StatusCode, readAll(t, resp))
+	}
+	if n := len(memories.listRequests()); n != 1 {
+		t.Errorf("the role was called %d times, want 1", n)
 	}
 }

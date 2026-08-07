@@ -75,6 +75,60 @@ func (s *Server) handleRememberMemory(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// memorySearchParam is the one query parameter this surface's memory plane
+// takes. It is spelled `q` and it is NOT the `q` of GET /v0/beads/issues:query:
+// that one is a boolean expression over issue fields with a vocabulary and a
+// parse refusal, this one is a substring match with neither. The document says
+// so on the parameter, because a client that assumed the other meaning would
+// send `status=open` and get a literal search rather than an error.
+const memorySearchParam = "q"
+
+// handleListMemories answers GET /v0/beads/memories.
+func (s *Server) handleListMemories(w http.ResponseWriter, r *http.Request) {
+	// The one-parameter shape of the unknown-parameter rule. requireNoQuery is
+	// for operations that take NONE; this one takes exactly one, so it goes
+	// through the same query decoder every filtering read uses — which tracks
+	// what was read and refuses what was not, so the allowlist is the parameter
+	// table itself rather than a second copy of it that can drift.
+	q := newQuery(r.URL.Query())
+	// str, not list: a repeated `q` is refused rather than silently resolved to
+	// one of its values, because a client that sent two terms asked a question
+	// this operation cannot answer and must not be told it did.
+	search := q.str(memorySearchParam)
+	if !s.acceptQuery(w, r, q) {
+		return
+	}
+
+	memories, err := s.memories(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	// The term goes in UNFOLDED and unparsed. Matching semantics are the role's
+	// — case folding included — so that this surface and `bd memories` cannot
+	// come to disagree about what a search means.
+	result, err := memories.List(r.Context(), memoryops.ListRequest{Search: search})
+	if err != nil {
+		s.failMemoryErr(w, r, err)
+		return
+	}
+
+	keys := make([]string, 0, len(result.Memories))
+	for key := range result.Memories {
+		keys = append(keys, key)
+	}
+	// Ordered by key, which is what makes the paginated envelope honest: the
+	// order is stable across calls, so a keyset cursor over it is expressible
+	// later without changing what a client already receives.
+	slices.Sort(keys)
+
+	items := make([]apigen.Memory, 0, len(keys))
+	for _, key := range keys {
+		items = append(items, apigen.Memory{Key: key, Value: result.Memories[key]})
+	}
+	writeJSON(w, apigen.MemoriesPage{Items: items, HasMore: false})
+}
+
 // handleGetMemory answers GET /v0/beads/memories/{key}.
 func (s *Server) handleGetMemory(w http.ResponseWriter, r *http.Request) {
 	if !s.requireNoQuery(w, r) {
