@@ -352,6 +352,13 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 				"added":     json.RawMessage(`"set"`),
 				"keep":      json.RawMessage(`"set"`),
 				"contested": json.RawMessage(`"set"`),
+				// NOT STRINGS, deliberately. Every other Set value in this file
+				// is a JSON string, so a body that accepted only strings — uow
+				// validates Set values by shape in its own gate, before the
+				// shared apply — passed every case here. A number and a nested
+				// object are the two shapes a caller actually stores.
+				"count":  json.RawMessage(`7`),
+				"nested": json.RawMessage(`{"a":[1,2],"b":{"c":true}}`),
 			},
 			Unset: []string{"keep", "drop"},
 		},
@@ -372,9 +379,9 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 	// broken order. "contested" survives the patch, so it records which of the
 	// two wrote last — Set does, per issueops.go's Merge≺Set≺Unset promise.
 	assertIssueOperationsMetadata(t, "ordered metadata patch", ordered.Issue.Metadata,
-		`{"added":"set","contested":"set","merged":true}`)
+		`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
 	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after the ordered metadata patch",
-		`{"added":"set","contested":"set","merged":true}`)
+		`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
 
 	// Replace beside any incremental edit is refused, and the document the
 	// replacement would have written never lands.
@@ -400,7 +407,7 @@ func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx 
 				t.Fatalf("%s: err = %v, want ErrValidation", name, err)
 			}
 			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after "+name,
-				`{"added":"set","contested":"set","merged":true}`)
+				`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
 		})
 	}
 	events.assert(t, "refused replace-plus-incremental patches", 0, nil)
@@ -1146,6 +1153,34 @@ func RunIssueOperationsUpdateClaimConflictCarriesTheLosingState(t *testing.T, ct
 	}
 	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, deferredID, "", types.StatusDeferred)
 	deferredEvents.assert(t, "refused ineligible claim", 0, nil)
+
+	// CLAIM UNDER A STALE ExpectedVersion, which is the ONE legal claim/guard
+	// composition and was pinned by nothing.
+	//
+	// internal/storage/issueops/aggregate.go refuses Claim beside
+	// ExpectedAssignee or ExpectedStatus before the unit of work opens, so
+	// ExpectedVersion is the only precondition a claim may carry — it is the
+	// optimistic fence a caller uses to claim a row it has already read. The
+	// positive half (claim with a current version succeeds) is covered
+	// elsewhere and passes even when the guard is bypassed entirely, so the
+	// refusal is the half that carries the promise.
+	fencedID := fixture.IssuePrefix + "-claimfence"
+	seedClosePolicyIssue(t, ctx, fixture, fencedID, publicops.CreateRequest{})
+	var currentVersion int64
+	if err := fixture.QueryScalar(ctx, "SELECT row_lock FROM issues WHERE id = ?", []any{fencedID}, &currentVersion); err != nil {
+		t.Fatalf("read row_lock for %s: %v", fencedID, err)
+	}
+	staleVersion := currentVersion - 1
+	fenceEvents := newIssueOperationsEventCounter(t, ctx, fixture, fencedID)
+	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "racer", IssueID: fencedID, Claim: true, ExpectedVersion: &staleVersion,
+	}); !errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Fatalf("claim guarded on a stale version: err = %v, want ErrVersionMismatch", err)
+	}
+	// The claim must not have landed: a bypassed fence shows up as an assignee,
+	// not as an error, so the row is what says whether the guard ran.
+	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, fencedID, "", types.StatusOpen)
+	fenceEvents.assert(t, "claim refused by a stale version fence", 0, nil)
 }
 
 // assertIssueOperationsClaimConflict checks the refusal is the typed conflict
@@ -1952,6 +1987,27 @@ func RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ct
 		t.Fatalf("edit guarded on the current holder = %#v, %v; want the edit applied", result, err)
 	}
 	assertPriority("priority after a guard naming the current holder", 0)
+
+	// THE ORDER-DEPENDENT COMPOSITION, and the one arm above that nothing else
+	// covers: an EARLIER guard that holds beside a LATER guard that is stale.
+	//
+	// Every refusal above puts the stale guard first, so a body that checked
+	// only the first present precondition — an `else if` where an `if` belongs,
+	// which is one refactor slip — refused all of them correctly and let this
+	// one through. The assignee guard names the current holder and the status
+	// guard names a status the row does not have, so the answer must be the
+	// LATER guard's sentinel, not silence.
+	// A fresh counter: the edit above committed and this arm is about what a
+	// REFUSAL writes, so it must start from zero rather than inherit that one.
+	maskedEvents := newIssueOperationsEventCounter(t, ctx, fixture, id)
+	maskedEdit := priorityEdit(3)
+	maskedEdit.ExpectedAssignee = &holder
+	maskedEdit.ExpectedStatus = &staleStatus
+	if _, err := fixture.Operations.Update(ctx, maskedEdit); !errors.Is(err, publicops.ErrStatusMismatch) {
+		t.Fatalf("edit with a holding assignee guard and a stale status guard: err = %v, want ErrStatusMismatch", err)
+	}
+	assertPriority("priority after a stale guard behind a holding one", 0)
+	maskedEvents.assert(t, "guard masked by the one before it", 0, nil)
 }
 
 // seedIssueOperationsLabeledIssue creates one open task at an explicit ID
