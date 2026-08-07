@@ -85,7 +85,17 @@ Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
 pointless).`,
-	Args:          cobra.MinimumNArgs(0),
+	// The non-interactive no-ID refusal lives in argument validation, which
+	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
+	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can
+	// open the store, run a version-bump migration, or auto-import JSONL
+	// (bd-m00pb). The interactive fallback itself is resolved in RunE.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && !AllowLastTouchedFallback() {
+			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
+		}
+		return nil
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -102,11 +112,9 @@ pointless).`,
 			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
-		// If no IDs provided, use last touched issue (interactive only)
+		// If no IDs provided, use last touched issue (interactive only;
+		// the non-interactive case was already refused in Args validation)
 		if len(args) == 0 {
-			if !AllowLastTouchedFallback() {
-				return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
-			}
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
 				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")

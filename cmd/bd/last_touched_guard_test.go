@@ -111,6 +111,34 @@ func TestNoIDFallbackGuard(t *testing.T) {
 		}
 	})
 
+	t.Run("refusal fires before store open", func(t *testing.T) {
+		// A bare directory that is not a beads workspace: if the no-ID
+		// refusal ran after root's pre-run hooks, this would die on a
+		// store/workspace error (or, in a real workspace, run a migration
+		// or JSONL auto-import first). Argument validation runs before
+		// PersistentPreRunE, so the advertised message must appear and the
+		// directory must stay untouched.
+		bareDir := t.TempDir()
+		code, out := runBDWithEnv(t, binPath, bareDir, nil, "update", "--priority", "3")
+		if code == 0 {
+			t.Fatalf("bd update with no ID succeeded outside a workspace; output: %s", out)
+		}
+		if !strings.Contains(out, "BD_LAST_TOUCHED_FALLBACK") {
+			t.Errorf("refusal should fail fast with the advertised message, not a store error; output: %s", out)
+		}
+		entries, err := os.ReadDir(bareDir)
+		if err != nil {
+			t.Fatalf("read bare dir: %v", err)
+		}
+		if len(entries) != 0 {
+			names := make([]string, 0, len(entries))
+			for _, e := range entries {
+				names = append(names, e.Name())
+			}
+			t.Errorf("no-ID refusal must have no side effects; created: %v", names)
+		}
+	})
+
 	t.Run("explicit ID always works", func(t *testing.T) {
 		code, out := runBDWithEnv(t, binPath, workDir, nil, "update", id, "--priority", "2")
 		if code != 0 {

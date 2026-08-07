@@ -37,7 +37,15 @@ When closing multiple issues, provide one --reason for all IDs or repeat
 --reason once per ID. Reasons map positionally: the first --reason applies
 to the first ID, the second --reason to the second ID, regardless of where
 the flags appear in the command line.`,
-	Args:          cobra.MinimumNArgs(0),
+	// Refuse a missing ID in argument validation, before root's
+	// PersistentPreRunE can open the store, migrate, or auto-import
+	// (bd-m00pb); see updateCmd for the full rationale.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && !AllowLastTouchedFallback() {
+			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
+		}
+		return nil
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -54,11 +62,9 @@ the flags appear in the command line.`,
 			return runCloseProxiedServer(cmd, rootCtx, args)
 		}
 
-		// If no IDs provided, use last touched issue (interactive only)
+		// If no IDs provided, use last touched issue (interactive only;
+		// the non-interactive case was already refused in Args validation)
 		if len(args) == 0 {
-			if !AllowLastTouchedFallback() {
-				return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
-			}
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
 				return HandleErrorRespectJSON("no issue ID provided and no last touched issue")
