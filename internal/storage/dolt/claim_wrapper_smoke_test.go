@@ -91,24 +91,20 @@ func TestClaimIssueWrapperRoutesItsOwnBranches(t *testing.T) {
 		}
 	})
 
-	// C-B. The wisp branch's OTHER decision: claimWisp deliberately takes a
-	// bare SQL commit and no DOLT_COMMIT, because wisps live in dolt_ignored
-	// tables. A version commit growing here would put ephemeral churn into
-	// `bd dolt log` — the thing the ignored tables exist to prevent — and
-	// nothing above this line would notice, since the role never reaches this
-	// branch to have an opinion about it.
-	t.Run("DoesNotVersionAWispClaim", func(t *testing.T) {
-		createWisp(t, ctx, store, "clwrap-wisp-hist")
-		before := historyCount(t)
-		if err := store.ClaimIssue(ctx, "clwrap-wisp-hist", "worker"); err != nil {
-			t.Fatalf("ClaimIssue of a wisp: %v", err)
-		}
-		if after := historyCount(t); after != before {
-			t.Errorf("history entries went %d -> %d across a wisp claim, want no change — "+
-				"wisps live in dolt_ignored tables and claimWisp takes no Dolt commit", before, after)
-		}
-	})
-
+	// THERE IS NO CASE HERE FOR "a wisp claim takes no Dolt version commit",
+	// and the absence is a measured result rather than an oversight. claimWisp
+	// says in so many words that it skips versioning because wisps live in
+	// dolt_ignored tables, which reads like a decision worth pinning. It is not
+	// observable. Two mutations in opposite directions both left a dolt_log
+	// delta assertion green: routing the wisp through the DURABLE branch
+	// instead (the durable branch stages "issues" and "events", neither of
+	// which a wisp claim dirties, so the empty-staged-set guard suppresses the
+	// commit), and adding a doltAddAndCommitInTx over the wisp tables to
+	// claimWisp itself (DOLT_ADD stages nothing for an ignored table, so the
+	// same guard fires). The property is enforced by the dolt_ignore
+	// configuration, one layer below this wrapper, and a case asserting it here
+	// would be a test that cannot fail.
+	//
 	// C-C. And the wisp branch's refusal, which is a different question from
 	// C-A: the branch runs its CAS over a bare BeginTx with a deferred
 	// Rollback, so a refusal has to both surface the sentinel AND leave the
