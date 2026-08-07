@@ -34,6 +34,8 @@ type (
 	MoleculeLastActivity        = types.MoleculeLastActivity
 	MoleculeProgressStats       = types.MoleculeProgressStats
 	PersistenceMode             = types.PersistenceMode
+	ProvKind                    = types.ProvKind
+	ProvenanceEvent             = types.ProvenanceEvent
 	ReclaimFilter               = types.ReclaimFilter
 	ReclaimedLease              = types.ReclaimedLease
 	SortPolicy                  = types.SortPolicy

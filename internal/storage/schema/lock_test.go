@@ -293,11 +293,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// Per-step commit (#4566) snapshots the working set before the migration
 	// runs so it can force-stage only the tables this step newly dirties.
 	expectDoltStatusRows(mock)
-	// The pending (latest) migration is 0062_events_dolt_ignore, whose body
-	// contains a bare CALL DOLT_COMMIT — execMigrationBody routes such bodies
-	// through DrainCall (QueryContext), not ExecContext.
-	mock.ExpectQuery("(?s).*").
-		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	// The pending (latest) migration is 0063_create_provenance_events, a
+	// plain CREATE TABLE body with no bare CALL — execMigrationBody routes
+	// such bodies through ExecContext, not DrainCall.
+	mock.ExpectExec("(?s).*").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).
 		WithArgs(latest, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
