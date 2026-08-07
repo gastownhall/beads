@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -27,6 +28,15 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	})
 	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
 		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
+	t.Run("CloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t, ctx, fixture)
+	})
+	t.Run("CloseIsIdempotentOnAClosedRowThatStillLooksBlocked", func(t *testing.T) {
+		conformance.RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t, ctx, fixture)
+	})
+	t.Run("CloseCountsOpenChildrenInBothPlanes", func(t *testing.T) {
+		conformance.RunLifecycleCloseCountsOpenChildrenInBothPlanes(t, ctx, fixture)
 	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
@@ -72,9 +82,27 @@ func newDoltLifecycleCloseReopenFixture(t *testing.T, prefix string) (conformanc
 		IssuePrefix:   kit.IssuePrefix,
 		Lifecycle:     lifecycle,
 		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
 		SetConfig:     kit.SetConfig,
 		QueryScalar:   kit.QueryScalar,
+		// The frozen kit exposes reads only, so the raw writes the close-policy
+		// cases need are supplied here — over the same *sql.DB its QueryScalar
+		// reads through, on ONE PINNED CONNECTION so a multi-statement seed
+		// cannot be split across sessions.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			for _, stmt := range statements {
+				if _, err := conn.ExecContext(ctx, stmt.Query, stmt.Args...); err != nil {
+					return fmt.Errorf("%s: %w", stmt.Query, err)
+				}
+			}
+			return nil
+		},
 	}
 	return fixture, ctx, func() {
 		cancel()

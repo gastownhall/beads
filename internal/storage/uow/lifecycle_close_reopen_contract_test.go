@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -28,6 +29,15 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	})
 	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
 		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
+	t.Run("CloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t, ctx, fixture)
+	})
+	t.Run("CloseIsIdempotentOnAClosedRowThatStillLooksBlocked", func(t *testing.T) {
+		conformance.RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t, ctx, fixture)
+	})
+	t.Run("CloseCountsOpenChildrenInBothPlanes", func(t *testing.T) {
+		conformance.RunLifecycleCloseCountsOpenChildrenInBothPlanes(t, ctx, fixture)
 	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
@@ -74,8 +84,22 @@ func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix
 		IssuePrefix:   kit.IssuePrefix,
 		Lifecycle:     lifecycle,
 		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
 		AddDependency: kit.AddDependency,
 		SetConfig:     kit.SetConfig,
 		QueryScalar:   kit.QueryScalar,
+		// The frozen kit exposes reads only. This is the write half of the same
+		// raw-SQL pass-through, inside ONE committing unit of work — which also
+		// gives the whole script one session.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				for _, stmt := range statements {
+					if _, err := uw.RawSQLUseCase().Exec(ctx, stmt.Query, stmt.Args...); err != nil {
+						return "", fmt.Errorf("%s: %w", stmt.Query, err)
+					}
+				}
+				return "seed close-policy state", nil
+			})
+		},
 	}
 }
