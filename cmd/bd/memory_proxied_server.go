@@ -7,8 +7,10 @@ import (
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
 
-// Proxied-server handlers for the memory surface (`bd remember`, `bd
-// memories`, `bd forget`, `bd recall`). Memories are a thin prefix layer
+// Proxied-server handlers for the memory verbs that have not yet converged
+// onto memoryops.Memories (`bd remember`, `bd memories`, `bd forget`; `bd
+// recall` now reaches the role through openMemories, like every other
+// converged command). Memories are a thin prefix layer
 // (kv.memory.*) over the config table, so these mirror
 // config_proxied_server.go / kv_proxied_server.go: one RunTx per write
 // invocation with a real commit message, RunTxRead for reads. Validation and
@@ -104,18 +106,4 @@ func runForgetProxiedServer(ctx context.Context, key string) error {
 	}
 
 	return printForgetResult(key, existing)
-}
-
-func runRecallProxiedServer(ctx context.Context, key string) error {
-	if uowProvider == nil {
-		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
-	storageKey := kvPrefix + memoryPrefix + key
-	value, err := memoryGetProxied(ctx, storageKey)
-	if err != nil {
-		return HandleErrorRespectJSON("recalling memory: %v", err)
-	}
-
-	return printRecallResult(key, value)
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -11,7 +12,40 @@ import (
 
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
+	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/memoryops"
 )
+
+// openMemories hands back the persistent-memory role for whichever route this
+// invocation is on, each through its OWN capability accessor — the store's for
+// the direct route and the provider's for the proxied one.
+//
+// directRequirement is the message `ensureDirectMode` reports when a workspace
+// is reachable by neither route. It is per-verb because the shipped text names
+// the verb.
+func openMemories(directRequirement string) (memoryops.Memories, error) {
+	if usesProxiedServer() {
+		return proxiedMemories()
+	}
+	if err := ensureDirectMode(directRequirement); err != nil {
+		return nil, err
+	}
+	return store.Memories()
+}
+
+// proxiedMemories hands back the guarded persistent-memory surface for the
+// proxied-server provider, through the provider's OWN capability accessor — the
+// same two-step proxiedWorkspaceConfig performs.
+func proxiedMemories() (memoryops.Memories, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.MemoriesSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the persistent-memory surface", uowProvider)
+	}
+	return src.Memories()
+}
 
 // memoryPrefix is prepended (after kvPrefix) to all memory keys.
 const memoryPrefix = kvkeys.MemoryPrefix
@@ -445,25 +479,16 @@ Examples:
 			}
 		}()
 
-		key := args[0]
-
-		if usesProxiedServer() {
-			return runRecallProxiedServer(rootCtx, key)
-		}
-
-		if err := ensureDirectMode("recall requires direct database access"); err != nil {
+		memories, err := openMemories("recall requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		storageKey := kvPrefix + memoryPrefix + key
-
-		ctx := rootCtx
-		value, err := store.GetConfig(ctx, storageKey)
+		result, err := memories.Recall(rootCtx, memoryops.RecallRequest{Key: args[0]})
 		if err != nil {
 			return HandleErrorRespectJSON("recalling memory: %v", err)
 		}
 
-		return printRecallResult(key, value)
+		return printRecallResult(result.Key, result.Value)
 	},
 }
 
