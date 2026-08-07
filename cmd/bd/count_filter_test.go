@@ -83,11 +83,13 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 	}
 
 	// parseTimeFlag resolves a bare date in the LOCAL zone, which is what a
-	// user typing --created-after 2026-01-01 means. The expectation says so
-	// rather than normalizing to UTC, so a change to that resolution shows up
-	// here instead of shifting every bound by the test machine's offset.
+	// user typing --created-after 2026-01-01 means, then normalizes the
+	// representation to UTC so the storage layer binds the same instant on
+	// every backend. The expectation constructs local midnight and converts,
+	// so a change to either half of that contract shows up here instead of
+	// shifting every bound by the test machine's offset.
 	day := func(d int) *time.Time {
-		stamp := time.Date(2026, 1, d, 0, 0, 0, 0, time.Local)
+		stamp := time.Date(2026, 1, d, 0, 0, 0, 0, time.Local).UTC()
 		return &stamp
 	}
 	priority, min, max := 1, 0, 4
