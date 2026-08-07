@@ -53,14 +53,14 @@ func (c *workspaceConfig) GetSetting(ctx context.Context, req publicops.GetSetti
 
 func (c *workspaceConfig) ListSettings(ctx context.Context, _ publicops.ListSettingsRequest) (publicops.ListSettingsResult, error) {
 	return RunTxRead(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ListSettingsResult, error) {
-		settings, err := uw.ConfigUseCase().GetAllConfig(ctx)
+		stored, err := uw.ConfigUseCase().GetAllConfig(ctx)
 		if err != nil {
 			return publicops.ListSettingsResult{}, err
 		}
-		if settings == nil {
-			settings = map[string]string{}
-		}
-		return publicops.ListSettingsResult{Settings: settings}, nil
+		// Same filter as the store-backed body, for the same reason: the config
+		// table holds the KV plane too, and what the settings enumeration may
+		// carry is one decision, not one per implementation.
+		return publicops.ListSettingsResult{Settings: workapi.FilterSettingsEnumeration(stored)}, nil
 	})
 }
 

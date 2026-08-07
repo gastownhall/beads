@@ -60,9 +60,11 @@ type ListSettingsRequest struct{}
 
 // ListSettingsResult is the whole stored settings map.
 type ListSettingsResult struct {
-	// Settings maps each stored key to its value. A workspace with nothing
-	// stored yields an empty map, never nil, so a caller can range over the
-	// result without a guard.
+	// Settings maps each stored setting's key to its value. A workspace with
+	// nothing stored yields an empty map, never nil, so a caller can range over
+	// the result without a guard.
+	//
+	// Rows of the KV plane are not settings and are not here; see ListSettings.
 	//
 	// It is the DURABLE plane only: values that reach a running bd from
 	// config.yaml, from the environment or from git config are not here and
@@ -158,6 +160,25 @@ type UnsetSettingResult struct {
 // key constants above describe, which is policed here because the damage is
 // not a dead row but a workspace whose ids stop agreeing with each other.
 //
+// THE THIRD FAMILY IS NOT ROUTED ELSEWHERE — IT RIDES IN THIS PLANE'S TABLE.
+// Everything under `kv.` is USER DATA: the generic keys `bd kv set` writes, and
+// nested inside them the `bd remember` memories under `kv.memory.`, which have
+// their own merge semantics (a config conflict auto-resolves --theirs only when
+// every conflicted key is a memory) and their own front doors. They are stored
+// as config rows because there is one table, not because they are settings.
+// `bd kv` and the memory surface are their views; this role is not. So
+// ListSettings OMITS them — see its own doc — while GetSetting, SetSetting and
+// UnsetSetting still answer and write a verbatim `kv.` key.
+//
+// THAT ASYMMETRY IS DELIBERATE. It is the same shape as the protected key's
+// (Set refuses issue_prefix, Unset does not): an exclusion from the ENUMERATION,
+// not a firewall. The enumeration was the disclosure — it handed every stored
+// memory, key and value, to `bd config list` and to an unauthenticated
+// GET /v0/beads/config, whose redaction decides on the key name while a
+// memory's content is in the value. A caller naming one exact key is a
+// different question, and refusing it would break `bd config get kv.foo` and
+// the escape hatch of deleting a wedged memory with `bd config unset`.
+//
 // Deterministic request-validation failures match ErrValidation; result values
 // are unspecified when error is non-nil. Implementations never mutate
 // caller-owned request values.
@@ -175,6 +196,12 @@ type WorkspaceConfig interface {
 	GetSetting(ctx context.Context, req GetSettingRequest) (SettingResult, error)
 
 	// ListSettings returns every stored setting.
+	//
+	// EXCEPT THE KV PLANE. No key under `kv.` appears here — not the generic
+	// `bd kv` keys and not the `bd remember` memories nested under them — even
+	// though those rows live in the same table and GetSetting still answers
+	// each one by name. See "KEYS THIS PLANE DOES NOT OWN" above for what that
+	// plane is and why the exclusion stops at the enumeration.
 	//
 	// A read, on the same terms as GetSetting, and one whose answer is a MAP rather
 	// than a page: settings are a keyed namespace a workspace holds tens of,

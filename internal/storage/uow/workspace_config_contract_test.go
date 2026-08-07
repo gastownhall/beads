@@ -36,6 +36,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ListsEveryStoredSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigListsEveryStoredSetting(t, ctx, fixture)
 	})
+	t.Run("ListExcludesTheKVPlane", func(t *testing.T) {
+		conformance.RunWorkspaceConfigListExcludesTheKVPlane(t, ctx, fixture)
+	})
 	t.Run("UnsetRemovesTheSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigUnsetRemovesTheSetting(t, ctx, fixture)
 	})
