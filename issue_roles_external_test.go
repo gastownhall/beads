@@ -237,6 +237,44 @@ func TestWorkspaceConfigKeepsTelemetryOutermost(t *testing.T) {
 	}
 }
 
+// TestMemoriesKeepsTelemetryOutermost is the settings role's answer for the
+// second plane that rides in the config table.
+//
+// Remember and Forget WRITE, so the reflex is to expect the hook wrapper here.
+// The hook vocabulary is what decides it: on_create, on_update and on_close each
+// hand a script an ISSUE, and a remembered insight is not one. There is no
+// on_remember to fire and inventing one is a hook proposal, not a role commit.
+// See internal/storage/hook_memories.go.
+func TestMemoriesKeepsTelemetryOutermost(t *testing.T) {
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	instrumented, ok := telemetry.WrapStorage(&dolt.DoltStore{}).(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatal("WrapStorage() did not create InstrumentedStorage")
+	}
+
+	memories, err := storage.NewHookFiringStore(instrumented, nil).Memories()
+	if err != nil {
+		t.Fatalf("Memories() error = %v", err)
+	}
+	if got := reflect.TypeOf(memories).String(); got != "*telemetry.instrumentedMemories" {
+		t.Fatalf("outer layer = %s, want the telemetry wrapper unwrapped by the hook decorator", got)
+	}
+}
+
+// TestMemoriesExposesTypedUnsupportedError pins the typed refusal a backend
+// gives when it cannot serve the memory role, reachable through the public
+// alias without importing internal/storage.
+func TestMemoriesExposesTypedUnsupportedError(t *testing.T) {
+	memories, err := (*dolt.DoltStore)(nil).Memories()
+	if memories != nil {
+		t.Fatalf("Memories() memories = %T, want nil", memories)
+	}
+	var unsupported *beads.ErrUnsupported
+	if !errors.As(err, &unsupported) {
+		t.Fatalf("Memories() error = %v, want *beads.ErrUnsupported", err)
+	}
+}
+
 // TestVersionReconcilerKeepsTelemetryOutermost is the settings role's reason
 // plus one this role has on its own: it runs from PersistentPreRun on every
 // startup, so a hook wrapper here would run a user's script before every

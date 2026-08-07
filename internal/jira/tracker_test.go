@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 func TestRegistered(t *testing.T) {
@@ -662,6 +663,9 @@ func (s *configStore) Counter() (issueops.Counter, error) {
 }
 func (s *configStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return nil, &storage.ErrUnsupported{Op: "WorkspaceConfig", Backend: "jira-config-stub"}
+}
+func (s *configStore) Memories() (memoryops.Memories, error) {
+	return nil, &storage.ErrUnsupported{Op: "Memories", Backend: "jira-config-stub"}
 }
 func (s *configStore) StatsReporter() (issueops.StatsReporter, error) {
 	return nil, &storage.ErrUnsupported{Op: "StatsReporter", Backend: "jira-config-stub"}

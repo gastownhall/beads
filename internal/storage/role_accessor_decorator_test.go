@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
-// roleAccessorNames is the twenty-three-strong capability surface every storage
+// roleAccessorNames is the twenty-four-strong capability surface every storage
 // decorator has to answer for. It is written out rather than derived so that
-// adding a twenty-fourth role to DoltStorage without deciding what each decorator
+// adding a twenty-fifth role to DoltStorage without deciding what each decorator
 // does with it is a compile-or-test failure somewhere, not silence.
 var roleAccessorNames = []string{
 	"IssueLifecycle",
@@ -25,6 +26,7 @@ var roleAccessorNames = []string{
 	"TreeWalker",
 	"Counter",
 	"WorkspaceConfig",
+	"Memories",
 	"VersionReconciler",
 	"StatsReporter",
 	"CycleDetector",
@@ -76,7 +78,7 @@ func assertRoleAccessorsAreDeclared(t *testing.T, decorator reflect.Type) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the twenty-three
+// roleAccessorStore is a DoltStorage whose only real methods are the twenty-four
 // role accessors, each answering with a distinguishable sentinel so a test can
 // tell a decorated surface from a passed-through one.
 type roleAccessorStore struct {
@@ -89,6 +91,7 @@ type roleAccessorStore struct {
 	tree         issueops.TreeWalker
 	counter      issueops.Counter
 	settings     issueops.WorkspaceConfig
+	memories     memoryops.Memories
 	versions     issueops.VersionReconciler
 	stats        issueops.StatsReporter
 	cycles       issueops.CycleDetector
@@ -109,6 +112,7 @@ type roleAccessorStore struct {
 func newRoleAccessorStore() *roleAccessorStore {
 	sentinel := &roleAccessorSentinel{}
 	return &roleAccessorStore{
+		memories:     &memoryRoleSentinel{},
 		lifecycle:    sentinel,
 		reader:       sentinel,
 		relations:    sentinel,
@@ -139,6 +143,9 @@ func (s *roleAccessorStore) IssueRelations() (issueops.Relations, error) { retur
 func (s *roleAccessorStore) Counter() (issueops.Counter, error)          { return s.counter, s.err }
 func (s *roleAccessorStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return s.settings, s.err
+}
+func (s *roleAccessorStore) Memories() (memoryops.Memories, error) {
+	return s.memories, s.err
 }
 func (s *roleAccessorStore) VersionReconciler() (issueops.VersionReconciler, error) {
 	return s.versions, s.err
@@ -183,8 +190,8 @@ func (s *roleAccessorStore) DependencyEditor() (issueops.DependencyEditor, error
 	return s.editor, s.err
 }
 
-// roleAccessorSentinel implements all twenty-three roles at once. Nothing calls its
-// methods; identity is the whole point.
+// roleAccessorSentinel implements twenty-three of the twenty-four roles at once.
+// Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
 func (*roleAccessorSentinel) Create(context.Context, issueops.CreateRequest) (issueops.CreateResult, error) {
@@ -292,6 +299,26 @@ func (*roleAccessorSentinel) RemoveDependency(context.Context, issueops.RemoveDe
 	return issueops.RemoveDependencyResult{}, nil
 }
 
+// memoryRoleSentinel is the twenty-fourth role's sentinel, and the one role
+// that cannot share the struct above: memoryops.Memories.List and
+// issueops.Reader.List are the same method name with different signatures, so
+// no single Go type can satisfy both. A second sentinel value is all the split
+// costs; identity is still the whole point.
+type memoryRoleSentinel struct{}
+
+func (*memoryRoleSentinel) Remember(context.Context, memoryops.RememberRequest) (memoryops.RememberResult, error) {
+	return memoryops.RememberResult{}, nil
+}
+func (*memoryRoleSentinel) Recall(context.Context, memoryops.RecallRequest) (memoryops.RecallResult, error) {
+	return memoryops.RecallResult{}, nil
+}
+func (*memoryRoleSentinel) Forget(context.Context, memoryops.ForgetRequest) (memoryops.ForgetResult, error) {
+	return memoryops.ForgetResult{}, nil
+}
+func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryops.ListResult, error) {
+	return memoryops.ListResult{}, nil
+}
+
 // TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough is the
 // behavioural half, and it catches what reflection cannot: an accessor that IS
 // declared but reads `return h.inner.Commenter()`. That edit compiles, keeps
@@ -304,13 +331,14 @@ func (*roleAccessorSentinel) RemoveDependency(context.Context, issueops.RemoveDe
 // CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter,
 // Querier and InitVerifier deliberately return the inner surface unwrapped,
 // each in its own hook_*.go. The ones in that column that are NOT reads are
-// WorkspaceConfig, VersionReconciler, Bootstrapper, Sweeper and Deleter: a
-// settings write changes the workspace rather than a bead, a version marker
-// names no bead at all, a bootstrap lands on a workspace whose hooks are not
-// installed yet, a swept row is gone, and the hook vocabulary has no name for a
-// deletion — so this decorator's issue-shaped hook vocabulary has nothing to
-// hand a hook script. This test pins every one of them as a decision rather
-// than leaving it indistinguishable from the regression above.
+// WorkspaceConfig, Memories, VersionReconciler, Bootstrapper, Sweeper and
+// Deleter: a settings write changes the workspace rather than a bead, a
+// remembered insight names no bead and there is no on_remember to fire, a
+// version marker names no bead at all, a bootstrap lands on a workspace whose
+// hooks are not installed yet, a swept row is gone, and the hook vocabulary has
+// no name for a deletion — so this decorator's issue-shaped hook vocabulary has
+// nothing to hand a hook script. This test pins every one of them as a decision
+// rather than leaving it indistinguishable from the regression above.
 func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T) {
 	inner := newRoleAccessorStore()
 	store := NewHookFiringStore(inner, nil)
@@ -334,6 +362,7 @@ func TestHookFiringStoreWrapsTheWriteRolesAndPassesTheReadsThrough(t *testing.T)
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }, inner.tree, false},
 		{"Counter", func() (any, error) { return store.Counter() }, inner.counter, false},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }, inner.settings, false},
+		{"Memories", func() (any, error) { return store.Memories() }, inner.memories, false},
 		{"VersionReconciler", func() (any, error) { return store.VersionReconciler() }, inner.versions, false},
 		{"StatsReporter", func() (any, error) { return store.StatsReporter() }, inner.stats, false},
 		{"CycleDetector", func() (any, error) { return store.CycleDetector() }, inner.cycles, false},
@@ -386,6 +415,7 @@ func TestHookFiringStoreRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"TreeWalker", func() (any, error) { return store.TreeWalker() }},
 		{"Counter", func() (any, error) { return store.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return store.WorkspaceConfig() }},
+		{"Memories", func() (any, error) { return store.Memories() }},
 		{"VersionReconciler", func() (any, error) { return store.VersionReconciler() }},
 		{"StatsReporter", func() (any, error) { return store.StatsReporter() }},
 		{"CycleDetector", func() (any, error) { return store.CycleDetector() }},

@@ -10,9 +10,10 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
-// roleAccessorNames is the twenty-three-strong capability surface every storage
+// roleAccessorNames is the twenty-four-strong capability surface every storage
 // decorator has to answer for. It is duplicated from the sibling test in
 // internal/storage rather than shared because that package cannot import this
 // one and this one's test helpers cannot be exported back.
@@ -26,6 +27,7 @@ var roleAccessorNames = []string{
 	"TreeWalker",
 	"Counter",
 	"WorkspaceConfig",
+	"Memories",
 	"VersionReconciler",
 	"StatsReporter",
 	"CycleDetector",
@@ -66,13 +68,19 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the twenty-three
+// roleAccessorStore is a DoltStorage whose only real methods are the twenty-four
 // role accessors, each answering with a distinguishable sentinel so a test can tell
 // an instrumented surface from a passed-through one.
+//
+// TWO sentinels rather than one: memoryops.Memories.List and issueops.Reader.List
+// are the same method name with different signatures, so no single Go type can
+// satisfy both roles. Every assertion below therefore names the inner surface it
+// expects rather than assuming there is only one.
 type roleAccessorStore struct {
 	storage.DoltStorage
-	surface *roleAccessorSentinel
-	err     error
+	surface  *roleAccessorSentinel
+	memories *memoryRoleSentinel
+	err      error
 }
 
 func (s *roleAccessorStore) IssueLifecycle() (issueops.Lifecycle, error) { return s.surface, s.err }
@@ -81,6 +89,9 @@ func (s *roleAccessorStore) IssueRelations() (issueops.Relations, error) { retur
 func (s *roleAccessorStore) Counter() (issueops.Counter, error)          { return s.surface, s.err }
 func (s *roleAccessorStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
 	return s.surface, s.err
+}
+func (s *roleAccessorStore) Memories() (memoryops.Memories, error) {
+	return s.memories, s.err
 }
 func (s *roleAccessorStore) VersionReconciler() (issueops.VersionReconciler, error) {
 	return s.surface, s.err
@@ -125,8 +136,8 @@ func (s *roleAccessorStore) DependencyEditor() (issueops.DependencyEditor, error
 	return s.surface, s.err
 }
 
-// roleAccessorSentinel implements all twenty-three roles at once. Nothing calls its
-// methods; identity is the whole point.
+// roleAccessorSentinel implements twenty-three of the twenty-four roles at once.
+// Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
 func (*roleAccessorSentinel) Create(context.Context, issueops.CreateRequest) (issueops.CreateResult, error) {
@@ -238,57 +249,82 @@ func (*roleAccessorSentinel) RemoveDependency(context.Context, issueops.RemoveDe
 	return issueops.RemoveDependencyResult{}, nil
 }
 
+// memoryRoleSentinel is the twenty-fourth role's sentinel — see
+// roleAccessorStore for why it cannot be a method set on the struct above.
+type memoryRoleSentinel struct{}
+
+func (*memoryRoleSentinel) Remember(context.Context, memoryops.RememberRequest) (memoryops.RememberResult, error) {
+	return memoryops.RememberResult{}, nil
+}
+func (*memoryRoleSentinel) Recall(context.Context, memoryops.RecallRequest) (memoryops.RecallResult, error) {
+	return memoryops.RecallResult{}, nil
+}
+func (*memoryRoleSentinel) Forget(context.Context, memoryops.ForgetRequest) (memoryops.ForgetResult, error) {
+	return memoryops.ForgetResult{}, nil
+}
+func (*memoryRoleSentinel) List(context.Context, memoryops.ListRequest) (memoryops.ListResult, error) {
+	return memoryops.ListResult{}, nil
+}
+
 // TestInstrumentedStorageInstrumentsEveryRoleAccessor catches what reflection
 // cannot: an accessor that IS declared but reads
 // `return s.Unwrap().Commenter()`. That edit compiles, keeps satisfying
 // DoltStorage, and silently drops every span and timing on that role.
 //
 // Unlike the hook decorator, this one has no read-role exemption: telemetry
-// spans reads as well as writes, so ALL EIGHTEEN must come back wrapped. Only
+// spans reads as well as writes, so EVERY role must come back wrapped. Only
 // IssueLifecycle and IssueReader had a recursion pin of their own before this
 // test; the rest had no test at all.
+//
+// Each row names the INNER surface it must not be, rather than sharing one
+// sentinel: the memory role has a sentinel of its own (its List collides with
+// the reader's), and a row that compared against the wrong one would be a row
+// that cannot fail.
 func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 	t.Setenv("BD_OTEL_STDOUT", "true")
 	sentinel := &roleAccessorSentinel{}
-	inner := &roleAccessorStore{surface: sentinel}
+	memorySentinel := &memoryRoleSentinel{}
+	inner := &roleAccessorStore{surface: sentinel, memories: memorySentinel}
 	wrapped, ok := WrapStorage(inner).(*InstrumentedStorage)
 	if !ok {
 		t.Fatal("WrapStorage did not instrument the store; telemetry is disabled in this environment")
 	}
 
 	for _, test := range []struct {
-		name string
-		got  func() (any, error)
+		name  string
+		got   func() (any, error)
+		inner any
 	}{
-		{"IssueLifecycle", func() (any, error) { return wrapped.IssueLifecycle() }},
-		{"IssueReader", func() (any, error) { return wrapped.IssueReader() }},
-		{"IssueRelations", func() (any, error) { return wrapped.IssueRelations() }},
-		{"EdgeReader", func() (any, error) { return wrapped.EdgeReader() }},
-		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }},
-		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }},
-		{"Counter", func() (any, error) { return wrapped.Counter() }},
-		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }},
-		{"VersionReconciler", func() (any, error) { return wrapped.VersionReconciler() }},
-		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }},
-		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }},
-		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }},
-		{"Querier", func() (any, error) { return wrapped.Querier() }},
-		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }},
-		{"Deleter", func() (any, error) { return wrapped.Deleter() }},
-		{"Bootstrapper", func() (any, error) { return wrapped.Bootstrapper() }},
-		{"InitVerifier", func() (any, error) { return wrapped.InitVerifier() }},
-		{"Commenter", func() (any, error) { return wrapped.Commenter() }},
-		{"ReadyClaimer", func() (any, error) { return wrapped.ReadyClaimer() }},
-		{"BatchCloser", func() (any, error) { return wrapped.BatchCloser() }},
-		{"BatchCreator", func() (any, error) { return wrapped.BatchCreator() }},
-		{"DependencyEditor", func() (any, error) { return wrapped.DependencyEditor() }},
+		{"IssueLifecycle", func() (any, error) { return wrapped.IssueLifecycle() }, sentinel},
+		{"IssueReader", func() (any, error) { return wrapped.IssueReader() }, sentinel},
+		{"IssueRelations", func() (any, error) { return wrapped.IssueRelations() }, sentinel},
+		{"EdgeReader", func() (any, error) { return wrapped.EdgeReader() }, sentinel},
+		{"BlockingAnnotator", func() (any, error) { return wrapped.BlockingAnnotator() }, sentinel},
+		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }, sentinel},
+		{"Counter", func() (any, error) { return wrapped.Counter() }, sentinel},
+		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }, sentinel},
+		{"Memories", func() (any, error) { return wrapped.Memories() }, memorySentinel},
+		{"VersionReconciler", func() (any, error) { return wrapped.VersionReconciler() }, sentinel},
+		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }, sentinel},
+		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }, sentinel},
+		{"ReadyCounter", func() (any, error) { return wrapped.ReadyCounter() }, sentinel},
+		{"Querier", func() (any, error) { return wrapped.Querier() }, sentinel},
+		{"Sweeper", func() (any, error) { return wrapped.Sweeper() }, sentinel},
+		{"Deleter", func() (any, error) { return wrapped.Deleter() }, sentinel},
+		{"Bootstrapper", func() (any, error) { return wrapped.Bootstrapper() }, sentinel},
+		{"InitVerifier", func() (any, error) { return wrapped.InitVerifier() }, sentinel},
+		{"Commenter", func() (any, error) { return wrapped.Commenter() }, sentinel},
+		{"ReadyClaimer", func() (any, error) { return wrapped.ReadyClaimer() }, sentinel},
+		{"BatchCloser", func() (any, error) { return wrapped.BatchCloser() }, sentinel},
+		{"BatchCreator", func() (any, error) { return wrapped.BatchCreator() }, sentinel},
+		{"DependencyEditor", func() (any, error) { return wrapped.DependencyEditor() }, sentinel},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()
 			if err != nil {
 				t.Fatalf("%s() error = %v", test.name, err)
 			}
-			if surface == any(sentinel) {
+			if surface == test.inner {
 				t.Fatalf("%s() returned the inner surface uninstrumented, so every call on that role is unspanned and untimed", test.name)
 			}
 		})
@@ -318,6 +354,7 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"TreeWalker", func() (any, error) { return wrapped.TreeWalker() }},
 		{"Counter", func() (any, error) { return wrapped.Counter() }},
 		{"WorkspaceConfig", func() (any, error) { return wrapped.WorkspaceConfig() }},
+		{"Memories", func() (any, error) { return wrapped.Memories() }},
 		{"VersionReconciler", func() (any, error) { return wrapped.VersionReconciler() }},
 		{"StatsReporter", func() (any, error) { return wrapped.StatsReporter() }},
 		{"CycleDetector", func() (any, error) { return wrapped.CycleDetector() }},

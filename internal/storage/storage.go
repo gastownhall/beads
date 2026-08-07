@@ -14,6 +14,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 // The guarded issue-operation error vocabulary is declared and documented by
@@ -188,6 +189,25 @@ type Storage interface {
 	// the WORKSPACE rather than about an issue, and because a write here can
 	// re-project a value into a normalized lookup table.
 	WorkspaceConfig() (issueops.WorkspaceConfig, error)
+
+	// Memories returns the guarded persistent-memory surface for this store:
+	// the keyed notes `bd remember`, `bd recall`, `bd forget` and `bd memories`
+	// work with, and that `bd prime` injects.
+	//
+	// IT IS NOT MORE WorkspaceConfig VERBS, and the rule forbidding that is the
+	// least of the reasons. Memories ride in the config table but they are user
+	// data in a reserved namespace, they are their own MERGE CLASS — a config
+	// conflict auto-resolves with --theirs only when every conflicted key is a
+	// memory — they have their own validation vocabulary (content, derived
+	// keys) and they have a found/not-found user contract the settings plane
+	// deliberately does not have. A settings enumeration that carried them
+	// would be answering a different question in the same list.
+	//
+	// Its hook decorator recurses UNWRAPPED for the vocabulary reason Sweeper's
+	// does: remembering is a write, but the hook vocabulary is on_create,
+	// on_update and on_close and each hands a script an ISSUE. See
+	// hook_memories.go.
+	Memories() (memoryops.Memories, error)
 
 	// VersionReconciler returns the clone-local version markers for this store:
 	// the dolt-ignored pair recording which bd binary last opened this
