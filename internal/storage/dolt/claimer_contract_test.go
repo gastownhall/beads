@@ -43,6 +43,18 @@ func TestClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt(t *test
 	conformance.RunClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt(t, ctx, fixture)
 }
 
+func TestClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone(t *testing.T) {
+	fixture, ctx, cleanup := newDoltClaimerFixture(t, "cllease")
+	defer cleanup()
+	conformance.RunClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone(t, ctx, fixture)
+}
+
+func TestClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween(t *testing.T) {
+	fixture, ctx, cleanup := newDoltClaimerFixture(t, "clstart")
+	defer cleanup()
+	conformance.RunClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween(t, ctx, fixture)
+}
+
 func TestClaimerRefusesAWispIDAsNotFound(t *testing.T) {
 	fixture, ctx, cleanup := newDoltClaimerFixture(t, "clwisp")
 	defer cleanup()

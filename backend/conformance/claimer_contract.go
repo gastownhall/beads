@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -548,6 +549,237 @@ func RunClaimerRefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState(t *tes
 	// The row a valid request would have won is still there, untouched.
 	assertClaimerRowState(t, ctx, fixture, decoy, string(types.StatusOpen), "")
 	assertClaimerCommittedNothing(t, ctx, fixture, before, "three refused requests")
+}
+
+// RunClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone pins the
+// half of the claim that is not on the issues row at all: the LEASE.
+//
+// issueops.UpsertLeaseInTx states the invariant this case reads — "a leases row
+// exists if and only if its issue is a live claim (in_progress with the row's
+// holder as assignee) on this node" — and issueops.ClaimIssueInTx grants it
+// ("what makes the claim recoverable — a worker that dies stops heartbeating
+// and bd reclaim later reverts the issue"). Neither sentence has an observer at
+// this seam today, on any leg.
+//
+// THE LEASE IS READ AS A RAW ROW, and it has to be. A claim that granted a
+// lease and a claim that granted none answer every role-visible question
+// identically: ClaimResult carries no lease member, the issues row carries no
+// lease column (the ephemeral leases table replaced them, bd-lrgn1), and no
+// verb on this role reports one. The difference is only visible in the table,
+// and the consequence of missing it is silent — a claim nothing can take back,
+// because heartbeats have no handle to extend and lease-expiry recovery never
+// sees the row.
+//
+// THE TWO ARMS ARE EACH OTHER'S CONTROL, the same way the ready-claim lease
+// case pairs a durable win with an ephemeral one. Asserting the grant alone
+// would pass over a body that granted a lease on every call including the
+// refusals, which breaks the invariant in the direction that strands a rival's
+// work; asserting the refusal alone would pass on a fixture whose query cannot
+// see the leases table at all, since an unreachable table reports zero rows for
+// everything. The before-count of 0 on both ids is what makes the 1 mean
+// something.
+//
+// A REFUSED CLAIM IS ASSERTED NOT TO TRANSFER THE LEASE, not merely not to
+// create one. "Refusals ... leave persistent state unchanged" is the clause,
+// and the leases table is the one piece of persistent state the existing
+// refusal cases cannot read: a re-grant to the losing actor moves no column on
+// the issues row, records no event and commits nothing, so every detector this
+// contract already owns ties.
+//
+// WHAT THIS FIXTURE CANNOT SEE, none of it the subject: the TTL's value (five
+// minutes today, and issueops.WithLeaseTTL is a context knob no role carries,
+// so a case pinning the number would be pinning the backend); the granting
+// node; renewal, which is HeartbeatIssue's and has no role verb; and the
+// release paths — close, unclaim, reclaim, delete — which are other roles'
+// verbs. What it CAN see is the whole of what a claim itself promises about the
+// lease: that one exists, that it names the claimant, and that it is alive at
+// the moment it is granted rather than born expired.
+func RunClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone(t *testing.T, ctx context.Context, fixture ClaimerFixture) {
+	t.Helper()
+	won := fixture.IssuePrefix + "-cllease-won"
+	held := fixture.IssuePrefix + "-cllease-held"
+	rival := fixture.IssuePrefix + "-cllease-rival"
+	seedClaimerIssue(t, ctx, fixture, claimerIssue(won, types.StatusOpen))
+	seedClaimerIssue(t, ctx, fixture, claimerIssue(held, types.StatusOpen))
+	// Neither row is leased before anything claims it. Without this the "one
+	// lease row" below would also pass over a fixture that had inherited one,
+	// and the "still one, still the rival's" would pass over a table this
+	// query cannot reach.
+	for _, id := range []string{won, held} {
+		if leases := claimerLeaseCount(t, ctx, fixture, id); leases != 0 {
+			t.Fatalf("the seeded issue %s already holds %d lease row(s), want 0; "+
+				"the grant asserted below would then not be this claim's doing", id, leases)
+		}
+	}
+
+	if _, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: claimerStranger, IssueID: won}); err != nil {
+		t.Fatalf("Claim of an open, unassigned issue: %v", err)
+	}
+	assertClaimerRowState(t, ctx, fixture, won, string(types.StatusInProgress), claimerStranger)
+	if leases := claimerLeaseCount(t, ctx, fixture, won); leases != 1 {
+		t.Fatalf("the winning claim left %d lease row(s) for %s, want exactly 1 — a claim with no lease is work "+
+			"nothing can take back, because heartbeats have no handle to extend and lease-expiry recovery never sees it",
+			leases, won)
+	}
+	holder, live, beating := claimerLeaseGrant(t, ctx, fixture, won)
+	if holder != claimerStranger {
+		t.Errorf("the lease on %s is held by %q, want the claiming actor %q — a lease naming anyone else is reclaimed "+
+			"on the wrong worker's behalf", won, holder, claimerStranger)
+	}
+	if !live {
+		t.Error("the granted lease's lease_expires_at is not after its granted_at: the claim was born already expired, " +
+			"so the next reclaim sweep takes the issue straight back off the worker that just won it")
+	}
+	if !beating {
+		t.Error("the granted lease's heartbeat_at is before its granted_at: a lease whose last heartbeat predates the " +
+			"grant is stale the moment it exists")
+	}
+
+	// A claim the role refuses neither mints a lease nor moves the one the
+	// real holder has.
+	if _, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: rival, IssueID: held}); err != nil {
+		t.Fatalf("seed the rival's live claim on %s: %v", held, err)
+	}
+	before := claimerHistoryCount(t, ctx, fixture)
+	_, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: claimerStranger, IssueID: held})
+	assertClaimerRefusal(t, err, publicops.ErrAlreadyClaimed, held, rival, types.StatusInProgress,
+		"an issue another actor holds in progress")
+	if leases := claimerLeaseCount(t, ctx, fixture, held); leases != 1 {
+		t.Errorf("the refused claim left %d lease row(s) for %s, want the 1 the rival won", leases, held)
+	}
+	if holder, _, _ := claimerLeaseGrant(t, ctx, fixture, held); holder != rival {
+		t.Errorf("after a refused claim the lease on %s is held by %q, want the rival %q that still holds the issue — "+
+			"a refusal that re-grants the lease hands recovery to the actor that lost", held, holder, rival)
+	}
+	assertClaimerRowState(t, ctx, fixture, held, string(types.StatusInProgress), rival)
+	assertClaimerCommittedNothing(t, ctx, fixture, before, "a claim refused by a foreign holder")
+}
+
+// RunClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween pins the
+// clause issueops.ClaimIssueInTx states beside its compare-and-set — "set
+// started_at on first transition to in_progress (GH#2796); preserve any
+// existing value so re-claims don't overwrite the original start time" — and it
+// is one case rather than two because the two halves are TWO DIFFERENT UPDATE
+// STATEMENTS, chosen by a branch on the pre-image, in each of the bodies under
+// this role.
+//
+// A fixture that only ever seeds an unstamped row reaches one of them. The
+// other — the statement that omits started_at from its SET list — is then never
+// executed at all, so a body that dropped the branch and always stamped `now`
+// is green: every other assertion in this contract reads the status and the
+// assignee, which both statements write identically.
+//
+// THE PRESERVED VALUE IS A DISTANT PAST INSTANT, not a recent one. The two
+// writes differ by whether started_at is re-stamped with the claim's own `now`,
+// and a seeded value close to the test's wall clock renders into the same
+// second-precision DATETIME as the re-stamp would — the tie that already made
+// this contract's updated_at detector blind once (see claimerClaimEventCount).
+// Years apart, the two cannot tie.
+//
+// The stamp is read as a raw column and compared as an opaque string, the way
+// claimerUpdatedAt is: the question is whether a write touched it, and the
+// three fixtures' scan paths render timestamps differently.
+//
+// WHAT THIS FIXTURE CANNOT SEE: what the stamp is SET TO on the first
+// transition — only that it moved from NULL to some value. The claim's `now` is
+// not a value a black-box case can predict, and asserting a range would pin the
+// clock rather than the clause. That is not what either half is named for: the
+// promise is "stamped once, then preserved", and both halves of that are here.
+func RunClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween(t *testing.T, ctx context.Context, fixture ClaimerFixture) {
+	t.Helper()
+	fresh := fixture.IssuePrefix + "-clstart-fresh"
+	restarted := fixture.IssuePrefix + "-clstart-restarted"
+	// Distant enough from the claim's own clock that a re-stamp cannot render
+	// into the same second-precision DATETIME.
+	firstStart := time.Date(2021, time.March, 4, 5, 6, 7, 0, time.UTC)
+
+	seedClaimerIssue(t, ctx, fixture, claimerIssue(fresh, types.StatusOpen))
+	carried := claimerIssue(restarted, types.StatusOpen)
+	carried.StartedAt = &firstStart
+	seedClaimerIssue(t, ctx, fixture, carried)
+
+	if !claimerStartedAtIsNull(t, ctx, fixture, fresh) {
+		t.Fatalf("the unstamped seed %s already carries a started_at; the stamp asserted below would not be the claim's doing", fresh)
+	}
+	if claimerStartedAtIsNull(t, ctx, fixture, restarted) {
+		t.Fatalf("seeding %s with a started_at did not land one: this backend's CreateIssue drops the column, so the "+
+			"preserve half below would be a second copy of the stamp half", restarted)
+	}
+	carriedStamp := claimerStartedAt(t, ctx, fixture, restarted)
+
+	if _, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: claimerStranger, IssueID: fresh}); err != nil {
+		t.Fatalf("Claim of an unstarted open issue: %v", err)
+	}
+	if claimerStartedAtIsNull(t, ctx, fixture, fresh) {
+		t.Errorf("started_at on %s is still NULL after the claim that moved it to in-progress; the transition is what "+
+			"stamps it, and every consumer of elapsed work time reads that column", fresh)
+	}
+
+	if _, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: claimerStranger, IssueID: restarted}); err != nil {
+		t.Fatalf("Claim of an open issue that already carries a started_at: %v", err)
+	}
+	assertClaimerRowState(t, ctx, fixture, restarted, string(types.StatusInProgress), claimerStranger)
+	if got := claimerStartedAt(t, ctx, fixture, restarted); got != carriedStamp {
+		t.Errorf("started_at on %s moved %q -> %q across a claim of a row that already carried one; the second of the "+
+			"two writes exists precisely so a re-start does not overwrite the original start time", restarted, carriedStamp, got)
+	}
+}
+
+// claimerLeaseCount reports how many rows the ephemeral leases table holds for
+// id. It counts rather than scanning a row so "no lease" and "a lease this
+// fixture cannot read" stay distinguishable: a failed scan is a fixture error,
+// an empty count is the answer.
+func claimerLeaseCount(t *testing.T, ctx context.Context, fixture ClaimerFixture, id string) int {
+	t.Helper()
+	var rows int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM leases WHERE issue_id = ?", []any{id}, &rows); err != nil {
+		t.Fatalf("count leases for %s: %v", id, err)
+	}
+	return rows
+}
+
+// claimerLeaseGrant reads the one lease row for id: who holds it, whether it
+// expires after it was granted, and whether its heartbeat is at least as new as
+// the grant.
+//
+// The two temporal questions are answered IN SQL, comparing the row's own
+// columns against each other rather than against a timestamp carried across the
+// seam. A Go-side comparison would have to agree with three fixtures on how a
+// DATETIME renders and on which zone it renders in; "expires after it was
+// granted" is the same promise with neither of those problems, and it is the
+// exact property a born-expired lease violates.
+func claimerLeaseGrant(t *testing.T, ctx context.Context, fixture ClaimerFixture, id string) (holder string, live, beating bool) {
+	t.Helper()
+	if err := fixture.QueryScalar(ctx,
+		"SELECT holder, lease_expires_at > granted_at, heartbeat_at >= granted_at FROM leases WHERE issue_id = ?",
+		[]any{id}, &holder, &live, &beating); err != nil {
+		t.Fatalf("read the lease row for %s: %v", id, err)
+	}
+	return holder, live, beating
+}
+
+// claimerStartedAtIsNull answers the null question in SQL rather than by
+// scanning the column, because a NULL DATETIME reaches the three fixtures'
+// scan paths as three different things and only one of them is an error.
+func claimerStartedAtIsNull(t *testing.T, ctx context.Context, fixture ClaimerFixture, id string) bool {
+	t.Helper()
+	var isNull bool
+	if err := fixture.QueryScalar(ctx, "SELECT started_at IS NULL FROM issues WHERE id = ?", []any{id}, &isNull); err != nil {
+		t.Fatalf("read started_at nullness for %s: %v", id, err)
+	}
+	return isNull
+}
+
+// claimerStartedAt reads one row's started_at as text, compared as an opaque
+// string for the same reason claimerUpdatedAt is: the question is only whether
+// a write touched it.
+func claimerStartedAt(t *testing.T, ctx context.Context, fixture ClaimerFixture, id string) string {
+	t.Helper()
+	var stamp string
+	if err := fixture.QueryScalar(ctx, "SELECT started_at FROM issues WHERE id = ?", []any{id}, &stamp); err != nil {
+		t.Fatalf("read started_at for %s: %v", id, err)
+	}
+	return stamp
 }
 
 // claimerStranger is the actor most cases claim as: a name that appears nowhere

@@ -43,6 +43,8 @@ func TestClaimerContract(t *testing.T) {
 		{name: "AcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne", run: conformance.RunClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne},
 		{name: "TakesAPoolAssignedIssueButRefusesAForeignHolder", run: conformance.RunClaimerTakesAPoolAssignedIssueButRefusesAForeignHolder},
 		{name: "RefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt", run: conformance.RunClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt},
+		{name: "GrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone", run: conformance.RunClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone},
+		{name: "StampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween", run: conformance.RunClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween},
 		{name: "RefusesAWispIDAsNotFound", run: conformance.RunClaimerRefusesAWispIDAsNotFound},
 		{name: "RefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState", run: conformance.RunClaimerRefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState},
 		{name: "RefusalMessagesCarryTheirFragments", run: conformance.RunClaimerRefusalMessagesCarryTheirFragments},

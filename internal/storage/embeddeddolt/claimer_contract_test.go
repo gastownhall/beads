@@ -50,6 +50,18 @@ func TestEmbeddedClaimerRefusesAWispIDAsNotFound(t *testing.T) {
 	conformance.RunClaimerRefusesAWispIDAsNotFound(t, ctx, newEmbeddedClaimerFixture(t, "clwisp"))
 }
 
+func TestEmbeddedClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunClaimerGrantsALiveLeaseOnTheRowItWonAndLeavesARefusedOneAlone(t, ctx, newEmbeddedClaimerFixture(t, "cllease"))
+}
+
+func TestEmbeddedClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunClaimerStampsStartedAtOnceAcrossTheTwoWritesItChoosesBetween(t, ctx, newEmbeddedClaimerFixture(t, "clstart"))
+}
+
 func TestEmbeddedClaimerRefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
