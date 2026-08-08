@@ -381,11 +381,15 @@ func RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t *testing.T,
 // is not on that list, so a re-close that met one would be a refusal the
 // contract does not permit.
 //
-// The state is reachable and not exotic: a forced close leaves the row closed
-// with its blocker still open and its is_blocked column still set, because the
-// recompute a close runs covers the rows whose blockedness the close CHANGED,
-// not the closed row itself. Re-running the guard there makes every forced
-// close of a blocked issue permanently un-re-closable.
+// The state is reachable but NOT from a forced close alone, which is why the
+// body below restores the column by hand. A close settles the row it closes:
+// the closed row is in its own affected set and a closed row is never blocked,
+// so the flag comes down with the status
+// (RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild pins exactly that).
+// What leaves a CLOSED row reading blocked is the invariant's merge clause — a
+// pull that merges a forced close against a clone that still reads the row as
+// blocked — and re-running the guard there would make that row permanently
+// un-re-closable.
 //
 // RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose does not cover it: its row
 // has no blocker, so `blocked` is false and the guard cannot fire whether or
@@ -1094,6 +1098,11 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 // flipped: the mark and unmark templates never touch a row whose value stays
 // put.
 //
+// WHAT IT DOES NOT COVER is the row the request names. Every subject here is
+// downstream of the blocker and the blocker is itself unblocked, so the
+// crossing row's own seat in the affected set belongs to
+// RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild.
+//
 // UNLIKE the two-body cases on DependencyEditor and Deleter, all three legs
 // reach ONE body here (internal/storage/issueops.closeIssueInTx; the
 // unit-of-work leg through its domain issue repository). This case is a
@@ -1139,6 +1148,108 @@ func RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t *testing.T, c
 
 	flip.requireFlippedTo(t, 0,
 		"closing a blocker settles its dependers, their descendants and both planes before the close commits")
+}
+
+// RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild pins the clause of
+// issueops.BlockedStateInvariant that every other is_blocked case in this
+// package reads only from the far side: A ROW THAT IS CLOSED OR PINNED IS NEVER
+// BLOCKED.
+//
+// The sibling case above, the reopen case below and the Update crossing case
+// all arrange for the row whose status moves to be UNBLOCKED itself, and watch
+// something downstream of it. That leaves the crossing row's OWN seat in the
+// affected set unpinned — internal/storage/issueops/blocked_state.go's
+// AffectedByStatusChangeInTx seeds the set with the id whose status changed,
+// and deleting that seed leaves every one of those cases green. What it strands
+// is not a transient: a blocked row that keeps is_blocked = 1 after it closes
+// is an ORPHANED FLAG, because nothing downstream of a closed row will ever
+// change its blockedness again and no verb will recompute it. The merge clause
+// is the only place the invariant admits a stale column, and this is not a
+// merge.
+//
+// THE CHILD IS THE OTHER HALF OF THE SAME SEED. The affected set expands by
+// parent-child descendants FROM ITS SEEDS, and the depender load that reaches a
+// neighbor follows blocks and conditional-blocks edges only — never
+// parent-child. Drop the crossing row from the seed and its children go with
+// it, silently, because no other case in this file hangs a child off the row
+// being closed: the sibling's child hangs off the DEPENDER.
+//
+// WHY THE CLOSE IS FORCED. Both unforced refusals stand in the way here, and
+// for opposite reasons — the subject is blocked (ErrCloseBlocked) and it has an
+// open child (CloseOpenChildrenError). The child-shaped block that
+// RunLifecycleCloseAdmitsATransitivelyBlockedTarget uses clears the first and
+// not the second, and closing the child to clear the second would take the
+// second subject with it, since a closed row cannot be blocked and so has
+// nothing left to flip. Force waives close policy and nothing else —
+// CloseRequest.Force "bypasses only blocker and open-child close policy" and
+// "never bypasses validation, ExpectedVersion, or lifecycle rules"
+// (issueops/issueops.go:310-311) — so it is the shape that keeps both subjects
+// observable, and it is not exotic: it is the same forced close of a
+// blocked issue that RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked
+// is built on.
+//
+// All three legs reach ONE body here (internal/storage/issueops.closeIssueInTx),
+// so this is a wrapper and engine check rather than a third vote, exactly as
+// blocked_state.go's header says of the whole Close family.
+func RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsself-blocker"
+	subject := fixture.IssuePrefix + "-bsself-subject"
+	child := fixture.IssuePrefix + "-bsself-child"
+	controlBlocker := fixture.IssuePrefix + "-bsself-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsself-ctldepender"
+	for _, id := range []string{blocker, subject, child, controlBlocker, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, subject, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, subject, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(subject), blockedIssue(blocker),
+		"the row whose status is about to cross is itself blocked, and by a live edge rather than a seeded column")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child),
+		"the closed row's own child inherits the block and carries none of its own")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker),
+		"the control is blocked for a reason this close never reaches")
+
+	// The subject is a flag SUBJECT and an updated_at exemption: the close
+	// writes that row on purpose. The child is neither, so the non-perturbation
+	// clause is observed on it.
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(subject), blockedIssue(child)},
+		[]blockedStateRow{blockedIssue(controlDepender)}).
+		alsoWrites(blockedIssue(subject))
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "writer", IssueID: subject, Reason: "shipped anyway", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("forced close of blocked %s with an open child: %v", subject, err)
+	}
+	if !closed.Changed || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("forced close of %s = %#v, want a committed close", subject, closed)
+	}
+	// The count is read for the FIXTURE, not for the policy: a child that was
+	// already closed could not be blocked, and the second subject would be a row
+	// with nothing to flip.
+	if closed.OpenChildren != 1 {
+		t.Fatalf("forced close of %s reports %d open children, want the 1 this case hung off it", subject, closed.OpenChildren)
+	}
+	if got := probe.rawStatus(t, blockedIssue(subject)); got != string(types.StatusClosed) {
+		t.Fatalf("stored status for %s = %q, want %q: the rest of this case is about what a CLOSED status means for the flag",
+			subject, got, types.StatusClosed)
+	}
+	// The blocker is still open, which is what makes the two flips below
+	// attributable to the SUBJECT closing rather than to its cause going away —
+	// the mechanism the sibling case already covers.
+	if got := probe.rawStatus(t, blockedIssue(blocker)); got != string(types.StatusOpen) {
+		t.Fatalf("blocker %s status = %q, want it still open", blocker, got)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"a closed row is never blocked, and settling it settles its own parent-child child with it")
 }
 
 // RunLifecycleReopenReblocksItsDependers is the other direction, and it is what

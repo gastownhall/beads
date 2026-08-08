@@ -291,6 +291,7 @@ func (p *blockedStateProbe) watchFlip(t *testing.T, subjects, controls []blocked
 		controls:  controls,
 		blocked:   make(map[string]int, len(subjects)+len(controls)),
 		updatedAt: make(map[string]string, len(subjects)+len(controls)),
+		written:   make(map[string]bool, 1),
 	}
 	for _, row := range append(append([]blockedStateRow{}, subjects...), controls...) {
 		flip.blocked[row.String()] = p.rawBlocked(t, row)
@@ -334,7 +335,9 @@ func (p *blockedStateProbe) watchControls(t *testing.T, controls ...blockedState
 //     clause. It is asserted HERE, on rows that actually flipped, because the
 //     mark and unmark templates only touch a row whose value changes: a row
 //     that did not flip could not have had its timestamp bumped by a recompute,
-//     so asserting it there would be asserting nothing.
+//     so asserting it there would be asserting nothing. A subject named to
+//     alsoWrites is exempt from THIS half and no other, because the verb writes
+//     that row for its own reasons.
 //   - every control still reads what it read, with its timestamp intact.
 func (f *blockedStateFlip) requireFlippedTo(t *testing.T, want int, why string) {
 	t.Helper()
@@ -348,6 +351,9 @@ func (f *blockedStateFlip) requireFlippedTo(t *testing.T, want int, why string) 
 			t.Errorf("%s raw is_blocked = %d after the verb, want %d — it read %d before (%s)",
 				row, got, want, f.blocked[key], why)
 		}
+		if f.written[key] {
+			continue
+		}
 		if got := f.probe.rawUpdatedAt(t, row); got != f.updatedAt[key] {
 			t.Errorf("%s updated_at moved %q -> %q across a blocked-state flip, want it untouched: a recompute is derived state, not a user edit (%s)",
 				row, f.updatedAt[key], got, why)
@@ -356,12 +362,12 @@ func (f *blockedStateFlip) requireFlippedTo(t *testing.T, want int, why string) 
 	f.requireControlsUnmoved(t, why)
 }
 
-// requireControlsUnmoved asserts only the control half, for the no-change cases
-// that have no flip of their own to make.
-// alsoWrites marks a control the verb under test LEGITIMATELY WRITES. Its
-// blocked flag stays a control — the invariant's non-perturbation clause is
-// about the flag, and a claim must not change it — but its updated_at is not,
-// because the verb moves that row by design.
+// alsoWrites marks a row the verb under test LEGITIMATELY WRITES. Its blocked
+// flag stays fully asserted either way — a control still must not move and a
+// subject still must flip, because the invariant's non-perturbation clause is
+// about the flag, and a claim must not change it. Only updated_at is waived,
+// because the verb moves that row by design: a claim writes the row it claims,
+// and a status crossing writes the row whose status crossed.
 //
 // Without this the case asserts the verb did not touch the row it exists to
 // touch, and passes only when both writes land in the same second: updated_at
@@ -376,6 +382,8 @@ func (f *blockedStateFlip) alsoWrites(rows ...blockedStateRow) *blockedStateFlip
 	return f
 }
 
+// requireControlsUnmoved asserts only the control half, for the no-change cases
+// that have no flip of their own to make.
 func (f *blockedStateFlip) requireControlsUnmoved(t *testing.T, why string) {
 	t.Helper()
 	for _, row := range f.controls {
