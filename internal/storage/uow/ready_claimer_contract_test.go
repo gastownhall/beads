@@ -36,6 +36,8 @@ func TestReadyClaimerContract(t *testing.T) {
 		{name: "ClaimsAnEphemeralRowTheFilterAdmits", run: conformance.RunReadyClaimerClaimsAnEphemeralRowTheFilterAdmits},
 		{name: "LeavesEphemeralRowsOutOfTheDefaultReadySet", run: conformance.RunReadyClaimerLeavesEphemeralRowsOutOfTheDefaultReadySet},
 		{name: "LeasesADurableWinButNotAnEphemeralOne", run: conformance.RunReadyClaimerLeasesADurableWinButNotAnEphemeralOne},
+		{name: "FencesTheClaimByEveryLabelSetAndTheParentItWasGiven", run: conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven},
+		{name: "HydratesOnlyItsBlocksEdgesIntoTheCardinalities", run: conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities},
 		{name: "AnswersTheQuestionReaderReadyLists", run: conformance.RunReadyClaimerAnswersTheQuestionReaderReadyLists},
 		{name: "SkipsIneligibleFrontRows", run: conformance.RunReadyClaimerSkipsIneligibleFrontRows},
 		{name: "RecordsOneHistoryEntryForAWin", run: conformance.RunReadyClaimerRecordsOneHistoryEntryForAWin},
