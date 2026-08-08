@@ -54,6 +54,10 @@ func TestUOWDependencyEditorContract(t *testing.T) {
 		{name: "RefusesBlockingEdgeAcrossAWispHierarchy", run: conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy},
 		{name: "RefusesACycleThroughAParentChildHop", run: conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop},
 		{name: "RefusesASamePlaneEdgeClosingACrossPlaneCycle", run: conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle},
+		{name: "AddMarksItsSourceInTheSameVerb", run: conformance.RunDependencyEditorAddMarksItsSourceInTheSameVerb},
+		{name: "RemoveUnmarksItsSourceAndDescendants", run: conformance.RunDependencyEditorRemoveUnmarksItsSourceAndDescendants},
+		{name: "MaintainsBlockedStateAcrossPlanes", run: conformance.RunDependencyEditorMaintainsBlockedStateAcrossPlanes},
+		{name: "ClosedChildAddSatisfiesAnAnyChildrenGate", run: conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)
@@ -73,11 +77,12 @@ func newUOWDependencyEditorFixture(t *testing.T, ctx context.Context) conformanc
 	}
 	kit := newUOWRoleFixtureKit(provider, "bd")
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Editor:       editor,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Editor:        editor,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		AddDependency: kit.AddDependency,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
 	}
 }

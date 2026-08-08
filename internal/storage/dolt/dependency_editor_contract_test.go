@@ -193,6 +193,30 @@ func TestDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing
 	conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t, ctx, fixture)
 }
 
+func TestDependencyEditorAddMarksItsSourceInTheSameVerb(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "bsadd")
+	defer cleanup()
+	conformance.RunDependencyEditorAddMarksItsSourceInTheSameVerb(t, ctx, fixture)
+}
+
+func TestDependencyEditorRemoveUnmarksItsSourceAndDescendants(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "bsrm")
+	defer cleanup()
+	conformance.RunDependencyEditorRemoveUnmarksItsSourceAndDescendants(t, ctx, fixture)
+}
+
+func TestDependencyEditorMaintainsBlockedStateAcrossPlanes(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "bsxp")
+	defer cleanup()
+	conformance.RunDependencyEditorMaintainsBlockedStateAcrossPlanes(t, ctx, fixture)
+}
+
+func TestDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T) {
+	fixture, ctx, cleanup := newDoltDependencyEditorFixture(t, "bsgate")
+	defer cleanup()
+	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, ctx, fixture)
+}
+
 // newDoltDependencyEditorFixture composes the backend's role fixture kit with
 // the accessor under test. Every hook but the accessor comes from the kit, so
 // the seeding and scalar-query plumbing stays identical to the other roles'.
@@ -208,12 +232,13 @@ func newDoltDependencyEditorFixture(t *testing.T, prefix string) (conformance.De
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
 	fixture := conformance.DependencyEditorFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Editor:       editor,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Editor:        editor,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		AddDependency: kit.AddDependency,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
 	}
 	return fixture, ctx, func() {
 		cancel()

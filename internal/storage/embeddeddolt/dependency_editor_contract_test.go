@@ -195,6 +195,30 @@ func TestEmbeddedDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t 
 	conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "splane"))
 }
 
+func TestEmbeddedDependencyEditorAddMarksItsSourceInTheSameVerb(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAddMarksItsSourceInTheSameVerb(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsadd"))
+}
+
+func TestEmbeddedDependencyEditorRemoveUnmarksItsSourceAndDescendants(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRemoveUnmarksItsSourceAndDescendants(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsrm"))
+}
+
+func TestEmbeddedDependencyEditorMaintainsBlockedStateAcrossPlanes(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorMaintainsBlockedStateAcrossPlanes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsxp"))
+}
+
+func TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsgate"))
+}
+
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit
 // with the accessor under test. Every hook but the accessor comes from the kit,
 // so the seeding and scalar-query plumbing stays identical to the other roles'.
@@ -207,11 +231,12 @@ func newEmbeddedDependencyEditorFixture(t *testing.T, ctx context.Context, prefi
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Editor:       editor,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Editor:        editor,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		AddDependency: kit.AddDependency,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
 	}
 }

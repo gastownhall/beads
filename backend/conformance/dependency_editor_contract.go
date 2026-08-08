@@ -42,8 +42,15 @@ type DependencyEditorFixture struct {
 	// CreateWisp seeds an ephemeral issue in the wisps plane. It is a separate
 	// field rather than an Ephemeral flag on CreateIssue because the three
 	// adapters reach the two planes through different verbs.
-	CreateWisp  func(context.Context, *types.Issue, string) error
-	QueryScalar func(context.Context, string, []any, ...any) error
+	CreateWisp func(context.Context, *types.Issue, string) error
+	// AddDependency seeds ONE edge out of band of the role, and is needed for
+	// exactly one thing the role's own request type cannot express: a
+	// DependencyEdge carries no metadata, so a waits-for edge with an
+	// any-children GATE on it can only be seeded through the kit's hook. The
+	// blocked-state case that needs one seeds only the precondition through it;
+	// the verb under test is still AddDependencies.
+	AddDependency func(context.Context, *types.Dependency, string) error
+	QueryScalar   func(context.Context, string, []any, ...any) error
 	// CountHistory reports how many history entries the fixture's branch has.
 	// The cases that need it take it before and after the operation under test,
 	// because two commits made inside one second tie on date and their relative
@@ -1466,10 +1473,278 @@ func RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.
 	assertDependencyEditorNoEdgesFrom(t, ctx, fixture, wispA)
 }
 
+// RunDependencyEditorAddMarksItsSourceInTheSameVerb pins the local-write
+// clause of issueops.BlockedStateInvariant on the add half of this role: an
+// edge onto a LIVE target leaves the source's stored is_blocked settled inside
+// the transaction that wrote the edge, and an edge onto a closed one leaves it
+// alone.
+//
+// The two edges land in ONE request, so the twin differs from the subject in
+// exactly one fact — the target's status — and nothing else. That is what makes
+// the zero meaningful: the twin's edge is asserted present, so its 0 is a value
+// the predicate produced rather than the absence of a seed. The retired
+// is_blocked case failed on precisely that distinction.
+//
+// The subject read is RAW. Asking the role whether the source is blocked would
+// pass against a backend that answered from the live edge set and never
+// denormalized, which is the whole point of a derived-AND-persisted column.
+func RunDependencyEditorAddMarksItsSourceInTheSameVerb(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	blocker := fixture.IssuePrefix + "-bsadd-blocker"
+	source := fixture.IssuePrefix + "-bsadd-source"
+	doneBlocker := fixture.IssuePrefix + "-bsadd-doneblocker"
+	twin := fixture.IssuePrefix + "-bsadd-twin"
+	control := fixture.IssuePrefix + "-bsadd-control"
+	for _, id := range []string{blocker, source, twin, control} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+	seedDependencyEditorIssueAtStatus(t, ctx, fixture, doneBlocker, types.StatusClosed)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(source)},
+		[]blockedStateRow{blockedIssue(twin), blockedIssue(control)})
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: source, DependsOnID: blocker, Type: publicops.DepBlocks},
+			{IssueID: twin, DependsOnID: doneBlocker, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("AddDependencies for the blocked-state add case: %v", err)
+	}
+
+	flip.requireFlippedTo(t, 1, "a blocks edge onto a live target blocks its source, and BlockedStateInvariant settles it in the writing transaction")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(source), blockedIssue(blocker),
+		"the postcondition is the flag AND the reason behind it")
+
+	// The twin's zero is only worth anything if its edge actually landed.
+	assertDependencyEdgeTypedCount(t, ctx, fixture, "dependencies", twin, doneBlocker, string(publicops.DepBlocks), 1)
+	if status := probe.rawStatus(t, blockedIssue(doneBlocker)); status != string(types.StatusClosed) {
+		t.Fatalf("twin's blocker %s has status %q, want %q: the twin differs from the subject in the target's status alone",
+			doneBlocker, status, types.StatusClosed)
+	}
+}
+
+// RunDependencyEditorRemoveUnmarksItsSourceAndDescendants pins the remove half,
+// and the part of the local-write clause that says the affected rows are not
+// only the row the request names: removing the source's last blocking edge
+// unblocks the source AND the parent-child descendant that inherited the block
+// from it.
+//
+// THE DESCENDANT IS THE POINT. bd-6dnrw.44 item 3 was a unit-of-work body that
+// computed the affected set without expanding by parent-child descendants, so
+// the named row settled and its children stayed stale. A case that watched only
+// the source would have passed against it.
+//
+// The child's precondition pins the flag AND zero direct blocker edges of its
+// own, so the case cannot be satisfied by a child that was blocked for its own
+// reasons — the pair the retired fixture-defect case lacked.
+func RunDependencyEditorRemoveUnmarksItsSourceAndDescendants(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	blocker := fixture.IssuePrefix + "-bsrm-blocker"
+	parent := fixture.IssuePrefix + "-bsrm-parent"
+	child := fixture.IssuePrefix + "-bsrm-child"
+	controlBlocker := fixture.IssuePrefix + "-bsrm-ctlblocker"
+	controlParent := fixture.IssuePrefix + "-bsrm-ctlparent"
+	for _, id := range []string{blocker, parent, child, controlBlocker, controlParent} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			{IssueID: parent, DependsOnID: blocker, Type: publicops.DepBlocks},
+			{IssueID: child, DependsOnID: parent, Type: publicops.DepParentChild},
+			{IssueID: controlParent, DependsOnID: controlBlocker, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("seed the blocked hierarchy through the role: %v", err)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(parent), blockedIssue(blocker), "the parent holds the only cause in this hierarchy")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child's block is INHERITED, which is what the removal has to reach")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlParent), blockedIssue(controlBlocker), "the control's cause is not the one being removed")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(parent), blockedIssue(child)},
+		[]blockedStateRow{blockedIssue(controlParent)})
+
+	removed, err := fixture.Editor.RemoveDependency(ctx, publicops.RemoveDependencyRequest{
+		Actor: "writer", IssueID: parent, DependsOnID: blocker,
+	})
+	if err != nil {
+		t.Fatalf("RemoveDependency %s -> %s: %v", parent, blocker, err)
+	}
+	if !removed.Removed {
+		t.Fatalf("RemoveDependency %s -> %s reported Removed = false, want the seeded edge", parent, blocker)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"removing the last cause unblocks the source AND everything that inherited from it, per BlockedStateInvariant's local-write clause")
+}
+
+// RunDependencyEditorMaintainsBlockedStateAcrossPlanes pins the clause that
+// blocking crosses the two planes in BOTH directions, and that inheritance
+// crosses them too. All four subjects settle inside one request.
+//
+// PLANE RESIDENCY IS ASSERTED, not assumed. Cross-plane and cross-tier is where
+// the earlier is_blocked defects lived, and a wisp that leaked a durable row
+// would still read a correct flag from one of the two tables — so each row is
+// checked present in its own plane's table and ABSENT from the other before the
+// flags mean anything.
+//
+// The wisp child is the sharpest of the four: its parent is a durable issue and
+// its own edge lives in wisp_dependencies, so it is reached only by an affected
+// set that expands across planes as well as down the hierarchy.
+func RunDependencyEditorMaintainsBlockedStateAcrossPlanes(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	issueTarget := fixture.IssuePrefix + "-bsxp-issuetarget"
+	wispSource := fixture.IssuePrefix + "-bsxp-wispsource"
+	wispTarget := fixture.IssuePrefix + "-bsxp-wisptarget"
+	issueSource := fixture.IssuePrefix + "-bsxp-issuesource"
+	blockedParent := fixture.IssuePrefix + "-bsxp-parent"
+	wispChild := fixture.IssuePrefix + "-bsxp-wispchild"
+	freeIssue := fixture.IssuePrefix + "-bsxp-freeissue"
+	freeWisp := fixture.IssuePrefix + "-bsxp-freewisp"
+	for _, id := range []string{issueTarget, issueSource, blockedParent, freeIssue} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+	for _, id := range []string{wispSource, wispTarget, wispChild, freeWisp} {
+		seedDependencyEditorWisp(t, ctx, fixture, id)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	for _, row := range []blockedStateRow{
+		blockedIssue(issueTarget), blockedIssue(issueSource), blockedIssue(blockedParent), blockedIssue(freeIssue),
+		blockedWisp(wispSource), blockedWisp(wispTarget), blockedWisp(wispChild), blockedWisp(freeWisp),
+	} {
+		probe.requirePlaneResidency(t, row)
+	}
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedWisp(wispSource), blockedIssue(issueSource), blockedIssue(blockedParent), blockedWisp(wispChild)},
+		[]blockedStateRow{blockedIssue(freeIssue), blockedWisp(freeWisp)})
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{
+			// wisp blocked by issue, and issue blocked by wisp: the two
+			// directions the invariant says are symmetric.
+			{IssueID: wispSource, DependsOnID: issueTarget, Type: publicops.DepBlocks},
+			{IssueID: issueSource, DependsOnID: wispTarget, Type: publicops.DepBlocks},
+			// A wisp child inheriting from a durable blocked parent. The
+			// parent-child edge is applied FIRST (the role applies hierarchy
+			// before blocking edges), so the child is only reachable through the
+			// affected set the later blocking edge expands.
+			{IssueID: wispChild, DependsOnID: blockedParent, Type: publicops.DepParentChild},
+			{IssueID: blockedParent, DependsOnID: issueTarget, Type: publicops.DepBlocks},
+		},
+	}); err != nil {
+		t.Fatalf("AddDependencies across both planes: %v", err)
+	}
+
+	flip.requireFlippedTo(t, 1, "blocking and inheritance cross the two planes in both directions")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispSource), blockedIssue(issueTarget), "a wisp is blocked by a live issue")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(issueSource), blockedWisp(wispTarget), "an issue is blocked by a live wisp")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedWisp(wispChild),
+		"the wisp child's block is inherited across the plane boundary, not its own")
+}
+
+// RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate pins the ONE add
+// that is not monotonic, and it is the case that tells MARK-ONLY wiring from
+// RECOMPUTE wiring.
+//
+// Every other add can only ADD blockage, so both hand-mirrored bodies take a
+// mark-only pass for it. A parent-child add cannot: an ALREADY-CLOSED child
+// satisfies an any-children waits-for gate, so the waiter must come UNBLOCKED
+// as a result of an add. Both bodies carve that case out to a full recompute
+// and both say so in a comment; nothing pinned it at the role until now. Swap
+// either carve-out back to the mark-only pass and this case is the one that
+// goes red.
+//
+// The control is a second waiter on the SAME spawner under the default
+// all-children gate. It is inside the affected set — the same recompute visits
+// it — and it must stay blocked, so the case separates "the gate was
+// re-evaluated" from "the flag was cleared".
+func RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T, ctx context.Context, fixture DependencyEditorFixture) {
+	t.Helper()
+	if fixture.AddDependency == nil {
+		t.Skip("fixture has no AddDependency hook: a waits-for GATE lives in edge metadata, which AddDependenciesRequest cannot carry")
+	}
+	spawner := fixture.IssuePrefix + "-bsgate-spawner"
+	openChild := fixture.IssuePrefix + "-bsgate-openchild"
+	closedChild := fixture.IssuePrefix + "-bsgate-closedchild"
+	waiterAny := fixture.IssuePrefix + "-bsgate-waiterany"
+	waiterAll := fixture.IssuePrefix + "-bsgate-waiterall"
+	for _, id := range []string{spawner, openChild, waiterAny, waiterAll} {
+		seedDependencyEditorIssue(t, ctx, fixture, id)
+	}
+	seedDependencyEditorIssueAtStatus(t, ctx, fixture, closedChild, types.StatusClosed)
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: openChild, DependsOnID: spawner, Type: publicops.DepParentChild}},
+	}); err != nil {
+		t.Fatalf("seed the spawner's open child: %v", err)
+	}
+	for _, gate := range []struct {
+		waiter string
+		gate   string
+	}{{waiterAny, types.WaitsForAnyChildren}, {waiterAll, types.WaitsForAllChildren}} {
+		edge, err := types.NewWaitsForDependency(gate.waiter, spawner, gate.gate)
+		if err != nil {
+			t.Fatalf("build the %s waits-for edge: %v", gate.gate, err)
+		}
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed the %s waits-for edge %s -> %s: %v", gate.gate, gate.waiter, spawner, err)
+		}
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(waiterAny), "the any-children waiter is gated, not edge-blocked")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(waiterAll), "the all-children waiter is gated, not edge-blocked")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(waiterAny)},
+		[]blockedStateRow{blockedIssue(waiterAll)})
+
+	if _, err := fixture.Editor.AddDependencies(ctx, publicops.AddDependenciesRequest{
+		Actor: "writer",
+		Edges: []publicops.DependencyEdge{{IssueID: closedChild, DependsOnID: spawner, Type: publicops.DepParentChild}},
+	}); err != nil {
+		t.Fatalf("add the already-closed child: %v", err)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"an already-closed child satisfies an any-children gate, so this ADD must UNBLOCK — the one add a mark-only pass cannot serve")
+
+	// The all-children control is only a control if its own gate is still
+	// genuinely unsatisfied, which is the open child nobody touched.
+	if status := probe.rawStatus(t, blockedIssue(openChild)); status != string(types.StatusOpen) {
+		t.Fatalf("the spawner's open child %s has status %q, want %q: the all-children control depends on it", openChild, status, types.StatusOpen)
+	}
+}
+
 func seedDependencyEditorIssue(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string) {
 	t.Helper()
 	if err := fixture.CreateIssue(ctx, dependencyEditorSeed(id, false), "seed"); err != nil {
 		t.Fatalf("seed issue %s: %v", id, err)
+	}
+}
+
+// seedDependencyEditorIssueAtStatus seeds a durable issue that is already in a
+// terminal status. It seeds a STATUS, never the is_blocked column: no fixture
+// in this package can write that flag, so every value a case reads was earned
+// by a role verb.
+func seedDependencyEditorIssueAtStatus(t *testing.T, ctx context.Context, fixture DependencyEditorFixture, id string, status types.Status) {
+	t.Helper()
+	seed := dependencyEditorSeed(id, false)
+	seed.Status = status
+	if err := fixture.CreateIssue(ctx, seed, "seed"); err != nil {
+		t.Fatalf("seed issue %s at status %q: %v", id, status, err)
 	}
 }
 
