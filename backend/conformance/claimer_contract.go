@@ -259,6 +259,7 @@ func RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t *testing.T, ctx con
 
 	before := claimerHistoryCount(t, ctx, fixture)
 	updatedBefore := claimerUpdatedAt(t, ctx, fixture, id)
+	claimEventsBefore := claimerClaimEventCount(t, ctx, fixture, id)
 
 	second, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: actor, IssueID: id})
 	if err != nil {
@@ -279,6 +280,17 @@ func RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t *testing.T, ctx con
 	if got := claimerUpdatedAt(t, ctx, fixture, id); got != updatedBefore {
 		t.Errorf("updated_at moved %q -> %q across a re-claim that reported Changed false; "+
 			"the compare-and-set ran anyway", updatedBefore, got)
+	}
+	if second.Issue.ID != id {
+		t.Errorf("returned Issue.ID = %q, want %q", second.Issue.ID, id)
+	}
+	// THE LOAD-BEARING ASSERTION. The two checks above it both tie under a
+	// compare-and-set that re-runs on a row the actor already holds; this one
+	// does not, because the re-run records a second claim event whether or not
+	// anything was committed.
+	if got := claimerClaimEventCount(t, ctx, fixture, id); got != claimEventsBefore {
+		t.Errorf("claim events went %d -> %d across a re-claim that reported Changed false; "+
+			"the compare-and-set ran again", claimEventsBefore, got)
 	}
 	assertClaimerRowState(t, ctx, fixture, id, string(types.StatusInProgress), actor)
 	assertClaimerCommittedNothing(t, ctx, fixture, before, "an idempotent re-claim")
@@ -658,6 +670,31 @@ func claimerUpdatedAt(t *testing.T, ctx context.Context, fixture ClaimerFixture,
 		t.Fatalf("read updated_at for %s: %v", id, err)
 	}
 	return stamp
+}
+
+// claimerClaimEventCount counts the CLAIM EVENTS on one issue.
+//
+// It exists because the two detectors beside it are provably blind on the store
+// legs, which a review demonstrated with a surviving mutant: widen the
+// compare-and-set so a re-claim rewrites the row, and `updated_at` still ties
+// (the column is DATETIME with no fractional precision, so both claims land in
+// the same second) while the history delta stays 0 (`Changed` is computed from
+// the pre-image, so the commit is skipped and the event row is written but
+// never committed). The event row is the one thing that moves.
+//
+// The deleted audit-suite Claimer contract counted exactly this, and it was the
+// only deterministic role-seam detector for "an idempotent re-claim persists
+// nothing". Losing it in the consolidation was a real regression; this restores
+// it through the QueryScalar hook the fixture already carries.
+func claimerClaimEventCount(t *testing.T, ctx context.Context, fixture ClaimerFixture, id string) int {
+	t.Helper()
+	var events int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
+		[]any{id, string(types.EventClaimed)}, &events); err != nil {
+		t.Fatalf("count claim events for %s: %v", id, err)
+	}
+	return events
 }
 
 func claimerHistoryCount(t *testing.T, ctx context.Context, fixture ClaimerFixture) int {
