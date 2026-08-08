@@ -974,3 +974,34 @@ func TestCookFormulaToSubgraph_StepMetadata(t *testing.T) {
 		t.Errorf("Metadata[origin] = %v, want \"repro\"", got)
 	}
 }
+
+func TestStepTypeToIssueType(t *testing.T) {
+	tests := []struct {
+		stepType string
+		want     types.IssueType
+	}{
+		// Core work types pass through.
+		{"task", types.TypeTask},
+		{"bug", types.TypeBug},
+		{"feature", types.TypeFeature},
+		{"epic", types.TypeEpic},
+		{"chore", types.TypeChore},
+		// Empty defaults to task.
+		{"", types.TypeTask},
+		// Other built-in types pass through instead of collapsing to task.
+		{"decision", types.TypeDecision},
+		{"spike", types.TypeSpike},
+		{"story", types.TypeStory},
+		// Aliases normalize to their canonical form.
+		{"enhancement", types.TypeFeature},
+		// Non-built-in types pass through so pour can register them as
+		// custom types (ensureSubgraphCustomTypes) and the storage layer
+		// can validate them against types.custom — matching bd create.
+		{"duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
+			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
+		}
+	}
+}

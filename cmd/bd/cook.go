@@ -16,22 +16,15 @@ import (
 )
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
-// Returns types.TypeTask for empty or unrecognized types.
+// Returns types.TypeTask for empty types. Non-empty types pass through
+// (normalized) rather than being validated here: pour registers non-built-in
+// types via ensureSubgraphCustomTypes, and the storage layer validates them
+// against types.custom — the same division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
-	switch stepType {
-	case "task":
-		return types.TypeTask
-	case "bug":
-		return types.TypeBug
-	case "feature":
-		return types.TypeFeature
-	case "epic":
-		return types.TypeEpic
-	case "chore":
-		return types.TypeChore
-	default:
+	if stepType == "" {
 		return types.TypeTask
 	}
+	return types.IssueType(stepType).Normalize()
 }
 
 // cookCmd compiles a formula JSON into a proto bead.
