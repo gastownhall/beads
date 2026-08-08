@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -94,15 +93,8 @@ func (r *configSQLRepositoryImpl) SetConfig(ctx context.Context, key, value stri
 	//
 	// The caller supplies a transactional runner, so the row and its projection
 	// commit together or neither does.
-	switch key {
-	case "status.custom":
-		if err := issueops.SyncCustomStatusesTable(ctx, r.runner, value); err != nil {
-			return fmt.Errorf("db: SetConfig %s: syncing custom_statuses table: %w", key, err)
-		}
-	case "types.custom":
-		if err := issueops.SyncCustomTypesTable(ctx, r.runner, value); err != nil {
-			return fmt.Errorf("db: SetConfig %s: syncing custom_types table: %w", key, err)
-		}
+	if _, err := issueops.SyncConfigTables(ctx, r.runner, key, value); err != nil {
+		return fmt.Errorf("db: SetConfig %s: %w", key, err)
 	}
 	return nil
 }
@@ -182,15 +174,7 @@ func (r *configSQLRepositoryImpl) readCustomTypesConfig(ctx context.Context) ([]
 	if err != nil {
 		return nil, fmt.Errorf("db: GetCustomTypes: %w", err)
 	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		return parseCustomTypesList(jsonTypes), nil
-	}
-	return parseCustomTypesList(strings.Split(value, ",")), nil
+	return issueops.ParseTypesConfigValue(value), nil
 }
 
 func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
@@ -209,20 +193,6 @@ func unionWithYAMLCustomTypes(dbTypes, yamlTypes []string) []string {
 				continue
 			}
 			seen[t] = struct{}{}
-			out = append(out, t)
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func parseCustomTypesList(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, t := range in {
-		t = strings.TrimSpace(t)
-		if t != "" {
 			out = append(out, t)
 		}
 	}

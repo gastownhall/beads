@@ -85,12 +85,7 @@ func ResolveCustomConfigInTx(ctx context.Context, tx DBTX) (statuses []types.Cus
 	}
 	if !typesFromTable {
 		if v := cfg["types.custom"]; v != "" {
-			var jsonTypes []string
-			if jsonErr := json.Unmarshal([]byte(v), &jsonTypes); jsonErr == nil {
-				customTypes = jsonTypes
-			} else {
-				customTypes = ParseCommaSeparatedList(v)
-			}
+			customTypes = ParseTypesConfigValue(v)
 		} else if yamlTypes := config.GetCustomTypesFromYAML(); len(yamlTypes) > 0 {
 			customTypes = yamlTypes
 		}
@@ -291,13 +286,7 @@ func ResolveCustomTypesInTx(ctx context.Context, tx DBTX) ([]string, error) {
 			return customTypesYAMLFallback(config.GetCustomTypesFromYAML, err)
 		}
 		if value != "" {
-			// Try JSON array first (e.g. '["gate","convoy"]'), fall back to comma-separated.
-			var jsonTypes []string
-			if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-				fromDB = jsonTypes
-			} else {
-				fromDB = ParseCommaSeparatedList(value)
-			}
+			fromDB = ParseTypesConfigValue(value)
 		}
 	}
 
@@ -419,7 +408,7 @@ func SyncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 	if value == "" {
 		return nil
 	}
-	names := parseTypesValue(value)
+	names := ParseTypesConfigValue(value)
 	for _, name := range names {
 		if _, err := tx.ExecContext(ctx, "INSERT INTO custom_types (name) VALUES (?)", name); err != nil {
 			return err
@@ -428,8 +417,11 @@ func SyncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 	return nil
 }
 
-// parseTypesValue tries JSON array first, then falls back to comma-separated.
-func parseTypesValue(value string) []string {
+// ParseTypesConfigValue parses a types.custom config value, accepting both
+// the JSON-array form written by bd config set / pour (e.g. ["duty","ops"])
+// and the legacy comma-separated form (duty,ops). Elements are trimmed and
+// empties dropped.
+func ParseTypesConfigValue(value string) []string {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
@@ -437,10 +429,38 @@ func parseTypesValue(value string) []string {
 	// Try JSON array first (e.g. '["gate","convoy"]')
 	var jsonTypes []string
 	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		return jsonTypes
+		var out []string
+		for _, t := range jsonTypes {
+			if t = strings.TrimSpace(t); t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
 	}
 	// Fall back to comma-separated
 	return ParseCommaSeparatedList(value)
+}
+
+// SyncConfigTables re-syncs the normalized lookup table backing a config
+// key, if any (status.custom → custom_statuses, types.custom →
+// custom_types). Reads of those sets are table-first, so every SetConfig
+// path must keep the projection in step with the string value or stale
+// table rows win forever. Returns the name of the synced table ("" when
+// the key has no projection) so transactional callers can mark it dirty.
+func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, error) {
+	switch key {
+	case "status.custom":
+		if err := SyncCustomStatusesTable(ctx, tx, value); err != nil {
+			return "", fmt.Errorf("syncing custom_statuses table: %w", err)
+		}
+		return "custom_statuses", nil
+	case "types.custom":
+		if err := SyncCustomTypesTable(ctx, tx, value); err != nil {
+			return "", fmt.Errorf("syncing custom_types table: %w", err)
+		}
+		return "custom_types", nil
+	}
+	return "", nil
 }
 
 // EnsureCustomTypeInTx registers name as a custom type if it is not

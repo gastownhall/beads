@@ -3,7 +3,6 @@ package dolt
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"log"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -19,17 +18,8 @@ func (s *DoltStore) SetConfig(ctx context.Context, key, value string) error {
 			return err
 		}
 		// Sync normalized tables when config keys change
-		switch key {
-		case "status.custom":
-			if err := issueops.SyncCustomStatusesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_statuses table: %w", err)
-			}
-		case "types.custom":
-			if err := issueops.SyncCustomTypesTable(ctx, tx, value); err != nil {
-				return fmt.Errorf("syncing custom_types table: %w", err)
-			}
-		}
-		return nil
+		_, err := issueops.SyncConfigTables(ctx, tx, key, value)
+		return err
 	}); err != nil {
 		return err
 	}

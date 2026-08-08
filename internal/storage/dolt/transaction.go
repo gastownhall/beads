@@ -428,24 +428,22 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	if issueops.IsWisp(issue) {
-		// Wisp rows live on the ignored session, but the validation context
-		// (config, custom_types) lives in regular dolt-tracked tables — read
-		// it through regularTx so types registered earlier in this
-		// transaction (ensureSubgraphCustomTypes during a wisp pour) are
-		// visible. Both sessions are pinned to the same branch (GH#5443).
-		bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
-		if err != nil {
-			return err
-		}
-		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
-		return err
-	}
-
+	// Build the validation context on regularTx for both tiers: wisp rows
+	// live on the ignored session, but the validation context (config,
+	// custom_types) lives in regular dolt-tracked tables — reading it
+	// through regularTx keeps types registered earlier in this transaction
+	// (ensureCustomTypesForIssues during a wisp pour) visible. Both
+	// sessions are pinned to the same branch (GH#5443).
 	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
 	}
+
+	if issueops.IsWisp(issue) {
+		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
+		return err
+	}
+
 	result, err := issueops.CreateIssueInTxWithResult(ctx, t.regularTx, bc, issue, actor)
 	if err != nil {
 		return err
@@ -478,10 +476,18 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 		}
 	}
 
+	// See CreateIssue: one validation context on regularTx serves both
+	// tiers, so in-transaction custom-type registration is visible to the
+	// wisp tier too (GH#5443).
+	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	})
+	if err != nil {
+		return err
+	}
+
 	if len(regularIssues) > 0 {
-		result, err := issueops.CreateIssuesInTxWithResult(ctx, t.regularTx, regularIssues, actor, storage.BatchCreateOptions{
-			SkipPrefixValidation: true,
-		})
+		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.regularTx, bc, regularIssues, actor)
 		if err != nil {
 			return err
 		}
@@ -491,14 +497,6 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(wispIssues) > 0 {
-		// See CreateIssue: the validation context must come from regularTx so
-		// in-transaction custom-type registration is visible (GH#5443).
-		bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
-			SkipPrefixValidation: true,
-		})
-		if err != nil {
-			return err
-		}
 		if _, err := issueops.CreateIssuesInTxWithContext(ctx, t.ignoredTx, bc, wispIssues, actor); err != nil {
 			return err
 		}
@@ -1293,23 +1291,16 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 	}
 	t.dirty.MarkDirty("config")
 
-	// Sync normalized tables when config keys change, matching
-	// embeddedTransaction.SetConfig and DoltStore.SetConfig.
 	// ResolveCustomTypesInTx reads the normalized tables first, so without
-	// this a type registered in-transaction (e.g. by
-	// ensureSubgraphCustomTypes during pour) stays invisible to validation
+	// this sync a type registered in-transaction (e.g. by
+	// ensureCustomTypesForIssues during pour) stays invisible to validation
 	// whenever the table already has rows.
-	switch key {
-	case "status.custom":
-		if err := issueops.SyncCustomStatusesTable(ctx, t.regularTx, value); err != nil {
-			return fmt.Errorf("syncing custom_statuses table: %w", err)
-		}
-		t.dirty.MarkDirty("custom_statuses")
-	case "types.custom":
-		if err := issueops.SyncCustomTypesTable(ctx, t.regularTx, value); err != nil {
-			return fmt.Errorf("syncing custom_types table: %w", err)
-		}
-		t.dirty.MarkDirty("custom_types")
+	table, err := issueops.SyncConfigTables(ctx, t.regularTx, key, value)
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		t.dirty.MarkDirty(table)
 	}
 	return nil
 }

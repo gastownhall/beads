@@ -1027,7 +1027,7 @@ func TestStepTypeToIssueType(t *testing.T) {
 		// Aliases normalize to their canonical form.
 		{"enhancement", types.TypeFeature},
 		// Non-built-in types pass through so pour can register them as
-		// custom types (ensureSubgraphCustomTypes) and the storage layer
+		// custom types (ensureCustomTypesForIssues) and the storage layer
 		// can validate them against types.custom — matching bd create.
 		{"duty", types.IssueType("duty")},
 	}

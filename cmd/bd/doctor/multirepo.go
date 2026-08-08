@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // multiRepoYAMLConfig represents the types section of config.yaml for YAML unmarshaling.
@@ -134,29 +134,7 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 		return nil, nil
 	}
 
-	return parseTypesConfigValue(typesStr), nil
-}
-
-// parseTypesConfigValue parses a types.custom config value, accepting both
-// the JSON-array form written by bd config set / pour (e.g. ["duty","ops"])
-// and the legacy comma-separated form (duty,ops).
-func parseTypesConfigValue(value string) []string {
-	var out []string
-	var jsonTypes []string
-	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
-		for _, t := range jsonTypes {
-			if t = strings.TrimSpace(t); t != "" {
-				out = append(out, t)
-			}
-		}
-		return out
-	}
-	for _, t := range strings.Split(value, ",") {
-		if t = strings.TrimSpace(t); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
+	return issueops.ParseTypesConfigValue(typesStr), nil
 }
 
 // readTypesFromYAML reads types.custom from config.yaml
@@ -212,7 +190,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	// Add parent's custom types
 	parentTypes, err := store.GetConfig(ctx, "types.custom")
 	if err == nil && parentTypes != "" {
-		for _, t := range parseTypesConfigValue(parentTypes) {
+		for _, t := range issueops.ParseTypesConfigValue(parentTypes) {
 			knownTypes[t] = true
 		}
 	}

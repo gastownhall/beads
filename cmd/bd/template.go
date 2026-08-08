@@ -11,6 +11,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
@@ -558,19 +559,19 @@ func getRelativeID(oldID, rootID string) string {
 	return ""
 }
 
-// ensureSubgraphCustomTypes scans the template subgraph for issue types
-// that are not built-in and ensures they are registered as custom types
-// in the database. This is needed because formula cooking can produce
-// issues with types like "gate" (for async coordination beads) that are
-// not in the default type whitelist. Without this, cloneSubgraph fails
-// with "invalid issue type" on the first non-built-in bead. (GH#3213)
-func ensureSubgraphCustomTypes(ctx context.Context, s molConfigWriter, subgraph *TemplateSubgraph) error {
-	// Collect non-built-in types used by the subgraph. IsBuiltIn (not
+// ensureCustomTypesForIssues scans the issues for types that are not
+// built-in and ensures they are registered as custom types in the
+// database. This is needed because formula cooking can produce issues
+// with types like "gate" (for async coordination beads) that are not in
+// the default type whitelist. Without this, issue creation fails with
+// "invalid issue type" on the first non-built-in bead. (GH#3213)
+func ensureCustomTypesForIssues(ctx context.Context, s molConfigWriter, issues []*types.Issue) error {
+	// Collect non-built-in types used by the issues. IsBuiltIn (not
 	// IsValid) matches the validator this registration exists to satisfy:
 	// IsValidWithCustom short-circuits on IsBuiltIn, so types like "event"
 	// need no types.custom entry.
 	needed := make(map[string]bool)
-	for _, issue := range subgraph.Issues {
+	for _, issue := range issues {
 		t := issue.IssueType
 		if t == "" || t.IsBuiltIn() {
 			continue
@@ -586,18 +587,7 @@ func ensureSubgraphCustomTypes(ctx context.Context, s molConfigWriter, subgraph 
 	if err != nil {
 		existing = ""
 	}
-	var current []string
-	if existing != "" {
-		// parseTypesValue handles both JSON arrays and comma-separated.
-		// It's in issueops — but we don't import that package here, so
-		// do a simple comma split (good enough for the merge check).
-		for _, t := range strings.Split(strings.Trim(existing, "[] \""), ",") {
-			t = strings.Trim(t, " \"")
-			if t != "" {
-				current = append(current, t)
-			}
-		}
-	}
+	current := issueops.ParseTypesConfigValue(existing)
 	currentSet := make(map[string]bool, len(current))
 	for _, t := range current {
 		currentSet[t] = true
@@ -650,7 +640,7 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 }
 
 func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
-	if err := ensureSubgraphCustomTypes(ctx, w, subgraph); err != nil {
+	if err := ensureCustomTypesForIssues(ctx, w, subgraph.Issues); err != nil {
 		return nil, fmt.Errorf("registering custom types for subgraph: %w", err)
 	}
 

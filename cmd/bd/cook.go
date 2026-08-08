@@ -18,7 +18,7 @@ import (
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
 // Returns types.TypeTask for empty types. Non-empty types pass through
 // (trimmed and normalized) rather than being validated here: pour and
-// cook --persist register non-built-in types via ensureSubgraphCustomTypes,
+// cook --persist register non-built-in types via ensureCustomTypesForIssues,
 // and the storage layer validates them against types.custom — the same
 // division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
@@ -902,7 +902,7 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 		// cloneSubgraphInto (pour). Without this, PrepareIssueForInsert
 		// rejects them with "invalid issue type" and the whole cook
 		// --persist transaction rolls back.
-		if err := ensureSubgraphCustomTypes(ctx, storeMolWriter{DoltStorage: s, tx: tx}, &TemplateSubgraph{Issues: issues}); err != nil {
+		if err := ensureCustomTypesForIssues(ctx, storeMolWriter{DoltStorage: s, tx: tx}, issues); err != nil {
 			return fmt.Errorf("registering custom types: %w", err)
 		}
 

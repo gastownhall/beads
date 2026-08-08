@@ -273,7 +273,7 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 // caller-supplied BatchContext. Callers that split config reads from row
 // writes across SQL sessions (doltTransaction's wisp tier) build the context
 // on the session that sees in-transaction config writes and pass it here.
-// Mutates bc: sets SkipChildCounterReconcile.
+// The caller's bc is not modified, so one context can serve several calls.
 func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext, issues []*types.Issue, actor string) (CreateIssuesResult, error) {
 	opts := bc.Opts
 	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)
@@ -284,7 +284,11 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 
 	// This function already runs a slice-wide ReconcileChildCounters below,
 	// covering every accepted issue; skip the redundant per-issue reconcile.
-	bc.SkipChildCounterReconcile = true
+	// Set the flag on a shallow copy so the caller's context keeps its own
+	// reconcile behavior.
+	local := *bc
+	local.SkipChildCounterReconcile = true
+	bc = &local
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]

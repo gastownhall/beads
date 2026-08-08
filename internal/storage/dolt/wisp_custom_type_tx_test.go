@@ -1,24 +1,20 @@
 package dolt
 
 import (
-	"database/sql"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 // setupAnyServerStore returns a store on the shared test server when TestMain
 // brought one up (Docker), and otherwise starts a private local dolt
-// sql-server from the dolt binary — the same recipe as
-// TestMultiProcessSchemaInit_DoltVerify — so the test still runs on machines
-// without a container runtime.
+// sql-server from the dolt binary — the same recipe as setupWispCascadeStore
+// — so the test still runs on machines without a container runtime.
 func setupAnyServerStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	if testServerPort != 0 {
@@ -34,30 +30,10 @@ func setupAnyServerStore(t *testing.T) (*DoltStore, func()) {
 func setupLocalServerStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
-	doltPath, err := exec.LookPath("dolt")
-	if err != nil {
-		t.Skip("dolt binary not found in PATH")
-	}
 
-	tmpDir := t.TempDir()
-	beadsDir := filepath.Join(tmpDir, ".beads")
-	doltDir := filepath.Join(beadsDir, "dolt")
-	if err := os.MkdirAll(doltDir, 0700); err != nil {
-		t.Fatalf("mkdir dolt: %v", err)
-	}
-
-	env := append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
-	for _, args := range [][]string{
-		{"config", "--global", "--add", "user.name", "test"},
-		{"config", "--global", "--add", "user.email", "test@example.com"},
-		{"init"},
-	} {
-		cmd := exec.Command(doltPath, args...)
-		cmd.Dir = doltDir
-		cmd.Env = env
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("dolt %v: %v\n%s", args, err, out)
-		}
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0700); err != nil {
+		t.Fatalf("mkdir beads dir: %v", err)
 	}
 
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
@@ -67,53 +43,33 @@ func setupLocalServerStore(t *testing.T) (*DoltStore, func()) {
 	if err != nil {
 		t.Fatalf("doltserver.Start: %v", err)
 	}
-	stopServer := func() { _ = doltserver.Stop(beadsDir) }
+	t.Cleanup(func() { _ = doltserver.Stop(beadsDir) })
 
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	dbName := uniqueTestDBName(t)
-	adminDSN := doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root"}.String()
-	adminDB, err := sql.Open("mysql", adminDSN)
-	if err != nil {
-		stopServer()
-		t.Fatalf("admin connect: %v", err)
-	}
-	_, err = adminDB.ExecContext(ctx, "CREATE DATABASE `"+dbName+"`")
-	adminDB.Close()
-	if err != nil {
-		stopServer()
-		t.Fatalf("create database: %v", err)
-	}
-
 	store, err := New(ctx, &Config{
-		Path:           doltDir,
-		BeadsDir:       beadsDir,
-		CommitterName:  "test",
-		CommitterEmail: "test@example.com",
-		Database:       dbName,
-		ServerPort:     state.Port,
-		MaxOpenConns:   1, // Required: DOLT_CHECKOUT is session-level
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		CommitterName:   "test",
+		CommitterEmail:  "test@example.com",
+		Database:        uniqueTestDBName(t),
+		ServerHost:      "127.0.0.1",
+		ServerPort:      state.Port,
+		ServerUser:      "root",
+		CreateIfMissing: true, // creates and schema-inits the fresh database
+		MaxOpenConns:    1,    // Required: DOLT_CHECKOUT is session-level
 	})
 	if err != nil {
-		stopServer()
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := initSchemaOnDB(ctx, store.db); err != nil {
-		store.Close()
-		stopServer()
-		t.Fatalf("initSchemaOnDB: %v", err)
-	}
+	t.Cleanup(func() { store.Close() })
+
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
-		store.Close()
-		stopServer()
 		t.Fatalf("set issue_prefix: %v", err)
 	}
 
-	return store, func() {
-		store.Close()
-		stopServer()
-	}
+	return store, func() {}
 }
 
 // TestWispSeesCustomTypeRegisteredInTransaction verifies that a wisp created
@@ -121,7 +77,7 @@ func setupLocalServerStore(t *testing.T) (*DoltStore, func()) {
 // the fresh registration. Wisp rows are written on the ignored-tables
 // session, but the validation context (config, custom_types) must be read
 // from the regular session, or in-transaction registration — how
-// ensureSubgraphCustomTypes works during a wisp pour — stays invisible
+// ensureCustomTypesForIssues works during a wisp pour — stays invisible
 // (GH#5443).
 func TestWispSeesCustomTypeRegisteredInTransaction(t *testing.T) {
 	store, cleanup := setupAnyServerStore(t)
