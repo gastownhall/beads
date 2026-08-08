@@ -217,6 +217,14 @@ func (e *NotFoundError) Unwrap() error { return ErrNotFound }
 // internal/hooks publishes on_create, on_update and on_close and none of them
 // names a deletion.
 //
+// A DELETION MAINTAINS BLOCKED STATE under BlockedStateInvariant. The rows it
+// erases are gone, so the promise is about the SURVIVORS: a row whose only
+// blocker was deleted is left unblocked, and so is everything that inherited
+// that block from it, inside the deleting transaction. This is the same
+// obligation the reference rewrite has and for the same reason — a survivor
+// left pointing at an absent row, or left blocked by one, is the state the
+// unforced guard exists to prevent a caller from creating by hand.
+//
 // Deterministic request-validation failures match ErrValidation. Result values
 // are unspecified when error is non-nil.
 type Deleter interface {

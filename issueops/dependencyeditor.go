@@ -125,6 +125,11 @@ type RemoveDependencyResult struct {
 // A TARGET's plane is independent of its source's: either class may depend on
 // the other.
 //
+// EITHER METHOD MAINTAINS BLOCKED STATE under BlockedStateInvariant: an edge
+// that lands or is removed leaves the column settled — for the source, for
+// everything that inherits from it, and for any waiter whose gate the edge
+// changed — inside the same transaction that wrote the edge.
+//
 // EACH METHOD LEAVES A TRAIL IN THE SOURCE'S EVENT STREAM, attributed to the
 // request's Actor: a genuinely new edge records a dependency_added entry, and
 // a removal that found its edge a dependency_removed one. Work that wrote

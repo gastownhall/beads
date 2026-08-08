@@ -390,6 +390,12 @@ type ReopenResult struct {
 
 // Lifecycle describes guarded issue mutations. A new capability gets a new
 // role interface and its own accessor; never append a method here.
+//
+// EVERY VERB HERE MAINTAINS BLOCKED STATE under BlockedStateInvariant: a
+// Create that carries edges, and an Update or Close or Reopen that moves a
+// status across the closed/pinned boundary, leave the column settled for every
+// row their mutation could have affected before the transaction commits.
+//
 // Deterministic request validation failures match ErrValidation; when a
 // more-specific validation sentinel applies, it remains matchable too.
 // Implementations never mutate
