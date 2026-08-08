@@ -97,7 +97,14 @@ if [ -e "$WT" ]; then
     echo "       cleans that path; running would destroy the checkout it is measuring." >&2
     exit 2
   fi
-  if ! git -C "$REPO" worktree list --porcelain | grep -qx "worktree $WT_ABS"; then
+  # Captured into a variable, NOT piped. `grep -q` exits on the first match,
+  # which SIGPIPEs git; with `pipefail` that makes the whole pipeline nonzero and
+  # the negation below then rejects a perfectly good worktree. It only bites once
+  # the list is large enough for git to still be writing — this repo has ~370
+  # worktrees / 53 KB — so it looks intermittent and machine-specific. It killed
+  # 5 of 9 runs for the first caller who hit it.
+  WT_LIST="$(git -C "$REPO" worktree list --porcelain)"
+  if ! grep -qx "worktree $WT_ABS" <<<"$WT_LIST"; then
     echo "FATAL: $WT exists but is not a worktree of $REPO." >&2
     echo "       This script hard-resets and cleans that path; refusing to touch it." >&2
     exit 2
