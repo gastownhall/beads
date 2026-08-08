@@ -72,6 +72,12 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunDeleterDoesNotMutateTheCallerRequest(t, ctx, fixture)
 	})
+	t.Run("SettlesTheSurvivorsOfADeletedBlocker", func(t *testing.T) {
+		conformance.RunDeleterSettlesTheSurvivorsOfADeletedBlocker(t, ctx, fixture)
+	})
+	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
+		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
+	})
 }
 
 func newUOWDeleterFixture(t *testing.T, ctx context.Context, prefix string) conformance.DeleterFixture {
