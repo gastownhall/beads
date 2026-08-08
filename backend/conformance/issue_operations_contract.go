@@ -2377,16 +2377,42 @@ func issueOperationsTypeRequest(id string, issueType publicops.IssueType) public
 // with the claim accounting gone. The precondition is read back from the raw
 // row rather than assumed, because a seed hook that dropped it would leave this
 // case unable to fail on its own claim.
+//
+// THE OTHER HALF IS THE CLAIM'S FOOTPRINT: assignee and status are the only
+// public columns it may write. Changed alone cannot say so — a claim that also
+// grabbed, say, ownership would report the same true — and neither can a
+// three-column assertion, which never looks at the rest of the row. So every
+// column outside the claim's own two is snapshotted and held.
+//
+// The snapshot is taken ONCE, before any claim, and asserted after each of
+// them. Re-reading it between claims would re-anchor it to whatever the last
+// claim wrote, and a body writing the same derived value on every claim would
+// then read as writing nothing at all. The seeded values are all distinct from
+// the actor name and from the empty column a claim would otherwise be
+// indistinguishable against, so a claim writing anything it derives from the
+// request lands a value that differs from the snapshot.
 func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
 	startedAt := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
+	seededMinutes := 7
+	seededRef := "claim-ref"
+	seededDue := time.Date(2033, 9, 8, 7, 6, 5, 0, time.UTC)
+	seededDefer := time.Date(2033, 8, 7, 6, 5, 4, 0, time.UTC)
 	restoringID := fixture.IssuePrefix + "-claimrestore"
 	restatingID := fixture.IssuePrefix + "-claimrestate"
 	for _, id := range []string{restoringID, restatingID} {
 		if err := fixture.CreateIssue(ctx, &types.Issue{
 			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 			StartedAt: &startedAt,
+			// The bystanders. None of them is a value a claim could write by
+			// coincidence: not the actor, not a status, not empty.
+			Description: "claim description", Design: "claim design",
+			AcceptanceCriteria: "claim acceptance", Notes: "claim notes",
+			SpecID: "claim-spec", AwaitID: "claim-await",
+			Owner: "claim-owner", ClosedBySession: "claim-session",
+			EstimatedMinutes: &seededMinutes, ExternalRef: &seededRef,
+			DueAt: &seededDue, DeferUntil: &seededDefer,
 		}, "seed"); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
@@ -2394,6 +2420,10 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 			startedAt.Format(issueOperationsStoredTimeLayout),
 			"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{id})
 	}
+	restoringBystanders := readIssueOperationsStoredColumns(t, ctx, fixture, restoringID,
+		"before any claim", issueOperationsClaimBystanderColumns)
+	restatingBystanders := readIssueOperationsStoredColumns(t, ctx, fixture, restatingID,
+		"before any claim", issueOperationsClaimBystanderColumns)
 
 	// Open and unassigned is the seeded state, so this patch restores it.
 	restoring := publicops.IssuePatch{
@@ -2428,6 +2458,7 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 	assertIssueOperationsScalarValue(t, ctx, fixture, "started_at after the restoring claim",
 		startedAt.Format(issueOperationsStoredTimeLayout),
 		"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{restoringID})
+	assertIssueOperationsStoredColumns(t, ctx, fixture, restoringID, "after the restoring claim", restoringBystanders)
 
 	// The mirror shape. There is no control for it — the same patch without a
 	// claim moves an unclaimed row for real — so it leans on the control above
@@ -2447,6 +2478,7 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restatingID)
 	}
 	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, restatingID, "claimant", types.StatusInProgress)
+	assertIssueOperationsStoredColumns(t, ctx, fixture, restatingID, "after the restating claim", restatingBystanders)
 
 	// The other edge, on the row the first shape left open and unassigned. A
 	// first claim grants the lease and counts.
@@ -2469,6 +2501,19 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 		t.Errorf("re-claiming %s as its own holder reported Changed = true, want a no-op", restoringID)
 	}
 	assertLiveAssignee(t, ctx, fixture, restoringID, "claimant")
+	// Still the pre-claim snapshot, three claims later.
+	assertIssueOperationsStoredColumns(t, ctx, fixture, restoringID, "after the bare claim and re-claim", restoringBystanders)
+}
+
+// issueOperationsClaimBystanderColumns are the stored columns a claim must
+// leave alone: everything the public issue carries except the assignee and
+// status it grants, the started_at it stamps, and the row marks every write
+// moves.
+var issueOperationsClaimBystanderColumns = []string{
+	"title", "description", "design", "acceptance_criteria", "notes",
+	"spec_id", "await_id", "priority", "issue_type", "owner",
+	"closed_by_session", "estimated_minutes", "external_ref",
+	"due_at", "defer_until", "metadata",
 }
 
 // issueOperationsStoredTimeLayout is how Dolt renders a DATETIME cast to CHAR.
