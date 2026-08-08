@@ -29,10 +29,12 @@ import (
 // are not duplicates of it. RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder
 // makes ONE boundary read at the role level; it exercises neither an overflow
 // walk, nor composition with other predicates, nor the AfterID:"" group start.
-// RunReaderListMaxRowsIsHonoredOrRefused is deliberately honored-OR-refused,
-// because a role implementation may decline the cap; the storage layer's own
-// obligation is unconditional honoring, and that stricter branch is what
-// RunSearchPaging asserts.
+// RunReaderListMaxRowsIsHonored drives the cap through the ROLE's request
+// vocabulary, where Limit defaulting and the probe row sit between the caller
+// and the filter; this block drives types.IssueFilter.MaxRows directly and
+// walks the boundary. It used to be the only strict one — the role case
+// accepted a refusal in place of the cap until both implementations threaded
+// it.
 
 // RunSearchPaging runs the keyset-paging and row-cap block against a factory
 // store.

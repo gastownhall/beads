@@ -20,9 +20,10 @@ import (
 //
 // TWO BODIES BEHIND THREE WIRINGS: dolt and embeddeddolt share
 // internal/workapi/storequerier, and the unit-of-work provider is the second,
-// genuinely separate vote. They diverge only where the uow seam renders OFFSET
-// and reports has-more natively, which is why the Offset case is written
-// comparatively.
+// genuinely separate vote. What is left of their difference is mechanism, not
+// answer: the uow seam renders OFFSET and reports has-more natively, the other
+// reaches past the skipped rows and lets an over-fetched row speak. Every case
+// here is written to the answer, which is why none of them names a backend.
 //
 // WHAT THESE CASES DO NOT PROVE: the max(3*Limit, 100) over-fetch window both
 // front doors used to apply, which takes MORE THAN A HUNDRED candidate rows to
@@ -303,73 +304,78 @@ func RunQuerierRefusesAMalformedRequest(t *testing.T, ctx context.Context, fixtu
 	}
 }
 
-// RunQuerierOffsetIsHonoredOrRefused pins the one thing every implementation
-// owes on QueryRequest.Offset (issueops/querier.go:65-83): a non-zero Offset is
-// either HONORED or REFUSED with a typed *ErrUnsupported, and never SILENTLY
-// IGNORED.
+// RunQuerierOffsetSkipsMatches pins QueryRequest.Offset
+// (issueops/querier.go:65-83): the page is the tail of the same answer, in the
+// same order, on every implementation and for every shape of expression.
 //
-// It is deliberately weaker than "Offset skips N rows", for the same reason
-// RunReaderOffsetIsHonoredOrRefused is: the two bodies disagree by design,
-// because one seam renders OFFSET and the other does not. Which body does which
-// is asserted at the wirings, not here.
+// It used to say "honored OR refused with a typed *ErrUnsupported", because one
+// seam rendered OFFSET and the other did not and so refused. That disjunction
+// described the split instead of pinning the promise; both bodies serve the
+// offset now, one in SQL and one by reaching past the skipped rows.
 //
 // BOTH SHAPES OF EXPRESSION ARE DRIVEN, which is what this case adds over the
 // reader's: a predicate query's offset is applied in Go, after the predicate, a
-// different code path from the filter-expressible one.
+// different code path from the filter-expressible one — and the whole point of
+// "skips MATCHES" is that a page cut from rejected candidates would be short.
 //
-// EVERY REQUEST HERE CARRIES A BOUNDED LIMIT: on the unit-of-work seam an
-// UNLIMITED request with a non-zero Offset renders SQL the Dolt engine answers
-// with a recovered panic ("makeslice: cap out of range" out of topRowsIter)
-// instead of rows. That is a storage-seam bug that predates this role, not a
-// contract question, so this case asks the question it can answer rather than
-// pinning a crash as behavior.
-func RunQuerierOffsetIsHonoredOrRefused(t *testing.T, ctx context.Context, fixture QuerierFixture) {
+// BOTH SHAPES OF PAGE BOUND ARE DRIVEN TOO. The bounded arm and the UNLIMITED
+// arm reach different code: an unlimited request with an offset has no LIMIT to
+// hang an OFFSET on, and the sentinel one seam used to render for it
+// ("LIMIT 18446744073709551615 OFFSET k") came back as a recovered
+// "makeslice: cap out of range" out of the Dolt engine's topRowsIter instead of
+// rows. This case carried a bounded limit on every request to route around
+// that. The seam skips those rows itself now, and the unlimited arm is what
+// says so.
+func RunQuerierOffsetSkipsMatches(t *testing.T, ctx context.Context, fixture QuerierFixture) {
 	t.Helper()
 	scope := querierLabel(fixture, "offset")
 	for _, tag := range []string{"a", "b", "c"} {
 		seedQuerierIssue(t, ctx, fixture, querierIssue(querierID(fixture, "offset", tag), types.TypeBug, 1, scope))
 	}
 
-	for _, test := range []struct {
+	for _, shape := range []struct {
 		what       string
 		expression string
 	}{
 		{"filter-expressible", fmt.Sprintf("type=bug AND label=%s", scope)},
 		{"predicate", fmt.Sprintf("(type=bug OR type=epic) AND label=%s", scope)},
 	} {
-		t.Run(test.what, func(t *testing.T) {
-			request := publicops.QueryRequest{Expression: test.expression, Limit: querierLimit(10)}
-			// Offset 0 is served everywhere; it is the baseline the paged call
-			// has to differ from.
-			unpaged := querierIDs(t, ctx, fixture, request)
-			if len(unpaged) != 3 {
-				t.Fatalf("Offset 0 returned %v, want the three seeded rows", unpaged)
-			}
+		for _, bound := range []struct {
+			what  string
+			limit int
+		}{
+			{"bounded", 10},
+			{"unlimited", 0},
+		} {
+			t.Run(shape.what+"/"+bound.what, func(t *testing.T) {
+				request := publicops.QueryRequest{Expression: shape.expression, Limit: querierLimit(bound.limit)}
+				// Offset 0 is the baseline every paged call is a suffix of. An
+				// unsorted page is in storage order, so it is read rather than
+				// assumed.
+				unpaged := querierIDs(t, ctx, fixture, request)
+				if len(unpaged) != 3 {
+					t.Fatalf("Offset 0 returned %v, want the three seeded rows", unpaged)
+				}
 
-			paged := request
-			paged.Offset = 1
-			page, err := fixture.Querier.Query(ctx, paged)
-			if err != nil {
-				var unsupported *publicops.ErrUnsupported
-				if !errors.As(err, &unsupported) {
-					t.Fatalf("Offset 1 refused with %v; a refusal has to be a typed *ErrUnsupported a caller can classify", err)
+				for offset := 1; offset <= len(unpaged); offset++ {
+					paged := request
+					paged.Offset = offset
+					page, err := fixture.Querier.Query(ctx, paged)
+					if err != nil {
+						t.Errorf("Offset %d: %v", offset, err)
+						continue
+					}
+					if page.Items == nil {
+						t.Errorf("Offset %d returned a nil Items; an offset past the end is an empty page, not a null one", offset)
+					}
+					// It skipped MATCHES: the tail of the unpaged order, never
+					// a page cut from rejected candidates.
+					if got, want := querierPageIDs(page), unpaged[offset:]; !slices.Equal(got, want) {
+						t.Errorf("Offset %d = %v, want %v — the tail of the same answer %v", offset, got, want, unpaged)
+					}
 				}
-				if unsupported.Op == "" || unsupported.Backend == "" {
-					t.Errorf("Offset 1 refused with Op=%q Backend=%q; a refusal naming neither the operation nor the backend leaves the caller nowhere to go",
-						unsupported.Op, unsupported.Backend)
-				}
-				return
-			}
-			got := querierPageIDs(page)
-			if slices.Equal(got, unpaged) {
-				t.Fatalf("Offset 1 returned the same page as Offset 0 (%v) and no error: the offset was silently ignored", got)
-			}
-			// Honored means it skipped MATCHES: two of the three, still in the
-			// unpaged order, never a page cut from rejected candidates.
-			if want := unpaged[1:]; !slices.Equal(got, want) {
-				t.Errorf("Offset 1 = %v, want %v — the tail of the same answer", got, want)
-			}
-		})
+			})
+		}
 	}
 }
 
