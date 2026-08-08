@@ -854,9 +854,9 @@ func assertReadyClaimerClaimsNothing(t *testing.T, ctx context.Context, fixture 
 	}
 }
 
-// seedReadyClaimerEdgeOfType seeds ONE edge of a named type. seedReadyClaimerEdge
-// is the blocks-only shorthand every other case uses; the cases that are ABOUT
-// edge type need to say which.
+// seedReadyClaimerTypedEdge seeds ONE edge of a named type.
+// seedReadyClaimerEdge is the blocks-only shorthand every other case uses; the
+// cases that are ABOUT edge type need to say which.
 func seedReadyClaimerTypedEdge(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture, issueID, dependsOnID string, depType types.DependencyType) {
 	t.Helper()
 	if err := fixture.AddDependency(ctx, &types.Dependency{
