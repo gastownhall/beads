@@ -41,6 +41,8 @@
 #   - A failed checkout/reset is fatal: it would measure a DIFFERENT COMMIT and
 #     still exit 0.
 #   - The mutation must change only the file it names, and A and B must differ.
+#   - It measures $REPO's HEAD COMMIT, not its working tree; uncommitted work is
+#     invisible and the run warns rather than silently measuring the wrong code.
 #   - Result greps do not anchor leading whitespace: `go test -v` indents
 #     subtests by 4 and NESTED subtests by 8, so an over-anchored pattern finds
 #     nothing and reads as "did not fail". scripts/conformance.sh documents the
@@ -49,7 +51,7 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,48p' "$0" | sed 's|^#||'
+  sed -n '2,51p' "$0" | sed 's|^#||'
   exit 2
 }
 [ $# -eq 6 ] || usage
@@ -69,6 +71,19 @@ fi
 [ -f "$MUT" ]        || { echo "FATAL: no such mutation script: $MUT" >&2; exit 2; }
 
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+
+# THIS TOOL MEASURES $REPO's HEAD COMMIT, NOT ITS WORKING TREE. The scratch
+# worktree is built from HEAD_SHA, so uncommitted work — including the very test
+# you are trying to verify — is invisible to the run. That failure is silent and
+# reads as INCONCLUSIVE, which is indistinguishable from "the test is weak"
+# unless you know to look. Commit first, or accept that the verdict is about
+# what is committed.
+if [ -n "$(git -C "$REPO" status --porcelain)" ]; then
+  echo "WARNING: $REPO has uncommitted changes. This run measures HEAD" >&2
+  echo "         ($(git -C "$REPO" rev-parse --short HEAD)); those changes are NOT in it." >&2
+  git -C "$REPO" status --short >&2 | head -10
+  echo >&2
+fi
 
 # The worktree path is hard-reset and cleaned below, so pointing it at a live
 # checkout DESTROYS that checkout — including $REPO itself, which is the exact
