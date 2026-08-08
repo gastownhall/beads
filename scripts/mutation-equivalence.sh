@@ -33,6 +33,14 @@
 #     0, so a typo reads as PASS forever.
 #   - A mutation that changes no bytes is fatal. It reports agreement.
 #   - A baseline that is not green is fatal. The verdict would be noise.
+#   - A nonzero exit is not a catch. A build failure or timeout is reported as
+#     UNUSABLE, never as FAIL, because either would turn an assertion-free test
+#     into a false REDUNDANT.
+#   - The worktree path must be a worktree of $REPO. It is hard-reset and
+#     cleaned, so pointing it at a live checkout would destroy that checkout.
+#   - A failed checkout/reset is fatal: it would measure a DIFFERENT COMMIT and
+#     still exit 0.
+#   - The mutation must change only the file it names, and A and B must differ.
 #   - Result greps do not anchor leading whitespace: `go test -v` indents
 #     subtests by 4 and NESTED subtests by 8, so an over-anchored pattern finds
 #     nothing and reads as "did not fail". scripts/conformance.sh documents the
@@ -41,7 +49,7 @@
 set -uo pipefail
 
 usage() {
-  sed -n '2,40p' "$0" | sed 's|^#||'
+  sed -n '2,48p' "$0" | sed 's|^#||'
   exit 2
 }
 [ $# -eq 6 ] || usage
@@ -52,18 +60,59 @@ TIMEOUT="${MUTEQ_TIMEOUT:-1200}"
 
 PROD="$1"; MUT="$2"; APKG="$3"; ARUN="$4"; BPKG="$5"; BRUN="$6"
 
+# Comparing a suite with itself yields REDUNDANT mechanically, because B IS A.
+if [ "$APKG" = "$BPKG" ] && [ "$ARUN" = "$BRUN" ]; then
+  echo "FATAL: A and B are the same selector; the verdict would be tautological" >&2; exit 2
+fi
+
 [ -f "$REPO/$PROD" ] || { echo "FATAL: no such file in $REPO: $PROD" >&2; exit 2; }
 [ -f "$MUT" ]        || { echo "FATAL: no such mutation script: $MUT" >&2; exit 2; }
 
 HEAD_SHA="$(git -C "$REPO" rev-parse HEAD)"
+
+# The worktree path is hard-reset and cleaned below, so pointing it at a live
+# checkout DESTROYS that checkout — including $REPO itself, which is the exact
+# accident the disposable-worktree design exists to prevent. Only a path this
+# script created, or one git already lists as a worktree of $REPO, is eligible.
+if [ -e "$WT" ]; then
+  WT_ABS="$(cd "$WT" 2>/dev/null && pwd)" || WT_ABS=""
+  REPO_ABS="$(cd "$REPO" && pwd)"
+  if [ -z "$WT_ABS" ] || [ "$WT_ABS" = "$REPO_ABS" ]; then
+    echo "FATAL: MUTEQ_WT resolves to \$REPO itself. This script hard-resets and" >&2
+    echo "       cleans that path; running would destroy the checkout it is measuring." >&2
+    exit 2
+  fi
+  if ! git -C "$REPO" worktree list --porcelain | grep -qx "worktree $WT_ABS"; then
+    echo "FATAL: $WT exists but is not a worktree of $REPO." >&2
+    echo "       This script hard-resets and cleans that path; refusing to touch it." >&2
+    exit 2
+  fi
+  # A worktree with a branch checked out is somebody's working copy, not a
+  # scratch one this tool created. Only a DETACHED head is disposable.
+  if git -C "$WT" symbolic-ref -q HEAD >/dev/null 2>&1; then
+    echo "FATAL: $WT has a branch checked out ($(git -C "$WT" rev-parse --abbrev-ref HEAD))." >&2
+    echo "       Only a detached scratch worktree is safe to hard-reset. Point" >&2
+    echo "       MUTEQ_WT at a path this tool created, or at nothing." >&2
+    exit 2
+  fi
+fi
 if [ ! -e "$WT/.git" ]; then
   echo "== creating mutation worktree at $WT =="
   git -C "$REPO" worktree add --detach "$WT" "$HEAD_SHA" >/dev/null 2>&1 \
     || { echo "FATAL: could not create worktree at $WT" >&2; exit 2; }
 else
-  git -C "$WT" checkout -q --detach "$HEAD_SHA" 2>/dev/null
+  # A failure here would silently measure a DIFFERENT COMMIT and still exit 0,
+  # so it is fatal rather than suppressed.
+  git -C "$WT" checkout -q --detach "$HEAD_SHA" \
+    || { echo "FATAL: could not check out $HEAD_SHA in $WT" >&2; exit 2; }
 fi
-git -C "$WT" reset -q --hard "$HEAD_SHA" && git -C "$WT" clean -qfd
+git -C "$WT" reset -q --hard "$HEAD_SHA" \
+  || { echo "FATAL: could not reset $WT to $HEAD_SHA" >&2; exit 2; }
+git -C "$WT" clean -qfd
+if [ "$(git -C "$WT" rev-parse HEAD)" != "$HEAD_SHA" ]; then
+  echo "FATAL: $WT is at $(git -C "$WT" rev-parse --short HEAD), not $REPO's HEAD" >&2
+  exit 2
+fi
 
 # A previous run that was killed can leave the worktree dirty, which would make
 # this run's "baseline" someone else's mutation.
@@ -85,8 +134,16 @@ trap restore EXIT INT TERM
 count() {
   timeout "$TIMEOUT" go test "$1" -run "$2" -count=1 -v 2>/dev/null | grep -cE '^ *=== RUN'
 }
+# A nonzero `go test` exit is NOT the same as "this suite caught the mutation".
+# A build failure and a timeout both exit nonzero, and both would otherwise read
+# as a catch — turning an assertion-free test into a false REDUNDANT, which is
+# the one wrong answer that costs coverage.
 result() {
-  timeout "$TIMEOUT" go test "$1" -run "$2" -count=1 >/dev/null 2>&1 && echo PASS || echo FAIL
+  local out rc
+  out="$(timeout "$TIMEOUT" go test "$1" -run "$2" -count=1 2>&1)"; rc=$?
+  if [ $rc -eq 124 ]; then echo TIMEOUT; return; fi
+  if grep -qE '^(# |.*\[build failed\]|.*\[setup failed\])' <<<"$out"; then echo BUILDFAIL; return; fi
+  [ $rc -eq 0 ] && echo PASS || echo FAIL
 }
 
 echo "== baseline ($WT @ $(git rev-parse --short HEAD)) =="
@@ -110,6 +167,16 @@ fi
 if ! go build ./... >/dev/null 2>&1; then
   rm -f "$BEFORE"; echo "FATAL: mutated tree does not compile; use a semantic mutation" >&2; exit 7
 fi
+# The displayed diff covers only $PROD, so a script that also edited something
+# else would show a harmless-looking change while the verdict came from a break
+# the operator never saw — the wrong-body hazard, manufactured by this tool.
+STRAY="$(git -C "$WT" status --porcelain | awk '{print $2}' | grep -vx "$PROD" || true)"
+if [ -n "$STRAY" ]; then
+  rm -f "$BEFORE"
+  echo "FATAL: the mutation also changed files it did not name:" >&2
+  printf '  %s\n' $STRAY >&2
+  exit 8
+fi
 diff "$BEFORE" "$PROD" | head -20; rm -f "$BEFORE"
 
 A1=$(result "$APKG" "$ARUN"); B1=$(result "$BPKG" "$BRUN")
@@ -124,4 +191,11 @@ case "$A1/$B1" in
   FAIL/PASS)  echo "  UNIQUE       Only A caught it. Port the case into B, THEN delete A." ;;
   PASS/FAIL)  echo "  MISDIRECTED  A does not cover this mutation. Wrong pairing." ;;
   PASS/PASS)  echo "  INCONCLUSIVE Neither caught it. Proves nothing about either." ;;
+  *TIMEOUT*|*BUILDFAIL*)
+    echo "  UNUSABLE     A suite did not fail on an ASSERTION: A=$A1 B=$B1."
+    echo "               A build failure or a timeout exits nonzero like a real"
+    echo "               catch does. Treating it as one is how an assertion-free"
+    echo "               test reads as REDUNDANT. Fix the mutation and re-run."
+    exit 9
+    ;;
 esac

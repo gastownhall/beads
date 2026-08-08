@@ -422,19 +422,24 @@ may be a row that cannot fail.**
 
 Once a role has a contract, the ad-hoc tests that predate it start to look
 redundant. Some are. A four-slice pass over ~78k LOC of backend tests retired
-about 700 lines net and, in the process, its adversarial reviews found **nine
-coverage losses and four tests that could not fail**. Every one of those was
-green under `go build`, `go vet`, `go test` and `golangci-lint`. The rules
-below are what the reviews actually caught, each stated as the check that would
-have caught it earlier.
+about 700 lines net. Along the way the slices and their reviews found **about a
+dozen coverage losses and six tests that could not fail**, every one of them
+green under `go build`, `go vet`, `go test` and `golangci-lint`. Two of the six
+could not fail by construction — unconditional `t.Skip` bodies with no
+assertion. The other four are the harder class, and most of what follows is
+about them. Treat the counts as an order of magnitude: the per-slice tallies
+live in the pull requests, and review revised them more than once.
 
-**A mutation verdict is only true of the body you mutated.** This produced three
-of the nine losses, in three different slices, independently. A test is broken,
+**A mutation verdict is only true of the body you mutated.** This is the most
+productive rule here — it produced confirmed losses in more than one slice
+independently, and reviews kept finding it after it had been written down. A
+test is broken,
 the contract goes red on the same break, the verdict reads REDUNDANT — and the
 deleted test was watching a different body. `uow` runs its own bodies under
 `internal/storage/domain/` where the two store backends share others; a store
 wrapper composes shared functions *itself* while the role path reaches the same
-functions through `runTransaction` and never calls the wrapper at all. Before
+functions through `runIssueOperationTx` and never calls the wrapper at all.
+Before
 accepting red/red: **name the body the deleted assertion observes, and confirm
 your mutation was in it.** Nothing automates this.
 
@@ -443,7 +448,8 @@ your mutation was in it.** Nothing automates this.
 `ClaimIssue` — published on `storage.DoltStorage`, with option types in
 `beads.go` — which assemble the shared bodies on their own. Deleting their only
 observers left `ExpectedStatus` routed on no branch at all, and disabling a
-wrapper's compare-and-set passed **all 136 contract cases**. When a wrapper has
+wrapper's compare-and-set passed every contract case on that backend. When a
+wrapper has
 no other caller, keep a narrow routing residue: see
 `internal/storage/dolt/checked_wrapper_smoke_test.go`.
 
@@ -455,8 +461,8 @@ writes* passed the entire suite. Refusal-only coverage of a guarded write is
 half a test. Enumerate each branch and each option, and ask of each whether
 anything would notice it going away.
 
-**Ask what the fixture makes unobservable.** All four cannot-fail tests were
-fixture defects, not assertion defects. One seeded `is_blocked=1` with no
+**Ask what the fixture makes unobservable.** The four fixture-defect cases had
+nothing wrong with their assertions — every one was correct. One seeded `is_blocked=1` with no
 blocker edge, so the guard short-circuited and the case could never fail on the
 term it was named for. One used ready ids `1` and `10`, whose natural, lexical
 and query orders are identical, so it could not see a dropped sort. One
@@ -466,8 +472,12 @@ case earns its place by going red against a mutation of its own subject.
 
 **Never let a role-answer assertion replace a raw-row one.** Reading a value
 back through the role is exactly the check that passes on a corrupted table.
-`is_blocked` is derived *and persisted*, so raw-column assertions about it are
-load-bearing and no contract case currently reads it.
+`is_blocked` is the standing example: derived *and* persisted, so a case that
+only asks the role whether an issue is blocked passes on a backend that never
+denormalizes. The lifecycle and batch-closer contracts read the raw column for
+that reason, and `lifecycle_close_reopen_contract.go` says so at the read.
+Several of those readers were added by the pass described here, precisely
+because the role answer could not see the defect.
 
 **Cite promises by symbol, not by line.** Two sweeps had to re-resolve 23 stale
 `file.go:line` citations across two contract files, drifted by growth above the
