@@ -41,6 +41,9 @@ func TestStatsReporterContract(t *testing.T) {
 	t.Run("BlockedExcludesByStatusNotByThePinnedFlag", func(t *testing.T) {
 		conformance.RunStatsReporterBlockedExcludesByStatusNotByThePinnedFlag(t, ctx, fixture)
 	})
+	t.Run("BlockedCountsEveryUnfinishedStatusNotJustOpen", func(t *testing.T) {
+		conformance.RunStatsReporterBlockedCountsEveryUnfinishedStatusNotJustOpen(t, ctx, fixture)
+	})
 	t.Run("ReadyIsOpenMinusBlocked", func(t *testing.T) {
 		conformance.RunStatsReporterReadyIsOpenMinusBlocked(t, ctx, fixture)
 	})
