@@ -41,8 +41,8 @@ func TestQuerierContract(t *testing.T) {
 	t.Run("RefusesAMalformedRequest", func(t *testing.T) {
 		conformance.RunQuerierRefusesAMalformedRequest(t, ctx, fixture)
 	})
-	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunQuerierOffsetIsHonoredOrRefused(t, ctx, fixture)
+	t.Run("OffsetSkipsMatches", func(t *testing.T) {
+		conformance.RunQuerierOffsetSkipsMatches(t, ctx, fixture)
 	})
 	t.Run("EmptyMatchIsAWellFormedPage", func(t *testing.T) {
 		conformance.RunQuerierEmptyMatchIsAWellFormedPage(t, ctx, fixture)

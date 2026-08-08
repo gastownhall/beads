@@ -184,9 +184,11 @@ func TestProxiedServerQuery(t *testing.T) {
 	// nothing; the window is gone, the predicate now sees every candidate row,
 	// and the offset skips MATCHES. An error became an answer.
 	t.Run("offset_pages_a_predicate_query", func(t *testing.T) {
-		// A BOUNDED limit on both calls, deliberately: an unlimited request
-		// carrying an offset renders SQL the engine answers with a recovered
-		// panic, which predates this role (see RunQuerierOffsetIsHonoredOrRefused).
+		// A bounded limit on both calls. It used to be load-bearing — an
+		// unlimited request carrying an offset rendered SQL the engine answered
+		// with a recovered panic — and is now just a fixture bound; the
+		// unlimited shape is driven at the role, by
+		// RunQuerierOffsetSkipsMatches.
 		full := bdProxiedQueryJSON(t, bd, p, "type=bug OR type=feature", "--limit", "20")
 		if len(full) < 2 {
 			t.Fatalf("fixture should match >= 2 rows for (bug OR feature), got %d", len(full))

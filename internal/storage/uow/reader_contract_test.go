@@ -35,14 +35,15 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyLimitBoundary", func(t *testing.T) {
 		conformance.RunReaderReadyLimitBoundary(t, ctx, fixture)
 	})
-	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
+	t.Run("OffsetSkipsTheRowsBeforeThePage", func(t *testing.T) {
+		conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, fixture)
 	})
-	// The REFUSING arm of MaxRows, and the mirror image of the wiring above:
-	// this body honors Offset and refuses the cap, the store-backed one honors
-	// the cap and refuses Offset. Neither answers a question it cannot answer.
-	t.Run("ListMaxRowsIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunReaderListMaxRowsIsHonoredOrRefused(t, ctx, fixture)
+	// This wiring used to be the REFUSING arm of MaxRows, and the mirror image
+	// of the Offset wiring above: this body honored Offset and refused the cap,
+	// the store-backed one did the opposite. Both fields are served on both
+	// bodies now, so both cases run the same assertion here as there.
+	t.Run("ListMaxRowsIsHonored", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
 	})
 	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
 		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
