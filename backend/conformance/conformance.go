@@ -180,8 +180,10 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("UnclaimIfAssigneeMatch", func(t *testing.T) { testUnclaimIfAssigneeMatch(t, factory) })
 	t.Run("UnclaimIfAssigneeStale", func(t *testing.T) { testUnclaimIfAssigneeStale(t, factory) })
 
-	// Claim role (issueops.Claimer, through the store's own accessor)
-	t.Run("ClaimerRole", func(t *testing.T) { RunClaimerRole(t, factory) })
+	// The Claimer role is NOT run here. Its contract lives in
+	// claimer_contract.go and is wired at all three legs through per-backend
+	// runners, because this suite's Factory is storage.DoltStorage and a
+	// unit-of-work provider is not one — the uow body could never reach it.
 
 	// Labels
 	t.Run("Labels", func(t *testing.T) { testLabels(t, factory) })

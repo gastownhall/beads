@@ -85,3 +85,9 @@ func newDoltClaimerFixture(t *testing.T, prefix string) (conformance.ClaimerFixt
 		CountHistory: kit.CountHistory,
 	}, ctx, stop
 }
+
+func TestClaimerRefusalMessagesCarryTheirFragments(t *testing.T) {
+	fixture, ctx, cleanup := newDoltClaimerFixture(t, "clfrag")
+	defer cleanup()
+	conformance.RunClaimerRefusalMessagesCarryTheirFragments(t, ctx, fixture)
+}

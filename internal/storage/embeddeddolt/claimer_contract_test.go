@@ -80,3 +80,9 @@ func newEmbeddedClaimerFixture(t *testing.T, prefix string) conformance.ClaimerF
 		CountHistory: kit.CountHistory,
 	}
 }
+
+func TestEmbeddedClaimerRefusalMessagesCarryTheirFragments(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunClaimerRefusalMessagesCarryTheirFragments(t, ctx, newEmbeddedClaimerFixture(t, "clfrag"))
+}

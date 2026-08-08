@@ -45,6 +45,7 @@ func TestClaimerContract(t *testing.T) {
 		{name: "RefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt", run: conformance.RunClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt},
 		{name: "RefusesAWispIDAsNotFound", run: conformance.RunClaimerRefusesAWispIDAsNotFound},
 		{name: "RefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState", run: conformance.RunClaimerRefusesIncompleteRequestsAndAnAbsentIDWithoutTouchingState},
+		{name: "RefusalMessagesCarryTheirFragments", run: conformance.RunClaimerRefusalMessagesCarryTheirFragments},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			test.run(t, ctx, fixture)

@@ -3,8 +3,10 @@ package conformance
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -688,4 +690,100 @@ func assertClaimerCommittedNothing(t *testing.T, ctx context.Context, fixture Cl
 	if after := claimerHistoryCount(t, ctx, fixture); after != before {
 		t.Errorf("history entries went %d -> %d across %s, want no change", before, after, subject)
 	}
+}
+
+// RunClaimerRefusalMessagesCarryTheirFragments pins the PROSE of the two
+// refusals, and it is here because a caller that cannot classify typed errors
+// still reads them.
+//
+// It came from the audit-suite copy of this contract (removed in the same
+// commit that added this case), which ran on the store legs only: the audit
+// Factory is `func(*testing.T) storage.DoltStorage`, and a unit-of-work
+// provider is not one, so the uow body's message shapes were never compared to
+// the stores'. They are now.
+//
+// The last arm is the one worth keeping: the open-but-assigned refusal OMITS
+// the "claimed by" fragment on purpose, while the typed conflict still carries
+// the holder. A caller reading prose learns less there than a caller reading
+// the struct, and that asymmetry is deliberate rather than a message bug.
+func RunClaimerRefusalMessagesCarryTheirFragments(t *testing.T, ctx context.Context, fixture ClaimerFixture) {
+	t.Helper()
+	held := fixture.IssuePrefix + "-frag-held"
+	closed := fixture.IssuePrefix + "-frag-closed"
+	assigned := fixture.IssuePrefix + "-frag-assigned"
+
+	seedClaimerIssue(t, ctx, fixture, claimerIssue(held, types.StatusOpen))
+	seedClaimerIssue(t, ctx, fixture, claimerIssue(closed, types.StatusClosed))
+	assignedIssue := claimerIssue(assigned, types.StatusOpen)
+	assignedIssue.Assignee = "alice"
+	seedClaimerIssue(t, ctx, fixture, assignedIssue)
+
+	if _, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: "alice", IssueID: held}); err != nil {
+		t.Fatalf("first claim of %s: %v", held, err)
+	}
+
+	_, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: "bob", IssueID: held})
+	conflict := claimerConflict(t, err, publicops.ErrAlreadyClaimed, held)
+	if got := claimerRecoveredTail(err.Error(), publicops.ErrAlreadyClaimed, storage.ClaimedByFragment); got != "alice" {
+		t.Errorf("assignee recovered from the in_progress conflict = %q, want alice (message %q)", got, err.Error())
+	}
+	if conflict.Assignee != "alice" {
+		t.Errorf("conflict.Assignee = %q, want alice", conflict.Assignee)
+	}
+
+	_, err = fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: "carol", IssueID: closed})
+	conflict = claimerConflict(t, err, publicops.ErrNotClaimable, closed)
+	if got := claimerRecoveredTail(err.Error(), publicops.ErrNotClaimable, storage.NotClaimableStatusFragment); got != string(types.StatusClosed) {
+		t.Errorf("status recovered from the not-claimable refusal = %q, want %q (message %q)", got, types.StatusClosed, err.Error())
+	}
+	if conflict.Status != types.StatusClosed {
+		t.Errorf("conflict.Status = %q, want %q", conflict.Status, types.StatusClosed)
+	}
+
+	_, err = fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: "bob", IssueID: assigned})
+	conflict = claimerConflict(t, err, publicops.ErrAlreadyClaimed, assigned)
+	if got := claimerRecoveredTail(err.Error(), publicops.ErrAlreadyClaimed, storage.ClaimedByFragment); got != "" {
+		t.Errorf("the open-but-assigned refusal carried the %q fragment (recovered %q from %q); that copy omits it on purpose",
+			storage.ClaimedByFragment, got, err.Error())
+	}
+	if conflict.Assignee != "alice" {
+		t.Errorf("conflict.Assignee = %q, want alice — the holder the prose does not name must still reach the caller typed", conflict.Assignee)
+	}
+}
+
+// claimerConflict asserts the refusal wraps sentinel AND arrives as a typed
+// *ClaimConflictError naming the issue, then hands the conflict back.
+func claimerConflict(t *testing.T, err error, sentinel error, wantID string) *publicops.ClaimConflictError {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("claim of %s succeeded, want a refusal wrapping %v", wantID, sentinel)
+	}
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("refusal for %s = %v, want one wrapping %v", wantID, err, sentinel)
+	}
+	var conflict *publicops.ClaimConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("refusal for %s is not a *issueops.ClaimConflictError (%v); a caller cannot classify the conflict without parsing prose", wantID, err)
+	}
+	if conflict.IssueID != wantID {
+		t.Errorf("conflict.IssueID = %q, want %q", conflict.IssueID, wantID)
+	}
+	return conflict
+}
+
+// claimerRecoveredTail returns what a message carries after `sentinel+fragment`,
+// or "" when the fragment is absent. It reads the tail rather than matching the
+// whole string so a case pins WHAT the prose names without pinning how the rest
+// of the sentence is worded.
+func claimerRecoveredTail(msg string, sentinel error, fragment string) string {
+	marker := sentinel.Error() + fragment
+	i := strings.LastIndex(msg, marker)
+	if i < 0 {
+		return ""
+	}
+	tail := msg[i+len(marker):]
+	if strings.ContainsAny(tail, " \t\r\n(") {
+		return ""
+	}
+	return tail
 }
