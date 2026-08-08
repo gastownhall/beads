@@ -267,6 +267,7 @@ type blockedStateFlip struct {
 	controls  []blockedStateRow
 	blocked   map[string]int
 	updatedAt map[string]string
+	written   map[string]bool
 }
 
 // watchFlip records the pre-verb state. Call it immediately before the verb
@@ -313,6 +314,7 @@ func (p *blockedStateProbe) watchControls(t *testing.T, controls ...blockedState
 		controls:  controls,
 		blocked:   make(map[string]int, len(controls)),
 		updatedAt: make(map[string]string, len(controls)),
+		written:   make(map[string]bool, 1),
 	}
 	for _, row := range controls {
 		flip.blocked[row.String()] = p.rawBlocked(t, row)
@@ -356,6 +358,24 @@ func (f *blockedStateFlip) requireFlippedTo(t *testing.T, want int, why string) 
 
 // requireControlsUnmoved asserts only the control half, for the no-change cases
 // that have no flip of their own to make.
+// alsoWrites marks a control the verb under test LEGITIMATELY WRITES. Its
+// blocked flag stays a control — the invariant's non-perturbation clause is
+// about the flag, and a claim must not change it — but its updated_at is not,
+// because the verb moves that row by design.
+//
+// Without this the case asserts the verb did not touch the row it exists to
+// touch, and passes only when both writes land in the same second: updated_at
+// is DATETIME with no fractional precision. That is the same second-precision
+// property that made an updated_at comparison useless as a detector elsewhere
+// in this suite, and here it produced a case that passed locally and failed in
+// CI on a second boundary.
+func (f *blockedStateFlip) alsoWrites(rows ...blockedStateRow) *blockedStateFlip {
+	for _, row := range rows {
+		f.written[row.String()] = true
+	}
+	return f
+}
+
 func (f *blockedStateFlip) requireControlsUnmoved(t *testing.T, why string) {
 	t.Helper()
 	for _, row := range f.controls {
@@ -363,6 +383,9 @@ func (f *blockedStateFlip) requireControlsUnmoved(t *testing.T, why string) {
 		if got := f.probe.rawBlocked(t, row); got != f.blocked[key] {
 			t.Errorf("control %s raw is_blocked moved %d -> %d, want it unchanged: the verb reached outside its affected set (%s)",
 				row, f.blocked[key], got, why)
+		}
+		if f.written[key] {
+			continue
 		}
 		if got := f.probe.rawUpdatedAt(t, row); got != f.updatedAt[key] {
 			t.Errorf("control %s updated_at moved %q -> %q, want it untouched (%s)", row, f.updatedAt[key], got, why)

@@ -2809,7 +2809,10 @@ func RunIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T, ctx context.Co
 	probe.requireBlockedByOpenBlocker(t, blockedIssue(blocked), blockedIssue(blocker), "the bystander is blocked for a reason the claim does not touch")
 	probe.requireUnblocked(t, blockedIssue(claimed), "a related edge onto an open issue is not a block")
 
-	unmoved := probe.watchControls(t, blockedIssue(blocked), blockedIssue(claimed), blockedIssue(neighbor))
+	// claimed is a FLAG control, not an updated_at control: the claim writes that
+	// row on purpose.
+	unmoved := probe.watchControls(t, blockedIssue(blocked), blockedIssue(claimed), blockedIssue(neighbor)).
+		alsoWrites(blockedIssue(claimed))
 	updated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimer", IssueID: claimed, Claim: true})
 	if err != nil {
 		t.Fatalf("claim %s: %v", claimed, err)
