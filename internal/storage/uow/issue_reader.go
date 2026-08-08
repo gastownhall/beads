@@ -59,40 +59,27 @@ func (r *issueReader) Ready(ctx context.Context, req publicops.ReadyRequest) (pu
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
+		limit := filter.Limit
+		// Reach past the rows the epilogue skips, and take the offset off the
+		// query. This seam COULD render it, and deliberately is not asked to;
+		// see FinishPageAt.
+		filter = workapi.WithReadyRowsBeforeThePage(filter, req.Offset)
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, filter)
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
 		// The same epilogue the sibling implementation runs, through the same
 		// function. Ready has no display order to apply and this seam reports
-		// HasMore natively, so nothing here is expected to do work — which is
-		// exactly why it must be the shared one rather than a local shortcut:
-		// the two arms of List below came apart precisely by one of them
-		// deciding its epilogue was unnecessary.
-		items, hasMore := workapi.FinishPage(page.Items, "", false, filter.Limit, page.HasMore)
+		// HasMore natively, so only the skip and the trim do any work here —
+		// which is exactly why it must be the shared one rather than a local
+		// shortcut: the two arms of List below came apart precisely by one of
+		// them deciding its epilogue was unnecessary.
+		items, hasMore := workapi.FinishPageAt(page.Items, "", false, req.Offset, limit, page.HasMore)
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
 }
 
-// listBackend names the backend a List refusal comes from: the provider seam
-// rather than the engine underneath it, because what cannot honor MaxRows is
-// the internal/storage/domain/db query path every provider reaches through.
-const listBackend = "uow-provider"
-
 func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publicops.IssuePage, error) {
-	// The MIRROR IMAGE of the store body's Offset refusal, one field over. The
-	// domain/db query path reads no MaxRows, so a request carrying a cap would
-	// come back as the FULL uncapped answer with no error on it — a caller who
-	// asked for a circuit breaker getting exactly the runaway query it was
-	// guarding against. Refusing is checked before the unit of work opens: a
-	// request that cannot be answered should not cost a transaction.
-	//
-	// `bd list --max-rows --proxied-server` already refuses one layer up
-	// (cmd/bd/max_rows.go, rejectMaxRowsUnderProxiedServer); this is the same
-	// refusal for the callers that are not the CLI.
-	if req.MaxRows != 0 {
-		return publicops.IssuePage{}, &publicops.ErrUnsupported{Op: "Reader.List(MaxRows)", Backend: listBackend}
-	}
 	// A --ready listing is the ready front by another door, so it wakes
 	// expired dated defers the same way Ready does — before the read span,
 	// which never commits.
@@ -114,6 +101,13 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
+		// Reach past the rows the epilogue skips, and take the offset off the
+		// query. The MaxRows cap rides the filter untouched from here: the
+		// domain/db query path sizes its bound and enforces the cap through the
+		// same two functions the store-backed seam uses
+		// (issueops.SearchProbeLimit, EnforceMaxRowsCap), so the same request
+		// trips the same breaker on either implementation.
+		filter = workapi.WithRowsBeforeThePage(filter, req.Offset)
 		// WHICH QUERY is the only thing --ready changes. The epilogue below is
 		// deliberately outside the branch: when it lived inside the non-ready
 		// arm only, the two arms of one contract method answered in different
@@ -136,7 +130,7 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		// verdict rather than an over-fetched row — the one thing that differs
 		// between this implementation and its store-backed sibling, and it is
 		// an argument to the shared function rather than a second copy of it.
-		items, hasMore := workapi.FinishPage(page.Items, req.SortBy, req.Reverse, workapi.PageLimit(req), page.HasMore)
+		items, hasMore := workapi.FinishPageAt(page.Items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), page.HasMore)
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
 }
