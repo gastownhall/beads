@@ -32,7 +32,7 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 		if err != nil {
 			return domain.SearchCountsPage{}, err
 		}
-		return finishSearchCountsPage(wisps, filter.Limit), nil
+		return finishSearchCountsPage(wisps, filter)
 	}
 
 	if filter.SkipWisps {
@@ -40,7 +40,7 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 		if err != nil {
 			return domain.SearchCountsPage{}, err
 		}
-		return finishSearchCountsPage(out, filter.Limit), nil
+		return finishSearchCountsPage(out, filter)
 	}
 
 	empty, probeErr := r.wispsTableEmptyOrMissing(ctx)
@@ -52,7 +52,7 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 		if err != nil {
 			return domain.SearchCountsPage{}, err
 		}
-		return finishSearchCountsPage(out, filter.Limit), nil
+		return finishSearchCountsPage(out, filter)
 	}
 
 	return r.searchUnionWithCounts(ctx, query, filter, wispDepsExist)
@@ -69,11 +69,11 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 	}
 
 	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
-	outerLimit := limitOffsetSQL(filter.Limit, filter.Offset)
+	window := searchWindowForFilter(filter)
 
 	//nolint:gosec // G201: subqueries built from hardcoded table names and ? placeholders.
 	unionSQL := fmt.Sprintf("SELECT id, src FROM (%s UNION ALL %s) merged %s %s",
-		iSub, wSub, outerOrderBy, outerLimit)
+		iSub, wSub, outerOrderBy, window.sql)
 
 	args := make([]any, 0, len(iArgs)+len(wArgs))
 	args = append(args, iArgs...)
@@ -87,7 +87,10 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts: %w", err)
 	}
-	hasMore := page.trimToLimit(filter.Limit)
+	hasMore, err := page.finishWindow(window)
+	if err != nil {
+		return domain.SearchCountsPage{}, err
+	}
 
 	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, hydrationFor(filter))
 	if err != nil {
@@ -150,8 +153,7 @@ func (r *issueSQLRepositoryImpl) runFilterSearchQuery(ctx context.Context, query
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 	orderBy := orderBySQL(filter.SortBy, filter.SortDesc, "i")
-	limitSQL := limitOffsetSQL(filter.Limit, filter.Offset)
-	return r.runSearchQuery(ctx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
+	return r.runSearchQuery(ctx, tables, whereSQL, orderBy, searchWindowForFilter(filter).sql, args, includeWispReverseDeps, hydrationFor(filter))
 }
 
 //nolint:gosec // G201: SQL fragments are built from hardcoded table names and parameterized filters.
@@ -214,7 +216,13 @@ func scanReadyWorkRowWithCounts(rows *sql.Rows) (*types.IssueWithCounts, error) 
 	return issueops.ScanReadyWorkRowWithCounts(rows)
 }
 
-func finishSearchCountsPage(items []*types.IssueWithCounts, limit int) domain.SearchCountsPage {
-	trimmed, hasMore := applyN1Overflow(items, limit)
-	return domain.SearchCountsPage{Items: trimmed, HasMore: hasMore}
+// finishSearchCountsPage closes the window runFilterSearchQuery opened. It
+// rebuilds it from the same filter rather than being handed it, so the two
+// halves cannot be given different numbers.
+func finishSearchCountsPage(items []*types.IssueWithCounts, filter types.IssueFilter) (domain.SearchCountsPage, error) {
+	trimmed, hasMore, err := finishWindow(items, searchWindowForFilter(filter))
+	if err != nil {
+		return domain.SearchCountsPage{}, err
+	}
+	return domain.SearchCountsPage{Items: trimmed, HasMore: hasMore}, nil
 }

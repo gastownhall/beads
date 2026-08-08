@@ -456,6 +456,31 @@ func EffectiveSearchLimit(limit, maxRows int) int {
 	return limit
 }
 
+// SearchProbeLimit is the row bound a search runs under when the seam detects
+// truncation with a probe row of its own, together with the cap that bound was
+// sized for. 0 means "do not emit a LIMIT clause".
+//
+// It is the composition this package's callers reach in two steps —
+// workapi.WithFetchOneExtra onto the filter, then EffectiveSearchLimit inside
+// the query builder — written once so a seam that renders its probe row INSIDE
+// the query rather than onto the filter (internal/storage/domain/db) bounds and
+// caps identically. Both implementations of issueops.Reader.List have to agree
+// about when a cap fires, and they only can if they size the same window.
+//
+// THE CAP COMES BACK BECAUSE IT MOVES. At limit == maxRows the probe row would
+// trip a cap the delivered page can never exceed, so it is bumped by one for
+// the length of that one query; see WithFetchOneExtra for the full argument.
+// A caller enforces the cap this returns, not the one it passed in.
+func SearchProbeLimit(limit, maxRows int) (bound, rowCap int) {
+	if maxRows > 0 && limit == maxRows {
+		maxRows++
+	}
+	if limit > 0 {
+		limit++
+	}
+	return EffectiveSearchLimit(limit, maxRows), maxRows
+}
+
 // EnforceMaxRowsCap returns *ErrTooManyRows when found exceeds maxRows.
 // maxRows<=0 disables the cap; the function returns nil. source is the
 // attribution string surfaced in the error message (see ErrTooManyRows).

@@ -52,17 +52,17 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	}
 
 	sortOrder := buildReadyWorkOrder(filter.SortPolicy)
-	// limitOffsetSQL keeps the +1 overfetch for hasMore AND honors Offset
-	// when Limit is 0 (the hand-rolled guard here used to drop the offset
-	// entirely in that case, bd-6dnrw.44 P3).
-	outerLimit := limitOffsetSQL(filter.Limit, filter.Offset)
+	// The window keeps the +1 overfetch for hasMore, honors Offset when Limit
+	// is 0 (the hand-rolled guard here used to drop the offset entirely in that
+	// case, bd-6dnrw.44 P3) and carries the defensive cap.
+	window := readyWindowForFilter(filter)
 
 	//nolint:gosec // G201: subqueries built from hardcoded fragments and ? placeholders.
 	unionSQL := fmt.Sprintf(
 		"SELECT id, src FROM (%s) merged %s %s",
 		strings.Join(subqueries, " UNION ALL "),
 		sortOrder.SQL,
-		outerLimit,
+		window.sql,
 	)
 	allArgs = append(allArgs, sortOrder.Args...)
 
@@ -74,7 +74,10 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: %w", err)
 	}
-	hasMore := page.trimToLimit(filter.Limit)
+	hasMore, err := page.finishWindow(window)
+	if err != nil {
+		return idSrcPage{}, false, err
+	}
 	return page, hasMore, nil
 }
 
