@@ -526,22 +526,34 @@ func orderBySQL(sortBy string, sortDesc bool, prefix string) string {
 // is one value rather than two decisions at each call site because the halves
 // only add up when they are decided together.
 //
-// WHO CARRIES THE OFFSET is the whole of it. The engine carries it — LIMIT n
-// OFFSET k — except when there is no LIMIT to hang one on. MySQL has no OFFSET
-// without a LIMIT, and the sentinel this used to render for that shape
+// WHO CARRIES THE OFFSET is the whole of it, and A CAP DECIDES IT. MaxRows
+// counts the rows the query TOUCHED — offset + limit — because a row the engine
+// skipped is still a row it matched, so an offset walks a caller toward the
+// breaker and must never walk one past it. When a cap is set the skip therefore
+// stays HERE: the bound covers the rows this package is about to drop, and
+// EnforceMaxRowsCap counts them. That is the same window the store-backed seam
+// runs under, which reaches it by widening the filter before it sizes its probe
+// row (internal/workapi.WithRowsBeforeThePage, then WithFetchOneExtra), so one
+// request fires on both.
+//
+// With no cap the engine carries it — LIMIT n OFFSET k — except when there is
+// no LIMIT to hang one on. MySQL has no OFFSET without a LIMIT, and the
+// sentinel this used to render for that shape
 // ("LIMIT 18446744073709551615 OFFSET k") makes the Dolt engine size a result
 // buffer from limit+offset and answer with a recovered "makeslice: cap out of
 // range" out of topRowsIter instead of rows. An unbounded query reads every
 // matching row anyway, so skipping here is the same answer at the same cost.
 //
-// NO CALLER COMBINES AN OFFSET WITH A CAP. The role that pages — issueops.Reader
-// — applies its offset in the shared page epilogue and hands this seam none
-// (internal/workapi.FinishPageAt says why, and the cap counting rows the query
-// MATCHED rather than rows that survived a skip is one of the two reasons). The
-// one caller that does set Offset here is the unit-of-work Querier, and a query
-// request carries no cap. RunReaderListMaxRowsIsHonored drives the cap behind an
-// offset on all three legs, so a body that started pushing the skip down would
-// be caught rather than quietly counting the wrong rows.
+// THE CALLERS THAT COMBINE AN OFFSET WITH A CAP are the ones that consume the
+// FILTER as a value and run their own query: proxied `bd list --watch`, with
+// and without --ready, and the proxied hierarchical --parent walk. They used to
+// get the engine's OFFSET and a cap counted on the survivors, which answered a
+// page for the very request `bd list --offset --max-rows` refuses one row of
+// result set earlier. The role that pages — issueops.Reader — hands this seam
+// no offset at all; it applies its own in the shared page epilogue for the
+// reason internal/workapi.FinishPageAt gives. The unit-of-work Querier does set
+// one here, and a query request carries no cap, so that is the shape still
+// pushing the skip down.
 type searchWindow struct {
 	// sql is the LIMIT/OFFSET clause, empty for an unbounded scan.
 	sql string
@@ -550,18 +562,29 @@ type searchWindow struct {
 	// limit is the page the caller receives; 0 is unlimited.
 	limit int
 	// rowCap and capSource are the defensive cap and its attribution. rowCap is
-	// SearchProbeLimit's cap, not the filter's: at limit == maxRows the probe
+	// SearchProbeLimit's cap, not the filter's: at touched == maxRows the probe
 	// row moves it by one.
 	rowCap    int
 	capSource string
 }
 
 func searchWindowFor(limit, offset, maxRows int, maxRowsSource string) searchWindow {
-	bound, rowCap := issueops.SearchProbeLimit(limit, maxRows)
+	// The window the cap is sized against is the one the query TOUCHES, so a
+	// skip this package keeps has to be inside the bound. An unbounded limit
+	// already carries every matching row and needs no widening — the same two
+	// lines WithRowsBeforeThePage runs on the filter for the other seam.
+	skipHere := maxRows > 0 && offset > 0
+	touched := limit
+	if skipHere && limit > 0 {
+		touched += offset
+	}
+	bound, rowCap := issueops.SearchProbeLimit(touched, maxRows)
 	w := searchWindow{limit: limit, rowCap: rowCap, capSource: maxRowsSource}
 	switch {
 	case bound <= 0:
 		w.skip = offset
+	case skipHere:
+		w.skip, w.sql = offset, fmt.Sprintf("LIMIT %d", bound)
 	case offset > 0:
 		w.sql = fmt.Sprintf("LIMIT %d OFFSET %d", bound, offset)
 	default:
@@ -579,10 +602,10 @@ func readyWindowForFilter(filter types.WorkFilter) searchWindow {
 }
 
 // finishWindow is the Go half of a window: the defensive cap against what the
-// query matched, then the offset the engine could not carry, then the page trim
+// query matched, then the offset the engine was not given, then the page trim
 // that produces the has-more verdict. The cap runs first because it counts rows
-// the query MATCHED — the same count the store-backed seam checks, which skips
-// nothing because its body does.
+// the query MATCHED, skipped ones included — the same count the store-backed
+// seam checks, which skips nothing because its body does.
 func finishWindow[T any](rows []T, w searchWindow) ([]T, bool, error) {
 	if err := issueops.EnforceMaxRowsCap(len(rows), w.rowCap, w.capSource); err != nil {
 		return nil, false, err

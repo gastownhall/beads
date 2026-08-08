@@ -135,8 +135,11 @@ func WithFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
 //
 // The builders still write Offset onto the filter, for the callers that consume
 // it as a VALUE and run their own query — `bd list --watch`, the proxied
-// hierarchical --parent walk, proxied `bd ready` — where the seam renders it and
-// there is no shared epilogue to move it to.
+// hierarchical --parent walk, proxied `bd ready` — where there is no shared
+// epilogue to move it to. Those callers get the same cap boundary anyway: the
+// seam beneath them widens its own bound by the offset and keeps the skip
+// whenever a cap is set, for the reason stated above (internal/storage/domain/db,
+// searchWindow).
 func WithRowsBeforeThePage(filter types.IssueFilter, offset int) types.IssueFilter {
 	filter.Offset = 0
 	if offset > 0 && filter.Limit > 0 {
