@@ -164,6 +164,13 @@ func TestEmbeddedIssueOperationsUpdatePersistentPreservesUnversionedClass(t *tes
 	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "unversioned"))
 }
 
+func TestEmbeddedIssueOperationsCreateWritesEveryScalarField(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "createsurface")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateWritesEveryScalarField(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "createsurface"))
+}
+
 func TestEmbeddedIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "scalarsurface")

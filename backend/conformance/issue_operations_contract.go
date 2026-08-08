@@ -2068,6 +2068,84 @@ func RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ct
 	maskedEvents.assert(t, "guard masked by the one before it", 0, nil)
 }
 
+// RunIssueOperationsCreateWritesEveryScalarField is the create-side twin of the
+// case below, over the same seventeen fields. Lifecycle.Create takes a whole
+// issue rather than a patch, and each backend copies that issue into its own
+// create shape — the two stores through issueops.PreparePublicCreateRequest into
+// CreateIssuesInTxWithResult, the unit-of-work backend through its own
+// createParams — so a field dropped on the way in is a column the caller asked
+// for and did not get, reported as a success.
+//
+// THE UPDATE CASE CANNOT ANSWER THIS, and the reason is its FIXTURE rather than
+// its assertions. It seeds through the fixture's raw hook, which is the
+// backend's own CreateIssue and not the guarded Create, and every seeded value
+// is overwritten by the patch before anything is read back. A guarded create
+// that blanked a field would leave all of it green. Seeding it through Create
+// instead is not the fix: Create refuses a closed_at on an open row, so the
+// close-lifecycle end of the surface cannot be seeded that way at all.
+//
+// EVERY VALUE IS DISTINCT AND NON-ZERO, which is what makes a dropped field
+// observable — a field the body never copied arrives at its zero value, and a
+// seed that agreed with that zero value could not tell the two apart. The status
+// is in_progress rather than open for exactly that reason: open is what an empty
+// status defaults to.
+//
+// The ROW is the subject, because a result hydrated from the request would echo
+// what the caller just handed in. The result is then held to the same
+// expectation table, because it is what a front door renders: a create that
+// stored every column and hydrated one of them away is a field the caller still
+// cannot see.
+func RunIssueOperationsCreateWritesEveryScalarField(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-createsurface"
+	minutes := 33
+	externalRef := "created-ref"
+	dueAt := time.Date(2033, 5, 6, 7, 8, 9, 0, time.UTC)
+	deferUntil := time.Date(2033, 4, 5, 6, 7, 8, 0, time.UTC)
+	created, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: id, Title: "created title", Description: "created description", Design: "created design",
+			AcceptanceCriteria: "created acceptance", Notes: "created notes",
+			SpecID: "created-spec", AwaitID: "created-await",
+			Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeBug,
+			Assignee: "created-assignee", Owner: "created-owner", ClosedBySession: "created-session",
+			EstimatedMinutes: &minutes, ExternalRef: &externalRef,
+			DueAt: &dueAt, DeferUntil: &deferUntil,
+		},
+	})
+	if err != nil {
+		t.Fatalf("full scalar create of %s: %v", id, err)
+	}
+	if created.Issue == nil {
+		t.Fatalf("full scalar create of %s returned no issue", id)
+	}
+
+	stored := []issueOperationsColumnValue{
+		{"title", "created title"},
+		{"description", "created description"},
+		{"design", "created design"},
+		{"acceptance_criteria", "created acceptance"},
+		{"notes", "created notes"},
+		{"spec_id", "created-spec"},
+		{"await_id", "created-await"},
+		{"status", string(types.StatusInProgress)},
+		{"priority", "1"},
+		{"issue_type", string(types.TypeBug)},
+		{"assignee", "created-assignee"},
+		{"owner", "created-owner"},
+		{"closed_by_session", "created-session"},
+		{"estimated_minutes", "33"},
+		{"external_ref", "created-ref"},
+		{"due_at", dueAt.Format(issueOperationsStoredTimeLayout)},
+		{"defer_until", deferUntil.Format(issueOperationsStoredTimeLayout)},
+	}
+	assertIssueOperationsStoredColumns(t, ctx, fixture, id, "after the full scalar create", stored)
+	assertIssueOperationsColumnValues(t, id, "in the create result", issueOperationsIssueScalars(created.Issue), stored)
+}
+
 // RunIssueOperationsUpdateWritesEveryScalarPatchField pins the whole scalar and
 // pointer surface of issueops.IssuePatch — seventeen fields — against the
 // columns each one maps to, and then pins the other half of that mapping:
@@ -2397,36 +2475,109 @@ func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testi
 // The columns carry no fractional seconds, so this round-trips exactly.
 const issueOperationsStoredTimeLayout = "2006-01-02 15:04:05"
 
-// issueOperationsColumnValue names one stored column and the value it must
-// hold, so a field-surface assertion reports WHICH column disagreed.
+// issueOperationsColumnValue names one stored column and the value it holds, so
+// a field-surface assertion reports WHICH column disagreed.
 type issueOperationsColumnValue struct {
 	column string
-	want   string
+	value  string
 }
 
-// assertIssueOperationsStoredColumns reads a set of columns back in one query
-// and compares each as text. Everything is COALESCEd and cast, because the
-// three fixtures scan into different destination sets and only *string is
-// common to all of them.
-func assertIssueOperationsStoredColumns(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label string, want []issueOperationsColumnValue) {
+// readIssueOperationsStoredColumns reads a set of columns back in one query as
+// text. Everything is COALESCEd and cast, because the three fixtures scan into
+// different destination sets and only *string is common to all of them.
+//
+// The result is the same pair list an assertion takes, so a case can snapshot
+// the columns an operation must NOT touch and hand the snapshot straight back
+// as the expectation afterwards.
+func readIssueOperationsStoredColumns(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label string, columns []string) []issueOperationsColumnValue {
 	t.Helper()
-	selected := make([]string, len(want))
-	dest := make([]any, len(want))
-	got := make([]string, len(want))
-	for i, field := range want {
-		selected[i] = "COALESCE(CAST(" + field.column + " AS CHAR), '')"
-		dest[i] = &got[i]
+	selected := make([]string, len(columns))
+	dest := make([]any, len(columns))
+	got := make([]issueOperationsColumnValue, len(columns))
+	for i, column := range columns {
+		selected[i] = "COALESCE(CAST(" + column + " AS CHAR), '')"
+		got[i].column = column
+		dest[i] = &got[i].value
 	}
 	//nolint:gosec // G201: the column names are this file's own literals
 	query := "SELECT " + strings.Join(selected, ", ") + " FROM issues WHERE id = ?"
 	if err := fixture.QueryScalar(ctx, query, []any{id}, dest...); err != nil {
 		t.Fatalf("read stored columns for %s (%s): %v", id, label, err)
 	}
+	return got
+}
+
+// assertIssueOperationsStoredColumns reads the named columns back and compares
+// each as text.
+func assertIssueOperationsStoredColumns(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label string, want []issueOperationsColumnValue) {
+	t.Helper()
+	columns := make([]string, len(want))
 	for i, field := range want {
-		if got[i] != field.want {
-			t.Errorf("%s %s stored %s = %q, want %q", id, label, field.column, got[i], field.want)
+		columns[i] = field.column
+	}
+	assertIssueOperationsColumnValues(t, id, label, readIssueOperationsStoredColumns(t, ctx, fixture, id, label, columns), want)
+}
+
+// assertIssueOperationsColumnValues compares two column-value lists position by
+// position, for the reads that do not come from a query.
+func assertIssueOperationsColumnValues(t *testing.T, id, label string, got, want []issueOperationsColumnValue) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s %s reported %d columns, want %d", id, label, len(got), len(want))
+	}
+	for i, field := range want {
+		if got[i].value != field.value {
+			t.Errorf("%s %s %s = %q, want %q", id, label, field.column, got[i].value, field.value)
 		}
 	}
+}
+
+// issueOperationsIssueScalars renders the seventeen-field scalar surface off a
+// returned issue, in the column vocabulary the stored-row assertions use, so a
+// case can hold the row and the result to ONE expectation table.
+func issueOperationsIssueScalars(issue *types.Issue) []issueOperationsColumnValue {
+	return []issueOperationsColumnValue{
+		{"title", issue.Title},
+		{"description", issue.Description},
+		{"design", issue.Design},
+		{"acceptance_criteria", issue.AcceptanceCriteria},
+		{"notes", issue.Notes},
+		{"spec_id", issue.SpecID},
+		{"await_id", issue.AwaitID},
+		{"status", string(issue.Status)},
+		{"priority", strconv.Itoa(issue.Priority)},
+		{"issue_type", string(issue.IssueType)},
+		{"assignee", issue.Assignee},
+		{"owner", issue.Owner},
+		{"closed_by_session", issue.ClosedBySession},
+		{"estimated_minutes", issueOperationsIntText(issue.EstimatedMinutes)},
+		{"external_ref", issueOperationsStringText(issue.ExternalRef)},
+		{"due_at", issueOperationsTimeText(issue.DueAt)},
+		{"defer_until", issueOperationsTimeText(issue.DeferUntil)},
+	}
+}
+
+// The three renderers below spell an unset pointer as the empty string, which
+// is how COALESCE reports the NULL it stores as.
+func issueOperationsIntText(value *int) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.Itoa(*value)
+}
+
+func issueOperationsStringText(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func issueOperationsTimeText(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(issueOperationsStoredTimeLayout)
 }
 
 // issueOperationsRowMarks are the two columns that record THAT a row was

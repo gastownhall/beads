@@ -139,6 +139,12 @@ func TestIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T) 
 	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
 }
 
+func TestIssueOperationsCreateWritesEveryScalarField(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateWritesEveryScalarField(t, ctx, fixture)
+}
+
 func TestIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()

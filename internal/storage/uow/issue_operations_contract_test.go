@@ -122,6 +122,11 @@ func TestIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T) 
 	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
+func TestIssueOperationsCreateWritesEveryScalarField(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsCreateWritesEveryScalarField(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
 func TestIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, ctx, newUOWIssueOperationsFixture(t, ctx))
