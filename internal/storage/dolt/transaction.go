@@ -429,7 +429,12 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 	}
 
 	if issueops.IsWisp(issue) {
-		bc, err := issueops.NewBatchContext(ctx, t.ignoredTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
+		// Wisp rows live on the ignored session, but the validation context
+		// (config, custom_types) lives in regular dolt-tracked tables — read
+		// it through regularTx so types registered earlier in this
+		// transaction (ensureSubgraphCustomTypes during a wisp pour) are
+		// visible. Both sessions are pinned to the same branch (GH#5443).
+		bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 		if err != nil {
 			return err
 		}
@@ -486,9 +491,15 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(wispIssues) > 0 {
-		if _, err := issueops.CreateIssuesInTxWithResult(ctx, t.ignoredTx, wispIssues, actor, storage.BatchCreateOptions{
+		// See CreateIssue: the validation context must come from regularTx so
+		// in-transaction custom-type registration is visible (GH#5443).
+		bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
 			SkipPrefixValidation: true,
-		}); err != nil {
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := issueops.CreateIssuesInTxWithContext(ctx, t.ignoredTx, bc, wispIssues, actor); err != nil {
 			return err
 		}
 	}
@@ -1277,10 +1288,30 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
-	if err == nil {
-		t.dirty.MarkDirty("config")
+	if err != nil {
+		return wrapExecError("set config in tx", err)
 	}
-	return wrapExecError("set config in tx", err)
+	t.dirty.MarkDirty("config")
+
+	// Sync normalized tables when config keys change, matching
+	// embeddedTransaction.SetConfig and DoltStore.SetConfig.
+	// ResolveCustomTypesInTx reads the normalized tables first, so without
+	// this a type registered in-transaction (e.g. by
+	// ensureSubgraphCustomTypes during pour) stays invisible to validation
+	// whenever the table already has rows.
+	switch key {
+	case "status.custom":
+		if err := issueops.SyncCustomStatusesTable(ctx, t.regularTx, value); err != nil {
+			return fmt.Errorf("syncing custom_statuses table: %w", err)
+		}
+		t.dirty.MarkDirty("custom_statuses")
+	case "types.custom":
+		if err := issueops.SyncCustomTypesTable(ctx, t.regularTx, value); err != nil {
+			return fmt.Errorf("syncing custom_types table: %w", err)
+		}
+		t.dirty.MarkDirty("custom_types")
+	}
+	return nil
 }
 
 // GetConfig gets a config value within the transaction

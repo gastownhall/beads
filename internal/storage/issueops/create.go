@@ -262,16 +262,26 @@ func CreateIssuesInTx(ctx context.Context, tx DBTX, issues []*types.Issue, actor
 // CreateIssuesInTxWithResult creates issues and reports tables whose writes are
 // only knowable after SQL reconciliation, such as child counter advances.
 func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssuesResult, error) {
+	bc, err := NewBatchContext(ctx, tx, opts)
+	if err != nil {
+		return CreateIssuesResult{}, err
+	}
+	return CreateIssuesInTxWithContext(ctx, tx, bc, issues, actor)
+}
+
+// CreateIssuesInTxWithContext is CreateIssuesInTxWithResult with a
+// caller-supplied BatchContext. Callers that split config reads from row
+// writes across SQL sessions (doltTransaction's wisp tier) build the context
+// on the session that sees in-transaction config writes and pass it here.
+// Mutates bc: sets SkipChildCounterReconcile.
+func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext, issues []*types.Issue, actor string) (CreateIssuesResult, error) {
+	opts := bc.Opts
 	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
 	issues = filteredIssues
 
-	bc, err := NewBatchContext(ctx, tx, opts)
-	if err != nil {
-		return CreateIssuesResult{}, err
-	}
 	// This function already runs a slice-wide ReconcileChildCounters below,
 	// covering every accepted issue; skip the redundant per-issue reconcile.
 	bc.SkipChildCounterReconcile = true

@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,16 +134,29 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 		return nil, nil
 	}
 
-	// Parse comma-separated list
-	var types []string
-	for _, t := range strings.Split(typesStr, ",") {
-		t = strings.TrimSpace(t)
-		if t != "" {
-			types = append(types, t)
+	return parseTypesConfigValue(typesStr), nil
+}
+
+// parseTypesConfigValue parses a types.custom config value, accepting both
+// the JSON-array form written by bd config set / pour (e.g. ["duty","ops"])
+// and the legacy comma-separated form (duty,ops).
+func parseTypesConfigValue(value string) []string {
+	var out []string
+	var jsonTypes []string
+	if err := json.Unmarshal([]byte(value), &jsonTypes); err == nil {
+		for _, t := range jsonTypes {
+			if t = strings.TrimSpace(t); t != "" {
+				out = append(out, t)
+			}
+		}
+		return out
+	}
+	for _, t := range strings.Split(value, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
 		}
 	}
-
-	return types, nil
+	return out
 }
 
 // readTypesFromYAML reads types.custom from config.yaml
@@ -198,11 +212,8 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	// Add parent's custom types
 	parentTypes, err := store.GetConfig(ctx, "types.custom")
 	if err == nil && parentTypes != "" {
-		for _, t := range strings.Split(parentTypes, ",") {
-			t = strings.TrimSpace(t)
-			if t != "" {
-				knownTypes[t] = true
-			}
+		for _, t := range parseTypesConfigValue(parentTypes) {
+			knownTypes[t] = true
 		}
 	}
 

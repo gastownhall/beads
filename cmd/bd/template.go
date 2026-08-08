@@ -565,11 +565,14 @@ func getRelativeID(oldID, rootID string) string {
 // not in the default type whitelist. Without this, cloneSubgraph fails
 // with "invalid issue type" on the first non-built-in bead. (GH#3213)
 func ensureSubgraphCustomTypes(ctx context.Context, s molConfigWriter, subgraph *TemplateSubgraph) error {
-	// Collect non-built-in types used by the subgraph.
+	// Collect non-built-in types used by the subgraph. IsBuiltIn (not
+	// IsValid) matches the validator this registration exists to satisfy:
+	// IsValidWithCustom short-circuits on IsBuiltIn, so types like "event"
+	// need no types.custom entry.
 	needed := make(map[string]bool)
 	for _, issue := range subgraph.Issues {
 		t := issue.IssueType
-		if t == "" || t.IsValid() {
+		if t == "" || t.IsBuiltIn() {
 			continue
 		}
 		needed[string(t)] = true
@@ -615,18 +618,13 @@ func ensureSubgraphCustomTypes(ctx context.Context, s molConfigWriter, subgraph 
 	// PrepareIssueForInsert → ValidateWithCustom.
 	merged := append(current, toAdd...)
 	// Serialize as JSON array for consistency with bd config set.
-	var buf strings.Builder
-	buf.WriteString("[")
-	for i, t := range merged {
-		if i > 0 {
-			buf.WriteString(",")
-		}
-		buf.WriteString("\"")
-		buf.WriteString(t)
-		buf.WriteString("\"")
+	// json.Marshal (rather than hand-rolled string building) so a type
+	// containing a quote or backslash cannot corrupt the config value.
+	data, err := json.Marshal(merged)
+	if err != nil {
+		return fmt.Errorf("serializing types.custom: %w", err)
 	}
-	buf.WriteString("]")
-	return s.SetConfig(ctx, "types.custom", buf.String())
+	return s.SetConfig(ctx, "types.custom", string(data))
 }
 
 // cloneSubgraph creates new issues from the template with variable substitution.

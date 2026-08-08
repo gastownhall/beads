@@ -17,10 +17,12 @@ import (
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
 // Returns types.TypeTask for empty types. Non-empty types pass through
-// (normalized) rather than being validated here: pour registers non-built-in
-// types via ensureSubgraphCustomTypes, and the storage layer validates them
-// against types.custom — the same division of labor as bd create --type.
+// (trimmed and normalized) rather than being validated here: pour and
+// cook --persist register non-built-in types via ensureSubgraphCustomTypes,
+// and the storage layer validates them against types.custom — the same
+// division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
+	stepType = strings.TrimSpace(stepType)
 	if stepType == "" {
 		return types.TypeTask
 	}
@@ -554,9 +556,11 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	// Generate issue ID (formula-name.step-id)
 	issueID := fmt.Sprintf("%s.%s", parentID, step.ID)
 
-	// Determine issue type (children override to epic)
+	// Determine issue type. A parent step with no declared type defaults to
+	// epic; a declared type is honored even when the step has children
+	// (GH#5443).
 	issueType := stepTypeToIssueType(step.Type)
-	if len(step.Children) > 0 {
+	if len(step.Children) > 0 && strings.TrimSpace(step.Type) == "" {
 		issueType = types.TypeEpic
 	}
 
@@ -894,6 +898,14 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	// Create issues, labels, and dependencies in a single atomic transaction.
 	// This prevents orphaned issues if label/dependency creation fails.
 	err := transact(ctx, s, fmt.Sprintf("bd: cook formula %s", protoID), func(tx storage.Transaction) error {
+		// Register non-built-in step types before inserting, mirroring
+		// cloneSubgraphInto (pour). Without this, PrepareIssueForInsert
+		// rejects them with "invalid issue type" and the whole cook
+		// --persist transaction rolls back.
+		if err := ensureSubgraphCustomTypes(ctx, storeMolWriter{DoltStorage: s, tx: tx}, &TemplateSubgraph{Issues: issues}); err != nil {
+			return fmt.Errorf("registering custom types: %w", err)
+		}
+
 		// Create all issues
 		if err := tx.CreateIssues(ctx, issues, actor); err != nil {
 			return fmt.Errorf("failed to create issues: %w", err)
