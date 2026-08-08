@@ -1079,6 +1079,121 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 // forbids. The case seeds through the fixture kit's CreateWisp hook the day the
 // clause exists.
 
+// RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers pins the
+// local-write clause of issueops.BlockedStateInvariant on Close, which the
+// existing cases in this file only ever read as a PRECONDITION.
+//
+// Close is where the affected set is widest, and the three subjects are the
+// three ways it widens: the direct depender, that depender's parent-child child
+// (which inherits and carries no blocker of its own), and a WISP depender whose
+// edge lives in the ephemeral dependency table. A body that settled only the
+// row the request named would pass a case watching the depender alone.
+//
+// Every subject's updated_at is asserted unchanged across the flip, which is
+// the non-perturbation clause and can only be observed on a row that actually
+// flipped: the mark and unmark templates never touch a row whose value stays
+// put.
+//
+// UNLIKE the two-body cases on DependencyEditor and Deleter, all three legs
+// reach ONE body here (internal/storage/issueops.closeIssueInTx; the
+// unit-of-work leg through its domain issue repository). This case is a
+// wrapper and engine check, not a third vote, and blocked_state.go's header
+// says so.
+func RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsclose-blocker"
+	depender := fixture.IssuePrefix + "-bsclose-depender"
+	child := fixture.IssuePrefix + "-bsclose-child"
+	wispDepender := fixture.IssuePrefix + "-bsclose-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsclose-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsclose-ctldepender"
+	for _, id := range []string{blocker, depender, child, controlBlocker, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wispDepender)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, depender, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requirePlaneResidency(t, blockedIssue(blocker))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the direct depender")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispDepender), blockedIssue(blocker), "the cross-plane depender")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child inherits its block and has none of its own")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker), "the control's blocker is not the one being closed")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedIssue(child), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: blocker})
+	if err != nil {
+		t.Fatalf("close the blocker %s: %v", blocker, err)
+	}
+	if !closed.Changed {
+		t.Fatalf("close of %s reported Changed = false, want a committed close", blocker)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"closing a blocker settles its dependers, their descendants and both planes before the close commits")
+}
+
+// RunLifecycleReopenReblocksItsDependers is the other direction, and it is what
+// makes the pair complete: the unmark template and the mark template are
+// separate SQL, so a case that only ever watches a flag fall exercises one of
+// them.
+//
+// The control is a depender whose blocker was CLOSED WHEN IT WAS SEEDED and
+// never reopened. It has the same shape as the subject and the same zero, so it
+// separates "reopening the blocker re-blocked this row" from "the verb re-marks
+// whatever it can reach".
+func RunLifecycleReopenReblocksItsDependers(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsreopen-blocker"
+	depender := fixture.IssuePrefix + "-bsreopen-depender"
+	wispDepender := fixture.IssuePrefix + "-bsreopen-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsreopen-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsreopen-ctldepender"
+	for _, id := range []string{blocker, depender, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, controlBlocker, types.StatusClosed, nil)
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wispDepender)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the pre-close state this case unwinds and rewinds")
+	probe.requireUnblocked(t, blockedIssue(controlDepender), "the control's blocker was already closed when its edge landed")
+
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: blocker}); err != nil {
+		t.Fatalf("close the blocker %s to reach the reopen precondition: %v", blocker, err)
+	}
+	probe.requireUnblocked(t, blockedIssue(depender), "the close is what put the subject at 0 — earned, never seeded")
+	probe.requireUnblocked(t, blockedWisp(wispDepender), "the cross-plane depender came down with it")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	reopened, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: blocker})
+	if err != nil {
+		t.Fatalf("reopen the blocker %s: %v", blocker, err)
+	}
+	if !reopened.Changed {
+		t.Fatalf("reopen of closed %s reported Changed = false, want a committed reopen", blocker)
+	}
+
+	flip.requireFlippedTo(t, 1, "a reopened blocker blocks again, on both planes, before the reopen commits")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the postcondition is the flag AND the live blocker behind it")
+}
+
 // lifecycleCloseReopenCountHistory counts version-control entries carrying an
 // EXACT message, which is the only way to tell the caller's spelling from the
 // implementation's default. It is read as a delta by every caller: these

@@ -63,6 +63,12 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseAndReopenRequireActorAndIssueID", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, ctx, fixture)
 	})
+	t.Run("CloseSettlesItsTransitiveAndCrossPlaneDependers", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t, ctx, fixture)
+	})
+	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
+		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleCloseReopenFixture {
