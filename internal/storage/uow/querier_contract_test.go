@@ -32,6 +32,15 @@ func TestQuerierContract(t *testing.T) {
 	t.Run("SortBoundsThePageInOrder", func(t *testing.T) {
 		conformance.RunQuerierSortBoundsThePageInOrder(t, ctx, fixture)
 	})
+	t.Run("SortByTitleFoldsCaseBeforeItCutsThePage", func(t *testing.T) {
+		conformance.RunQuerierSortByTitleFoldsCaseBeforeItCutsThePage(t, ctx, fixture)
+	})
+	t.Run("SortByClosedPutsTheUnclosedRowsAtTheFarEnd", func(t *testing.T) {
+		conformance.RunQuerierSortByClosedPutsTheUnclosedRowsAtTheFarEnd(t, ctx, fixture)
+	})
+	t.Run("SortTieBreaksByIDInBothDirections", func(t *testing.T) {
+		conformance.RunQuerierSortTieBreaksByIDInBothDirections(t, ctx, fixture)
+	})
 	t.Run("SortSeesTheWholeMatchingSet", func(t *testing.T) {
 		conformance.RunQuerierSortSeesTheWholeMatchingSet(t, ctx, fixture)
 	})

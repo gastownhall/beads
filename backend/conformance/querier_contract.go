@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -196,6 +197,236 @@ func RunQuerierSortBoundsThePageInOrder(t *testing.T, ctx context.Context, fixtu
 	}
 	if want := []string{fourth.ID, third.ID}; !slices.Equal(querierPageIDs(reversed), want) {
 		t.Errorf("reversed page = %v, want %v", querierPageIDs(reversed), want)
+	}
+}
+
+// RunQuerierSortByTitleFoldsCaseBeforeItCutsThePage pins the title order's
+// COLLATION, which the case above is structurally unable to observe.
+//
+// THE DEFECT IS IN THE FIXTURE, not in the assertion. The case above titles
+// every row with its own id, so every title is lower-case: byte order, folded
+// order and linguistic order are the same sequence over `a b y z`, and an
+// engine whose text comparison is byte-wise satisfies it exactly. That is the
+// ordering-fixture trap ADDING_AN_ISSUEOPS_ROLE.md names by name. The five
+// titles here are chosen so the three orders disagree — byte order is
+// APPLE2 < Apple < Zebra < apple < banana, folded order is
+// apple = Apple < APPLE2 < banana < Zebra — so which rows survive a cut of two
+// is a different answer under each.
+//
+// THE CUT IS WHERE IT IS OBSERVABLE, and the case has both arms because the two
+// arms fail on different legs. A bounded page is the rows the DATABASE kept, so
+// a collation break changes the page on every leg. An unbounded answer is
+// re-sorted after the fact by the shared Go comparator, which folds — and the
+// one thing that comparator cannot restore is the order INSIDE a folded tie,
+// which it reports as equal and a stable sort therefore leaves in the order the
+// query returned. So the unbounded arm pins the tie leg, and on the unit-of-work
+// leg — whose page order comes straight out of the UNION's ORDER BY — that is
+// the collation's own answer.
+//
+// WHAT THIS FIXTURE CANNOT SEE: the store legs' unbounded tie. Those two
+// backends re-order the merged rows with sqlbuild.Less before the page is cut,
+// and its tie-break is id ASC in Go, so the unbounded arm cannot fail there
+// however the engine collates. The bounded arm is the one that speaks on all
+// three legs.
+//
+// The two winners carry the WORST priorities, so the default engine order puts
+// them last: a body that bounded in storage order and sorted afterwards returns
+// neither of them, which is the property this case inherits from the one above.
+func RunQuerierSortByTitleFoldsCaseBeforeItCutsThePage(t *testing.T, ctx context.Context, fixture QuerierFixture) {
+	t.Helper()
+	scope := querierLabel(fixture, "titlefold")
+	// The ids ascend with the tags, so the two rows that fold to the same title
+	// pin the id-ASC tie leg in a known direction.
+	lower := querierTitledIssue(querierID(fixture, "titlefold", "1"), "apple", 3, scope)
+	upper := querierTitledIssue(querierID(fixture, "titlefold", "2"), "Apple", 3, scope)
+	shouted := querierTitledIssue(querierID(fixture, "titlefold", "3"), "APPLE2", 2, scope)
+	fruit := querierTitledIssue(querierID(fixture, "titlefold", "4"), "banana", 1, scope)
+	animal := querierTitledIssue(querierID(fixture, "titlefold", "5"), "Zebra", 0, scope)
+	for _, issue := range []*types.Issue{lower, upper, shouted, fruit, animal} {
+		seedQuerierIssue(t, ctx, fixture, issue)
+	}
+
+	// A conjunction the filter vocabulary expresses exactly, so the database
+	// carries both the order and the bound.
+	expression := fmt.Sprintf("type=bug AND label=%s", scope)
+	want := []string{lower.ID, upper.ID, shouted.ID, fruit.ID, animal.ID}
+
+	whole := querierIDs(t, ctx, fixture, publicops.QueryRequest{
+		Expression: expression, SortBy: "title", Limit: querierLimit(0),
+	})
+	if !slices.Equal(whole, want) {
+		t.Errorf("title order = %v, want %v: titles compare case-folded, and two titles that fold alike break by id ASC",
+			whole, want)
+	}
+
+	page := querierIDs(t, ctx, fixture, publicops.QueryRequest{
+		Expression: expression, SortBy: "title", Limit: querierLimit(2),
+	})
+	if !slices.Equal(page, want[:2]) {
+		t.Errorf("bounded page = %v, want %v: the cut keeps the first rows of the CASE-FOLDED order, so a byte-wise "+
+			"collation hands back a different page and no error", page, want[:2])
+	}
+}
+
+// RunQuerierSortByClosedPutsTheUnclosedRowsAtTheFarEnd pins the nullable sort
+// key's placement — the promise sqlbuild leads its clause with an explicit
+// (col IS NULL) term to keep: a row with no value for the key sorts LAST under
+// the key's own direction and FIRST when the direction is reversed, whatever
+// the driver's native NULL ordering happens to be.
+//
+// No contract case drove the closed sort at all before this one, in either
+// direction.
+//
+// EVERY ARM IS BOUNDED, and that is the whole design of the case. Unbounded,
+// the answer is re-sorted by the shared Go comparator, which has its own
+// nil-handling — so an unbounded assertion is one body checking itself and
+// passes with the SQL term deleted or inverted. Under a cut of two it is the
+// DATABASE that decides which rows reach the epilogue at all, and no Go
+// comparator can put back a row the query left behind. Each arm therefore
+// carries a limit smaller than the match count, and the unbounded reads are
+// kept only as the baseline the pages must be prefixes of.
+//
+// WHAT THIS FIXTURE CANNOT SEE: which encoding "no value" takes. closed_at is
+// genuinely NULL on an open row, so this key exercises the NULL term; the
+// assignee key does not, because an unassigned row's column holds the empty
+// string — that key's placement is ordinary string order and is pinned in
+// RunQuerierSortTieBreaksByIDInBothDirections instead. Nor does it see the
+// closed-row DEFAULT: IncludeClosed is set on every request here, so the
+// conditional hiding is somebody else's case.
+func RunQuerierSortByClosedPutsTheUnclosedRowsAtTheFarEnd(t *testing.T, ctx context.Context, fixture QuerierFixture) {
+	t.Helper()
+	scope := querierLabel(fixture, "closedsort")
+	older := querierWholeSecond(2021)
+	newer := querierWholeSecond(2022)
+
+	openFirst := querierTitledIssue(querierID(fixture, "closedsort", "1"), "open first", 1, scope)
+	openSecond := querierTitledIssue(querierID(fixture, "closedsort", "2"), "open second", 1, scope)
+	shutOld := querierTitledIssue(querierID(fixture, "closedsort", "3"), "shut old", 1, scope)
+	shutOld.Status = types.StatusClosed
+	shutOld.ClosedAt = &older
+	shutNew := querierTitledIssue(querierID(fixture, "closedsort", "4"), "shut new", 1, scope)
+	shutNew.Status = types.StatusClosed
+	shutNew.ClosedAt = &newer
+	for _, issue := range []*types.Issue{openFirst, openSecond, shutOld, shutNew} {
+		seedQuerierIssue(t, ctx, fixture, issue)
+	}
+
+	expression := fmt.Sprintf("type=bug AND label=%s", scope)
+	request := func(reverse bool, limit int) publicops.QueryRequest {
+		return publicops.QueryRequest{
+			Expression: expression, IncludeClosed: true,
+			SortBy: "closed", Reverse: reverse, Limit: querierLimit(limit),
+		}
+	}
+
+	// The key's own direction is newest-closed first, and the two rows that
+	// were never closed follow every row that was.
+	forward := []string{shutNew.ID, shutOld.ID, openFirst.ID, openSecond.ID}
+	if got := querierIDs(t, ctx, fixture, request(false, 0)); !slices.Equal(got, forward) {
+		t.Errorf("closed order = %v, want %v: newest close first, and the rows with no close last", got, forward)
+	}
+	if got := querierIDs(t, ctx, fixture, request(false, 2)); !slices.Equal(got, forward[:2]) {
+		t.Errorf("bounded closed page = %v, want %v: an unclosed row must not displace a closed one from the page",
+			got, forward[:2])
+	}
+
+	// Reversed, the unclosed rows lead — the placement flips with the
+	// direction rather than staying pinned to one end of the answer.
+	reversed := []string{openFirst.ID, openSecond.ID, shutOld.ID, shutNew.ID}
+	if got := querierIDs(t, ctx, fixture, request(true, 0)); !slices.Equal(got, reversed) {
+		t.Errorf("reversed closed order = %v, want %v: the rows with no close lead, then the oldest close",
+			got, reversed)
+	}
+	if got := querierIDs(t, ctx, fixture, request(true, 2)); !slices.Equal(got, reversed[:2]) {
+		t.Errorf("bounded reversed closed page = %v, want %v: reversing moves the unclosed rows INTO the page, "+
+			"which is the half a driver's native NULL order gets wrong", got, reversed[:2])
+	}
+}
+
+// RunQuerierSortTieBreaksByIDInBothDirections pins the other half of every
+// non-default sort clause: rows the key cannot separate are ordered by id
+// ASC, and reversing the request flips the KEY only — the tie-break never
+// turns around.
+//
+// It is what makes a sorted page reproducible. Two rows updated in the same
+// second, or sharing a status, are a tie at the key; if the tie-break flipped
+// with the key, the same request answered twice around a reversal would visit
+// the tied rows in two different orders and a caller paging through them would
+// see rows move under it.
+//
+// THREE KEYS, BECAUSE THE TIE ARRIVES THREE DIFFERENT WAYS: a timestamp column
+// (whole-second stamps that collide), an enumerated string column (a status
+// two rows share), and a column that is EMPTY on every row here — the
+// unassigned case, where the tied group is the entire answer and reversing the
+// request must therefore change nothing at all.
+//
+// WHERE THE ANSWER COMES FROM DIFFERS BY LEG, which is why this is worth
+// running on all three. The role's own epilogue reports a tie as equal and
+// sorts stably, so it hands the decision back to whatever produced the rows:
+// the unit-of-work leg's UNION ORDER BY, and the store legs' Go mirror of it
+// (sqlbuild.Less). Two bodies, one promise.
+//
+// WHAT THIS FIXTURE CANNOT SEE: the direction of the KEY on a nullable column —
+// no row here has a NULL sort key, so
+// RunQuerierSortByClosedPutsTheUnclosedRowsAtTheFarEnd owns that — and any
+// order below a page cut, since every read here is unbounded so that the tied
+// group is visible whole.
+func RunQuerierSortTieBreaksByIDInBothDirections(t *testing.T, ctx context.Context, fixture QuerierFixture) {
+	t.Helper()
+	scope := querierLabel(fixture, "tiebreak")
+	tied := querierWholeSecond(2020)
+	fresh := querierWholeSecond(2022)
+
+	first := querierTitledIssue(querierID(fixture, "tiebreak", "1"), "tied first", 1, scope)
+	first.UpdatedAt = tied
+	first.CreatedAt = tied
+	second := querierTitledIssue(querierID(fixture, "tiebreak", "2"), "tied second", 1, scope)
+	second.UpdatedAt = tied
+	second.CreatedAt = tied
+	shut := querierTitledIssue(querierID(fixture, "tiebreak", "3"), "tied closed", 1, scope)
+	shut.Status = types.StatusClosed
+	shut.UpdatedAt = tied
+	shut.CreatedAt = tied
+	moving := querierTitledIssue(querierID(fixture, "tiebreak", "4"), "moved lately", 1, scope)
+	moving.Status = types.StatusInProgress
+	moving.UpdatedAt = fresh
+	moving.CreatedAt = fresh
+	for _, issue := range []*types.Issue{first, second, shut, moving} {
+		seedQuerierIssue(t, ctx, fixture, issue)
+	}
+
+	expression := fmt.Sprintf("type=bug AND label=%s", scope)
+	answer := func(sortBy string, reverse bool) []string {
+		return querierIDs(t, ctx, fixture, publicops.QueryRequest{
+			Expression: expression, IncludeClosed: true,
+			SortBy: sortBy, Reverse: reverse, Limit: querierLimit(0),
+		})
+	}
+
+	for _, test := range []struct {
+		name    string
+		sortBy  string
+		reverse bool
+		want    []string
+	}{
+		// Most recently updated first; the three same-second rows are a tie.
+		{"updated", "updated", false, []string{moving.ID, first.ID, second.ID, shut.ID}},
+		// Reversed, the tied group moves to the front UNCHANGED.
+		{"updated reversed", "updated", true, []string{first.ID, second.ID, shut.ID, moving.ID}},
+		// closed < in_progress < open, and the two open rows tie.
+		{"status", "status", false, []string{shut.ID, moving.ID, first.ID, second.ID}},
+		{"status reversed", "status", true, []string{first.ID, second.ID, moving.ID, shut.ID}},
+		// Nothing here is assigned, so the tie is the whole answer and
+		// reversing it is a no-op.
+		{"assignee", "assignee", false, []string{first.ID, second.ID, shut.ID, moving.ID}},
+		{"assignee reversed", "assignee", true, []string{first.ID, second.ID, shut.ID, moving.ID}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := answer(test.sortBy, test.reverse); !slices.Equal(got, test.want) {
+				t.Errorf("sort by %q reverse=%v = %v, want %v: ties break by id ASC, and a reversal flips the key alone",
+					test.sortBy, test.reverse, got, test.want)
+			}
+		})
 	}
 }
 
@@ -482,6 +713,22 @@ func querierIssue(id string, issueType types.IssueType, priority int, labels ...
 		IssueType: issueType,
 		Labels:    labels,
 	}
+}
+
+// querierTitledIssue is querierIssue for the ordering cases, which need a
+// title that is not the row's own id: an id-titled fixture can only carry the
+// lower-case, seed-ordered titles that make a collation break invisible.
+func querierTitledIssue(id, title string, priority int, labels ...string) *types.Issue {
+	issue := querierIssue(id, types.TypeBug, priority, labels...)
+	issue.Title = title
+	return issue
+}
+
+// querierWholeSecond is a fixed timestamp with no sub-second part, so a column
+// stored at DATETIME(0) round-trips it exactly and two rows given the same one
+// are a genuine tie rather than a truncation artifact.
+func querierWholeSecond(year int) time.Time {
+	return time.Date(year, time.June, 1, 12, 0, 0, 0, time.UTC)
 }
 
 func seedQuerierIssue(t *testing.T, ctx context.Context, fixture QuerierFixture, issue *types.Issue) {
