@@ -277,6 +277,29 @@ func (p *blockedStateProbe) watchFlip(t *testing.T, subjects, controls []blocked
 	return flip
 }
 
+// watchControls records only rows that must NOT move, for the one case shape
+// that has no flag of its own to flip: a verb the invariant says must not reach
+// blocked state at all. Such a case still has to be falsifiable, and it is —
+// but on a different column, so the case itself asserts a flip the verb DID
+// make (a claimed row's status) and names that as its must-flip term.
+func (p *blockedStateProbe) watchControls(t *testing.T, controls ...blockedStateRow) *blockedStateFlip {
+	t.Helper()
+	if len(controls) == 0 {
+		t.Fatal("watchControls needs at least one control row")
+	}
+	flip := &blockedStateFlip{
+		probe:     p,
+		controls:  controls,
+		blocked:   make(map[string]int, len(controls)),
+		updatedAt: make(map[string]string, len(controls)),
+	}
+	for _, row := range controls {
+		flip.blocked[row.String()] = p.rawBlocked(t, row)
+		flip.updatedAt[row.String()] = p.rawUpdatedAt(t, row)
+	}
+	return flip
+}
+
 // requireFlippedTo asserts the local-write clause of
 // issueops.BlockedStateInvariant on the rows watchFlip snapshotted:
 //

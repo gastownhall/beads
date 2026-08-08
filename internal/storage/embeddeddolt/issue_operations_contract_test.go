@@ -192,6 +192,27 @@ func TestEmbeddedIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow
 	conformance.RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "claimrestore"))
 }
 
+func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bsupd")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bsupd"))
+}
+
+func TestEmbeddedIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bscreate")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bscreate"))
+}
+
+func TestEmbeddedIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bsclaim")
+	ctx := t.Context()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bsclaim"))
+}
+
 func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *testEnv, prefix string) conformance.IssueOperationsStagingFixture {
 	t.Helper()
 	operations, err := embeddeddolt.NewIssueOperations(te.store)

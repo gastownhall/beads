@@ -163,6 +163,24 @@ func TestIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *test
 	conformance.RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, ctx, fixture)
 }
 
+func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, fixture)
+}
+
+func TestIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, fixture)
+}
+
 func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsStagingFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)

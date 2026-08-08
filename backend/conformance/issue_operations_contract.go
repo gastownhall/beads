@@ -2645,6 +2645,205 @@ func readIssueOperationsRowMarks(t *testing.T, ctx context.Context, fixture Issu
 	return marks
 }
 
+// RunIssueOperationsUpdateStatusCrossingSettlesDependers pins the local-write
+// clause of issueops.BlockedStateInvariant on Update, and it is the case with
+// the most to say about per-backend WIRING in this file: the decision that a
+// status move counts as a crossing is written TWICE, in
+// internal/storage/issueops/update.go and in internal/storage/domain/db's
+// issue Update, so the three legs are two genuine votes here.
+//
+// The crossing is open -> pinned and back, deliberately not open -> closed:
+// pinned is a status Lifecycle.Close cannot produce, so this branch is
+// reachable only through Update. Both directions run, because the mark and the
+// unmark are separate SQL and a case that watches one exercises one.
+//
+// The depender is CREATED with its edge rather than seeded with one, which is
+// why the fixture needs no dependency hook: the edge and the flag both come
+// from role verbs, and no fixture in this package can write the flag at all.
+func RunIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsupd-blocker"
+	depender := fixture.IssuePrefix + "-bsupd-depender"
+	controlBlocker := fixture.IssuePrefix + "-bsupd-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsupd-ctldepender"
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, blocker)
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, controlBlocker)
+	createIssueOperationsBlockedIssue(t, ctx, fixture, depender, blocker)
+	createIssueOperationsBlockedIssue(t, ctx, fixture, controlDepender, controlBlocker)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the create carried the edge and earned the flag")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker), "the control's blocker never moves")
+
+	out := probe.watchFlip(t, []blockedStateRow{blockedIssue(depender)}, []blockedStateRow{blockedIssue(controlDepender)})
+	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: blocker,
+		Patch: publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusPinned}},
+	}); err != nil {
+		t.Fatalf("update %s to pinned: %v", blocker, err)
+	}
+	out.requireFlippedTo(t, 0, "pinning a blocker takes it out of the active set, so its depender is no longer blocked")
+
+	back := probe.watchFlip(t, []blockedStateRow{blockedIssue(depender)}, []blockedStateRow{blockedIssue(controlDepender)})
+	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: blocker,
+		Patch: publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusOpen}},
+	}); err != nil {
+		t.Fatalf("update %s back to open: %v", blocker, err)
+	}
+	back.requireFlippedTo(t, 1, "unpinning the blocker returns it to the active set and re-blocks its depender")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the postcondition is the flag AND the live blocker behind it")
+}
+
+// RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction pins
+// the create half, and with it the one structural asymmetry between the two
+// bodies: the store-backed create runs ONE terminal recompute over the union of
+// the created ids and every edge's affected set, while the unit-of-work create
+// maintains blocked state per edge as its dependency repository writes them.
+// The two are convergent by argument — adds are monotonic, and the one
+// non-monotonic add recomputes on both sides — but an argument is not a pinned
+// fact, and this is where a divergence would show.
+//
+// THE EXISTING ROW IS THE FALSIFIABLE TERM. A created row has no pre-value, so
+// a case that only read the new row's flag could not tell "the create marked
+// it" from "the column defaults that way". The reverse edge points an existing,
+// already-read row at the new one, so the create must flip a row it did not
+// create.
+//
+// The child is the transitive half, asserted with zero direct blocker edges of
+// its own: creating a child of a blocked parent must leave it blocked in the
+// creating transaction, not at the next recompute.
+func RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bscreate-blocker"
+	waiting := fixture.IssuePrefix + "-bscreate-waiting"
+	free := fixture.IssuePrefix + "-bscreate-free"
+	created := fixture.IssuePrefix + "-bscreate-new"
+	for _, id := range []string{blocker, waiting, free} {
+		seedIssueOperationsLabeledIssue(t, ctx, fixture, id)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireUnblocked(t, blockedIssue(waiting), "the existing row is clean until the create points it at the new one")
+
+	flip := probe.watchFlip(t, []blockedStateRow{blockedIssue(waiting)}, []blockedStateRow{blockedIssue(free)})
+	result, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: created, Title: created, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+		Dependencies: []publicops.CreateDependency{
+			// The new issue is blocked by an existing one...
+			{TargetID: blocker, Type: types.DepBlocks},
+			// ...and an existing one is blocked by the new issue.
+			{TargetID: waiting, Type: types.DepBlocks, Reverse: true},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create %s with edges in both directions: %v", created, err)
+	}
+	if result.Issue == nil || result.Issue.ID != created {
+		t.Fatalf("create result = %#v, want the issue at %s", result.Issue, created)
+	}
+
+	flip.requireFlippedTo(t, 1, "a reverse edge created with an issue blocks the row it points at, inside the creating transaction")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(created), blockedIssue(blocker),
+		"the created row settled against its own forward edge in the same transaction")
+
+	// The transitive half: a child created under the blocked new row inherits
+	// the block with no blocker of its own.
+	child, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{Title: "child of a blocked parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		ParentID:      created,
+	})
+	if err != nil {
+		t.Fatalf("create a child under the blocked %s: %v", created, err)
+	}
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child.Issue.ID),
+		"a child created under a blocked parent inherits the block in its own creating transaction")
+	probe.requireUnblocked(t, blockedIssue(free), "the control never entered any affected set")
+}
+
+// RunIssueOperationsClaimLeavesBlockedStateAlone pins the last clause of
+// issueops.BlockedStateInvariant: settling never reaches outside the affected
+// set, so an unrelated blocked row is still blocked — for the same reason —
+// after a neighboring claim.
+//
+// It is the only case in this family with no flag of its own to flip, so its
+// falsifiable term is the STATUS the claim really moved: if the claim did not
+// land, the case fails before it asserts anything about blocked state. The
+// claimed row carries a `related` edge onto an open issue, which is the shape a
+// predicate that counted every edge type would mark — so this case is red
+// against that mutation and no other case is.
+//
+// It extends internal/storage/domain/db's ClaimDoesNotChangeIsBlocked, which
+// runs on the unit-of-work leg alone, to all three, and adds the updated_at
+// half.
+func RunIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsclaim-blocker"
+	blocked := fixture.IssuePrefix + "-bsclaim-blocked"
+	neighbor := fixture.IssuePrefix + "-bsclaim-neighbor"
+	claimed := fixture.IssuePrefix + "-bsclaim-claimed"
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, blocker)
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, neighbor)
+	createIssueOperationsBlockedIssue(t, ctx, fixture, blocked, blocker)
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: claimed, Title: claimed, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+		Dependencies: []publicops.CreateDependency{{TargetID: neighbor, Type: types.DepRelated}},
+	}); err != nil {
+		t.Fatalf("create the claim target %s with a non-blocking edge: %v", claimed, err)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(blocked), blockedIssue(blocker), "the bystander is blocked for a reason the claim does not touch")
+	probe.requireUnblocked(t, blockedIssue(claimed), "a related edge onto an open issue is not a block")
+
+	unmoved := probe.watchControls(t, blockedIssue(blocked), blockedIssue(claimed), blockedIssue(neighbor))
+	updated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimer", IssueID: claimed, Claim: true})
+	if err != nil {
+		t.Fatalf("claim %s: %v", claimed, err)
+	}
+	// The must-flip term: without a landed claim this case asserts nothing.
+	if !updated.Changed || updated.Issue.Status != types.StatusInProgress {
+		t.Fatalf("claim of %s = (Changed %v, status %q), want a committed move to %q",
+			claimed, updated.Changed, updated.Issue.Status, types.StatusInProgress)
+	}
+	if got := probe.rawStatus(t, blockedIssue(claimed)); got != string(types.StatusInProgress) {
+		t.Fatalf("stored status for %s = %q, want %q: the claim has to have landed for the rest of this case to mean anything",
+			claimed, got, types.StatusInProgress)
+	}
+
+	unmoved.requireControlsUnmoved(t, "a claim is not a blocked-state event and reaches nothing outside its own row")
+}
+
+// createIssueOperationsBlockedIssue creates one open task blocked by an
+// existing issue, through the role's own create-with-edges. The flag it ends up
+// carrying is EARNED by that verb; nothing in these fixtures can write it.
+func createIssueOperationsBlockedIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, blockerID string) {
+	t.Helper()
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue: &types.Issue{
+			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		},
+		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
+	}); err != nil {
+		t.Fatalf("create %s blocked by %s: %v", id, blockerID, err)
+	}
+}
+
 // seedIssueOperationsLabeledIssue creates one open task at an explicit ID
 // carrying labels, through the store seed hook rather than the guarded create,
 // so the labels are already durable state when the case under test runs.
