@@ -45,6 +45,14 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ListMaxRowsIsHonored", func(t *testing.T) {
 		conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
 	})
+	// The same cap, driven along the OFFSET axis. This body hands its seam the
+	// widened limit and lets internal/storage/domain/db size the bound and the
+	// cap from it, where the store-backed body sizes both above the seam — two
+	// compositions of one boundary, which is exactly where they can disagree
+	// by a row.
+	t.Run("ListMaxRowsBoundaryIsLimitPlusOffset", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
+	})
 	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
 		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 	})

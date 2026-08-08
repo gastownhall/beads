@@ -900,6 +900,173 @@ func RunReaderListMaxRowsIsHonored(t *testing.T, ctx context.Context, fixture Re
 	}
 }
 
+// RunReaderListMaxRowsBoundaryIsLimitPlusOffset pins WHICH WINDOW the cap is
+// sized against: the rows the query TOUCHES, Limit+Offset, not the rows the
+// caller receives (reader.go, ListRequest.MaxRows).
+//
+// A row Offset skips is a row the query matched, so an offset walks a caller
+// TOWARD the breaker and never past it. The boundary that follows is exact:
+// Limit+Offset <= MaxRows is a page whatever the result set does, and
+// Limit+Offset > MaxRows fires as soon as that many rows match. The case above
+// drives that boundary along the LIMIT axis at Offset 0; this one drives it
+// along the OFFSET axis, with the limit and the cap held still, so the only
+// thing that moves between the last page and the first refusal is one row of
+// skip.
+//
+// WHY IT IS A CASE OF ITS OWN rather than another arm of the one above: the two
+// seams compose the window differently — the store-backed body widens the
+// filter and then sizes its probe row (workapi.WithRowsBeforeThePage, then
+// WithFetchOneExtra), the unit-of-work body hands its seam the widened limit
+// and lets internal/storage/domain/db size both. Either composition can be one
+// row wrong in a way no request without an offset can see, and the two can be
+// wrong in DIFFERENT directions: the cap bump at the equal boundary keys off
+// the widened window on one side and off the page on the other unless both are
+// written to key off the same one.
+//
+// THE FIXTURE HAS TO REACH THE CAP FOR ANY OF THAT TO BE VISIBLE. Five rows
+// against a cap of three: every window below is bounded at four rows or fewer,
+// so each query has more matching rows behind it than its bound, and a body
+// that fetched one row too many or counted one row too few has somewhere to
+// show it. Three rows would make the two non-firing cases pass on a body with
+// no cap at all.
+func RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	const rowCap = 3
+	scope := readerLabel(fixture, "maxrowswindow")
+	var ids []string
+	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Hour)
+	for i, tag := range []string{"a", "b", "c", "d", "e"} {
+		id := readerID(fixture, "maxrowswindow", tag)
+		ids = append(ids, id)
+		issue := readerIssue(id, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Minute)
+		issue.CreatedAt, issue.UpdatedAt = at, at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	idScope := readerIDFilter(ids...)
+
+	// The order every expectation below is a window of, READ rather than
+	// assumed: which end "created" starts from is the query's business, and
+	// this case is about which rows the cap counts, not about that.
+	unpaged, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", Limit: readerLimit(0),
+	})
+	if err != nil {
+		t.Fatalf("List unpaged: %v", err)
+	}
+	order := readerPageIDs(unpaged)
+	if len(order) != len(ids) {
+		t.Fatalf("List unpaged returned %v, want the %d seeded rows: a result set smaller than the bound cannot observe the cap this case drives",
+			order, len(ids))
+	}
+
+	// The window, one row of offset at a time, against a cap of three.
+	for _, test := range []struct {
+		what   string
+		limit  int
+		offset int
+		fires  bool
+	}{
+		// Limit+Offset == MaxRows-1: strictly inside the cap.
+		{"Limit+Offset one row inside the cap", 1, 1, false},
+		// Limit+Offset == MaxRows: the touched window is exactly the cap, and
+		// the probe row that answers has-more must not be counted against it.
+		{"Limit+Offset exactly at the cap", 2, 1, false},
+		// Limit+Offset == MaxRows+1: the same limit and the same cap, one more
+		// row of skip, and the query can now touch more rows than the cap
+		// allows.
+		{"Limit+Offset one row past the cap", 2, 2, true},
+	} {
+		what := test.what
+		page, err := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "created",
+			Limit: readerLimit(test.limit), Offset: test.offset,
+			MaxRows: rowCap, MaxRowsSource: "--max-rows",
+		})
+		if test.fires {
+			if err == nil {
+				t.Errorf("%s (Limit=%d Offset=%d MaxRows=%d over %d matching rows) returned the page %v; a query that may touch %d rows has to fire a cap of %d",
+					what, test.limit, test.offset, rowCap, len(ids), readerPageIDs(page), test.limit+test.offset, rowCap)
+				continue
+			}
+			var tooMany *storageops.ErrTooManyRows
+			if !errors.As(err, &tooMany) {
+				t.Errorf("%s failed with %v, want *ErrTooManyRows", what, err)
+				continue
+			}
+			if tooMany.Cap != rowCap {
+				t.Errorf("%s: the cap error reports Cap = %d, want the %d the request asked for; the probe row's bump must not reach the caller",
+					what, tooMany.Cap, rowCap)
+			}
+			if tooMany.Found <= tooMany.Cap {
+				t.Errorf("%s: the cap error reports Found = %d against Cap = %d; a cap that fired saw more rows than it allows",
+					what, tooMany.Found, tooMany.Cap)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s (Limit=%d Offset=%d MaxRows=%d): %v; a query bounded to %d rows cannot break a cap of %d, so this must not fire",
+				what, test.limit, test.offset, rowCap, err, test.limit+test.offset, rowCap)
+			continue
+		}
+		assertReaderPageIDs(t, what, page, order[test.offset:test.offset+test.limit])
+		// Every window here stops short of the fifth row, so the page that
+		// came back hid something. A body that failed to reach past the skip
+		// answers the same rows with has_more=false.
+		if !page.HasMore {
+			t.Errorf("%s reported has_more=false over %d matching rows; the row past the page is what the bound has to have reached",
+				what, len(ids))
+		}
+	}
+
+	// THE SAME BOUNDARY ON THE --ready ARM, which is a different query in both
+	// seams — a blocker-aware union rather than the search — reached through
+	// the same request and the same cap. Both sides are driven: an arm that
+	// refused every capped ready request would pass on the firing half alone.
+	//
+	// WHICH rows come back is deliberately not asserted here. The ready query
+	// runs in its sort POLICY's order and the display order is applied to the
+	// page afterwards, so a bounded ready query picks its rows in an order this
+	// request does not name — that promise is
+	// RunReaderReadySortPoliciesOrderTheSameRows's, and restating it here would
+	// pin an order the contract does not owe. What this arm owes is the cap.
+	readyAll, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created", Limit: readerLimit(0),
+	})
+	if err != nil {
+		t.Fatalf("List --ready unpaged: %v", err)
+	}
+	if got := readerPageIDs(readyAll); len(got) != len(ids) {
+		t.Fatalf("List --ready unpaged returned %v, want the %d seeded rows: they are open, unassigned and unblocked, and a smaller ready set cannot reach the cap",
+			got, len(ids))
+	}
+	readyAt, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created",
+		Limit: readerLimit(2), Offset: 1, MaxRows: rowCap, MaxRowsSource: "--max-rows",
+	})
+	switch {
+	case err != nil:
+		t.Errorf("List --ready at Limit=2 Offset=1 under MaxRows=%d: %v; the touched window is exactly the cap and must not fire", rowCap, err)
+	case len(readyAt.Items) != 2:
+		t.Errorf("List --ready at Limit=2 Offset=1 returned %v, want the 2 rows behind the skip", readerPageIDs(readyAt))
+	}
+	readyOver, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created",
+		Limit: readerLimit(2), Offset: 2, MaxRows: rowCap, MaxRowsSource: "--max-rows",
+	})
+	if err == nil {
+		t.Fatalf("List --ready at Limit=2 Offset=2 under MaxRows=%d returned the page %v; the ready query counts a skipped row the same way the search does",
+			rowCap, readerPageIDs(readyOver))
+	}
+	var readyTooMany *storageops.ErrTooManyRows
+	if !errors.As(err, &readyTooMany) {
+		t.Fatalf("List --ready at Limit=2 Offset=2 under MaxRows=%d failed with %v, want *ErrTooManyRows", rowCap, err)
+	}
+	if readyTooMany.Cap != rowCap {
+		t.Errorf("List --ready: the cap error reports Cap = %d, want the %d the request asked for", readyTooMany.Cap, rowCap)
+	}
+}
+
 // RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse pins
 // ListRequest.SkipCounts (reader.go:160-175). Two halves, and the second is
 // the load-bearing one:

@@ -302,13 +302,15 @@ type ListRequest struct {
 	// this leaf does not import it, and no answer depends on that.
 	//
 	// EVERY IMPLEMENTATION HONORS IT, and they agree on when it fires: when
-	// the query matched more rows than the cap allows AND the page the caller
-	// asked for could have exceeded it. A cap looser than Limit never fires,
-	// because a page of Limit rows can never break it — the two seams size
-	// that window through one function
-	// (internal/storage/issueops.SearchProbeLimit) so they cannot disagree
-	// about the boundary. A row skipped by Offset still counts: it is a row
-	// the query matched.
+	// the query matched more rows than the cap allows AND the window the
+	// request asked the query to TOUCH could have exceeded it. THAT WINDOW IS
+	// Limit+Offset, NOT Limit. A row Offset skips is a row the query matched,
+	// so an offset walks a caller toward the breaker and never past it: a cap
+	// of Limit+Offset or looser never fires, because a query bounded to that
+	// many rows cannot break it, and one more row of offset is what flips the
+	// same request to a refusal. The two seams size that window through one
+	// function (internal/storage/issueops.SearchProbeLimit) so they cannot
+	// disagree about the boundary.
 	//
 	// Unlike SkipCounts and SkipLabels it IS carried onto the ReadyFlag arm.
 	MaxRows int
