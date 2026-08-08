@@ -127,6 +127,12 @@ func TestEmbeddedBatchCloserDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunBatchCloserDoesNotMutateTheCallerRequest(t, ctx, newEmbeddedBatchCloserFixture(t, "bcsnapshot"))
 }
 
+func TestEmbeddedBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunBatchCloserSettlesTheDependersOfWhatItClosed(t, ctx, newEmbeddedBatchCloserFixture(t, "bcblocked"))
+}
+
 func newEmbeddedBatchCloserFixture(t *testing.T, prefix string) conformance.BatchCloserFixture {
 	t.Helper()
 	te := newTestEnv(t, prefix)

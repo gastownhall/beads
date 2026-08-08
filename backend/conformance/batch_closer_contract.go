@@ -1158,6 +1158,64 @@ func assertBatchCloserCarriesNoPrecondition(t *testing.T) {
 	}
 }
 
+// RunBatchCloserSettlesTheDependersOfWhatItClosed pins the blocked-state
+// clause the leaf states for this role: what LANDS leaves its dependers
+// settled in the SAME transaction the batch commits.
+//
+// The existing claim case observes an unblocking from inside a batch only
+// THROUGH THE CLAIM — a row the batch unblocked turns up as the winner. That
+// is a role answer, and a role answer to "is this ready" can be computed from
+// the live edge set by a backend that never denormalized. This one reads the
+// raw column, which is the read that cannot be satisfied that way.
+//
+// The batch closes a blocker AND an unrelated item, so a body that collapsed
+// the batch to its first item is still visibly wrong; the control depender
+// hangs off a blocker the batch never names.
+func RunBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
+	t.Helper()
+	blocker := fixture.IssuePrefix + "-bsbatch-blocker"
+	other := fixture.IssuePrefix + "-bsbatch-other"
+	depender := fixture.IssuePrefix + "-bsbatch-depender"
+	child := fixture.IssuePrefix + "-bsbatch-child"
+	wispDepender := fixture.IssuePrefix + "-bsbatch-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsbatch-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsbatch-ctldepender"
+	for _, id := range []string{blocker, other, depender, child, controlBlocker, controlDepender} {
+		seedBatchCloserIssue(t, ctx, fixture, id)
+	}
+	seedBatchCloserWisp(t, ctx, fixture, wispDepender)
+	seedBatchCloserEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	seedBatchCloserEdge(t, ctx, fixture, child, depender, types.DepParentChild)
+	seedBatchCloserEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	seedBatchCloserEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the direct depender of a batch item")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispDepender), blockedIssue(blocker), "the cross-plane depender of a batch item")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child's block is inherited from the depender")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker), "the control's blocker is in no batch")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedIssue(child), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	result, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "closer",
+		Items: []publicops.BatchCloseItem{{IssueID: blocker}, {IssueID: other}},
+	})
+	if err != nil {
+		t.Fatalf("CloseBatch: %v", err)
+	}
+	for i, outcome := range result.Outcomes {
+		if outcome.Err != nil || !outcome.Changed {
+			t.Fatalf("outcome[%d] = %#v, want a landed close: the postcondition only applies to what LANDED", i, outcome)
+		}
+	}
+
+	flip.requireFlippedTo(t, 0, "a batch settles the dependers of every item that landed, in the transaction the batch commits")
+}
+
 func seedBatchCloserIssue(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id string, labels ...string) {
 	t.Helper()
 	issue := &types.Issue{
