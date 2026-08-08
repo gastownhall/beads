@@ -130,9 +130,10 @@ type WalkTreeRequest struct {
 	// `bd dep tree`'s own --help has always said, and stating it here keeps the
 	// promise honest rather than implied.
 	//
-	// UNLIKE ListRequest.MaxRows, EVERY IMPLEMENTATION HONORS IT. The cap lives
-	// in the one shared walk body all three backends run, so there is no
-	// unit-of-work arm that has to refuse the field with ErrUnsupported.
+	// EVERY IMPLEMENTATION HONORS IT, as ListRequest.MaxRows is honored
+	// everywhere too — here because the cap lives in the one shared walk body
+	// all three backends run, rather than in two query paths that have to size
+	// the same window.
 	MaxRows int
 	// MaxRowsSource attributes the cap to whatever knob set it — "--max-rows",
 	// "BEADS_MAX_ROWS", or empty for a library caller — and that attribution is

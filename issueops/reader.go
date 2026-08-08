@@ -87,12 +87,19 @@ type ReadyRequest struct {
 	// stay distinguishable, which is what lets one constant serve both
 	// surfaces.
 	Limit *int
-	// Offset skips the first N matching rows. It is honored by the
-	// unit-of-work implementation, which renders OFFSET; the store-backed one
-	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
-	// naming the operation and the backend. What it never does is silently
-	// return an unpaged answer, so a caller that sets it either gets the page
-	// it asked for or an error it can classify with errors.As.
+	// Offset skips the first N matching rows, on EVERY implementation. The
+	// page a caller receives is the rows at positions [Offset, Offset+Limit)
+	// of the answer the same request returns unpaged, in the same order.
+	//
+	// WHERE the skip happens is not a backend's choice either. One seam
+	// renders OFFSET and one renders LIMIT without it, so both bodies reach
+	// past the skipped rows and drop them in the shared page epilogue
+	// (internal/workapi.FinishPageAt) — which is also the only sequence that
+	// is right for a sort SQL cannot express, since that order first exists
+	// after the fetch.
+	//
+	// An Offset past the end of the result set is an empty page and a nil
+	// error, not a failure: a pager that walks off the end has its answer.
 	//
 	// A ready request carries no keyset position, so there is no portable way
 	// to page ready work. A caller that must page across backends pages a
@@ -266,12 +273,10 @@ type ListRequest struct {
 	// is derived from it inside the implementation, together with the
 	// over-fetch that detects truncation.
 	Limit *int
-	// Offset skips the first N matching rows. It is honored by the
-	// unit-of-work implementation, which renders OFFSET; the store-backed one
-	// cannot, and REFUSES a non-zero Offset with a typed *ErrUnsupported
-	// naming the operation and the backend. What it never does is silently
-	// return an unpaged answer, so a caller that sets it either gets the page
-	// it asked for or an error it can classify with errors.As.
+	// Offset skips the first N matching rows, on EVERY implementation, and the
+	// page is the rows at positions [Offset, Offset+Limit) of the answer the
+	// same request returns unpaged. See ReadyRequest.Offset for where the skip
+	// is applied and why that is not a backend's choice either.
 	//
 	// THE PORTABLE WAY TO PAGE IS THE KEYSET POSITION below,
 	// AfterCreatedAt/AfterID: every implementation honors it, and it does not
@@ -296,16 +301,14 @@ type ListRequest struct {
 	// caller can tell the cap firing from any other failure with errors.As;
 	// this leaf does not import it, and no answer depends on that.
 	//
-	// It is HONORED by the store-backed implementation and REFUSED by the
-	// unit-of-work one, with a typed *ErrUnsupported naming the operation and
-	// the backend. That is the exact INVERSE of Offset above, and for the same
-	// kind of reason: the unit-of-work query path threads no cap, so a body
-	// that accepted the field would answer an uncapped query to a caller who
-	// asked for a circuit breaker. What no implementation does is silently
-	// ignore it, so a caller either gets the cap it asked for or an error it
-	// can classify with errors.As. `bd list --max-rows --proxied-server`
-	// already refuses one layer up, in the CLI; this is the same refusal for
-	// the callers that are not the CLI.
+	// EVERY IMPLEMENTATION HONORS IT, and they agree on when it fires: when
+	// the query matched more rows than the cap allows AND the page the caller
+	// asked for could have exceeded it. A cap looser than Limit never fires,
+	// because a page of Limit rows can never break it — the two seams size
+	// that window through one function
+	// (internal/storage/issueops.SearchProbeLimit) so they cannot disagree
+	// about the boundary. A row skipped by Offset still counts: it is a row
+	// the query matched.
 	//
 	// Unlike SkipCounts and SkipLabels it IS carried onto the ReadyFlag arm.
 	MaxRows int

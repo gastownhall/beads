@@ -62,22 +62,21 @@ type QueryRequest struct {
 	// than a caller can check for.
 	Limit *int
 
-	// Offset skips the first N MATCHING rows. It is honored by the
-	// unit-of-work implementation and REFUSED by the store-backed one with a
-	// typed *ErrUnsupported naming the operation and the backend, exactly as
-	// ListRequest.Offset is; what neither does is silently return an unpaged
-	// answer. A negative Offset is ErrValidation everywhere.
+	// Offset skips the first N MATCHING rows, on EVERY implementation and for
+	// EVERY shape of expression, exactly as ListRequest.Offset does. A
+	// negative Offset is ErrValidation everywhere.
 	//
-	// THE STORE-BACKED REFUSAL IS UNIFORM, not per-expression, and that is a
-	// decision rather than an oversight. That body could in principle skip
-	// rows for a PREDICATE query, where the skipping happens in Go and no SQL
-	// OFFSET is involved — but which shape an expression takes is decided by
-	// the evaluator, not by the caller, so an Offset that worked for
-	// `type=bug OR type=task` and refused `type=bug` would be a refusal a
-	// caller could not predict. One answer per backend is the weaker promise
-	// and the checkable one.
+	// IT IS UNIFORM, not per-expression, and that is a decision rather than an
+	// accident of the seams. One body renders SQL OFFSET for a
+	// filter-expressible query and the other reaches past the skipped rows and
+	// drops them in Go; both skip in Go for a predicate query, which is
+	// unbounded and has nothing to push down. Which shape an expression takes
+	// is decided by the evaluator, not by the caller, so an Offset that
+	// behaved differently for `type=bug OR type=task` than for `type=bug`
+	// would be unpredictable from the outside. One answer everywhere is the
+	// only checkable promise.
 	//
-	// IT SKIPS MATCHES, wherever it is honored — never candidate rows. A skip
+	// IT SKIPS MATCHES — never candidate rows. A skip
 	// applied before the predicate would discard rows the predicate would have
 	// rejected anyway and hand back a short page, which is the failure that
 	// made `bd query --offset` refuse OR queries outright.
@@ -142,9 +141,8 @@ type Querier interface {
 	//
 	// Querying is a READ. Nothing here records a history entry, fires a
 	// completion hook or changes a row, and a refusal changes nothing either.
-	// Deterministic request-validation failures match ErrValidation, an
-	// Offset a backend cannot serve is *ErrUnsupported, and result values are
-	// unspecified when error is non-nil. Implementations never mutate
-	// caller-owned request values.
+	// Deterministic request-validation failures match ErrValidation, and
+	// result values are unspecified when error is non-nil. Implementations
+	// never mutate caller-owned request values.
 	Query(ctx context.Context, req QueryRequest) (IssuePage, error)
 }
