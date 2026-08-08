@@ -191,10 +191,16 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		if err := rejectResolvedMaxRowsUnderProxiedServer(in.MaxRows); err != nil {
-			return err
-		}
+		// The cap USED to be rejected here: the proxied query path threaded no
+		// MaxRows, so honoring it would have been silence. It threads one now
+		// (internal/storage/domain/db sizes its bound and enforces the cap
+		// through the same two functions the store seam uses), so this route
+		// answers *ErrTooManyRows the same way the direct route below does —
+		// same message, same exit code.
 		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		return nil
@@ -499,7 +505,8 @@ func init() {
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
 
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(listCmd)
+	// ROUTED, not direct-only: both routes thread the cap now.
+	addRoutedMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

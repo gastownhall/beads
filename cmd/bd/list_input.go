@@ -312,9 +312,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	//
 	// Resolving it HERE also means it is resolved exactly once per invocation.
 	// resolveMaxRowsEnvOnly warns on a malformed BEADS_MAX_ROWS every time it
-	// runs, so runListCore's proxied-server refusal reads the value this
-	// resolved (rejectResolvedMaxRowsUnderProxiedServer) rather than resolving
-	// a second time and warning twice.
+	// runs, so a second resolve downstream would warn twice.
 	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
 	if err != nil {
 		return in, err
