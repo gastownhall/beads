@@ -37,6 +37,27 @@ import (
 //     measured drift in that family lived in a WRAPPER — but a mutation there
 //     reddens all three legs at once and proves nothing about per-leg wiring.
 //
+// TWO STRUCTURAL ASYMMETRIES, RECORDED HERE AND DELIBERATELY NOT FIXED. Both
+// are shape differences between the store-backed and unit-of-work wirings that
+// are not semantic divergences today; the cases pin the behavior so that if
+// either becomes one, it becomes one loudly.
+//
+//   - CREATE-WITH-EDGES runs ONE terminal recompute over the union of created
+//     ids and per-edge affected sets on the store-backed side
+//     (internal/storage/issueops/create.go), and per-edge maintenance through
+//     the dependency repository's Insert on the unit-of-work side. Convergent
+//     by ARGUMENT — adds are monotonic and the one non-monotonic add
+//     (parent-child) recomputes on both — and an argument is not a pinned fact.
+//     RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction
+//     is what pins it.
+//   - THE WISP PLANE has store-only recompute call sites with no unit-of-work
+//     twin: the persistence move (dolt's demoteToWispInTx) and the store's own
+//     wisp delete and batch wisp delete. Neither is on a role path — the
+//     Deleter role reaches wisps through the shared delete body, and a wisp
+//     CLOSE routes inside closeIssueInTx on all three legs rather than through
+//     a separate site — so no case here covers them, and that is a scope
+//     statement rather than an omission.
+//
 // HOW THESE CASES CANNOT BE THE DEFECT THIS PROGRAM ALREADY SHIPPED. One
 // retired case seeded is_blocked = 1 with no blocker edge, so the guard it was
 // named for short-circuited and it could never fail
