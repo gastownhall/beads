@@ -196,7 +196,13 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 
 	filter := types.IssueFilter{
-		Limit:          SQLLimit(in),
+		Limit: SQLLimit(in),
+		// The offset is carried for the callers that consume this filter as a
+		// VALUE and run their own query — `bd list --watch` and the proxied
+		// hierarchical --parent walk — where the seam beneath them renders it.
+		// Both implementations of issueops.Reader take it back off
+		// (WithRowsBeforeThePage) and skip in the shared page epilogue instead;
+		// FinishPageAt says why the role cannot leave it here.
 		Offset:         in.Offset,
 		SortBy:         in.SortBy,
 		SortDesc:       in.Reverse,
