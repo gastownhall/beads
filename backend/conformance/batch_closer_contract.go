@@ -91,6 +91,12 @@ type BatchCloserFixture struct {
 	// entry-per-call clause. Nil means this backend cannot observe history,
 	// and the two history cases then skip loudly rather than pass quietly.
 	CountHistory func(context.Context) (int, error)
+	// CountHistoryMatching is CountHistory narrowed to the entries whose
+	// message matches a SQL LIKE pattern ("" = every entry), which is how the
+	// wisp-naming case asks whether any entry NAMES an id. Nil means this
+	// backend cannot observe history by message, and that case skips loudly.
+	// See history_matching.go for the convention.
+	CountHistoryMatching func(context.Context, string) (int, error)
 }
 
 // RunBatchCloserOutcomesMirrorItemsIndexForIndex pins the index correspondence
@@ -711,6 +717,7 @@ func RunBatchCloserDurableHistoryNeverNamesAWisp(t *testing.T, ctx context.Conte
 	t.Helper()
 	requireBatchCloserWisps(t, fixture)
 	requireBatchCloserHistory(t, fixture)
+	requireBatchCloserHistoryMatching(t, fixture)
 	durable := fixture.IssuePrefix + "-wisphistory-durable"
 	wisp := fixture.IssuePrefix + "-wisphistory-wisp"
 	seedBatchCloserIssue(t, ctx, fixture, durable)
@@ -1323,11 +1330,13 @@ func assertBatchCloserWispStatus(t *testing.T, ctx context.Context, fixture Batc
 // message mentions id anywhere. The contract asserts on the MESSAGE rather than
 // on a count alone because "an entry naming a wisp" is a claim about what
 // shipped, and only the message carries an id at all.
+//
+// The ids this is called with are the fixture's own seeded ones, which carry no
+// LIKE wildcard, so the surrounding %s are the only wildcards in the pattern.
 func batchCloserHistoryEntriesNaming(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id string) int {
 	t.Helper()
-	var entries int
-	if err := fixture.QueryScalar(ctx,
-		"SELECT COUNT(*) FROM dolt_log WHERE message LIKE ?", []any{"%" + id + "%"}, &entries); err != nil {
+	entries, err := fixture.CountHistoryMatching(ctx, "%"+historyPatternForExactMessage(t, id)+"%")
+	if err != nil {
 		t.Fatalf("count history entries naming %s: %v", id, err)
 	}
 	return entries
@@ -1366,6 +1375,16 @@ func requireBatchCloserHistory(t *testing.T, fixture BatchCloserFixture) {
 	t.Helper()
 	if fixture.CountHistory == nil {
 		t.Skipf("fixture has no CountHistory: this backend cannot observe history, so batchcloser.go:119-122 is UNPINNED here")
+	}
+}
+
+// requireBatchCloserHistoryMatching is requireBatchCloserHistory for the
+// message-scoped count: a backend that can say how LONG its history is but not
+// what an entry READS leaves the wisp-naming clause unpinned, and says so.
+func requireBatchCloserHistoryMatching(t *testing.T, fixture BatchCloserFixture) {
+	t.Helper()
+	if fixture.CountHistoryMatching == nil {
+		t.Skipf("fixture has no CountHistoryMatching: this backend cannot observe history BY MESSAGE, so batchcloser.go:128-135 is UNPINNED here")
 	}
 }
 

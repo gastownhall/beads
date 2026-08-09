@@ -80,7 +80,8 @@ func newUOWBatchCloserFixture(t *testing.T, provider UnitOfWorkProvider, prefix 
 				return "seed comment on " + issueID, err
 			})
 		},
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		QueryScalar:          kit.QueryScalar,
+		CountHistory:         kit.CountHistory,
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 }
