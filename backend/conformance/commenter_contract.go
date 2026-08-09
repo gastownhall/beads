@@ -3,6 +3,8 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"testing"
 	"time"
 
@@ -37,6 +39,16 @@ import (
 // on all three legs, so neither is a divergence being papered over — see
 // RunCommenterRecordsExactlyOneHistoryEntry for why a bound would have been
 // worse than no assertion at all.
+//
+// NO CASE HERE MEASURES TIME BY WAITING FOR IT. created_at is DATETIME(0), so
+// two comments written inside one wall-clock second land on the same stamp and
+// a case that added two comments back to back would be asserting the runner's
+// speed: the second stamp lands one second later either because the body
+// advanced it or because the clock ticked between the two calls, and the two
+// are indistinguishable. Every timing assertion therefore starts from a
+// comment seeded AHEAD of the clock through SeedCommentAt, where no wall-clock
+// reading can produce the value the promise requires — see
+// RunCommenterAdvancesALiveStampPastTheThreadsNewestComment.
 
 // CommenterFixture supplies adapter-specific storage access for the
 // add-comment assertions. Every field is named and typed exactly like the
@@ -58,6 +70,15 @@ type CommenterFixture struct {
 	// A nil hook means "this backend cannot observe history", and the cases
 	// that need it SKIP with that reason rather than pass quietly.
 	CountHistory func(context.Context) (int, error)
+	// SeedCommentAt appends one comment to an EXISTING thread at a created_at
+	// the caller chooses, verbatim. It is the import shape — the path that
+	// carries a comment's original timestamp instead of inventing one — and it
+	// is the only hook here that can put a comment where the wall clock is not,
+	// which is what makes the live-add stamp rule observable at all.
+	//
+	// A nil hook means "this backend cannot seed a comment at a chosen time",
+	// and the case that needs it SKIPS with that reason.
+	SeedCommentAt func(ctx context.Context, issueID, author, text string, at time.Time) error
 }
 
 // RunCommenterStoresTextVerbatim pins commenter.go:31-34: blankness is decided
@@ -144,6 +165,98 @@ func RunCommenterResultMirrorsTheStoredRow(t *testing.T, ctx context.Context, fi
 	if truncated := result.Comment.CreatedAt.Truncate(time.Second); !result.Comment.CreatedAt.Equal(truncated) {
 		t.Errorf("returned created_at = %s carries sub-second parts the DATETIME(0) column cannot hold, so it is not cursor-safe",
 			result.Comment.CreatedAt.UTC())
+	}
+}
+
+// RunCommenterAdvancesALiveStampPastTheThreadsNewestComment pins the stamp
+// rule a live add follows (storage/issueops.NextLiveCommentTime): the comment
+// is stamped ONE SECOND past the thread's newest existing comment whenever the
+// clock has not already passed it, so a thread reads back in the order it was
+// written.
+//
+// The order is not otherwise recoverable. A thread reads in (created_at ASC,
+// id ASC) order, created_at holds whole seconds, and since bd-ri8bd a
+// comment's id is a content DIGEST rather than a time-ordered UUIDv7 — so two
+// comments that tie on the second are ordered by hash, arbitrarily with
+// respect to who wrote first. That regression is invisible to every other case
+// in this file: they all read one comment back, or two whose relative order
+// nothing asserts.
+//
+// WHAT THE FIXTURE DELIBERATELY MAKES OBSERVABLE. The thread starts with a
+// comment seeded AN HOUR AHEAD of the clock, which is the whole design of the
+// case:
+//
+//   - Every stamp asserted below is an hour in the future, so no reading of
+//     the wall clock can produce it. A body that dropped the advance stamps
+//     `now` and fails by an hour, not by the sub-second margin a same-second
+//     burst would leave.
+//   - It removes the runner from the assertion. Two comments added back to
+//     back land one second apart when the body advances AND when the body does
+//     nothing but the clock ticks between the calls; with the newest comment
+//     an hour out, the clock cannot reach it and only the advance can produce
+//     the value.
+//   - It reaches the branch a same-second burst never proves on its own: the
+//     `newest` argument, not `now`, is what the stamp is derived from.
+//
+// TWO live adds, not one, because the advance has to be REPEATABLE — a body
+// that clamped to the newest stamp without adding the second, or that advanced
+// only past comments it had not written itself, produces a first comment that
+// looks right and a second that ties with it.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing. The anchor and its whole
+// thread are seeded here under this case's own id, the rule is scoped to one
+// issue_id, and no assertion reads a count, a stamp or a history depth that
+// another case could have moved. The seed's own stamp is read back RAW before
+// anything leans on it, because an import path that re-stamped it with the
+// clock would leave the thread with no comment ahead of `now` — and then every
+// equality below would hold for a body that advances nothing.
+func RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t *testing.T, ctx context.Context, fixture CommenterFixture) {
+	t.Helper()
+	if fixture.SeedCommentAt == nil {
+		t.Skip("fixture cannot seed a comment at a chosen time: SeedCommentAt is nil, so the live-add stamp rule is unpinned on this backend")
+	}
+	anchor := fixture.IssuePrefix + "-advance"
+	seedCommenterIssue(t, ctx, fixture, anchor)
+
+	const seeded = "seeded an hour ahead of the clock"
+	ahead := time.Now().UTC().Truncate(time.Second).Add(time.Hour)
+	if err := fixture.SeedCommentAt(ctx, anchor, "importer", seeded, ahead); err != nil {
+		t.Fatalf("seed a comment on %s at %s: %v", anchor, ahead, err)
+	}
+	if stored := readCommenterStampOf(t, ctx, fixture, anchor, seeded); !stored.Equal(ahead) {
+		t.Fatalf("the seeded comment is stored at %s, want %s verbatim: a seed the clock has already passed cannot show that a live add advances past it",
+			stored, ahead)
+	}
+
+	live := []string{"first live", "second live"}
+	for i, text := range live {
+		result, err := fixture.Commenter.AddComment(ctx, publicops.AddCommentRequest{
+			Author:  "author",
+			IssueID: anchor,
+			Text:    text,
+		})
+		if err != nil {
+			t.Fatalf("AddComment %q: %v", text, err)
+		}
+		requireCommenterResult(t, result)
+
+		want := ahead.Add(time.Duration(i+1) * time.Second)
+		stored := readCommenterRow(t, ctx, fixture, "comments", result.Comment.ID)
+		if got := stored.CreatedAt.UTC(); !got.Equal(want) {
+			t.Errorf("live comment %q is stored at %s, want %s — one second past the thread's newest comment, which was seeded an hour out: a stamp taken from the clock lands an hour early and reads back in front of a comment written before it",
+				text, got, want)
+		}
+		// The result is what a caller pages from, so it has to carry the
+		// advanced value too, not the instant the body observed.
+		if got := result.Comment.CreatedAt.UTC(); !got.Equal(stored.CreatedAt.UTC()) {
+			t.Errorf("AddComment(%q) returned created_at %s while the row holds %s: the result must carry the stamp the row got",
+				text, got, stored.CreatedAt.UTC())
+		}
+	}
+
+	want := append([]string{seeded}, live...)
+	if got := readCommenterThreadTexts(t, ctx, fixture, anchor, len(want)); !slices.Equal(got, want) {
+		t.Errorf("thread %s reads back as %v, want %v: the stamps are what carry write order to a reader", anchor, got, want)
 	}
 }
 
@@ -522,6 +635,44 @@ func readCommenterRow(t *testing.T, ctx context.Context, fixture CommenterFixtur
 		t.Fatalf("read the %s row %s the result names: %v", table, commentID, err)
 	}
 	return row
+}
+
+// readCommenterStampOf reads the created_at of the one comment on a thread
+// carrying text. It addresses the row by its TEXT rather than by an id because
+// the seeding hook derives ids per backend and a case that had to know the
+// shape of one would be asserting the backend's id scheme.
+func readCommenterStampOf(t *testing.T, ctx context.Context, fixture CommenterFixture, issueID, text string) time.Time {
+	t.Helper()
+	var stamp time.Time
+	if err := fixture.QueryScalar(ctx,
+		"SELECT created_at FROM comments WHERE issue_id = ? AND text = ?",
+		[]any{issueID, text}, &stamp); err != nil {
+		t.Fatalf("read the created_at of %q on %s: %v", text, issueID, err)
+	}
+	return stamp.UTC()
+}
+
+// readCommenterThreadTexts reads one thread's first n comments in the order a
+// reader walks them — (created_at ASC, id ASC), which is the order both
+// comment-read bodies use.
+//
+// One row per query, because the fixture's scalar hook answers exactly one row
+// on the unit-of-work wiring and reading a whole thread through it would be a
+// hook this contract does not have.
+func readCommenterThreadTexts(t *testing.T, ctx context.Context, fixture CommenterFixture, issueID string, n int) []string {
+	t.Helper()
+	texts := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		//nolint:gosec // G201: the offset is this loop's own index.
+		query := fmt.Sprintf(
+			"SELECT text FROM comments WHERE issue_id = ? ORDER BY created_at ASC, id ASC LIMIT 1 OFFSET %d", i)
+		var text string
+		if err := fixture.QueryScalar(ctx, query, []any{issueID}, &text); err != nil {
+			t.Fatalf("read comment %d of the thread on %s: %v", i, issueID, err)
+		}
+		texts = append(texts, text)
+	}
+	return texts
 }
 
 // commenterAnchorRow is the issues row a comment must not disturb: three
