@@ -722,7 +722,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.claim`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
+	// Capabilities The operations this server actually implements, derived from its route table. v0's vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.get`, `issues.create`, `issues.claim`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; it grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -741,6 +741,122 @@ type ContextResponse struct {
 
 	// SchemaVersion The shared JSON schema version — the same constant the CLI's stdout JSON envelope reports. Diagnostic only: it can move for CLI-only reasons with no HTTP wire change, so clients MUST NOT branch on it.
 	SchemaVersion int `json:"schema_version"`
+}
+
+// CreateIssueDependency One edge created with the issue. It carries `reverse` where `BatchCreateDependency` does not, because that operation's items have no id a target could point back at and this one's issue does.
+type CreateIssueDependency struct {
+	// Metadata One metadata value: ANY JSON value — string, number, boolean, null, array or object — because typed values enter through the explicit JSON metadata path and persist in older rows. It is not a string, and a client must not decode it as one.
+	//
+	// Where a member of this type is OMITTED, the key is absent; where it is present holding `null`, the key exists and holds null. Those are different states and this surface reports both.
+	Metadata MetadataValue `json:"metadata,omitempty"`
+
+	// Reverse Writes the edge from `target_id` TO the new issue rather than from it. It is what lets a create declare an edge that points INTO the row being minted — the id no caller could have spelled beforehand — and it is the member that makes `dependency_cycle` reachable on this operation at all.
+	Reverse *bool `json:"reverse,omitempty"`
+
+	// TargetId The other endpoint of the edge.
+	TargetId string `json:"target_id"`
+
+	// Type The edge type, from the same OPEN vocabulary `Dependency.type` carries: checked for BEING a storable value, never for membership of a known-types list, so a workspace's own type passes.
+	Type string `json:"type"`
+}
+
+// CreateIssueRequest One issue, its parent, its explicit edges and its waits-for gate, created as one act.
+//
+// It is FLAT rather than nesting the issue's fields under an `issue` member, unlike `UpdateIssueRequest`'s `patch`: a patch has to distinguish a member that is absent from one set to its zero value, and a create has no such distinction to make — an absent member is the workspace default, which is the same answer a nested object would have given.
+//
+// The issue members mirror `ApplyCreateItem` exactly, minus that schema's two plan-only members (`key` and `metadata_refs`, which name items of a request this operation has only one of). What this adds is the edge vocabulary that operation moves into `dep_add` items: `parent_id`, `inherit_labels_from_parent`, `dependencies` and `waits_for`.
+type CreateIssueRequest struct {
+	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
+
+	// Actor Who is creating the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the created edges' author column, the history entry's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
+	//
+	// It is NOT the issue's `created_by`, which this operation does not publish: this is the caller-asserted provenance of the ACT, and the row's own author column is left to the implementation.
+	Actor    string  `json:"actor"`
+	Assignee *string `json:"assignee,omitempty"`
+
+	// DeferUntil RFC 3339. The issue is hidden from ready work until then. Not nullable, for `estimated_minutes`' reason.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
+
+	// Dependencies The complete set of explicit edges created with the issue. Authoritative, not a patch. Every edge is written in the same transaction as the row, so an edge this request cannot write means no issue either.
+	//
+	// A TARGET NEED NOT BE A ROW THIS DATABASE HOLDS: an `external:` reference and an id belonging to another repository are legitimate targets, so only an absence this database can SEE is refused — `ApplyDepAddItem`'s rule, unchanged.
+	Dependencies *[]CreateIssueDependency `json:"dependencies,omitempty"`
+	Description  *string                  `json:"description,omitempty"`
+	Design       *string                  `json:"design,omitempty"`
+
+	// DueAt RFC 3339. Not nullable, for `estimated_minutes`' reason.
+	DueAt *time.Time `json:"due_at,omitempty"`
+
+	// Ephemeral Creates the issue on the EPHEMERAL plane rather than the durable one, exactly as it does for `POST /v0/beads/issues:batchApply`. Mutually exclusive with `no_history`.
+	Ephemeral *bool `json:"ephemeral,omitempty"`
+
+	// EstimatedMinutes An estimate in minutes. Absent leaves it unset. NOT nullable, unlike `IssuePatchBody.estimated_minutes`: a create has nothing to clear, so `null` here would be a second spelling of omission and is a `400`.
+	EstimatedMinutes *int `json:"estimated_minutes,omitempty"`
+
+	// ExternalRef e.g. `gh-9`. Not nullable, for `estimated_minutes`' reason.
+	ExternalRef *string `json:"external_ref,omitempty"`
+
+	// ForceIdPrefix Permits an explicit `id` outside the workspace's configured issue prefix. It bypasses ONLY that check: it is not a force on the create-only guard, so an occupied id is still a `409`.
+	ForceIdPrefix *bool `json:"force_id_prefix,omitempty"`
+
+	// Id An explicit id for the new row, CREATE-ONLY: an id that already names a stored row is a `409` `already_exists` and nothing is written — never an adoption and never an overwrite. It is checked against the workspace's configured issue prefix unless `force_id_prefix` is set. Absent is the ordinary case and the server mints one.
+	Id *string `json:"id,omitempty"`
+
+	// InheritLabelsFromParent Copies the parent's labels onto the new issue at creation, on top of `labels`. It has no effect without `parent_id`.
+	//
+	// The DEFAULT IS FALSE and diverges from `bd create --parent`, whose default is to inherit. A wire caller sends what it means: this operation has no `--no-inherit-labels` to turn off, and a create that silently acquired labels the request never named would be a set the caller has to read back to learn.
+	InheritLabelsFromParent *bool `json:"inherit_labels_from_parent,omitempty"`
+
+	// IssueType Issue type. Spelled `issue_type` rather than `type`, matching the member `Issue` carries, and validated against the built-ins plus the workspace's configured custom types by the ROLE — this server cannot read that vocabulary without a transaction, so it checks only what this schema declares and an unknown one arrives as a `400`.
+	//
+	// SEND ONE. The member is optional in this schema and the role validates the EMPTY type against the same vocabulary as any other, where it is neither a built-in nor a configured type — so an omitted `issue_type` is refused with everything else the request asked for. It stays optional because the vocabulary belongs to the workspace and a deployment may configure a default this server cannot read, but it is not optional in practice on any workspace shipped today. `POST /v0/beads/issues:batchCreate` has the same property and does not say so, which is why this member does.
+	IssueType *string `json:"issue_type,omitempty"`
+
+	// Labels The complete label set the issue is created with. Authoritative, not a patch — a create has nothing to add to. `inherit_labels_from_parent` adds the parent's labels on top of it.
+	Labels *[]string `json:"labels,omitempty"`
+
+	// Metadata One metadata value: ANY JSON value — string, number, boolean, null, array or object — because typed values enter through the explicit JSON metadata path and persist in older rows. It is not a string, and a client must not decode it as one.
+	//
+	// Where a member of this type is OMITTED, the key is absent; where it is present holding `null`, the key exists and holds null. Those are different states and this surface reports both.
+	Metadata MetadataValue `json:"metadata,omitempty"`
+
+	// NoHistory Creates the issue on the ephemeral plane WITHOUT history, and without the garbage collection an ordinary ephemeral row is eligible for. Mutually exclusive with `ephemeral`.
+	NoHistory *bool   `json:"no_history,omitempty"`
+	Notes     *string `json:"notes,omitempty"`
+
+	// Owner The human owner, which is a different member from `assignee`: the assignee is who is working it now, the owner is who it is attributed to.
+	Owner *string `json:"owner,omitempty"`
+
+	// ParentId Creates a typed `parent-child` edge from the new issue to this target. It must not duplicate an edge `dependencies` already spells; naming the same pair twice with two types is a `400`.
+	ParentId *string `json:"parent_id,omitempty"`
+
+	// Priority 0 is P0/critical. Absent means the workspace default.
+	Priority *int `json:"priority,omitempty"`
+
+	// Sender Who sent this, for the message-shaped rows an orchestrator creates. Stored verbatim and interpreted by nothing on this surface.
+	Sender *string `json:"sender,omitempty"`
+
+	// Status The status the issue is created in, from this workspace's own configured vocabulary. Absent means the workspace's own default, which is `open` today — unlike `issue_type`, the role fills this one in before it validates.
+	Status *string `json:"status,omitempty"`
+
+	// Title The issue's title. Must not be blank after trimming.
+	Title string `json:"title"`
+
+	// WaitsFor A typed `waits-for` edge from the new issue to a spawner whose children gate it. It records a readiness primitive; it does not define scheduling or execution policy.
+	//
+	// IT IS A TYPED MEMBER HERE AND A METADATA BLOB ON `POST /v0/beads/issues:batchApply`, and the difference follows the ROLE rather than taste: `CreateRequest.WaitsFor` is a typed field that gets the gate defaulted and the "must not duplicate an explicit edge" check, while that operation's `dep_add` item is one generic edge with no typed field to reach. One spelling per operation, and each is its role's.
+	WaitsFor *CreateIssueWaitsFor `json:"waits_for,omitempty"`
+}
+
+// CreateIssueWaitsFor A typed `waits-for` edge from the new issue to a spawner whose children gate it. It records a readiness primitive; it does not define scheduling or execution policy.
+//
+// IT IS A TYPED MEMBER HERE AND A METADATA BLOB ON `POST /v0/beads/issues:batchApply`, and the difference follows the ROLE rather than taste: `CreateRequest.WaitsFor` is a typed field that gets the gate defaulted and the "must not duplicate an explicit edge" check, while that operation's `dep_add` item is one generic edge with no typed field to reach. One spelling per operation, and each is its role's.
+type CreateIssueWaitsFor struct {
+	// Gate The readiness condition: `all-children` or `any-children`. Absent or empty defaults to `all-children`. A value that is neither is refused by the ROLE and reaches the client as a `400`.
+	Gate *string `json:"gate,omitempty"`
+
+	// SpawnerId The dependency target whose children are observed. It must not duplicate an edge `dependencies` or `parent_id` already spells.
+	SpawnerId string `json:"spawner_id"`
 }
 
 // Cycle One circular blocking dependency: its members in EDGE ORDER, so `members[i]` blocks on `members[i+1]` and the last member blocks on the first. The closing edge is implied and is not repeated as a final member.
@@ -1711,6 +1827,9 @@ type AddDependenciesJSONRequestBody = AddDependenciesRequest
 
 // RemoveDependencyJSONRequestBody defines body for RemoveDependency for application/json ContentType.
 type RemoveDependencyJSONRequestBody = RemoveDependencyRequest
+
+// CreateIssueJSONRequestBody defines body for CreateIssue for application/json ContentType.
+type CreateIssueJSONRequestBody = CreateIssueRequest
 
 // UpdateIssueJSONRequestBody defines body for UpdateIssue for application/json ContentType.
 type UpdateIssueJSONRequestBody = UpdateIssueRequest

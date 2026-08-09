@@ -324,6 +324,17 @@ const (
 	// refusals include a question about the GRAPH — a named bead with a
 	// dependent the request did not name.
 	OpDeleteIssues = "deleteIssues"
+	// OpCreateIssue creates ONE issue, with its parent, its explicit edges and
+	// its waits-for gate, as one transaction. It is the plain collection POST
+	// batchCreateIssues left free by spelling itself as a custom method.
+	//
+	// It publishes the whole create vocabulary rather than that operation's
+	// narrow item — `status`, `sender`, `metadata`, `ephemeral`, `no_history`
+	// and an explicit `id` included — which is what makes it usable for a
+	// caller composing a real row, and which is also where its two conflict
+	// codes come from: an occupied id, and the graph refusing the edges the
+	// request asked for.
+	OpCreateIssue = "createIssue"
 	// OpBatchCreateIssues creates many issues as one transaction, or none.
 	OpBatchCreateIssues = "batchCreateIssues"
 	// OpApplyBatch applies an ORDERED, heterogeneous plan — creates, updates,
@@ -503,6 +514,32 @@ var operationCodes = map[string][]Code{
 	// item can collide with a stored row and the role's ErrAlreadyExists is
 	// unreachable from the wire.
 	OpBatchCreateIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The batch's row plus the two codes its narrower vocabulary cannot earn,
+	// and both additions are members rather than judgement calls.
+	//
+	// already_exists arrives with `id`: that operation publishes none, so its
+	// items can never collide with a stored row and the role's ErrAlreadyExists
+	// is unreachable from its wire. Here it is reachable and it is a 409 for
+	// CodeNotClosable's reason — the body is well-formed and STATE refuses it.
+	//
+	// dependency_cycle arrives with `parent_id` and `dependencies[].reverse`:
+	// the first places the new row inside a hierarchy the caller cannot see, so
+	// a blocking edge against its own ancestor is refusable, and the second
+	// writes an edge INTO the id being minted, which is the only way a create
+	// can close a scheduling cycle at all. It is addDependencies' 409 unchanged,
+	// including the hierarchy discriminator.
+	//
+	// NO 404 and no dependency_exists. A target that names nothing is a
+	// statement about the request body rather than a resource this operation was
+	// asked to address — batchCreateIssues' argument, and there is no id in this
+	// path to have missed. And the only type conflict a create can raise is
+	// between two edges of the SAME request, which is a malformed body: no
+	// stored edge can name a pair whose endpoint is an id this request is
+	// minting.
+	OpCreateIssue: {
+		CodeInvalidArgument, CodeAlreadyExists, CodeDependencyCycle,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
 	// The widest row here, and every code on it is inherited from an operation
 	// that already has it: this one performs the lifecycle's writes, the claim's
 	// assignee transfer and the graph's edge assertions inside one transaction,

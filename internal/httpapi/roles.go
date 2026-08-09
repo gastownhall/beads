@@ -93,16 +93,23 @@ func (c checkedBatchCreator) CreateBatch(ctx context.Context, req issueops.Creat
 
 // checkedLifecycle is the lifecycle role every mutation handler is handed.
 //
-// Update, Close and Reopen are why it exists: all three handlers write
-// *result.Issue, which is checkedClaimer's hazard exactly. Create passes
-// through because no handler on this surface reaches it — a single create is
-// unpublished here, and batchCreateIssues goes to issueops.BatchCreator.
+// All four methods are why it exists: every handler over this role writes
+// *result.Issue, which is checkedClaimer's hazard exactly.
 type checkedLifecycle struct{ inner issueops.Lifecycle }
 
-// Create passes the request through unchanged: this surface publishes no
-// create-one operation (batchCreateIssues reaches issueops.BatchCreator).
+// Create refuses a result that reports success without the row the response
+// body is built from, for Close's reason.
+//
+// It USED to pass through, because no handler on this surface reached it. The
+// single create publishes one, and handleCreateIssue writes *result.Issue
+// straight onto the wire, so the same nil-with-nil-error a provider-supplied
+// role can return is a panic on a live server without this.
 func (c checkedLifecycle) Create(ctx context.Context, req issueops.CreateRequest) (issueops.CreateResult, error) {
-	return c.inner.Create(ctx, req)
+	result, err := c.inner.Create(ctx, req)
+	if err == nil && result.Issue == nil {
+		return issueops.CreateResult{}, fmt.Errorf("create: the lifecycle reported success without an issue")
+	}
+	return result, err
 }
 
 // Update refuses a result that reports success without the row the response

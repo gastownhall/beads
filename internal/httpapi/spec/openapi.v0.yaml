@@ -1117,6 +1117,168 @@ paths:
         '503':
           $ref: '#/components/responses/Unavailable'
 
+    post:
+      operationId: createIssue
+      summary: Create one issue
+      description: >-
+        Creates one issue, with its parent, its explicit edges and its waits-for
+        gate, as ONE transaction. A plain collection `POST` rather than a custom
+        method, because creating one member of the collection the path names is
+        what `POST` already means — the same argument `memories.remember` makes
+        on its own collection.
+
+
+        ## It publishes the whole create vocabulary
+
+
+        Every member the role accepts and this surface publishes anywhere is
+        here, and that is deliberate: `POST /v0/beads/issues:batchCreate` spells
+        nine of them, which is what makes it unusable for a caller composing a
+        real row — no `status`, no `sender`, no `metadata`, no `ephemeral`, no
+        `no_history`, no `id`. This operation is the single-issue create with
+        `ApplyCreateItem`'s vocabulary, and the two agree member for member
+        except where a difference is stated below.
+
+
+        THE EDGES ARE HERE, unlike on `issues:batchApply`. That operation splits
+        edges into their own `dep_add` items so a plan's edge order is total;
+        one create has no ordering to express, so `parent_id`, `dependencies`
+        and `waits_for` ride on the request the way `bd create --parent`,
+        `--deps` and `--waits-for` do. Every edge lands in the same transaction
+        as the row: an edge this request could not write is a `400` and the
+        issue is not created either.
+
+
+        ## The explicit id
+
+
+        `id` is CREATE-ONLY. An id that already names a stored row — on either
+        plane — is a `409 already_exists` and nothing is written. It is never an
+        adoption and never an overwrite: `PATCH /v0/beads/issues/{id}` acts on a
+        row that already exists, and `bd import` is the upsert surface, which
+        this API does not publish. Absent is the ordinary case and the server
+        mints one.
+
+
+        ## What this operation deliberately cannot set
+
+
+        `created_at` and `created_by` — a create whose stored creation time and
+        author come from the caller makes the row's own timestamp disagree with
+        the journal entry that records it, and re-dating history is what an
+        import is for. `issues:batchApply`'s create item publishes neither
+        either.
+
+
+        `spec_id`, `await_*`, `mol_type`, `wisp_type`, `work_type`,
+        `storage_class`, `source_*`, `pinned`, `is_template` and the event
+        quartet (`event_kind`, `actor`, `target`, `payload`) — workflow and
+        classification plumbing this surface publishes on no operation, read or
+        write. `PATCH /v0/beads/issues/{id}` says the same of `spec_id` and
+        `await_id`.
+
+
+        `comments` and an inline `dependencies` list on the issue itself — the
+        role refuses both, because edges belong to the request's own
+        `dependencies` member where their direction can be stated.
+
+
+        ## Planes
+
+
+        `ephemeral` and `no_history` create the row on the EPHEMERAL plane
+        rather than the durable one, exactly as they do for `issues:batchApply`.
+        They are mutually exclusive; sending both is a `400`. An edge between
+        rows on opposite planes is refused with everything else the request
+        asked for.
+
+
+        ## Hooks and auto-commit
+
+
+        Hooks do not fire and the per-command auto-commit machinery does not
+        run, exactly as for `POST /v0/beads/issues/{id}:claim`. The only durable
+        effect is the single storage commit the role makes in its own
+        transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateIssueRequest'
+      responses:
+        '200':
+          description: >-
+            The created issue, hydrated with its labels and the edges this
+            request wrote. It is the row as STORED — the minted id, the
+            defaulted status and the persisted timestamps — never the request
+            reflected back.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Issue'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member at any level, an `actor` that
+            is empty after trimming, longer than 256 bytes or carrying control
+            characters, a blank or missing `title`, a member carrying the wrong
+            JSON type, an explicit `null` on any member, a value outside its
+            documented bounds, `ephemeral` together with `no_history` — or a
+            value this workspace's own validation refuses, such as an
+            `issue_type` or `status` outside its configured vocabulary, an
+            OMITTED `issue_type` (see that member), an `id` outside its
+            configured prefix, an edge from the new issue to itself, the same
+            pair named twice by two members, or a dependency, parent or
+            waits-for target that names nothing this workspace holds.
+
+
+            A DEPENDENCY TARGET THAT NAMES NOTHING IS A `400`, NOT A `404`,
+            conforming to `POST /v0/beads/dependencies:add` and
+            `POST /v0/beads/issues:batchCreate`: an edge describes a relation
+            rather than a resource this request was asked to address, and this
+            operation names no id in its path to have missed. Nothing is created
+            in any of these cases.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: >-
+            The request is well-formed and the STATE refuses it, and NOTHING WAS
+            WRITTEN.
+
+
+            `already_exists` is an explicit `id` that already names a stored row.
+            `param` is `id`. There is no force bypass and no upsert: the
+            identical body succeeded before the id was taken and would succeed
+            against a workspace that never took it, which is why this is a `409`
+            rather than a `400` — recovery is to look at the state (adopt the row
+            with `PATCH`, choose another id, or stop) rather than to fix a
+            malformed request.
+
+
+            `dependency_cycle` is the graph refusing the edges this request
+            asked for, spelled exactly as `POST /v0/beads/dependencies:add`
+            spells it and covering both of that operation's refusals: a
+            scheduling cycle, and a blocking edge against the new issue's own
+            ancestor or descendant. The hierarchy case — and only it —
+            additionally carries `issue_id`, `blocker_id` and
+            `blocker_is_ancestor`, so member presence is the discriminator.
+            Neither has a force bypass; both are reachable here because
+            `parent_id` places the new row in a hierarchy the caller cannot see
+            and `dependencies[].reverse` writes an edge INTO it.
+          x-bd-codes: [already_exists, dependency_cycle]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
   /v0/beads/issues:query:
     get:
       operationId: queryIssues
@@ -4631,7 +4793,8 @@ components:
           description: >-
             The operations this server actually implements, derived from its
             route table. v0's vocabulary is `ready.list`, `ready.count`,
-            `issues.list`, `issues.query`, `issues.get`, `issues.claim`,
+            `issues.list`, `issues.query`, `issues.get`, `issues.create`,
+            `issues.claim`,
             `issues.close`, `issues.reopen`, `issues.update`,
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `issues.batchApply`,
@@ -6890,6 +7053,276 @@ components:
             Whether the request persisted a semantic mutation. A same-value
             patch is a 200 with `changed: false` rather than an error —
             idempotent, like every replay answer on this surface.
+
+    CreateIssueRequest:
+      type: object
+      additionalProperties: false
+      required: [actor, title]
+      description: >-
+        One issue, its parent, its explicit edges and its waits-for gate,
+        created as one act.
+
+
+        It is FLAT rather than nesting the issue's fields under an `issue`
+        member, unlike `UpdateIssueRequest`'s `patch`: a patch has to distinguish
+        a member that is absent from one set to its zero value, and a create has
+        no such distinction to make — an absent member is the workspace default,
+        which is the same answer a nested object would have given.
+
+
+        The issue members mirror `ApplyCreateItem` exactly, minus that schema's
+        two plan-only members (`key` and `metadata_refs`, which name items of a
+        request this operation has only one of). What this adds is the edge
+        vocabulary that operation moves into `dep_add` items: `parent_id`,
+        `inherit_labels_from_parent`, `dependencies` and `waits_for`.
+      properties:
+        actor:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$'
+          description: >-
+            Who is creating the issue. `ClaimRequest.actor`'s rules exactly: the
+            server trims it, then refuses an empty result, anything longer than
+            256 BYTES (the `maxLength` above counts characters — the byte limit
+            is the binding one), and any control character including newline.
+            The value reaches the created edges' author column, the history
+            entry's attribution and the storage commit message, so an
+            unvalidated newline would forge audit-trail lines.
+
+
+            It is NOT the issue's `created_by`, which this operation does not
+            publish: this is the caller-asserted provenance of the ACT, and the
+            row's own author column is left to the implementation.
+        id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            An explicit id for the new row, CREATE-ONLY: an id that already
+            names a stored row is a `409` `already_exists` and nothing is
+            written — never an adoption and never an overwrite. It is checked
+            against the workspace's configured issue prefix unless
+            `force_id_prefix` is set. Absent is the ordinary case and the server
+            mints one.
+        title:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: The issue's title. Must not be blank after trimming.
+        description:
+          type: string
+        design:
+          type: string
+        acceptance_criteria:
+          type: string
+        notes:
+          type: string
+        issue_type:
+          type: string
+          maxLength: 255
+          description: >-
+            Issue type. Spelled `issue_type` rather than `type`, matching the
+            member `Issue` carries, and validated against the built-ins plus the
+            workspace's configured custom types by the ROLE — this server cannot
+            read that vocabulary without a transaction, so it checks only what
+            this schema declares and an unknown one arrives as a `400`.
+
+
+            SEND ONE. The member is optional in this schema and the role
+            validates the EMPTY type against the same vocabulary as any other,
+            where it is neither a built-in nor a configured type — so an omitted
+            `issue_type` is refused with everything else the request asked for.
+            It stays optional because the vocabulary belongs to the workspace and
+            a deployment may configure a default this server cannot read, but it
+            is not optional in practice on any workspace shipped today.
+            `POST /v0/beads/issues:batchCreate` has the same property and does
+            not say so, which is why this member does.
+        status:
+          type: string
+          maxLength: 255
+          description: >-
+            The status the issue is created in, from this workspace's own
+            configured vocabulary. Absent means the workspace's own default,
+            which is `open` today — unlike `issue_type`, the role fills this one
+            in before it validates.
+        priority:
+          type: integer
+          minimum: 0
+          maximum: 4
+          description: 0 is P0/critical. Absent means the workspace default.
+        assignee:
+          type: string
+          maxLength: 255
+        owner:
+          type: string
+          maxLength: 255
+          description: >-
+            The human owner, which is a different member from `assignee`: the
+            assignee is who is working it now, the owner is who it is attributed
+            to.
+        labels:
+          type: array
+          items:
+            type: string
+            maxLength: 255
+          description: >-
+            The complete label set the issue is created with. Authoritative, not
+            a patch — a create has nothing to add to. `inherit_labels_from_parent`
+            adds the parent's labels on top of it.
+        estimated_minutes:
+          type: integer
+          description: >-
+            An estimate in minutes. Absent leaves it unset. NOT nullable, unlike
+            `IssuePatchBody.estimated_minutes`: a create has nothing to clear, so
+            `null` here would be a second spelling of omission and is a `400`.
+        external_ref:
+          type: string
+          maxLength: 255
+          description: 'e.g. `gh-9`. Not nullable, for `estimated_minutes`'' reason.'
+        due_at:
+          type: string
+          format: date-time
+          description: 'RFC 3339. Not nullable, for `estimated_minutes`'' reason.'
+        defer_until:
+          type: string
+          format: date-time
+          description: >-
+            RFC 3339. The issue is hidden from ready work until then. Not
+            nullable, for `estimated_minutes`' reason.
+        sender:
+          type: string
+          maxLength: 255
+          description: >-
+            Who sent this, for the message-shaped rows an orchestrator creates.
+            Stored verbatim and interpreted by nothing on this surface.
+        metadata:
+          $ref: '#/components/schemas/MetadataValue'
+        ephemeral:
+          type: boolean
+          default: false
+          description: >-
+            Creates the issue on the EPHEMERAL plane rather than the durable one,
+            exactly as it does for `POST /v0/beads/issues:batchApply`. Mutually
+            exclusive with `no_history`.
+        no_history:
+          type: boolean
+          default: false
+          description: >-
+            Creates the issue on the ephemeral plane WITHOUT history, and without
+            the garbage collection an ordinary ephemeral row is eligible for.
+            Mutually exclusive with `ephemeral`.
+        parent_id:
+          type: string
+          maxLength: 255
+          description: >-
+            Creates a typed `parent-child` edge from the new issue to this
+            target. It must not duplicate an edge `dependencies` already spells;
+            naming the same pair twice with two types is a `400`.
+        inherit_labels_from_parent:
+          type: boolean
+          default: false
+          description: >-
+            Copies the parent's labels onto the new issue at creation, on top of
+            `labels`. It has no effect without `parent_id`.
+
+
+            The DEFAULT IS FALSE and diverges from `bd create --parent`, whose
+            default is to inherit. A wire caller sends what it means: this
+            operation has no `--no-inherit-labels` to turn off, and a create that
+            silently acquired labels the request never named would be a set the
+            caller has to read back to learn.
+        dependencies:
+          type: array
+          maxItems: 100
+          items:
+            $ref: '#/components/schemas/CreateIssueDependency'
+          description: >-
+            The complete set of explicit edges created with the issue.
+            Authoritative, not a patch. Every edge is written in the same
+            transaction as the row, so an edge this request cannot write means no
+            issue either.
+
+
+            A TARGET NEED NOT BE A ROW THIS DATABASE HOLDS: an `external:`
+            reference and an id belonging to another repository are legitimate
+            targets, so only an absence this database can SEE is refused —
+            `ApplyDepAddItem`'s rule, unchanged.
+        waits_for:
+          $ref: '#/components/schemas/CreateIssueWaitsFor'
+        force_id_prefix:
+          type: boolean
+          default: false
+          description: >-
+            Permits an explicit `id` outside the workspace's configured issue
+            prefix. It bypasses ONLY that check: it is not a force on the
+            create-only guard, so an occupied id is still a `409`.
+
+    CreateIssueDependency:
+      type: object
+      additionalProperties: false
+      required: [target_id, type]
+      description: >-
+        One edge created with the issue. It carries `reverse` where
+        `BatchCreateDependency` does not, because that operation's items have no
+        id a target could point back at and this one's issue does.
+      properties:
+        target_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: The other endpoint of the edge.
+        type:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            The edge type, from the same OPEN vocabulary `Dependency.type`
+            carries: checked for BEING a storable value, never for membership of
+            a known-types list, so a workspace's own type passes.
+        reverse:
+          type: boolean
+          default: false
+          description: >-
+            Writes the edge from `target_id` TO the new issue rather than from
+            it. It is what lets a create declare an edge that points INTO the row
+            being minted — the id no caller could have spelled beforehand — and
+            it is the member that makes `dependency_cycle` reachable on this
+            operation at all.
+        metadata:
+          $ref: '#/components/schemas/MetadataValue'
+
+    CreateIssueWaitsFor:
+      type: object
+      additionalProperties: false
+      required: [spawner_id]
+      description: >-
+        A typed `waits-for` edge from the new issue to a spawner whose children
+        gate it. It records a readiness primitive; it does not define scheduling
+        or execution policy.
+
+
+        IT IS A TYPED MEMBER HERE AND A METADATA BLOB ON
+        `POST /v0/beads/issues:batchApply`, and the difference follows the ROLE
+        rather than taste: `CreateRequest.WaitsFor` is a typed field that gets
+        the gate defaulted and the "must not duplicate an explicit edge" check,
+        while that operation's `dep_add` item is one generic edge with no typed
+        field to reach. One spelling per operation, and each is its role's.
+      properties:
+        spawner_id:
+          type: string
+          minLength: 1
+          maxLength: 255
+          description: >-
+            The dependency target whose children are observed. It must not
+            duplicate an edge `dependencies` or `parent_id` already spells.
+        gate:
+          type: string
+          maxLength: 255
+          description: >-
+            The readiness condition: `all-children` or `any-children`. Absent or
+            empty defaults to `all-children`. A value that is neither is refused
+            by the ROLE and reaches the client as a `400`.
 
     Problem:
       type: object

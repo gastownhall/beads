@@ -456,6 +456,8 @@ func (c *roleClaimer) claimRequests() []issueops.ClaimRequest {
 // rules and the problem shapes, with the transaction and the policy left to the
 // integration test against real Dolt.
 type roleLifecycle struct {
+	createResult issueops.CreateResult
+	createErr    error
 	closeResult  issueops.CloseResult
 	closeErr     error
 	reopenResult issueops.ReopenResult
@@ -464,13 +466,28 @@ type roleLifecycle struct {
 	updateErr    error
 
 	mu      sync.Mutex
+	creates []issueops.CreateRequest
 	closes  []issueops.CloseRequest
 	reopens []issueops.ReopenRequest
 	updates []issueops.UpdateRequest
 }
 
-func (l *roleLifecycle) Create(_ context.Context, _ issueops.CreateRequest) (issueops.CreateResult, error) {
-	return issueops.CreateResult{}, errors.New("create is not published on this surface")
+func (l *roleLifecycle) Create(_ context.Context, req issueops.CreateRequest) (issueops.CreateResult, error) {
+	l.mu.Lock()
+	l.creates = append(l.creates, req)
+	l.mu.Unlock()
+	if l.createErr != nil {
+		return issueops.CreateResult{}, l.createErr
+	}
+	return l.createResult, nil
+}
+
+// createRequests is closeRequests' twin, and the one the create tests read the
+// whole projection off: an empty list means nothing reached the role.
+func (l *roleLifecycle) createRequests() []issueops.CreateRequest {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]issueops.CreateRequest(nil), l.creates...)
 }
 
 func (l *roleLifecycle) Update(_ context.Context, req issueops.UpdateRequest) (issueops.UpdateResult, error) {

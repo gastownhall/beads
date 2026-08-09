@@ -280,6 +280,24 @@ var routeTable = []route{
 		handler:     (*Server).handleDependencyTree,
 	},
 	{
+		op:     OpCreateIssue,
+		method: http.MethodPost,
+		// THE PLAIN COLLECTION POST, and the row the batch below deliberately
+		// left this path free for: creating one member of the collection a path
+		// names is what POST already means, so a single create needs no custom
+		// method and squatting on the path with a batch would have made this
+		// operation unnameable.
+		//
+		// It shares its pattern with no other row. The claim's wide
+		// /v0/beads/issues/{idop} wildcard requires the separating slash this
+		// path has none of, and every batch beside it is a literal `:verb`
+		// segment ServeMux matches whole.
+		pattern:     "/v0/beads/issues",
+		capability:  "issues.create",
+		implemented: true,
+		handler:     (*Server).handleCreateIssue,
+	},
+	{
 		op:     OpBatchCreateIssues,
 		method: http.MethodPost,
 		// A collection-level custom method, spelled the way ready:count's is.
@@ -288,9 +306,10 @@ var routeTable = []route{
 		// That pattern is /v0/beads/issues/{idop} and requires the separating
 		// slash; this path has none, so the two never match the same request.
 		//
-		// It also leaves POST /v0/beads/issues free. A collection POST is where
-		// a single create belongs when one is published, and squatting on it
-		// with a batch would have made that operation unnameable.
+		// Nor with the single create above, which took the plain collection
+		// POST this row was spelled as a custom method to leave free: ServeMux
+		// prefers the literal `:batchCreate` segment, and the two paths differ
+		// in any case.
 		pattern:     "/v0/beads/issues:batchCreate",
 		capability:  "issues.batchCreate",
 		implemented: true,

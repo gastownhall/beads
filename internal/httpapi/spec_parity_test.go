@@ -804,6 +804,84 @@ func TestUpdateRequestMembersMatchTheHandler(t *testing.T) {
 	}
 }
 
+// TestCreateIssueRequestMembersMatchTheHandler is the update's gate for the
+// single create, at ALL THREE of its levels.
+//
+// It carries the weight the batch create's narrow item did not. That operation
+// publishes nine members and its handler's copy of the list is small enough to
+// eyeball; this one publishes the whole create vocabulary, so a spec revision
+// adding an optional member would leave `make api-check` and every other spec
+// test green while the server refused the newly documented member as
+// unknown_parameter — and the reverse, a member the handler honors that the
+// document never promised, is undisclosed write surface on a mutation that can
+// mint a row at an id the caller chose.
+func TestCreateIssueRequestMembersMatchTheHandler(t *testing.T) {
+	doc := loadSpec(t)
+	schemas := mapAt(t, mapAt(t, doc, "components"), "schemas")
+
+	for _, tc := range []struct {
+		schema   string
+		accepted []string
+		goType   reflect.Type
+	}{
+		{"CreateIssueRequest", createRequestMembers, reflect.TypeOf(apigen.CreateIssueRequest{})},
+		{"CreateIssueDependency", createDependencyMembers, reflect.TypeOf(apigen.CreateIssueDependency{})},
+		{"CreateIssueWaitsFor", createWaitsForMembers, reflect.TypeOf(apigen.CreateIssueWaitsFor{})},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			accepted := map[string]bool{}
+			for _, name := range tc.accepted {
+				accepted[name] = true
+			}
+
+			goFields := jsonTagNames(t, tc.goType)
+			if extra := diff(goFields, accepted); len(extra) > 0 {
+				t.Errorf("generated %s declares members the create handler refuses as unknown: %v\n"+
+					"teach the handler to honor them, or the document promises a member the server turns down", tc.schema, extra)
+			}
+			if missing := diff(accepted, goFields); len(missing) > 0 {
+				t.Errorf("the create handler accepts members %s does not declare: %v", tc.schema, missing)
+			}
+
+			specProps := schemaProperties(t, doc, mapAt(t, schemas, tc.schema))
+			if extra := diff(specProps, accepted); len(extra) > 0 {
+				t.Errorf("the %s schema documents members the create handler refuses: %v", tc.schema, extra)
+			}
+			if missing := diff(accepted, specProps); len(missing) > 0 {
+				t.Errorf("the create handler accepts members the %s schema does not document: %v", tc.schema, missing)
+			}
+		})
+	}
+}
+
+// TestCreateIssueRequestPublishesNoNullableMember pins the create side of the
+// rule TestNullablePatchMembersAreExactlyTheDocumentsNullableOnes pins for the
+// patch: on this body the nullable set is EMPTY, and the handler refuses an
+// explicit null on every member but `metadata`.
+//
+// The two can drift in the direction that matters. A member marked nullable
+// here would promise a clear on a create — a create has nothing to clear, so
+// the promise could only be kept by writing a zero value the caller did not ask
+// for — while the handler would keep answering 400. Asserting the empty set is
+// what makes the four members that ARE nullable on `IssuePatchBody` a statement
+// about patching rather than about the field.
+func TestCreateIssueRequestPublishesNoNullableMember(t *testing.T) {
+	doc := loadSpec(t)
+	for _, schema := range []string{"CreateIssueRequest", "CreateIssueDependency", "CreateIssueWaitsFor"} {
+		node := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), schema)
+		for name, raw := range mapAt(t, node, "properties") {
+			prop, ok := raw.(map[string]any)
+			if !ok {
+				t.Fatalf("%s property %q is %T, want a mapping", schema, name, raw)
+			}
+			if nullable, _ := prop["nullable"].(bool); nullable {
+				t.Errorf("%s.%s is documented nullable and the create handler refuses a null on it; "+
+					"a create has nothing to clear, so a nullable member here promises a write nobody asked for", schema, name)
+			}
+		}
+	}
+}
+
 // TestReopenRequestMembersMatchTheHandler is the claim's and the close's gate
 // for the reopen body. The reopen decodes raw members for the same reason its
 // mirror does — so a refusal can name the offending one, which is what makes
