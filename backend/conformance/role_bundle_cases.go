@@ -245,6 +245,18 @@ var roleContractCases = []roleContract{
 		RunEdgeReaderWritesNothing,
 	),
 
+	// The accessor named here is NOT a storage.DoltStorage one, alone among
+	// these rows: Importer is served only by uow.ImporterSource, so a backend
+	// built on the store interface has nothing to fill this field with and
+	// leaves it nil. See importer_contract.go's header.
+	roleCases("Importer", "Importer()", oncePerRole,
+		func(b RoleContractBundle) func(t *testing.T) *ImporterFixture { return b.Importer },
+		RunImporterRejectsAStaleRowAndNamesIt,
+		RunImporterReportsTheAbsentTargetItDroppedOnce,
+		RunImporterReportsTheCrossPlaneEdgeItDropped,
+		RunImporterReportsTheCycleEdgeItDropped,
+	),
+
 	// Per case, not per role: see RoleContractBundle.IssueOperations.
 	roleCases("IssueOperations", "IssueLifecycle()", oncePerCase,
 		func(b RoleContractBundle) func(t *testing.T) *IssueOperationsStagingFixture { return b.IssueOperations },

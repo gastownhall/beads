@@ -89,6 +89,7 @@ type RoleContractBundle struct {
 	Deleter              func(t *testing.T) *DeleterFixture
 	DependencyEditor     func(t *testing.T) *DependencyEditorFixture
 	EdgeReader           func(t *testing.T) *EdgeReaderFixture
+	Importer             func(t *testing.T) *ImporterFixture
 	LifecycleCloseReopen func(t *testing.T) *LifecycleCloseReopenFixture
 	LifecycleUpdate      func(t *testing.T) *LifecycleUpdateFixture
 	Memories             func(t *testing.T) *MemoriesFixture
