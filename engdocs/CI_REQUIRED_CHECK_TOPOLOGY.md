@@ -1,8 +1,11 @@
 # Required Check Topology
 
-Status: initial aggregate gate jobs implemented on branch
-`ci/bd-am3.1-wrapper-commands`. Do not change branch protection until the new
-checks have appeared and passed on at least one recent commit.
+Status: aggregate gate jobs are implemented; branch-protection and ruleset
+adoption remain pending. The aggregate-gate policy below remains maintainer
+context, but `.github/workflows/*.yml` and their structural tests are
+authoritative for current job membership and display names. Copied workflow
+wiring and rollout steps in this note describe the initial rollout, not the
+live topology.
 
 ## Problem
 
@@ -81,7 +84,7 @@ Do not require these existing check names directly:
 
 - `Detect CI tier`
 - `Check build-tag policy`
-- `Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)`
+- `Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)`
 - `Check version consistency`
 - `Check doc flags freshness`
 - `Check for .beads changes`
@@ -123,7 +126,11 @@ Do not add `paths`, `paths-ignore`, or narrower branch filters to `pr.yml` or
 
 ### 2. Add Aggregate Gate Jobs
 
-`.github/workflows/pr.yml` now has one final baseline gate job:
+The block below is a historical snapshot of the initial baseline gate. It is
+intentionally not kept in lockstep with later leaf additions and renames; use
+`.github/workflows/pr.yml` and its structural tests for the current wiring.
+
+`.github/workflows/pr.yml` introduced one final baseline gate job:
 
 <!-- markdownlint-disable MD013 -->
 
@@ -323,10 +330,15 @@ Policy for `merge_group`:
   results, except PR-only hygiene checks such as `Check for .beads changes` may
   be skipped by design.
 
-## Rollout Steps
+## Initial Rollout Snapshot
+
+The following checklist records the original rollout plan. It is retained as
+decision context, not as a current deployment procedure. Workflow plumbing is
+implemented; the branch-protection and ruleset policy changes in steps 7 and 8
+remain pending maintainer decisions.
 
 1. Add `.github/scripts/ci-gate.sh` and aggregate gate jobs to the required PR
-   workflows. Initial implementation exists on branch
+   workflows. The initial implementation was developed on branch
    `ci/bd-am3.1-wrapper-commands`.
 2. Open a PR and verify the new aggregate check names appear exactly as
    expected from GitHub Actions.
