@@ -62,16 +62,32 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
-		storageCommand = "go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/..."
-		doctorCommand  = "go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/"
-		jobTimeout     = 30
+		storageTimeoutMinutes     = 15
+		doctorTimeoutMinutes      = 10
+		setupTeardownSlackMinutes = 5
+		jobTimeoutMinutes         = storageTimeoutMinutes + doctorTimeoutMinutes + setupTeardownSlackMinutes
 	)
+	storageCommand := fmt.Sprintf(
+		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...",
+		storageTimeoutMinutes)
+	doctorCommand := fmt.Sprintf(
+		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./cmd/bd/doctor/fix/",
+		doctorTimeoutMinutes)
 
 	for _, workflowName := range []string{"pr.yml", "main.yml"} {
 		t.Run(workflowName, func(t *testing.T) {
 			job := readCIWorkflow(t, workflowName).job(t, "test-domain-uow")
-			if job.TimeoutMinutes != jobTimeout {
-				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeout)
+			if job.TimeoutMinutes != jobTimeoutMinutes {
+				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeoutMinutes)
+			}
+			// Go's timeout applies per package test binary, so this is a
+			// maintenance tripwire for the declared sequential tier budgets,
+			// not a mathematical upper bound for the multi-package first step.
+			if job.TimeoutMinutes <= storageTimeoutMinutes+doctorTimeoutMinutes {
+				t.Errorf(
+					"test-domain-uow timeout = %d minutes, want more than %d minutes of declared tier budgets",
+					job.TimeoutMinutes,
+					storageTimeoutMinutes+doctorTimeoutMinutes)
 			}
 			assertStepRunsExactly(t, job, "Test domain + uow + tracker", storageCommand)
 			assertStepRunsExactly(t, job, "Test doctor/fix (Dolt-backed, hard-require container)", doctorCommand)
