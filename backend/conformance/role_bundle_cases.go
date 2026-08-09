@@ -120,6 +120,7 @@ var roleContractCases = []roleContract{
 		RunCommenterStoresTextVerbatim,
 		RunCommenterResultMirrorsTheStoredRow,
 		RunCommenterAdvancesALiveStampPastTheThreadsNewestComment,
+		RunCommenterTakesTheClockWhenTheThreadIsBehindIt,
 		RunCommenterCommentOnAWispLandsOnTheWispThread,
 		RunCommenterRefusesAnIDOnNeitherPlane,
 		RunCommenterRefusesAnEmptyIssueID,
