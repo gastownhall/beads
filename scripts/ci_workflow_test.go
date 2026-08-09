@@ -60,6 +60,79 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
+	if job.RunsOn != "ubuntu-latest" {
+		t.Errorf("js/wasm hook job runs-on = %q, want ubuntu-latest", job.RunsOn)
+	}
+	if job.If != "" {
+		t.Errorf("js/wasm hook job is conditional: %q", job.If)
+	}
+
+	setupGo := job.step(t, "Set up Go")
+	if setupGo.Uses != "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" {
+		t.Errorf("setup-go action = %q", setupGo.Uses)
+	}
+	if setupGo.With["go-version-file"] != "go.mod" || setupGo.With["cache"] != "false" {
+		t.Errorf("setup-go inputs = %v", setupGo.With)
+	}
+
+	setupNode := job.step(t, "Set up Node.js")
+	if setupNode.Uses != "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" {
+		t.Errorf("setup-node action = %q", setupNode.Uses)
+	}
+	if setupNode.With["node-version"] != "24" {
+		t.Errorf("setup-node version = %q, want 24", setupNode.With["node-version"])
+	}
+
+	execute := job.step(t, "Run js/wasm hook boundary")
+	if execute.If != "" {
+		t.Errorf("js/wasm hook step is conditional: %q", execute.If)
+	}
+	if execute.Shell != "bash" {
+		t.Errorf("js/wasm hook shell = %q, want bash", execute.Shell)
+	}
+	for key, want := range map[string]string{
+		"CGO_ENABLED": "0",
+		"GOARCH":      "wasm",
+		"GOOS":        "js",
+	} {
+		if got := execute.Env[key]; got != want {
+			t.Errorf("js/wasm hook env %s = %q, want %q", key, got, want)
+		}
+	}
+	for _, required := range []string{
+		`realpath "$(command -v go)"`,
+		`realpath "$(command -v node)"`,
+		`env GOVERSION`,
+		`go1.26.5`,
+		`WebAssembly.instantiate`,
+		`lib/wasm/wasm_exec_node.js`,
+		`test -tags gms_pure_go -c`,
+		`-test.run '^TestRunHookReportsUnsupportedExecution$'`,
+		`grep -c '^=== RUN   TestRunHookReportsUnsupportedExecution$'`,
+		`grep -Ec '^--- PASS: TestRunHookReportsUnsupportedExecution`,
+		`grep -Ec '^--- (FAIL|SKIP): TestRunHookReportsUnsupportedExecution`,
+	} {
+		if !strings.Contains(execute.Run, required) {
+			t.Errorf("js/wasm hook command does not contain %q", required)
+		}
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "check-cmd-bd-puregeo-tests") {
+		t.Errorf("ci-gate does not require js/wasm hook job: %v", gate.Needs)
+	}
+	if got := gateEnv["CHECK_CMD_BD_PUREGEO_TESTS"]; got != "${{ needs.check-cmd-bd-puregeo-tests.result }}" {
+		t.Errorf("ci-gate js/wasm hook result = %q", got)
+	}
+	if !strings.Contains(gateEnv["CI_GATE_REQUIRED"], "CHECK_CMD_BD_PUREGEO_TESTS") {
+		t.Errorf("ci-gate required set omits js/wasm hook job")
+	}
+}
+
 func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
@@ -597,6 +670,7 @@ type ciWorkflowJob struct {
 	Needs    ciWorkflowStringList `yaml:"needs"`
 	Steps    []ciWorkflowStep     `yaml:"steps"`
 	RunsOn   string               `yaml:"runs-on"`
+	If       string               `yaml:"if"`
 	Strategy ciWorkflowStrategy   `yaml:"strategy"`
 }
 
@@ -616,13 +690,14 @@ type ciWorkflowMatrixInclude struct {
 }
 
 type ciWorkflowStep struct {
-	Name string            `yaml:"name"`
-	ID   string            `yaml:"id"`
-	If   string            `yaml:"if"`
-	Uses string            `yaml:"uses"`
-	Run  string            `yaml:"run"`
-	Env  map[string]string `yaml:"env"`
-	With map[string]string `yaml:"with"`
+	Name  string            `yaml:"name"`
+	ID    string            `yaml:"id"`
+	If    string            `yaml:"if"`
+	Uses  string            `yaml:"uses"`
+	Run   string            `yaml:"run"`
+	Shell string            `yaml:"shell"`
+	Env   map[string]string `yaml:"env"`
+	With  map[string]string `yaml:"with"`
 }
 
 type ciWorkflowStringList []string
