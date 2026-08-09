@@ -62,7 +62,7 @@ func TestCloneIssueOperationRequestsDeepCopyMutableFields(t *testing.T) {
 }
 
 func TestIssueOperationCloneFunctionsKeepFrozenRequestFields(t *testing.T) {
-	issueMutable := map[string]bool{"EstimatedMinutes": true, "StartedAt": true, "ClosedAt": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "DueAt": true, "DeferUntil": true, "ExternalRef": true, "CompactedAt": true, "CompactedAtCommit": true, "Metadata": true, "Labels": true, "Dependencies": true, "Comments": true, "BondedFrom": true, "Waiters": true}
+	issueMutable := map[string]bool{"EstimatedMinutes": true, "StartedAt": true, "ClosedAt": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "DueAt": true, "DeferUntil": true, "ExternalRef": true, "CompactedAt": true, "CompactedAtCommit": true, "Metadata": true, "Labels": true, "Dependencies": true, "Comments": true, "BondedFrom": true, "Waiters": true, "WispPlaneOverride": true}
 	for index := 0; index < reflect.TypeOf(types.Issue{}).NumField(); index++ {
 		field := reflect.TypeOf(types.Issue{}).Field(index)
 		if isMutableKind(field.Type.Kind()) && !issueMutable[field.Name] {

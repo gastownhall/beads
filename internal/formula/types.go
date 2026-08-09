@@ -293,6 +293,13 @@ type Gate struct {
 
 	// Timeout is how long to wait before escalation (e.g., "1h", "24h").
 	Timeout string `json:"timeout,omitempty"`
+
+	// Repo optionally selects the GitHub repository (OWNER/REPO or
+	// HOST/OWNER/REPO) a gh:run or gh:pr gate's condition is checked
+	// against. Empty means the current Git repository - the same default
+	// as an ad-hoc `bd gate create` gate. Ignored for non-GitHub gate
+	// types (human, timer, bead).
+	Repo string `json:"repo,omitempty" toml:"repo,omitempty"`
 }
 
 // LoopSpec defines iteration over a body of steps.

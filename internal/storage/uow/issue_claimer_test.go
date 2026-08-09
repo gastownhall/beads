@@ -13,6 +13,30 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
+// WHAT THIS FILE STILL OWNS, now that Claimer HAS a conformance contract
+// (backend/conformance/claimer_contract.go, wired here by
+// claimer_contract_test.go): everything below runs against FAKES, and each case
+// is here because the property it pins is not reachable from a real database.
+//
+//   - the UNIT-OF-WORK ACCOUNTING. How many units of work were opened and how
+//     many times they committed is invisible across the role seam; the contract
+//     can only see the history the commits leave, and only when there is one.
+//   - the REFUSAL THAT SURVIVES AN UNREADABLE ROW. The leaf qualifies the typed
+//     conflict with "when the refusing state was readable in the same
+//     transaction"; a black-box case cannot make that read fail, so the
+//     negative half of the clause lives here and nowhere else.
+//   - the ERROR SHAPES THE SEAM NORMALIZES. A bare wrapped sql.ErrNoRows
+//     arriving from the repository is a shape only a fake can produce.
+//   - VALIDATION BEFORE A CONNECTION. The contract pins that an incomplete
+//     request is refused and writes nothing; that it costs no database
+//     round-trip to discover is this seam's own promise.
+//   - the NIL-PROVIDER accessor refusal, which has no role-level surface.
+//
+// The overlap that remains — the won CAS, the idempotent re-claim, the two
+// refusal sentinels — is deliberate: these cases assert them against a fake
+// whose answers are fixed, which is what makes the accounting assertions beside
+// them mean anything.
+
 // claimerIssues answers the two calls the claim makes: the CAS and the
 // same-transaction read-back. Everything else panics rather than returning a
 // zero value.

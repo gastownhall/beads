@@ -3,6 +3,7 @@ package validation
 import (
 	"fmt"
 	"slices"
+	"strings"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -70,14 +71,65 @@ func NotPinned(force bool) IssueValidator {
 	}
 }
 
+// canonicalActor normalizes an identity string so two spellings of the same
+// Gas Town identity compare equal. The same identity arrives at bd in more
+// than one spelling depending on which layer produced the string it was
+// handed: a dotted alias like "gastown.mayor" gets its dot replaced wherever
+// a dot is unsafe for that context — "__" in a session name, "_" in a Dolt
+// table/database name, "-" elsewhere — and bd only ever sees the resulting
+// string, never the substitution itself (ga-wzl83). None of ".", "_", "-"
+// carries meaning in an identity string: each is always a positional
+// separator between a rig and a role/agent name, never part of either name.
+// Collapsing any run of them to one canonical separator lets two spellings
+// of the same identity compare equal without weakening comparisons between
+// genuinely different identities, whose non-separator characters still
+// differ (e.g. "gastown.mayor" vs "gastown.dog-3" stay distinct).
+//
+// Empty stays empty: an actual absence of an actor must never canonicalize
+// to the same value as a non-empty one, or AssigneeMatches would start
+// accepting an empty actor against an assigned issue.
+func canonicalActor(s string) string {
+	if s == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	inSeparator := false
+	for _, r := range s {
+		switch r {
+		case '.', '_', '-':
+			if !inSeparator {
+				b.WriteByte('_')
+				inSeparator = true
+			}
+		default:
+			b.WriteRune(r)
+			inSeparator = false
+		}
+	}
+	return b.String()
+}
+
+// actorMatches reports whether actor has the same authority as assignee:
+// either they're byte-identical, or they canonicalize to the same identity
+// (see canonicalActor). The byte-identical check is not redundant — it is
+// what keeps two DIFFERENT identities that happen to canonicalize the same
+// way from ever being needed for this to matter in practice, and it avoids
+// paying canonicalization on the overwhelmingly common exact-match path.
+func actorMatches(assignee, actor string) bool {
+	return assignee == actor || canonicalActor(assignee) == canonicalActor(actor)
+}
+
 // AssigneeMatches validates that the actor has authority to close the issue.
 // Authority means the issue is unassigned or the actor matches the current
 // assignee. Returns an error on mismatch unless force is true.
 //
-// Authority is identity-by-string: actor is compared verbatim to assignee, so
-// two principals sharing one actor name both pass. bd has no identity layer,
-// so this matches the existing semantics of the actor field — the guard
-// removes silent cross-actor closes without adding new identity guarantees.
+// Authority is identity-by-string: actor is compared to assignee under
+// canonicalActor, so two principals sharing one canonical actor name both
+// pass — including the same principal spelled two different ways by two
+// different layers of Gas Town (ga-wzl83). bd has no identity layer, so this
+// matches the existing semantics of the actor field — the guard removes
+// silent cross-actor closes without adding new identity guarantees.
 //
 // This guards against the silent-success bug where actor A closes a bead that
 // was concurrently re-claimed by actor B: storage accepts the close (id-only
@@ -88,7 +140,7 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 		if issue == nil || force {
 			return nil
 		}
-		if issue.Assignee == "" || issue.Assignee == actor {
+		if issue.Assignee == "" || actorMatches(issue.Assignee, actor) {
 			return nil
 		}
 		return fmt.Errorf("cannot close %s: assignee is %q, actor is %q; reclaim or use --force to override", id, issue.Assignee, actor)
@@ -101,10 +153,14 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 // stripping a live claim is what bd unclaim refuses without --force).
 //
 // The refusal fires only when every clause holds; each one is load-bearing:
-//   - Assignee != ""          — unassigned issues are freely assignable.
-//   - Assignee != actor       — an actor editing its own claim is untouched.
-//   - Assignee != newAssignee — an idempotent re-assert of the current holder
-//     stays a success (retry/replay safety on the proxied path).
+//   - Assignee != ""                    — unassigned issues are freely
+//     assignable.
+//   - Assignee doesn't canonicalize to actor       — an actor editing its
+//     own claim is untouched, under any spelling of its own identity.
+//   - Assignee doesn't canonicalize to newAssignee — an idempotent re-assert
+//     of the current holder stays a success (retry/replay safety on the
+//     proxied path), even when the re-assert names the holder under a
+//     different spelling.
 //   - Status == in_progress   — reassigning an OPEN bead stays frictionless:
 //     dispatchers hand-dole open beads and pool-queue takes happen constantly,
 //     which is why this cannot reuse the unclaim/close ownership rule verbatim.
@@ -114,15 +170,18 @@ func AssigneeMatches(actor string, force bool) IssueValidator {
 //     bead. poolAliases is a thunk so call sites don't pay the config read on
 //     the overwhelmingly common non-conflicting paths.
 //
-// Like AssigneeMatches, authority is identity-by-string: bd has no identity
-// layer, so this removes silent cross-actor takeovers without adding new
-// identity guarantees.
+// Like AssigneeMatches, authority is identity-by-string — compared under
+// canonicalActor rather than verbatim (ga-wzl83), so this removes silent
+// cross-actor takeovers without adding new identity guarantees, and without
+// falsely treating the current holder as a stranger when actor or
+// newAssignee names it under a different layer's spelling of the same
+// identity.
 func AssigneeNotStolen(actor, newAssignee string, poolAliases func() []string, force bool) IssueValidator {
 	return func(id string, issue *types.Issue) error {
 		if issue == nil || force {
 			return nil
 		}
-		if issue.Assignee == "" || issue.Assignee == actor || issue.Assignee == newAssignee {
+		if issue.Assignee == "" || actorMatches(issue.Assignee, actor) || actorMatches(issue.Assignee, newAssignee) {
 			return nil
 		}
 		if issue.Status != types.StatusInProgress {

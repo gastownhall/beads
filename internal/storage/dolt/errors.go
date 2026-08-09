@@ -44,12 +44,9 @@ var (
 	// environment variable.
 	ErrFSCKTimeout = errors.New("pre-push integrity check timed out")
 
-	// errCommitPhase marks an error as having occurred during tx.Commit (as
-	// opposed to BeginTx or the transaction body). A connection failure during
-	// commit is ambiguous — the commit may have landed on the server before the
-	// connection dropped — so withRetryTx must NOT blindly replay it, or it
-	// could double-apply the write. Pre-commit failures carry no such risk.
-	errCommitPhase = errors.New("write commit phase")
+	// ErrCommitIndeterminate is the storage-wide no-replay sentinel. Keep this
+	// alias for server-Dolt callers while embedded Dolt returns the same value.
+	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 )
 
 // isTableNotExistError returns true if the error indicates a MySQL/Dolt
@@ -91,6 +88,30 @@ func isDoltAutocommitRollbackError(err error) bool {
 		mysqlErr.Number == 1105 &&
 		(mysqlErr.Message == "Merge conflict detected, @autocommit transaction rolled back" ||
 			strings.HasPrefix(mysqlErr.Message, "Merge conflict detected, @autocommit transaction rolled back."))
+}
+
+// isIndeterminateCommitResponse reports whether a Commit error lacks a decoded
+// server response proving a definite rejection or rollback. Every untyped
+// protocol or transport error is conservatively indeterminate.
+func isIndeterminateCommitResponse(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrCommitIndeterminate) {
+		return true
+	}
+	var mysqlErr *mysql.MySQLError
+	return !errors.As(err, &mysqlErr)
+}
+
+func wrapSQLCommitError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if isIndeterminateCommitResponse(err) {
+		return fmt.Errorf("%s: %w: %w", op, err, ErrCommitIndeterminate)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // wrapDBError wraps a database error with operation context.

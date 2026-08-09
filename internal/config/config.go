@@ -226,6 +226,33 @@ func Initialize() error {
 	// Set defaults for all flags
 	v.SetDefault("json", false)
 	v.SetDefault("events-export", false)
+	// Durable events journal (bd_events_journal). OFF by default because it
+	// costs a snapshot write on every mutation and exists only for a consumer
+	// that is actually tailing it. Enable per workspace with
+	// `bd config set events-journal true` or BD_EVENTS_JOURNAL=1; read it with
+	// `bd events tail/export`.
+	v.SetDefault("events-journal", false)
+	// Retention floors. retain-days keeps rows younger than N days; retain-rows
+	// always keeps the newest N rows. They bound every prune, whether an
+	// operator asked for it (`bd events prune`) or maintenance applied it
+	// (events-journal-auto-prune). Both default ON: a journal is only ever
+	// enabled because something is consuming it, and with both floors at 0 a
+	// single `bd events prune --before <large>` deletes the whole journal,
+	// stranding a consumer whose checkpoint is now below the floor with no way
+	// to recover the lost span. The defaults buy a consumer a week of downtime,
+	// or 100k mutations of backlog, whichever is larger. Setting either to 0
+	// explicitly disables that floor.
+	// Env: BD_EVENTS_JOURNAL_RETAIN_DAYS / BD_EVENTS_JOURNAL_RETAIN_ROWS.
+	v.SetDefault("events-journal-retain-days", 7)
+	v.SetDefault("events-journal-retain-rows", 100000)
+	// Automatic retention, ON by default: after a mutating command commits, and
+	// on a timer inside `bd serve`, bd deletes the journal prefix the floors
+	// above do not protect. Enabling the journal therefore yields a BOUNDED
+	// feed, which is what makes it safe to turn on and forget. Turning both
+	// floors to 0 is the deliberate way to keep every record forever; this key
+	// is for a consumer that wants the floors respected on reads but wants to
+	// own deletion itself. Env: BD_EVENTS_JOURNAL_AUTO_PRUNE.
+	v.SetDefault("events-journal-auto-prune", true)
 	v.SetDefault("audit.enabled", false)
 	v.SetDefault("no-db", false)
 	v.SetDefault("no-hooks", false)

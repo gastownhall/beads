@@ -29,17 +29,25 @@ type issueClaimer struct{ store *DoltStore }
 // either direction, and a phantom claim is a duplicated implementation. Replay
 // is safe because the CAS is re-checked inside the replayed transaction.
 func (c *issueClaimer) Claim(ctx context.Context, request issueops.ClaimRequest) (issueops.ClaimResult, error) {
+	// The write and its verify sit under withCircuitWrite so terminal circuit
+	// success is recorded once at the boundary, only after verifiedClaimWrite
+	// returns nil — matching the store's own ClaimIssue. write is defined inside
+	// the boundary so its runIssueOperationTx captures the circuit-managed ctx
+	// and defers success to the boundary.
 	var result issueops.ClaimResult
-	write := func() error {
-		return c.store.runIssueOperationTx(ctx, storageissueops.ClaimCommitMessage(request.IssueID, request.Actor),
-			func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
-				var err error
-				var tables storageissueops.ChangedTables
-				result, tables, err = storageissueops.ExecuteClaim(ctx, tx, request)
-				return tables, err
-			})
-	}
-	if err := c.store.verifiedClaimWrite(ctx, request.IssueID, claimedBy(request.Actor), write); err != nil {
+	err := c.store.withCircuitWrite(ctx, func(ctx context.Context) error {
+		write := func() error {
+			return c.store.runIssueOperationTx(ctx, storageissueops.ClaimCommitMessage(request.IssueID, request.Actor),
+				func(tx *sql.Tx) (storageissueops.ChangedTables, error) {
+					var err error
+					var tables storageissueops.ChangedTables
+					result, tables, err = storageissueops.ExecuteClaim(ctx, tx, request)
+					return tables, err
+				})
+		}
+		return c.store.verifiedClaimWrite(ctx, request.IssueID, claimedBy(request.Actor), write)
+	})
+	if err != nil {
 		return issueops.ClaimResult{}, err
 	}
 	return result, nil

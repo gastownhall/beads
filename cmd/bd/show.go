@@ -169,7 +169,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
 				}
-				allDetails = append(allDetails, details)
+				allDetails = append(allDetails, projectShowJSONDetails(details))
 				result.Close()
 				continue
 			}

@@ -293,11 +293,11 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// Per-step commit (#4566) snapshots the working set before the migration
 	// runs so it can force-stage only the tables this step newly dirties.
 	expectDoltStatusRows(mock)
-	// The pending (latest) migration is 0062_events_dolt_ignore, whose body
-	// contains a bare CALL DOLT_COMMIT — execMigrationBody routes such bodies
-	// through DrainCall (QueryContext), not ExecContext.
-	mock.ExpectQuery("(?s).*").
-		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	// The pending (latest) migration is 0063_create_provenance_events, a
+	// plain CREATE TABLE body with no bare CALL — execMigrationBody routes
+	// such bodies through ExecContext, not DrainCall.
+	mock.ExpectExec("(?s).*").
+		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO schema_migrations (version, content_hash) VALUES (?, ?)")).
 		WithArgs(latest, sqlmock.AnyArg()).
 		WillReturnResult(sqlmock.NewResult(0, 1))
@@ -380,17 +380,22 @@ func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 // It relies on the latest migration touching `issues`; if a future latest
 // migration stops doing so, sqlmock will fail loudly on the unexpected query
 // flow and this helper should dirty a table that migration does touch.
+// eventsFlipVersion is 0062_events_dolt_ignore, the migration whose body
+// drops and recreates `events`. The dirty-guard shape below needs a pending
+// migration that touches the dirty table, so the mocked cursor is pinned just
+// below THIS version rather than to an offset from LatestVersion() — an offset
+// silently stops covering 0062 the moment anything newer lands (it did, when
+// 0063/0064 arrived).
+const eventsFlipVersion = 62
+
 func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 	t.Helper()
 
-	latest := LatestVersion()
+	cursor := eventsFlipVersion - 1
 
-	expectIgnorePatternSeedNoop(mock, latest-2)
+	expectIgnorePatternSeedNoop(mock, cursor)
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
-	// Two behind, not one: 0061 is a pure version anchor (SELECT 1, touches no
-	// table), so the guard shape needs 0062 — which drops/recreates `events` —
-	// among the pending migrations.
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-2)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
 	expectDoltStatusDirtyEvents(mock)
 	// Nothing staged -> no unstage exec; seed was a no-op -> no seed commit.
@@ -401,7 +406,7 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
 	// touches `events` -> DirtyTablesError.
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-2)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 }
 
 func expectDoltStatusDirtyEvents(mock sqlmock.Sqlmock) {

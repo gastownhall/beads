@@ -40,6 +40,12 @@ func (f *recordingIssues) SearchIssuesWithCounts(_ context.Context, _ string, fi
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
 
+// The ready surface's defer-wake sweep reaches this before the read; nothing
+// is deferred in the fixture, so it reports a no-op sweep.
+func (f *recordingIssues) WakeExpiredDefers(context.Context) (issues, wisps int, err error) {
+	return 0, 0, nil
+}
+
 func (f *recordingIssues) readyFilters() []types.WorkFilter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -345,8 +351,11 @@ func TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens(t *testing.T) {
 	if resp := ts.get(t, "/v0/beads/ready"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if n := len(provider.openedUOWs()); n != 1 {
-		t.Fatalf("opened %d units of work, want 1", n)
+	// Two units of work, both through the wrapper: the ready surface's
+	// defer-wake sweep, then the read span. A reader bound to the untimed
+	// provider would report zero.
+	if n := len(provider.openedUOWs()); n != 2 {
+		t.Fatalf("opened %d units of work, want 2 (defer-wake sweep + read span)", n)
 	}
 
 	line := findLogLine(t, ts.stderr.String(), "op="+OpListReadyWork)

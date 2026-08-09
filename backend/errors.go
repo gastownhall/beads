@@ -18,19 +18,20 @@ type ErrUnsupported = storage.ErrUnsupported
 // identities: a backend must return (or wrap) these values, not
 // equivalently-worded errors of its own.
 var (
-	ErrAlreadyClaimed    = storage.ErrAlreadyClaimed
-	ErrAlreadyExists     = storage.ErrAlreadyExists
-	ErrAssigneeMismatch  = storage.ErrAssigneeMismatch
-	ErrCloseBlocked      = storage.ErrCloseBlocked
-	ErrCloseOpenChildren = storage.ErrCloseOpenChildren
-	ErrNotClaimable      = storage.ErrNotClaimable
-	ErrNotFound          = storage.ErrNotFound
-	ErrNotInitialized    = storage.ErrNotInitialized
-	ErrNotOwner          = storage.ErrNotOwner
-	ErrPrefixMismatch    = storage.ErrPrefixMismatch
-	ErrStatusMismatch    = storage.ErrStatusMismatch
-	ErrValidation        = storage.ErrValidation
-	ErrVersionMismatch   = storage.ErrVersionMismatch
+	ErrAlreadyClaimed      = storage.ErrAlreadyClaimed
+	ErrAlreadyExists       = storage.ErrAlreadyExists
+	ErrAssigneeMismatch    = storage.ErrAssigneeMismatch
+	ErrCloseBlocked        = storage.ErrCloseBlocked
+	ErrCloseOpenChildren   = storage.ErrCloseOpenChildren
+	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
+	ErrNotClaimable        = storage.ErrNotClaimable
+	ErrNotFound            = storage.ErrNotFound
+	ErrNotInitialized      = storage.ErrNotInitialized
+	ErrNotOwner            = storage.ErrNotOwner
+	ErrPrefixMismatch      = storage.ErrPrefixMismatch
+	ErrStatusMismatch      = storage.ErrStatusMismatch
+	ErrValidation          = storage.ErrValidation
+	ErrVersionMismatch     = storage.ErrVersionMismatch
 
 	// ErrFieldTooLong pairs with MaxFieldLen.
 	ErrFieldTooLong = types.ErrFieldTooLong

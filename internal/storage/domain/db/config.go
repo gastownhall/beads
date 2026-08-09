@@ -83,6 +83,27 @@ func (r *configSQLRepositoryImpl) SetConfig(ctx context.Context, key, value stri
 	if _, err := r.runner.ExecContext(ctx, "REPLACE INTO config (`key`, value) VALUES (?, ?)", key, value); err != nil {
 		return fmt.Errorf("db: SetConfig %s: %w", key, err)
 	}
+	// Re-sync the normalized lookup table a value backs, mirroring
+	// DoltStore.SetConfig. Reads are TABLE-FIRST — GetCustomTypes above
+	// consults custom_types and falls back to the string only when the table is
+	// empty, and GetCustomStatuses reads custom_statuses outright — so a write
+	// that updated only the string left the table holding the previous set,
+	// forever: `bd config set types.custom` on a proxied deployment reported
+	// success and `bd create -t <the new type>` kept answering "invalid issue
+	// type", with doctor re-verifying against the string and reporting all-OK.
+	//
+	// The caller supplies a transactional runner, so the row and its projection
+	// commit together or neither does.
+	switch key {
+	case "status.custom":
+		if err := issueops.SyncCustomStatusesTable(ctx, r.runner, value); err != nil {
+			return fmt.Errorf("db: SetConfig %s: syncing custom_statuses table: %w", key, err)
+		}
+	case "types.custom":
+		if err := issueops.SyncCustomTypesTable(ctx, r.runner, value); err != nil {
+			return fmt.Errorf("db: SetConfig %s: syncing custom_types table: %w", key, err)
+		}
+	}
 	return nil
 }
 

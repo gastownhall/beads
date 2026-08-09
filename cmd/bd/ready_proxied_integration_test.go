@@ -228,10 +228,14 @@ func TestProxiedServerReady(t *testing.T) {
 		if envelope.Pagination.Returned != 2 {
 			t.Errorf("pagination.returned = %d, want 2", envelope.Pagination.Returned)
 		}
-		// Total is unavailable on the proxied backend; omitempty must drop
-		// the key rather than emit a false "total": 0.
-		if strings.Contains(s[start:], `"total"`) {
-			t.Errorf("unexpected 'total' key in proxied pagination (unavailable on this backend): %s", s[start:])
+		// Total is PUBLISHED here, which it was not before the ReadyCounter
+		// role: this route had no way to size the ready set, so the direct
+		// route's "total" simply had no proxied counterpart and a script that
+		// read it got nothing under a proxied workspace. Four rows were seeded
+		// and two returned.
+		if envelope.Pagination.Total != 4 {
+			t.Errorf("pagination.total = %d, want the 4 rows this case seeded: %s",
+				envelope.Pagination.Total, s[start:])
 		}
 	})
 

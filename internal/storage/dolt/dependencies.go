@@ -29,6 +29,12 @@ func (s *DoltStore) AddDependency(ctx context.Context, dep *types.Dependency, ac
 // Delegates SQL work to issueops.AddDependencyInTx; handles Dolt versioning
 // and cache invalidation. EmitEvent records a dependency_added history event.
 func (s *DoltStore) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		return s.addDependencyWithOptions(ctx, dep, actor, addOpts)
+	})
+}
+
+func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
 	isCrossPrefix := isCrossPrefixDep(dep.IssueID, dep.DependsOnID)
 
 	// Route to wisp_dependencies if the source is an active wisp.
@@ -88,46 +94,53 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 // Delegates SQL work to issueops.RemoveDependencyInTx which handles wisp routing.
 // EmitEvent records a dependency_removed history event for the explicit dep verb.
 func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, rmOpts storage.DependencyRemoveOptions) error {
-	// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
-	if s.isActiveWisp(ctx, issueID) {
+	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
+		if s.isActiveWisp(ctx, issueID) {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return fmt.Errorf("failed to begin transaction: %w", err)
+			}
+			defer func() { _ = tx.Rollback() }()
+			clearJournalScope := s.scopeEventsJournalTransaction(tx)
+			defer clearJournalScope()
+			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+				return err
+			}
+			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
+				return err
+			}
+			return nil
+		}
+
 		tx, err := s.db.BeginTx(ctx, nil)
 		if err != nil {
 			return fmt.Errorf("failed to begin transaction: %w", err)
 		}
 		defer func() { _ = tx.Rollback() }()
-		if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+
+		clearJournalScope := s.scopeEventsJournalTransaction(tx)
+		defer clearJournalScope()
+
+		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		if err != nil {
 			return err
 		}
-		return wrapTransactionError("commit remove wisp dependency", tx.Commit())
-	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
-	if err != nil {
-		return err
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("sql commit: %w", err)
-	}
-	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
-	// Stage events only when RemoveDependencyInTx actually recorded a
-	// dependency_removed event (explicit verb + genuine edge removal). A
-	// structural or missing-edge remove writes no event, so staging events would
-	// sweep unrelated pending event rows into this dependency commit.
-	tables := []string{"dependencies"}
-	if eventWritten {
-		tables = append(tables, "events")
-	}
-	if err := s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID); err != nil {
-		return err
-	}
-	return nil
+		if err := s.commitSQLTx(ctx, "sql commit", tx); err != nil {
+			return err
+		}
+		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
+		// Stage events only when RemoveDependencyInTx actually recorded a
+		// dependency_removed event (explicit verb + genuine edge removal). A
+		// structural or missing-edge remove writes no event, so staging events would
+		// sweep unrelated pending event rows into this dependency commit.
+		tables := []string{"dependencies"}
+		if eventWritten {
+			tables = append(tables, "events")
+		}
+		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
+	})
 }
 
 // GetDependencies retrieves issues that this issue depends on

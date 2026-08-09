@@ -13,6 +13,15 @@ import (
 // storage by a path the other two do not, and an earlier attempt was reverted
 // for exactly this: the request carried the override, the spec did not, and the
 // caller's force was lost silently.
+//
+// The table is kept WHOLE although two of its three rows are now also held by
+// RunIssueOperationsUpdateClosePolicy at this backend: deleting the override
+// fails both suites, and always spelling it would let the contract's unforced
+// crossing succeed where it must refuse. The third row is the one the contract
+// cannot see — spelling the override WITHOUT a status change has no
+// caller-visible effect, so a body that spelled it anyway passes every contract
+// case. It is only falsifiable here, in the spec, and only in contrast with the
+// two rows above it.
 func TestUpdateSpecCarriesForceClosePolicy(t *testing.T) {
 	t.Parallel()
 

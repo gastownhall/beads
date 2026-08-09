@@ -86,6 +86,18 @@ func RoleFiresHooks(role any) bool {
 	switch role.(type) {
 	case *hookIssueClaimer:
 		return true
+	// The lifecycle role fires on_create, on_update and the close hooks for
+	// every mutation it lands (hook_issue_operations.go), so it is the same
+	// value the network server must refuse — and a wider one than the claimer,
+	// because it carries four verbs rather than one.
+	case *hookIssueOperations:
+		return true
+	// The dependency editor fires the update hook once per DISTINCT SOURCE
+	// ISSUE it edits (hook_dependency_editor.go), so one batch runs the
+	// workspace's script several times — the same value to refuse, for the same
+	// reason, and the one that multiplies fastest.
+	case *hookDependencyEditor:
+		return true
 	}
 	return false
 }
@@ -529,6 +541,7 @@ func cloneIssueForHook(issue *types.Issue) *types.Issue {
 	clone.LeaseExpiresAt = clonePtr(issue.LeaseExpiresAt)
 	clone.HeartbeatAt = clonePtr(issue.HeartbeatAt)
 	clone.ExternalRef = clonePtr(issue.ExternalRef)
+	clone.WispPlaneOverride = clonePtr(issue.WispPlaneOverride)
 	clone.Labels = append([]string(nil), issue.Labels...)
 	clone.Metadata = append([]byte(nil), issue.Metadata...)
 	clone.CompactedAt = clonePtr(issue.CompactedAt)

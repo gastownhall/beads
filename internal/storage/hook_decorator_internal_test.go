@@ -307,6 +307,7 @@ func TestCloneIssueForHookCoversReferenceFields(t *testing.T) {
 		"LeaseExpiresAt":    {},
 		"HeartbeatAt":       {},
 		"ExternalRef":       {},
+		"WispPlaneOverride": {},
 		"Metadata":          {},
 		"CompactedAt":       {},
 		"CompactedAtCommit": {},

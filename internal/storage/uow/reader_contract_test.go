@@ -35,8 +35,26 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyLimitBoundary", func(t *testing.T) {
 		conformance.RunReaderReadyLimitBoundary(t, ctx, fixture)
 	})
-	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
+	t.Run("OffsetSkipsTheRowsBeforeThePage", func(t *testing.T) {
+		conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, fixture)
+	})
+	// This wiring used to be the REFUSING arm of MaxRows, and the mirror image
+	// of the Offset wiring above: this body honored Offset and refused the cap,
+	// the store-backed one did the opposite. Both fields are served on both
+	// bodies now, so both cases run the same assertion here as there.
+	t.Run("ListMaxRowsIsHonored", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
+	})
+	// The same cap, driven along the OFFSET axis. This body hands its seam the
+	// widened limit and lets internal/storage/domain/db size the bound and the
+	// cap from it, where the store-backed body sizes both above the seam — two
+	// compositions of one boundary, which is exactly where they can disagree
+	// by a row.
+	t.Run("ListMaxRowsBoundaryIsLimitPlusOffset", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
+	})
+	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 	})
 	t.Run("ReadySortPoliciesOrderTheSameRows", func(t *testing.T) {
 		conformance.RunReaderReadySortPoliciesOrderTheSameRows(t, ctx, fixture)

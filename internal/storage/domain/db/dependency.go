@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func NewDependencySQLRepository(runner Runner) domain.DependencySQLRepository {
@@ -121,7 +122,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			); err != nil {
 				return fmt.Errorf("db: DependencySQLRepository.Insert: refresh metadata: %w", err)
 			}
-			return nil
+			// A same-type add refreshes edge metadata. It is an observable graph
+			// mutation, so emit the complete replacement edge for replay.
+			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 		}
 		return &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -150,6 +153,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, string(dep.Type),
 		time.Now().UTC(), actor, metadata, dep.ThreadID,
 	); err != nil {
+		if missing := r.classifyMissingEndpoint(ctx, dep, opts.UseWispsTable, targetCol, err); missing != nil {
+			return missing
+		}
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w", err)
 	}
 	if dep.Type == types.DepParentChild {
@@ -209,12 +215,70 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
-		return nil
+		// Snapshot only after all derived blocked-state maintenance has completed.
+		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 	}
 	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
-	return nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// Never gated on opts.EmitEvent: a structurally-wired edge is as real to a
+	// replaying consumer as one added by an explicit dep verb.
+	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+}
+
+// classifyMissingEndpoint names the endpoint behind a foreign-key refusal,
+// re-read on the same runner that refused the insert. The driver's message
+// names its constraint, but taking identity out of driver prose is the thing a
+// typed refusal exists to avoid, so the two endpoints are read back instead —
+// only on the refusal path, so a bulk add still pays no probe per edge.
+//
+// The refusal is never downgraded to a probe's failure: anything the reads
+// cannot settle returns nil and the caller keeps the original error.
+func (r *dependencySQLRepositoryImpl) classifyMissingEndpoint(ctx context.Context, dep *types.Dependency, sourceIsWisp bool, targetCol string, insertErr error) error {
+	if !dberrors.IsMissingForeignKeyTarget(insertErr) {
+		return nil
+	}
+	sourceTable := "issues"
+	if sourceIsWisp {
+		sourceTable = "wisps"
+	}
+	sourceExists, probeErr := r.rowExists(ctx, sourceTable, dep.IssueID)
+	if probeErr != nil {
+		return nil
+	}
+	if !sourceExists {
+		return issueops.MissingDependencySource(dep.IssueID, dep.DependsOnID)
+	}
+
+	var targetTable string
+	switch targetCol {
+	case "depends_on_issue_id":
+		targetTable = "issues"
+	case "depends_on_wisp_id":
+		targetTable = "wisps"
+	default:
+		return nil
+	}
+	targetExists, probeErr := r.rowExists(ctx, targetTable, dep.DependsOnID)
+	if probeErr != nil || targetExists {
+		return nil
+	}
+	return issueops.MissingDependencyTarget(dep.IssueID, dep.DependsOnID)
+}
+
+func (r *dependencySQLRepositoryImpl) rowExists(ctx context.Context, table, id string) (bool, error) {
+	var probe int
+	//nolint:gosec // G201: table is one of the two hardcoded plane tables
+	err := r.runner.QueryRowContext(ctx, fmt.Sprintf("SELECT 1 FROM %s WHERE id = ? LIMIT 1", table), id).Scan(&probe)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 func (r *dependencySQLRepositoryImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
@@ -269,12 +333,12 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	}
 	table := pickDepTable(opts.UseWispsTable)
 
-	var depType string
+	var depType, depMetadata string
 	//nolint:gosec // G201: table and depTargetExpr are hardcoded constants
 	err := r.runner.QueryRowContext(ctx,
-		fmt.Sprintf("SELECT type FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
+		fmt.Sprintf("SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?", table, depTargetExpr),
 		issueID, dependsOnID,
-	).Scan(&depType)
+	).Scan(&depType, &depMetadata)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
 		return domain.DepDeleteResult{Found: false}, nil
@@ -318,6 +382,13 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	}
 	if err := issueops.RecomputeIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return domain.DepDeleteResult{}, fmt.Errorf("db: DependencySQLRepository.Delete: recompute is_blocked: %w", err)
+	}
+
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// Never gated on opts.EmitEvent — a structural removal is as real to a
+	// replaying consumer as one from an explicit dep verb.
+	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata); err != nil {
+		return domain.DepDeleteResult{}, err
 	}
 
 	return domain.DepDeleteResult{Found: true, Type: dt, DependsOnID: dependsOnID}, nil
@@ -690,6 +761,11 @@ func (r *dependencySQLRepositoryImpl) DeleteAllForIDs(ctx context.Context, ids [
 			args = append(args, id)
 		}
 		ph := strings.Join(placeholders, ",")
+		// Journal the edges this batch is about to remove, while they and their
+		// source snapshots are still readable.
+		if err := issueops.RecordDependencyRemovalsForTableInTx(ctx, r.runner, table, batch); err != nil {
+			return total, fmt.Errorf("db: DependencySQLRepository.DeleteAllForIDs journal removals from %s: %w", table, err)
+		}
 		//nolint:gosec // G201: table is one of two hardcoded constants; ? placeholders only.
 		res, err := r.runner.ExecContext(ctx,
 			fmt.Sprintf("DELETE FROM %s WHERE issue_id IN (%s) OR %s IN (%s)", table, ph, issueops.DepTargetExpr, ph),
@@ -812,6 +888,27 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 		return nil, fmt.Errorf("db: DependencySQLRepository.DetectCycles: %w", err)
 	}
 	return out, nil
+}
+
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+	if err != nil {
+		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
+	}
+	return out, nil
+}
+
+// WalkDependencyTree runs the SHARED walk body, unwrapped.
+//
+// It does NOT wrap the error the way its siblings above do, and that is the one
+// thing to keep when editing it: the body publishes issueops.ErrValidation,
+// storage.ErrNotFound and *issueops.ErrTooManyRows as the role's own vocabulary,
+// and every one of those is classified by errors.Is/errors.As at both front
+// doors and in the HTTP problem mapping. A `fmt.Errorf("db: ...: %w")` would keep
+// them matchable but would also put this repository's name into the message a
+// user reads, which the direct route never does for the same refusal.
+func (r *dependencySQLRepositoryImpl) WalkDependencyTree(ctx context.Context, req publicops.WalkTreeRequest) (publicops.TreeResult, error) {
+	return issueops.WalkDependencyTreeInTx(ctx, r.runner, req)
 }
 
 func (r *dependencySQLRepositoryImpl) GetTree(ctx context.Context, rootID string, opts domain.DepTreeOpts) ([]*types.TreeNode, error) {

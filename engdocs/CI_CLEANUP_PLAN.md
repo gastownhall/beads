@@ -1,10 +1,10 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-05-29
+Last reviewed: 2026-08-02
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
-`.buildflags`, `.golangci.yml`, package test manifests, and maintainer decision
-review on 2026-05-28.
+`.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`, package test
+manifests, and maintainer decision review.
 
 This document records the agreed target shape for CI cleanup. It is the policy
 and roadmap layer; the current inventory remains in
@@ -163,7 +163,10 @@ Additional rules:
 easy to identify and rerun. It includes:
 
 - `make fmt-check`.
-- `golangci-lint run --timeout=5m --build-tags=gms_pure_go ./...`.
+- A zero-finding golangci-lint pass using `.golangci.yml`, readonly module
+  downloads, a five-minute timeout, and the `gms_pure_go` build tag.
+- A second non-CGO Windows cross-lint pass when the native target does not
+  already cover that build tuple.
 
 Known false positives must be handled in `.golangci.yml` or with targeted
 `//nolint` comments. CI should not use a tolerated failing lint baseline.

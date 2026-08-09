@@ -2,6 +2,7 @@ package uow
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -26,8 +27,23 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseRefusalsCarryTheirTypesAndWriteNothing", func(t *testing.T) {
 		conformance.RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t, ctx, fixture)
 	})
+	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
+	t.Run("CloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t, ctx, fixture)
+	})
+	t.Run("CloseIsIdempotentOnAClosedRowThatStillLooksBlocked", func(t *testing.T) {
+		conformance.RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t, ctx, fixture)
+	})
+	t.Run("CloseCountsOpenChildrenInBothPlanes", func(t *testing.T) {
+		conformance.RunLifecycleCloseCountsOpenChildrenInBothPlanes(t, ctx, fixture)
+	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
+	})
+	t.Run("CloseAndReopenKeepTheClaimHolder", func(t *testing.T) {
+		conformance.RunLifecycleCloseAndReopenKeepTheClaimHolder(t, ctx, fixture)
 	})
 	t.Run("ReopenLeavesNonDoneStatusesUnchanged", func(t *testing.T) {
 		conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, ctx, fixture)
@@ -50,6 +66,18 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseAndReopenRequireActorAndIssueID", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, ctx, fixture)
 	})
+	t.Run("CloseSettlesItsTransitiveAndCrossPlaneDependers", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t, ctx, fixture)
+	})
+	t.Run("CloseSettlesTheClosedRowItselfAndItsChild", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t, ctx, fixture)
+	})
+	t.Run("CloseOnASpawnersLastChildSatisfiesAWaitsForGate", func(t *testing.T) {
+		conformance.RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t, ctx, fixture)
+	})
+	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
+		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
+	})
 }
 
 func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix string) conformance.LifecycleCloseReopenFixture {
@@ -68,11 +96,26 @@ func newUOWLifecycleCloseReopenFixture(t *testing.T, ctx context.Context, prefix
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.LifecycleCloseReopenFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Lifecycle:     lifecycle,
-		CreateIssue:   kit.CreateIssue,
-		AddDependency: kit.AddDependency,
-		SetConfig:     kit.SetConfig,
-		QueryScalar:   kit.QueryScalar,
+		IssuePrefix:          kit.IssuePrefix,
+		Lifecycle:            lifecycle,
+		CreateIssue:          kit.CreateIssue,
+		CreateWisp:           kit.CreateWisp,
+		AddDependency:        kit.AddDependency,
+		SetConfig:            kit.SetConfig,
+		QueryScalar:          kit.QueryScalar,
+		CountHistoryMatching: kit.CountHistoryMatching,
+		// The frozen kit exposes reads only. This is the write half of the same
+		// raw-SQL pass-through, inside ONE committing unit of work — which also
+		// gives the whole script one session.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				for _, stmt := range statements {
+					if _, err := uw.RawSQLUseCase().Exec(ctx, stmt.Query, stmt.Args...); err != nil {
+						return "", fmt.Errorf("%s: %w", stmt.Query, err)
+					}
+				}
+				return "seed close-policy state", nil
+			})
+		},
 	}
 }

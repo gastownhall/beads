@@ -395,6 +395,12 @@ formula authors because it maps directly to Issue.AwaitID.`,
 				JSONName: "timeout",
 				Doc:      `Timeout is how long to wait before escalation (e.g., "1h", "24h").`,
 			},
+			{
+				Name:     "Repo",
+				Type:     "string",
+				JSONName: "repo",
+				Doc:      "Repo optionally selects the GitHub repository (OWNER/REPO or\nHOST/OWNER/REPO) a gh:run or gh:pr gate's condition is checked\nagainst. Empty means the current Git repository - the same default\nas an ad-hoc `bd gate create` gate. Ignored for non-GitHub gate\ntypes (human, timer, bead).",
+			},
 		},
 	},
 	{

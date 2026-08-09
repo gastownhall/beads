@@ -238,7 +238,7 @@ func TestBuildReadyWorkWhereLabelRegex(t *testing.T) {
 func TestSearchCountsSQLShape(t *testing.T) {
 	t.Parallel()
 
-	sql, args := SearchCountsSQL(WispsFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, false)
+	sql, args := SearchCountsSQL(WispsFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, CountsHydration{})
 	if args != nil {
 		t.Errorf("predicate form must not return generated args, got %d", len(args))
 	}
@@ -286,7 +286,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 		}
 	}
 
-	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, true)
+	noWispDeps, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", false, CountsHydration{SkipLabels: true})
 	if strings.Contains(noWispDeps, "UNION ALL") {
 		t.Error("counts SQL must not union wisp reverse deps when probe says absent")
 	}
@@ -306,7 +306,7 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	// By-IDs form: driver and every subquery are constrained to the ids, and the
 	// arg count matches the placeholder injection points (labels, dc, rc-deps,
 	// rc-wisp, cc, pc, d, driver = 8 for the wisp family with labels).
-	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, false)
+	byIDs, idArgs := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{})
 	if !strings.Contains(byIDs, "WHERE i.id IN (?,?)") {
 		t.Errorf("by-IDs counts SQL missing driver id filter:\n%s", byIDs)
 	}
@@ -325,9 +325,40 @@ func TestSearchCountsSQLShape(t *testing.T) {
 
 	// skipLabels drops the labels point and !includeWispReverseDeps drops the
 	// rc-wisp point, leaving 6 injection points (dc, rc-deps, cc, pc, d, driver).
-	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, true)
+	_, idArgsNoLabels := SearchCountsSQL(IssuesFilterTables, []string{"a", "b"}, "", "", "", false, CountsHydration{SkipLabels: true})
 	if len(idArgsNoLabels) != 6*2 {
 		t.Errorf("by-IDs args (skipLabels, no wisp deps) = %d, want %d", len(idArgsNoLabels), 6*2)
+	}
+
+	// SkipCounts drops the three cardinality joins and projects constants in
+	// their place, so the six extra columns the scan reads positionally stay
+	// six and in the same order.
+	skipCounts, _ := SearchCountsSQL(IssuesFilterTables, nil, "", "", "", true, CountsHydration{SkipCounts: true})
+	for _, gone := range []string{"dc ON dc.issue_id", "rc ON rc.dep_id", "cc ON cc.issue_id", "COALESCE(dc.cnt, 0)", "UNION ALL"} {
+		if strings.Contains(skipCounts, gone) {
+			t.Errorf("counts SQL must drop %q when SkipCounts is set:\n%s", gone, skipCounts)
+		}
+	}
+	for _, want := range []string{"0 AS dep_count", "0 AS rdep_count", "0 AS comment_count", "pc.parent_id     AS parent_id", "d.deps_json      AS deps_json"} {
+		if !strings.Contains(skipCounts, want) {
+			t.Errorf("counts SQL missing %q under SkipCounts:\n%s", want, skipCounts)
+		}
+	}
+	// Labels survive SkipCounts: the two opt-outs are independent.
+	if !strings.Contains(skipCounts, "JSON_ARRAYAGG(label)") {
+		t.Error("SkipCounts must not drop the labels join")
+	}
+
+	// By-IDs: SkipCounts removes the dc, rc-deps, rc-wisp and cc injection
+	// points, leaving labels, pc, d and the driver.
+	_, idArgsNoCounts := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{SkipCounts: true})
+	if len(idArgsNoCounts) != 4*2 {
+		t.Errorf("by-IDs args (skipCounts) = %d, want %d", len(idArgsNoCounts), 4*2)
+	}
+	// Both opt-outs together leave pc, d and the driver.
+	_, idArgsNeither := SearchCountsSQL(WispsFilterTables, []string{"a", "b"}, "", "", "", true, CountsHydration{SkipLabels: true, SkipCounts: true})
+	if len(idArgsNeither) != 3*2 {
+		t.Errorf("by-IDs args (skipLabels+skipCounts) = %d, want %d", len(idArgsNeither), 3*2)
 	}
 }
 

@@ -125,6 +125,49 @@ func (sp *serveProcess) wait() error {
 
 func (sp *serveProcess) url(path string) string { return "http://" + sp.addr + path }
 
+// servedCapabilities is what GET /v0/beads/context must advertise, spelled out
+// ONCE for every topology that checks it.
+//
+// It is deliberately a literal rather than httpapi.Capabilities(): comparing the
+// server against its own derivation would pass for any surface at all, and the
+// point of this list is that adding an operation costs a line here. The
+// assertion is on the whole list rather than a count, so an operation that
+// arrives stubbed still fails — which is what it did when the facade programme
+// took this from four operations to sixteen. Update it deliberately when you
+// add one.
+//
+// ONE COPY, and that is the fix this list arrived with. It used to be written
+// out separately in each topology's test, on the theory that the two must agree
+// — and they silently stopped agreeing: the server-mode copy sat at four
+// entries through every expansion since, asserting a surface that had not
+// existed for a long time. Two literals that MUST match are one literal; a
+// package's own gates cannot catch an expectation stored as data outside it.
+var servedCapabilities = []any{
+	"config.get", "config.list",
+	"dependencies.add", "dependencies.blocking", "dependencies.cycles",
+	"dependencies.list", "dependencies.remove", "dependencies.tree",
+	"events.list", "events.watch",
+	"issues.batchCreate", "issues.claim", "issues.close", "issues.delete",
+	"issues.get", "issues.list", "issues.query", "issues.reopen", "issues.sweep",
+	"issues.update",
+	"memories.forget", "memories.get", "memories.list", "memories.remember",
+	"ready.count", "ready.list", "stats.get",
+}
+
+// assertServedCapabilities checks a decoded context body against
+// servedCapabilities. Every topology asserts the same thing, because a mode
+// changes where the data lives and never what the handshake advertises.
+func assertServedCapabilities(t *testing.T, body map[string]any) {
+	t.Helper()
+	caps, ok := body["capabilities"].([]any)
+	if !ok {
+		t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
+	}
+	if !reflect.DeepEqual(caps, servedCapabilities) {
+		t.Errorf("capabilities = %v, want %v", caps, servedCapabilities)
+	}
+}
+
 func (sp *serveProcess) get(t *testing.T, path string) (int, map[string]any, http.Header) {
 	t.Helper()
 	resp, err := sp.client.Get(sp.url(path))
@@ -219,19 +262,7 @@ func TestProxiedServerServeLifecycle(t *testing.T) {
 		if body["bd_version"] == "" || body["bd_version"] == nil {
 			t.Error("bd_version is empty")
 		}
-		// The handshake advertises exactly what this build implements. A client
-		// that gates on capabilities is then correct without knowing which
-		// release it hit. With the read endpoints landed that is the whole v0
-		// vocabulary; the assertion is on the derived list, not on a count, so
-		// the next operation to arrive stubbed still fails here.
-		caps, ok := body["capabilities"].([]any)
-		if !ok {
-			t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
-		}
-		want := []any{"issues.claim", "issues.get", "issues.list", "ready.list"}
-		if !reflect.DeepEqual(caps, want) {
-			t.Errorf("capabilities = %v, want %v", caps, want)
-		}
+		assertServedCapabilities(t, body)
 		// The allowlist is enforced in internal/httpapi; this is the end-to-end
 		// half — a real workspace's real config, over a real socket.
 		for _, forbidden := range []string{"sync_remote", "server_host", "server_port", "data_dir", "proxied_dir", "role"} {

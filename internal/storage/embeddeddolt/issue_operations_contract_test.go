@@ -24,6 +24,34 @@ func TestEmbeddedIssueOperationsCreateRejectsMissingDependencyTargets(t *testing
 	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "skipdep"))
 }
 
+func TestEmbeddedIssueOperationsCreateRefusesAnOccupiedID(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "occupied")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateRefusesAnOccupiedID(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "occupied"))
+}
+
+func TestEmbeddedIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "foreignpfx")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateRefusesAForeignIDPrefix(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "foreignpfx"))
+}
+
+func TestEmbeddedIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "metaorder")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "metaorder"))
+}
+
+func TestEmbeddedIssueOperationsCreateInheritsParentLabels(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "inherit")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "inherit"))
+}
+
 func TestEmbeddedIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "metaevent")
@@ -43,6 +71,13 @@ func TestEmbeddedIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
 	te := newTestEnv(t, "xferfence")
 	ctx := t.Context()
 	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "xferfence"))
+}
+
+func TestEmbeddedIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "guardgate")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "guardgate"))
 }
 
 func TestEmbeddedIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {
@@ -129,12 +164,69 @@ func TestEmbeddedIssueOperationsUpdatePersistentPreservesUnversionedClass(t *tes
 	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "unversioned"))
 }
 
+func TestEmbeddedIssueOperationsCreateWritesEveryScalarField(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "createsurface")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateWritesEveryScalarField(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "createsurface"))
+}
+
+func TestEmbeddedIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "scalarsurface")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "scalarsurface"))
+}
+
+func TestEmbeddedIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "typevocab")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "typevocab"))
+}
+
+func TestEmbeddedIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "claimrestore")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "claimrestore"))
+}
+
+func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bsupd")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bsupd"))
+}
+
+func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bscond")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bscond"))
+}
+
+func TestEmbeddedIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bscreate")
+	ctx := t.Context()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bscreate"))
+}
+
+func TestEmbeddedIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bsclaim")
+	ctx := t.Context()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bsclaim"))
+}
+
 func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *testEnv, prefix string) conformance.IssueOperationsStagingFixture {
 	t.Helper()
 	operations, err := embeddeddolt.NewIssueOperations(te.store)
 	if err != nil {
 		t.Fatalf("NewIssueOperations: %v", err)
 	}
+	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.IssueOperationsStagingFixture{
 		IssuePrefix: prefix,
 		Operations:  operations,
@@ -145,5 +237,6 @@ func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *te
 			te.queryScalar(t, ctx, query, args, dest...)
 			return nil
 		},
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 }

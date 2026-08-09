@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	storageops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -72,7 +73,7 @@ import (
 //     default listing suppresses, not a reconfigured vocabulary.
 //
 //   - THE NEVER-MUTATE-CALLER-REQUEST RULE, beyond the single tripwire
-//     RunReaderDoesNotMutateTheCallerRequest. reader.go:326 makes it a promise,
+//     RunReaderDoesNotMutateTheCallerRequest. reader.go:392 makes it a promise,
 //     so it gets one case for the whole role; it is a property of the shared
 //     implementation, not of each method, and asserting it per method would
 //     triple the cost for no new information.
@@ -198,7 +199,7 @@ func RunReaderReadyDeferredAndEphemeralGates(t *testing.T, ctx context.Context, 
 }
 
 // RunReaderReadyLimitBoundary walks the whole Limit vocabulary
-// (reader.go:85-100) against the page shape it produces (reader.go:310-315).
+// (reader.go:85-100) against the page shape it produces (reader.go:376-381).
 //
 // This is the one case that exercises a genuine two-implementation seam rather
 // than one body twice. The store-backed body has no has-more of its own, so it
@@ -209,9 +210,9 @@ func RunReaderReadyDeferredAndEphemeralGates(t *testing.T, ctx context.Context, 
 // is where an off-by-one in either mechanism shows: three rows, asked for two,
 // three, all, and by default.
 //
-// Offset is the neighboring knob and is deliberately NOT asserted here: the
-// two bodies answer it differently on purpose, so what the contract can pin is
-// weaker than a row count. RunReaderOffsetIsHonoredOrRefused owns it.
+// Offset is the neighboring knob and is deliberately NOT asserted here, so
+// that a body which conflated the two knobs fails one case rather than
+// muddying both. RunReaderOffsetSkipsTheRowsBeforeThePage owns it.
 func RunReaderReadyLimitBoundary(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope := readerLabel(fixture, "rdylimit")
@@ -252,27 +253,26 @@ func RunReaderReadyLimitBoundary(t *testing.T, ctx context.Context, fixture Read
 	}
 }
 
-// RunReaderOffsetIsHonoredOrRefused pins the one thing every implementation
-// owes on ReadyRequest.Offset and ListRequest.Offset: a non-zero Offset is
-// either HONORED or REFUSED with a typed *ErrUnsupported, and never SILENTLY
-// IGNORED.
+// RunReaderOffsetSkipsTheRowsBeforeThePage pins ReadyRequest.Offset and
+// ListRequest.Offset: the page is the TAIL of the unpaged answer, in the
+// unpaged order, on every implementation.
 //
-// It is deliberately weaker than "Offset skips N rows", and the weakness is the
-// point. The two bodies disagree by design — the unit-of-work one renders
-// LIMIT/OFFSET, the store-backed one renders LIMIT only and therefore refuses
-// rather than answering the first page again — so a case written to either
-// behavior would fail the other. What they do share is the property whose
-// ABSENCE made this a spec gap (bd-yby99.7): with three matching rows, Offset
-// 0/1/2 came back 3/3/3 through the store body, with no error for a pager to
-// notice. Which body does which is a per-backend fact and is asserted at the
-// wirings, not here.
+// It used to be weaker — "honored or refused" — because the two bodies did
+// disagree: the unit-of-work one rendered LIMIT/OFFSET and the store-backed one
+// rendered LIMIT only and refused rather than answering the first page again.
+// A capability that is either served or refused is not a semantics the caller
+// can write against, so the split was closed rather than described: both bodies
+// now reach past the skipped rows and drop them in the shared page epilogue.
+// The spec gap this grew out of (bd-yby99.7) was the weakest form of the same
+// thing — three matching rows and Offset 0/1/2 coming back 3/3/3 with no error
+// for a pager to notice.
 //
-// The assertion is therefore comparative. The same request is issued at Offset
-// 0 and at Offset 1, and the second must either refuse with an error a caller
-// can classify, or answer with a genuinely different page. Both requests name a
-// total order over rows seeded minutes apart, so "different" cannot be storage
+// THE WALK IS THE ASSERTION. Every offset from 0 to one past the end is driven,
+// so a body that skipped a fixed number, skipped before the page bound, or
+// stopped skipping at the end fails on one of them. Both requests name a TOTAL
+// order over rows seeded minutes apart, so the expected tail is not storage
 // order wobbling between two calls.
-func RunReaderOffsetIsHonoredOrRefused(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+func RunReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope := readerLabel(fixture, "offset")
 	var ids []string
@@ -303,32 +303,33 @@ func RunReaderOffsetIsHonoredOrRefused(t *testing.T, ctx context.Context, fixtur
 			})
 		}},
 	} {
-		// Offset 0 is not a page request, so it is served everywhere and is
-		// the baseline the paged call has to differ from.
+		// Offset 0 is not a page request, so it is the baseline every paged
+		// call is a suffix of. It is READ rather than assumed: the two sorts
+		// name a total order, but which end each starts from is the query's
+		// business and not this case's.
 		unpaged, err := test.call(0)
 		if err != nil {
 			t.Fatalf("%s at Offset 0: %v", test.what, err)
 		}
-		if len(unpaged.Items) != len(ids) {
-			t.Fatalf("%s at Offset 0 returned %v, want the three seeded rows", test.what, readerPageIDs(unpaged))
+		whole := readerPageIDs(unpaged)
+		if len(whole) != len(ids) {
+			t.Fatalf("%s at Offset 0 returned %v, want the three seeded rows", test.what, whole)
 		}
 
-		paged, err := test.call(1)
-		if err != nil {
-			var unsupported *publicops.ErrUnsupported
-			if !errors.As(err, &unsupported) {
-				t.Errorf("%s at Offset 1 refused with %v; a refusal has to be a typed *ErrUnsupported a caller can classify", test.what, err)
+		for offset := 1; offset <= len(ids); offset++ {
+			paged, err := test.call(offset)
+			if err != nil {
+				t.Errorf("%s at Offset %d: %v", test.what, offset, err)
 				continue
 			}
-			if unsupported.Op == "" || unsupported.Backend == "" {
-				t.Errorf("%s at Offset 1 refused with Op=%q Backend=%q; a refusal naming neither the operation nor the backend leaves the caller nowhere to go",
-					test.what, unsupported.Op, unsupported.Backend)
+			if paged.Items == nil {
+				t.Errorf("%s at Offset %d returned a nil Items; an offset past the end is an empty page, not a null one",
+					test.what, offset)
 			}
-			continue
-		}
-		if slices.Equal(readerPageIDs(paged), readerPageIDs(unpaged)) {
-			t.Errorf("%s at Offset 1 returned the same page as Offset 0 (%v) and no error: the offset was silently ignored",
-				test.what, readerPageIDs(paged))
+			if got, want := readerPageIDs(paged), whole[offset:]; !slices.Equal(got, want) {
+				t.Errorf("%s at Offset %d = %v, want %v — the tail of the unpaged answer %v",
+					test.what, offset, got, want, whole)
+			}
 		}
 	}
 }
@@ -545,7 +546,7 @@ func RunReaderListNaturalNumericIDSortTrimsAfterTheFetch(t *testing.T, ctx conte
 }
 
 // RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder pins the decoded
-// cursor (reader.go:264-268). The position is a PAIR, and both halves matter:
+// cursor (reader.go:277-286). The position is a PAIR, and both halves matter:
 // rows older than the cursor's timestamp are returned, and rows sharing that
 // timestamp are returned only when their id sorts after the cursor's. A seam
 // that compared the timestamp alone would drop the same-second row, which is
@@ -604,13 +605,25 @@ func RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder(t *testing.T, ct
 // side of it and IDFilter is not. The DROPPED half — and the refusal that
 // replaced the silent widening — is
 // RunReaderListReadyFlagRefusesAFilterItCannotCarry.
+//
+// THREE READY IDS, not two, and the reason is the regression's other half. With
+// only bd-1 and bd-10 in the set, natural-numeric order, lexical order and the
+// order the query returns them in all read the same, so an arm that skipped the
+// display order entirely still answered correctly and the case could only see
+// the missing TRIM. bd-1 / bd-2 / bd-10 separates them: natural order is
+// 1, 2, 10, lexical is 1, 10, 2, and the seed order below is neither. `--sort
+// id` is the sort SQL cannot express, so on this arm as on the other one the
+// epilogue is the only thing that can produce it (ListRequest.SortBy, "the
+// display order is applied to the page after the query rather than inside it").
 func RunReaderListReadyFlagAnswersTheBlockerAwareSet(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope := readerLabel(fixture, "lsready")
 	blocker := readerID(fixture, "lsready", "1")
-	blocked := readerID(fixture, "lsready", "2")
+	alsoFree := readerID(fixture, "lsready", "2")
+	blocked := readerID(fixture, "lsready", "3")
 	free := readerID(fixture, "lsready", "10")
-	for _, id := range []string{blocker, blocked, free} {
+	// Seeded in an order that is neither the natural order nor the lexical one.
+	for _, id := range []string{free, blocked, alsoFree, blocker} {
 		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, scope))
 	}
 	if err := fixture.AddDependency(ctx, &types.Dependency{
@@ -625,7 +638,7 @@ func RunReaderListReadyFlagAnswersTheBlockerAwareSet(t *testing.T, ctx context.C
 	if err != nil {
 		t.Fatalf("List --ready: %v", err)
 	}
-	assertReaderPageIDs(t, "List --ready", page, []string{blocker, free})
+	assertReaderPageIDs(t, "List --ready --sort id", page, []string{blocker, alsoFree, free})
 
 	// The same arm, under a sort the database cannot express and a limit: the
 	// epilogue has to sort AND trim here, and report the truncation.
@@ -731,7 +744,7 @@ func RunReaderListReadyFlagRefusesAFilterItCannotCarry(t *testing.T, ctx context
 }
 
 // RunReaderListEmptyPageIsWellFormed pins the page shape when nothing matches
-// (reader.go:310-315). Items is never nil for a successful call, so no caller
+// (reader.go:376-381). Items is never nil for a successful call, so no caller
 // has to tell null from empty to learn that nothing matched, and an empty page
 // hid nothing.
 func RunReaderListEmptyPageIsWellFormed(t *testing.T, ctx context.Context, fixture ReaderFixture) {
@@ -758,8 +771,403 @@ func RunReaderListEmptyPageIsWellFormed(t *testing.T, ctx context.Context, fixtu
 	}
 }
 
+// RunReaderListMaxRowsIsHonored pins ListRequest.MaxRows: a cap the result set
+// exceeds refuses the whole answer with *ErrTooManyRows carrying the count, the
+// cap and the request's attribution — on every implementation.
+//
+// It used to say "honored OR refused with *ErrUnsupported", because one body
+// threaded the cap and the other did not. That disjunction could not tell a
+// working circuit breaker from a backend that had none, which is the one thing
+// a caller setting a cap needs to know. Both query paths now size the same
+// window through one function (internal/storage/issueops.SearchProbeLimit) and
+// enforce it with the same one (EnforceMaxRowsCap).
+//
+// A cap is a CIRCUIT BREAKER: a caller sets it because it would rather fail
+// than wait, so answering the unbounded query hands that caller exactly the
+// runaway result it was guarding against.
+//
+// THE COMPLEMENT IS ASSERTED TOO — the same request under a cap the result set
+// fits inside comes back as an ordinary page. Without it a body that refused
+// every non-zero MaxRows out of hand would pass. And the cap is driven UNDER AN
+// OFFSET as well, because a row the query skipped is still a row it matched: a
+// body that counted only what survived the skip would let an offset talk a
+// caller out of the breaker.
+//
+// THE LIMIT BOUNDARY IS THE LAST PART, and it is where the two seams are most
+// able to disagree. A cap only fires when the PAGE could have exceeded it: at
+// Limit <= MaxRows the caller can never receive more rows than the cap allows,
+// so the answer is an ordinary truncated page, and at Limit > MaxRows the same
+// result set fires. Both sides of the boundary are driven, one row apart. The
+// store seam reaches it by composing workapi.WithFetchOneExtra with
+// EffectiveSearchLimit — including the cap bump that keeps the probe row from
+// tripping a cap the page cannot break — and the unit-of-work seam by calling
+// the one function that IS that composition. A seam that added its probe row
+// without the bump fires at Limit == MaxRows; one that added no probe row
+// reports has-more wrongly. Neither is visible from the unlimited requests
+// above.
+func RunReaderListMaxRowsIsHonored(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	var ids []string
+	for _, tag := range []string{"a", "b", "c"} {
+		id := readerID(fixture, "maxrows", tag)
+		ids = append(ids, id)
+		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, ""))
+	}
+	idScope := readerIDFilter(ids...)
+
+	// A cap the three seeded rows fit inside: an ordinary page everywhere.
+	const roomyWhat = "List under a cap the result set fits inside"
+	roomy, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", MaxRows: len(ids) + 1, MaxRowsSource: "--max-rows",
+	})
+	if err != nil {
+		t.Fatalf("%s: %v", roomyWhat, err)
+	}
+	assertReaderPageIDSet(t, roomyWhat, roomy, ids)
+
+	// A cap the result set exceeds, with and without an offset in front of it.
+	// A PAGE from either means the field was ignored.
+	for _, test := range []struct {
+		what   string
+		offset int
+	}{
+		{"List under a cap the result set exceeds", 0},
+		{"List under a cap the result set exceeds, behind an offset", 1},
+	} {
+		tight, err := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "created", Offset: test.offset,
+			MaxRows: len(ids) - 1, MaxRowsSource: "--max-rows",
+		})
+		if err == nil {
+			t.Fatalf("%s (MaxRows=%d over %d matching rows) returned the page %v and no error: the cap was silently ignored",
+				test.what, len(ids)-1, len(ids), readerPageIDs(tight))
+		}
+		// The leaf names the answer — *ErrTooManyRows — so a caller can tell
+		// "the cap fired" from any other failure without reading error text.
+		var tooMany *storageops.ErrTooManyRows
+		if !errors.As(err, &tooMany) {
+			t.Fatalf("%s failed with %v; a cap that fired has to answer with *ErrTooManyRows a caller can classify", test.what, err)
+		}
+		if tooMany.Cap != len(ids)-1 {
+			t.Errorf("%s: the cap error reports Cap = %d, want the %d the request asked for", test.what, tooMany.Cap, len(ids)-1)
+		}
+		if tooMany.Found <= tooMany.Cap {
+			t.Errorf("%s: the cap error reports Found = %d against Cap = %d; a cap that fired saw more rows than it allows",
+				test.what, tooMany.Found, tooMany.Cap)
+		}
+		// The whole job of MaxRowsSource (reader.go): the attribution the
+		// request supplied comes back on the refusal, so the caller that set
+		// the cap can say which of its own knobs did.
+		if tooMany.Source != "--max-rows" {
+			t.Errorf("%s: the cap error reports Source = %q, want the %q the request supplied: MaxRowsSource decides nothing else",
+				test.what, tooMany.Source, "--max-rows")
+		}
+	}
+
+	// The boundary, one row apart, over the same three rows and the same cap.
+	// Limit 2 under a cap of 2 delivers a page of 2 and says there is more;
+	// Limit 3 under the same cap fires.
+	const cap2 = 2
+	page, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", Limit: readerLimit(cap2),
+		MaxRows: cap2, MaxRowsSource: "--max-rows",
+	})
+	if err != nil {
+		t.Fatalf("List at Limit=%d under MaxRows=%d: %v; a page the caller receives cannot exceed a cap it fits inside, so this must not fire",
+			cap2, cap2, err)
+	}
+	if len(page.Items) != cap2 {
+		t.Errorf("List at Limit=%d under MaxRows=%d returned %v, want %d rows", cap2, cap2, readerPageIDs(page), cap2)
+	}
+	if !page.HasMore {
+		t.Errorf("List at Limit=%d under MaxRows=%d over %d rows reported has_more=false; the probe row that answers that question is what the cap must not fire on",
+			cap2, cap2, len(ids))
+	}
+	over, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", Limit: readerLimit(cap2 + 1),
+		MaxRows: cap2, MaxRowsSource: "--max-rows",
+	})
+	if err == nil {
+		t.Fatalf("List at Limit=%d under MaxRows=%d returned the page %v; a page that could exceed the cap has to fire it",
+			cap2+1, cap2, readerPageIDs(over))
+	}
+	var tooMany *storageops.ErrTooManyRows
+	if !errors.As(err, &tooMany) {
+		t.Fatalf("List at Limit=%d under MaxRows=%d failed with %v, want *ErrTooManyRows", cap2+1, cap2, err)
+	}
+	if tooMany.Cap != cap2 {
+		t.Errorf("the cap error reports Cap = %d, want the %d the request asked for; the probe row's bump must not reach the caller", tooMany.Cap, cap2)
+	}
+}
+
+// RunReaderListMaxRowsBoundaryIsLimitPlusOffset pins WHICH WINDOW the cap is
+// sized against: the rows the query TOUCHES, Limit+Offset, not the rows the
+// caller receives (reader.go, ListRequest.MaxRows).
+//
+// A row Offset skips is a row the query matched, so an offset walks a caller
+// TOWARD the breaker and never past it. The boundary that follows is exact:
+// Limit+Offset <= MaxRows is a page whatever the result set does, and
+// Limit+Offset > MaxRows fires as soon as that many rows match. The case above
+// drives that boundary along the LIMIT axis at Offset 0; this one drives it
+// along the OFFSET axis, with the limit and the cap held still, so the only
+// thing that moves between the last page and the first refusal is one row of
+// skip.
+//
+// WHY IT IS A CASE OF ITS OWN rather than another arm of the one above: the two
+// seams compose the window differently — the store-backed body widens the
+// filter and then sizes its probe row (workapi.WithRowsBeforeThePage, then
+// WithFetchOneExtra), the unit-of-work body hands its seam the widened limit
+// and lets internal/storage/domain/db size both. Either composition can be one
+// row wrong in a way no request without an offset can see, and the two can be
+// wrong in DIFFERENT directions: the cap bump at the equal boundary keys off
+// the widened window on one side and off the page on the other unless both are
+// written to key off the same one.
+//
+// THE FIXTURE HAS TO REACH THE CAP FOR ANY OF THAT TO BE VISIBLE. Five rows
+// against a cap of three: every window below is bounded at four rows or fewer,
+// so each query has more matching rows behind it than its bound, and a body
+// that fetched one row too many or counted one row too few has somewhere to
+// show it. Three rows would make the two non-firing cases pass on a body with
+// no cap at all.
+func RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	const rowCap = 3
+	scope := readerLabel(fixture, "maxrowswindow")
+	var ids []string
+	base := time.Now().UTC().Truncate(time.Second).Add(-5 * time.Hour)
+	for i, tag := range []string{"a", "b", "c", "d", "e"} {
+		id := readerID(fixture, "maxrowswindow", tag)
+		ids = append(ids, id)
+		issue := readerIssue(id, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Minute)
+		issue.CreatedAt, issue.UpdatedAt = at, at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	idScope := readerIDFilter(ids...)
+
+	// The order every expectation below is a window of, READ rather than
+	// assumed: which end "created" starts from is the query's business, and
+	// this case is about which rows the cap counts, not about that.
+	unpaged, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", Limit: readerLimit(0),
+	})
+	if err != nil {
+		t.Fatalf("List unpaged: %v", err)
+	}
+	order := readerPageIDs(unpaged)
+	if len(order) != len(ids) {
+		t.Fatalf("List unpaged returned %v, want the %d seeded rows: a result set smaller than the bound cannot observe the cap this case drives",
+			order, len(ids))
+	}
+
+	// The window, one row of offset at a time, against a cap of three.
+	for _, test := range []struct {
+		what   string
+		limit  int
+		offset int
+		fires  bool
+	}{
+		// Limit+Offset == MaxRows-1: strictly inside the cap.
+		{"Limit+Offset one row inside the cap", 1, 1, false},
+		// Limit+Offset == MaxRows: the touched window is exactly the cap, and
+		// the probe row that answers has-more must not be counted against it.
+		{"Limit+Offset exactly at the cap", 2, 1, false},
+		// Limit+Offset == MaxRows+1: the same limit and the same cap, one more
+		// row of skip, and the query can now touch more rows than the cap
+		// allows.
+		{"Limit+Offset one row past the cap", 2, 2, true},
+	} {
+		what := test.what
+		page, err := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "created",
+			Limit: readerLimit(test.limit), Offset: test.offset,
+			MaxRows: rowCap, MaxRowsSource: "--max-rows",
+		})
+		if test.fires {
+			if err == nil {
+				t.Errorf("%s (Limit=%d Offset=%d MaxRows=%d over %d matching rows) returned the page %v; a query that may touch %d rows has to fire a cap of %d",
+					what, test.limit, test.offset, rowCap, len(ids), readerPageIDs(page), test.limit+test.offset, rowCap)
+				continue
+			}
+			var tooMany *storageops.ErrTooManyRows
+			if !errors.As(err, &tooMany) {
+				t.Errorf("%s failed with %v, want *ErrTooManyRows", what, err)
+				continue
+			}
+			if tooMany.Cap != rowCap {
+				t.Errorf("%s: the cap error reports Cap = %d, want the %d the request asked for; the probe row's bump must not reach the caller",
+					what, tooMany.Cap, rowCap)
+			}
+			if tooMany.Found <= tooMany.Cap {
+				t.Errorf("%s: the cap error reports Found = %d against Cap = %d; a cap that fired saw more rows than it allows",
+					what, tooMany.Found, tooMany.Cap)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s (Limit=%d Offset=%d MaxRows=%d): %v; a query bounded to %d rows cannot break a cap of %d, so this must not fire",
+				what, test.limit, test.offset, rowCap, err, test.limit+test.offset, rowCap)
+			continue
+		}
+		assertReaderPageIDs(t, what, page, order[test.offset:test.offset+test.limit])
+		// Every window here stops short of the fifth row, so the page that
+		// came back hid something. A body that failed to reach past the skip
+		// answers the same rows with has_more=false.
+		if !page.HasMore {
+			t.Errorf("%s reported has_more=false over %d matching rows; the row past the page is what the bound has to have reached",
+				what, len(ids))
+		}
+	}
+
+	// THE SAME BOUNDARY ON THE --ready ARM, which is a different query in both
+	// seams — a blocker-aware union rather than the search — reached through
+	// the same request and the same cap. Both sides are driven: an arm that
+	// refused every capped ready request would pass on the firing half alone.
+	//
+	// WHICH rows come back is deliberately not asserted here. The ready query
+	// runs in its sort POLICY's order and the display order is applied to the
+	// page afterwards, so a bounded ready query picks its rows in an order this
+	// request does not name — that promise is
+	// RunReaderReadySortPoliciesOrderTheSameRows's, and restating it here would
+	// pin an order the contract does not owe. What this arm owes is the cap.
+	readyAll, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created", Limit: readerLimit(0),
+	})
+	if err != nil {
+		t.Fatalf("List --ready unpaged: %v", err)
+	}
+	if got := readerPageIDs(readyAll); len(got) != len(ids) {
+		t.Fatalf("List --ready unpaged returned %v, want the %d seeded rows: they are open, unassigned and unblocked, and a smaller ready set cannot reach the cap",
+			got, len(ids))
+	}
+	readyAt, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created",
+		Limit: readerLimit(2), Offset: 1, MaxRows: rowCap, MaxRowsSource: "--max-rows",
+	})
+	switch {
+	case err != nil:
+		t.Errorf("List --ready at Limit=2 Offset=1 under MaxRows=%d: %v; the touched window is exactly the cap and must not fire", rowCap, err)
+	case len(readyAt.Items) != 2:
+		t.Errorf("List --ready at Limit=2 Offset=1 returned %v, want the 2 rows behind the skip", readerPageIDs(readyAt))
+	}
+	readyOver, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		Labels: []string{scope}, ReadyFlag: true, SortBy: "created",
+		Limit: readerLimit(2), Offset: 2, MaxRows: rowCap, MaxRowsSource: "--max-rows",
+	})
+	if err == nil {
+		t.Fatalf("List --ready at Limit=2 Offset=2 under MaxRows=%d returned the page %v; the ready query counts a skipped row the same way the search does",
+			rowCap, readerPageIDs(readyOver))
+	}
+	var readyTooMany *storageops.ErrTooManyRows
+	if !errors.As(err, &readyTooMany) {
+		t.Fatalf("List --ready at Limit=2 Offset=2 under MaxRows=%d failed with %v, want *ErrTooManyRows", rowCap, err)
+	}
+	if readyTooMany.Cap != rowCap {
+		t.Errorf("List --ready: the cap error reports Cap = %d, want the %d the request asked for", readyTooMany.Cap, rowCap)
+	}
+}
+
+// RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse pins
+// ListRequest.SkipCounts (reader.go:160-175). Two halves, and the second is
+// the load-bearing one:
+//
+//   - the three cardinalities come back ZERO on a row that genuinely has each
+//     of them, so the knob demonstrably reached the query rather than being
+//     accepted and dropped; and
+//   - NOTHING ELSE MOVES. Same rows, same order, same Parent, same has-more
+//     verdict as the identical request without the knob. The aggregates hang
+//     off outer joins, so an implementation that made one of them inner would
+//     answer with a strict subset and still look like it had "skipped the
+//     counts".
+//
+// Zero is asserted rather than "unknown" because zero is what the wire and the
+// struct can carry; the doc's instruction to READ it as unknown is a promise to
+// the caller.
+func RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "skipcounts", "subject")
+	blocker := readerID(fixture, "skipcounts", "blocker")
+	dependent := readerID(fixture, "skipcounts", "dependent")
+	parent := readerID(fixture, "skipcounts", "parent")
+	for _, id := range []string{subject, blocker, dependent, parent} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(id, types.TypeTask, ""))
+	}
+	// One outgoing blocks edge, one incoming one, and a parent-child edge, so
+	// the subject row carries a nonzero DependencyCount, DependentCount and
+	// Parent at once. Parent rides the same mega-query as the counts and is NOT
+	// a count: it is the tripwire for a knob that suppressed too much.
+	for _, edge := range []*types.Dependency{
+		{IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: dependent, DependsOnID: subject, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: parent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	if err := fixture.AddComment(ctx, subject, "seed", "so the comment count is nonzero"); err != nil {
+		t.Fatalf("seed the comment: %v", err)
+	}
+
+	idScope := readerIDFilter(subject, blocker, dependent, parent)
+	req := publicops.ListRequest{IDFilter: idScope, SortBy: "created"}
+
+	hydrated, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with the counts hydrated: %v", err)
+	}
+	hydratedRow := readerRowByID(t, "List with the counts hydrated", hydrated, subject)
+	if hydratedRow == nil {
+		return
+	}
+	// The premise. If the seeded row has no counts to suppress and no parent to
+	// keep, the second half of this case proves nothing either way.
+	if hydratedRow.DependencyCount == 0 || hydratedRow.DependentCount == 0 || hydratedRow.CommentCount == 0 {
+		t.Fatalf("the seeded subject came back with counts (%d, %d, %d); this case needs all three nonzero before it can assert they are suppressed",
+			hydratedRow.DependencyCount, hydratedRow.DependentCount, hydratedRow.CommentCount)
+	}
+	if hydratedRow.Parent == nil {
+		t.Fatalf("the seeded subject came back with no Parent; this case needs one before Parent can be the tripwire for a knob that suppressed too much")
+	}
+
+	req.SkipCounts = true
+	skipped, err := fixture.Reader.List(ctx, req)
+	if err != nil {
+		t.Fatalf("List with SkipCounts: %v", err)
+	}
+	skippedRow := readerRowByID(t, "List with SkipCounts", skipped, subject)
+	if skippedRow == nil {
+		return
+	}
+	for _, got := range []struct {
+		what  string
+		count int
+	}{
+		{"DependencyCount", skippedRow.DependencyCount},
+		{"DependentCount", skippedRow.DependentCount},
+		{"CommentCount", skippedRow.CommentCount},
+	} {
+		if got.count != 0 {
+			t.Errorf("List with SkipCounts returned %s = %d, want 0: the knob was accepted and the aggregate computed anyway", got.what, got.count)
+		}
+	}
+
+	// Nothing else moves.
+	if !slices.Equal(readerPageIDs(skipped), readerPageIDs(hydrated)) {
+		t.Errorf("List with SkipCounts returned %v, want the same page as without it, %v: this knob chooses what is hydrated, never which rows match",
+			readerPageIDs(skipped), readerPageIDs(hydrated))
+	}
+	if skipped.HasMore != hydrated.HasMore {
+		t.Errorf("List with SkipCounts reported HasMore = %v, want %v", skipped.HasMore, hydrated.HasMore)
+	}
+	if !readerSameParent(skippedRow.Parent, hydratedRow.Parent) {
+		t.Errorf("List with SkipCounts returned Parent = %v, want %v: Parent is not a cardinality and rides the same query",
+			readerParentText(skippedRow.Parent), readerParentText(hydratedRow.Parent))
+	}
+}
+
 // RunReaderGetResolvesTheExactIDAcrossBothPlanes pins GetRequest.ID
-// (reader.go:273-276): the id is exact and canonical, the issue-to-wisp fallback
+// (reader.go:364): the id is exact and canonical, the issue-to-wisp fallback
 // happens inside, and there is no fuzzy, prefix or substring resolution. The
 // prefix probe is the half that matters — an affordance that can answer with a
 // different issue than the caller named has no place on a contract an
@@ -795,7 +1203,7 @@ func RunReaderGetResolvesTheExactIDAcrossBothPlanes(t *testing.T, ctx context.Co
 }
 
 // RunReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay pins both halves of
-// Get's error promise (reader.go:420-423). A miss on BOTH planes is ErrNotFound;
+// Get's error promise (reader.go:500-503). A miss on BOTH planes is ErrNotFound;
 // a backend failure passes through unchanged and never decays into not-found.
 //
 // The decay half needs a fixture that can induce a backend error without
@@ -828,7 +1236,7 @@ func RunReaderGetMissIsNotFoundAndBackendFailureDoesNotDecay(t *testing.T, ctx c
 }
 
 // RunReaderGetOptionalRowListsAreOffByDefault pins the two DetailOptions
-// (reader.go:300-303): the detail view carries counts either way, the expensive
+// (reader.go:365-369): the detail view carries counts either way, the expensive
 // row lists are absent until asked for, and a positive comment count with no
 // rows says so rather than reading as "no comments".
 func RunReaderGetOptionalRowListsAreOffByDefault(t *testing.T, ctx context.Context, fixture ReaderFixture) {
@@ -883,7 +1291,7 @@ func RunReaderGetOptionalRowListsAreOffByDefault(t *testing.T, ctx context.Conte
 }
 
 // RunReaderGetDetailShapeMatchesTheSeededIssue pins the shape of the detail view
-// against what was actually stored (reader.go:15, reader.go:272-304): the
+// against what was actually stored (reader.go:15, reader.go:364-369): the
 // issue's own fields, its labels, its OUTGOING edges with their types, and the
 // three cardinalities. The direction split is the part worth pinning — an
 // implementation that answered Dependencies with the incoming edges would still
@@ -932,7 +1340,7 @@ func RunReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T, ctx context.Cont
 }
 
 // RunReaderDoesNotMutateTheCallerRequest is the role's single request-snapshot
-// tripwire (reader.go:326-327). One case for the whole role, not one per
+// tripwire (reader.go:392-393). One case for the whole role, not one per
 // method: the promise is a property of the shared implementation, and every
 // method is driven here through the same request values so a normalization
 // written in place is caught wherever it lives.
@@ -991,7 +1399,7 @@ func RunReaderDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, f
 }
 
 // RunReaderListLimitBoundaryUnderASortTheDatabaseCanExpress walks
-// ListRequest.Limit's vocabulary at the page boundary (reader.go:246-250) under
+// ListRequest.Limit's vocabulary at the page boundary (reader.go:264-272) under
 // a display order SQL CAN express, which is the only way to reach the seam this
 // case exists for.
 //
@@ -1002,7 +1410,7 @@ func RunReaderDoesNotMutateTheCallerRequest(t *testing.T, ctx context.Context, f
 // the over-fetch. Under `--sort created` the limit is pushed into the query
 // instead, and the two bodies detect truncation by genuinely different
 // mechanisms: the store body asks the query for one row past the page
-// (workapi.WithFetchOneExtra, storereader/reader.go:118) and lets the extra
+// (workapi.WithFetchOneExtra, storereader/reader.go:124,126) and lets the extra
 // row's presence be the answer, while the unit-of-work body renders LIMIT n+1
 // itself and reports the verdict natively (domain/db/issue_search.go:511-529).
 // An off-by-one in either one shows here and nowhere else in this file:
@@ -1151,7 +1559,7 @@ func RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions(t *testing.T, ctx 
 }
 
 // RunReaderListReadyFlagCarriesTheAssigneeAndPriorityFilters pins three more
-// entries from the --ready arm's CARRIED list (reader.go:211-217): Assignee,
+// entries from the --ready arm's CARRIED list (reader.go:226-232): Assignee,
 // NoAssignee and the exact Priority.
 //
 // RunReaderListReadyFlagAnswersTheBlockerAwareSet pins that list for Labels
@@ -1322,6 +1730,42 @@ func readerIDFilter(ids ...string) string {
 
 func readerLimit(n int) *int { return &n }
 
+// readerRowByID picks one row out of a page by id, failing the case rather than
+// returning a zero row: an assertion about a row that is not there would
+// otherwise read as an assertion that passed.
+func readerRowByID(t *testing.T, what string, page publicops.IssuePage, id string) *types.IssueWithCounts {
+	t.Helper()
+	for _, item := range page.Items {
+		if item != nil && item.Issue != nil && item.ID == id {
+			return item
+		}
+	}
+	t.Errorf("%s returned %v, which does not contain %s", what, readerPageIDs(page), id)
+	return nil
+}
+
+// assertReaderUnsupported is GONE. It existed for the two "honored or refused"
+// cases above, which accepted a typed *ErrUnsupported in place of the
+// behavior; nothing on this role is unsupported by any implementation now, so
+// keeping a helper that accepts a refusal would keep the disjunction available
+// to the next case that finds one convenient. *ErrUnsupported is still a real
+// contract elsewhere — conformance.go:100 pins it for the capabilities a
+// backend genuinely does not have.
+
+func readerSameParent(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func readerParentText(p *string) string {
+	if p == nil {
+		return "<nil>"
+	}
+	return *p
+}
+
 func readerPageIDs(page publicops.IssuePage) []string {
 	out := make([]string, 0, len(page.Items))
 	for _, item := range page.Items {
@@ -1347,7 +1791,7 @@ func readerDependencyIDs(rows []*types.IssueWithDependencyMetadata) []string {
 }
 
 // assertReaderPageNotNil is the half of the page shape every assertion owes:
-// Items is never nil for a successful call (reader.go:310-315).
+// Items is never nil for a successful call (reader.go:376-381).
 func assertReaderPageNotNil(t *testing.T, what string, page publicops.IssuePage) {
 	t.Helper()
 	if page.Items == nil {

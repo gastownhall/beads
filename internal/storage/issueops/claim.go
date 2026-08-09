@@ -197,6 +197,13 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
+	// A claim changes assignee and status, so it journals as an update. The
+	// idempotent re-claim path returns above without writing and journals
+	// nothing.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return nil, err
+	}
+
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 }
 

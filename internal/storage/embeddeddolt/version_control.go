@@ -112,17 +112,33 @@ func (s *EmbeddedDoltStore) withMutatingPinnedDBConn(ctx context.Context, fn fun
 // if anything else writes concurrently.
 func (s *EmbeddedDoltStore) commitAll(ctx context.Context, message string, tolerateEmpty bool) (committed bool, err error) {
 	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
-		if _, execErr := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); execErr != nil {
-			if tolerateEmpty && issueops.IsNothingToCommitError(execErr) {
-				committed = false
-				return nil
-			}
-			return fmt.Errorf("dolt commit: %w", execErr)
-		}
-		committed = true
-		return nil
+		var commitErr error
+		committed, commitErr = commitAllInTx(ctx, tx, message, tolerateEmpty)
+		return commitErr
 	})
 	return committed, err
+}
+
+func commitAllInTx(ctx context.Context, tx *sql.Tx, message string, tolerateEmpty bool) (bool, error) {
+	if _, err := tx.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', ?)", message); err != nil {
+		if issueops.IsNothingToCommitError(err) {
+			if tolerateEmpty {
+				return false, nil
+			}
+			return false, fmt.Errorf("dolt commit: %w", err)
+		}
+		return false, wrapCommitIndeterminate("dolt commit", err)
+	}
+	return true, nil
+}
+
+// stageAndCommitAfterSQLCommit preserves the no-replay boundary for version
+// publication after an already-visible SQL mutation.
+func stageAndCommitAfterSQLCommit(ctx context.Context, db versioncontrolops.DBConn, dirtyTables map[string]bool, commitMsg, author string) error {
+	if err := versioncontrolops.StageAndCommit(ctx, db, dirtyTables, commitMsg, author); err != nil {
+		return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
+	}
+	return nil
 }
 
 // Commit stages and commits the full working set. A clean working set is not
@@ -340,14 +356,12 @@ func (s *EmbeddedDoltStore) RecomputeBlockedAfterMerge(ctx context.Context, from
 func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error) {
 	var changed int64
 	if err := s.withConn(ctx, true, func(tx *sql.Tx) error {
-		// Refuse to derive and commit is_blocked from a dirty graph (see
-		// DoltStore.RecomputeAllBlocked); checked inside the recompute tx so it
-		// sees the same working set the recompute will read (bd-6dnrw.37).
-		if e := issueops.GuardBlockedRecomputeWorkingSet(ctx, tx); e != nil {
-			return e
-		}
+		// One shared body across every mode: refuse to derive and commit
+		// is_blocked from a dirty graph (see DoltStore.RecomputeAllBlocked),
+		// checked inside the recompute tx so it sees the same working set the
+		// recompute will read (bd-6dnrw.37).
 		var e error
-		changed, e = issueops.RecomputeAllIsBlockedInTx(ctx, tx)
+		changed, e = versioncontrolops.GuardedRecomputeAllBlockedInTx(ctx, tx)
 		return e
 	}); err != nil {
 		return 0, err
@@ -356,8 +370,9 @@ func (s *EmbeddedDoltStore) RecomputeAllBlocked(ctx context.Context) (int, error
 		// Stage only issues (wisps are dolt_ignore'd), matching the post-pull
 		// recompute, so an unrelated dirty working set is not swept in.
 		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-			return versioncontrolops.StageAndCommit(ctx, db,
-				map[string]bool{"issues": true}, "bd: recompute is_blocked (full)", commitAuthor)
+			return stageAndCommitAfterSQLCommit(ctx, db,
+				versioncontrolops.BlockedRecomputeStagedTables(),
+				versioncontrolops.BlockedRecomputeCommitMsg, commitAuthor)
 		}); err != nil {
 			return int(changed), err
 		}
@@ -438,9 +453,26 @@ const defaultRemote = "origin"
 // otherwise rejects with CLONE_ADMIN). DOLT_REMOTE_PASSWORD is read by Dolt
 // itself from the same process environment. Returns "" when no auth is
 // configured (typical for git+ssh, file://, or unauthenticated remotes).
+//
+// Every remote verb reaches this through withPeerAuth, which prefers the
+// credentials add-peer stored for the remote and falls back here when the
+// remote has no peer entry.
 func remoteAuthUser() string {
 	return os.Getenv("DOLT_REMOTE_USER")
 }
+
+// The remote entry points the verbs below reach are held in variables purely
+// as a test seam: credentials only change the outcome against a remotesapi
+// server enforcing authentication, which a unit test cannot stand up, so the
+// credential-routing tests swap these to observe the remote name and user each
+// verb presents. TestRemoteEntryPointsUseVersionControlOps pins the production
+// bindings.
+var (
+	vcPush             = versioncontrolops.Push
+	vcForcePush        = versioncontrolops.ForcePush
+	vcPull             = versioncontrolops.Pull
+	vcPullWithStrategy = versioncontrolops.PullWithStrategy
+)
 
 func (s *EmbeddedDoltStore) RemoveRemote(ctx context.Context, name string) error {
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
@@ -458,9 +490,21 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 	return remotes, err
 }
 
+// GH#5080 follow-up: the verbs below resolve credentials through withPeerAuth
+// rather than the environment alone, so a remote registered as a federation
+// peer presents its stored credentials however it is reached (`bd sync
+// --remote`, `bd dolt push|pull --remote`, or as the default remote). A remote
+// with no peer entry keeps the DOLT_REMOTE_USER/DOLT_REMOTE_PASSWORD fallback
+// unchanged. Routing every verb through the one resolver also narrows the
+// window around withPeerAuth's mutation of that process-wide pair: a verb
+// operating on a peer-backed remote now reads it holding federationEnvMutex,
+// where before it read it holding no lock at all.
+
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
-	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Push(ctx, db, defaultRemote, s.branch, remoteAuthUser())
+	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcPush(ctx, db, defaultRemote, s.branch, user)
+		})
 	})
 }
 
@@ -472,8 +516,10 @@ func (s *EmbeddedDoltStore) Pull(ctx context.Context) error {
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
 	preHead := s.preMergeHead(ctx)
-	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Pull(ctx, db, defaultRemote, s.branch, remoteAuthUser())
+	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcPull(ctx, db, defaultRemote, s.branch, user)
+		})
 	})
 	if err != nil {
 		return err
@@ -490,8 +536,10 @@ func (s *EmbeddedDoltStore) PullWithStrategy(ctx context.Context, strategy strin
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
 	preHead := s.preMergeHead(ctx)
-	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.PullWithStrategy(ctx, db, defaultRemote, s.branch, remoteAuthUser(), strategy)
+	err := s.withPeerAuth(ctx, defaultRemote, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcPullWithStrategy(ctx, db, defaultRemote, s.branch, user, strategy)
+		})
 	})
 	if err != nil {
 		return err
@@ -506,8 +554,10 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
 	preHead := s.preMergeHead(ctx)
-	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.PullWithStrategy(ctx, db, remote, s.branch, remoteAuthUser(), strategy)
+	err := s.withPeerAuth(ctx, remote, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcPullWithStrategy(ctx, db, remote, s.branch, user, strategy)
+		})
 	})
 	if err != nil {
 		return err
@@ -516,17 +566,21 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
-	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.ForcePush(ctx, db, defaultRemote, s.branch, remoteAuthUser())
+	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcForcePush(ctx, db, defaultRemote, s.branch, user)
+		})
 	})
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
-	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		if force {
-			return versioncontrolops.ForcePush(ctx, db, remote, s.branch, remoteAuthUser())
-		}
-		return versioncontrolops.Push(ctx, db, remote, s.branch, remoteAuthUser())
+	return s.withPeerAuth(ctx, remote, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			if force {
+				return vcForcePush(ctx, db, remote, s.branch, user)
+			}
+			return vcPush(ctx, db, remote, s.branch, user)
+		})
 	})
 }
 
@@ -536,8 +590,10 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 		return fmt.Errorf("commit pending before pull: %w", err)
 	}
 	preHead := s.preMergeHead(ctx)
-	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Pull(ctx, db, remote, s.branch, remoteAuthUser())
+	err := s.withPeerAuth(ctx, remote, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return vcPull(ctx, db, remote, s.branch, user)
+		})
 	})
 	if err != nil {
 		return err
@@ -546,14 +602,18 @@ func (s *EmbeddedDoltStore) PullRemote(ctx context.Context, remote string) error
 }
 
 func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
-	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Fetch(ctx, db, peer, remoteAuthUser())
+	return s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.Fetch(ctx, db, peer, user)
+		})
 	})
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
-	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.Push(ctx, db, peer, s.branch, remoteAuthUser())
+	return s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			return versioncontrolops.Push(ctx, db, peer, s.branch, user)
+		})
 	})
 }
 
@@ -566,20 +626,22 @@ func (s *EmbeddedDoltStore) PullFrom(ctx context.Context, peer string) ([]storag
 
 	preHead := s.preMergeHead(ctx)
 	var conflicts []storage.Conflict
-	err := s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch, remoteAuthUser()); pullErr != nil {
-			// bd-578h9.15: the settle machinery aborts a merge it cannot
-			// auto-resolve before returning, so dolt_conflicts is already
-			// empty here; the conflicts arrive captured pre-abort inside
-			// MergeConflictsError instead.
-			var mce *versioncontrolops.MergeConflictsError
-			if errors.As(pullErr, &mce) {
-				conflicts = mce.Conflicts
-				return nil
+	err := s.withPeerAuth(ctx, peer, func(user string) error {
+		return s.withMutatingPinnedDBConn(ctx, func(db versioncontrolops.DBConn) error {
+			if pullErr := versioncontrolops.Pull(ctx, db, peer, s.branch, user); pullErr != nil {
+				// bd-578h9.15: the settle machinery aborts a merge it cannot
+				// auto-resolve before returning, so dolt_conflicts is already
+				// empty here; the conflicts arrive captured pre-abort inside
+				// MergeConflictsError instead.
+				var mce *versioncontrolops.MergeConflictsError
+				if errors.As(pullErr, &mce) {
+					conflicts = mce.Conflicts
+					return nil
+				}
+				return fmt.Errorf("pull from %s: %w", peer, pullErr)
 			}
-			return fmt.Errorf("pull from %s: %w", peer, pullErr)
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil || len(conflicts) > 0 {
 		// Conflicted pulls skip the recompute: the operator resolves first,
@@ -624,7 +686,7 @@ func (s *EmbeddedDoltStore) recomputeBlockedAfterPull(ctx context.Context, preHe
 		return err
 	}
 	return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		return versioncontrolops.StageAndCommit(ctx, db,
+		return stageAndCommitAfterSQLCommit(ctx, db,
 			map[string]bool{"issues": true}, "bd: recompute is_blocked after pull", commitAuthor)
 	})
 }

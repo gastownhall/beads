@@ -43,6 +43,18 @@ func TestReadyClaimerLeasesADurableWinButNotAnEphemeralOne(t *testing.T) {
 	conformance.RunReadyClaimerLeasesADurableWinButNotAnEphemeralOne(t, ctx, fixture)
 }
 
+func TestReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcfence")
+	defer cleanup()
+	conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t, ctx, fixture)
+}
+
+func TestReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rccount")
+	defer cleanup()
+	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, ctx, fixture)
+}
+
 func TestReadyClaimerAnswersTheQuestionReaderReadyLists(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcagree")
 	defer cleanup()

@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -91,6 +92,17 @@ func testAuditCustomStatusesOrder(t *testing.T, f Factory) {
 // value and returns an error for an invalid one, rolling back the whole write tx.
 // So SetConfig returns an error AND nothing is stored (GetConfig empty). A backend
 // that skips the sync would silently store the invalid value and return nil.
+//
+// NOT DOMINATED by RunWorkspaceConfigRefusesAnUnparseableCustomStatus, however
+// alike the two read. The role refuses in workapi.ValidateSettingWrite, which
+// parses the value BEFORE calling the store at all ("Checking here rather than
+// leaving it to SyncCustomStatusesTable is what makes the refusal a validation
+// error rather than a storage failure"). The store's own in-transaction refusal
+// is therefore reachable only from this seam: make the store swallow the sync
+// error and the whole workspaceconfig contract stays green while this case goes
+// red (measured with scripts/mutation-equivalence.sh). The two also drive
+// different parser branches — a name-shaped refusal here, a built-in collision
+// there.
 func testAuditSetConfigInvalidStatusRollsBack(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -127,6 +139,12 @@ func testAuditCustomTypesOrder(t *testing.T, f Factory) {
 // earlier SetConfig populated. So after deleting status.custom the reference still
 // reports the custom statuses (stale table). A backend that never synced the table
 // would instead report empty.
+//
+// RunWorkspaceConfigUnsetLeavesTheProjectionBehind pins the same bd-yby99.33
+// clause on three legs and reads the projection table raw rather than through
+// GetCustomStatuses, so on promises alone this case is dominated. It survives
+// because it is the only call to DoltStorage.DeleteConfig anywhere in RunAll,
+// the gate an out-of-tree backend proves itself with.
 func testAuditDeleteConfigLeavesNormalizedTable(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -144,6 +162,70 @@ func testAuditDeleteConfigLeavesNormalizedTable(t *testing.T, f Factory) {
 	must(t, err)
 	if !slices.Equal(names, []string{"alpha"}) {
 		t.Errorf("GetCustomStatuses = %v after DeleteConfig, want [alpha] (normalized table still populated)", names)
+	}
+}
+
+// testAuditUnconfiguredVocabulary pins the success path a fresh workspace takes
+// on its very first list-shaped command: with no custom vocabulary configured,
+// GetCustomStatuses, GetCustomStatusesDetailed and GetCustomTypes answer empty
+// with a nil error, and GetInfraTypes answers the default infra set.
+//
+// Every existing vocabulary case configures the vocabulary first, so the
+// unconfigured path had no owning proof and GetInfraTypes had none at all.
+// The consumption is a hard failure edge: internal/workapi/list.go LoadListConfig
+// loads all four up front and wraps any error, so a backend that answers a scan
+// error or a nil-map surprise for an unconfigured workspace bricks `bd list`,
+// `bd ready` and every other list-shaped command rather than degrading.
+//
+// The infra set is spelled out rather than compared against the production
+// constant: this suite is the contract, and reading the answer from the same
+// place the implementation reads it would assert nothing.
+func testAuditUnconfiguredVocabulary(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	names, err := s.GetCustomStatuses(c)
+	must(t, err)
+	if len(names) != 0 {
+		t.Errorf("GetCustomStatuses on an unconfigured workspace = %v, want empty", names)
+	}
+
+	detailed, err := s.GetCustomStatusesDetailed(c)
+	must(t, err)
+	if len(detailed) != 0 {
+		t.Errorf("GetCustomStatusesDetailed on an unconfigured workspace = %v, want empty", auditDetailedPairs(detailed))
+	}
+
+	custom, err := s.GetCustomTypes(c)
+	must(t, err)
+	if len(custom) != 0 {
+		t.Errorf("GetCustomTypes on an unconfigured workspace = %v, want empty", custom)
+	}
+
+	infra := s.GetInfraTypes(c)
+	if !maps.Equal(infra, map[string]bool{"agent": true, "role": true, "message": true}) {
+		t.Errorf("GetInfraTypes on an unconfigured workspace = %v, want the default agent/role/message set", infra)
+	}
+}
+
+// testAuditConfiguredInfraTypes pins the other half: a configured types.infra
+// key replaces the default set outright, and the answer is exactly the
+// configured names. Infra types decide which issue types route to the wisps
+// table instead of the versioned issues table, so a backend that ignores the
+// key silently versions rows the workspace asked to keep ephemeral.
+//
+// Subject: SetConfig. A backend whose allowlist refuses it does not run this
+// case. The assertion is the value, not the cache: invalidation is a per-store
+// concern this suite declines to pin, which is why the read happens on a store
+// that has not read the key before.
+func testAuditConfiguredInfraTypes(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	must(t, s.SetConfig(c, "types.infra", "gate,probe"))
+
+	infra := s.GetInfraTypes(c)
+	if !maps.Equal(infra, map[string]bool{"gate": true, "probe": true}) {
+		t.Errorf("GetInfraTypes after types.infra=gate,probe = %v, want exactly gate/probe", infra)
 	}
 }
 
@@ -204,6 +286,8 @@ func RunAudit_config_metadata_slots_repomtime(t *testing.T, f Factory) {
 	t.Run("SetConfigInvalidStatusRollsBack", func(t *testing.T) { testAuditSetConfigInvalidStatusRollsBack(t, f) })
 	t.Run("CustomTypesOrder", func(t *testing.T) { testAuditCustomTypesOrder(t, f) })
 	t.Run("DeleteConfigLeavesNormalizedTable", func(t *testing.T) { testAuditDeleteConfigLeavesNormalizedTable(t, f) })
+	t.Run("UnconfiguredVocabulary", func(t *testing.T) { testAuditUnconfiguredVocabulary(t, f) })
+	t.Run("ConfiguredInfraTypes", func(t *testing.T) { testAuditConfiguredInfraTypes(t, f) })
 	t.Run("RepoMtimeClearKeyAsymmetry", func(t *testing.T) { testAuditRepoMtimeClearKeyAsymmetry(t, f) })
 	t.Run("SlotGetNonStringValues", func(t *testing.T) { testAuditSlotGetNonStringValues(t, f) })
 }

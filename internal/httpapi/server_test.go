@@ -20,6 +20,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // These tests are pure: no database, no cgo, no build tag. The whole request
@@ -76,6 +77,23 @@ type emptyDeps struct{ domain.DependencyUseCase }
 
 func (emptyDeps) GetIssueDependencyRecords(context.Context, []string) (map[string][]*types.Dependency, error) {
 	return nil, nil
+}
+
+// DetectCycleReport answers for a workspace with no cycles. Without it the
+// promoted method on the embedded nil interface panics, and the provider-backed
+// cycle route would 500 through the panic recovery rather than answering.
+func (emptyDeps) DetectCycleReport(context.Context) (issueops.CycleReport, error) {
+	return issueops.CycleReport{Cycles: []issueops.Cycle{}}, nil
+}
+
+// WalkDependencyTree answers a one-node tree, present for the same reason
+// DetectCycleReport is.
+//
+// A ONE-NODE tree rather than an empty one, because that is what the role
+// promises for a root with no edges, and a fake that answered nothing would let
+// a handler which dropped the root pass.
+func (emptyDeps) WalkDependencyTree(_ context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
+	return issueops.TreeResult{Nodes: []*types.TreeNode{{Issue: types.Issue{ID: req.RootID}}}}, nil
 }
 
 func (u *fakeUOW) Commit(_ context.Context, message string) error {
@@ -186,7 +204,12 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-func newTestServer(t *testing.T, cfg Config) *testServer {
+// newTestServer binds and serves one server for a case. The optional tune
+// functions run between Listen and the first accepted connection, which is
+// where the millisecond-scale knobs (semTimeout, writeStall, the stream
+// cadences and the stream cap) belong: they are fields rather than Config
+// members precisely because they are not deployment configuration.
+func newTestServer(t *testing.T, cfg Config, tune ...func(*Server)) *testServer {
 	t.Helper()
 	stdout := &bytes.Buffer{}
 	stderr := &lockedBuffer{}
@@ -196,7 +219,7 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 	// The default source, for the tests that care about something else. A
 	// config that already names a source — either one — keeps it: defaulting a
 	// provider onto a roles-backed config would serve the wrong one and pass.
-	if cfg.Provider == nil && cfg.Reader == nil && cfg.Claimer == nil {
+	if cfg.Provider == nil && cfg.Reader == nil && cfg.Claimer == nil && cfg.CycleDetector == nil {
 		cfg.Provider = &fakeProvider{}
 	}
 	cfg.Stdout = stdout
@@ -205,6 +228,9 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 	srv, err := Listen(cfg)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
+	}
+	for _, apply := range tune {
+		apply(srv)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -567,7 +593,16 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	for _, c := range caps {
 		got = append(got, c.(string))
 	}
-	want := []string{"issues.claim", "issues.get", "issues.list", "ready.list"}
+	want := []string{
+		"config.get", "config.list", "dependencies.add", "dependencies.blocking",
+		"dependencies.cycles", "dependencies.list", "dependencies.remove",
+		"dependencies.tree", "events.list", "events.watch", "issues.batchCreate",
+		"issues.claim", "issues.close", "issues.delete", "issues.get", "issues.list",
+		"issues.query", "issues.reopen", "issues.sweep", "issues.update",
+		"memories.forget", "memories.get",
+		"memories.list", "memories.remember", "ready.count", "ready.list",
+		"stats.get",
+	}
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)
 	}

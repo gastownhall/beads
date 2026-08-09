@@ -32,10 +32,34 @@ func TestReaderReadyLimitBoundary(t *testing.T) {
 	conformance.RunReaderReadyLimitBoundary(t, ctx, fixture)
 }
 
-func TestReaderOffsetIsHonoredOrRefused(t *testing.T) {
+func TestReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
-	conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
+	conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, fixture)
+}
+
+// The cap rides the filter the shared builder produces and the search path
+// enforces it after the scan. It used to be the only arm that did: the
+// unit-of-work wiring refused the field, and the case accepted either answer.
+func TestReaderListMaxRowsIsHonored(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
+}
+
+// The cap's boundary along the OFFSET axis. It is the composition this body
+// reaches in two steps — widen the filter, then size the probe row — that the
+// case checks, and no request without an offset can see it go wrong.
+func TestReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
+}
+
+func TestReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 }
 
 func TestReaderReadySortPoliciesOrderTheSameRows(t *testing.T) {
