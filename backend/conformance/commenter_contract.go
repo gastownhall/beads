@@ -368,10 +368,10 @@ func RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t *testing.T, ctx context.
 //
 // The history assertion is an EQUALITY at ZERO, where the durable path's is an
 // equality at one: AddComment's ephemeral clause promises "NO durable history
-// entry — none, not 'at most one'". A bound would let a regression that records
-// exactly one entry pass on every backend, and that regression is the one that
-// breaks federation — the wisp tables are dolt-ignored so ephemeral work never
-// ships, and an entry naming a wisp thread ships.
+// entry — none, not one". A bound would let a regression that records exactly
+// one entry pass on every backend, and that regression is the one that breaks
+// federation — the wisp tables are dolt-ignored so ephemeral work never ships,
+// and an entry naming a wisp thread ships.
 //
 // The anchor here lives on exactly one plane, and every anchor a CALLER can
 // create does: no local write path reaches dual residency, which is why
@@ -495,24 +495,22 @@ func RunCommenterDoesNotResolvePrefixes(t *testing.T, ctx context.Context, fixtu
 }
 
 // RunCommenterRecordsExactlyOneHistoryEntry pins Commenter.AddComment's "ONE
-// atomic mutation, with at most one history entry" at the number every wiring
-// actually records: a durable comment costs EXACTLY one entry.
+// atomic mutation, with EXACTLY ONE history entry": a durable comment costs
+// exactly one entry.
 //
-// The case is deliberately stricter than the leaf's bound, because the bound
-// cannot fail in the direction that matters. "after <= before+1" holds whether
-// the entry was written or not, so a body that quietly stopped committing
-// keeps it green — and that is not hypothetical. The deleter role stopped
-// versioning embedded deletes, the identically-shaped range in its contract
-// absorbed it, and what noticed months later was a sibling-write test outside
-// the contract suite (e9acfac6e).
+// EXACTLY ONE, NOT AT MOST ONE. The leaf carried a bound until this case's
+// number was ratified into it, and a bound cannot fail in the direction that
+// matters: "after <= before+1" holds whether the entry was written or not, so
+// a body that quietly stopped committing keeps it green — and that is not
+// hypothetical. The deleter role stopped versioning embedded deletes, the
+// identically-shaped range in its contract absorbed it, and what noticed months
+// later was a sibling-write test outside the contract suite (e9acfac6e).
 //
-// EXACTLY ONE IS MEASURED, NOT DEMANDED: all three wirings already record one
+// EXACTLY ONE WAS MEASURED, NOT DEMANDED: all three wirings already record one
 // entry for a durable comment — the server-backed store inside its write
 // transaction, the embedded store on a second connection after the SQL commit,
-// the unit-of-work provider from the message it hands RunTxResult — so this
-// tightens the assertion and asks no backend to change. Ratifying the leaf's
-// own wording to match is the owner's call; until then this case is the
-// stricter of the two statements, and the honest one.
+// the unit-of-work provider from the message it hands RunTxResult — so neither
+// this assertion nor the wording it ratified asked any backend to change.
 //
 // What the strictness buys a caller: a comment row no entry carries is a row
 // `bd dolt push` does not ship. The thread then reads back locally and exists

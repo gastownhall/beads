@@ -1266,9 +1266,18 @@ paths:
             ancestor or descendant. The hierarchy case — and only it —
             additionally carries `issue_id`, `blocker_id` and
             `blocker_is_ancestor`, so member presence is the discriminator.
-            Neither has a force bypass; both are reachable here because
-            `parent_id` places the new row in a hierarchy the caller cannot see
-            and `dependencies[].reverse` writes an edge INTO it.
+            Neither has a force bypass.
+
+
+            BOTH ARMS ARE REACHABLE HERE because this operation writes BLOCKING
+            edges and hierarchy in one transaction: `parent_id` places the new
+            row under a parent whose ancestry the caller cannot see, and
+            `dependencies[]` may name a blocking edge against that ancestry —
+            while `dependencies[].reverse` writes an edge INTO the id being
+            minted, which is the only way a create can close a scheduling cycle.
+            `PATCH /v0/beads/issues/{id}` publishes no blocking-edge member, so
+            its `dependency_cycle` never carries the hierarchy members; the
+            discriminator is meaningful here and absent there.
           x-bd-codes: [already_exists, dependency_cycle]
           content:
             application/problem+json:
@@ -1496,32 +1505,61 @@ paths:
         `400`.
 
 
+        ## Guards, forces and the conflicts they answer
+
+
+        `expected_version`, `expected_status` and `expected_assignee` are
+        compare-and-set preconditions, checked before the patch. A miss refuses
+        the WHOLE request with `409 precondition_failed` and writes nothing, so
+        recovery is to re-read and recompose rather than to retry the same body.
+        They are `ApplyUpdateItem`'s three members with `ApplyUpdateItem`'s
+        contract; `expected_version`'s token is the `revision` this operation
+        answers with.
+
+
+        `force_close_policy` and `force_assignee_transfer` bypass exactly one
+        refusal each and nothing else. Neither bypasses validation, the
+        preconditions above, or the other's guard.
+
+
+        Three members carry policy, which is where this operation's `409`s come
+        from. `status` crossing into the workspace's done category answers to
+        close policy (`not_closable`). `assignee` transferring away from a live
+        foreign in-progress owner answers to the assignee fence
+        (`already_claimed`). `parent_id` is a graph edit and answers to the
+        graph (`dependency_cycle`, `dependency_exists`). Each is the SAME
+        refusal `issues:batchApply` and `dependencies:add` already publish, not
+        a second vocabulary.
+
+
         ## What this operation deliberately cannot edit
 
 
-        `status` — lifecycle is `{id}:close`, `{id}:reopen` and `{id}:claim`,
-        the operations that carry the policy and conflict vocabulary. A status
-        member here would smuggle close policy into this operation's code set
-        and publish two ways to do one thing.
+        `owner` — additive later, and there is no argument against it any more:
+        the one it had was `assignee`'s, which this operation now publishes.
+        Nothing has asked for it.
 
 
-        `assignee` — assignment is the claim's compare-and-set territory, and a
-        raw assignee write would need the claim's conflict vocabulary on this
-        operation too. An unclaim/transfer operation is future surface.
+        `persistence` — a plane move is an atomic aggregate migration rather
+        than a field write, and moving a row between planes mid-patch is a
+        different act from editing it.
 
 
-        `metadata` — its replace/merge/set/unset algebra deserves its own
-        design pass, not a corner of this one.
+        `closed_by_session` and `close_reason` — written under first-close-wins
+        by `{id}:close`, which a patch write would bypass. A `status` that
+        crosses into the done category still answers to close POLICY here; it
+        does not acquire the close's semantics, which is why `{id}:close`
+        remains the operation to reach for when what you mean is "close this".
 
 
-        Also absent, and additive to publish later: `parent_id` (a set value
-        atomically replaces ALL parents — a graph edit in patch clothing),
-        `persistence` (a plane move is an atomic aggregate migration),
-        `owner` (`assignee`'s argument), `closed_by_session` (written under
-        first-close-wins by `{id}:close`, which a patch write would bypass),
-        and `spec_id`/`await_id` (workflow plumbing this surface publishes
-        nowhere yet). Keeping the first three out is half the reason this
-        operation documents no `409` at all.
+        `created_at`, `created_by` — `POST /v0/beads/issues` withholds them for
+        the same reason: a caller-chosen creation time makes the row disagree
+        with the journal entry that recorded it, and re-dating history is what an
+        import is for.
+
+
+        `spec_id` and `await_id` — workflow plumbing this surface publishes
+        nowhere yet.
 
 
         ## Planes
@@ -1559,13 +1597,23 @@ paths:
         '400':
           description: >-
             Invalid request: an unknown query parameter, an unparseable or
-            oversized body, an unknown body member at either level, an `actor`
+            oversized body, an unknown body member at any level, an `actor`
             that is empty after trimming, longer than 256 bytes, or carrying
             control characters, an empty `patch`, a member carrying the wrong
             JSON type, an explicit `null` on a member that is not nullable, a
             value outside its documented bounds, `notes` together with
-            `append_notes` — or a value this workspace's own validation
-            refuses, such as an `issue_type` outside its configured vocabulary.
+            `append_notes`, `metadata.replace` together with any other metadata
+            edit, `force_assignee_transfer` without `patch.assignee` or beside
+            `expected_assignee`, a `patch.parent_id` naming the issue itself or
+            naming no issue this workspace holds — or a value this workspace's
+            own validation refuses, such as an `issue_type` or `status` outside
+            its configured vocabulary.
+
+
+            A NEW PARENT THAT NAMES NOTHING IS A `400`, NOT A `404`, conforming
+            to `POST /v0/beads/dependencies:add`: an edge describes a relation
+            rather than the resource this request addresses, and the `404` below
+            is reserved for the id in the PATH.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:
@@ -1573,6 +1621,60 @@ paths:
                 $ref: '#/components/schemas/Problem'
         '404':
           $ref: '#/components/responses/NotFound'
+        '409':
+          description: >-
+            The request is well-formed and the STATE refuses it, and NOTHING WAS
+            WRITTEN. Four codes, each inherited from the operation that already
+            publishes it rather than minted here.
+
+
+            `precondition_failed` is `expected_version`, `expected_status` or
+            `expected_assignee` missing. `param` names the guard member and the
+            `expected_*` member echoes what the request asked for; the
+            `actual_*` members are absent, because the refusal rolled its
+            transaction back and a read afterwards would describe a row the
+            refusal never saw. Re-read and recompose; never retry the same body.
+
+
+            `not_closable` is close policy refusing a `patch.status` that
+            crosses into the workspace's done category: open children, or a live
+            blocker. `open_children` is attached for the first and withheld for
+            the second, so member presence tells them apart.
+            `force_close_policy` is the bypass.
+
+
+            `already_claimed` is the assignee fence: a `patch.assignee` that
+            transfers work away from a live foreign in-progress owner.
+            `force_assignee_transfer` is the bypass and `expected_assignee` is
+            the compare-and-set that replaces the fence outright. The `assignee`
+            extension member is attached only when the refusing transaction
+            reported the holder — the fence itself refuses without one, so a
+            client must treat it as optional and re-read the row.
+
+
+            `dependency_cycle` and `dependency_exists` are `patch.parent_id`
+            reaching the graph: a move under the issue's own descendant, and a
+            pair that already carries an edge of a different type. Neither has a
+            force bypass.
+
+
+            `dependency_cycle` ARRIVES WITHOUT THE HIERARCHY MEMBERS HERE, and a
+            client must not dispatch on their presence on this operation. The
+            hierarchy refusal — `issue_id`, `blocker_id`, `blocker_is_ancestor`
+            — is raised only for a BLOCKING edge, and the only edge this
+            operation writes is the `parent-child` one `patch.parent_id` names,
+            so the discriminator cannot fire. That is the difference from
+            `POST /v0/beads/issues` and from `POST /v0/beads/dependencies:add`,
+            both of which write blocking edges and do carry it: this operation
+            publishes no member that writes one. What you get here is the plain
+            scheduling cycle, every time.
+          x-bd-codes:
+            [already_claimed, dependency_cycle, dependency_exists,
+             not_closable, precondition_failed]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -6122,9 +6224,13 @@ components:
       additionalProperties: false
       required: [target, patch]
       description: >-
-        Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules
-        plus the preconditions and force flags that operation deliberately does
-        not publish.
+        Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules.
+
+
+        The two carry the same preconditions and the same force flags; what is
+        this operation's alone is that its guards evaluate AS-MODIFIED — against
+        the row as earlier items of this same request have already changed it —
+        and that a miss takes the whole plan down rather than one write.
       properties:
         target:
           $ref: '#/components/schemas/Ref'
@@ -6196,21 +6302,26 @@ components:
 
 
         It mirrors `IssuePatchBody` member for member and diverges in exactly
-        three places, each of them a capability that operation withheld on
-        purpose and this one needs. `status`, `assignee` and `owner` are
-        published here, which is what makes `force_close_policy`,
-        `force_assignee_transfer` and `expected_assignee` mean anything and what
-        gives this operation the `not_closable` and `already_claimed` refusals
-        `updateIssue` has none of. `labels` is a full patch rather than a
-        replacement, because a plan has to be able to REMOVE one label without
-        knowing the rest of the set. And `metadata` is a patch at all.
+        two places now that `PATCH /v0/beads/issues/{id}` publishes `status`,
+        `assignee` and the same `metadata` algebra.
+
+
+        `owner` is published here and not there, which is an accident of order
+        rather than a decision: nothing has asked for it on the single patch.
+
+
+        `labels` is a full patch rather than a complete replacement, and that
+        one is a real difference: a plan has to be able to REMOVE one label
+        without knowing the rest of the set, because it edits a set it did not
+        compose. A caller patching one row it just read already knows the set.
 
 
         `parent_id` is deliberately absent, and its absence is this operation's
         one-edge-one-spelling rule: a parent is a `dep_add` item of type
         `parent-child`, so the order of every edge in the request stays total.
-        `persistence` is absent too — moving a row between planes mid-plan is a
-        different act from writing its fields, and nothing has asked for it
+        The single patch has no ordering to express and publishes it directly.
+        `persistence` is absent from both — moving a row between planes mid-plan
+        is a different act from writing its fields, and nothing has asked for it
         here.
       properties:
         title:
@@ -6963,6 +7074,69 @@ components:
             lines.
         patch:
           $ref: '#/components/schemas/IssuePatchBody'
+        expected_version:
+          type: integer
+          format: int64
+          description: >-
+            Requires the row's revision to equal this value before the patch. A
+            miss refuses the WHOLE request with `409 precondition_failed` and
+            writes nothing — `ApplyUpdateItem.expected_version`'s contract, on
+            the operation that patches one row.
+
+
+            The token is the `revision` this operation's own response carries.
+            No READ on this surface publishes one yet, so a first guarded write
+            seeds itself from an unguarded one or from
+            `POST /v0/beads/issues:batchApply`'s `ApplyItemResult.revision`.
+            Compose the next expectation from the value the write ANSWERED with,
+            never from a number the client incremented itself: the token is
+            OPAQUE and compared for equality alone, so it has no predecessor a
+            client can compute.
+
+
+            DECODE IT AS A 64-BIT INTEGER. Live tokens run past 5e17, where an
+            IEEE-754 double's ulp is already 64, so a parser that decodes JSON
+            numbers as doubles — JavaScript's `JSON.parse`, Go's `any`, Python's
+            `float` — hands back a value NEAR the token that is not it, and the
+            guard is refused against a row nothing else touched.
+        expected_status:
+          type: string
+          maxLength: 255
+          description: >-
+            Requires the issue's status to equal this value before the patch. A
+            miss refuses the whole request with `409 precondition_failed`.
+
+
+            Unlike `expected_version` this one is readable: `Issue.status` is on
+            every read of this surface, so a caller can guard a status
+            transition without any token at all.
+        expected_assignee:
+          type: string
+          maxLength: 255
+          description: >-
+            Requires the issue's assignee to equal this value before the patch.
+            A match AUTHORIZES the requested `patch.assignee` transfer: this
+            compare-and-set replaces the ordinary anti-steal fence, so it must
+            not be combined with `force_assignee_transfer`. A miss refuses the
+            whole request with `409 precondition_failed`.
+        force_close_policy:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY close policy — the open-children refusal and the live
+            blocker refusal — for a `patch.status` that crosses into the
+            workspace's done category. It has no effect without such a status
+            change, and it never bypasses validation, the preconditions above,
+            or the assignee fence.
+        force_assignee_transfer:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY a genuine transfer away from a live foreign
+            in-progress owner. Reasserting the exact current assignee is
+            idempotent and needs no force. It requires `patch.assignee` — a
+            request setting it without one is a `400` — and it must be false
+            when `expected_assignee` is sent.
 
     IssuePatchBody:
       type: object
@@ -6976,6 +7150,15 @@ components:
         This is a deliberate SUBSET of the fields an issue carries; the members
         it does not spell are future surface rather than oversights, and
         `updateIssue`'s own description says which and why.
+
+
+        It now agrees with `ApplyPatchBody` on every member it publishes, and
+        the two differ only in the SHAPE of two of them: `labels` is complete
+        replacement here and an ordered add/remove/replace patch there, because
+        that operation edits a set it did not compose. Everything else — down to
+        the `metadata` algebra and the four nullable members — is one
+        definition, so a caller cannot get a different answer for the same edit
+        depending on which operation it sent.
       properties:
         title:
           type: string
@@ -7012,6 +7195,64 @@ components:
             type outside it is refused by the ROLE and reaches the client as a
             `400` — this server cannot read the vocabulary without a
             transaction, so it checks only what this schema declares.
+        status:
+          type: string
+          maxLength: 255
+          description: >-
+            The issue's status, from this workspace's own configured vocabulary.
+
+
+            A STATUS THAT CROSSES INTO THE DONE CATEGORY ANSWERS TO CLOSE
+            POLICY: the update is refused with `409 not_closable` for open
+            children or a live blocker unless `force_close_policy` is set. A
+            done-to-done change and a move OUT of the done category are
+            unaffected.
+
+
+            IT IS NOT A SECOND SPELLING OF `{id}:close` AND `{id}:reopen`. Those
+            two carry semantics a status write has nowhere to put — the reason
+            and session under first-close-wins, the done-status normalization,
+            the `already_closed`/`already_open` idempotence flags — and they
+            remain the operations to reach for when what you mean is "close
+            this". This member is for the edit that moves a status ALONGSIDE
+            other fields in one transaction, which is the thing two calls cannot
+            do. `ApplyPatchBody.status` has meant exactly this since
+            `issues:batchApply` landed.
+        assignee:
+          type: string
+          maxLength: 255
+          description: >-
+            The assignee. A transfer away from a live foreign in-progress owner
+            is refused with `409 already_claimed` unless
+            `force_assignee_transfer` is set or `expected_assignee` matched.
+            Setting it to the empty string unassigns.
+
+
+            `{id}:claim` remains the operation that ACQUIRES work: it carries
+            its own eligibility rules and sets the status with the assignee in
+            one act. This member is the raw write, fenced.
+        parent_id:
+          type: string
+          maxLength: 255
+          description: >-
+            Replaces the issue's parents atomically: a nonempty value makes THAT
+            issue the only parent, and an EMPTY STRING removes every parent-child
+            edge the issue has. Labels are not inherited — that is a create-time
+            choice (`CreateIssueRequest.inherit_labels_from_parent`) and a
+            reparent does not re-run it.
+
+
+            IT IS A GRAPH EDIT, and it earns the graph's refusals: a new parent
+            this workspace holds no row for is a `400`, a pair that already
+            carries an edge of another type is `409 dependency_exists`, and a
+            move under the issue's own descendant is `409 dependency_cycle` —
+            the PLAIN one, carrying no `issue_id`/`blocker_id`/
+            `blocker_is_ancestor`, because the hierarchy refusal answers only to
+            blocking edges and this member writes a `parent-child` edge.
+            Naming the issue itself is a `400`. One call rather than a
+            remove-then-add pair, which is the whole reason it is here: the
+            two-call spelling leaves the issue parentless if the second call
+            fails.
         labels:
           type: array
           items:
@@ -7021,6 +7262,13 @@ components:
             COMPLETE REPLACEMENT of the label set. An empty array clears every
             label. Incremental add/remove is deferred: replacement is the only
             shape whose result the client already knows without a read-back.
+
+
+            This is the ONE member whose shape differs from `ApplyPatchBody`'s,
+            and the difference is that operation's rather than this one's: a plan
+            edits a set it did not compose, so it needs an ordered
+            add/remove/replace patch, while a caller patching one row it just
+            read already knows the set.
         estimated_minutes:
           type: integer
           nullable: true
@@ -7040,10 +7288,12 @@ components:
           format: date-time
           nullable: true
           description: 'RFC 3339. Explicit `null` CLEARS the deferral.'
+        metadata:
+          $ref: '#/components/schemas/ApplyMetadataPatch'
 
     UpdateIssueResponse:
       type: object
-      required: [issue, changed]
+      required: [issue, changed, revision]
       properties:
         issue:
           $ref: '#/components/schemas/Issue'
@@ -7053,6 +7303,27 @@ components:
             Whether the request persisted a semantic mutation. A same-value
             patch is a 200 with `changed: false` rather than an error —
             idempotent, like every replay answer on this surface.
+        revision:
+          type: integer
+          format: int64
+          description: >-
+            The row's optimistic-concurrency token AFTER this write, spelled the
+            way `ApplyItemResult.revision` spells it.
+
+
+            It is here because `expected_version` is: a guard whose token no
+            response carries is a guard a caller cannot fill. A read-modify-write
+            loop composes its next expectation from THIS value and never from a
+            number it incremented itself, for the reason
+            `compareAndSetMetadata` gives about a value the store renormalizes.
+            No read on this surface publishes a revision yet; when one does, this
+            member is what it will agree with.
+
+
+            DECODE IT AS A 64-BIT INTEGER, for the reason
+            `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double
+            parser corrupts it silently, and the corruption only shows up as a
+            `precondition_failed` on the NEXT request.
 
     CreateIssueRequest:
       type: object

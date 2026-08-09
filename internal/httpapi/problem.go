@@ -281,10 +281,17 @@ const (
 	// so a recovery flow works end to end over this surface. It is the one
 	// write here with no conflict code: reopen has no policy guard.
 	OpReopenIssue = "reopenIssue"
-	// OpUpdateIssue edits the FIELDS of one issue. Lifecycle is deliberately not
-	// among them: status belongs to close/reopen/claim, which carry the policy
-	// and conflict vocabulary, and assignee belongs to the claim's
-	// compare-and-set. Keeping both out is why this operation has no 409.
+	// OpUpdateIssue edits the FIELDS of one issue, including the three that
+	// carry policy: `status`, `assignee` and `parent_id`.
+	//
+	// It USED to exclude all three, and to have no 409 because of it. The
+	// exclusion did not survive contact with a caller: an edit that moves a
+	// status alongside other fields in one transaction is the thing two calls
+	// cannot do, `issues:batchApply`'s update item has published all three since
+	// it landed, and keeping them off here meant the two operations disagreed
+	// about what patching one issue means. They are the SAME refusals here as
+	// there — close policy, the assignee fence, the graph's two — and the named
+	// lifecycle operations keep the semantics a status write has nowhere to put.
 	OpUpdateIssue          = "updateIssue"
 	OpListSettings         = "listSettings"
 	OpGetSetting           = "getSetting"
@@ -495,13 +502,30 @@ var operationCodes = map[string][]Code{
 		CodeInvalidArgument, CodeNotFound,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
-	// No conflict code, and the excluded members are exactly where one would
-	// have entered: `status` would drag in close policy, `assignee` the claim
-	// fence, `parent_id` the graph vocabulary. The 400 is the body vocabulary
-	// plus the ROLE's ErrValidation — a workspace-vocabulary issue_type, a
-	// field-length refusal that slipped the edge check — through failUpdate.
+	// FOUR conflict codes, and the three members that publish them are exactly
+	// the ones this row used to say would drag them in: `status` brought close
+	// policy, `assignee` the fence, `parent_id` the graph vocabulary. Publishing
+	// the members is what made the codes reachable, and every one of them is
+	// inherited from an operation that already has it — this is applyBatch's row
+	// for a single update item, minus `already_exists`, which needs a create.
+	//
+	// precondition_failed is the guard trio's, and it is the 409 form rather
+	// than compareAndSetMetadata's 200 for the reason that code documents: a
+	// miss here refuses the whole write and leaves nothing to report but the
+	// refusal, where a lost metadata swap is a retry loop's ordinary iteration
+	// carrying the value it needs next.
+	//
+	// The 404 is still the PATH id only. A `patch.parent_id` that names nothing
+	// is an edge endpoint and stays a 400, conforming to addDependencies.
+	//
+	// The 400 is the body vocabulary plus the ROLE's ErrValidation — a
+	// workspace-vocabulary issue_type or status, a metadata key the query layer
+	// could not spell, a field-length refusal that slipped the edge check —
+	// through failUpdate.
 	OpUpdateIssue: {
 		CodeInvalidArgument, CodeNotFound,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
+		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// No not_found. The role refuses an edge whose target names nothing, and

@@ -401,7 +401,9 @@ type ApplyItem struct {
 	// Kind Which member below is read. A CLOSED set, unlike a dependency `type`: every value here is a verb this operation implements, and an unknown one is a request the server cannot execute rather than a workspace's own vocabulary.
 	Kind ApplyItemKind `json:"kind"`
 
-	// Update Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules plus the preconditions and force flags that operation deliberately does not publish.
+	// Update Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules.
+	//
+	// The two carry the same preconditions and the same force flags; what is this operation's alone is that its guards evaluate AS-MODIFIED — against the row as earlier items of this same request have already changed it — and that a miss takes the whole plan down rather than one write.
 	Update *ApplyUpdateItem `json:"update,omitempty"`
 }
 
@@ -476,9 +478,13 @@ type ApplyMetadataPatch struct {
 
 // ApplyPatchBody The fields an `update` item writes. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 //
-// It mirrors `IssuePatchBody` member for member and diverges in exactly three places, each of them a capability that operation withheld on purpose and this one needs. `status`, `assignee` and `owner` are published here, which is what makes `force_close_policy`, `force_assignee_transfer` and `expected_assignee` mean anything and what gives this operation the `not_closable` and `already_claimed` refusals `updateIssue` has none of. `labels` is a full patch rather than a replacement, because a plan has to be able to REMOVE one label without knowing the rest of the set. And `metadata` is a patch at all.
+// It mirrors `IssuePatchBody` member for member and diverges in exactly two places now that `PATCH /v0/beads/issues/{id}` publishes `status`, `assignee` and the same `metadata` algebra.
 //
-// `parent_id` is deliberately absent, and its absence is this operation's one-edge-one-spelling rule: a parent is a `dep_add` item of type `parent-child`, so the order of every edge in the request stays total. `persistence` is absent too — moving a row between planes mid-plan is a different act from writing its fields, and nothing has asked for it here.
+// `owner` is published here and not there, which is an accident of order rather than a decision: nothing has asked for it on the single patch.
+//
+// `labels` is a full patch rather than a complete replacement, and that one is a real difference: a plan has to be able to REMOVE one label without knowing the rest of the set, because it edits a set it did not compose. A caller patching one row it just read already knows the set.
+//
+// `parent_id` is deliberately absent, and its absence is this operation's one-edge-one-spelling rule: a parent is a `dep_add` item of type `parent-child`, so the order of every edge in the request stays total. The single patch has no ordering to express and publishes it directly. `persistence` is absent from both — moving a row between planes mid-plan is a different act from writing its fields, and nothing has asked for it here.
 type ApplyPatchBody struct {
 	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
 
@@ -531,7 +537,9 @@ type ApplyPatchBody struct {
 	Title *string `json:"title,omitempty"`
 }
 
-// ApplyUpdateItem Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules plus the preconditions and force flags that operation deliberately does not publish.
+// ApplyUpdateItem Patches one existing issue, under `PATCH /v0/beads/issues/{id}`'s rules.
+//
+// The two carry the same preconditions and the same force flags; what is this operation's alone is that its guards evaluate AS-MODIFIED — against the row as earlier items of this same request have already changed it — and that a miss takes the whole plan down rather than one write.
 type ApplyUpdateItem struct {
 	// ExpectedAssignee Requires the issue's assignee to equal this value, evaluated as-modified. A match AUTHORIZES the requested `patch.assignee` transfer: this compare-and-set replaces the ordinary anti-steal fence, so it must not be combined with `force_assignee_transfer`. A miss refuses the whole request with `409 precondition_failed`.
 	ExpectedAssignee *string `json:"expected_assignee,omitempty"`
@@ -554,9 +562,13 @@ type ApplyUpdateItem struct {
 
 	// Patch The fields an `update` item writes. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 	//
-	// It mirrors `IssuePatchBody` member for member and diverges in exactly three places, each of them a capability that operation withheld on purpose and this one needs. `status`, `assignee` and `owner` are published here, which is what makes `force_close_policy`, `force_assignee_transfer` and `expected_assignee` mean anything and what gives this operation the `not_closable` and `already_claimed` refusals `updateIssue` has none of. `labels` is a full patch rather than a replacement, because a plan has to be able to REMOVE one label without knowing the rest of the set. And `metadata` is a patch at all.
+	// It mirrors `IssuePatchBody` member for member and diverges in exactly two places now that `PATCH /v0/beads/issues/{id}` publishes `status`, `assignee` and the same `metadata` algebra.
 	//
-	// `parent_id` is deliberately absent, and its absence is this operation's one-edge-one-spelling rule: a parent is a `dep_add` item of type `parent-child`, so the order of every edge in the request stays total. `persistence` is absent too — moving a row between planes mid-plan is a different act from writing its fields, and nothing has asked for it here.
+	// `owner` is published here and not there, which is an accident of order rather than a decision: nothing has asked for it on the single patch.
+	//
+	// `labels` is a full patch rather than a complete replacement, and that one is a real difference: a plan has to be able to REMOVE one label without knowing the rest of the set, because it edits a set it did not compose. A caller patching one row it just read already knows the set.
+	//
+	// `parent_id` is deliberately absent, and its absence is this operation's one-edge-one-spelling rule: a parent is a `dep_add` item of type `parent-child`, so the order of every edge in the request stays total. The single patch has no ordering to express and publishes it directly. `persistence` is absent from both — moving a row between planes mid-plan is a different act from writing its fields, and nothing has asked for it here.
 	Patch ApplyPatchBody `json:"patch"`
 
 	// Target Names ONE issue, either by an id that already exists or by the `key` a create item earlier in the same request gave itself.
@@ -1015,11 +1027,18 @@ type IssueDetails = types.IssueDetails
 // IssuePatchBody The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 //
 // This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
+//
+// It now agrees with `ApplyPatchBody` on every member it publishes, and the two differ only in the SHAPE of two of them: `labels` is complete replacement here and an ordered add/remove/replace patch there, because that operation edits a set it did not compose. Everything else — down to the `metadata` algebra and the four nullable members — is one definition, so a caller cannot get a different answer for the same edit depending on which operation it sent.
 type IssuePatchBody struct {
 	AcceptanceCriteria *string `json:"acceptance_criteria,omitempty"`
 
 	// AppendNotes Appends to the notes rather than replacing them. Mutually exclusive with `notes`.
 	AppendNotes *string `json:"append_notes,omitempty"`
+
+	// Assignee The assignee. A transfer away from a live foreign in-progress owner is refused with `409 already_claimed` unless `force_assignee_transfer` is set or `expected_assignee` matched. Setting it to the empty string unassigns.
+	//
+	// `{id}:claim` remains the operation that ACQUIRES work: it carries its own eligibility rules and sets the status with the assignee in one act. This member is the raw write, fenced.
+	Assignee *string `json:"assignee,omitempty"`
 
 	// DeferUntil RFC 3339. Explicit `null` CLEARS the deferral.
 	DeferUntil  *time.Time `json:"defer_until,omitempty"`
@@ -1039,11 +1058,30 @@ type IssuePatchBody struct {
 	IssueType *string `json:"issue_type,omitempty"`
 
 	// Labels COMPLETE REPLACEMENT of the label set. An empty array clears every label. Incremental add/remove is deferred: replacement is the only shape whose result the client already knows without a read-back.
+	//
+	// This is the ONE member whose shape differs from `ApplyPatchBody`'s, and the difference is that operation's rather than this one's: a plan edits a set it did not compose, so it needs an ordered add/remove/replace patch, while a caller patching one row it just read already knows the set.
 	Labels *[]string `json:"labels,omitempty"`
 
+	// Metadata A metadata edit. `replace` is mutually exclusive with the other three; without it the edits apply as `merge`, then `set` in key order, then `unset`, so UNSETTING A KEY WINS over setting or merging it. Sending `replace` beside any of the others is a `400`.
+	//
+	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
+	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
+
 	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`.
-	Notes    *string `json:"notes,omitempty"`
+	Notes *string `json:"notes,omitempty"`
+
+	// ParentId Replaces the issue's parents atomically: a nonempty value makes THAT issue the only parent, and an EMPTY STRING removes every parent-child edge the issue has. Labels are not inherited — that is a create-time choice (`CreateIssueRequest.inherit_labels_from_parent`) and a reparent does not re-run it.
+	//
+	// IT IS A GRAPH EDIT, and it earns the graph's refusals: a new parent this workspace holds no row for is a `400`, a pair that already carries an edge of another type is `409 dependency_exists`, and a move under the issue's own descendant is `409 dependency_cycle` — the PLAIN one, carrying no `issue_id`/`blocker_id`/ `blocker_is_ancestor`, because the hierarchy refusal answers only to blocking edges and this member writes a `parent-child` edge. Naming the issue itself is a `400`. One call rather than a remove-then-add pair, which is the whole reason it is here: the two-call spelling leaves the issue parentless if the second call fails.
+	ParentId *string `json:"parent_id,omitempty"`
 	Priority *int    `json:"priority,omitempty"`
+
+	// Status The issue's status, from this workspace's own configured vocabulary.
+	//
+	// A STATUS THAT CROSSES INTO THE DONE CATEGORY ANSWERS TO CLOSE POLICY: the update is refused with `409 not_closable` for open children or a live blocker unless `force_close_policy` is set. A done-to-done change and a move OUT of the done category are unaffected.
+	//
+	// IT IS NOT A SECOND SPELLING OF `{id}:close` AND `{id}:reopen`. Those two carry semantics a status write has nowhere to put — the reason and session under first-close-wins, the done-status normalization, the `already_closed`/`already_open` idempotence flags — and they remain the operations to reach for when what you mean is "close this". This member is for the edit that moves a status ALONGSIDE other fields in one transaction, which is the thing two calls cannot do. `ApplyPatchBody.status` has meant exactly this since `issues:batchApply` landed.
+	Status *string `json:"status,omitempty"`
 
 	// Title The issue's title. Must not be blank after trimming; the length bound is what the column holds.
 	Title *string `json:"title,omitempty"`
@@ -1450,9 +1488,32 @@ type UpdateIssueRequest struct {
 	// Actor Who is editing the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the history entry's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
 	Actor string `json:"actor"`
 
+	// ExpectedAssignee Requires the issue's assignee to equal this value before the patch. A match AUTHORIZES the requested `patch.assignee` transfer: this compare-and-set replaces the ordinary anti-steal fence, so it must not be combined with `force_assignee_transfer`. A miss refuses the whole request with `409 precondition_failed`.
+	ExpectedAssignee *string `json:"expected_assignee,omitempty"`
+
+	// ExpectedStatus Requires the issue's status to equal this value before the patch. A miss refuses the whole request with `409 precondition_failed`.
+	//
+	// Unlike `expected_version` this one is readable: `Issue.status` is on every read of this surface, so a caller can guard a status transition without any token at all.
+	ExpectedStatus *string `json:"expected_status,omitempty"`
+
+	// ExpectedVersion Requires the row's revision to equal this value before the patch. A miss refuses the WHOLE request with `409 precondition_failed` and writes nothing — `ApplyUpdateItem.expected_version`'s contract, on the operation that patches one row.
+	//
+	// The token is the `revision` this operation's own response carries. No READ on this surface publishes one yet, so a first guarded write seeds itself from an unguarded one or from `POST /v0/beads/issues:batchApply`'s `ApplyItemResult.revision`. Compose the next expectation from the value the write ANSWERED with, never from a number the client incremented itself: the token is OPAQUE and compared for equality alone, so it has no predecessor a client can compute.
+	//
+	// DECODE IT AS A 64-BIT INTEGER. Live tokens run past 5e17, where an IEEE-754 double's ulp is already 64, so a parser that decodes JSON numbers as doubles — JavaScript's `JSON.parse`, Go's `any`, Python's `float` — hands back a value NEAR the token that is not it, and the guard is refused against a row nothing else touched.
+	ExpectedVersion *int64 `json:"expected_version,omitempty"`
+
+	// ForceAssigneeTransfer Bypasses ONLY a genuine transfer away from a live foreign in-progress owner. Reasserting the exact current assignee is idempotent and needs no force. It requires `patch.assignee` — a request setting it without one is a `400` — and it must be false when `expected_assignee` is sent.
+	ForceAssigneeTransfer *bool `json:"force_assignee_transfer,omitempty"`
+
+	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
+	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
+
 	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
 	//
 	// This is a deliberate SUBSET of the fields an issue carries; the members it does not spell are future surface rather than oversights, and `updateIssue`'s own description says which and why.
+	//
+	// It now agrees with `ApplyPatchBody` on every member it publishes, and the two differ only in the SHAPE of two of them: `labels` is complete replacement here and an ordered add/remove/replace patch there, because that operation edits a set it did not compose. Everything else — down to the `metadata` algebra and the four nullable members — is one definition, so a caller cannot get a different answer for the same edit depending on which operation it sent.
 	Patch IssuePatchBody `json:"patch"`
 }
 
@@ -1463,6 +1524,13 @@ type UpdateIssueResponse struct {
 
 	// Issue A tracked work item. Property semantics documented here apply to every schema that repeats them below.
 	Issue Issue `json:"issue"`
+
+	// Revision The row's optimistic-concurrency token AFTER this write, spelled the way `ApplyItemResult.revision` spells it.
+	//
+	// It is here because `expected_version` is: a guard whose token no response carries is a guard a caller cannot fill. A read-modify-write loop composes its next expectation from THIS value and never from a number it incremented itself, for the reason `compareAndSetMetadata` gives about a value the store renormalizes. No read on this surface publishes a revision yet; when one does, this member is what it will agree with.
+	//
+	// DECODE IT AS A 64-BIT INTEGER, for the reason `UpdateIssueRequest.expected_version` spells out: an IEEE-754-double parser corrupts it silently, and the corruption only shows up as a `precondition_failed` on the NEXT request.
+	Revision int64 `json:"revision"`
 }
 
 // IssueID defines model for IssueID.

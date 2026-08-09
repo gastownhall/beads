@@ -54,7 +54,6 @@ type ImportOptions struct {
 	Strict                     bool
 	RenameOnImport             bool
 	ClearDuplicateExternalRefs bool
-	OrphanHandling             string
 	DeletionIDs                []string
 	SkipPrefixValidation       bool
 	ProtectLocalExportIDs      map[string]time.Time

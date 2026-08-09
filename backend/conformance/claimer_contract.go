@@ -516,11 +516,12 @@ func RunClaimerRefusesAWispIDAsNotFound(t *testing.T, ctx context.Context, fixtu
 // claimable decoy seeded here is what makes that visible; it is checked
 // afterwards as a raw row, still open and still unassigned.
 //
-// SPEC GAP. The leaf says these failures are "deterministic validation
-// failures" and that they leave state alone, but it never names the sentinel
-// they carry — every other role in this family says "match ErrValidation" in so
-// many words. All three implementations answer ErrValidation, so the assertion
-// records an observed three-way agreement that the doc has not yet ratified.
+// THE SENTINEL IS THE LEAF'S OWN. Claimer's doc names ErrValidation for
+// deterministic request-validation failures, in the same words every other
+// role in this family uses, and all three implementations answer it — so the
+// assertion pins published prose rather than an observed three-way agreement
+// the doc had not yet ratified, which is what it recorded before the wording
+// landed.
 //
 // The absent id is here for the same reason a wisp id is ErrNotFound: an id
 // that names nothing is not a conflict, and a caller that had to read the prose
