@@ -199,6 +199,13 @@ func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.
 	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bsupd"))
 }
 
+func TestEmbeddedIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "bscond")
+	ctx := t.Context()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, newEmbeddedIssueOperationsFixture(t, ctx, te, "bscond"))
+}
+
 func TestEmbeddedIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	te := newTestEnv(t, "bscreate")

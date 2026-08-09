@@ -147,6 +147,11 @@ func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
 	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
+func TestIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
 func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, newUOWIssueOperationsFixture(t, ctx))

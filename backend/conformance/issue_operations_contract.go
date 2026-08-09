@@ -2696,6 +2696,91 @@ func RunIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T, ctx co
 	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the postcondition is the flag AND the live blocker behind it")
 }
 
+// RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender pins
+// the HALF OF THE PREDICATE'S FIRST CLAUSE THAT NAMES A SECOND EDGE TYPE.
+// issueops.BlockedStateInvariant says a row is blocked when "it has a blocks or
+// conditional-blocks edge onto a target that is itself neither closed nor
+// pinned"; every other is_blocked case in this package seeds the first type
+// only, so the second was a word in the doc with no case behind it. The type
+// list is spelled out five times in
+// internal/storage/issueops/blocked_state.go — the two mark templates, the two
+// unmark templates, and the depender load that builds the affected set — and
+// dropping `conditional-blocks` from any of them left every case green.
+//
+// IT IS ON UPDATE, and on the same crossing the sibling case above uses, for
+// the reason that case gives: the decision that a status move counts as a
+// crossing is written TWICE (internal/storage/issueops/update.go and
+// internal/storage/domain/db's issue Update), so this is TWO GENUINE VOTES
+// rather than one body seen three times. The DependencyEditor's add path could
+// not host it — the direct-source mark there runs a type-agnostic UPDATE of its
+// own (markDirectBlockingDependencySourceInTx and its domain/db mirror) once
+// the caller's type has already passed the wiring's gate, so on that role the
+// mark template's copy of the type list is never the thing that decides.
+//
+// BOTH DIRECTIONS RUN. The mark and the unmark are separate SQL carrying
+// separate copies of the type list, and the unpinning half is the one that
+// reaches the MARK template: it must re-block a row whose only cause is a
+// conditional-blocks edge.
+//
+// WHAT THE FIXTURE MAKES OBSERVABLE. The depender carries a conditional-blocks
+// edge AND NOTHING ELSE, asserted by counting its `blocks` edges at zero and
+// its `conditional-blocks` edges at one. A depender holding both types would be
+// blocked either way and this case would pass against a predicate that had
+// never heard of the second one — which is the shape of the retired
+// fixture-defect case, a subject whose named term was not the term producing
+// its value.
+//
+// The control is blocked through a PLAIN blocks edge. It is the same shape at
+// the same moment differing in the one fact under test, so a mutation that
+// drops the conditional type reddens the subject and leaves the control exactly
+// where it was, and the failure names the term.
+func RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bscond-blocker"
+	depender := fixture.IssuePrefix + "-bscond-depender"
+	controlBlocker := fixture.IssuePrefix + "-bscond-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bscond-ctldepender"
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, blocker)
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, controlBlocker)
+	createIssueOperationsTypedBlockedIssue(t, ctx, fixture, depender, blocker, types.DepConditionalBlocks)
+	createIssueOperationsBlockedIssue(t, ctx, fixture, controlDepender, controlBlocker)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	// The conditional term is only observable while it is the ONLY term.
+	assertIssueOperationsEdgeTypeCount(t, ctx, fixture, depender, string(types.DepBlocks), 0)
+	assertIssueOperationsEdgeTypeCount(t, ctx, fixture, depender, string(types.DepConditionalBlocks), 1)
+	assertIssueOperationsEdgeTypeCount(t, ctx, fixture, controlDepender, string(types.DepBlocks), 1)
+	assertIssueOperationsEdgeTypeCount(t, ctx, fixture, controlDepender, string(types.DepConditionalBlocks), 0)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker),
+		"a conditional-blocks edge onto a live target blocks its source exactly as a blocks edge does")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker),
+		"the control is blocked through the edge type this suite already covered")
+
+	out := probe.watchFlip(t, []blockedStateRow{blockedIssue(depender)}, []blockedStateRow{blockedIssue(controlDepender)})
+	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: blocker,
+		Patch: publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusPinned}},
+	}); err != nil {
+		t.Fatalf("update %s to pinned: %v", blocker, err)
+	}
+	out.requireFlippedTo(t, 0,
+		"pinning the target of a conditional-blocks edge takes it out of the active set, and the unmark template counts that type")
+
+	back := probe.watchFlip(t, []blockedStateRow{blockedIssue(depender)}, []blockedStateRow{blockedIssue(controlDepender)})
+	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
+		Actor: "writer", IssueID: blocker,
+		Patch: publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusOpen}},
+	}); err != nil {
+		t.Fatalf("update %s back to open: %v", blocker, err)
+	}
+	back.requireFlippedTo(t, 1,
+		"unpinning re-blocks a row whose only cause is a conditional-blocks edge — the MARK template's own copy of the type list")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker),
+		"the postcondition is the flag AND the live conditional blocker behind it")
+	assertIssueOperationsEdgeTypeCount(t, ctx, fixture, depender, string(types.DepBlocks), 0)
+}
+
 // RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction pins
 // the create half, and with it the one structural asymmetry between the two
 // bodies: the store-backed create runs ONE terminal recompute over the union of
@@ -2835,15 +2920,44 @@ func RunIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T, ctx context.Co
 // carrying is EARNED by that verb; nothing in these fixtures can write it.
 func createIssueOperationsBlockedIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, blockerID string) {
 	t.Helper()
+	createIssueOperationsTypedBlockedIssue(t, ctx, fixture, id, blockerID, types.DepBlocks)
+}
+
+// createIssueOperationsTypedBlockedIssue is the same create with the edge type
+// named, for the case whose subject is the OTHER type the blocking predicate
+// accepts. The type travels on the request rather than on a seeding hook so the
+// edge and the flag both come from role verbs.
+func createIssueOperationsTypedBlockedIssue(
+	t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, blockerID string, depType types.DependencyType,
+) {
+	t.Helper()
 	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
 		Actor:         "writer",
 		ForceIDPrefix: true,
 		Issue: &types.Issue{
 			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 		},
-		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
+		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: depType}},
 	}); err != nil {
-		t.Fatalf("create %s blocked by %s: %v", id, blockerID, err)
+		t.Fatalf("create %s blocked by %s through a %s edge: %v", id, blockerID, depType, err)
+	}
+}
+
+// assertIssueOperationsEdgeTypeCount counts one row's outgoing edges OF ONE
+// TYPE. The blocked-state cases that name an edge type need it: a subject whose
+// flag is attributed to a conditional-blocks edge proves nothing unless the row
+// is known to carry no plain blocks edge as well.
+func assertIssueOperationsEdgeTypeCount(
+	t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, depType string, want int,
+) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = ?", []any{id, depType}, &got); err != nil {
+		t.Fatalf("count %s edges out of %s: %v", depType, id, err)
+	}
+	if got != want {
+		t.Fatalf("%s carries %d %s edges, want %d: the case attributes its blocked state to a NAMED edge type", id, got, depType, want)
 	}
 }
 

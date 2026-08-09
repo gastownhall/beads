@@ -169,6 +169,12 @@ func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
 	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, fixture)
 }
 
+func TestIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, fixture)
+}
+
 func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
