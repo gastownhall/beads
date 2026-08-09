@@ -19,13 +19,7 @@ import (
 // the gate takes away is doing it quietly: an addition must name a real method,
 // carry a reason, and land in a diff a reviewer reads. It converts silence into
 // an argument someone has to make.
-var uncoveredRoleMethods = map[string]string{
-	"issueops.Importer.ImportBatch": "Importer is the one role no storage accessor hands out: " +
-		"internal/storage/uow reaches it through its own provider and the other two " +
-		"backends do not implement it at all. The role tier reaches a backend through " +
-		"storage accessors, so there is no fixture to run this contract from until " +
-		"Importer joins that surface.",
-}
+var uncoveredRoleMethods = map[string]string{}
 
 // TestEveryRoleMethodHasAContractCase is the exhaustiveness gate on the role
 // tier: every method of every interface the public facade declares must be
