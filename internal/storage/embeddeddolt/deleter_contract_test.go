@@ -74,6 +74,9 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("SettlesTheSurvivorsOfADeletedBlocker", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheSurvivorsOfADeletedBlocker(t, ctx, fixture)
 	})
+	t.Run("SettlesTheSurvivorsOfADeletedWispBlocker", func(t *testing.T) {
+		conformance.RunDeleterSettlesTheSurvivorsOfADeletedWispBlocker(t, ctx, fixture)
+	})
 	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
 	})

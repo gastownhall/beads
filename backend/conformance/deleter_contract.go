@@ -707,7 +707,7 @@ func RunDeleterSettlesTheSurvivorsOfADeletedBlocker(t *testing.T, ctx context.Co
 	controlBlocker := deleterSeedIssue(t, ctx, fixture, "bsdel", "ctlblocker")
 	controlDepender := deleterSeedIssue(t, ctx, fixture, "bsdel", "ctldepender")
 	deleterAddEdge(t, ctx, fixture, depender, blocker)
-	deleterAddTypedEdge(t, ctx, fixture, child, depender, types.DepParentChild)
+	deleterAddParentChildEdge(t, ctx, fixture, child, depender)
 	deleterAddEdge(t, ctx, fixture, wispDepender, blocker)
 	deleterAddEdge(t, ctx, fixture, controlDepender, controlBlocker)
 
@@ -749,9 +749,9 @@ func RunDeleterSettlesTheChildrenOfADeletedParent(t *testing.T, ctx context.Cont
 	controlParent := deleterSeedIssue(t, ctx, fixture, "bsdelpc", "ctlparent")
 	controlChild := deleterSeedIssue(t, ctx, fixture, "bsdelpc", "ctlchild")
 	deleterAddEdge(t, ctx, fixture, parent, blocker)
-	deleterAddTypedEdge(t, ctx, fixture, child, parent, types.DepParentChild)
+	deleterAddParentChildEdge(t, ctx, fixture, child, parent)
 	deleterAddEdge(t, ctx, fixture, controlParent, controlBlocker)
-	deleterAddTypedEdge(t, ctx, fixture, controlChild, controlParent, types.DepParentChild)
+	deleterAddParentChildEdge(t, ctx, fixture, controlChild, controlParent)
 
 	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
 	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child is blocked only through the parent about to be deleted")
@@ -773,17 +773,99 @@ func RunDeleterSettlesTheChildrenOfADeletedParent(t *testing.T, ctx context.Cont
 	flip.requireFlippedTo(t, 0, "a child orphaned from a blocked parent inherits nothing, and the deleting transaction settles it")
 }
 
-// deleterAddTypedEdge is deleterAddEdge for an edge that is not a block. The
-// blocked-state cases need parent-child edges, which is the type that carries
-// inheritance.
-func deleterAddTypedEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, source, target string, depType types.DependencyType) {
+// RunDeleterSettlesTheSurvivorsOfADeletedWispBlocker is the same obligation
+// with the deleted row in the OTHER PLANE, and it is a different query rather
+// than the same one with different data: the deletion's affected set walks the
+// two planes through two separate loads keyed on two separate columns
+// (internal/storage/issueops/blocked_state.go AffectedByDeletionInTx, which
+// asks depends_on_issue_id about the deleted issues and depends_on_wisp_id
+// about the deleted wisps). Every other Deleter case in this file names durable
+// rows only, so the second load ran against an empty list every time and could
+// have been deleted with nothing going red.
+//
+// IT IS ROLE-REACHABLE. DeleteRequest.IDs "names the rows to delete, IN EITHER
+// PLANE", and the unforced guard has "no wisp exemption at either end", so a
+// forced `bd delete <wisp>` with durable dependents is a documented mode rather
+// than an out-of-band poke — which is why blocked_state.go's wisp carve-out,
+// which covers the store's own wisp-delete entry points, does not cover this
+// one.
+//
+// The survivors span both planes and both distances: a DURABLE depender of the
+// wisp, that depender's parent-child child, and a WISP depender whose edge
+// lives in the ephemeral table. The durable depender is the sharpest — its edge
+// sits in `dependencies` with the target in depends_on_wisp_id, which is the
+// exact pairing a body that classified the affected set by the DEPENDER's plane
+// instead of the deleted row's would miss.
+//
+// Force is required for the same reason the sibling case gives, and here it is
+// also the mode the leaf calls out by name: without it the dependents outside
+// the request refuse the delete.
+func RunDeleterSettlesTheSurvivorsOfADeletedWispBlocker(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+	t.Helper()
+	wispBlocker := deleterSeedWisp(t, ctx, fixture, "bsdelw", "wispblocker")
+	depender := deleterSeedIssue(t, ctx, fixture, "bsdelw", "depender")
+	child := deleterSeedIssue(t, ctx, fixture, "bsdelw", "child")
+	wispDepender := deleterSeedWisp(t, ctx, fixture, "bsdelw", "wispdep")
+	controlBlocker := deleterSeedIssue(t, ctx, fixture, "bsdelw", "ctlblocker")
+	controlDepender := deleterSeedIssue(t, ctx, fixture, "bsdelw", "ctldepender")
+	deleterAddEdge(t, ctx, fixture, depender, wispBlocker)
+	deleterAddParentChildEdge(t, ctx, fixture, child, depender)
+	deleterAddEdge(t, ctx, fixture, wispDepender, wispBlocker)
+	deleterAddEdge(t, ctx, fixture, controlDepender, controlBlocker)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	// Residency is asserted on the row being deleted above all: a "wisp" that
+	// had leaked a durable row would make this case a second copy of its
+	// sibling.
+	probe.requirePlaneResidency(t, blockedWisp(wispBlocker))
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requirePlaneResidency(t, blockedIssue(depender))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedWisp(wispBlocker),
+		"the DURABLE depender of the ephemeral row about to be deleted")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispDepender), blockedWisp(wispBlocker),
+		"the same-plane depender, whose edge lives in the ephemeral table")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child),
+		"the child inherits across the plane boundary and holds no blocker of its own")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker),
+		"the control's blocker is a durable row this delete never names")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedIssue(child), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	result, err := fixture.Deleter.Delete(ctx, publicops.DeleteRequest{IDs: []string{wispBlocker}, Force: true, Actor: "deleter"})
+	if err != nil {
+		t.Fatalf("force-delete the wisp blocker %s: %v", wispBlocker, err)
+	}
+	if result.Deleted != 1 {
+		t.Fatalf("Deleted = %d, want the 1 named wisp", result.Deleted)
+	}
+	// The zeros below mean "blocked by nothing" only if the cause is really
+	// gone; a delete that reported 1 and left the row would make them describe
+	// a live blocker.
+	var survives int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM wisps WHERE id = ?", []any{wispBlocker}, &survives); err != nil {
+		t.Fatalf("count the deleted wisp %s: %v", wispBlocker, err)
+	}
+	if survives != 0 {
+		t.Fatalf("wisp %s still has %d row(s) after a forced delete, want it gone", wispBlocker, survives)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"a survivor whose only blocker was an erased WISP is left unblocked, in both planes, and so is everything that inherited from it")
+}
+
+// deleterAddParentChildEdge is deleterAddEdge for the one edge type that is not
+// a block: the blocked-state cases hang a child off a subject to observe
+// INHERITANCE, which parent-child is what carries.
+func deleterAddParentChildEdge(t *testing.T, ctx context.Context, fixture DeleterFixture, child, parent string) {
 	t.Helper()
 	if err := fixture.AddDependency(ctx, &types.Dependency{
-		IssueID:     source,
-		DependsOnID: target,
-		Type:        depType,
+		IssueID:     child,
+		DependsOnID: parent,
+		Type:        types.DepParentChild,
 	}, "deleter-seed"); err != nil {
-		t.Fatalf("seeding %s edge %s -> %s: %v", depType, source, target, err)
+		t.Fatalf("seeding %s edge %s -> %s: %v", types.DepParentChild, child, parent, err)
 	}
 }
 
