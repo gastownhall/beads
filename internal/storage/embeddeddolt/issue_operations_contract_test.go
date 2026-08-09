@@ -219,6 +219,7 @@ func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *te
 	if err != nil {
 		t.Fatalf("NewIssueOperations: %v", err)
 	}
+	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.IssueOperationsStagingFixture{
 		IssuePrefix: prefix,
 		Operations:  operations,
@@ -229,5 +230,6 @@ func newEmbeddedIssueOperationsFixture(t *testing.T, ctx context.Context, te *te
 			te.queryScalar(t, ctx, query, args, dest...)
 			return nil
 		},
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 }

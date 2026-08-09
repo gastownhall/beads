@@ -191,6 +191,7 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		storeCleanup()
 		t.Fatalf("NewIssueOperations: %v", err)
 	}
+	kit := newDoltRoleFixtureKit(store, "test")
 	fixture := conformance.IssueOperationsStagingFixture{
 		IssuePrefix: "test",
 		Operations:  operations,
@@ -200,6 +201,7 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
 			return store.db.QueryRowContext(ctx, query, args...).Scan(dest...)
 		},
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 	return fixture, ctx, func() {
 		cancel()

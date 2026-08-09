@@ -160,6 +160,7 @@ func TestIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
 func newUOWIssueOperationsFixture(t *testing.T, ctx context.Context) conformance.IssueOperationsStagingFixture {
 	t.Helper()
 	operations, provider := newRealIssueOperationsWithProvider(t, ctx)
+	kit := newUOWRoleFixtureKit(provider, "bd")
 	return conformance.IssueOperationsStagingFixture{
 		IssuePrefix: "bd",
 		Operations:  operations,
@@ -208,6 +209,7 @@ func newUOWIssueOperationsFixture(t *testing.T, ctx context.Context) conformance
 			}
 			return nil
 		},
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 }
 

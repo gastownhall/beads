@@ -2987,23 +2987,30 @@ type issueOperationsHistoryCounter struct {
 	total   int
 }
 
+// newIssueOperationsHistoryCounter is the single choke point for the fixture's
+// history hook, so it is also where a backend that cannot observe history skips
+// LOUDLY rather than passing quietly — including for any case that reaches for
+// the counter later.
 func newIssueOperationsHistoryCounter(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) *issueOperationsHistoryCounter {
 	t.Helper()
+	if fixture.CountHistoryMatching == nil {
+		t.Skip("fixture has no CountHistoryMatching: this backend cannot observe history, so issueops.go:261-270 is UNPINNED here")
+	}
 	counter := &issueOperationsHistoryCounter{ctx: ctx, fixture: fixture}
 	counter.total = counter.count(t, "")
 	return counter
 }
 
+// count answers the entries carrying message exactly, or every entry when
+// message is empty.
 func (c *issueOperationsHistoryCounter) count(t *testing.T, message string) int {
 	t.Helper()
-	query := "SELECT COUNT(*) FROM dolt_log"
-	var args []any
+	pattern := ""
 	if message != "" {
-		query += " WHERE message = ?"
-		args = append(args, message)
+		pattern = historyPatternForExactMessage(t, message)
 	}
-	var got int
-	if err := c.fixture.QueryScalar(c.ctx, query, args, &got); err != nil {
+	got, err := c.fixture.CountHistoryMatching(c.ctx, pattern)
+	if err != nil {
 		t.Fatalf("count history entries (%q): %v", message, err)
 	}
 	return got
