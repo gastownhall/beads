@@ -73,7 +73,7 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	}
 
 	setupGo := job.step(t, "Set up Go")
-	if setupGo.Uses != "actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e" {
+	if setupGo.Uses != setupGoActionFamily+"@"+setupGoSHA {
 		t.Errorf("setup-go action = %q", setupGo.Uses)
 	}
 	if setupGo.With["go-version-file"] != "go.mod" || setupGo.With["cache"] != "false" {
@@ -81,7 +81,7 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	}
 
 	setupNode := job.step(t, "Set up Node.js")
-	if setupNode.Uses != "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020" {
+	if setupNode.Uses != setupNodeActionFamily+"@"+setupNodeSHA {
 		t.Errorf("setup-node action = %q", setupNode.Uses)
 	}
 	if setupNode.With["node-version"] != "24" {
@@ -122,7 +122,6 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 		`type -P node`,
 		`require("node:fs").realpathSync(process.argv[1])`,
 		`env GOVERSION`,
-		`go1.26.5`,
 		`WebAssembly.instantiate`,
 		`[[ -x "$go_root/bin/go" && "$go_bin" -ef "$go_root/bin/go" ]]`,
 		`lib/wasm/wasm_exec_node.js`,
@@ -139,6 +138,9 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 		if !strings.Contains(execute.Run, required) {
 			t.Errorf("js/wasm hook command does not contain %q", required)
 		}
+	}
+	if regexp.MustCompile(`\bgo1\.[0-9]`).MatchString(execute.Run) {
+		t.Errorf("js/wasm hook command duplicates the Go version owned by go.mod")
 	}
 	for _, tool := range []string{"uname", "realpath", "tee", "grep"} {
 		pattern := regexp.MustCompile(`(?m)(^|[|;&[:space:]'"])([^|;&[:space:]'"]*/)?` + regexp.QuoteMeta(tool) + `([[:space:]'"]|$)`)
@@ -404,10 +406,12 @@ func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow
 
 const (
 	setupGoActionFamily         = "actions/setup-go"
+	setupNodeActionFamily       = "actions/setup-node"
 	cacheMonolithicActionFamily = "actions/cache"
 	cacheRestoreActionFamily    = "actions/cache/restore"
 	cacheSaveActionFamily       = "actions/cache/save"
 	setupGoSHA                  = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
+	setupNodeSHA                = "820762786026740c76f36085b0efc47a31fe5020"
 	cacheSHA                    = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 	goCacheSchema               = "v2"
 	goBaseTag                   = "gms_pure_go"

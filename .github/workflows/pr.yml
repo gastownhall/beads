@@ -157,7 +157,6 @@ jobs:
           printf 'Go host: %s (%s)\n' "$go_bin" "$go_version"
           printf 'Node host: %s (%s)\n' "$node_bin" "$node_version"
 
-          [[ "$go_version" == "go1.26.5" ]]
           [[ "$("$go_bin" env GOHOSTOS)" == "linux" ]]
           [[ "$("$go_bin" env GOOS)" == "js" ]]
           [[ "$("$go_bin" env GOARCH)" == "wasm" ]]
@@ -178,6 +177,9 @@ jobs:
 
           "$go_bin" test -tags gms_pure_go -c -o "$wasm_test" ./internal/hooks
           [[ -s "$wasm_test" ]]
+          # This required lane owns the exact js/wasm refusal contract. If the
+          # wasm test surface grows, widen this selector and its count guard
+          # together rather than assuming compilation executes new tests.
           test_status=0
           test_output="$("$node_bin" --stack-size=8192 "$wasm_exec_node" "$wasm_test" \
             -test.v -test.timeout=2m \
