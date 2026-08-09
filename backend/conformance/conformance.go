@@ -1,10 +1,57 @@
 // Package conformance provides backend-agnostic tests for Storage
-// implementations: the suite every storage backend — in-tree or out-of-tree —
-// runs to prove it behaves like the embedded-Dolt reference.
+// implementations. It holds TWO tiers, and RunAll is one of them.
 //
-// Usage from a backend test file:
+// # What RunAll proves
+//
+// RunAll is the PORTABLE RAW-SURFACE suite. It drives the store's own methods —
+// issue CRUD, search and counts, dependencies and readiness, labels, comments,
+// config, metadata slots, statistics, staleness, iterators, transactions,
+// claim/lease/heartbeat/reclaim, promote and rekey, batch create — and for most
+// of that surface it is the ONLY conformance coverage there is: the role tier
+// reaches a store through a handful of fixture seed hooks and nothing else.
+//
+// Counting the methods invoked on the store a Factory returns (measured
+// 2026-08-09): 51 of core Storage's 98, plus 32 across five capability
+// sub-interfaces — BulkIssueStore (10/10), DependencyQueryStore,
+// ConfigMetadataStore, AnnotationStore and AdvancedQueryStore (6/6) — and
+// EventQueryStore through the Transaction that RunInTransaction yields. Most of
+// the untouched half of core Storage is the 23 role accessors, which the role
+// contracts cover instead.
+//
+// What RunAll does NOT do is exercise the version-control families its Factory
+// type names. This package makes no call to any method of VersionControl,
+// HistoryViewer, RemoteStore, SyncStore, FederationStore, CompactionStore or
+// FastStatisticsStore — not one, in either tier. Their positive behavior has no
+// conformance coverage anywhere. A backend DECLARES those families instead:
+// it answers a typed *storage.ErrUnsupported and proves that with
+// RunUnsupportedContract over its allowlist. A backend that stubs all seven
+// passes RunAll today, because the stubs are never reached.
+//
+// # Why Factory is storage.DoltStorage
+//
+// Because the registry door is (internal/storage/backends), not because this
+// suite needs the surface. For a backend the registry already admits, the type
+// asks nothing beyond registration. It is a wall only for a provider that is
+// not a store at all — the in-tree unit-of-work provider, which is why the
+// Claimer role is wired outside RunAll (see the note in RunAll's body).
+//
+// The name RunAll is historical and stays. The suite is not Dolt-specific, and
+// the name overstates only its coverage, not its portability.
+//
+// # The role tier
+//
+// The *_contract.go files hold the role contracts: the SEMANTIC obligation, one
+// contract per issueops role, driven through small per-fixture hooks rather
+// than through the store type — which is how a provider that could never enter
+// RunAll proves the same promises. Their portability class is "a store that can
+// answer single-row SQL over the canonical relational schema": QueryScalar is
+// required, while CountHistory, CountHistoryMatching, Exec and the seed hooks
+// are optional and degrade LOUDLY when nil (see history_matching.go).
+//
+// # Usage from a backend test file
 //
 //	func TestConformance(t *testing.T) {
+//	    conformance.RunUnsupportedContract(t, &Store{}, unsupported)
 //	    conformance.RunAll(t, func(t *testing.T) storage.DoltStorage {
 //	        return newTestStore(t)
 //	    })
@@ -14,8 +61,7 @@
 // its public alias, github.com/steveyegge/beads/backend.DoltStorage — the
 // identical type, so the factory literal satisfies Factory as-is. The whole
 // public contract an external backend implements (interface, signature types,
-// registry, sentinels) lives in that backend package; this package is its
-// proof obligation.
+// registry, sentinels) lives in that backend package.
 //
 // # Stability
 //
@@ -224,10 +270,15 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("TransactionReadYourWrites", func(t *testing.T) { testTransactionReadYourWrites(t, factory) })
 }
 
-// RunDeferredReads runs the subset of the suite covering SQLite's shared
-// non-version-control reads: statistics, external-ref lookup, and staleness. RunAll
-// remains the full Dolt reference; SQLite runs this focused gate for methods supplied
-// by issueops while its Dolt-only methods fail loudly as unsupported.
+// RunDeferredReads runs a curated three-case subset — statistics, external-ref
+// lookup, staleness — for a backend whose unsupported allowlist refuses enough
+// of RunAll's subjects that the full suite is the wrong gate.
+//
+// It is the worked example the admission rule in RunSearchPaging cites. Its
+// original consumer, the in-tree SQLite backend, is gone (configfile now answers
+// that name with a RemovedBackendError), so this entry point has no caller
+// in-tree; it survives as the published precedent for composing a
+// supported-subset gate out of the per-block runners.
 func RunDeferredReads(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("Statistics", func(t *testing.T) { testStatistics(t, factory) })

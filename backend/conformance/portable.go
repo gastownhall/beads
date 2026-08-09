@@ -14,8 +14,8 @@ import (
 )
 
 // This file holds the behavior contract for the portable, non-version-control methods
-// that SQLite implements through shared issueops helpers: molecule rollups, repo-mtime
-// cache, event/dependency streams, dependent
+// the shared issueops helpers implement: molecule rollups, repo-mtime cache,
+// event/dependency streams, dependent
 // counts, wisp cascade discovery, comment/audit writes, id rekey, source-repo purge, and
 // batch create. Each case is validated against the embedded-Dolt reference (the oracle)
 // and, once a method is wired into a backend, must match it there too.
@@ -23,8 +23,10 @@ import (
 // Ordering that the implementations leave unspecified (map iteration, same-second event
 // ties, tie-broken "current step") is asserted as a set, never positionally.
 
-// RunPortableMethods runs the portable-method behavior contract. The Dolt reference runs
-// it via RunAll; SQLite runs it for the methods supplied by the shared layer.
+// RunPortableMethods runs the portable-method behavior contract. RunAll composes it, so
+// every backend driving the full suite runs it with no extra wiring; a backend whose
+// allowlist refuses some of these subjects composes its own supported-subset entry point
+// instead, on the RunDeferredReads precedent.
 func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("MoleculeProgress", func(t *testing.T) { testGetMoleculeProgress(t, factory) })

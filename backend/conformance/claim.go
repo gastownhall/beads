@@ -10,10 +10,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Claim / lease behavior (Gas Station v1.1 dead-worker recovery). Each backend
-// routes ClaimIssue/ClaimReadyIssue/HeartbeatIssue/ReclaimExpiredLeases through the
-// shared issueops implementations, so these assertions hold identically on Dolt and
-// SQLite. issueops.WithLeaseTTL pins the lease deterministically
+// Claim / lease behavior (Gas Station v1.1 dead-worker recovery). The in-tree backends
+// route ClaimIssue/ClaimReadyIssue/HeartbeatIssue/ReclaimExpiredLeases through the
+// shared issueops implementations, so they answer these assertions identically; a
+// backend with a claim path of its own is what the assertions are here to measure.
+// issueops.WithLeaseTTL pins the lease deterministically
 // so the reclaim path is testable without wall-clock waits.
 
 // testClaim: claiming an open issue stamps assignee, in_progress, started_at, and a
