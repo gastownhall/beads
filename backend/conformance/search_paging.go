@@ -287,8 +287,17 @@ func pagingCapFilter(maxRows int, source string) types.IssueFilter {
 // backend answering any other shape silently loses the circuit breaker while
 // every row-count assertion still passes.
 //
-// This is the STORAGE layer's obligation, which is stricter than the reader
-// role's honored-or-refused case: refusing the cap is not an option here.
+// WHY THIS SURVIVES BESIDE RunReaderListMaxRowsIsHonored, which is stricter on
+// every assertion and runs a third leg: it is a DIFFERENT BODY. The Reader role
+// rides SearchIssuesWithCountsInTx, which enforces the cap once
+// (issueops/search_counts.go). The raw SearchIssues verb rides searchInTx, which
+// has FOUR terminal exit paths and enforces the cap on each one separately —
+// ephemeral-only, SkipWisps, empty-wisps-table, and the merged set. This case
+// drives the SkipWisps exit; deleting that exit's EnforceMaxRowsCap call leaves
+// the whole reader contract green and only this case red (measured with
+// scripts/mutation-equivalence.sh). Any earlier claim that this case is merely
+// "stricter than the reader role" is stale: the reader case is strict now, and
+// strictness was never the reason.
 func testSearchPagingMaxRows(t *testing.T, f Factory) {
 	t.Run("UnderTheCapIsAnOrdinaryResult", func(t *testing.T) {
 		s := f(t)

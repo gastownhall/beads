@@ -166,6 +166,13 @@ func RunIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T, ctx c
 // The proxied-server `bd create` route asked its use case for a plain create
 // with no create-only guard, so `bd create --id <occupied>` silently UPSERTED
 // the stored row and reported success while the direct route refused.
+//
+// THIS CASE AND conformance.go's testCreateDuplicate PIN OPPOSITE SEMANTICS OF
+// THE SAME CORE. That one drives the raw CreateIssue verb, which UPSERTS, and
+// asserts only that the second write leaves exactly one row; this one drives
+// the create-only role and asserts a typed refusal with the stored row
+// unchanged. They read like duplicates and are not: retiring either against
+// the other deletes the only proof of one of the two behaviors.
 func RunIssueOperationsCreateRefusesAnOccupiedID(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
