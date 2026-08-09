@@ -643,6 +643,100 @@ func TestProxiedServerDep2(t *testing.T) {
 			}
 		})
 
+		// bd-lx5iu / Q11: this route resolves a PARTIAL id now. It used to hand the
+		// argument to the use case verbatim, so the same abbreviation that worked
+		// on a direct workspace failed on a team server.
+		t.Run("partial_id_resolves", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dpta")
+			root := bdProxiedCreate(t, bd, p.dir, "Partial root", "--type", "task")
+			dep := bdProxiedCreate(t, bd, p.dir, "Partial dep", "--type", "task")
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, dep.ID)
+
+			// The bare suffix, with the workspace prefix stripped.
+			bare := root.ID[strings.Index(root.ID, "-")+1:]
+			out := bdProxiedDep(t, bd, p.dir, "tree", bare)
+			if !strings.Contains(out, root.ID) || !strings.Contains(out, dep.ID) {
+				t.Fatalf("a partial id did not resolve to the full tree: %s", out)
+			}
+		})
+
+		t.Run("absent_root_is_a_lookup_failure", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptb")
+			out := bdProxiedDepFail(t, bd, p.dir, "tree", "dptb-nosuchbead")
+			if !strings.Contains(out, "dptb-nosuchbead") {
+				t.Fatalf("the refusal does not name the id the caller gave: %s", out)
+			}
+		})
+
+		// bd-lx5iu / Q11: --max-rows is HONORED on this route now. It used to be
+		// refused outright ("not supported in proxied-server mode") because the
+		// unit-of-work path threaded no cap; the cap is on the role's request, so
+		// it threads everywhere.
+		t.Run("max_rows_is_honored", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptc")
+			root := bdProxiedCreate(t, bd, p.dir, "Cap root", "--type", "task")
+			for i := 0; i < 3; i++ {
+				child := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Cap child %d", i), "--type", "task")
+				bdProxiedDep(t, bd, p.dir, "add", root.ID, child.ID)
+			}
+
+			out := bdProxiedDepFail(t, bd, p.dir, "tree", root.ID, "--max-rows", "2")
+			if strings.Contains(out, "not supported in proxied-server mode") {
+				t.Fatalf("the cap is still being refused rather than enforced: %s", out)
+			}
+			if !strings.Contains(out, "too many rows") {
+				t.Fatalf("stderr missing the cap message: %s", out)
+			}
+			if !strings.Contains(out, "--max-rows=2") {
+				t.Fatalf("stderr missing the source attribution: %s", out)
+			}
+
+			// And the same walk under a cap it fits inside answers normally, so the
+			// case is about the cap rather than about the tree.
+			under := bdProxiedDep(t, bd, p.dir, "tree", root.ID, "--max-rows", "4")
+			if !strings.Contains(under, root.ID) {
+				t.Fatalf("a walk under the cap did not answer: %s", under)
+			}
+		})
+
+		// --show-all-paths is a DOCUMENTED NO-OP (Q7). It is still accepted so no
+		// script breaks, and a diamond is still rendered once.
+		t.Run("show_all_paths_is_an_accepted_no_op", func(t *testing.T) {
+			t.Parallel()
+			p := newSharedProxiedProject(t, bd, "dptd")
+			root := bdProxiedCreate(t, bd, p.dir, "Diamond root", "--type", "task")
+			left := bdProxiedCreate(t, bd, p.dir, "Diamond left", "--type", "task")
+			right := bdProxiedCreate(t, bd, p.dir, "Diamond right", "--type", "task")
+			shared := bdProxiedCreate(t, bd, p.dir, "Diamond shared", "--type", "task")
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, left.ID)
+			bdProxiedDep(t, bd, p.dir, "add", root.ID, right.ID)
+			bdProxiedDep(t, bd, p.dir, "add", left.ID, shared.ID)
+			bdProxiedDep(t, bd, p.dir, "add", right.ID, shared.ID)
+
+			for _, args := range [][]string{
+				{"tree", root.ID},
+				{"tree", root.ID, "--show-all-paths"},
+			} {
+				arr := bdProxiedDepJSONArray(t, bd, p.dir, args...)
+				count := 0
+				for _, node := range arr {
+					m, ok := node.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					if id, _ := m["id"].(string); id == shared.ID {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("%v: shared node appears %d times, want 1", args, count)
+				}
+			}
+		})
+
 		t.Run("ignores_relates_to", func(t *testing.T) {
 			t.Parallel()
 			p := newSharedProxiedProject(t, bd, "dpt9")

@@ -780,11 +780,37 @@ func TestIsSecretKey(t *testing.T) {
 		{"some.secret", true},
 		{"some.api-key", true},
 
+		// Spellings the wire redaction has to cover. GET /v0/beads/config
+		// publishes a value for any key this returns false for, and bd serve
+		// has no authentication, so each of these is a credential in cleartext
+		// if it regresses. "apikey" in particular is the spelling the
+		// published schema promises is covered.
+		{"integrations.apikey", true},
+		{"github.pat", true},
+		{"github.auth", true},
+		{"db.pwd", true},
+		{"db.passwd", true},
+		{"ssh.key", true},
+		{"registry.bearer", true},
+		{"aws.credentials", true},
+		{"tls.cert", true},
+		{"signing.private_key", true},
+
 		{"no-db", false},
 		{"json", false},
 		{"routing.mode", false},
 		{"sync.remote", false},
 		{"linear.team_id", false},
+
+		// The near misses that make the short spellings SEGMENT matches rather
+		// than substring matches. Redacting these would be a bug in the other
+		// direction: every one is an ordinary key that merely starts with a
+		// sensitive word.
+		{"issue.path", false},
+		{"export.pattern", false},
+		{"commit.author", false},
+		{"sort.keyword", false},
+		{"build.compat", false},
 	}
 
 	for _, tt := range tests {

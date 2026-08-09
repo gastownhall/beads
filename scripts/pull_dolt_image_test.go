@@ -145,16 +145,17 @@ set -eu
 printf '%s\n' "$*" >>"$DOLT_PULL_SLEEP_LOG"
 `)
 
-	binPath := shellPath(t, bin)
-	statePath := shellPath(t, stateDir)
-	path := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
+	pathEnv := shellPathEnv()
+	binPath := shellPathUnderEnv(t, bash, bin, pathEnv)
+	statePath := shellPathUnderEnv(t, bash, stateDir, pathEnv)
+	commandPath := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
 	if runtime.GOOS == "windows" {
-		path = binPath + ":/usr/bin:/bin"
+		commandPath = binPath + ":/usr/bin:/bin"
 	}
-	cmd := exec.Command(bash, "scripts/ci/pull-dolt-image.sh")
-	cmd.Dir = sourceRepoRoot(t)
-	cmd.Env = []string{
-		"PATH=" + path,
+	root := sourceRepoRoot(t)
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"BEADS_TEST_COMMAND_PATH=" + commandPath,
 		"LC_ALL=C",
 		"LANG=C",
 		"BASH_ENV=",
@@ -164,6 +165,12 @@ printf '%s\n' "$*" >>"$DOLT_PULL_SLEEP_LOG"
 		"DOLT_PULL_SLEEP_LOG=" + statePath + "/sleep-calls",
 		"DOLT_PULL_FAILURES=" + strconv.Itoa(failures),
 	}
+	requireShellCommandPath(t, bash, root, env, "docker", binPath+"/docker")
+	requireShellCommandPath(t, bash, root, env, "sleep", binPath+"/sleep")
+
+	cmd := bashScriptCommand(bash, "scripts/ci/pull-dolt-image.sh")
+	cmd.Dir = root
+	cmd.Env = env
 	output, runErr := cmd.CombinedOutput()
 
 	dockerCalls := readCallLines(t, dockerLog)

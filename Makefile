@@ -255,10 +255,9 @@ test-cross-version: build
 	@echo "Running cross-version smoke tests..."
 	@CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh
 
-# Run migration test harness (rich dataset, fidelity checks, recipe discovery).
-# Tests direct and stepping-stone upgrade paths from all storage eras.
-# Direct only: ./scripts/migration-test/run.sh --direct-only
-# Single version: ./scripts/migration-test/run.sh v0.49.6
+# Run the authenticated historical upgrade corpus with strict fidelity checks.
+# All qualified versions: ./scripts/migration-test/run.sh
+# Single version: ./scripts/migration-test/run.sh --version v0.49.6
 test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
@@ -419,7 +418,7 @@ help:
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"
-	@echo "  make test-migration - Run migration test harness (fidelity checks, recipes)"
+	@echo "  make test-migration - Run authenticated historical upgrade tests"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"

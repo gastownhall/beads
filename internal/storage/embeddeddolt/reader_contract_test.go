@@ -33,10 +33,32 @@ func TestEmbeddedReaderReadyLimitBoundary(t *testing.T) {
 	conformance.RunReaderReadyLimitBoundary(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
-func TestEmbeddedReaderOffsetIsHonoredOrRefused(t *testing.T) {
+func TestEmbeddedReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
-	conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+	conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+// SkipCounts matters most HERE. The aggregate it drops is the reverse-blocker
+// join, whose COALESCE key the pure-Go analyzer cannot auto-index — so this is
+// the engine where the knob is worth having, and the one where an
+// implementation that quietly ignored it would be least visible.
+func TestEmbeddedReaderListMaxRowsIsHonored(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListMaxRowsIsHonored(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+}
+
+func TestEmbeddedReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
 func TestEmbeddedReaderReadySortPoliciesOrderTheSameRows(t *testing.T) {

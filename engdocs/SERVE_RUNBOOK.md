@@ -1,7 +1,8 @@
 # `bd serve` operator runbook
 
-Last reviewed: 2026-08-01 (freshness sources: the operating-envelope constants
-in `internal/httpapi/server.go`, and the fields its `event` emitters write)
+Last reviewed: 2026-08-09 (freshness sources: the operating-envelope constants
+in `internal/httpapi/server.go` and `internal/httpapi/events_watch.go`, and the
+fields their `event` emitters write)
 
 Running the v0 HTTP surface. For the contract it serves — the operations, the
 error vocabulary, the cursor, the loopback posture — see
@@ -155,11 +156,64 @@ knob. If it does not, `bd serve` says so at startup with
 `event=pool_limits_unavailable` and runs with an **unbounded** pool rather than
 silently pretending. Check for that line before trusting the arithmetic above.
 
+None of this arithmetic applies to a registered backend, which is served from
+the store the root command opened rather than from a unit-of-work provider
+(`db=roles` on the startup line, against `db=provider` for every Dolt topology).
+The pool belongs to that backend, `bd serve` neither owns it nor can reach it,
+and no `pool_limits_unavailable` line is emitted — a missing capability would be
+reported for a provider that was never asked for. Size that pool wherever the
+backend is configured.
+
 `maxConns = 64` bounds *accepted TCP connections*, which is a client-side limit
 and not part of the database budget. It exists because the semaphore does not
 bound connections: Go spawns a goroutine per connection, and one parked on a
 full semaphore still holds its goroutine, file descriptor and buffers. Excess
 connections wait in the kernel accept backlog instead of in Go memory.
+
+`maxWatchStreams = 48` caps `GET /v0/beads/events:watch`, the one operation
+whose requests last hours, and it sits **16 connections below `maxConns`
+deliberately**. `LimitListener` hands a connection slot back only when the
+connection closes — after the handler returns, and therefore after the stream
+counter has already come down — so a stream cap equal to the connection cap
+would be unreachable: the connect that should earn the `503` would never be
+accepted, and neither would the poll it is told to fall back to. The headroom is
+what makes the refusal deliverable and keeps polls, mutations and a
+fresh-connection `/healthz` answerable while every stream slot is taken.
+
+Watch the gauge, not the cliff: `event=events_watch_admitted` carries
+`streams=N max_streams=48` on every connect, so accumulation is visible before
+the first refusal. `event=events_watch_saturated` is the refusal itself.
+
+**Connection saturation at `maxConns` is the worse cliff and is still
+reachable** — by 64 ordinary clients, or by 48 streams plus 16 other
+connections. It is silent by construction: `LimitListener` simply stops calling
+`Accept`, so further connections wait in the kernel backlog with nothing on
+stderr and `/healthz` unable to get a fresh connection either. `conn_cap_saturated`
+is the only warning, and it is edge-triggered; see [Detecting a wedge](#detecting-a-wedge).
+
+A stream has no read deadline (SSE clients legitimately send nothing for hours,
+so one would kill healthy streams), which raises the question of what reaps a
+consumer that vanishes without a FIN or RST — a yanked cable, a killed VM.
+**TCP keepalive already does**, and is on by default: Go's listener enables
+`SO_KEEPALIVE` on every accepted connection and overrides the system idle and
+interval with its own 15s, leaving the probe count at the system's. Measured on
+this fleet (2026-08-09): `SO_KEEPALIVE=1`, `TCP_KEEPIDLE=15`, `TCP_KEEPINTVL=15`,
+`TCP_KEEPCNT=9` — a **~150 second** reap for a connection that is idle, against
+the ~2h11m the bare system defaults (7200/75/9) would have given. A stream that
+is actively writing when the peer vanishes is reaped by retransmission instead,
+on `tcp_retries2` (15 here, roughly **15 minutes**), because keepalive does not
+run while data is unacknowledged. So the worst case for a stream slot held by a
+vanished peer is minutes, not hours — and the stream cap is sized on the
+assumption that it is minutes.
+
+**Streams cost nothing from the database budget between reads**: the handler
+takes a semaphore slot around each one-second poll and gives it straight back,
+so 48 open streams do not occupy 16 handler slots. They are exempt from the 60s
+whole-request deadline for the same reason, and each read is bounded by its own
+15s deadline instead — short because it also bounds how long a stream can go
+without a heartbeat and how long it can ignore a shutdown, not because a page of
+1000 journal rows should ever take that long. Tell accumulating consumers to
+poll `GET /v0/beads/events`, which is never refused for capacity.
 
 ## Shutdown, and the ambiguous claim
 
@@ -168,6 +222,20 @@ On SIGINT, SIGTERM or SIGHUP the server stops accepting and drains for up to
 contexts: the budget covers a claim inside its serialization-retry budget plus
 its commit, because killing such a connection early would leave the client
 unable to tell whether its write landed.
+
+Journal streams are the exception, and they have to be: a held-open response
+would otherwise sit through the whole budget and then be killed anyway. They get
+an explicit close signal when the drain starts and end on their own within a
+poll interval — or, if they are mid-read or mid-backlog, within one 15s read —
+so an open stream does not turn a clean stop into a twenty-second one. Their
+clients reconnect and resume from the id they reached.
+
+One case still forces it, and it is accepted rather than fixed: a stream whose
+client has **stopped reading** blocks in a write, and the write-stall deadline
+that frees it is 30 seconds against a 20-second drain. Such a stream will be
+force-closed, and the `shutdown_forced` line is correct — that connection was
+already ambiguous. Nothing is lost: a stream carries no write, and its client
+resumes from its own last id.
 
 If the drain budget is exceeded, remaining connections are closed and
 `event=shutdown_forced` is logged with the count. That is the ambiguous case,
@@ -235,6 +303,10 @@ Other events on the same stream:
 | `panic` | A panicking handler: the value, the stack, and the same `request_id`. |
 | `semaphore_saturated`, `semaphore_timeout`, `conn_cap_saturated` | See [Detecting a wedge](#detecting-a-wedge). |
 | `shutdown_start`, `shutdown_complete`, `shutdown_forced` | The drain. |
+| `events_watch_admitted` | A journal stream opened, carrying `streams=N max_streams=48`. One line per stream, not per record: this is the gauge that shows accumulation before the cap is hit. |
+| `events_watch_saturated` | A journal stream was refused because this process is already holding its cap. Carries the live count and the cap. Streams end when their consumers leave, so a run of these means consumers are accumulating, not that the server is slow. |
+| `events_watch_failed` | An open journal stream ended on a failure it could not report to the client, because the `200` was already sent: a read that failed (carrying the checkpoint it reached), or a stored payload that would not encode (carrying its `seq`). The client reconnects on its own; a repeated read failure names a database problem, and a repeated `seq` names one unencodable row that will end every stream that reaches it. |
+| `events_watch_unflushable` | A journal stream was refused because the response writer cannot flush. Not reachable through `bd serve`'s own server; it means something is wrapping this handler. |
 
 A 5xx body carries a fixed static detail by design, so `request_id` is the
 client's only handle on the one line that has the real error. When a user
@@ -245,7 +317,8 @@ gives the shape, the `request_error` line gives the cause.
 
 | Message | Cause |
 |---|---|
-| `bd serve requires a Dolt SQL server; this workspace uses embedded Dolt` | Permanent. The embedded backend commits outside the SQL transaction on a separate connection, so this server's per-request atomicity would be a lie there. Refused by `serveModeGate`, which is the only thing refusing it — see "Workspace modes" in the design doc. |
+| `bd serve requires a Dolt SQL server; this workspace uses embedded Dolt` | Permanent. The embedded backend commits outside the SQL transaction on a separate connection, so this server's per-request atomicity would be a lie there. Refused by `serveDatabaseSource`, which is the only thing refusing it — see "Workspace modes" in the design doc. |
+| `bd serve is unavailable under strict readonly` | `--readonly`, or `readonly` in config. Every server this command binds publishes the issue-claim operation and the advertised capability set is a property of the build, not of the flags on the process that started it — so the alternatives were a server advertising a claim it always fails (the store source, where the read-only open reaches the claimer) or a `--readonly` that quietly bought nothing (the provider source, which builds its own writable connection). Drop the flag to serve. |
 | `host must be a numeric IP literal, not a name — use 127.0.0.1 rather than localhost` | `--addr` was given a DNS name. |
 | `binds beyond loopback; bd serve has no authentication, so this requires --allow-non-loopback` | A non-loopback `--addr` without the flag. |
 | `address already in use` | The fixed-port mutual exclusion working as intended: a second server is already on that port. |

@@ -38,6 +38,11 @@ func TestPublicSurfaceComplete(t *testing.T) {
 		reflect.TypeOf((*backend.DoltStorage)(nil)).Elem(),
 		reflect.TypeOf(backend.Backend{}),
 		reflect.TypeOf(conformance.Factory(nil)),
+		// The role tier's entry point reaches every role fixture through its
+		// factory fields, so all 25 of them join this guard: a contract that
+		// later grows a hook carrying a new internal type fails here rather
+		// than on an external backend's next version bump.
+		reflect.TypeOf(conformance.RoleContractBundle{}),
 		reflect.TypeOf(conformance.IssueOperationsStagingFixture{}),
 	}
 	for _, r := range roots {

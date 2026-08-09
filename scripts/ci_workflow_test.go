@@ -305,7 +305,7 @@ const (
 	cacheRestoreActionFamily    = "actions/cache/restore"
 	cacheSaveActionFamily       = "actions/cache/save"
 	setupGoSHA                  = "b7ad1dad31e06c5925ef5d2fc7ad053ef454303e"
-	cacheSHA                    = "caa296126883cff596d87d8935842f9db880ef25"
+	cacheSHA                    = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 	goCacheSchema               = "v2"
 	goBaseTag                   = "gms_pure_go"
 	goModuleCachePath           = "~/go/pkg/mod"

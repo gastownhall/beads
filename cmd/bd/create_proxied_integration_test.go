@@ -5,8 +5,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -345,6 +347,51 @@ A new feature
 		}
 		if sourceRepo != "/path/to/repo" {
 			t.Errorf("source_repo: got %q, want %q", sourceRepo, "/path/to/repo")
+		}
+	})
+
+	// RULING R1 (TestParityCreateOnOccupiedIDRefuses): `bd create --id` on an
+	// occupied ID refuses with exit 1 and a fixed message, leaving the
+	// pre-existing row untouched. This is the proxied twin of the embedded
+	// parity pin — before the bd-b8itp fix the proxied route sent the
+	// domain-level upsert form and silently destroyed the existing issue
+	// while reporting "Created issue:".
+	t.Run("occupied_id_refuses", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "oc")
+		seeded := bdProxiedCreate(t, bd, p.dir, "Original title",
+			"--id", "oc-occ1", "-d", "original description", "-p", "0")
+		if seeded.ID != "oc-occ1" {
+			t.Fatalf("seed ID = %q, want oc-occ1", seeded.ID)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "Replacement title",
+			"--id", "oc-occ1", "-d", "replacement description", "-p", "4")
+		if err == nil {
+			t.Fatalf("bd create --id oc-occ1 should have refused the occupied ID\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Errorf("exit = %v, want exit code 1", err)
+		}
+		const wantErr = "Error: oc-occ1 already exists; use bd update, or bd import for upsert semantics\n"
+		if stderr != wantErr {
+			t.Errorf("stderr = %q, want %q", stderr, wantErr)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty on a refused create", stdout)
+		}
+
+		db := openProxiedDB(t, p)
+		var title, description string
+		var priority int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT title, description, priority FROM issues WHERE id = ?", "oc-occ1").
+			Scan(&title, &description, &priority); err != nil {
+			t.Fatalf("query surviving row: %v", err)
+		}
+		if title != "Original title" || description != "original description" || priority != 0 {
+			t.Errorf("row after refused create = title=%q description=%q priority=%d, want the seeded values", title, description, priority)
 		}
 	})
 

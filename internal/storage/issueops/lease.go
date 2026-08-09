@@ -335,6 +335,15 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)
 	}
+	// DELIBERATELY NOT JOURNALED — do not add an emit here. A heartbeat is a
+	// high-frequency lease keepalive: it writes only the clone-local `leases`
+	// table (lease-liveness state), never a durable bead field. Journaling it
+	// would put a full-snapshot write plus the shared seq-counter serialization
+	// on the hottest write in the fleet, and a replay consumer gains nothing —
+	// lease state lives on the working-set plane and expires on its own. Lease
+	// RECLAIM is the opposite case and does journal: it clears assignee and
+	// reverts status, which is durable bead state. The decision is pinned by
+	// journalExemptMutations in journal_completeness_test.go.
 	return nil
 }
 
@@ -554,6 +563,12 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)
+		}
+		// Journal the lease reclaim as an update (assignee cleared, status
+		// reverted to open) so a replayer sees the claim released. Emitted past
+		// both re-checks, so only reverts that actually happened are recorded.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID); err != nil {
+			return nil, err
 		}
 		// Logged HERE, past both re-checks, so the audit trail records reverts
 		// that actually happened: a heartbeat landing after the snapshot makes

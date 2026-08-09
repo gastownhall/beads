@@ -56,6 +56,18 @@ func TestEmbeddedReadyClaimerSkipsIneligibleFrontRows(t *testing.T) {
 	conformance.RunReadyClaimerSkipsIneligibleFrontRows(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcskip"))
 }
 
+func TestEmbeddedReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcfence"))
+}
+
+func TestEmbeddedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, ctx, newEmbeddedReadyClaimerFixture(t, "rccount"))
+}
+
 func TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()

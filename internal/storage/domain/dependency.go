@@ -17,8 +17,10 @@ import (
 // values, so every domain.ErrX reference and every errors.Is site keeps
 // matching the identical error.
 var (
-	ErrSelfDependency  = issueops.ErrSelfDependency
-	ErrDependencyCycle = issueops.ErrDependencyCycle
+	ErrSelfDependency           = issueops.ErrSelfDependency
+	ErrDependencyCycle          = issueops.ErrDependencyCycle
+	ErrDependencySourceNotFound = issueops.ErrDependencySourceNotFound
+	ErrDependencyTargetNotFound = issueops.ErrDependencyTargetNotFound
 )
 
 // cycleError carries a fully-formatted cycle-rejection message while unwrapping
@@ -58,6 +60,11 @@ type DependencyTypeConflictError = issueops.DependencyTypeConflictError
 // blocking hierarchy impossible to complete. See
 // issueops.DependencyHierarchyConflictError.
 type DependencyHierarchyConflictError = issueops.DependencyHierarchyConflictError
+
+// DependencyEndpointNotFoundError reports which endpoint of a refused edge this
+// database could see the absence of. See
+// issueops.DependencyEndpointNotFoundError.
+type DependencyEndpointNotFoundError = issueops.DependencyEndpointNotFoundError
 
 type DepDirection int
 
@@ -148,8 +155,18 @@ type DependencySQLRepository interface {
 	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts DepCountsOpts) (int, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
+	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
+	// publishes: canonically ordered, and carrying every member of a cycle
+	// whether or not this database can describe it. DetectCycles above is the
+	// lossy legacy shape.
+	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
+	// WalkDependencyTree answers the tree walk in the shape issueops.TreeWalker
+	// publishes: validated, rooted, pruned by status and capped, with both
+	// directions of a `both` request inside ONE transaction. GetTree above is the
+	// unvalidated shape.
+	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 	GetWispDependencyRecordsForIDs(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
@@ -178,8 +195,14 @@ type DependencyUseCase interface {
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
+	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
+	// repository method of the same name.
+	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
+	// WalkDependencyTree is the shape issueops.TreeWalker publishes; see the
+	// repository method of the same name.
+	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
 	// AddDependencies asserts a batch of edges, each landing in the plane its
 	// own SOURCE lives in. There is deliberately no plane-pinned variant:
 	// `bd dep add` takes whatever ids the caller names and one request may
@@ -260,13 +283,18 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp, HierarchyValidated: true, CycleValidated: true, EmitEvent: true}); err != nil {
 		// The retype conflict is a user-facing error whose message already
 		// matches embedded verbatim; pass it through unwrapped so the CLI does
-		// not prepend "add dep: insert:" (#4547 F-1).
+		// not prepend "add dep: insert:" (#4547 F-1). The endpoint-existence
+		// refusals are here for the same reason.
 		var conflict *DependencyTypeConflictError
 		if errors.As(err, &conflict) {
 			return err
 		}
 		var hierarchyConflict *DependencyHierarchyConflictError
 		if errors.As(err, &hierarchyConflict) {
+			return err
+		}
+		var missingEndpoint *DependencyEndpointNotFoundError
+		if errors.As(err, &missingEndpoint) {
 			return err
 		}
 		return fmt.Errorf("add dep: insert: %w", err)
@@ -594,6 +622,23 @@ func (u *dependencyUseCaseImpl) DetectCycles(ctx context.Context) ([][]*types.Is
 	return out, nil
 }
 
+func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context) (issueops.CycleReport, error) {
+	out, err := u.depRepo.DetectCycleReport(ctx)
+	if err != nil {
+		return issueops.CycleReport{}, fmt.Errorf("DetectCycleReport: %w", err)
+	}
+	return out, nil
+}
+
+// WalkDependencyTree passes the request straight through.
+//
+// No pre-check and no error wrapping, unlike GetDependencyTree below: the
+// request's whole vocabulary is validated inside the shared body, and its
+// refusals are typed sentinels both front doors classify.
+func (u *dependencyUseCaseImpl) WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
+	return u.depRepo.WalkDependencyTree(ctx, req)
+}
+
 func (u *dependencyUseCaseImpl) GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error) {
 	if rootID == "" {
 		return nil, fmt.Errorf("GetDependencyTree: rootID must not be empty")
@@ -685,6 +730,10 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 			}); err != nil {
 				var hierarchyConflict *DependencyHierarchyConflictError
 				if errors.As(err, &hierarchyConflict) {
+					return BulkAddDepsResult{}, err
+				}
+				var missingEndpoint *DependencyEndpointNotFoundError
+				if errors.As(err, &missingEndpoint) {
 					return BulkAddDepsResult{}, err
 				}
 				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)

@@ -21,7 +21,27 @@ type unclaimProxiedResult struct {
 	errs      []string
 }
 
-func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, force bool) error {
+// runUnclaimProxiedServer releases claims through the proxied-server unit of
+// work. expectedAssignee carries `--if-assignee`: a non-empty value selects the
+// compare-and-swap release, and empty means an unconditional one. There is no
+// third case — `--if-assignee ""` is rejected in unclaim.go before any issue is
+// touched, precisely so an unset shell variable can never downgrade a CAS to an
+// unconditional release.
+//
+// The two releases differ only in which use-case verb runs: both apply the same
+// transition through the same classic issueops implementation, so a conditional
+// release records the same "unclaimed" event and drops the same lease row as an
+// unconditional one, on this backend exactly as on the embedded one.
+//
+// EXIT CONTRACT (unchanged by the port, and deliberately identical to the
+// embedded path): a mismatched holder prints the storage.ErrAssigneeMismatch
+// error naming the current holder, writes NOTHING, and exits 1 via SilentExit.
+// `bd unclaim` has never had `bd update`'s ExitGuardMismatch(13) verdict —
+// see the "Exit status" paragraph of the command's help — and this port does
+// not invent one, because a proxied exit code that differs from the embedded
+// one for the same refusal is exactly the divergence this lane exists to
+// prevent.
+func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, force bool, expectedAssignee string) error {
 	if uowProvider == nil {
 		return HandleError("proxied-server UOW provider not initialized")
 	}
@@ -40,7 +60,13 @@ func runUnclaimProxiedServer(ctx context.Context, args []string, reason string, 
 			}
 			fullID := issue.ID
 
-			if uerr := uw.IssueUseCase().Unclaim(ctx, fullID, actor, force); uerr != nil {
+			var uerr error
+			if expectedAssignee != "" {
+				uerr = uw.IssueUseCase().UnclaimIfAssignee(ctx, fullID, actor, expectedAssignee)
+			} else {
+				uerr = uw.IssueUseCase().Unclaim(ctx, fullID, actor, force)
+			}
+			if uerr != nil {
 				r.errs = append(r.errs, fmt.Sprintf("Error unclaiming %s: %v", fullID, uerr))
 				continue
 			}

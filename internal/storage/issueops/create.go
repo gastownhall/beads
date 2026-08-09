@@ -22,10 +22,19 @@ type BatchContext struct {
 	ConfigPrefix    string
 	AllowedPrefixes string
 	Opts            storage.BatchCreateOptions
+	// SkipChildCounterReconcile tells CreateIssueInTxWithResult to skip its
+	// per-issue ReconcileChildCounters call. CreateIssuesInTxWithResult sets
+	// this because it already runs one slice-wide ReconcileChildCounters over
+	// the whole accepted batch after the per-issue loop, which covers every
+	// issue the per-issue call would have handled; running it again per issue
+	// during a batch import was 3-4 redundant round trips per hierarchical
+	// issue for a result the caller discards. Singular creates leave this
+	// false so they keep reconciling immediately, per-issue.
+	SkipChildCounterReconcile bool
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
-func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOptions) (*BatchContext, error) {
+func NewBatchContext(ctx context.Context, tx DBTX, opts storage.BatchCreateOptions) (*BatchContext, error) {
 	customStatuses, err := GetCustomStatusesTx(ctx, tx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get custom statuses: %w", err)
@@ -50,7 +59,7 @@ func NewBatchContext(ctx context.Context, tx *sql.Tx, opts storage.BatchCreateOp
 	}, nil
 }
 
-func CreateIssueInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) error {
+func CreateIssueInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
 	_, err := CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
 	return err
 }
@@ -63,6 +72,10 @@ type CreateIssueResult struct {
 	// persisted by later batch stages either (bd-578h9.8).
 	StaleRejected         bool
 	persistedDependencies []persistedDependency
+	// persistedComments are the comments this create actually inserted, carried
+	// up to the entry point so their journal rows land AFTER the create's. A
+	// consumer must never see a comment for a bead it has not been told about.
+	persistedComments []EventComment
 }
 
 type persistedDependency struct {
@@ -92,7 +105,7 @@ func mergeChangedTables(dst map[string]bool, src map[string]bool) map[string]boo
 	return dst
 }
 
-func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
+func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
 		return result, err
@@ -164,10 +177,44 @@ func CreateIssueInTxWithResult(ctx context.Context, tx *sql.Tx, bc *BatchContext
 		return result, err
 	}
 	result.ChangedTables = mergeChangedTables(result.ChangedTables, commentResult.ChangedTables)
+	result.persistedComments = append(result.persistedComments, commentResult.persistedComments...)
+
+	// Advance child_counters when a singular create materializes a hierarchical
+	// ID (e.g. bd create --id P.8). The batch path already calls
+	// ReconcileChildCounters after CreateIssuesInTx; without this, explicit --id
+	// creates leave last_child behind the live suffix high-water mark and the
+	// next bd create --parent can recycle lower suffixes (GH#4750).
+	if isNew && !bc.SkipChildCounterReconcile {
+		if _, childNum, ok := ParseHierarchicalID(issue.ID); ok && childNum > 0 {
+			changedCounters, err := ReconcileChildCounters(ctx, tx, []*types.Issue{issue})
+			if err != nil {
+				return result, err
+			}
+			result.ChangedTables = mergeChangedTables(result.ChangedTables, changedCounters)
+		}
+	}
+	// Journal the create once, after labels and comments are in the row's
+	// transaction, so the snapshot is the complete bead. The early returns above
+	// (collision skip, orphan skip, stale reject) wrote nothing and journal
+	// nothing.
+	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID); err != nil {
+		return result, err
+	}
+	// Creation-time comments (import/interchange carries them inline) are
+	// replayable content the create snapshot does NOT contain — issue hydration
+	// joins labels but not comments — so each inserted comment gets its own op,
+	// emitted after the create so a consumer is never told about a comment on a
+	// bead it has not seen created. Dedup hits above inserted nothing and emit
+	// nothing.
+	for i := range result.persistedComments {
+		if err := RecordCommentEventInTx(ctx, tx, issue.ID, &result.persistedComments[i]); err != nil {
+			return result, err
+		}
+	}
 	return result, nil
 }
 
-func assignCreateIssueIDInTx(ctx context.Context, tx *sql.Tx, bc *BatchContext, issue *types.Issue, actor string) error {
+func assignCreateIssueIDInTx(ctx context.Context, tx DBTX, bc *BatchContext, issue *types.Issue, actor string) error {
 	if issue.ID == "" {
 		issueTable, _ := TableRouting(issue)
 		prefix := bc.ConfigPrefix
@@ -214,14 +261,14 @@ func (r *CreateIssuesResult) merge(changed map[string]bool) {
 	r.ChangedTables = mergeChangedTables(r.ChangedTables, changed)
 }
 
-func CreateIssuesInTx(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
+func CreateIssuesInTx(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) error {
 	_, err := CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
 	return err
 }
 
 // CreateIssuesInTxWithResult creates issues and reports tables whose writes are
 // only knowable after SQL reconciliation, such as child counter advances.
-func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssuesResult, error) {
+func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssuesResult, error) {
 	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)
 	if err != nil {
 		return CreateIssuesResult{}, err
@@ -232,6 +279,9 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx *sql.Tx, issues []*types
 	if err != nil {
 		return CreateIssuesResult{}, err
 	}
+	// This function already runs a slice-wide ReconcileChildCounters below,
+	// covering every accepted issue; skip the redundant per-issue reconcile.
+	bc.SkipChildCounterReconcile = true
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
@@ -388,7 +438,11 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
 			if targetInBatch && sourceIsWisp != targetIsWisp {
 				if !opts.SkipDependencyValidationErrors {
-					return nil, fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist", sourceID, dep.DependsOnID)
+					// Through the shared constructor, so the two bodies raise
+					// one message AND one sentinel: the role promises this
+					// refusal is the caller's fault, and an untyped error left
+					// callers classifying it by prose.
+					return nil, CrossPlaneBatchEdgeError(sourceID, dep.DependsOnID)
 				}
 				if !filteredDeps {
 					keptDeps = append([]*types.Dependency(nil), issue.Dependencies[:depIndex]...)
@@ -416,7 +470,7 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 	return issues, nil
 }
 
-func createBlockedRecomputeIDs(ctx context.Context, tx *sql.Tx, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
+func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {
 	issueSeen := make(map[string]bool, len(issues))
 	wispSeen := make(map[string]bool, len(issues))
 	issueIDs := make([]string, 0, len(issues))
@@ -551,7 +605,7 @@ func AllWisps(issues []*types.Issue) bool {
 // Returns (skip=true, nil) if the issue should be skipped.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable string, handling storage.OrphanHandling) (skip bool, err error) {
+func CheckOrphan(ctx context.Context, tx DBTX, issue *types.Issue, issueTable string, handling storage.OrphanHandling) (skip bool, err error) {
 	if issue.ID == "" {
 		return false, nil
 	}
@@ -595,7 +649,7 @@ func CheckOrphan(ctx context.Context, tx *sql.Tx, issue *types.Issue, issueTable
 // tolerant via GH#4163).
 //
 //nolint:gosec // G201: siblingTable is one of two hardcoded constants
-func checkCrossTableIDCollision(ctx context.Context, tx *sql.Tx, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
+func checkCrossTableIDCollision(ctx context.Context, tx DBTX, id, issueTable string, opts storage.BatchCreateOptions) (skip bool, err error) {
 	if id == "" {
 		return false, nil
 	}
@@ -696,7 +750,7 @@ func InsertIssueStrictInTx(ctx context.Context, tx DBTX, table string, issue *ty
 	return nil
 }
 
-func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
+func PersistLabels(ctx context.Context, tx DBTX, issue *types.Issue, actor, eventTable string) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Labels) == 0 {
 		return result, nil
@@ -749,7 +803,7 @@ func PersistLabels(ctx context.Context, tx *sql.Tx, issue *types.Issue, actor, e
 	return result, nil
 }
 
-func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (CreateIssueResult, error) {
+func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	if len(issue.Comments) == 0 {
 		return result, nil
@@ -783,6 +837,9 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (Creat
 			comment.ID = id
 			if !existed {
 				result.markChanged(commentTable)
+				result.persistedComments = append(result.persistedComments, EventComment{
+					ID: id, Author: comment.Author, Text: comment.Text, CreatedAt: createdAt, Source: CommentSourceStructured,
+				})
 			}
 			continue
 		}
@@ -808,20 +865,23 @@ func PersistComments(ctx context.Context, tx *sql.Tx, issue *types.Issue) (Creat
 			return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 		}
 		result.markChanged(commentTable)
+		result.persistedComments = append(result.persistedComments, EventComment{
+			ID: comment.ID, Author: comment.Author, Text: comment.Text, CreatedAt: createdAt, Source: CommentSourceStructured,
+		})
 	}
 	return result, nil
 }
 
-func PersistDependencies(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string) error {
+func PersistDependencies(ctx context.Context, tx DBTX, issues []*types.Issue, actor string) error {
 	_, err := PersistDependenciesWithResult(ctx, tx, issues, actor)
 	return err
 }
 
-func PersistDependenciesWithResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string) (CreateIssueResult, error) {
+func PersistDependenciesWithResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string) (CreateIssueResult, error) {
 	return PersistDependenciesWithOptionsResult(ctx, tx, issues, actor, storage.BatchCreateOptions{})
 }
 
-func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
+func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues []*types.Issue, actor string, opts storage.BatchCreateOptions) (CreateIssueResult, error) {
 	var result CreateIssueResult
 	type pendingDependency struct {
 		dep      *types.Dependency
@@ -933,6 +993,11 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx *sql.Tx, issue
 						return result, err
 					}
 				}
+				// Creation-time edges are independently replayable operations; do
+				// not rely on the issue create payload's inline dependencies.
+				if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata); err != nil {
+					return result, err
+				}
 			}
 		}
 	}
@@ -963,7 +1028,7 @@ func recordSkippedDependencyEdge(opts storage.BatchCreateOptions, issueID, depen
 	opts.OnSkippedDependency(issueID, dependsOnID, reason)
 }
 
-func ReconcileChildCounters(ctx context.Context, tx *sql.Tx, issues []*types.Issue) (map[string]bool, error) {
+func ReconcileChildCounters(ctx context.Context, tx DBTX, issues []*types.Issue) (map[string]bool, error) {
 	type bucket struct {
 		maxChild int
 		isWisp   bool

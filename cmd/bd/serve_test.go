@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"go/ast"
 	"go/parser"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -159,9 +162,14 @@ func TestServeRefusalsPromiseNothing(t *testing.T) {
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				useStorageModeGlobals(t)
+				beadsDir := writeContractBackendConfig(t, configfile.BackendDolt)
 				tc.apply(t)
-				if err := serveModeGate(); err != nil {
-					t.Fatalf("serveModeGate() = %v, want nil: this mode has a SQL server and bd serve builds a provider for it", err)
+				db, err := serveDatabaseSource(beadsDir)
+				if err != nil {
+					t.Fatalf("serveDatabaseSource() = %v, want nil: this mode has a SQL server and bd serve builds a provider for it", err)
+				}
+				if db.source != serveSourceProvider {
+					t.Errorf("source = %v, want serveSourceProvider", db.source)
 				}
 			})
 		}
@@ -174,10 +182,11 @@ func TestServeRefusalsPromiseNothing(t *testing.T) {
 			// is a constant false there, so there is no case to make.
 			t.Skip("this build cannot open an embedded workspace")
 		}
-		err := serveModeGate()
+		beadsDir := writeContractBackendConfig(t, configfile.BackendDolt)
+		_, err := serveDatabaseSource(beadsDir)
 		var unsupported *storage.ErrUnsupported
 		if !errors.As(err, &unsupported) {
-			t.Fatalf("serveModeGate() = %v, want the typed embedded refusal", err)
+			t.Fatalf("serveDatabaseSource() = %v, want the typed embedded refusal", err)
 		}
 		if unsupported.Backend != "embedded-dolt" {
 			t.Errorf("Backend = %q, want embedded-dolt", unsupported.Backend)
@@ -201,23 +210,29 @@ func useStorageModeGlobals(t *testing.T) {
 	})
 }
 
-// TestServeBuildsOnlyAProviderBackedServer is the source-level half of the
-// embedded refusal, and it exists because the other half stopped being
-// structural.
+// TestServeNamesOneDatabaseSourcePerServerItBuilds is the source-level half of
+// the embedded refusal. It replaces TestServeBuildsOnlyAProviderBackedServer,
+// which pinned a world in which bd built provider-backed servers only.
 //
-// httpapi.Listen once took a unit-of-work provider or nothing, and there is no
-// provider for the embedded backend, so an embedded-backed server could not be
-// built even with serveModeGate deleted. httpapi.Config now also accepts the
-// two issue roles as a database source, and the embedded store publishes both
-// accessors — so the shortest edit from here to a server whose per-request
-// atomicity claim is false is handing Listen the roles off the store the root
-// command already opened. internal/httpapi will not catch it: a role is an
-// interface, and nothing about one says which backend is behind it.
+// That world ended for a reason and not by accident: the registered-backend arm
+// exists precisely so a store bd already opened can be served. But the property
+// the old test protected did not end with it — internal/httpapi still cannot
+// tell an embedded-backed role from any other, so the shortest edit from here to
+// a server whose per-request atomicity claim is false is still handing Listen
+// the roles off whatever store happens to be open.
 //
-// So the claim this pins is narrow and checkable: bd names exactly one database
-// source, and it is the provider serveModeGate has already vouched for. An edit
-// that reaches for the roles instead fails here and has to read that gate.
-func TestServeBuildsOnlyAProviderBackedServer(t *testing.T) {
+// So this pins what is left, and it is narrow and checkable:
+//
+//   - every httpapi.Config bd builds names exactly ONE COMPLETE database
+//     source — Provider alone, or Reader and Claimer together. A half-set pair
+//     binds, answers every read, and nil-dereferences on the first claim;
+//     Listen refuses it, and so does this, one layer earlier;
+//   - both arms exist, so the test cannot pass because one was deleted;
+//   - a roles-bearing Config is built only inside a function that consults
+//     serveDatabaseSource and names serveSourceStore. That is the gate holding
+//     the embedded refusal, so an edit that reaches for the roles anywhere else
+//     fails here and has to go read it.
+func TestServeNamesOneDatabaseSourcePerServerItBuilds(t *testing.T) {
 	dir := packageDir(t)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -225,7 +240,7 @@ func TestServeBuildsOnlyAProviderBackedServer(t *testing.T) {
 	}
 
 	fset := token.NewFileSet()
-	configs, provided := 0, 0
+	var providerBacked, rolesBacked int
 	for _, entry := range entries {
 		name := entry.Name()
 		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
@@ -235,50 +250,114 @@ func TestServeBuildsOnlyAProviderBackedServer(t *testing.T) {
 		if err != nil {
 			t.Fatalf("parse %s: %v", name, err)
 		}
-		ast.Inspect(file, func(n ast.Node) bool {
-			lit, ok := n.(*ast.CompositeLit)
+
+		// Attribute every literal to its enclosing function. A literal outside
+		// one is not reachable through the gate by construction, so the
+		// whole-file count below refuses to let it hide.
+		attributed := 0
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
 			if !ok {
-				return true
+				continue
 			}
-			sel, ok := lit.Type.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Config" {
-				return true
-			}
-			if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "httpapi" {
-				return true
-			}
-			configs++
-			for _, elt := range lit.Elts {
-				kv, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
+			// NOTE: Reader+Claimer is the ROLES-SOURCE SIGNAL, not the whole
+			// role set — Config also carries Settings, Stats, CycleDetector,
+			// ReadyCounter, Sweeper, EdgeReader, BatchCreator and more. That is
+			// sound for what this test asks (which database source did this
+			// Config name), but the pair is hand-maintained: a future source
+			// signal that is not Reader+Claimer would read as "no database
+			// source". Deriving it is bd-lidlu's territory.
+			for _, lit := range httpapiConfigLiterals(fn) {
+				attributed++
+				keys := configLiteralKeys(lit)
+				provider := keys["Provider"]
+				reader, claimer := keys["Reader"], keys["Claimer"]
+
+				switch {
+				case provider && (reader || claimer):
+					t.Errorf("%s: this httpapi.Config names two database sources; pass exactly one",
+						fset.Position(lit.Pos()))
+				case reader != claimer:
+					t.Errorf("%s: this httpapi.Config sets one issue role without the other; a reader without a "+
+						"claimer binds, answers every read, and fails the first claim on a live server",
+						fset.Position(lit.Pos()))
+				case provider:
+					providerBacked++
+				case reader && claimer:
+					rolesBacked++
+					if !functionMentions(fn, "serveDatabaseSource") || !functionMentions(fn, "serveSourceStore") {
+						t.Errorf("%s: %s builds a roles-backed httpapi.Config without consulting serveDatabaseSource. "+
+							"That gate is where the permanent embedded-Dolt refusal lives, and internal/httpapi "+
+							"cannot tell an embedded-backed role from any other — read it before changing this",
+							fset.Position(lit.Pos()), fn.Name.Name)
+					}
+				default:
+					t.Errorf("%s: this httpapi.Config names no database source", fset.Position(lit.Pos()))
 				}
-				key, ok := kv.Key.(*ast.Ident)
-				if !ok {
-					continue
-				}
-				switch key.Name {
-				case "Reader", "Claimer":
-					t.Errorf("%s: bd serve sets httpapi.Config.%s. The roles source bypasses the unit-of-work "+
-						"provider serveModeGate vouched for, and internal/httpapi cannot tell an embedded-backed "+
-						"role from any other — read serveModeGate before changing this",
-						fset.Position(kv.Pos()), key.Name)
-				case "Provider":
-					provided++
-				}
 			}
-			return true
-		})
+		}
+		if total := len(httpapiConfigLiterals(file)); total != attributed {
+			t.Errorf("%s: %d of %d httpapi.Config literals are outside any function; such a literal cannot be "+
+				"reached through serveDatabaseSource", name, total-attributed, total)
+		}
 	}
 
-	// Both counts, so the test cannot pass because the literal moved, was
-	// renamed, or stopped naming a source at all.
-	if configs == 0 {
-		t.Fatal("no httpapi.Config literal in cmd/bd: this test no longer looks at the code that builds the server")
+	// Both arms, so the test cannot pass because one was deleted, renamed, or
+	// stopped naming a source at all.
+	if providerBacked == 0 {
+		t.Error("no provider-backed httpapi.Config in cmd/bd: the dolt SQL-server workspaces are no longer served")
 	}
-	if provided != configs {
-		t.Errorf("%d of %d httpapi.Config literals set Provider; every server bd builds is provider-backed", provided, configs)
+	if rolesBacked == 0 {
+		t.Error("no roles-backed httpapi.Config in cmd/bd: a registered backend is no longer served from its store")
 	}
+}
+
+// httpapiConfigLiterals returns every `httpapi.Config{...}` composite literal
+// under n.
+func httpapiConfigLiterals(n ast.Node) []*ast.CompositeLit {
+	var out []*ast.CompositeLit
+	ast.Inspect(n, func(n ast.Node) bool {
+		lit, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := lit.Type.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Config" {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "httpapi" {
+			out = append(out, lit)
+		}
+		return true
+	})
+	return out
+}
+
+// configLiteralKeys is the set of field names a keyed composite literal sets.
+func configLiteralKeys(lit *ast.CompositeLit) map[string]bool {
+	keys := make(map[string]bool, len(lit.Elts))
+	for _, elt := range lit.Elts {
+		kv, ok := elt.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if key, ok := kv.Key.(*ast.Ident); ok {
+			keys[key.Name] = true
+		}
+	}
+	return keys
+}
+
+// functionMentions reports whether fn's body names the given identifier.
+func functionMentions(fn *ast.FuncDecl, name string) bool {
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if ident, ok := n.(*ast.Ident); ok && ident.Name == name {
+			found = true
+		}
+		return !found
+	})
+	return found
 }
 
 // packageDir is this test file's own directory, resolved from the compiled-in
@@ -292,4 +371,92 @@ func packageDir(t *testing.T) string {
 		t.Fatal("cannot resolve this test's source path")
 	}
 	return filepath.Dir(file)
+}
+
+// TestServeRefusesStrictReadonly.
+//
+// `bd --readonly serve` is a contradiction, and until it was refused it
+// resolved differently on each of the two database sources — badly on both.
+//
+// On the STORE source the root command opens the workspace through
+// backend.OpenReadOnly and serve takes its claimer off that store, so the
+// server bound, GET /v0/beads/context went on advertising `issues.claim` (the
+// capability set is derived from the route table and knows nothing about a CLI
+// flag), and every claim came back 500 with the issue left open and unassigned.
+// A server that advertises a write it will always fail is worse than no server.
+//
+// On the PROVIDER source it was the other silent answer: serve builds its own
+// unit-of-work provider from the workspace's connection settings, which has no
+// read-only posture at all, so `--readonly` bought the operator nothing and
+// every claim landed. (Proxied mode never got that far — the root pre-run
+// already refuses strict readonly for it.)
+//
+// Refusing is the same policy bd already applies one layer down, where a
+// backend that cannot guarantee mutation-free access is turned away rather than
+// opened anyway. It is also the only answer that is the same on both sources.
+//
+// The gate is ahead of the workspace, which this pins by refusing in a
+// directory that has no workspace at all: no topology can reach past it.
+func TestServeRefusesStrictReadonly(t *testing.T) {
+	// Refused in a directory with NO workspace, which is how the ordering is
+	// pinned: the gate cannot be sitting behind a topology if there is no
+	// topology to resolve. That is what makes one test cover both sources.
+	// TestServeRefusesStrictReadonlyOnARegisteredBackend drives the same
+	// refusal in a workspace that would otherwise have served.
+	t.Run("before any workspace is resolved", func(t *testing.T) {
+		stderr, err := runServeUnderReadonly(t, t.TempDir())
+		if err == nil {
+			t.Fatalf("bd --readonly serve bound a server\nstderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "--readonly") {
+			t.Errorf("the refusal does not name the flag that caused it: %q", stderr)
+		}
+		if strings.Contains(stderr, "cannot resolve workspace context") {
+			t.Errorf("the readonly refusal runs after the workspace is resolved: %q", stderr)
+		}
+	})
+
+	t.Run("the capability set stays honest", func(t *testing.T) {
+		// The other way to settle this would have been to drop issues.claim
+		// from what a read-only server advertises. That is a wire change —
+		// `capabilities` is the documented pre-flight a client checks — and it
+		// would make one operation's presence depend on a CLI flag, which no
+		// client can discover before connecting. Refusing the process instead
+		// leaves the published surface a property of the build.
+		if !slices.Contains(httpapi.Capabilities(), "issues.claim") {
+			t.Error("issues.claim left the advertised capability set; bd serve refuses --readonly " +
+				"precisely so that set never has to vary")
+		}
+	})
+}
+
+// runServeUnderReadonly runs bd serve with strict readonly set, in dir, and
+// returns what it wrote to stderr. The refusal reaches the operator through
+// HandleError, which writes the message to stderr and returns an opaque exit
+// error, so the message is only observable here.
+func runServeUnderReadonly(t *testing.T, dir string) (string, error) {
+	t.Helper()
+	useStorageModeGlobals(t)
+	restoreServeGlobals(t)
+
+	origReadonly := readonlyMode
+	readonlyMode = true
+	t.Cleanup(func() { readonlyMode = origReadonly })
+
+	store = nil
+	serveAddr, serveAllowNonLoopback = "127.0.0.1:0", false
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	setRootContext(ctx, cancel)
+	t.Chdir(dir)
+	// The workspace snapshot is resolved once per process and cached, so
+	// without this a directory with no workspace would still resolve to
+	// whichever one an earlier test in this binary left behind — and "no
+	// workspace" is the whole premise of the ordering assertion above.
+	beads.ResetCaches()
+	t.Cleanup(beads.ResetCaches)
+
+	var err error
+	stderr := captureBootstrapStderr(t, func() { err = runServe() })
+	return stderr, err
 }

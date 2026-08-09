@@ -207,6 +207,18 @@ type CreateRequest struct {
 	WaitsFor *WaitsFor
 	// ForceIDPrefix permits an explicit ID outside the configured prefix.
 	ForceIDPrefix bool
+	// IDPrefix is the prefix an explicit Issue.ID is checked against, and it
+	// OVERRIDES the one the substrate has configured. Empty means "use the
+	// substrate's", which is the ordinary case.
+	//
+	// It exists because the workspace's own config.yaml `issue-prefix` wins
+	// over the database's (GH#4957) and no implementation can see config.yaml
+	// — a shared server's database knows only its own prefix. Resolving that
+	// is the front door's job, the same way DeleteRequest.IDs are exact
+	// because resolution belongs to the front door; the role enforces what it
+	// is handed. Without it the two `bd create` routes disagree about which
+	// ids a workspace may mint.
+	IDPrefix string
 }
 
 // UpdateRequest describes an issue update.
@@ -378,6 +390,12 @@ type ReopenResult struct {
 
 // Lifecycle describes guarded issue mutations. A new capability gets a new
 // role interface and its own accessor; never append a method here.
+//
+// EVERY VERB HERE MAINTAINS BLOCKED STATE under BlockedStateInvariant: a
+// Create that carries edges, and an Update or Close or Reopen that moves a
+// status across the closed/pinned boundary, leave the column settled for every
+// row their mutation could have affected before the transaction commits.
+//
 // Deterministic request validation failures match ErrValidation; when a
 // more-specific validation sentinel applies, it remains matchable too.
 // Implementations never mutate

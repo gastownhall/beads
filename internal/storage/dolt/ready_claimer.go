@@ -44,28 +44,41 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, request issueops.ClaimNext
 		return issueops.ClaimNextResult{}, err
 	}
 
-	var result issueops.ClaimNextResult
-	write := func() (*types.Issue, error) {
-		var claimed *types.Issue
-		err := c.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
-			attempt, tables, err := storageissueops.ExecuteClaimNext(ctx, tx, request.Actor, filter)
-			if err != nil {
-				return nil, "", err
-			}
-			result = attempt
-			if attempt.Claimed == nil {
-				return tables, "", nil
-			}
-			claimed = attempt.Claimed.Issue
-			// The message names the claimed issue because that is the one `bd
-			// dolt log` affordance callers actually grep, and it is what the
-			// store's own ClaimReadyIssue wrote before the claim moved here.
-			return tables, storageissueops.ClaimNextCommitMessage(attempt.Claimed.ID), nil
-		})
-		return claimed, err
-	}
+	// Wake expired dated defers before selecting, so a bead whose snooze just
+	// ended is claimable the moment its date passes. Advisory, in a write tx
+	// of its own: a failed sweep must not cost the claim.
+	c.store.wakeExpiredDefers(ctx)
 
-	if _, err := c.store.verifiedReadyClaim(ctx, request.Actor, write); err != nil {
+	// The write and its verify sit under withCircuitWrite so terminal circuit
+	// success is recorded once at the boundary, only after verifiedReadyClaim
+	// returns nil — matching the store's own ClaimReadyIssue. write is defined
+	// inside the boundary so its runIssueOperationTxWithMessage captures the
+	// circuit-managed ctx and defers success to the boundary.
+	var result issueops.ClaimNextResult
+	err = c.store.withCircuitWrite(ctx, func(ctx context.Context) error {
+		write := func() (*types.Issue, error) {
+			var claimed *types.Issue
+			err := c.store.runIssueOperationTxWithMessage(ctx, func(tx *sql.Tx) (storageissueops.ChangedTables, string, error) {
+				attempt, tables, err := storageissueops.ExecuteClaimNext(ctx, tx, request.Actor, filter)
+				if err != nil {
+					return nil, "", err
+				}
+				result = attempt
+				if attempt.Claimed == nil {
+					return tables, "", nil
+				}
+				claimed = attempt.Claimed.Issue
+				// The message names the claimed issue because that is the one `bd
+				// dolt log` affordance callers actually grep, and it is what the
+				// store's own ClaimReadyIssue wrote before the claim moved here.
+				return tables, storageissueops.ClaimNextCommitMessage(attempt.Claimed.ID), nil
+			})
+			return claimed, err
+		}
+		_, verr := c.store.verifiedReadyClaim(ctx, request.Actor, write)
+		return verr
+	})
+	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
 	return result, nil

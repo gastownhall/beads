@@ -36,9 +36,6 @@ Examples:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("heartbeat is not supported in proxied-server mode")
-		}
 		CheckReadonly("heartbeat")
 
 		evt := metrics.NewCommandEvent("heartbeat")
@@ -50,6 +47,10 @@ Examples:
 
 		ctx := rootCtx
 		id := args[0]
+
+		if usesProxiedServer() {
+			return runHeartbeatProxiedServer(ctx, id)
+		}
 
 		result, err := resolveAndGetIssueForMutation(ctx, store, id)
 		if err != nil {
@@ -80,16 +81,24 @@ Examples:
 
 		SetLastTouchedID(result.ResolvedID)
 
-		if jsonOutput {
-			return outputJSON(map[string]string{
-				"id":     result.ResolvedID,
-				"status": "heartbeat",
-				"owner":  actor,
-			})
-		}
-		fmt.Printf("%s Heartbeat %s (lease refreshed)\n", ui.RenderPass("✓"), formatFeedbackID(result.ResolvedID, result.Issue.Title))
-		return nil
+		return renderHeartbeatSuccess(result.ResolvedID, result.Issue.Title)
 	},
+}
+
+// renderHeartbeatSuccess prints the success shape both storage routes share —
+// the classic path and the proxied-server path (heartbeat_proxied_server.go)
+// call exactly this code, so the --json contract workers parse
+// ({"id","status":"heartbeat","owner"}) cannot drift between modes.
+func renderHeartbeatSuccess(id, title string) error {
+	if jsonOutput {
+		return outputJSON(map[string]string{
+			"id":     id,
+			"status": "heartbeat",
+			"owner":  actor,
+		})
+	}
+	fmt.Printf("%s Heartbeat %s (lease refreshed)\n", ui.RenderPass("✓"), formatFeedbackID(id, title))
+	return nil
 }
 
 func init() {

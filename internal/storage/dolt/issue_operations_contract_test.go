@@ -19,10 +19,34 @@ func TestIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T) {
 	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, fixture)
 }
 
+func TestIssueOperationsCreateRefusesAnOccupiedID(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateRefusesAnOccupiedID(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateInheritsParentLabels(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateInheritsParentLabels(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateRefusesAForeignIDPrefix(t, ctx, fixture)
+}
+
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateClosePolicy(t *testing.T) {
@@ -35,6 +59,12 @@ func TestIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
 	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {
@@ -109,6 +139,54 @@ func TestIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T) 
 	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
 }
 
+func TestIssueOperationsCreateWritesEveryScalarField(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateWritesEveryScalarField(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, fixture)
+}
+
+func TestIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, fixture)
+}
+
 func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsStagingFixture, context.Context, func()) {
 	t.Helper()
 	store, storeCleanup := setupTestStore(t)
@@ -119,6 +197,7 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		storeCleanup()
 		t.Fatalf("NewIssueOperations: %v", err)
 	}
+	kit := newDoltRoleFixtureKit(store, "test")
 	fixture := conformance.IssueOperationsStagingFixture{
 		IssuePrefix: "test",
 		Operations:  operations,
@@ -128,6 +207,7 @@ func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsSta
 		QueryScalar: func(ctx context.Context, query string, args []any, dest ...any) error {
 			return store.db.QueryRowContext(ctx, query, args...).Scan(dest...)
 		},
+		CountHistoryMatching: kit.CountHistoryMatching,
 	}
 	return fixture, ctx, func() {
 		cancel()

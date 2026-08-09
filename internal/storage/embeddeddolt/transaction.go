@@ -14,9 +14,12 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// RunInTransaction executes a function within a database transaction.
-// After the SQL transaction commits, dirty tables are selectively staged
-// and a Dolt version commit is created with the given message.
+// RunInTransaction executes a function within a database transaction. Its
+// callback is invoked at most once per call; callers retry explicitly after a
+// callback has started when their operation is safe to repeat. An error
+// wrapping storage.ErrCommitIndeterminate must not be blindly replayed.
+// After the SQL transaction commits, dirty tables are selectively staged and a
+// Dolt version commit is created with the given message.
 func (s *EmbeddedDoltStore) RunInTransaction(ctx context.Context, commitMsg string, fn func(tx storage.Transaction) error) error {
 	return s.runTransaction(ctx, commitMsg, func(tx *embeddedTransaction) error { return fn(tx) })
 }
@@ -50,11 +53,17 @@ func (s *EmbeddedDoltStore) runTransactionWithMessage(ctx context.Context, fn fu
 
 	// Create a Dolt version commit from the working set changes.
 	if commitMsg != "" && len(tracker.DirtyTables()) > 0 {
-		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
+		if err := s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.StageAndCommit(ctx, db, tracker.DirtyTables(), commitMsg, commitAuthor)
-		})
+		}); err != nil {
+			return wrapCommitIndeterminate("embeddeddolt: stage and commit after SQL commit", err)
+		}
 	}
 	return nil
+}
+
+func wrapCommitIndeterminate(op string, err error) error {
+	return fmt.Errorf("%s: %w: %w", op, err, storage.ErrCommitIndeterminate)
 }
 
 type embeddedTransaction struct {

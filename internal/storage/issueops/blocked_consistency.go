@@ -266,6 +266,10 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return 0, nil
 	}
+	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
+	if err != nil {
+		return 0, err
+	}
 	var total int64
 	for {
 		var changed int64
@@ -281,6 +285,9 @@ func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs 
 		changed += n
 		total += changed
 		if changed == 0 {
+			if err := recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs); err != nil {
+				return total, err
+			}
 			return total, nil
 		}
 	}

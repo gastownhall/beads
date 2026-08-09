@@ -107,12 +107,53 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 // EffectiveSearchLimit's branch selection there is unaffected by a one-row bump
 // to Limit, and MaxRows is left untouched, so a genuine tighter-cap violation
 // still fires with the correct (unbumped) Cap value in the error message.
+// The pair of steps this performs — bump the cap in lockstep at Limit==MaxRows,
+// then bump Limit — is also written as one function for the seam that renders
+// its probe row inside the query rather than onto a filter; see
+// internal/storage/issueops.SearchProbeLimit. Change one and change the other,
+// or the two implementations of issueops.Reader.List stop agreeing about when a
+// cap fires.
 func WithFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
 	if filter.Limit > 0 {
 		if filter.MaxRows > 0 && filter.Limit == filter.MaxRows {
 			filter.MaxRows++
 		}
 		filter.Limit++
+	}
+	return filter
+}
+
+// WithRowsBeforeThePage moves an OFFSET off the query and onto the epilogue: it
+// widens the filter's row bound to cover the rows the epilogue will skip, and
+// clears the Offset the builder carried so the query does not skip them too.
+// An unbounded filter needs no widening — it already carries every matching row.
+//
+// It is the filter half of FinishPageAt, and the reason both halves exist is
+// there: the skip belongs after the display order, and the rows it drops are
+// rows the MaxRows cap has to have counted. Apply it BEFORE WithFetchOneExtra,
+// which sizes the probe row against the bound this leaves.
+//
+// The builders still write Offset onto the filter, for the callers that consume
+// it as a VALUE and run their own query — `bd list --watch`, the proxied
+// hierarchical --parent walk, proxied `bd ready` — where there is no shared
+// epilogue to move it to. Those callers get the same cap boundary anyway: the
+// seam beneath them widens its own bound by the offset and keeps the skip
+// whenever a cap is set, for the reason stated above (internal/storage/domain/db,
+// searchWindow).
+func WithRowsBeforeThePage(filter types.IssueFilter, offset int) types.IssueFilter {
+	filter.Offset = 0
+	if offset > 0 && filter.Limit > 0 {
+		filter.Limit += offset
+	}
+	return filter
+}
+
+// WithReadyRowsBeforeThePage is WithRowsBeforeThePage for the ready-work filter,
+// which is a different type carrying the same two fields.
+func WithReadyRowsBeforeThePage(filter types.WorkFilter, offset int) types.WorkFilter {
+	filter.Offset = 0
+	if offset > 0 && filter.Limit > 0 {
+		filter.Limit += offset
 	}
 	return filter
 }

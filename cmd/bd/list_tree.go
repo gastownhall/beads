@@ -145,19 +145,20 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 // displayPrettyList displays issues in pretty tree format (GH#654)
 // Uses buildIssueTree which only supports dotted ID hierarchy
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
-	displayPrettyListWithDeps(issues, showHeader, nil)
+	displayPrettyListWithDeps(issues, showHeader, nil, false)
 }
 
 // displayPrettyListWithDeps displays issues in tree format using dependency data.
-func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "")
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated bool) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated)
 }
 
 // displayPrettyListWithDepsMode displays issues in tree format. When depsMode is
 // "scheduling" or "all", the tree also annotates each node's dependency edges and
 // orders siblings by their scheduling dependencies (see orderSiblingsByDeps). An
-// empty depsMode is the plain parent-child tree.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string) {
+// empty depsMode is the plain parent-child tree. truncated means the page was cut
+// by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated bool) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -190,7 +191,7 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 		printPrettyTree(childrenMap, issue.ID, "", dr)
 	}
 
-	// Summary
+	// Summary — counts describe the shown page; never label a truncated page "Total".
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 80))
 	openCount := 0
@@ -203,7 +204,12 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inProgressCount++
 		}
 	}
-	fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
+	if truncated {
+		fmt.Printf("Showing %d issues (%d open, %d in progress); more match (truncated by --limit). Use --limit 0 for all.\n",
+			len(issues), openCount, inProgressCount)
+	} else {
+		fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
+	}
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
 	if dr != nil {

@@ -10,112 +10,49 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// This file encodes audit findings for the "issue-lifecycle" slice: close/reopen
-// idempotency, batch delete (cascade/force/orphan-guard/dry-run), FK child-row
-// cleanup, derived timestamps (closed_at, started_at), metadata JSON round-trip,
-// and the external-ref wisp fallthrough. Every case is validated against the
-// embedded-Dolt reference (the oracle); they pin real reference behavior so a SQL
-// backend that diverges fails loudly.
-
-// auditCountEventType counts how many of the issue's audit events have the given type.
-func auditCountEventType(events []*types.Event, want types.EventType) int {
-	n := 0
-	for _, e := range events {
-		if e.EventType == want {
-			n++
-		}
-	}
-	return n
-}
+// This file encodes audit findings for the "issue-lifecycle" slice: batch delete
+// (cascade/force/orphan-guard/dry-run), FK child-row cleanup, derived timestamps
+// (closed_at, started_at), metadata JSON round-trip, and the external-ref wisp
+// fallthrough. Every case is validated against the embedded-Dolt reference (the
+// oracle); they pin real reference behavior so a SQL backend that diverges fails
+// loudly.
+//
+// THE CLOSE/REOPEN CASES ARE GONE, and deliberately. Close, reopen and the
+// is_blocked recompute they trigger reach ONE body from either seam
+// (issueops.closeIssueInTx / ReopenIssueInTx; the store verbs and the Lifecycle
+// role both land there), and lifecycle_close_reopen_contract.go pins each of the
+// four promises they held with a strictly stronger observation:
+//
+//	first-close attribution wins   RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose
+//	                               (raw closed_at/close_reason/session + a raw
+//	                               event delta, where this file read GetIssue)
+//	reopen is a strict no-op       RunLifecycleReopenLeavesNonDoneStatusesUnchanged
+//	                               (three non-done statuses, whole-row compare)
+//	reopen mints exactly one event RunLifecycleReopenRecordsItsReason
+//	a missing id is ErrNotFound    RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps
+//	                               (guarded and unguarded, and NOT ErrVersionMismatch)
+//	the recompute leaves           RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers
+//	updated_at alone               (raw is_blocked flip + raw updated_at, with a
+//	                               falsifiability pre-check, a cross-plane wisp
+//	                               depender, an inherited child and a control)
+//
+// and each runs on the unit-of-work leg as well, which this suite's Factory type
+// cannot reach. Same for UpdateIssueTypeRejectsInvalid against
+// RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary, which adds
+// the CONFIGURED-vocabulary positive half a guard hardcoding the built-ins would
+// pass here. The store verbs keep their seats in this suite through
+// testCloseAndReopen, testUpdateIssueType and the ready/blocked cases.
 
 // RunAudit_issue_lifecycle runs the issue-lifecycle audit cases.
 func RunAudit_issue_lifecycle(t *testing.T, f Factory) {
 	t.Helper()
-	t.Run("CloseIdempotentKeepsFirstReason", func(t *testing.T) { testAuditCloseIdempotentKeepsFirstReason(t, f) })
-	t.Run("ReopenEventSemantics", func(t *testing.T) { testAuditReopenEventSemantics(t, f) })
-	t.Run("ReopenNotFoundIsSentinel", func(t *testing.T) { testAuditReopenNotFoundIsSentinel(t, f) })
 	t.Run("DeleteIssuesBatchModes", func(t *testing.T) { testAuditDeleteIssuesBatchModes(t, f) })
 	t.Run("DeleteIssuesDryRunCounts", func(t *testing.T) { testAuditDeleteIssuesDryRunCounts(t, f) })
 	t.Run("DeleteIssueCascadesChildRows", func(t *testing.T) { testAuditDeleteIssueCascadesChildRows(t, f) })
-	t.Run("CloseDependentUpdatedAtPreserved", func(t *testing.T) { testAuditCloseDependentUpdatedAtPreserved(t, f) })
 	t.Run("CreateClosedDerivesClosedAt", func(t *testing.T) { testAuditCreateClosedDerivesClosedAt(t, f) })
 	t.Run("MetadataJSONRoundTrip", func(t *testing.T) { testAuditMetadataJSONRoundTrip(t, f) })
 	t.Run("StartedAtStampedOnceOnInProgress", func(t *testing.T) { testAuditStartedAtStampedOnceOnInProgress(t, f) })
 	t.Run("ExternalRefResolvesWispTier", func(t *testing.T) { testAuditExternalRefResolvesWispTier(t, f) })
-	t.Run("UpdateIssueTypeRejectsInvalid", func(t *testing.T) { testAuditUpdateIssueTypeRejectsInvalid(t, f) })
-}
-
-// A second close of an already-closed issue is a no-op: it returns nil, does not
-// overwrite the original close_reason/closed_at, and mints no second EventClosed.
-func testAuditCloseIdempotentKeepsFirstReason(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-1", Title: "T", Status: types.StatusOpen}), "a"))
-	must(t, s.CloseIssue(ctx(), "cl-1", "first", "a", "s1"))
-
-	afterFirst, err := s.GetIssue(ctx(), "cl-1")
-	must(t, err)
-	if afterFirst.ClosedAt == nil {
-		t.Fatal("ClosedAt nil after first close")
-	}
-	firstClosedAt := *afterFirst.ClosedAt
-
-	// Second close with a different reason/session must be silently dropped.
-	if err := s.CloseIssue(ctx(), "cl-1", "second", "b", "s2"); err != nil {
-		t.Fatalf("second CloseIssue: %v", err)
-	}
-
-	got, err := s.GetIssue(ctx(), "cl-1")
-	must(t, err)
-	if got.CloseReason != "first" {
-		t.Errorf("CloseReason = %q, want %q (first close wins)", got.CloseReason, "first")
-	}
-	if got.ClosedAt == nil || !got.ClosedAt.Equal(firstClosedAt) {
-		t.Errorf("ClosedAt = %v, want %v (unchanged by second close)", got.ClosedAt, firstClosedAt)
-	}
-
-	events, err := s.GetEvents(ctx(), "cl-1", 0)
-	must(t, err)
-	if n := auditCountEventType(events, types.EventClosed); n != 1 {
-		t.Errorf("EventClosed count = %d, want 1", n)
-	}
-}
-
-// Reopening an already-open issue is a strict no-op. Reopening the same issue
-// after a genuine close mints exactly one reopened event.
-func testAuditReopenEventSemantics(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ro-1", Title: "T", Status: types.StatusOpen}), "a"))
-
-	before, err := s.GetEvents(ctx(), "ro-1", 0)
-	must(t, err)
-
-	must(t, s.ReopenIssue(ctx(), "ro-1", "", "a"))
-
-	after, err := s.GetEvents(ctx(), "ro-1", 0)
-	must(t, err)
-	if len(after) != len(before) {
-		t.Errorf("events after reopen-on-open = %d, want %d (strict no-op)", len(after), len(before))
-	}
-
-	must(t, s.CloseIssue(ctx(), "ro-1", "done", "a", "session"))
-	must(t, s.ReopenIssue(ctx(), "ro-1", "", "a"))
-	afterClosedReopen, err := s.GetEvents(ctx(), "ro-1", 0)
-	must(t, err)
-	if n := auditCountEventType(afterClosedReopen, types.EventReopened); n != 1 {
-		t.Errorf("EventReopened count after closed reopen = %d, want 1", n)
-	}
-}
-
-// Reopening a non-existent id returns a wrapped storage.ErrNotFound on the reference.
-func testAuditReopenNotFoundIsSentinel(t *testing.T, f Factory) {
-	s := f(t)
-	err := s.ReopenIssue(ctx(), "nonexistent", "", "a")
-	if err == nil {
-		t.Fatal("expected error reopening a missing issue")
-	}
-	if !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("err = %v, want errors.Is(storage.ErrNotFound)", err)
-	}
 }
 
 // Batch DeleteIssues: non-cascade/non-force with an external dependent is a guarded
@@ -229,29 +166,6 @@ func testAuditDeleteIssueCascadesChildRows(t *testing.T, f Factory) {
 	}
 }
 
-// Closing a blocker reprojects is_blocked on its dependent WITHOUT bumping the
-// dependent's updated_at (the recompute uses `updated_at = updated_at`).
-func testAuditCloseDependentUpdatedAtPreserved(t *testing.T, f Factory) {
-	s := f(t)
-	frozen := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cd-blk", Title: "Blocker", Status: types.StatusOpen}), "a"))
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cd-dep", Title: "Dep", Status: types.StatusOpen, CreatedAt: frozen, UpdatedAt: frozen}), "a"))
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "cd-dep", DependsOnID: "cd-blk", Type: types.DepBlocks}, "a"))
-	must(t, s.CloseIssue(ctx(), "cd-blk", "done", "a", "s"))
-
-	got, err := s.GetIssue(ctx(), "cd-dep")
-	must(t, err)
-	if !got.UpdatedAt.Equal(frozen) {
-		t.Errorf("dependent UpdatedAt = %v, want %v (is_blocked reprojection must not bump it)", got.UpdatedAt, frozen)
-	}
-
-	ready, err := s.GetReadyWork(ctx(), types.WorkFilter{})
-	must(t, err)
-	if !contains(issueIDs(ready), "cd-dep") {
-		t.Errorf("ready = %v, want it to include cd-dep after blocker closed", issueIDs(ready))
-	}
-}
-
 // Creating an issue Status=closed with no ClosedAt derives closed_at = max(created,updated)+1s.
 func testAuditCreateClosedDerivesClosedAt(t *testing.T, f Factory) {
 	s := f(t)
@@ -355,19 +269,5 @@ func testAuditExternalRefResolvesWispTier(t *testing.T, f Factory) {
 	_, err = s.GetIssueByExternalRef(ctx(), "gh-absent")
 	if !errors.Is(err, storage.ErrNotFound) {
 		t.Errorf("missing ref: %v, want ErrNotFound", err)
-	}
-}
-
-// UpdateIssueType rejects an unknown type and leaves the row unchanged.
-func testAuditUpdateIssueTypeRejectsInvalid(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "it-1", Title: "T", IssueType: "task"}), "a"))
-	if err := s.UpdateIssueType(ctx(), "it-1", "not-a-type", "a"); err == nil {
-		t.Error("expected error for invalid issue type")
-	}
-	got, err := s.GetIssue(ctx(), "it-1")
-	must(t, err)
-	if got.IssueType != "task" {
-		t.Errorf("IssueType = %q, want task (unchanged)", got.IssueType)
 	}
 }

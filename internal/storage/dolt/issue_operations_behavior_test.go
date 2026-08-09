@@ -12,10 +12,28 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
-// TestIssueOperationsGuardedVerbs exercises the public operation adapter against
-// a real direct store. Each subtest states a guard which the adapter, rather
-// than a caller, must enforce.
-func TestIssueOperationsGuardedVerbs(t *testing.T) {
+// TestIssueOperationsCreateAggregatesEveryRelationItWasGiven is the residue of
+// TestIssueOperationsGuardedVerbs.
+//
+// Its other five subtests went to the contract, which states the same promises
+// at three backends and is stronger on each: the occupied-ID refusal is
+// RunIssueOperationsCreateRefusesAnOccupiedID (both planes, both directions,
+// raw title/type/labels), the foreign prefix is
+// RunIssueOperationsCreateRefusesAForeignIDPrefix, the inherited label is
+// RunIssueOperationsCreateInheritsParentLabels, the CAS and guard legs are
+// RunIssueOperationsUpdateAssigneeTransferFence and
+// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits, the metadata
+// patch is RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset, and the
+// close/reopen legs are the whole Lifecycle contract.
+//
+// What no contract case does is COUNT the edges one aggregate create produces.
+// Three request fields each contribute one -- ParentID, WaitsFor, and the
+// Dependencies list -- and an implementation that dropped any of them still
+// satisfies every case that reads only the field it cares about. The reverse
+// edge's thread id is deliberately not re-asserted here:
+// issue_operations_staging_test.go:111-133 already pins it at this backend,
+// with its metadata.
+func TestIssueOperationsCreateAggregatesEveryRelationItWasGiven(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -25,329 +43,120 @@ func TestIssueOperationsGuardedVerbs(t *testing.T) {
 		t.Fatalf("NewIssueOperations: %v", err)
 	}
 
-	create := func(t *testing.T, id string) *types.Issue {
-		t.Helper()
-		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
+	for _, id := range []string{"ops-parent", "ops-spawner", "ops-target"} {
+		if err := store.CreateIssue(ctx, &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, "seed"); err != nil {
 			t.Fatalf("seed %s: %v", id, err)
 		}
-		return issue
 	}
 
-	t.Run("create rejects occupied ID without overwriting", func(t *testing.T) {
-		create(t, "ops-duplicate")
-		_, err := operations.Create(ctx, publicops.CreateRequest{Actor: "writer", ForceIDPrefix: true, Issue: &types.Issue{ID: "ops-duplicate", Title: "replacement", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}})
-		if !errors.Is(err, publicops.ErrAlreadyExists) {
-			t.Fatalf("Create error = %v, want ErrAlreadyExists", err)
-		}
-		got, getErr := store.GetIssue(ctx, "ops-duplicate")
-		if getErr != nil || got.Title != "ops-duplicate" {
-			t.Fatalf("stored duplicate = %#v, %v; want original title", got, getErr)
-		}
+	result, err := operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{ID: "foreign-aggregate", Title: "aggregate", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		ParentID:      "ops-parent",
+		WaitsFor:      &publicops.WaitsFor{SpawnerID: "ops-spawner"},
+		Dependencies:  []publicops.CreateDependency{{TargetID: "ops-target", Type: types.DepRelated}},
 	})
-
-	t.Run("create applies aggregate request and validates prefix", func(t *testing.T) {
-		parent := create(t, "ops-parent")
-		spawner := create(t, "ops-spawner")
-		if err := store.AddLabel(ctx, parent.ID, "parent-label", "seed"); err != nil {
-			t.Fatal(err)
+	if err != nil {
+		t.Fatalf("aggregate Create: %v", err)
+	}
+	if len(result.Issue.Dependencies) != 3 {
+		t.Fatalf("Create dependencies = %#v, want three: the parent edge, the waits-for edge, and the requested one", result.Issue.Dependencies)
+	}
+	byType := map[types.DependencyType]string{}
+	for _, dependency := range result.Issue.Dependencies {
+		byType[dependency.Type] = dependency.DependsOnID
+	}
+	for _, want := range []struct {
+		kind   types.DependencyType
+		target string
+	}{
+		{types.DepParentChild, "ops-parent"},
+		{types.DepWaitsFor, "ops-spawner"},
+		{types.DepRelated, "ops-target"},
+	} {
+		if byType[want.kind] != want.target {
+			t.Errorf("%s edge points at %q, want %q", want.kind, byType[want.kind], want.target)
 		}
-		target := create(t, "ops-target")
-		_, err := operations.Create(ctx, publicops.CreateRequest{Actor: "writer", Issue: &types.Issue{ID: "foreign-aggregate", Title: "aggregate", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, ParentID: parent.ID, InheritLabelsFromParent: true, Dependencies: []publicops.CreateDependency{{TargetID: target.ID, Type: types.DepRelated, ThreadID: "thread"}, {TargetID: target.ID, Type: types.DepRelatesTo, Reverse: true, ThreadID: "reverse-thread"}}, WaitsFor: &publicops.WaitsFor{SpawnerID: spawner.ID}})
-		if !errors.Is(err, publicops.ErrPrefixMismatch) {
-			t.Fatalf("unforced foreign prefix error = %v, want ErrPrefixMismatch", err)
-		}
-		result, err := operations.Create(ctx, publicops.CreateRequest{Actor: "writer", Issue: &types.Issue{ID: "foreign-aggregate", Title: "aggregate", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}, ForceIDPrefix: true, ParentID: parent.ID, InheritLabelsFromParent: true, Dependencies: []publicops.CreateDependency{{TargetID: target.ID, Type: types.DepRelated, ThreadID: "thread"}, {TargetID: target.ID, Type: types.DepRelatesTo, Reverse: true, ThreadID: "reverse-thread"}}, WaitsFor: &publicops.WaitsFor{SpawnerID: spawner.ID}})
-		if err != nil {
-			t.Fatalf("forced Create: %v", err)
-		}
-		if len(result.Issue.Labels) != 1 || result.Issue.Labels[0] != "parent-label" {
-			t.Fatalf("Create result aggregate = %#v", result.Issue)
-		}
-		if len(result.Issue.Dependencies) != 3 {
-			t.Fatalf("Create dependencies = %#v, want parent, waits-for, and direct edges", result.Issue.Dependencies)
-		}
-		inbound, err := store.GetDependentRecords(ctx, result.Issue.ID, "", 10, "")
-		if err != nil || len(inbound) != 1 || inbound[0].IssueID != target.ID || inbound[0].ThreadID != "reverse-thread" {
-			t.Fatalf("reverse dependency = %#v, %v", inbound, err)
-		}
-	})
-
-	t.Run("update enforces CAS claim and patch aggregate", func(t *testing.T) {
-		issue := create(t, "ops-update")
-		stale := issue.RowVersion + 1
-		_, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedVersion: &stale, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "must not persist"}}})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("stale Update error = %v, want ErrVersionMismatch", err)
-		}
-		claimed, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Claim: true})
-		if err != nil || !claimed.Changed || claimed.Issue.Assignee != "writer" || claimed.Issue.Status != publicops.StatusInProgress {
-			t.Fatalf("claim result = %#v, %v", claimed, err)
-		}
-		updated, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{AppendNotes: publicops.Field[string]{Set: true, Value: "note"}, ExternalRef: publicops.Field[*string]{Set: true, Value: stringPtr("external")}, Labels: publicops.LabelPatch{Add: []string{"label"}}, Metadata: publicops.MetadataPatch{Set: map[string]json.RawMessage{"key": json.RawMessage(`"value"`)}}, Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModeEphemeral}}})
-		if err != nil || !updated.Changed || updated.Issue.ExternalRef == nil || *updated.Issue.ExternalRef != "external" || len(updated.Issue.Labels) != 1 {
-			t.Fatalf("aggregate update = %#v, %v", updated, err)
-		}
-	})
-
-	t.Run("update enforces field guards and reports no-op", func(t *testing.T) {
-		issue := create(t, "ops-field-guards")
-		expectedAssignee := "other"
-		_, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedAssignee: &expectedAssignee, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "no"}}})
-		if !errors.Is(err, publicops.ErrAssigneeMismatch) {
-			t.Fatalf("assignee guard error = %v, want ErrAssigneeMismatch", err)
-		}
-		noOp, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: issue.Title}}})
-		if err != nil || noOp.Changed {
-			t.Fatalf("same-value update = %#v, %v; want unchanged", noOp, err)
-		}
-	})
-
-	t.Run("update applies metadata patch", func(t *testing.T) {
-		issue := create(t, "ops-metadata")
-		updated, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{Set: map[string]json.RawMessage{"answer": json.RawMessage(`42`)}}}})
-		if err != nil || !updated.Changed || string(updated.Issue.Metadata) != `{"answer":42}` {
-			t.Fatalf("metadata update = %#v, %v", updated, err)
-		}
-	})
-
-	t.Run("close and reopen enforce lifecycle guards", func(t *testing.T) {
-		parent := create(t, "ops-close-parent")
-		child := create(t, "ops-close-child")
-		if err := store.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		stale := parent.RowVersion + 1
-		_, err := operations.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID, ExpectedVersion: &stale})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("stale Close error = %v, want ErrVersionMismatch", err)
-		}
-		_, err = operations.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID})
-		if !errors.Is(err, publicops.ErrCloseOpenChildren) {
-			t.Fatalf("unforced close error = %v, want ErrCloseOpenChildren", err)
-		}
-		closed, err := operations.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID, Force: true})
-		if err != nil || !closed.Changed || closed.OpenChildren != 1 {
-			t.Fatalf("forced close = %#v, %v", closed, err)
-		}
-		stale = closed.Issue.RowVersion + 1
-		_, err = operations.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: parent.ID, ExpectedVersion: &stale})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("stale Reopen error = %v, want ErrVersionMismatch", err)
-		}
-	})
+	}
 }
 
-func TestIssueOperationsUpdateMetadataPatchOrderingAndReplacementGuard(t *testing.T) {
+// TestIssueOperationsUpdateRefusesIncoherentClaimRequests is what is left of
+// TestIssueOperationsUpdateClaimCASAndTransferMatrix.
+//
+// Its CAS legs, its claim-eligibility legs and its transfer legs all state
+// promises RunIssueOperationsUpdateAssigneeTransferFence,
+// RunIssueOperationsUpdateClaimConflictCarriesTheLosingState and
+// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits make at three
+// backends, each of them reading the stored row rather than only the result.
+//
+// The table below does not: it is the only pin in the tree on
+// ValidateUpdateRequest's refusal of REQUEST SHAPES that cannot mean anything
+// -- a claim that also names an expected assignee, a claim that also forces a
+// transfer, a force with nothing to transfer. Those are deterministic
+// validation failures with no backend in them at all, which is why the natural
+// home is issueops's own millisecond-level update_validation_test.go rather
+// than a contract case; moving it there is a follow-up outside this file's
+// partition, so it stays here until then.
+//
+// The wisp claim stays with it. SPEC-GAP bd-yby99.31 records that no leaf
+// clause says which plane a lifecycle id resolves against, so a contract case
+// for it would be inventing the promise.
+func TestIssueOperationsUpdateRefusesIncoherentClaimRequests(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
 	defer cancel()
 	operations, err := NewIssueOperations(store)
 	if err != nil {
-		t.Fatalf("NewIssueOperations: %v", err)
-	}
-	issue := &types.Issue{ID: "ops-metadata-order", Title: "metadata", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Metadata: json.RawMessage(`{"keep":"old","remove":"old"}`)}
-	if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
 		t.Fatal(err)
 	}
-
-	updated, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{
-		Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"keep":"merged","merge":true}`)},
-		Set:   map[string]json.RawMessage{"after": json.RawMessage(`"set"`), "keep": json.RawMessage(`"set"`)},
-		Unset: []string{"keep", "remove"},
-	}}})
-	if err != nil || !updated.Changed || !sameMetadataJSON(updated.Issue.Metadata, json.RawMessage(`{"after":"set","merge":true}`)) {
-		t.Fatalf("ordered metadata update = %#v, %v", updated, err)
-	}
-	replaced, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)}}}})
-	if err != nil || !replaced.Changed || !sameMetadataJSON(replaced.Issue.Metadata, json.RawMessage(`{"replacement":true}`)) {
-		t.Fatalf("metadata replacement = %#v, %v", replaced, err)
-	}
-
-	_, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Metadata: publicops.MetadataPatch{
-		Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
-		Set:     map[string]json.RawMessage{"must_not_persist": json.RawMessage(`true`)},
-	}}})
-	if !errors.Is(err, publicops.ErrValidation) {
-		t.Fatalf("combined replacement error = %v, want ErrValidation", err)
-	}
-	stored, err := store.GetIssue(ctx, issue.ID)
-	if err != nil || !sameMetadataJSON(stored.Metadata, json.RawMessage(`{"replacement":true}`)) {
-		t.Fatalf("replacement guard persisted metadata = %#v, %v", stored, err)
-	}
-}
-
-func TestIssueOperationsUpdateLabelPatchOrderingAndNoop(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-	ctx, cancel := testContext(t)
-	defer cancel()
-	operations, err := NewIssueOperations(store)
-	if err != nil {
-		t.Fatalf("NewIssueOperations: %v", err)
-	}
-	issue := &types.Issue{ID: "ops-label-order", Title: "labels", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"old", "shared"}}
-	if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
-		t.Fatal(err)
-	}
-	patch := publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"replace", "shared"}}, Add: []string{"add", "shared"}, Remove: []string{"old", "shared"}}
-	updated, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Labels: patch}})
-	if err != nil || !updated.Changed || strings.Join(updated.Issue.Labels, ",") != "add,replace" {
-		t.Fatalf("ordered labels update = %#v, %v", updated, err)
-	}
-	noOp, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, Patch: publicops.IssuePatch{Labels: publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"replace", "add"}}, Add: []string{"add"}, Remove: []string{"missing"}}}})
-	if err != nil || noOp.Changed || strings.Join(noOp.Issue.Labels, ",") != "add,replace" {
-		t.Fatalf("same labels update = %#v, %v", noOp, err)
-	}
-}
-
-func TestIssueOperationsUpdateParentReplacementClearAndNoop(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-	ctx, cancel := testContext(t)
-	defer cancel()
-	operations, err := NewIssueOperations(store)
-	if err != nil {
-		t.Fatalf("NewIssueOperations: %v", err)
-	}
-	create := func(id string) *types.Issue {
-		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	create := func(id string, wisp bool) *types.Issue {
+		issue := &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: wisp}
 		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
 			t.Fatal(err)
 		}
 		return issue
 	}
-	parentA, parentB, parentC := create("ops-parent-a"), create("ops-parent-b"), create("ops-parent-c")
-	child := create("ops-parent-child")
-	for _, parent := range []*types.Issue{parentA, parentB} {
-		if err := store.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}, "seed"); err != nil {
-			t.Fatal(err)
-		}
+
+	wisp := create("ops-wisp", true)
+	wispResult, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: wisp.ID, Claim: true})
+	if err != nil || !wispResult.Changed {
+		t.Fatalf("wisp claim = %#v, %v", wispResult, err)
 	}
 
-	replaced, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: child.ID, Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true, Value: parentC.ID}}})
-	if err != nil || !replaced.Changed || issueParentIDs(replaced.Issue) != parentC.ID {
-		t.Fatalf("parent replacement = %#v, %v", replaced, err)
-	}
-	noOp, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: child.ID, Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true, Value: parentC.ID}}})
-	if err != nil || noOp.Changed || issueParentIDs(noOp.Issue) != parentC.ID {
-		t.Fatalf("same parent replacement = %#v, %v", noOp, err)
-	}
-	cleared, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: child.ID, Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true}}})
-	if err != nil || !cleared.Changed || issueParentIDs(cleared.Issue) != "" {
-		t.Fatalf("parent clear = %#v, %v", cleared, err)
-	}
-	noOp, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: child.ID, Patch: publicops.IssuePatch{ParentID: publicops.Field[string]{Set: true}}})
-	if err != nil || noOp.Changed || issueParentIDs(noOp.Issue) != "" {
-		t.Fatalf("same parent clear = %#v, %v", noOp, err)
-	}
-}
-
-func TestIssueOperationsUpdateClaimCASAndTransferMatrix(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-	ctx, cancel := testContext(t)
-	defer cancel()
-	operations, err := NewIssueOperations(store)
-	if err != nil {
-		t.Fatal(err)
-	}
-	create := func(id, assignee string, status types.Status, wisp bool) *types.Issue {
-		issue := &types.Issue{ID: id, Title: id, Assignee: assignee, Status: status, Priority: 2, IssueType: types.TypeTask, Ephemeral: wisp}
-		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		return issue
-	}
-	t.Run("CAS and claim eligibility", func(t *testing.T) {
-		issue := create("ops-cas", "owner", types.StatusOpen, false)
-		stale := issue.RowVersion + 1
-		_, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedVersion: &stale, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "no"}}})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("version error = %v", err)
-		}
-		expected, status := "other", publicops.StatusOpen
-		_, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedAssignee: &expected, ExpectedStatus: &status, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "no"}}})
-		if !errors.Is(err, publicops.ErrAssigneeMismatch) {
-			t.Fatalf("assignee error = %v", err)
-		}
-		status = publicops.StatusInProgress
-		expected = "owner"
-		_, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedAssignee: &expected, ExpectedStatus: &status, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "no"}}})
-		if !errors.Is(err, publicops.ErrStatusMismatch) {
-			t.Fatalf("status error = %v", err)
-		}
-		status = publicops.StatusOpen
-		matched, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: issue.ID, ExpectedAssignee: &expected, ExpectedStatus: &status, Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "matched"}}})
-		if err != nil || !matched.Changed || matched.Issue.Title != "matched" {
-			t.Fatalf("matching CAS = %#v, %v", matched, err)
-		}
-		claimable := create("ops-claim", "", types.StatusOpen, false)
-		claimed, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: claimable.ID, Claim: true})
-		if err != nil || !claimed.Changed {
-			t.Fatalf("claim = %#v, %v", claimed, err)
-		}
-		noOp, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: claimable.ID, Claim: true})
-		if err != nil || noOp.Changed {
-			t.Fatalf("same claim = %#v, %v", noOp, err)
-		}
-		foreign := create("ops-foreign", "owner", types.StatusOpen, false)
-		_, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: foreign.ID, Claim: true})
-		if !errors.Is(err, publicops.ErrAlreadyClaimed) {
-			t.Fatalf("foreign claim = %v", err)
-		}
-		if err := store.SetConfig(ctx, "claim.pools", "crew"); err != nil {
-			t.Fatal(err)
-		}
-		pool := create("ops-pool", "crew", types.StatusOpen, false)
-		pooled, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: pool.ID, Claim: true})
-		if err != nil || !pooled.Changed || pooled.Issue.Assignee != "worker" {
-			t.Fatalf("pool claim = %#v, %v", pooled, err)
-		}
-		poolTransfer := create("ops-pool-transfer", "crew", types.StatusInProgress, false)
-		transferred, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: poolTransfer.ID, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}})
-		if err != nil || !transferred.Changed || transferred.Issue.Assignee != "next" {
-			t.Fatalf("pool transfer = %#v, %v", transferred, err)
-		}
-	})
-	t.Run("transfer override validation and wisp", func(t *testing.T) {
-		foreign := create("ops-transfer", "owner", types.StatusInProgress, false)
-		_, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: foreign.ID, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}})
-		if !errors.Is(err, publicops.ErrAlreadyClaimed) {
-			t.Fatalf("unforced transfer = %v", err)
-		}
-		forced, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: foreign.ID, ForceAssigneeTransfer: true, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}})
-		if err != nil || !forced.Changed {
-			t.Fatalf("forced transfer = %#v, %v", forced, err)
-		}
-		expected := "owner"
-		authorized := create("ops-authorized", "owner", types.StatusInProgress, false)
-		result, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: authorized.ID, ExpectedAssignee: &expected, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}})
-		if err != nil || !result.Changed {
-			t.Fatalf("authorized transfer = %#v, %v", result, err)
-		}
-		override := create("ops-override", "", types.StatusOpen, false)
-		result, err = operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: override.ID, Claim: true, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "reviewer"}, Status: publicops.Field[publicops.Status]{Set: true, Value: publicops.StatusOpen}}})
-		if err != nil || !result.Changed || result.Issue.Assignee != "reviewer" || result.Issue.Status != publicops.StatusOpen {
-			t.Fatalf("override = %#v, %v", result, err)
-		}
-		wisp := create("ops-wisp", "", types.StatusOpen, true)
-		wispResult, err := operations.Update(ctx, publicops.UpdateRequest{Actor: "worker", IssueID: wisp.ID, Claim: true})
-		if err != nil || !wispResult.Changed {
-			t.Fatalf("wisp claim = %#v, %v", wispResult, err)
-		}
-		expected = ""
-		for _, request := range []publicops.UpdateRequest{{Actor: "worker", IssueID: override.ID, Claim: true, ExpectedAssignee: &expected}, {Actor: "worker", IssueID: override.ID, Claim: true, ForceAssigneeTransfer: true}, {Actor: "worker", IssueID: override.ID, ForceAssigneeTransfer: true}, {Actor: "worker", IssueID: override.ID, ForceAssigneeTransfer: true, ExpectedAssignee: &expected, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}}} {
-			_, err := operations.Update(ctx, request)
-			if !errors.Is(err, publicops.ErrValidation) {
-				t.Fatalf("invalid request = %v", err)
+	subject := create("ops-override", false)
+	unassigned := ""
+	for name, request := range map[string]publicops.UpdateRequest{
+		"claim with an expected assignee":  {Actor: "worker", IssueID: subject.ID, Claim: true, ExpectedAssignee: &unassigned},
+		"claim with a forced transfer":     {Actor: "worker", IssueID: subject.ID, Claim: true, ForceAssigneeTransfer: true},
+		"forced transfer with no assignee": {Actor: "worker", IssueID: subject.ID, ForceAssigneeTransfer: true},
+		"forced transfer under a guard":    {Actor: "worker", IssueID: subject.ID, ForceAssigneeTransfer: true, ExpectedAssignee: &unassigned, Patch: publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: "next"}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := operations.Update(ctx, request); !errors.Is(err, publicops.ErrValidation) {
+				t.Fatalf("%s: err = %v, want ErrValidation", name, err)
 			}
-		}
-	})
+		})
+	}
 }
 
-func TestIssueOperationsLifecycleContractMatrix(t *testing.T) {
+// TestIssueOperationsCloseAndReopenAWisp is what is left of
+// TestIssueOperationsLifecycleContractMatrix.
+//
+// Its durable legs -- the first close's attribution, the idempotent re-close,
+// the open-child refusal and its forced count, the ExpectedVersion ordering,
+// and the reopen no-op -- are RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose,
+// RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing,
+// RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps and
+// RunLifecycleReopenLeavesNonDoneStatusesUnchanged, all at three backends and
+// all reading the stored row.
+//
+// The ephemeral leg is not, and cannot be until the leaf says so: SPEC-GAP
+// bd-yby99.31 records that neither Close nor Reopen states which PLANE an id
+// resolves against, and the contract declines to assert a promise the doc does
+// not make. Both `bd close` and `bd reopen` depend on it, so it is pinned here.
+func TestIssueOperationsCloseAndReopenAWisp(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
@@ -356,110 +165,31 @@ func TestIssueOperationsLifecycleContractMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	makeIssue := func(id string, status types.Status, wisp bool) *types.Issue {
-		issue := &types.Issue{ID: id, Title: id, Status: status, Priority: 2, IssueType: types.TypeTask, Ephemeral: wisp}
-		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		return issue
+	wisp := &types.Issue{ID: "ops-life-wisp", Title: "ops-life-wisp", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true}
+	if err := store.CreateIssue(ctx, wisp, "seed"); err != nil {
+		t.Fatal(err)
 	}
-	t.Run("close session and reclose", func(t *testing.T) {
-		issue := makeIssue("ops-life", types.StatusOpen, false)
-		result, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID, Reason: "because", Session: "session-1"})
-		if err != nil || !result.Changed || result.Issue.ClosedBySession != "session-1" || result.Issue.CloseReason != "because" {
-			t.Fatalf("first close session=%q reason=%q changed=%t error=%v", result.Issue.ClosedBySession, result.Issue.CloseReason, result.Changed, err)
-		}
-		reclose, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: issue.ID})
-		if err != nil || reclose.Changed {
-			t.Fatalf("idempotent reclose = %#v, %v; want unchanged", reclose, err)
-		}
-	})
-	t.Run("version force and reopen routes", func(t *testing.T) {
-		parent, child := makeIssue("ops-life-parent", types.StatusOpen, false), makeIssue("ops-life-child", types.StatusOpen, false)
-		if err := store.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		_, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID})
-		if !errors.Is(err, publicops.ErrCloseOpenChildren) {
-			t.Fatalf("children refusal = %v", err)
-		}
-		forced, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID, Force: true})
-		if err != nil || forced.OpenChildren != 1 {
-			t.Fatalf("forced close = %#v, %v", forced, err)
-		}
-		stale := forced.Issue.RowVersion + 1
-		_, err = ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent.ID, ExpectedVersion: &stale})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("close version = %v", err)
-		}
-		opened, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: parent.ID})
-		if err != nil || !opened.Changed || opened.Issue.Status != publicops.StatusOpen {
-			t.Fatalf("reopen = %#v, %v", opened, err)
-		}
-		noOp, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: parent.ID})
-		if err != nil || noOp.Changed {
-			t.Fatalf("open reopen = %#v, %v", noOp, err)
-		}
-		wisp := makeIssue("ops-life-wisp", types.StatusOpen, true)
-		closed, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp.ID})
-		if err != nil || !closed.Changed {
-			t.Fatalf("wisp close = %#v, %v", closed, err)
-		}
-		if _, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: wisp.ID}); err != nil {
-			t.Fatal(err)
-		}
-	})
+
+	closed, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: wisp.ID})
+	if err != nil || !closed.Changed || closed.Issue.Status != publicops.StatusClosed {
+		t.Fatalf("wisp close = %#v, %v", closed, err)
+	}
+	reopened, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: wisp.ID})
+	if err != nil || !reopened.Changed || reopened.Issue.Status != publicops.StatusOpen {
+		t.Fatalf("wisp reopen = %#v, %v", reopened, err)
+	}
+	var status string
+	if err := store.db.QueryRowContext(ctx, "SELECT status FROM wisps WHERE id = ?", wisp.ID).Scan(&status); err != nil {
+		t.Fatalf("read the wisp row: %v", err)
+	}
+	if types.Status(status) != types.StatusOpen {
+		t.Fatalf("stored wisp status = %q, want %q -- the verbs resolved the id somewhere else", status, types.StatusOpen)
+	}
 }
 
-func TestIssueOperationsLifecycleRemainingCausalCases(t *testing.T) {
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
-	ctx, cancel := testContext(t)
-	defer cancel()
-	ops, _ := NewIssueOperations(store)
-	makeIssue := func(id string, status types.Status) *types.Issue {
-		issue := &types.Issue{ID: id, Title: id, Status: status, Priority: 2, IssueType: types.TypeTask}
-		if err := store.CreateIssue(ctx, issue, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		return issue
-	}
-	t.Run("blocker refusal and force leave no partial mutation", func(t *testing.T) {
-		blocker, target := makeIssue("ops-blocker", types.StatusOpen), makeIssue("ops-blocked", types.StatusOpen)
-		if err := store.AddDependency(ctx, &types.Dependency{IssueID: target.ID, DependsOnID: blocker.ID, Type: types.DepBlocks}, "seed"); err != nil {
-			t.Fatal(err)
-		}
-		_, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: target.ID})
-		if !errors.Is(err, publicops.ErrCloseBlocked) {
-			t.Fatalf("blocker=%v", err)
-		}
-		got, _ := store.GetIssue(ctx, target.ID)
-		if got.Status != types.StatusOpen {
-			t.Fatalf("refusal mutated=%#v", got)
-		}
-		forced, err := ops.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: target.ID, Force: true})
-		if err != nil || !forced.Changed {
-			t.Fatalf("force=%#v,%v", forced, err)
-		}
-	})
-	t.Run("reopen version before non-done noop and custom done", func(t *testing.T) {
-		open := makeIssue("ops-open", types.StatusOpen)
-		stale := open.RowVersion + 1
-		_, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: open.ID, ExpectedVersion: &stale})
-		if !errors.Is(err, publicops.ErrVersionMismatch) {
-			t.Fatalf("reopen version=%v", err)
-		}
-		if err := store.SetConfig(ctx, "status.custom", "archived:done"); err != nil {
-			t.Fatal(err)
-		}
-		custom := makeIssue("ops-custom", types.Status("archived"))
-		reopened, err := ops.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: custom.ID})
-		if err != nil || !reopened.Changed || reopened.Issue.Status != types.StatusOpen {
-			t.Fatalf("custom=%#v,%v", reopened, err)
-		}
-	})
-}
-
+// issueParentIDs is also called from issue_operations_staging_test.go, so it
+// outlives the parent-replacement tests this file used to hold. stringPtr went
+// with them: nothing else called it.
 func issueParentIDs(issue *types.Issue) string {
 	parents := make([]string, 0)
 	for _, dependency := range issue.Dependencies {
@@ -474,8 +204,6 @@ func sameMetadataJSON(left, right json.RawMessage) bool {
 	var leftValue, rightValue any
 	return json.Unmarshal(left, &leftValue) == nil && json.Unmarshal(right, &rightValue) == nil && reflect.DeepEqual(leftValue, rightValue)
 }
-
-func stringPtr(value string) *string { return &value }
 
 func TestIssueOperationsUpdateAllScalarAndPointerFieldsReportChanged(t *testing.T) {
 	store, cleanup := setupTestStore(t)

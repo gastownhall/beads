@@ -519,7 +519,7 @@ func TestExtractVariables(t *testing.T) {
 		Steps: []*Step{
 			{ID: "s1", Title: "Deploy {{project}} to {{env}}"},
 			{ID: "s2", Title: "Notify {{owner}}"},
-			{ID: "s3", Gate: &Gate{Type: "gh:{{gate_kind}}", AwaitID: "{{pr_url}}", Timeout: "{{gate_timeout}}"}},
+			{ID: "s3", Gate: &Gate{Type: "gh:{{gate_kind}}", AwaitID: "{{pr_url}}", Timeout: "{{gate_timeout}}", Repo: "{{gate_repo}}"}},
 		},
 	}
 
@@ -531,6 +531,7 @@ func TestExtractVariables(t *testing.T) {
 		"gate_kind":    true,
 		"pr_url":       true,
 		"gate_timeout": true,
+		"gate_repo":    true,
 	}
 
 	if len(vars) != len(want) {

@@ -10,7 +10,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
@@ -135,9 +134,6 @@ func runCloseProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	for i, o := range outcomes {
 		if o.closed {
 			audit.LogFieldChange(o.id, "status", o.auditOld, "closed", actor, o.auditReason)
-			if err := fireProxiedCloseHooks(ctx, o.before, o.after); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: %s: %v\n", o.id, err)
-			}
 		}
 		if !in.jsonOut {
 			fmt.Printf("%s Closed %s: %s\n", ui.RenderPass("✓"), formatFeedbackID(o.after.ID, o.after.Title), closeReasons[i])
@@ -401,28 +397,6 @@ func closeProxiedRunPostClose(ctx context.Context, args []string, in closeProxie
 		post.warnings = append(post.warnings, fmt.Sprintf("post-close work failed: %v", err))
 	}
 	return post
-}
-
-func fireProxiedCloseHooks(ctx context.Context, before, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
-	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
-	}
-	if runner == nil {
-		return nil
-	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
-	}
-	if before != nil && before.Status != types.StatusClosed && after.Status == types.StatusClosed {
-		if err := runner.RunSync(hooks.EventClose, after); err != nil {
-			return fmt.Errorf("on_close hook: %w", err)
-		}
-	}
-	return nil
 }
 
 func closeProxiedSuggestNext(ctx context.Context, uw uow.UnitOfWork, closedID string) ([]*types.Issue, string) {

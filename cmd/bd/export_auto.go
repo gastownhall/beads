@@ -426,7 +426,7 @@ func exportToFile(ctx context.Context, path string, includeMemories bool) (issue
 	// issues that the manual `bd export` path excludes can still leak into git
 	// history and PRs via auto-export (maphew review, be-e2nb). Auto-export has
 	// no --exclude-owner flag, so only config-sourced owners apply here.
-	if ownerExcludes := buildOwnerExcludeSet(ctx, nil); len(ownerExcludes) > 0 {
+	if ownerExcludes := buildOwnerExcludeSet(ctx, storeExportSource{}, nil); len(ownerExcludes) > 0 {
 		issues = filterOutOwners(issues, ownerExcludes)
 	}
 

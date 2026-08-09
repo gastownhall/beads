@@ -50,34 +50,49 @@ var _ publicops.Reader = (*issueReader)(nil)
 // detached rollback, so a caller that hangs up mid-response cannot burn a
 // pinned session.
 func (r *issueReader) Ready(ctx context.Context, req publicops.ReadyRequest) (publicops.IssuePage, error) {
+	// Wake expired dated defers before reading, in a write UOW of its own —
+	// this read's span never commits (see the doc comment above), so the
+	// sweep cannot live inside it.
+	WakeExpiredDefersAdvisory(ctx, r.provider)
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		filter, err := workapi.BuildReadyFilter(req)
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
+		limit := filter.Limit
+		// Reach past the rows the epilogue skips, and take the offset off the
+		// query. This seam COULD render it, and deliberately is not asked to;
+		// see FinishPageAt.
+		filter = workapi.WithReadyRowsBeforeThePage(filter, req.Offset)
 		page, err := uw.IssueUseCase().GetReadyWorkWithCounts(ctx, filter)
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
 		// The same epilogue the sibling implementation runs, through the same
 		// function. Ready has no display order to apply and this seam reports
-		// HasMore natively, so nothing here is expected to do work — which is
-		// exactly why it must be the shared one rather than a local shortcut:
-		// the two arms of List below came apart precisely by one of them
-		// deciding its epilogue was unnecessary.
-		items, hasMore := workapi.FinishPage(page.Items, "", false, filter.Limit, page.HasMore)
+		// HasMore natively, so only the skip and the trim do any work here —
+		// which is exactly why it must be the shared one rather than a local
+		// shortcut: the two arms of List below came apart precisely by one of
+		// them deciding its epilogue was unnecessary.
+		items, hasMore := workapi.FinishPageAt(page.Items, "", false, req.Offset, limit, page.HasMore)
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
 }
 
 func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publicops.IssuePage, error) {
+	// A --ready listing is the ready front by another door, so it wakes
+	// expired dated defers the same way Ready does — before the read span,
+	// which never commits.
+	if req.ReadyFlag {
+		WakeExpiredDefersAdvisory(ctx, r.provider)
+	}
 	return RunTxRead(ctx, r.provider, func(ctx context.Context, uw UnitOfWork) (publicops.IssuePage, error) {
 		// The config source comes from the unit of work this call already
 		// holds, so a caller reaching this method through the role has nothing
-		// to supply and no step to skip. (`bd list --proxied-server` opens its
-		// own unit of work and loads the same config directly — see
-		// issueops.Reader's doc comment for why those two paging commands are
-		// still off the role.)
+		// to supply and no step to skip. `bd list --proxied-server` gets its
+		// page this way in every mode but --watch and the hierarchical --parent
+		// tree; those two still open their own unit of work because they consume
+		// the FILTER rather than a page (see issueops.Reader's doc comment).
 		cfg, err := workapi.LoadUOWListConfig(ctx, uw)
 		if err != nil {
 			return publicops.IssuePage{}, err
@@ -86,6 +101,13 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		if err != nil {
 			return publicops.IssuePage{}, err
 		}
+		// Reach past the rows the epilogue skips, and take the offset off the
+		// query. The MaxRows cap rides the filter untouched from here: the
+		// domain/db query path sizes its bound and enforces the cap through the
+		// same two functions the store-backed seam uses
+		// (issueops.SearchProbeLimit, EnforceMaxRowsCap), so the same request
+		// trips the same breaker on either implementation.
+		filter = workapi.WithRowsBeforeThePage(filter, req.Offset)
 		// WHICH QUERY is the only thing --ready changes. The epilogue below is
 		// deliberately outside the branch: when it lived inside the non-ready
 		// arm only, the two arms of one contract method answered in different
@@ -108,7 +130,7 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		// verdict rather than an over-fetched row — the one thing that differs
 		// between this implementation and its store-backed sibling, and it is
 		// an argument to the shared function rather than a second copy of it.
-		items, hasMore := workapi.FinishPage(page.Items, req.SortBy, req.Reverse, workapi.PageLimit(req), page.HasMore)
+		items, hasMore := workapi.FinishPageAt(page.Items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), page.HasMore)
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil
 	})
 }

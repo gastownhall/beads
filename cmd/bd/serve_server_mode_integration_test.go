@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -148,19 +147,12 @@ func TestServerModeServe(t *testing.T) {
 		if body["api_version"] != "v0" {
 			t.Errorf("api_version = %v, want v0", body["api_version"])
 		}
-		caps, ok := body["capabilities"].([]any)
-		if !ok {
-			t.Fatalf("capabilities = %#v, want an array", body["capabilities"])
-		}
-		// Same build, same handlers: what a mode changes is where the data lives,
-		// never what the handshake advertises. This is deliberately the same
-		// assertion TestProxiedServerServeLifecycle makes against the proxied
-		// path — if the two ever have to be written differently, a mode has
-		// started changing the contract and that is the bug.
-		want := []any{"issues.claim", "issues.get", "issues.list", "ready.list"}
-		if !reflect.DeepEqual(caps, want) {
-			t.Errorf("capabilities = %v, want %v", caps, want)
-		}
+		// Same build, same handlers: what a mode changes is where the data
+		// lives, never what the handshake advertises. This is LITERALLY the same
+		// assertion the proxied path makes — if the two ever have to be written
+		// differently, a mode has started changing the contract and that is the
+		// bug.
+		assertServedCapabilities(t, body)
 	})
 
 	t.Run("a read operation answers from the server-mode database", func(t *testing.T) {

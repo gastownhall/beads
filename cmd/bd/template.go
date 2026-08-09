@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -402,6 +404,84 @@ func substituteVariables(text string, vars map[string]string) string {
 	})
 }
 
+// substituteMetadataRepo substitutes {{variable}} placeholders in an issue's
+// metadata.repo value (SF2 follow-up). A formula gate step's `repo` selector
+// (e.g. repo = "{{gate_repo}}") is stored literally on the persisted proto's
+// metadata by createGateIssue/persistCookFormula - `bd cook --persist` keeps
+// the proto reusable across pours rather than substituting at compile time.
+// Substitution instead needs to happen at the same point as every other
+// var-bearing issue field (Title, Description, AwaitID, ...): here, in
+// cloneSubgraphInto, when a proto is poured/spawned into real issues.
+//
+// Restricted to gh:* gate types (SF4), matching createGateIssue's write-side
+// rule: `repo` on a human/timer/bead gate is unrelated, ordinary metadata,
+// not a GitHub repo selector, so it must not be touched here either.
+//
+// Metadata is arbitrary JSON on any issue, so this only touches a top-level
+// string-valued "repo" key; anything else (missing key, non-object, non-
+// string value) is left untouched for githubRepoFromIssue to validate at
+// check time. The round-trip unmarshals into map[string]json.RawMessage
+// rather than map[string]interface{} and replaces only the "repo" entry, so
+// every OTHER key's value survives byte-identical - interface{} would
+// mangle numbers to float64, and a full re-marshal of decoded values can
+// reshuffle nested object keys and HTML-escape strings that were never
+// touched.
+func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map[string]string) json.RawMessage {
+	if len(metadata) == 0 || !isGitHubGateType(awaitType) {
+		return metadata
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(metadata, &raw); err != nil {
+		return metadata
+	}
+
+	repoRaw, hasRepo := raw["repo"]
+	if !hasRepo {
+		return metadata
+	}
+
+	var repoStr string
+	if err := json.Unmarshal(repoRaw, &repoStr); err != nil {
+		// Non-string (e.g. null) repo value: leave untouched for
+		// githubRepoFromIssue to reject at check time.
+		return metadata
+	}
+
+	substituted := substituteVariables(repoStr, vars)
+	if substituted == repoStr {
+		return metadata
+	}
+
+	substitutedJSON, err := marshalNoHTMLEscape(substituted)
+	if err != nil {
+		return metadata
+	}
+	raw["repo"] = substitutedJSON
+
+	out, err := marshalNoHTMLEscape(raw)
+	if err != nil {
+		return metadata
+	}
+	return out
+}
+
+// marshalNoHTMLEscape is json.Marshal without HTML-escaping '<', '>', and
+// '&' - the stdlib's json.Marshal escapes them by default (aimed at
+// embedding JSON in HTML), which would silently corrupt an unrelated
+// metadata value round-tripped through substituteMetadataRepo.
+func marshalNoHTMLEscape(v interface{}) (json.RawMessage, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	// json.Encoder.Encode appends a trailing newline; callers embed this
+	// result as a json.RawMessage value, which must not carry one.
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
 // generateBondedID creates a custom ID for dynamically bonded molecules.
 // When bonding a proto to a parent molecule, this generates IDs like:
 //   - Root: parent.childref (e.g., "patrol-x7k.arm-ace")
@@ -609,7 +689,7 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
 			Timeout:   oldIssue.Timeout,
 			Labels:    oldIssue.Labels,
-			Metadata:  oldIssue.Metadata,
+			Metadata:  substituteMetadataRepo(oldIssue.Metadata, oldIssue.AwaitType, opts.Vars),
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}

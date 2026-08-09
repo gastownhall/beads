@@ -122,6 +122,9 @@ func TestProxiedServerShow(t *testing.T) {
 		if m["priority"] != float64(1) {
 			t.Errorf("priority: got %v, want 1", m["priority"])
 		}
+		if revision, ok := m["revision"].(float64); !ok || revision == 0 {
+			t.Errorf("revision: got %v, want a non-zero opaque token", m["revision"])
+		}
 		if _, ok := m["created_at"]; !ok {
 			t.Errorf("missing created_at")
 		}

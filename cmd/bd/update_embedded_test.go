@@ -60,6 +60,23 @@ func bdUpdateCapture(t *testing.T, bd, dir string, args ...string) (stdout, stde
 	return outBuf.String(), errBuf.String()
 }
 
+func bdRunInTimezone(t *testing.T, bd, dir, timezone string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir = dir
+	for _, env := range bdEnv(dir) {
+		if !strings.HasPrefix(env, "TZ=") {
+			cmd.Env = append(cmd.Env, env)
+		}
+	}
+	cmd.Env = append(cmd.Env, "TZ="+timezone)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd %s failed in %s: %v\n%s", strings.Join(args, " "), timezone, err, out)
+	}
+	return string(out)
+}
+
 func embeddedCurrentCommit(t *testing.T, beadsDir, database string) string {
 	t.Helper()
 	store, err := embeddeddolt.Open(t.Context(), beadsDir, database, "main")
@@ -398,6 +415,41 @@ func TestEmbeddedUpdate(t *testing.T) {
 		// GH#3233: --defer should also set status=deferred for consistency with `bd defer`
 		if string(got.Status) != "deferred" {
 			t.Errorf("expected status=deferred, got %q", got.Status)
+		}
+	})
+
+	t.Run("relative_defer_is_persisted_in_UTC", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "UTC defer test", "--type", "task")
+		bdRunInTimezone(t, bd, dir, "America/Denver", "update", issue.ID, "--defer", "+1h")
+
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), "tu", "main")
+		if err != nil {
+			t.Fatalf("open embedded SQL: %v", err)
+		}
+		defer func() { _ = cleanup() }()
+
+		var future, bounded bool
+		if err := db.QueryRowContext(t.Context(), `
+			SELECT defer_until > UTC_TIMESTAMP(),
+			       defer_until <= DATE_ADD(UTC_TIMESTAMP(), INTERVAL 2 HOUR)
+			FROM issues WHERE id = ?
+		`, issue.ID).Scan(&future, &bounded); err != nil {
+			t.Fatalf("query persisted defer_until: %v", err)
+		}
+		if !future || !bounded {
+			t.Fatalf("relative defer UTC bounds = future:%t bounded:%t, want true/true", future, bounded)
+		}
+	})
+
+	t.Run("show_renders_scheduled_dates_in_local_time", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Local date display test", "--type", "task")
+		const date = "2099-01-15"
+		bdRunInTimezone(t, bd, dir, "Pacific/Auckland", "update", issue.ID, "--due", date, "--defer", date)
+		output := bdRunInTimezone(t, bd, dir, "Pacific/Auckland", "--no-color", "show", issue.ID)
+		for _, want := range []string{"Due: " + date, "Deferred: " + date} {
+			if !strings.Contains(output, want) {
+				t.Errorf("bd show output missing %q:\n%s", want, output)
+			}
 		}
 	})
 

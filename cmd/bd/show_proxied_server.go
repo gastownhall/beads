@@ -73,7 +73,7 @@ func proxiedOpenReadUOW(ctx context.Context) (uow.UnitOfWork, error) {
 // proxied-server provider, through the provider's OWN capability accessor —
 // the same two-step a direct command performs on a store.
 //
-// The accessor is the door and there is no other: the cmd-bd-reader-constructor
+// The accessor is the door and there is no other: the cmd-bd-role-constructors
 // depguard rule keeps the shared implementation's constructor out of cmd/bd
 // entirely, because a decorator adds its layer in its own accessor and a
 // command that built a reader directly would get an undecorated one. A
@@ -468,7 +468,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 				return HandleErrorRespectJSON("%v", derr)
 			}
 			foundCount++
-			allDetails = append(allDetails, details)
+			allDetails = append(allDetails, projectShowJSONDetails(details))
 			continue
 		}
 

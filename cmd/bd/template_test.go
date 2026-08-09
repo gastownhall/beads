@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -82,6 +83,213 @@ func TestSubstituteVariables(t *testing.T) {
 				t.Errorf("substituteVariables(%q, %v) = %q, want %q", tt.input, tt.vars, result, tt.expected)
 			}
 		})
+	}
+}
+
+// TestSubstituteMetadataRepo covers the SF2 follow-up: a gate step's `repo`
+// selector ("repo": "{{gate_repo}}") is stored literally in the persisted
+// proto's metadata by cook --persist (compile-time mode never substitutes),
+// so substitution must happen at the same point other var-bearing issue
+// fields (Title, Description, AwaitID, ...) are substituted: here, when a
+// proto is cloned/poured into real issues.
+func TestSubstituteMetadataRepo(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		metadata  string
+		awaitType string
+		vars      map[string]string
+		want      string
+	}{
+		{
+			name:      "substitutes repo variable",
+			metadata:  `{"repo":"{{gate_repo}}"}`,
+			awaitType: "gh:run",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"repo":"srobroek/agentic-packages"}`,
+		},
+		{
+			name:      "gh:pr gate type also substitutes",
+			metadata:  `{"repo":"{{gate_repo}}"}`,
+			awaitType: "gh:pr",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"repo":"srobroek/agentic-packages"}`,
+		},
+		{
+			name:      "missing var leaves placeholder",
+			metadata:  `{"repo":"{{gate_repo}}"}`,
+			awaitType: "gh:run",
+			vars:      map[string]string{},
+			want:      `{"repo":"{{gate_repo}}"}`,
+		},
+		{
+			name:      "no repo key untouched",
+			metadata:  `{"other":"value"}`,
+			awaitType: "gh:run",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"other":"value"}`,
+		},
+		{
+			name:      "empty metadata untouched",
+			metadata:  "",
+			awaitType: "gh:run",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      "",
+		},
+		{
+			name:      "null repo left for check-time validation",
+			metadata:  `{"repo":null}`,
+			awaitType: "gh:run",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"repo":null}`,
+		},
+		{
+			// SF4 consistency: a repo field on a non-gh:* gate (or any other
+			// issue with an unrelated "repo" metadata key) is ordinary
+			// metadata, not a GitHub repo selector - matching createGateIssue's
+			// write-side isGitHubGateType restriction.
+			name:      "non-github gate type leaves repo untouched",
+			metadata:  `{"repo":"{{gate_repo}}"}`,
+			awaitType: "human",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"repo":"{{gate_repo}}"}`,
+		},
+		{
+			name:      "empty await type leaves repo untouched",
+			metadata:  `{"repo":"{{gate_repo}}"}`,
+			awaitType: "",
+			vars:      map[string]string{"gate_repo": "srobroek/agentic-packages"},
+			want:      `{"repo":"{{gate_repo}}"}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var metadata json.RawMessage
+			if tt.metadata != "" {
+				metadata = json.RawMessage(tt.metadata)
+			}
+			got := substituteMetadataRepo(metadata, tt.awaitType, tt.vars)
+			if tt.want == "" {
+				if len(got) != 0 {
+					t.Errorf("substituteMetadataRepo(%q, %q, %v) = %q, want empty", tt.metadata, tt.awaitType, tt.vars, got)
+				}
+				return
+			}
+			// Compare parsed JSON to avoid brittleness over key ordering.
+			var gotObj, wantObj map[string]interface{}
+			if err := json.Unmarshal(got, &gotObj); err != nil {
+				t.Fatalf("result %s is not valid JSON: %v", got, err)
+			}
+			if err := json.Unmarshal([]byte(tt.want), &wantObj); err != nil {
+				t.Fatalf("want %s is not valid JSON: %v", tt.want, err)
+			}
+			gotJSON, _ := json.Marshal(gotObj)
+			wantJSON, _ := json.Marshal(wantObj)
+			if string(gotJSON) != string(wantJSON) {
+				t.Errorf("substituteMetadataRepo(%q, %q, %v) = %s, want %s", tt.metadata, tt.awaitType, tt.vars, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestSubstituteMetadataRepo_PreservesUnrelatedValuesByteIdentical covers the
+// round-trip-fidelity half of the SF2/SF4 follow-up: substituteMetadataRepo
+// must decode into map[string]json.RawMessage, not map[string]interface{},
+// so a sibling key's value survives untouched when "repo" is substituted -
+// a decode into interface{} would mangle a JSON number to float64 (losing
+// its original formatting/precision on re-encode), reorder a nested object's
+// keys, and HTML-escape '<'/'>'/'&' inside string values that were never
+// touched by the substitution.
+func TestSubstituteMetadataRepo_PreservesUnrelatedValuesByteIdentical(t *testing.T) {
+	t.Parallel()
+	metadata := json.RawMessage(`{"repo":"{{gate_repo}}","count":123456789012345,"nested":{"z":1,"a":2,"m":3},"note":"a <b> & c"}`)
+
+	got := substituteMetadataRepo(metadata, "gh:run", map[string]string{"gate_repo": "srobroek/agentic-packages"})
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(got, &raw); err != nil {
+		t.Fatalf("result %s is not valid JSON: %v", got, err)
+	}
+
+	if string(raw["count"]) != "123456789012345" {
+		t.Errorf(`metadata["count"] = %s, want 123456789012345 (byte-identical, not float64-mangled)`, raw["count"])
+	}
+	if string(raw["nested"]) != `{"z":1,"a":2,"m":3}` {
+		t.Errorf(`metadata["nested"] = %s, want {"z":1,"a":2,"m":3} (byte-identical key order)`, raw["nested"])
+	}
+	if string(raw["note"]) != `"a <b> & c"` {
+		t.Errorf(`metadata["note"] = %s, want "a <b> & c" (no HTML-escaping)`, raw["note"])
+	}
+	var repo string
+	if err := json.Unmarshal(raw["repo"], &repo); err != nil {
+		t.Fatalf("metadata[\"repo\"] = %s is not a JSON string: %v", raw["repo"], err)
+	}
+	if repo != "srobroek/agentic-packages" {
+		t.Errorf(`metadata["repo"] = %q, want "srobroek/agentic-packages"`, repo)
+	}
+}
+
+// TestCloneSubgraph_SubstitutesGateRepoMetadata is the end-to-end regression
+// test for the cook --persist -> pour path: a gate issue persisted with
+// metadata.repo="{{gate_repo}}" (as createGateIssue/persistCookFormula would
+// write it for `repo = "{{gate_repo}}"` in the formula) must have that
+// placeholder substituted when the proto is cloned/poured with
+// --var gate_repo=..., exactly like it would be if the repo selector were an
+// AwaitID or Title placeholder instead.
+func TestCloneSubgraph_SubstitutesGateRepoMetadata(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	testDB := filepath.Join(tmpDir, ".beads", "beads.db")
+	s := newTestStore(t, testDB)
+	ctx := context.Background()
+	h := &templateTestHelper{s: s, ctx: ctx, t: t}
+
+	epic := h.createIssue("Release {{version}}", "", types.TypeEpic, 1)
+	h.addLabel(epic.ID, BeadsTemplateLabel)
+
+	gate := &types.Issue{
+		Title:     "Gate: gh:run",
+		IssueType: "gate",
+		Status:    types.StatusOpen,
+		AwaitType: "gh:run",
+		AwaitID:   "release.yml",
+		Metadata:  json.RawMessage(`{"repo":"{{gate_repo}}"}`),
+	}
+	if err := s.CreateIssue(ctx, gate, "test-user"); err != nil {
+		t.Fatalf("Failed to create gate issue: %v", err)
+	}
+	h.addParentChild(gate.ID, epic.ID)
+
+	subgraph, err := loadTemplateSubgraph(ctx, s, epic.ID)
+	if err != nil {
+		t.Fatalf("loadTemplateSubgraph failed: %v", err)
+	}
+
+	vars := map[string]string{"version": "2.0.0", "gate_repo": "srobroek/agentic-packages"}
+	opts := CloneOptions{Vars: vars, Actor: "test-user"}
+	result, err := cloneSubgraph(ctx, s, subgraph, opts)
+	if err != nil {
+		t.Fatalf("cloneSubgraph failed: %v", err)
+	}
+
+	newGateID, ok := result.IDMapping[gate.ID]
+	if !ok {
+		t.Fatalf("IDMapping missing entry for gate %s: %+v", gate.ID, result.IDMapping)
+	}
+	newGate, err := s.GetIssue(ctx, newGateID)
+	if err != nil {
+		t.Fatalf("Failed to get cloned gate issue: %v", err)
+	}
+
+	var metadata struct {
+		Repo string `json:"repo"`
+	}
+	if err := json.Unmarshal(newGate.Metadata, &metadata); err != nil {
+		t.Fatalf("newGate.Metadata = %s, not valid JSON: %v", newGate.Metadata, err)
+	}
+	if metadata.Repo != "srobroek/agentic-packages" {
+		t.Errorf("cloned gate metadata.repo = %q, want %q (repo = \"{{gate_repo}}\" must be substituted at pour time, same as AwaitID/Title)", metadata.Repo, "srobroek/agentic-packages")
 	}
 }
 

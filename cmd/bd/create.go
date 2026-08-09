@@ -71,20 +71,16 @@ var createCmd = &cobra.Command{
 		graphFile, _ := cmd.Flags().GetString("graph")
 
 		if file != "" {
-			if graphFile != "" {
-				return HandleError("cannot specify both --file and --graph")
-			}
-			if len(args) > 0 {
-				return HandleError("cannot specify both title and --file flag")
-			}
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			if dryRun {
-				return HandleError("--dry-run is not supported with --file flag")
-			}
-			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+			// gatherCreateInput repeats the --file argument checks and applies
+			// the plan-wide flags this route used to accept and ignore
+			// (--ephemeral, --no-history, --mol-type, --validate). It is the
+			// same input the proxied route reads, which is what lets both build
+			// one issueops.CreateBatchRequest.
+			in, err := gatherCreateInput(cmd, args)
+			if err != nil {
 				return err
 			}
-			return createIssuesFromMarkdown(cmd, file)
+			return createIssuesFromMarkdown(rootCtx, in)
 		}
 
 		if graphFile != "" {
@@ -260,7 +256,7 @@ var createCmd = &cobra.Command{
 			// Warn if defer date is in the past (user probably meant future)
 			if t.Before(time.Now()) && !silent && !debug.IsQuiet() {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+					ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 			}
 			deferUntil = &t
@@ -591,6 +587,7 @@ var createCmd = &cobra.Command{
 			Dependencies:  createDependencyRequests(depSpecs),
 			WaitsFor:      waitsForRequest(waitsForSpec),
 			ForceIDPrefix: forceCreate,
+			IDPrefix:      createIDPrefixOverride(),
 		})
 		if err != nil {
 			// RULING R1: an occupied --id is a refusal, not a silent full-row
@@ -784,6 +781,22 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 		return nil
 	}
 	return merged
+}
+
+// createIDPrefixOverride is the prefix an explicit --id must match, when the
+// WORKSPACE knows better than the database does.
+//
+// config.yaml's `issue-prefix` wins over the database's, except under --global
+// where the shared database is authoritative (GH#4957, selectCreateIDPrefix).
+// Only a front door can read config.yaml — a shared server's database knows
+// only its own prefix — so both routes resolve it here and hand it to the role
+// as CreateRequest.IDPrefix. Empty means "the substrate's prefix is right",
+// which is the ordinary case.
+func createIDPrefixOverride() string {
+	if globalFlag {
+		return ""
+	}
+	return overlayYAMLPrefix("")
 }
 
 func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {

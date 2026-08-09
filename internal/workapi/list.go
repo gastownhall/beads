@@ -196,12 +196,26 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 
 	filter := types.IssueFilter{
-		Limit:          SQLLimit(in),
+		Limit: SQLLimit(in),
+		// The offset is carried for the callers that consume this filter as a
+		// VALUE and run their own query — `bd list --watch` and the proxied
+		// hierarchical --parent walk — where the seam beneath them renders it.
+		// Both implementations of issueops.Reader take it back off
+		// (WithRowsBeforeThePage) and skip in the shared page epilogue instead;
+		// FinishPageAt says why the role cannot leave it here.
 		Offset:         in.Offset,
 		SortBy:         in.SortBy,
 		SortDesc:       in.Reverse,
 		AfterCreatedAt: in.AfterCreatedAt,
 		AfterID:        in.AfterID,
+		// The defensive cap travels ON the request, so this builder is the
+		// only writer of the filter's two cap fields. `bd list` used to stamp
+		// them onto the filter after the builder returned, which is the
+		// "build it, then reach in and change it" half-step the role exists to
+		// make unreachable — and it left the cap invisible to every
+		// implementation of Reader.List.
+		MaxRows:       in.MaxRows,
+		MaxRowsSource: in.MaxRowsSource,
 	}
 
 	if in.ReadyFlag {
@@ -305,6 +319,9 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	}
 	if in.SkipLabels {
 		filter.SkipLabels = true
+	}
+	if in.SkipCounts {
+		filter.SkipCounts = true
 	}
 
 	if in.PriorityMin != nil {

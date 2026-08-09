@@ -35,6 +35,10 @@ func RunAudit_search_counts_stats(t *testing.T, f Factory) {
 	t.Run("SearchDefaultOrderTieBreak", func(t *testing.T) { testAuditSearchDefaultOrderTieBreak(t, f) })
 	t.Run("SearchIdenticalTimestampIDOrder", func(t *testing.T) { testAuditSearchIdenticalTimestampIDOrder(t, f) })
 	t.Run("SearchSortByClosedNullsLast", func(t *testing.T) { testAuditSearchSortByClosedNullsLast(t, f) })
+	t.Run("SearchSortByTitleCaseFolded", func(t *testing.T) { testAuditSearchSortByTitleCaseFolded(t, f) })
+	t.Run("SearchSortTieBreakSurvivesReversal", func(t *testing.T) { testAuditSearchSortTieBreakSurvivesReversal(t, f) })
+	t.Run("SearchSortNullsDirectional", func(t *testing.T) { testAuditSearchSortNullsDirectional(t, f) })
+	t.Run("SearchSortByIDCompleteSet", func(t *testing.T) { testAuditSearchSortByIDCompleteSet(t, f) })
 	t.Run("SearchTextIDBranchExternalRef", func(t *testing.T) { testAuditSearchTextIDBranchExternalRef(t, f) })
 	t.Run("SearchIDPrefixCaseSensitive", func(t *testing.T) { testAuditSearchIDPrefixCaseSensitive(t, f) })
 	t.Run("SearchParentDescendantCaseSensitive", func(t *testing.T) { testAuditSearchParentDescendantCaseSensitive(t, f) })
@@ -398,6 +402,152 @@ func testAuditSearchSortByClosedNullsLast(t *testing.T, f Factory) {
 	want := []string{"cs-closed-new", "cs-closed-old", "cs-open-a", "cs-open-b"}
 	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
 		t.Errorf("closed-sort order = %v, want %v (NULLs last on DESC)", got, want)
+	}
+}
+
+// A search sorted by title and cut to a limit keeps the first N rows under
+// case-folded title order — "apple" before "Zebra" — with case-folded ties broken
+// by id ASC, on every backend and database collation. sqlbuild/sort.go renders
+// LOWER(title) for both the SQL ORDER BY and the Go-side merge, but an engine whose
+// default text collation is byte-wise or linguistic satisfies every other ordering
+// case in this slice while reordering this one, silently changing which rows survive
+// the cut with no error and no other signal.
+func testAuditSearchSortByTitleCaseFolded(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	// Byte order (APPLE2, Apple, Zebra, apple, banana) and priority order both
+	// disagree with the case-folded order asserted below.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ti-1", Title: "Zebra", Priority: 0}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ti-2", Title: "apple", Priority: 3}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ti-3", Title: "APPLE2", Priority: 2}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ti-4", Title: "banana", Priority: 1}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "ti-5", Title: "Apple", Priority: 3}), "a"))
+
+	// ti-2/ti-5 fold to the same title, so they pin the id-ASC tie leg.
+	want := []string{"ti-2", "ti-5", "ti-3", "ti-4", "ti-1"}
+	results, err := s.SearchIssues(c, "", types.IssueFilter{SortBy: "title"})
+	must(t, err)
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("title-sort order = %v, want %v (LOWER(title) ASC, id ASC)", got, want)
+	}
+
+	page, err := s.SearchIssues(c, "", types.IssueFilter{SortBy: "title", Limit: 2})
+	must(t, err)
+	if got := orderedIDs(page); !reflect.DeepEqual(got, want[:2]) {
+		t.Errorf("title-sort page = %v, want %v (first 2 rows of the case-folded order)", got, want[:2])
+	}
+}
+
+// Every non-default sort breaks exact ties by id ASC, and reversing the sort flips
+// the primary key only — the id tie-break never flips. sqlbuild/sort.go emits
+// ORDER BY <col> <dir>, id ASC for every non-default key and runs flipDir over the
+// primary direction alone, so a tied group's internal order is identical in both
+// directions. The slice pins tie-breaking for the default and closed sorts only;
+// this case covers a timestamp key and a vocabulary key below the same seam.
+func testAuditSearchSortTieBreakSurvivesReversal(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	tied, newer := auditWholeSec(2020), auditWholeSec(2022)
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "tb-a", Title: "a", Status: types.StatusOpen, CreatedAt: tied, UpdatedAt: tied}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "tb-b", Title: "b", Status: types.StatusOpen, CreatedAt: tied, UpdatedAt: tied}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "tb-c", Title: "c", Status: types.StatusClosed, CreatedAt: tied, UpdatedAt: tied}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "tb-new", Title: "n", Status: types.StatusInProgress, CreatedAt: newer, UpdatedAt: newer}), "a"))
+
+	results, err := s.SearchIssues(c, "", types.IssueFilter{SortBy: "updated"})
+	must(t, err)
+	want := []string{"tb-new", "tb-a", "tb-b", "tb-c"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("updated-sort order = %v, want %v (updated_at DESC, id ASC)", got, want)
+	}
+
+	results, err = s.SearchIssues(c, "", types.IssueFilter{SortBy: "updated", SortDesc: true})
+	must(t, err)
+	want = []string{"tb-a", "tb-b", "tb-c", "tb-new"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("reversed updated-sort order = %v, want %v (oldest first; the tied group is STILL id ASC)", got, want)
+	}
+
+	results, err = s.SearchIssues(c, "", types.IssueFilter{SortBy: "status"})
+	must(t, err)
+	want = []string{"tb-c", "tb-new", "tb-a", "tb-b"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("status-sort order = %v, want %v (status ASC, id ASC)", got, want)
+	}
+
+	results, err = s.SearchIssues(c, "", types.IssueFilter{SortBy: "status", SortDesc: true})
+	must(t, err)
+	want = []string{"tb-a", "tb-b", "tb-new", "tb-c"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("reversed status-sort order = %v, want %v (the tied open group is STILL id ASC)", got, want)
+	}
+}
+
+// Rows with no value for a nullable sort key (closed_at, assignee) sort first on
+// ascending order and last on descending order, regardless of the engine's native
+// NULL ordering. sqlbuild/sort.go leads those keys with an explicit (col IS NULL)
+// term precisely "so the contract does not depend on a driver's default NULL
+// ordering", but the slice pins only the closed sort in its default direction.
+// The unassigned rows are created exactly as `bd create` leaves them, so the case
+// pins the observable order without prescribing a NULL-vs-empty-string encoding.
+func testAuditSearchSortNullsDirectional(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	tNew, tOld := auditWholeSec(2022), auditWholeSec(2021)
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "nl-open-a", Title: "oa", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "nl-open-b", Title: "ob", Status: types.StatusOpen}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "nl-closed-new", Title: "cn", Status: types.StatusClosed, ClosedAt: &tNew, Assignee: "alice"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "nl-closed-old", Title: "co", Status: types.StatusClosed, ClosedAt: &tOld, Assignee: "bob"}), "a"))
+
+	results, err := s.SearchIssues(c, "", types.IssueFilter{SortBy: "closed", SortDesc: true})
+	must(t, err)
+	want := []string{"nl-open-a", "nl-open-b", "nl-closed-old", "nl-closed-new"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("reversed closed-sort order = %v, want %v (NULLs first on ASC, then oldest closed)", got, want)
+	}
+
+	results, err = s.SearchIssues(c, "", types.IssueFilter{SortBy: "assignee"})
+	must(t, err)
+	want = []string{"nl-open-a", "nl-open-b", "nl-closed-new", "nl-closed-old"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("assignee-sort order = %v, want %v (unassigned first on ASC, id ASC among them)", got, want)
+	}
+
+	results, err = s.SearchIssues(c, "", types.IssueFilter{SortBy: "assignee", SortDesc: true})
+	must(t, err)
+	want = []string{"nl-closed-old", "nl-closed-new", "nl-open-a", "nl-open-b"}
+	if got := orderedIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("reversed assignee-sort order = %v, want %v (unassigned last on DESC)", got, want)
+	}
+}
+
+// A search with SortBy="id" succeeds and answers the complete matching set. "id" is
+// the one key sqlbuild renders no ORDER BY for at all — IsGoSideSort suppresses the
+// clause and "id" is deliberately absent from SortDefs — so a store that validated
+// the key against SortDefs would refuse it, and a store that trimmed the set in its
+// own byte order would break the id sort for every caller. Sequence is not asserted:
+// the natural-numeric display order is owned above the store (internal/workapi/sort.go
+// CompareIssuesBy via utils.NaturalCompareIDs), which is why callers push Limit 0 here.
+//
+// RunReaderListNaturalNumericIDSortTrimsAfterTheFetch looks like a dominator and
+// is not: it drives the Reader, which rides SearchIssuesWithCountsInTx (and the
+// unit-of-work UNION), while this drives the PLAIN SearchIssues verb over
+// searchInTx. Those are separate bodies — make searchInTx refuse the go-side sort
+// key and the reader case stays green while this one goes red (measured with
+// scripts/mutation-equivalence.sh). This is the only place the go-side sort key
+// meets the plain search projection.
+func testAuditSearchSortByIDCompleteSet(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+	// Natural order (test-2, test-9, test-10) and byte order (test-10, test-2, test-9) differ.
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-9", Title: "nine"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-10", Title: "ten"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-2", Title: "two"}), "a"))
+
+	results, err := s.SearchIssues(c, "", types.IssueFilter{SortBy: "id", Limit: 0})
+	must(t, err)
+	want := []string{"test-10", "test-2", "test-9"}
+	if got := issueIDs(results); !reflect.DeepEqual(got, want) {
+		t.Errorf("SortBy=id set = %v, want %v (complete matching set)", got, want)
 	}
 }
 

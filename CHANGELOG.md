@@ -9,6 +9,547 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A durable events journal, and `bd events` to read it** (bd-opisf). External
+  tooling that wants to stay in step with a workspace had two options and
+  neither was a feed: a fire-and-forget script hook that may not run, or polling
+  whole snapshots and diffing them — which still misses anything that changed
+  twice between two reads. The journal is the third. Every committed issue
+  mutation writes one ordered record, in the same transaction as the mutation
+  itself, and a consumer replays those records from a checkpoint it can resume.
+  Each record carries the operation, the mutated id, and the issue's full
+  post-mutation snapshot (including `is_blocked`), so a mirror stays correct
+  without re-querying the graph.
+
+  **It is off by default and opt-in per workspace**: `bd config set
+  events-journal true`, or `BD_EVENTS_JOURNAL=1`. Nothing is recorded while it
+  is off, so a workspace that never enables it pays nothing.
+
+  **On means bounded.** Two retention floors define the window every consumer
+  is guaranteed — `events-journal-retain-days` (default 7) and
+  `events-journal-retain-rows` (default 100000), each disabled by setting it to
+  0 — and beads enforces them for you: after a mutating command commits, and on
+  a timer inside `bd serve`, it deletes the prefix the floors do not protect.
+  The pass is throttled by a persisted watermark (about one an hour per
+  workspace — or sooner after a large burst of writes), runs in its own
+  transactions outside the mutation's, is capped at a few batches so a long
+  backlog drains over several commands rather than stalling one, and can never
+  fail a command — a failure is logged and skipped. It maintains the workspace
+  whose command triggered it, so a workspace only ever written remotely (a
+  routed `bd create --repo`) relies on commands run in it, or on its own `bd
+  serve`. Setting both floors to 0 keeps every record forever;
+  `events-journal-auto-prune false` keeps the floors but leaves deletion to you.
+  All four are `config.yaml` keys with `BD_EVENTS_JOURNAL*` environment
+  equivalents.
+
+  `bd events tail --since <seq>` prints records as JSON lines and `--follow`
+  keeps printing them as writes commit; `bd events export` prints the journal
+  from the beginning; `bd events prune --before <seq>` takes an earlier,
+  on-demand cut below the floors — it cannot cut deeper than they allow, so
+  shrinking the retained window means lowering them. The floors are a
+  recent-window guarantee, not a consumer watermark: size them for the longest
+  outage a consumer must survive.
+
+  **A read that cannot resume fails instead of lying.** When `--since` falls
+  below the oldest retained record, the read neither skips ahead to the
+  surviving suffix nor returns an empty success: both are silent record loss
+  that a cursor cannot detect. It exits 1 with a typed
+  `events_journal_truncated` error carrying `since`, `floor` and `head`, so a
+  consumer can choose between resuming at `floor - 1` with a known gap and
+  re-baselining. Under `--json` that is the error payload; mid-`--follow` it is
+  one compact JSON object on a line of the JSONL stream it interrupts, because
+  the consumer on the other end is a line reader. An interior gap — which
+  nothing in bd can produce, since a prune only ever removes a prefix — refuses
+  the same way.
+
+  The journal is clone-local working-set state (`dolt_ignore`d): never
+  versioned, never pushed or federated, per branch, and per replica — each
+  clone counts its own seq space, so a checkpoint from one replica is
+  meaningless against another. `bd dolt pull` and merge-settled changes, raw
+  `bd sql` DML, store-open migrations, and compaction rewrites are not
+  journaled. The record contract and every boundary are documented in
+  [docs/reference/events-journal.md](docs/reference/events-journal.md).
+
+- **`is_blocked` is a documented optional member of the /v0 OpenAPI issue
+  schemas** (bd-opisf) — `Issue`, `IssueWithCounts`, `IssueDetails`,
+  `IssueWithDependencyMetadata` and `TreeNode`, the five welded to the
+  canonical Go struct. It is the persisted readiness projection: true when an
+  open blocking dependency keeps an issue out of the ready set, derived from
+  the dependency graph and maintained by the server, never set by a client. It
+  is omitted when false, so absence means false. Journal snapshots are what set
+  it; readiness itself is computed exactly as before.
+
+- **`bd serve` grows the write half of the agent loop** (v0 wire surface,
+  [#5410](https://github.com/gastownhall/beads/pull/5410),
+  [#5417](https://github.com/gastownhall/beads/pull/5417),
+  [#5422](https://github.com/gastownhall/beads/pull/5422),
+  [#5423](https://github.com/gastownhall/beads/pull/5423),
+  [#5429](https://github.com/gastownhall/beads/pull/5429)). v0 shipped with one
+  mutation, the claim, which meant an HTTP client could take work and had to
+  fork a `bd` subprocess to finish it. Five operations close that loop:
+
+  - `POST /v0/beads/issues/{id}:close` and `POST /v0/beads/issues/{id}:reopen`
+    — the two halves of the lifecycle move. Both are idempotent, and both say
+    so in the body rather than in a status: a close of a closed issue answers
+    `200` with `already_closed: true`, a reopen of an open one
+    `already_open: true`, and each still carries the row.
+  - `PATCH /v0/beads/issues/{id}` — partial update of one issue. The `patch`
+    object publishes thirteen members; four of them (`estimated_minutes`,
+    `external_ref`, `due_at`, `defer_until`) are nullable, and an explicit
+    `null` CLEARS them. That set is closed and machine-checked against the
+    document, so a `null` on any other member is a `400` rather than an
+    unannounced clear. A patch that changes nothing answers `200` with
+    `changed: false`.
+  - `POST /v0/beads/dependencies:add` — up to 100 edges per request, asserted
+    all or none, echoed back in request order. A refusal names the offending
+    edge as `edges[i].member`, so a client learns which edge and which member
+    rather than that something in the batch was wrong.
+  - `POST /v0/beads/dependencies:remove` — removes exactly the edge the body
+    names. Idempotent at the role: an edge that is not there is
+    `removed: false` with a `200`, never a 404, so a replayed teardown does not
+    have to classify an error to discover it already ran.
+
+  **Every one of them carries the claim's posture, unchanged.** The `actor` is
+  caller-asserted provenance for the audit trail and not authenticated
+  identity; hooks do not fire; the per-command auto-commit machinery does not
+  run. The only durable effect is the single storage commit the role makes
+  inside its own transaction, so durability is per request on every write, not
+  just the claim.
+
+  **Three codes join the frozen error vocabulary**, all 409 and all typed so a
+  client never has to substring-match a message. `not_closable` is close policy
+  refusing an unforced close of an issue with open children or a live blocker.
+  `dependency_exists` is the pair that already carries an edge of a DIFFERENT
+  type, and carries `existing_type` and `requested_type`. `dependency_cycle`
+  covers both never-makes-progress refusals: the plain scheduling cycle, and a
+  blocking edge against the issue's own ancestor or descendant — the second
+  carries `issue_id`, `blocker_id` and `blocker_is_ancestor`, and their ABSENCE
+  is what tells a client which of the two it got. Every extension member is
+  read off the refusing transaction's own typed error; the hierarchy members
+  have no other source, since the conflicting edge may exist only inside the
+  batch that was rolled back. An edge naming an endpoint this database can see
+  the absence of is a `400` on `edges[i].issue_id` or `edges[i].depends_on_id`,
+  not a 404: the request BODY is what is wrong, and there is no path id to have
+  missed.
+
+  **`GET /v0/beads/issues/{id}` takes two new parameters.**
+  `include_comments` populates `comments` with the full comment bodies and
+  `include_dependents` populates `dependents` with the issues that depend on
+  this one, each carrying its edge type. Both default to false, because both
+  are extra reads nobody should pay for by accident — and when a caller does
+  not ask, `comment_count`, `dependent_count` and `comments_omitted` still
+  report what was left out, so an absent `comments` is never ambiguous between
+  "no comments" and "not included in this response". A malformed boolean is
+  this operation's own `400 invalid_argument` / `reason: "invalid_value"`,
+  which is deliberately not the `unknown_parameter` a client should read as
+  version skew.
+
+  `GET /v0/beads/context` advertises `issues.close`, `issues.reopen`,
+  `issues.update`, `dependencies.add` and `dependencies.remove` alongside the
+  rest — derived from the registered handlers as always, so probing
+  `capabilities` remains the way to ask one server what it can do.
+
+- **The two dependency-endpoint refusals now carry an identity** (bd-yby99.9).
+  `DependencyEditor.AddDependencies` refuses an edge whose SOURCE names no row,
+  and one whose TARGET names no row this database can see the absence of. Both
+  were "an error" and nothing more — not the same error text on every backend,
+  and impossible to tell apart from an infrastructure failure — which left the
+  role's typed-refusal vocabulary with a hole every other refusal it can raise
+  had already filled. They are now `errors.Is`-matchable as
+  `ErrDependencySourceNotFound` and `ErrDependencyTargetNotFound`, carried by a
+  `*DependencyEndpointNotFoundError` naming the refused edge and which of its
+  endpoints was absent, all three re-exported from the root package beside the
+  conflict types. What is NOT refused is unchanged: an `external:` reference
+  and another repository's id are still accepted as external targets.
+
+  The user-facing message is byte-identical on the embedded and store paths
+  (`issue <id> not found`), and the proxied-server path now renders that
+  message too instead of a raw foreign-key violation — the endpoint is
+  classified from the refusing transaction rather than parsed out of the
+  driver's prose, so the two plumbings agree on the text as well as the type.
+  The shared `DependencyEditor` contract asserts the sentinel and the typed
+  fields for each endpoint, alone in a request and mid-batch, with the
+  mid-batch half reading the graph back at zero edges. `RemoveDependency` is
+  unaffected: a removal that finds no edge is a success, not a refusal.
+
+### Changed
+
+- **`bd search` now includes closed issues by default** (bd-t5yex). The
+  dominant real-world search query is "was this already found/filed/fixed?" —
+  exactly the query where silently excluding closed issues produced a false
+  "no" (downstream repos grew shell wrappers purely to undo the old default).
+  `bd list` keeps its open-only default. Narrow explicitly with `--status open`
+  (or any status list) where the old behavior is wanted; `--status all` still
+  works and is now redundant. Applies to both the embedded and proxied-server
+  paths.
+
+  Two consequences to know: matches beyond `--limit` (default 50) are dropped
+  under a status-blind sort (priority, then created), so a broad query on a
+  large DB can now fill the page with closed matches and silently drop open
+  ones — use `--status open` or raise `--limit` when hunting live work. And
+  `bd query` (plus the HTTP `q=` endpoint) deliberately keeps its closed-
+  exclusion default with opt-in `--all`; only `bd search` changed.
+
+### Fixed
+
+- **Script hooks now fire on both write plumbings** (bd-opisf). bd has two write
+  plumbings and only one of them ran the workspace's hook scripts. The
+  DoltStorage decorator chain fires `on_create`/`on_update`/`on_close` after
+  every mutation it lands; the unit-of-work plumbing — the one **proxied-server
+  mode** writes through — fired nothing from the plumbing, so an integration
+  wired to `.beads/hooks/` silently missed every mutation that went through it.
+  Four commands (`update`, `close`, `reopen`, `gate`) had grown hand-wired hook
+  calls of their own to paper over the gap; every other write — `create`, batch
+  create and close, claim, `comment`, label edits, dependency edits — ran no
+  hook at all. A notifying wrapper now fires them from the plumbing, buffered
+  during the transaction and drained only after the commit succeeds, so a
+  rolled-back or retried write reports nothing.
+
+  Six changes are visible in proxied mode, and all six move it toward what the
+  embedded path has always done (a seventh, below, applies to both):
+
+  - **One firing site per plumbing.** The four per-command hook calls are gone.
+  - **`bd update -s closed` fires `on_update` only.** It used to fire `on_close`
+    as well. `bd close` is what fires `on_close`, on both plumbings.
+  - **`bd close` no longer fires an `on_update` ahead of its `on_close`.**
+  - **Hooks run fire-and-forget, after the write commits**, rather than
+    synchronously inside the command.
+  - **`no-hooks` is honored.** The per-command calls ignored it, so hooks fired
+    in proxied mode even when they were switched off.
+  - **An idempotent re-close fires `on_close`**, and a double `bd gate resolve`
+    fires it too. The per-command calls suppressed both; the embedded path has
+    always fired for a close that succeeded, changed row or not, so a script
+    reconciling on "it is closed" is told every time rather than only the first.
+
+  And one change every workspace sees, embedded and proxied alike: **a command
+  now waits for its own fire-and-forget hooks before exiting**, bounded by the
+  per-hook timeout (10s). Both plumbings run hook scripts on background
+  goroutines, and a short command could return from `main` before one had even
+  started — a hook that silently never fired. The wait happens after the store
+  closes, so a hook script's own `bd` can open the workspace, and it runs on the
+  error exit paths too, so a partial batch still delivers the hook for what it
+  did commit. A command that fires no hooks waits on nothing.
+
+  `bd serve` still runs no hooks, and `bd import` still fires none on either
+  plumbing (both import through the batch-upsert engine rather than the
+  per-issue verbs).
+
+- **`--dolt-auto-commit batch`/`off` now actually defer version commits in
+  SQL-server mode** (bd-4wamg). The mode was silently inert there: the CLI's
+  auto-commit policy was embedded-only, and the storage layer minted one Dolt
+  commit inside every write transaction regardless — measured at one commit
+  per write through all five configuration paths (flag, config.yaml, env,
+  `bd config set`, no-daemon). The write verbs now thread the batch/off
+  deferral to the storage layer's commit sites, which leave writes in the
+  working set for an explicit commit point (`bd dolt commit`), in server and
+  embedded mode alike. The server-mode **default** changes spelling, not
+  behavior: it used to resolve to `off` (while behaving like `on`); it now
+  resolves to `on`, naming what a default server-mode write has always done.
+  The `--dolt-auto-commit` help also stops claiming `Default: off`. On a
+  shared server, staging is table-level, so an `on`-mode writer's commit may
+  sweep up another client's deferred rows — deferral bounds who *creates*
+  commits, not commit contents.
+
+  Scope: embedded and direct SQL-server modes. Proxied-server routes never
+  apply auto-commit policy (they short-circuit before it resolves), so
+  batch/off remain inert there — tracked as a follow-up. A deployment that
+  had explicitly configured `dolt.auto-commit: off` from the old help text
+  note: in server mode that was behaving like `on`; it now genuinely stops
+  minting version commits until an explicit `bd dolt commit`.
+
+- **The no-ID "last touched issue" fallback on `bd update` / `bd close` is
+  now interactive-only** (bd-m00pb,
+  [#4839](https://github.com/gastownhall/beads/pull/4839)).
+  Previously a scripted `bd update $ID ...` with an accidentally empty `$ID`
+  silently mutated whatever issue was touched last — a real agent session
+  corrupted an unrelated closed bead this way. The missing-ID refusal happens
+  in argument validation, before any store open, migration, or auto-import
+  side effect. The fallback now requires stdin to be a terminal;
+  `BD_NON_INTERACTIVE=1` and `CI=1/true` also disable it. Scripts that
+  intentionally relied on it can set `BD_LAST_TOUCHED_FALLBACK=1` (or `=0` to
+  disable the fallback everywhere). Explicit IDs and `bd show --current` are
+  unaffected.
+
+- **A dated defer now means what it says: the issue returns to the ready front
+  when the date passes** (bd-i8qx8). `bd defer --until` and `bd update --defer`
+  set `status=deferred` plus a `defer_until` timestamp, but nothing ever
+  flipped the status back — so an expired defer stayed invisible to `bd ready`
+  forever until a human ran `bd undefer`. One deployment measured 241 issues
+  (including P1s) silently dark this way, regenerating daily from
+  correct-looking automation.
+
+  Ready-front reads and claims (`bd ready`, `bd ready --claim`, `bd list
+  --ready`, and the serve/proxied Reader roles) now run a lazy wake sweep
+  first: every issue (and wisp) with `status=deferred` and `defer_until <=
+  now` flips to `status=open, defer_until=NULL` — byte-identical to what `bd
+  undefer` writes, so a later dateless re-defer cannot inherit a stale past
+  date. Each wake records a `status_changed` event (actor `bd-defer-wake`).
+
+  What does NOT change: a **dateless** defer (`bd defer` with no `--until`,
+  `defer_until` NULL) is the indefinite icebox and never auto-wakes — `bd
+  undefer` remains its only exit. The sweep is a no-op when nothing has
+  expired (no dolt commit is minted), advisory by contract (a ready listing
+  never fails because the sweep could not run — strict `--readonly` skips it),
+  and identical in embedded, server, and proxied-server modes.
+
+- **`bd delete --cascade` no longer marks LIVE issues as deleted in other
+  issues' text** (bd-x82so). When the deletion named a wisp, the set used to
+  rewrite `[deleted:<id>]` citations was computed differently from the set that
+  was actually deleted: dependents reachable only through a wisp root were left
+  in place, and then their neighbours' `description`, `notes`, `design` and
+  `acceptance_criteria` were rewritten to say those still-present rows had been
+  deleted. `bd wisp gc` ran exactly this path, because it hardcodes cascade.
+
+  **Text already corrupted by earlier builds is NOT repaired.** Those are stored
+  bytes and nothing here scans for them; a `[deleted:<id>]` marker naming a row
+  that still exists is a leftover from a pre-fix build. Searching for markers
+  whose id is still present will find them.
+
+  Three consequences of the same fix, all on the direct and embedded routes and
+  all converging onto what the team-server route already did:
+
+  - `bd delete <wisp> --cascade` now deletes the wisp's dependents in **both**
+    planes, as `--cascade` has always claimed. It previously stopped at the
+    wisp, reported only what it deleted, and gave no sign it had done less than
+    asked. Anyone relying on that under-deletion will see more rows go — and
+    `bd wisp gc` now removes durable rows hanging off abandoned wisps.
+  - `bd delete <wisp>` with a durable dependent, unforced, is now **refused**
+    with `issue <id> has dependents not in deletion set`. It previously
+    succeeded and silently orphaned the dependent.
+  - `bd delete <wisp> --force` now lists that dependent in the orphan report,
+    where it previously reported nothing, and the removed cross-plane edge is
+    counted.
+
+  The two set computations are gone: one `DeletionSet`, resolved once, is handed
+  to the neighbourhood read, the delete and the rewrite, so they cannot drift
+  apart again.
+
+- **`bd query` no longer drops matches from an `OR` or `NOT` query** (bd-pohmh).
+  **Your results will change, and they change by getting bigger.** To answer an
+  expression the storage filter cannot express, both routes fetched
+  `max(3 × --limit, 100)` rows and applied the expression to those in memory. A
+  match past that window was absent from the page — and the truncation hint said
+  nothing, so the answer looked complete. `bd query "type=bug OR label=urgent"`
+  over a workspace with more than a hundred issues has been returning an
+  arbitrary prefix of its answer.
+
+  The window is gone: the expression is now evaluated against every candidate
+  row, the page is the first `--limit` MATCHES, and the truncation hint is
+  exact. **The cost is real and worth knowing:** a broad `OR`/`NOT` expression
+  over a large workspace now reads every row its plain filters admit, where it
+  used to read at most a few hundred. Narrow the expression — the parts of it
+  that ARE plain filters still bound the read — if that matters to you.
+
+  Two smaller changes ride along. `bd query --offset N` **now works with
+  `OR`/`NOT` expressions**, where it used to be refused outright: the offset
+  skips matches, which is only meaningful now that every match is seen.
+  `--offset` with `--sort` is still refused, with new wording, and so is a
+  malformed expression: both messages now come from one place instead of one per
+  route.
+
+- **`bd purge --pattern` and `bd prune --pattern` no longer report success on a
+  malformed glob** (bd-pn231). Both routes matched patterns with the error
+  return of `filepath.Match` discarded, so `bd prune --pattern '[' --force`
+  printed "No closed beads to prune" and exited 0 — indistinguishable from a
+  correct pattern over an empty set. A pattern the glob syntax refuses is now an
+  error naming the pattern, on both routes.
+
+- **`bd purge --dry-run` and `bd prune --dry-run` no longer fail on sweeps the
+  real run completes** (bd-pn231). The preview asked for the refuse-if-any-
+  external-dependent path while the confirmed run asked for the force path, so a
+  dry run could report "has dependents not in deletion set" for a sweep
+  `--force` finishes by orphaning them — and the CLI then swallowed the error
+  and printed zeros. The preview and the run now ask the same question.
+
+### Added
+
+- **`GET /v0/beads/dependencies/blocking` — the blocking decoration `bd list`
+  prints, over HTTP** (bd-5k21g). `bd serve` now answers
+  `?ids=bd-abc&ids=bd-def` with, per requested id, its open blockers, the beads
+  it blocks and its open parent — the derived summary `bd list` renders as
+  `blocked by:` and `blocks:`, from the same `issueops.BlockingAnnotator` both
+  CLI routes call. `capabilities` gains `dependencies.blocking`.
+
+  It is not a mode of `GET /v0/beads/dependencies`: that one returns stored edge
+  rows and applies nothing, this one applies the status rule and separates the
+  parent edge from the blocking ones. It is also not a page — the number of ids
+  the caller named is what bounds it, so there is no `limit` and no cursor. An
+  id that names nothing is annotated bare rather than reported missing, which is
+  the same answer the CLI gives.
+
+- **`GET /v0/beads/dependencies/tree` — the `bd dep tree` walk over HTTP**
+  (bd-lx5iu). `bd serve` now answers a recursive walk from one root —
+  `?root_id=bd-abc&direction=both&max_depth=3&status=open` — with the flat
+  `TreeNode` list `bd dep tree --json` emits, from the same
+  `issueops.TreeWalker` both CLI routes call. `capabilities` gains
+  `dependencies.tree`.
+
+  It is a sibling of `GET /v0/beads/dependencies` rather than a mode of it: that
+  one answers raw stored edge rows for many anchors at one hop, this one recurses
+  from a single anchor. A `root_id` that names nothing is a 404 here, where an
+  unknown `issue_id` there is reported in `missing` — one anchor leaves no other
+  answer to preserve. There is no `max_rows`: the defensive cap is a CLI circuit
+  breaker and refusing a whole answer is not something this surface offers a
+  remote client.
+
+- **`GET /v0/beads/issues:query` — the `bd query` expression language over
+  HTTP** (bd-pohmh). `bd serve` now answers boolean expressions —
+  `?q=type%3Dbug+OR+label%3Durgent` — with the same page shape the ready listing
+  returns, under the same completeness guarantee as the CLI, because both call
+  one `issueops.Querier`. It is the only operation on the surface that takes a
+  disjunction; every filter parameter of `GET /v0/beads/issues` narrows. There
+  is no cursor and no `offset`: a predicate query's matching set is assembled
+  outside the database, so there is no keyset position to encode. `capabilities`
+  gains `issues.query`.
+- **`POST /v0/beads/issues:delete` — deleting named beads over HTTP**
+  (bd-x82so). `bd serve` gains the second destructive operation on its surface:
+  a body of `ids` plus `cascade`, `force` and `dry_run`, answering with the
+  counts and the orphan list. It calls the same `issueops.Deleter` `bd delete`
+  calls, so the dependents guard, the all-or-nothing id resolution and the
+  reference rewrite are the library's rather than the handler's — the endpoint
+  cannot orphan a graph by omission. `cascade` and `force` both default false,
+  which is the guarded mode. `capabilities` gains `issues.delete`.
+- **`POST /v0/beads/issues:batchCreate` — creating many issues over HTTP**
+  (bd-lu170). `bd serve` gains the second write on its surface and the first
+  one that creates rows: a request carrying an `actor` and up to 100 items is
+  created as ONE transaction, or none of it is. It runs on the new
+  `issueops.BatchCreator` role that both `bd create --file` routes now call,
+  and `capabilities` gains `issues.batchCreate`.
+
+  **The server assigns every id.** There is no `id` member on an item, so this
+  operation can never adopt or overwrite a stored row; the generated ids come
+  back in `items`, in request order, which is the only place a client can learn
+  them. `bd import` remains the upsert surface and is not published here.
+
+  A dependency target may name an issue the workspace holds, an item created
+  EARLIER in the same request, an `external:` reference, or an id belonging to
+  another repository. Anything else is a `400` and nothing is created. Hooks do
+  not fire and the per-command auto-commit machinery does not run, exactly as
+  for `POST /v0/beads/issues/{id}:claim`.
+
+- **`POST /v0/beads/issues:sweep` — bulk clearance of closed beads over HTTP**
+  (bd-pn231). The operation behind `bd purge` (`tier: ephemeral`) and
+  `bd prune` (`tier: durable`), on the new `issueops.Sweeper` role both CLI
+  routes now call. `capabilities` gains `issues.sweep`.
+
+  **This is the first DESTRUCTIVE operation on the surface, and nothing it
+  deletes comes back.** `bd serve` binds loopback and has no authentication, so
+  anyone who can reach the port can now clear closed beads: `--help` gained a
+  DESTRUCTIVE OPERATIONS section and the `--allow-non-loopback` warning says so.
+  A `durable` sweep with neither a cutoff nor a pattern is refused by the role
+  itself rather than by the handler, and `dry_run: true` costs the same request
+  without writing anything.
+
+  **`protect_referenced` defaults to `true` here**, where the CLI's equivalent
+  (`--ignore-references`) is opt-out. The local flag and the remote member
+  therefore disagree on purpose: this surface has no authentication, and a
+  remote caller who omits a member should not get a weaker guard than the
+  operator typing the same sweep locally. Send `protect_referenced: false` to
+  match the CLI default.
+
+- **`GET /v0/beads/config` and `GET /v0/beads/config/{key}` — the workspace's
+  stored settings over HTTP** (bd-kzepq). `bd serve` now answers for the
+  settings plane `bd config list` and `bd config get` read. Both operations run
+  on the new `issueops.WorkspaceConfig` role the CLI reaches through the same
+  accessor, and `capabilities` gains `config.list` and `config.get`.
+
+  **A setting whose KEY marks it as credential-bearing** — the name contains
+  `token`, `secret`, `password` or an API-key spelling, which
+  `notion.token` does — **is published with `redacted: true` and no `value`.**
+  Withheld values are OMITTED rather than masked, so a client cannot mistake a
+  placeholder for configuration. The CLI is unchanged and still prints stored
+  values in full: its caller already holds the database, and this surface has
+  no authentication.
+
+  There is no HTTP WRITE, deliberately. `bd config set` routes most keys to
+  `config.yaml` or to git config before the database is ever reached, and both
+  live on the client's filesystem, so a server-side write of (say)
+  `export.auto` would return success and land a row nothing reads. The
+  multi-source views — `bd config show`, `drift`, `apply`, `validate` — are
+  off the role and off the wire for the same reason.
+
+- **`bd serve` runs on a registered storage backend.** A downstream
+  distribution that registers a backend
+  (`github.com/steveyegge/beads/backend`.`Register`) could already use it from
+  every ordinary `bd` command — `bd list`, `bd create` and friends dispatch
+  the store open through the registry — but `bd serve` alone reimplemented a
+  creation path of its own, hard-wired to Dolt's SQL wire, and refused the
+  workspace before it got there. It now uses the store the root command
+  already opened, through the same registry dispatch: zero creation calls of
+  its own, so there is one creation path rather than two. The two issue roles
+  are taken from BENEATH the workspace's hook decorator, keeping the
+  documented "hooks do not fire" contract (`httpapi.Listen` refuses a
+  hook-firing role rather than trusting the caller), and the store's lifecycle
+  stays where it was — opened and closed by the root command, closed only
+  after the server has drained. The startup line names the source
+  (`db=roles`) and the backend (`mode="<name> (registered backend)"`).
+
+  The permanent refusal is unchanged and unweakened: an embedded-Dolt
+  workspace is still refused, because its commit protocol runs outside the SQL
+  transaction and this server's per-request atomicity would be a lie there.
+  The classification consults the registry before any Dolt-mode signal, which
+  is the order the store open already resolves them in — and which also fixes
+  a latent `CGO_ENABLED=0` bug where a registered workspace was handed to the
+  Dolt provider and either failed with a misleading Dolt error or connected to
+  a defaulted host and served the wrong database.
+
+### Changed
+
+- **BREAKING: `bd config list` and `GET /v0/beads/config` no longer enumerate
+  the `kv.` plane, which is where `bd remember` memories live.** Memories and
+  generic `bd kv` values are stored as config rows under `kv.` — user data
+  riding in the settings table because there is one table, not because they are
+  settings — and both doors onto the settings plane were listing them with
+  their values. On the HTTP door that meant an unauthenticated
+  `GET /v0/beads/config` handed every stored memory to anything that could
+  reach the port, and the surface's redaction is no defence there: it decides
+  on the KEY name, while a memory's content is in the VALUE, so a memory
+  containing a credential under an innocuous slug was served verbatim.
+
+  The exclusion is in the shared role both doors call, not in the HTTP handler,
+  so the CLI and the API cannot drift apart on what a setting is. The whole
+  `kv.` prefix goes, not just `kv.memory.`.
+
+  **What still works:** `bd memories`, `bd recall` and `bd kv list` are
+  unaffected — they read the store directly and are the purpose-built views
+  over those rows. So are `bd prime`'s memory injection and export's memory
+  extraction. Point access is unchanged and deliberately so: `bd config get
+  kv.foo` and `GET /v0/beads/config/kv.foo` still answer a key named exactly,
+  and `bd config set` / `bd config unset` still write and remove one. The
+  enumeration was what made a memory discoverable; naming one you already know
+  is a different question, and refusing it would take away the escape hatch of
+  removing a wedged memory through `bd config unset`.
+
+  **What breaks:** a script parsing `bd config list` or its `--json` output for
+  `kv.` rows. Generic `kv.` rows have no other HTTP view today.
+
+- **BREAKING: `bd --readonly serve` is now refused instead of binding a server
+  that cannot do what it advertises.** On a Dolt SQL-server workspace this
+  previously bound a fully functional, fully writable server — the flag was a
+  silent no-op there — so anyone scripting `bd --readonly serve` as a "safe"
+  read server loses it on upgrade and should drop the flag. The advertised capability set is a property of the
+  build and includes the issue-claim operation, so under strict readonly the
+  two database sources degraded differently and silently: a registered backend
+  bound on its read-only store and answered every claim with an opaque 500
+  while still advertising `issues.claim`, and a Dolt SQL-server workspace built
+  its own writable provider and let every claim land, so the flag bought
+  nothing. `bd serve` now refuses to start under `--readonly` (or `readonly` in
+  config), before it resolves the workspace, so the answer is the same on both.
+
+### Fixed
+
+- **`GET /v0/beads/context` and `bd context` no longer describe every
+  workspace as Dolt.** The shared identity projection hardcoded
+  `backend: dolt` and copied `dolt_mode` and `database` unconditionally — and
+  both of those default rather than fail, so a workspace on a registered
+  backend was reported as `backend="dolt"`, `dolt_mode="embedded"`,
+  `database="beads"`: a confident description of a topology it is not on, on
+  the one endpoint automation is told to trust for a server's identity. The
+  backend is now named as the store open resolves it, and the two Dolt-derived
+  values are reported only for the Dolt backend; a registered backend reports
+  the empty string for both, which is the only value `bd` can assert about a
+  backend it does not implement. No wire field is renamed, retyped or dropped
+  — both remain required strings, and the `v0` shape is unchanged.
+
 - **Public surface for out-of-tree storage backends** (bd-h3dib.2). The
   storage backend contract and its conformance suite are now importable by
   external Go modules — the conformance-gated external-backend path promised
@@ -168,6 +709,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `scoped` boolean so a reclaim log distinguishes a scoped sweep from a global
   one.
 
+- **Every command that had a role now reaches it through the accessor, on both
+  routes** (facade waves 1-4). This is the close of the programme: twenty-three
+  capability accessors on the storage substrate, each answering a role interface
+  in the leaf package `issueops`, each with a backend-independent conformance
+  suite run against the Dolt server store, the embedded Dolt store and the
+  unit-of-work provider, and each reached by the CLI's direct route, the CLI's
+  `--proxied-server` route and — where the capability is published — one HTTP
+  operation, all calling the same role. `bd serve` publishes sixteen
+  capability-bearing operations, twelve of them added by the programme, every one written into
+  `internal/httpapi/spec/openapi.v0.yaml` before its handler existed.
+
+  **What did NOT get a role is as deliberate as what did.** `bd show` and
+  `bd close` were already behind `Reader` and `BatchCloser`/`Lifecycle` on both
+  routes, so there was nothing to converge. `bd version` prints build
+  information and a role is an interface onto a substrate — the one part of it
+  that touches state, the recorded-version marker, got `VersionReconciler`
+  instead. Most of `bd init` CREATES the substrate a role would be reached
+  through; only the workspace identity is reachable as a store capability, and
+  that is what `Bootstrapper` and `InitVerifier` are. `bd create --graph` is
+  deferred on the record: it is an UPSERT with caller-supplied symbolic names
+  and `BatchCreator` is create-only with server-assigned ids, so folding them
+  would have meant one role with two incompatible id policies.
+
 - **A shared semantic contract for every issue role** (bd-yby99). Seven of the
   eight role interfaces in `issueops` now have a backend-independent
   conformance suite in `backend/conformance`, run against the Dolt server store,
@@ -231,6 +795,334 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Dolt-only in persistence tests.
 
 ### Changed
+
+- **`bd delete --force` on a TEAM SERVER now orphans dependents instead of
+  deleting them** (bd-x82so). **Read this one before you upgrade a team-server
+  script.**
+
+  Against a proxied server, `bd delete X --force` used to delete X *and its
+  whole dependent subtree*, and `--cascade` was refused outright with "not
+  supported in proxied-server mode (delete always cascades)". There was no way
+  to delete one bead on a team server without taking everything that depended on
+  it, and asking for the safer behaviour was an error.
+
+  Both routes now mean the same three things by the same two flags, which are
+  the local database's meanings, unchanged:
+
+  | you type | you get |
+  |---|---|
+  | `bd delete X` | REFUSED if anything outside the request depends on X |
+  | `bd delete X --force` | X is deleted; its dependents survive, ORPHANED |
+  | `bd delete X --cascade --force` | X and its whole dependent subtree are deleted |
+
+  **A team-server script that relied on the implicit cascade will start leaving
+  orphans.** Add `--cascade` to it. The proxied `--json` result gains
+  `orphaned_issues` so a script can see them; a cascade leaves it null.
+
+- **Proxied `bd init` ADOPTS an existing project identity instead of
+  overwriting it** (bd-zl3u8). **This one silently corrupted shared databases.**
+  Against a team server whose database another rig had already identified,
+  `bd init --proxied-server` wrote its own locally-derived issue prefix and
+  project id straight over the stored pair — renaming every id the co-tenant was
+  about to mint. It now reads the identity first and prints "Adopted project
+  identity from existing database", which is what the direct route has always
+  done. There is no flag that restores the overwrite.
+
+  Two consequences ride along. `bd init` **no longer fills in a missing project
+  id** on a substrate that already carries an issue prefix: half-identified is
+  now adopted as it stands rather than completed, because the guard that stops
+  the overwrite above cannot tell a half-provisioned workspace from a shared one
+  mid-write. Re-identifying is an explicit act with no command yet; if you have
+  such a workspace, it keeps working and it stays half-identified. And `bd init`
+  **with `BEADS_DIR` pointing outside the repository now records a project id**,
+  taken from that workspace's own `metadata.json`, where it previously recorded
+  none and left exactly the state the new refusal will not complete.
+
+- **`bd list` and `bd children` print blocker ids in ASCENDING ORDER**
+  (bd-5k21g). The `blocked by:` and `blocks:` ids in compact and agent output
+  came out in query order, which is map-iteration and query-plan dependent, so
+  an unchanged workspace could print different bytes on two consecutive runs.
+  They are now sorted ascending with repeats collapsed, on both routes. Only
+  rows with two or more live blockers change; a diff-based script that pinned
+  the old order was pinning an order the database never promised.
+
+- **`bd delete <one-id>` without `--force` now REFUSES when the bead has an
+  outside dependent**, instead of printing a preview and exiting 0 (bd-x82so).
+  This is the direct route converging with itself: the multi-id path and
+  `--dry-run` have always refused here, and only the unconfirmed one-id preview
+  did not. The refusal names the bead and says to use `--cascade` or `--force`,
+  which is the same sentence the other two paths already printed.
+
+- **`bd delete` rewrites text references INSIDE the delete transaction**
+  (bd-x82so). The direct route deleted the rows in one transaction and then
+  rewrote `[deleted:ID]` into the neighbouring beads' descriptions afterwards,
+  discarding every update error it got; a failure in the window left a workspace
+  whose beads were gone and whose descriptions still cited them by id. The whole
+  operation — the existence probe, the dependents guard, the cascade expansion,
+  the deletion and the rewrite — is now one transaction on the new
+  `issueops.Deleter` role, shared by both routes and by `bd serve`.
+
+  **The trade, said out loud:** the transaction is now as large as the deletion
+  plus its graph neighbourhood, so a delete whose neighbourhood is big enough to
+  exceed the backend's write timeout fails whole instead of deleting the beads
+  and leaving the text stale. Split a very large `--from-file` batch.
+
+- **`bd delete` refuses the whole request when any id names no bead**
+  (bd-x82so), on both routes and under `--dry-run`. The multi-id path already
+  did; the guarantee is now the role's, so nothing partial is deleted before the
+  typo is reported.
+- **`bd dep tree --direction=both` now sees ONE database state** (bd-lx5iu).
+  Both routes made two independent reads — the dependency walk and the dependent
+  walk — with no transaction spanning them, so an edge added between them could
+  leave the two halves of the picture describing different graphs. The whole
+  walk, both directions, now runs inside one transaction on the new
+  `issueops.TreeWalker` role.
+
+- **`bd dep tree` on a team server resolves partial ids and honors
+  `--max-rows`** (bd-lx5iu). Two things the `--proxied-server` route did not do
+  and the direct route did.
+
+  `bd dep tree a1b2` used to fail there: the argument went to storage verbatim,
+  so the abbreviation that worked on a direct workspace did not work on a shared
+  one. It resolves now, and an id that resolves to nothing reports the same
+  lookup failure the direct route reports.
+
+  `bd dep tree X --max-rows N` used to be refused outright — "not supported in
+  proxied-server mode" — because the unit-of-work path threaded no cap. The cap
+  now rides the role's request, so all three backends enforce it and the flag
+  means the same thing wherever the command runs. It is still POST-HOC: a tree
+  walk has no query filter to thread a cap through, so the full tree is built
+  and then counted.
+
+- **`bd dep tree --show-all-paths` is documented as the no-op it always was**
+  (bd-lx5iu). Nothing has ever read the flag. It was accepted and passed down to
+  a walk that ignored it, so a node reachable by two paths has always been shown
+  once, under the first path that reached it. The flag is still accepted so no
+  script breaks, its help text now says it is ignored, and the one-visit rule is
+  a stated promise of the role rather than an accident of the walk. `TreeNode`'s
+  `truncated` member is dead in the same way: it is always `false`, because a
+  node beyond `--max-depth` is absent from the answer rather than present and
+  flagged.
+
+- **`bd purge` and `bd prune` select and delete in ONE transaction** (bd-pn231).
+  The direct route used to search in one transaction and delete in another, so a
+  bead closed between the two could be counted and not deleted, or deleted and
+  not counted. Both routes now run the whole sweep as one act on the new
+  `issueops.Sweeper` role, and the count a sweep reports is the set it deleted.
+
+  **The trade is worth knowing before you run a very large purge on a team
+  server.** One transaction means the Dolt server backend can no longer batch
+  wisp deletions 200 at a time, so a purge big enough to exceed Dolt's write
+  timeout now fails whole instead of deleting part of the workspace and
+  reporting nothing. Sweep in slices (`--pattern`, `--closed-before`) if you are
+  clearing a very large backlog.
+
+  The version-control entry for a sweep is now `bd: sweep <n> <tier> bead(s)` on
+  both routes, where the proxied route wrote `bd: prune <n> bead(s)` and the
+  direct route wrote `bd: delete <n> issue(s)`, naming neither the command nor
+  the tier. Scripts that grep commit messages for the old spellings need
+  updating.
+
+- **`bd list --max-rows` reports its own malformed value first** (bd-b34o7).
+  The row cap now rides the list request rather than being stamped onto the
+  filter after it was built, which moves the flag's validation ahead of the
+  filter's. `bd list --max-rows -1 --status bogus` now reports the `--max-rows`
+  usage error where it used to report the invalid status; the exit code is
+  unchanged and it takes two bad arguments to reach.
+
+- **`bd create --file` is all or nothing, and its plan-wide flags now mean
+  something** (bd-lu170). Both routes build one `issueops.CreateBatchRequest`
+  and ask for the new `BatchCreator` role, so a markdown plan is created as one
+  act with one history entry on either.
+
+  **A file the workspace refuses now creates NOTHING.** Each template goes
+  through the same validation a single `bd create` goes through — the
+  workspace's configured types and statuses, the field lengths, the
+  create-only guard — and a template that fails takes the whole file down with
+  it. **Re-running a file that used to fail can therefore give a different
+  outcome than it did before**, because the run before it may have landed rows
+  this one refuses to duplicate; check `bd list` before re-running a plan that
+  errored on an older version.
+
+  **A declared dependency on an id that does not exist is now an error rather
+  than a silently dropped edge.** The direct route used to create the issues
+  and leave the edge out, with nothing on stdout or stderr saying so, so a plan
+  file with a typo produced a graph that looked complete and was not. An
+  `external:` reference and an id belonging to another repository are still
+  written, exactly as `bd dep add` accepts them; only a target that shares the
+  workspace's own prefix and names no row is refused.
+
+  **`--ephemeral`, `--no-history`, `--mol-type` and `--validate` are honoured
+  on the direct route.** All four were accepted and silently ignored there
+  while the proxied route acted on them, so `bd create --file plan.md
+  --ephemeral` created durable issues on a local workspace and wisps on a team
+  server. `--validate` (and `validation.on-create`) now lints every template on
+  both routes, which is the policy a single-issue create has always applied.
+  Issues created from a file also carry `created_by` and `owner`, as a
+  single-issue create does.
+
+  **`bd create --file --json` emits the STORED rows on both routes.** Each
+  entry is the post-create snapshot the role reads back — with `owner`,
+  `created_by` and dependency records carrying their own `created_at`,
+  `created_by` and `metadata` — where the direct route used to marshal the
+  structs it had built in memory. Additive: no member was removed, and both
+  routes now emit one shape.
+
+  Proxied `--file` loses its `config.yaml` fallback for `types.custom`, the
+  same convergence onto the direct route's database-only vocabulary that
+  landed for single-issue create (bd-7oyh5).
+
+  `bd create --graph` is untouched: an upsert over a declared shape is a
+  different contract, and it gets its own role when it gets one.
+
+- **Proxied `bd ready --json --limit N` publishes `pagination.total`**
+  (bd-s10oa). Under `BD_JSON_ENVELOPE=1` the direct route has always carried
+  the size of the ready front beside a truncated page; the proxied route
+  emitted no `total` key at all, so the same script read a number against a
+  local workspace and nothing against a team server. Both routes now answer
+  from the new `issueops.ReadyCounter` role. The count is only asked for when
+  the page came back full, so an untruncated listing costs nothing extra.
+
+- **Proxied `bd dep list a b c` reports ids that name nothing** (bd-nhsno). The
+  route handed its raw arguments to the batch read, whose answer simply has no
+  entry for an id nothing matched, so a typo printed `<id> has no dependencies`
+  — a clean graph — instead of a warning. It now prints
+  `warning: no issue found: <id> (skipped)` on stderr, the line the direct
+  route has always printed, and omits the anchor from stdout. Emitted in
+  `--json` mode too, on stderr, so the document stays a flat array.
+
+  Two smaller shape changes ride along, on both routes: a repeated anchor is
+  answered ONCE, at its first mention, rather than twice; and
+  `bd dep list --type X a b` prints `<id> has no dependencies` instead of a
+  section header with no rows under it for an anchor whose every edge the
+  filter rejected.
+
+- **`bd status --assigned` reports why it failed** (bd-4ze25). The direct route
+  swallowed every underlying error and printed the causeless
+  `failed to get assigned statistics`. Both routes now report the same
+  underlying error. Relatedly, the proxied `--no-blocked` warning is derived
+  from the ANSWER rather than printed unconditionally before the query, so it
+  is correct for any backend and disappears by itself when a backend gains a
+  fast path.
+
+- **`bd dep cycles` output is deterministic, and no longer shortens a cycle it
+  cannot fully describe** (bd-wfkbv). Two changes, both visible in bytes.
+
+  The report is now CANONICAL: each cycle's members are rotated so the lowest
+  id comes first, and the cycles are sorted against each other. Two runs
+  against an unchanged database previously disagreed — the walk iterated a Go
+  map, so both the order of the cycles and each one's starting point moved
+  between runs, `--json` included, and on a graph with overlapping cycles even
+  the SET of cycles could differ. Diffing two snapshots is now meaningful.
+
+  A cycle whose member has no row behind it is now reported HONESTLY. Members
+  that could not be looked up were silently dropped from the path, so a
+  three-node cycle rendered as a two-node one and looked complete, and a cycle
+  none of whose members could be looked up vanished from the report and from
+  the `Found N dependency cycles` count. Every member is now carried with its
+  id, its description is omitted rather than the member, and the cycle is
+  marked partial. The count no longer shrinks because rows went missing.
+
+  `--json` therefore emits a NEW SHAPE: an array of
+  `{"members": [{"id", "issue"?}], "partial": bool}` where it used to emit an
+  array of arrays of issues. The `issue` member is the same issue object as
+  before and is absent — never null — for a member this workspace holds no
+  record of. Scripts that read `bd dep cycles --json` need updating.
+
+  The post-add cycle warning that `bd dep add`, `bd dep --blocks` and
+  `bd link` print is the same sweep and gains the same two properties, on both
+  the direct and the proxied route.
+
+- **The v0 HTTP surface reaches twelve operations** (facade wave 2). This
+  release adds six: `GET /v0/beads/stats` (bd-4ze25),
+  `GET /v0/beads/dependencies/cycles` (bd-wfkbv), `GET /v0/beads/dependencies`
+  (bd-nhsno), `GET /v0/beads/ready:count` (bd-s10oa) and the two config reads
+  (bd-kzepq). Every one answers from the SAME `issueops` role its `bd` command
+  reaches, so the two surfaces cannot drift: the operation is written into
+  `internal/httpapi/spec/openapi.v0.yaml` first and the wire types are
+  generated from it. `capabilities` now carries `ready.list`, `ready.count`,
+  `issues.list`, `issues.get`, `issues.claim`, `stats.get`, `config.list`,
+  `config.get`, `dependencies.cycles`, `dependencies.list`.
+
+- **`GET /v0/beads/stats` — the workspace summary over HTTP** (bd-4ze25). The
+  same envelope `bd status --json` prints, minus `recent_activity`, which no
+  shipped code path populates. `skip_blocked` is a HINT: a backend with no
+  cheaper path answers with the full numbers and says so through
+  `blocked_count_skipped`, which is derived from the answer rather than echoed
+  from the request. `assignee` scopes the summary to one actor and is refused
+  when empty rather than answering with the unassigned rows.
+
+- **`GET /v0/beads/dependencies` — stored edge rows for several issues at
+  once** (bd-nhsno). The shape `bd dep list a b c --json` emits. An id that
+  names nothing is reported in the response's `missing` member rather than
+  turning the whole call into a 404, so a batch keeps the answers for the ids
+  that WERE found; an edge whose target this database holds no row for is still
+  an edge and is returned as stored.
+
+- **`GET /v0/beads/ready:count` — the size of the ready front** (bd-s10oa).
+  Takes the same filter vocabulary as `GET /v0/beads/ready`, decoded once by
+  the same code so the two cannot admit different parameters, and takes no
+  `limit` and no `sort`: a cardinality has no page and no order.
+
+- **`bd serve` publishes `GET /v0/beads/dependencies/cycles`** (bd-wfkbv). The
+  cycle sweep is now an HTTP operation as well as a command, answering from the
+  same role, and `capabilities` gains `dependencies.cycles`. It takes no
+  parameters and is not paginated: truncating would shrink the count, which is
+  the number an operator acts on. `bd link` on a team server also runs its
+  cycle sweep and its title lookups AFTER the write commits rather than inside
+  it, so the warning describes a graph other clients can see.
+
+- **`bd count` is one implementation again** (bd-m8hn7). The command had two:
+  the direct route opened its own store and the proxied route re-parsed the
+  same flags against a unit of work, and each independently loaded the
+  workspace list configuration before applying `--include-infra`. The
+  cardinality contract `bd count` keeps with `bd list` was therefore asserted
+  once and implemented twice. Both routes now go through the new
+  `issueops.Counter` role, which builds its filter with the same shared
+  builder `bd list` uses. Text and `--json` output are unchanged on both
+  routes — the committed protocol corpus fixture for `bd count` is
+  byte-identical — so this is a change you should only notice if the two
+  routes previously disagreed. Two behaviours are now written down as
+  promises rather than left as accidents: an unrecognised `--status` or
+  `--type` still matches nothing and answers `0` rather than refusing (where
+  `bd list` validates both), and a grouped count's `Total` is computed
+  independently of its buckets, so overlapping dimensions such as labels do
+  not sum to it.
+
+- **Proxied `bd create`, `bd reopen` and `bd update` emit the same `--json`
+  shape as their direct counterparts** (bd-7oyh5, bd-1f5a2, bd-xt6de). Each of
+  the three now answers from the hydrated post-state snapshot the
+  `issueops.Lifecycle` role returns instead of a bare row read, so all three
+  gained the `labels` field they were silently dropping, and — as on the
+  direct route — dependency records are not included. Scripts that read
+  proxied output should expect the direct route's documented shape; nothing
+  was removed. `bd update --claim --json` is the one exception and still
+  strips labels.
+
+- **Proxied multi-id `bd reopen` records one history entry per id**
+  (bd-1f5a2). It wrote a single combined entry covering every id in the
+  batch; the direct route has always written one per id, and both routes now
+  do. On a team server a `bd reopen a b c` is consequently three round trips
+  and three Dolt commits rather than one, which a script reopening a large
+  batch will feel.
+
+- **Proxied `bd create` validates the way the direct route validates**
+  (bd-7oyh5). Its custom issue-type check no longer falls back to
+  `config.yaml` when the database has no custom types, its explicit-id prefix
+  guard no longer consults the YAML prefix overlay, and its `--type`,
+  `--status` and prefix refusals are worded as the role words them. The
+  direct route has never had either fallback, so this is convergence onto the
+  stricter of the two. The version-control entry a proxied create records
+  also changes text, from `bd: create <id>` to `create issue`: the role
+  publishes no field for a caller-supplied label, and no test asserted either
+  string.
+
+- **Proxied `bd update` error messages no longer name the stage that failed**
+  (bd-xt6de). "opening unit of work" and "committing" collapse into the
+  generic per-id update failure, and an update whose commit fails with a
+  context cancellation now aborts the batch instead of recording a per-id
+  verdict for it. This matches the choice `bd update --claim` already made
+  when it moved to the role. Exit codes are unchanged.
 
 - **An empty-string label is dropped rather than stored** (bd-yby99.29). Adding
   or replacing labels with an empty value wrote a `labels` row keyed on `''` on
@@ -660,6 +1552,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Multi-id `bd dep list` no longer changes its JSON shape on failure**
+  (bd-nhsno). The direct route used the batched edge read only `if err == nil`
+  and otherwise fell through to the neighbour path, which emits a different
+  document — issues, not edge rows — with no error and no warning. Worse, the
+  batched read was only ATTEMPTED when every resolved anchor shared one store,
+  so a cross-workspace batch emitted the wrong document every time rather than
+  only on failure. The read now goes through the new `issueops.EdgeReader`
+  role, taken per store, with the answers merged back into argument order, and
+  a failure is reported as a failure.
+
+- **`bd ready --claim` honours the directory-label scope** (bd-s10oa). The
+  branch that applies a directory's configured `directory.labels` default
+  tested the filter it had already written that default into, so it could never
+  fire. In a directory with `directory.labels` configured, `bd ready --claim`
+  therefore claimed from the WHOLE ready front while `bd ready` beside it
+  listed only the configured scope — handing an agent work the listing never
+  offered it. Both routes affected.
+
+- **Proxied `bd config set status.custom` and `types.custom` take effect
+  immediately** (bd-kzepq). Reads of the custom status and type vocabularies
+  are TABLE-first: they consult the normalized `custom_statuses` and
+  `custom_types` tables and fall back to the config string only when the table
+  is empty. The direct route has always rewritten the table in the same
+  transaction as the row; the proxied route wrote only the string. So on a team
+  server `bd config set types.custom "session"` reported success, `bd config
+  get types.custom` read it back, `bd doctor` re-verified against the string
+  and reported all-OK — and `bd create -t session` answered `invalid issue
+  type: session` for as long as the workspace lived. Both routes now project
+  the value into its table inside the same unit of work as the row, so the
+  setting and its effect land together or neither does.
+
+- **`bd config set-many issue_prefix=<x>` is refused, as `bd config set` has
+  always been** (bd-kzepq). `bd config set` rejects the workspace id prefix in
+  both spellings and points at `bd init --prefix`, `bd bootstrap` and
+  `bd rename-prefix`, each of which does work a config write cannot — seeding a
+  workspace that has none, or rewriting the ids that already exist. `set-many`
+  partitioned its pairs by source and wrote the database ones straight through,
+  so it walked past that guard and re-prefixed the workspace: beads created
+  before the write and beads created after it disagreed about their own
+  namespace, with nothing to reconcile them. Both verbs now refuse it, and so
+  does the substrate, so a future front door cannot miss it either.
+
+
+- **`bd create --id <id>` on a proxied server refuses an occupied id instead
+  of overwriting it** (bd-7oyh5). The direct route has always been create-only.
+  The proxied route passed no such flag, so `bd create --id bd-abc123 --title
+  ...` against an id that already existed silently upserted every column of
+  the resident issue — title, type, description, labels — and exited zero. The
+  original was gone, with no history entry naming a create and nothing in the
+  output to suggest anything had been replaced. Both routes now return
+  `ErrAlreadyExists` naming the id and leave the stored row untouched, across
+  the shared id space: an occupied durable id refuses a wisp create and an
+  occupied wisp id refuses a durable one. If you have automation that relied
+  on `--id` as an upsert, it should call `bd update`.
+
+- **Proxied `bd update --ephemeral` and `--no-history` move the issue instead
+  of flagging it in place** (bd-xt6de). The direct route sends these through an
+  atomic aggregate move: insert into the target plane, copy the auxiliary rows,
+  retarget inbound dependency edges, drop the lease, delete from the source.
+  The proxied route instead ran a plain column update on whichever table the
+  row already sat in, so a proxied `bd update --ephemeral` left the issue in
+  `issues` carrying `ephemeral = 1` — still durable, still versioned, still
+  replicated, but invisible to every wisp-plane read and skipped by JSONL
+  export. Both routes now perform the move. The inverse spellings
+  `--persistent` and `--history` appeared to work before only by accident:
+  moving a row that never left `issues` is a no-op that still clears the flag.
+  **This does not repair existing rows.** Any issue a proxied
+  `bd update --ephemeral` produced before this release is still in `issues`
+  with the flag set, and nothing here finds it; that needs its own migration.
+
+- **Proxied `bd reopen` reopens an issue in a configured done status**
+  (bd-1f5a2). The proxied handler short-circuited on `status != closed` and
+  reported "nothing to do" for any workspace-configured done status, so on a
+  team server an issue in a custom done state such as `verified` could not be
+  reopened at all while the same command worked locally. Both routes now go
+  through `issueops.Lifecycle.Reopen`, which spans the whole configured done
+  category. Reopening something genuinely not closed is still a no-op and
+  still says so.
+
 - **`bd update --parent` on a proxied server no longer leaves a stale parent**
   (bd-yby99.26). A parent id is a *set* assignment: setting it replaces every
   parent edge the child has, and clearing it removes them all. The unit-of-work
@@ -942,6 +1913,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wisps and embedded mode are unchanged. New metrics
   `bd.claim_verify_lost_total` and `bd.claim_verify_recovered_total` count
   loud failures and converted outcomes.
+
+- **Single-issue `bd create --id P.N` no longer leaves `child_counters` stale**
+  (one root cause of [#4750](https://github.com/gastownhall/beads/issues/4750);
+  the issue stays open — three other drift paths remain). `CreateIssueInTxWithResult`
+  only reconciled `child_counters` when the batch path called
+  `ReconcileChildCounters`; an explicit hierarchical `--id` never advanced the
+  parent's `last_child` high-water mark. Once such children were later
+  archived out of `issues`, `GetNextChildIDTx` no longer saw them and could
+  re-mint an already-used suffix — an ID collision with an archived issue.
+  The single-issue path now calls `ReconcileChildCounters` too, and its
+  changed tables are merged into the result so the reconcile actually gets
+  staged for commit.
 
 ## [1.1.2] - 2026-07-26
 

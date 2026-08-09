@@ -26,7 +26,17 @@ import (
 // a naming convention for generated wisp IDs, but promoted wisps keep their
 // ID while moving to the issues table (Ephemeral=false). Routing on the ID
 // would send promoted wisps back to the wisps table on re-insert.
+//
+// WispPlaneOverride, when set, wins over the flags. Import sets it from the
+// export stream's explicit "wisp" plane marker: a record carrying
+// no_history=true but NO marker is a promoted no-history wisp — a durable
+// issues-table row whose stray flag must not re-plane it into the wisps
+// table on re-insert, which is how export→import→export silently dropped
+// such rows' relations (bd-r9uce).
 func IsWisp(issue *types.Issue) bool {
+	if issue.WispPlaneOverride != nil {
+		return *issue.WispPlaneOverride
+	}
 	return issue.Ephemeral || issue.NoHistory
 }
 
@@ -164,7 +174,7 @@ func RecordEventInTable(ctx context.Context, tx DBTX, table, issueID string, eve
 // in the specified table. Supports counter mode for non-ephemeral issues.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func GenerateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix string, issue *types.Issue, actor string) (string, error) {
+func GenerateIssueIDInTable(ctx context.Context, tx DBTX, table, prefix string, issue *types.Issue, actor string) (string, error) {
 	// Counter mode only applies to the issues table (not wisps).
 	if table == "issues" {
 		counterMode, err := IsCounterModeTx(ctx, tx)
@@ -207,7 +217,7 @@ func GenerateIssueIDInTable(ctx context.Context, tx *sql.Tx, table, prefix strin
 }
 
 // IsCounterModeTx checks whether issue_id_mode=counter is configured.
-func IsCounterModeTx(ctx context.Context, tx *sql.Tx) (bool, error) {
+func IsCounterModeTx(ctx context.Context, tx DBTX) (bool, error) {
 	var idMode string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_id_mode").Scan(&idMode)
 	if err != nil && err != sql.ErrNoRows {
@@ -217,7 +227,7 @@ func IsCounterModeTx(ctx context.Context, tx *sql.Tx) (bool, error) {
 }
 
 // NextCounterIDTx atomically increments and returns the next sequential issue ID.
-func NextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, error) {
+func NextCounterIDTx(ctx context.Context, tx DBTX, prefix string) (string, error) {
 	res, err := tx.ExecContext(ctx, "UPDATE issue_counter SET last_id = last_id + 1 WHERE prefix = ?", prefix)
 	if err != nil {
 		return "", fmt.Errorf("failed to increment issue counter for prefix %q: %w", prefix, err)
@@ -258,7 +268,7 @@ func NextCounterIDTx(ctx context.Context, tx *sql.Tx, prefix string) (string, er
 
 // SeedCounterFromExistingIssuesTx scans existing issues to find the highest numeric suffix
 // for the given prefix, then seeds the issue_counter table if no row exists yet.
-func SeedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix string) error {
+func SeedCounterFromExistingIssuesTx(ctx context.Context, tx DBTX, prefix string) error {
 	var existing int
 	err := tx.QueryRowContext(ctx, "SELECT last_id FROM issue_counter WHERE prefix = ?", prefix).Scan(&existing)
 	if err == nil {
@@ -306,7 +316,7 @@ func SeedCounterFromExistingIssuesTx(ctx context.Context, tx *sql.Tx, prefix str
 // GetAdaptiveIDLengthTx returns the appropriate hash length based on database size.
 //
 //nolint:gosec // G201: table is a hardcoded constant
-func GetAdaptiveIDLengthTx(ctx context.Context, tx *sql.Tx, table, prefix string) (int, error) {
+func GetAdaptiveIDLengthTx(ctx context.Context, tx DBTX, table, prefix string) (int, error) {
 	var count int
 	err := tx.QueryRowContext(ctx, fmt.Sprintf(`
 		SELECT COUNT(*)
@@ -339,7 +349,7 @@ func DefaultAdaptiveConfig() AdaptiveIDConfig {
 }
 
 // GetAdaptiveConfigTx reads adaptive ID config from the database.
-func GetAdaptiveConfigTx(ctx context.Context, tx *sql.Tx) AdaptiveIDConfig {
+func GetAdaptiveConfigTx(ctx context.Context, tx DBTX) AdaptiveIDConfig {
 	cfg := DefaultAdaptiveConfig()
 
 	var probStr string
@@ -385,7 +395,7 @@ func ComputeAdaptiveLength(numIssues int, cfg AdaptiveIDConfig) int {
 }
 
 // GetCustomStatusesTx reads custom statuses from config within a transaction.
-func GetCustomStatusesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
+func GetCustomStatusesTx(ctx context.Context, tx DBTX) ([]string, error) {
 	detailed, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
 		return nil, err
@@ -528,7 +538,7 @@ func IsDoltNothingToCommit(err error) bool {
 }
 
 // ReadConfigPrefix reads and normalizes issue_prefix from the config table.
-func ReadConfigPrefix(ctx context.Context, tx *sql.Tx) (string, error) {
+func ReadConfigPrefix(ctx context.Context, tx DBTX) (string, error) {
 	var configPrefix string
 	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "issue_prefix").Scan(&configPrefix)
 	if err == sql.ErrNoRows || configPrefix == "" {

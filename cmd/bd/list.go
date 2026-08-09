@@ -191,10 +191,16 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if usesProxiedServer() {
-		if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-			return err
-		}
+		// The cap USED to be rejected here: the proxied query path threaded no
+		// MaxRows, so honoring it would have been silence. It threads one now
+		// (internal/storage/domain/db sizes its bound and enforces the cap
+		// through the same two functions the store seam uses), so this route
+		// answers *ErrTooManyRows the same way the direct route below does —
+		// same message, same exit code.
 		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+			if capErr := handleMaxRowsError(err); capErr != nil {
+				return capErr
+			}
 			return HandleError("%v", err)
 		}
 		return nil
@@ -204,24 +210,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		return HandleError("--offset is only supported under --proxied-server")
 	}
 
-	// `bd list` builds the filter rather than calling IssueReader(), because
-	// this filter feeds --watch, the hierarchical --parent tree, the text
-	// renderings that want []*types.Issue rather than a counted page, and the
-	// --max-rows cap stamped on below — none of which the Reader role
-	// expresses, and routing only the JSON path through it would fork the
-	// command in two.
-	//
-	// It shares CONSTRUCTION with the role unconditionally: the same
-	// issueops.ListRequest through the same builder, pinned by the builder's
-	// golden file.
-	//
-	// It shares EXECUTION — the same workapi.FinishPage, same sort, same trim,
-	// same has-more verdict — in every mode but one. The exception is the
-	// hierarchical --parent tree under pretty output below: it renders the
-	// recursive walk's own result and never reaches the epilogue, on this
-	// route or the proxied one. For the modes that do reach it (JSON, plain
-	// text, --watch, --ready) what differs from the HTTP listing is
-	// presentation and the --max-rows cap. See issueops.Reader's doc comment.
+	// `bd list`'s PAGE is on issueops.Reader. The filter is still built here
+	// because --watch and the hierarchical --parent tree consume it as a VALUE:
+	// the poll loop re-runs it on a ticker and the tree walk re-parents a copy
+	// of it at every level, neither of which a page can express. Building it
+	// unconditionally also keeps the page query ahead of the tree branch, so
+	// `--parent --pretty --max-rows N` still refuses on the cap where it did.
 	cfg, err := workapi.LoadStoreListConfig(rootCtx, store)
 	if err != nil {
 		return HandleError("%v", err)
@@ -230,12 +224,6 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
-	if err != nil {
-		return err
-	}
-	filter.MaxRows = maxRows
-	filter.MaxRowsSource = maxRowsSource
 
 	ctx := rootCtx
 
@@ -260,58 +248,54 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
+	// The accessor on the ROUTED store, not on the global one: a contributor
+	// listing is answered from the repository the routing rule picked, and a
+	// reader taken off `store` would read the wrong database.
+	reader, err := activeStore.IssueReader()
+	if err != nil {
+		return HandleError("%v", err)
+	}
+
+	// --json. The role's List runs the same LoadStoreListConfig, the same
+	// BuildListFilter and the same workapi.FinishPage this branch ran longhand,
+	// and the --ready arm is its ReadyFlag, so the page, its order, its trim and
+	// its has-more verdict are unchanged bytes. The cap still arrives as
+	// *ErrTooManyRows, which is why handleMaxRowsError still wraps the call.
 	if jsonOutput {
-		var iwc []*types.IssueWithCounts
-		var err error
-		if in.ReadyFlag {
-			iwc, err = activeStore.GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter)))
-		} else {
-			iwc, err = activeStore.SearchIssuesWithCounts(ctx, "", workapi.WithFetchOneExtra(filter))
-		}
+		page, err := reader.List(ctx, in.ListRequest)
 		if err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
 			return HandleError("%v", err)
 		}
-		iwc, truncated := workapi.FinishPage(iwc, in.SortBy, in.Reverse, in.effectiveLimit, false)
 		if in.SkipLabels {
-			if err := outputJSON(newSkipLabelsListJSONResponse(iwc)); err != nil {
+			if err := outputJSON(newSkipLabelsListJSONResponse(page.Items)); err != nil {
 				return err
 			}
-			printTruncationHint(truncated, in.effectiveLimit)
+			printTruncationHint(page.HasMore, in.effectiveLimit)
 			return nil
 		}
-		if err := outputJSON(iwc); err != nil {
+		if err := outputJSON(page.Items); err != nil {
 			return err
 		}
-		printTruncationHint(truncated, in.effectiveLimit)
+		printTruncationHint(page.HasMore, in.effectiveLimit)
 		return nil
 	}
 
-	var issues []*types.Issue
-	if in.ReadyFlag {
-		wf := workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter))
-		var err error
-		issues, err = activeStore.GetReadyWork(ctx, wf)
-		if err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
-			return HandleError("%v", err)
+	// The text renderings print no cardinality, so the request carries SkipCounts
+	// (issueops.ListRequest.SkipCounts). Without it this would trade a plain scan
+	// for three aggregate joins on the most-run command in the tree.
+	textRequest := in.ListRequest
+	textRequest.SkipCounts = true
+	page, err := reader.List(ctx, textRequest)
+	if err != nil {
+		if capErr := handleMaxRowsError(err); capErr != nil {
+			return capErr
 		}
-	} else {
-		var err error
-		issues, err = activeStore.SearchIssues(ctx, "", workapi.WithFetchOneExtra(filter))
-		if err != nil {
-			if capErr := handleMaxRowsError(err); capErr != nil {
-				return capErr
-			}
-			return HandleError("%v", err)
-		}
+		return HandleError("%v", err)
 	}
-
-	issues, truncated := workapi.FinishPage(issues, in.SortBy, in.Reverse, in.effectiveLimit, false)
+	issues, truncated := listPageIssues(page)
 
 	if in.prettyFormat && !jsonOutput {
 		if in.ParentID != "" && !in.ReadyFlag {
@@ -329,7 +313,8 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 			if depErr != nil && in.depsMode != "" {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode)
+			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -338,7 +323,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
@@ -364,12 +349,17 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		}
 	}
 
-	blockedByMap, blocksMap, parentMap, _ := activeStore.GetBlockingInfoForIssues(ctx, issueIDs)
+	// The decoration goes through issueops.BlockingAnnotator. Its failure is
+	// still swallowed: this route has always rendered the page undecorated
+	// rather than failing on it, while the proxied route fails — a difference
+	// between the two CALLERS, recorded for the owner in AMBIGUITIES.md
+	// (A-blk-1) rather than converged here.
+	blocking := annotateListBlocking(ctx, activeStore, issueIDs)
 
 	var buf strings.Builder
 	if ui.IsAgentMode() {
 		for _, issue := range issues {
-			formatAgentIssue(&buf, issue, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
+			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
 		fmt.Print(buf.String())
 		printTruncationHint(truncated, in.effectiveLimit)
@@ -383,7 +373,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	} else {
 		for _, issue := range issues {
 			labels := labelsMap[issue.ID]
-			formatIssueCompact(&buf, issue, labels, blockedByMap[issue.ID], blocksMap[issue.ID], parentMap[issue.ID])
+			formatIssueCompact(&buf, issue, labels, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
 	}
 
@@ -516,7 +506,8 @@ func init() {
 	listCmd.Flags().Bool("ready", false, "Show only ready issues (no active blockers, same semantics as bd ready)")
 
 	// Defensive row cap (be-x42v): exits 2 on overage, default disabled.
-	addMaxRowsFlag(listCmd)
+	// ROUTED, not direct-only: both routes thread the cap now.
+	addRoutedMaxRowsFlag(listCmd)
 
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(listCmd)

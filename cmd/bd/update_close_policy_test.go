@@ -140,28 +140,7 @@ func TestUpdateClosePolicyBatchGrammarForceToken(t *testing.T) {
 	}
 }
 
-// TestUpdateClosePolicyProxiedSpecCarriesForce pins the proxied path's
-// translation of `--force`. An earlier attempt was reverted for exactly this
-// missing mapping: the proxied caller built a spec that never carried the
-// override, so a shared policy check refused the close with no way for the
-// user to say otherwise. The spec must carry it, and must not invent it.
-func TestUpdateClosePolicyProxiedSpecCarriesForce(t *testing.T) {
-	current := &types.Issue{ID: "test-ucpp", Status: types.StatusOpen}
-
-	forced := buildUpdateSpecForIssue(current, &updateInput{
-		fields: map[string]any{"status": string(types.StatusClosed)}, force: true,
-	})
-	if got := forced.Fields[issueops.OpForceClosePolicy]; got != true {
-		t.Errorf("spec.Fields[%q] = %v, want true", issueops.OpForceClosePolicy, got)
-	}
-	if got := forced.Fields["status"]; got != string(types.StatusClosed) {
-		t.Errorf("spec.Fields[status] = %v, want closed", got)
-	}
-
-	unforced := buildUpdateSpecForIssue(current, &updateInput{
-		fields: map[string]any{"status": string(types.StatusClosed)},
-	})
-	if _, ok := unforced.Fields[issueops.OpForceClosePolicy]; ok {
-		t.Errorf("spec.Fields carries %q without --force", issueops.OpForceClosePolicy)
-	}
-}
+// The proxied path's own translation of `--force` is pinned in
+// update_proxied_server_test.go (TestProxiedUpdateCarriesForce), against the
+// UpdateRequest that path now hands issueops.Lifecycle — the spec it used to
+// build by hand is gone.

@@ -142,6 +142,16 @@ func TestApplyNoGitHooksToCmdComposesWithCredentials(t *testing.T) {
 	}
 }
 
+// unsetEnvForTest removes key for the duration of the test, restoring the
+// ambient value on cleanup.
+func unsetEnvForTest(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	if err := os.Unsetenv(key); err != nil {
+		t.Fatalf("unset %s: %v", key, err)
+	}
+}
+
 func TestWithRemoteOperationEnvRestoresS3ChecksumEnv(t *testing.T) {
 	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
 
@@ -160,10 +170,7 @@ func TestWithRemoteOperationEnvRestoresS3ChecksumEnv(t *testing.T) {
 }
 
 func TestWithRemoteOperationEnvUnsetsS3ChecksumEnv(t *testing.T) {
-	t.Setenv(awsResponseChecksumValidationEnv, "")
-	if err := os.Unsetenv(awsResponseChecksumValidationEnv); err != nil {
-		t.Fatalf("unset %s: %v", awsResponseChecksumValidationEnv, err)
-	}
+	unsetEnvForTest(t, awsResponseChecksumValidationEnv)
 
 	err := withRemoteOperationEnv(nil, true, func() error {
 		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
@@ -176,6 +183,125 @@ func TestWithRemoteOperationEnvUnsetsS3ChecksumEnv(t *testing.T) {
 	}
 	if _, ok := os.LookupEnv(awsResponseChecksumValidationEnv); ok {
 		t.Fatalf("%s should be unset after operation", awsResponseChecksumValidationEnv)
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresAmbientCredentials verifies that stored
+// credentials override an ambient DOLT_REMOTE_USER/DOLT_REMOTE_PASSWORD pair
+// for the operation and hand it back afterwards. Unsetting on cleanup would
+// destroy credentials the remote operation never owned.
+func TestWithRemoteOperationEnvRestoresAmbientCredentials(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "ambient-pass")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "ambient-pass" {
+		t.Fatalf("DOLT_REMOTE_PASSWORD after operation = %q, want restored ambient-pass", got)
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresPartialAmbientCredentials covers the mixed
+// case: a var that was set comes back, a var that was unset stays unset.
+func TestWithRemoteOperationEnvRestoresPartialAmbientCredentials(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	unsetEnvForTest(t, "DOLT_REMOTE_PASSWORD")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if _, ok := os.LookupEnv("DOLT_REMOTE_PASSWORD"); ok {
+		t.Fatal("DOLT_REMOTE_PASSWORD should be unset after operation (it was unset before)")
+	}
+}
+
+// TestWithRemoteOperationEnvUnsetsCredentialsWithNoAmbientPair verifies stored
+// credentials do not linger in the process environment when there was nothing
+// ambient to restore.
+func TestWithRemoteOperationEnvUnsetsCredentialsWithNoAmbientPair(t *testing.T) {
+	unsetEnvForTest(t, "DOLT_REMOTE_USER")
+	unsetEnvForTest(t, "DOLT_REMOTE_PASSWORD")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, false, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if _, ok := os.LookupEnv("DOLT_REMOTE_USER"); ok {
+		t.Fatal("DOLT_REMOTE_USER should be unset after operation")
+	}
+	if _, ok := os.LookupEnv("DOLT_REMOTE_PASSWORD"); ok {
+		t.Fatal("DOLT_REMOTE_PASSWORD should be unset after operation")
+	}
+}
+
+// TestWithRemoteOperationEnvRestoresAmbientEnvWithBothCleanups exercises the
+// two-cleanup path, the shape store.go uses for push and pull against an S3
+// remote: credentials plus the checksum override are registered together, so
+// both restores run from the same defer. All three ambient values must come
+// back after the operation.
+func TestWithRemoteOperationEnvRestoresAmbientEnvWithBothCleanups(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "ambient-user")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "ambient-pass")
+	t.Setenv(awsResponseChecksumValidationEnv, "when_supported")
+
+	creds := &remoteCredentials{username: "peer-user", password: "peer-pass"}
+	err := withRemoteOperationEnv(creds, true, func() error {
+		if got := os.Getenv("DOLT_REMOTE_USER"); got != "peer-user" {
+			t.Fatalf("DOLT_REMOTE_USER during operation = %q, want peer-user", got)
+		}
+		if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "peer-pass" {
+			t.Fatalf("DOLT_REMOTE_PASSWORD during operation = %q, want peer-pass", got)
+		}
+		if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_required" {
+			t.Fatalf("%s during operation = %q, want when_required", awsResponseChecksumValidationEnv, got)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("withRemoteOperationEnv returned error: %v", err)
+	}
+
+	if got := os.Getenv("DOLT_REMOTE_USER"); got != "ambient-user" {
+		t.Fatalf("DOLT_REMOTE_USER after operation = %q, want restored ambient-user", got)
+	}
+	if got := os.Getenv("DOLT_REMOTE_PASSWORD"); got != "ambient-pass" {
+		t.Fatalf("DOLT_REMOTE_PASSWORD after operation = %q, want restored ambient-pass", got)
+	}
+	if got := os.Getenv(awsResponseChecksumValidationEnv); got != "when_supported" {
+		t.Fatalf("%s after operation = %q, want restored when_supported", awsResponseChecksumValidationEnv, got)
 	}
 }
 

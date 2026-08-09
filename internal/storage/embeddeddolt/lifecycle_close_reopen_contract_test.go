@@ -3,9 +3,12 @@
 package embeddeddolt_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // TestLifecycleCloseReopenContract runs the Close/Reopen half of the Lifecycle
@@ -26,8 +29,23 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseRefusalsCarryTheirTypesAndWriteNothing", func(t *testing.T) {
 		conformance.RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t, ctx, fixture)
 	})
+	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
+	t.Run("CloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t, ctx, fixture)
+	})
+	t.Run("CloseIsIdempotentOnAClosedRowThatStillLooksBlocked", func(t *testing.T) {
+		conformance.RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t, ctx, fixture)
+	})
+	t.Run("CloseCountsOpenChildrenInBothPlanes", func(t *testing.T) {
+		conformance.RunLifecycleCloseCountsOpenChildrenInBothPlanes(t, ctx, fixture)
+	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
+	})
+	t.Run("CloseAndReopenKeepTheClaimHolder", func(t *testing.T) {
+		conformance.RunLifecycleCloseAndReopenKeepTheClaimHolder(t, ctx, fixture)
 	})
 	t.Run("ReopenLeavesNonDoneStatusesUnchanged", func(t *testing.T) {
 		conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, ctx, fixture)
@@ -50,6 +68,18 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseAndReopenRequireActorAndIssueID", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, ctx, fixture)
 	})
+	t.Run("CloseSettlesItsTransitiveAndCrossPlaneDependers", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t, ctx, fixture)
+	})
+	t.Run("CloseSettlesTheClosedRowItselfAndItsChild", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t, ctx, fixture)
+	})
+	t.Run("CloseOnASpawnersLastChildSatisfiesAWaitsForGate", func(t *testing.T) {
+		conformance.RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t, ctx, fixture)
+	})
+	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
+		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
+	})
 }
 
 func newEmbeddedLifecycleCloseReopenFixture(t *testing.T, te *testEnv, prefix string) conformance.LifecycleCloseReopenFixture {
@@ -63,11 +93,34 @@ func newEmbeddedLifecycleCloseReopenFixture(t *testing.T, te *testEnv, prefix st
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.LifecycleCloseReopenFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Lifecycle:     lifecycle,
-		CreateIssue:   kit.CreateIssue,
-		AddDependency: kit.AddDependency,
-		SetConfig:     kit.SetConfig,
-		QueryScalar:   kit.QueryScalar,
+		IssuePrefix:          kit.IssuePrefix,
+		Lifecycle:            lifecycle,
+		CreateIssue:          kit.CreateIssue,
+		CreateWisp:           kit.CreateWisp,
+		AddDependency:        kit.AddDependency,
+		SetConfig:            kit.SetConfig,
+		QueryScalar:          kit.QueryScalar,
+		CountHistoryMatching: kit.CountHistoryMatching,
+		// The frozen kit exposes reads only, so this is the write half of the
+		// same short-lived raw connection its QueryScalar opens, pinned for the
+		// whole script so a multi-statement seed stays in one session.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			db, cleanup, err := embeddeddolt.OpenSQL(ctx, te.dataDir, te.database, "main")
+			if err != nil {
+				return err
+			}
+			defer func() { _ = cleanup() }()
+			conn, err := db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			for _, stmt := range statements {
+				if _, err := conn.ExecContext(ctx, stmt.Query, stmt.Args...); err != nil {
+					return fmt.Errorf("%s: %w", stmt.Query, err)
+				}
+			}
+			return nil
+		},
 	}
 }

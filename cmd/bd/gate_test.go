@@ -3,11 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
-	"path/filepath"
-	"runtime"
+	"slices"
 	"sync"
 	"testing"
 
@@ -263,31 +263,14 @@ func TestCheckBeadGate_NilStoreStaysPending(t *testing.T) {
 }
 
 func TestCheckGHPRUsesStateWithoutMergedField(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("fake gh shell script uses POSIX sh")
-	}
-
-	binDir := t.TempDir()
-	fakeGH := filepath.Join(binDir, "gh")
-	script := `#!/bin/sh
-case "$*" in
-  *merged*)
-    echo "unexpected merged field" >&2
-    exit 9
-    ;;
-esac
-printf '{"state":"MERGED","title":"Fix gate"}'
-`
-	if err := os.WriteFile(fakeGH, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake gh: %v", err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
-	resolved, escalated, reason, err := checkGHPR(&types.Issue{
+	resolved, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
 		IssueType: "gate",
 		AwaitType: "gh:pr",
 		AwaitID:   "3488",
-	})
+	}, fakeGHRunner(t,
+		`{"state":"MERGED","title":"Fix gate"}`,
+		"pr", "view", "3488", "--json", "state,title",
+	))
 	if err != nil {
 		t.Fatalf("checkGHPR returned error: %v", err)
 	}
@@ -300,6 +283,225 @@ printf '{"state":"MERGED","title":"Fix gate"}'
 	if !gateTestContains(reason, "was merged") {
 		t.Fatalf("reason = %q, want merged message", reason)
 	}
+}
+
+func TestCheckGHPRUsesRepositoryFromMetadata(t *testing.T) {
+	resolved, escalated, reason, err := checkGHPRWithRunner(&types.Issue{
+		IssueType: "gate",
+		AwaitType: "gh:pr",
+		AwaitID:   "608",
+		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
+	}, fakeGHRunner(t,
+		`{"state":"MERGED","title":"Cross-repo gate"}`,
+		"pr", "view", "608", "--json", "state,title", "--repo", "srobroek/agentic-packages",
+	))
+	if err != nil {
+		t.Fatalf("checkGHPR returned error: %v", err)
+	}
+	if !resolved || escalated {
+		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
+	}
+}
+
+func TestCheckGHRunUsesRepositoryFromMetadata(t *testing.T) {
+	resolved, escalated, reason, err := checkGHRunWithRunner(&types.Issue{
+		IssueType: "gate",
+		AwaitType: "gh:run",
+		AwaitID:   "12345",
+		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
+	}, nil,
+		fakeGHRunner(t,
+			`{"status":"completed","conclusion":"success","name":"CI"}`,
+			"run", "view", "12345", "--json", "status,conclusion,name", "--repo", "srobroek/agentic-packages",
+		),
+	)
+	if err != nil {
+		t.Fatalf("checkGHRun returned error: %v", err)
+	}
+	if !resolved || escalated {
+		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
+	}
+}
+
+// TestCheckGHRun_CrossRepoDiscoveryUsesInjectedRunner covers the standards
+// note on the SF1 review: discoverRunIDByWorkflowNameInRepo was hard-wired to
+// runGHCommand, so the cross-repo discovery path (a workflow-name hint plus
+// metadata.repo) could not be exercised through the injected ghCommandRunner
+// seam at all. Both the discovery "run list" call and the follow-up "run
+// view" call must go through the same fake runner - if either one reached
+// the real runGHCommand this test would fail (or hang) instead of using the
+// canned response below.
+func TestCheckGHRun_CrossRepoDiscoveryUsesInjectedRunner(t *testing.T) {
+	var calls [][]string
+	fakeRunner := func(args ...string) (stdout, stderr []byte, err error) {
+		calls = append(calls, append([]string(nil), args...))
+		switch args[0] {
+		case "run":
+			if len(args) > 1 && args[1] == "list" {
+				return []byte(`[{"databaseId":999,"name":"release","status":"completed","conclusion":"success","workflowName":"release.yml"}]`), nil, nil
+			}
+			if len(args) > 1 && args[1] == "view" {
+				return []byte(`{"status":"completed","conclusion":"success","name":"CI"}`), nil, nil
+			}
+		}
+		t.Fatalf("unexpected gh invocation: %v", args)
+		return nil, nil, nil
+	}
+
+	resolved, escalated, reason, err := checkGHRunWithRunner(&types.Issue{
+		IssueType: "gate",
+		AwaitType: "gh:run",
+		AwaitID:   "release.yml",
+		Metadata:  json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
+	}, nil, fakeRunner)
+	if err != nil {
+		t.Fatalf("checkGHRun returned error: %v", err)
+	}
+	if !resolved || escalated {
+		t.Fatalf("resolved, escalated = %v, %v; want true, false (%s)", resolved, escalated, reason)
+	}
+
+	wantCalls := [][]string{
+		{"run", "list", "--workflow", "release.yml", "--json", "databaseId,name,status,conclusion,createdAt,workflowName", "--limit", "5", "--repo", "srobroek/agentic-packages"},
+		{"run", "view", "999", "--json", "status,conclusion,name", "--repo", "srobroek/agentic-packages"},
+	}
+	if len(calls) != len(wantCalls) {
+		t.Fatalf("gh invocations = %v, want %v", calls, wantCalls)
+	}
+	for i, want := range wantCalls {
+		if !slices.Equal(calls[i], want) {
+			t.Errorf("gh invocation %d = %v, want %v", i, calls[i], want)
+		}
+	}
+}
+
+func TestQueryGitHubRunsForWorkflowUsesRepository(t *testing.T) {
+	runs, err := queryGitHubRunsForWorkflowInRepoWithRunner(
+		"release.yml",
+		5,
+		"srobroek/agentic-packages",
+		fakeGHRunner(t,
+			`[{"databaseId":12345,"name":"release","status":"completed","conclusion":"success","workflowName":"release.yml"}]`,
+			"run", "list", "--workflow", "release.yml", "--json", "databaseId,name,status,conclusion,createdAt,workflowName", "--limit", "5", "--repo", "srobroek/agentic-packages",
+		),
+	)
+	if err != nil {
+		t.Fatalf("queryGitHubRunsForWorkflowInRepo returned error: %v", err)
+	}
+	if len(runs) != 1 || runs[0].DatabaseID != 12345 {
+		t.Fatalf("runs = %#v, want one run with database ID 12345", runs)
+	}
+}
+
+func TestGitHubRepoFromIssueRejectsInvalidMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+	}{
+		{"missing_owner", json.RawMessage(`{"repo":"missing-owner"}`)},
+		{"shell_metacharacter", json.RawMessage(`{"repo":"owner/repo;echo"}`)},
+		{"metadata_not_an_object", json.RawMessage(`"not-an-object"`)},
+		// SF3: an explicit JSON null must be rejected rather than silently
+		// falling back to the current repository - the dangerous direction,
+		// since it could point a cross-repo check at the wrong repo.
+		{"repo_null", json.RawMessage(`{"repo":null}`)},
+		{"repo_number", json.RawMessage(`{"repo":42}`)},
+		{"repo_bool", json.RawMessage(`{"repo":true}`)},
+		{"repo_object", json.RawMessage(`{"repo":{"owner":"a","name":"b"}}`)},
+		{"repo_array", json.RawMessage(`{"repo":["a","b"]}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if repo, err := githubRepoFromIssue(&types.Issue{Metadata: tt.metadata}); err == nil {
+				t.Fatalf("githubRepoFromIssue(%s) = %q, nil; want validation error", tt.metadata, repo)
+			}
+		})
+	}
+}
+
+// TestGitHubRepoFromIssueAllowsMissingRepoKey verifies metadata without a
+// "repo" key at all (as opposed to an explicit null) still falls back to the
+// current repository without error - only an explicit malformed value is
+// rejected (SF3).
+func TestGitHubRepoFromIssueAllowsMissingRepoKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata json.RawMessage
+	}{
+		{"nil_metadata", nil},
+		{"null_metadata", json.RawMessage(`null`)},
+		{"empty_object", json.RawMessage(`{}`)},
+		{"unrelated_key", json.RawMessage(`{"priority":"high"}`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, err := githubRepoFromIssue(&types.Issue{Metadata: tt.metadata})
+			if err != nil {
+				t.Fatalf("githubRepoFromIssue(%s) returned error: %v", tt.metadata, err)
+			}
+			if repo != "" {
+				t.Fatalf("githubRepoFromIssue(%s) = %q, want empty", tt.metadata, repo)
+			}
+		})
+	}
+}
+
+// TestRepoMetadataForGateRestrictsToGitHubTypes covers SF4: repo metadata
+// inheritance/validation must only run for gh:* gate types. A human or timer
+// gate blocking an issue with non-GitHub-shaped "repo" metadata (legal per
+// the metadata contract - "any valid JSON") must not fail gate creation.
+func TestRepoMetadataForGateRestrictsToGitHubTypes(t *testing.T) {
+	badRepoMetadata := json.RawMessage(`{"repo":"not-owner-slash-repo"}`)
+
+	nonGitHubTypes := []string{"human", "timer", "bead"}
+	for _, gateType := range nonGitHubTypes {
+		t.Run("ignores_bad_repo_metadata_for_"+gateType, func(t *testing.T) {
+			metadata, err := repoMetadataForGate(gateType, &types.Issue{Metadata: badRepoMetadata})
+			if err != nil {
+				t.Fatalf("repoMetadataForGate(%q) returned error: %v; non-GitHub gates must tolerate arbitrary repo metadata", gateType, err)
+			}
+			if metadata != nil {
+				t.Fatalf("repoMetadataForGate(%q) = %s, want nil metadata", gateType, metadata)
+			}
+		})
+	}
+
+	githubTypes := []string{"gh:run", "gh:pr"}
+	for _, gateType := range githubTypes {
+		t.Run("rejects_bad_repo_metadata_for_"+gateType, func(t *testing.T) {
+			if _, err := repoMetadataForGate(gateType, &types.Issue{Metadata: badRepoMetadata}); err == nil {
+				t.Fatalf("repoMetadataForGate(%q) = nil error, want validation error", gateType)
+			}
+		})
+
+		t.Run("inherits_valid_repo_for_"+gateType, func(t *testing.T) {
+			metadata, err := repoMetadataForGate(gateType, &types.Issue{
+				Metadata: json.RawMessage(`{"repo":"srobroek/agentic-packages"}`),
+			})
+			if err != nil {
+				t.Fatalf("repoMetadataForGate(%q) returned error: %v", gateType, err)
+			}
+			var decoded struct {
+				Repo string `json:"repo"`
+			}
+			if unmarshalErr := json.Unmarshal(metadata, &decoded); unmarshalErr != nil {
+				t.Fatalf("repoMetadataForGate(%q) = %s, not valid JSON: %v", gateType, metadata, unmarshalErr)
+			}
+			if decoded.Repo != "srobroek/agentic-packages" {
+				t.Fatalf("repoMetadataForGate(%q) repo = %q, want srobroek/agentic-packages", gateType, decoded.Repo)
+			}
+		})
+	}
+
+	t.Run("no_metadata_no_repo", func(t *testing.T) {
+		metadata, err := repoMetadataForGate("gh:run", &types.Issue{})
+		if err != nil {
+			t.Fatalf("repoMetadataForGate(gh:run) returned error: %v", err)
+		}
+		if metadata != nil {
+			t.Fatalf("repoMetadataForGate(gh:run) = %s, want nil", metadata)
+		}
+	})
 }
 
 func TestIsNumericID(t *testing.T) {
@@ -552,9 +754,14 @@ func TestCheckGHRun_ReturnsErrorWhenPersistingDiscoveredRunIDFails(t *testing.T)
 }
 
 func TestCheckGHRunStatus_Success(t *testing.T) {
-	installFakeGHScript(t, `{"status":"completed","conclusion":"success","name":"release"}`)
-
-	resolved, escalated, reason, err := checkGHRunStatus("12345")
+	resolved, escalated, reason, err := checkGHRunStatusInRepoWithRunner(
+		"12345",
+		"",
+		fakeGHRunner(t,
+			`{"status":"completed","conclusion":"success","name":"release"}`,
+			"run", "view", "12345", "--json", "status,conclusion,name",
+		),
+	)
 	if err != nil {
 		t.Fatalf("checkGHRunStatus returned error: %v", err)
 	}
@@ -754,10 +961,6 @@ func TestWorkflowNameMatches(t *testing.T) {
 }
 
 func TestCheckGHPR_StateHandling(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX-sh fake binary; skipping on Windows")
-	}
-
 	tests := []struct {
 		name           string
 		ghJSON         string
@@ -790,9 +993,11 @@ func TestCheckGHPR_StateHandling(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			installFakeGHScript(t, tt.ghJSON)
 			gate := &types.Issue{AwaitID: "https://github.com/org/repo/pull/1"}
-			resolved, escalated, reason, err := checkGHPR(gate)
+			resolved, escalated, reason, err := checkGHPRWithRunner(gate, fakeGHRunner(t,
+				tt.ghJSON,
+				"pr", "view", gate.AwaitID, "--json", "state,title",
+			))
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -810,28 +1015,11 @@ func TestCheckGHPR_StateHandling(t *testing.T) {
 }
 
 func TestCheckGHPR_NoMergedFieldRequested(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("POSIX-sh fake binary; skipping on Windows")
-	}
-
-	dir := t.TempDir()
-	scriptPath := filepath.Join(dir, "gh")
-	// Fake gh that fails if "merged" appears anywhere in args
-	script := `#!/bin/sh
-for arg in "$@"; do
-  case "$arg" in
-    *merged*) echo "ERROR: 'merged' field must not be requested" >&2; exit 1;;
-  esac
-done
-echo '{"state":"MERGED","title":"Test PR"}'
-`
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake gh: %v", err)
-	}
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
 	gate := &types.Issue{AwaitID: "https://github.com/org/repo/pull/99"}
-	resolved, _, reason, err := checkGHPR(gate)
+	resolved, _, reason, err := checkGHPRWithRunner(gate, fakeGHRunner(t,
+		`{"state":"MERGED","title":"Test PR"}`,
+		"pr", "view", gate.AwaitID, "--json", "state,title",
+	))
 	if err != nil {
 		t.Fatalf("checkGHPR failed (likely requested 'merged' field): %v", err)
 	}
@@ -843,34 +1031,15 @@ echo '{"state":"MERGED","title":"Test PR"}'
 	}
 }
 
-func installFakeGHScript(t *testing.T, stdout string) {
+func fakeGHRunner(t *testing.T, stdout string, wantArgs ...string) ghCommandRunner {
 	t.Helper()
-
-	dir := t.TempDir()
-
-	var (
-		scriptPath string
-		script     string
-	)
-
-	if runtime.GOOS == "windows" {
-		scriptPath = filepath.Join(dir, "gh.cmd")
-		script = "@echo off\r\necho " + stdout + "\r\n"
-	} else {
-		scriptPath = filepath.Join(dir, "gh")
-		script = "#!/bin/sh\ncat <<'EOF'\n" + stdout + "\nEOF\n"
-	}
-
-	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake gh: %v", err)
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(scriptPath, 0o755); err != nil {
-			t.Fatalf("chmod fake gh: %v", err)
+	return func(args ...string) ([]byte, []byte, error) {
+		t.Helper()
+		if !slices.Equal(args, wantArgs) {
+			t.Fatalf("gh arguments = %q, want %q", args, wantArgs)
 		}
+		return []byte(stdout), nil, nil
 	}
-
-	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 
 // gateTestContainsIgnoreCase checks if haystack contains needle (case-insensitive)

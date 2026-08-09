@@ -10,10 +10,11 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// Claim / lease behavior (Gas Station v1.1 dead-worker recovery). Each backend
-// routes ClaimIssue/ClaimReadyIssue/HeartbeatIssue/ReclaimExpiredLeases through the
-// shared issueops implementations, so these assertions hold identically on Dolt and
-// SQLite. issueops.WithLeaseTTL pins the lease deterministically
+// Claim / lease behavior (Gas Station v1.1 dead-worker recovery). The in-tree backends
+// route ClaimIssue/ClaimReadyIssue/HeartbeatIssue/ReclaimExpiredLeases through the
+// shared issueops implementations, so they answer these assertions identically; a
+// backend with a claim path of its own is what the assertions are here to measure.
+// issueops.WithLeaseTTL pins the lease deterministically
 // so the reclaim path is testable without wall-clock waits.
 
 // testClaim: claiming an open issue stamps assignee, in_progress, started_at, and a
@@ -43,75 +44,22 @@ func testClaim(t *testing.T, f Factory) {
 	}
 }
 
-// testClaimIdempotent: re-claiming an in_progress issue by the SAME actor is a no-op
-// success (supports agent retry workflows).
-func testClaimIdempotent(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-2", Title: "T"}), "a"))
-	must(t, s.ClaimIssue(ctx(), "cl-2", "worker"))
-	if err := s.ClaimIssue(ctx(), "cl-2", "worker"); err != nil {
-		t.Errorf("idempotent re-claim by same actor: %v", err)
-	}
-}
-
-// testClaimAlreadyClaimed: claiming an issue held by a different actor is ErrAlreadyClaimed.
-func testClaimAlreadyClaimed(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-3", Title: "T"}), "a"))
-	must(t, s.ClaimIssue(ctx(), "cl-3", "worker1"))
-	err := s.ClaimIssue(ctx(), "cl-3", "worker2")
-	if !errors.Is(err, storage.ErrAlreadyClaimed) {
-		t.Errorf("claim by different actor: err = %v, want ErrAlreadyClaimed", err)
-	}
-}
-
-// testClaimOpenForeignAssignee: an OPEN issue pre-assigned to a different real
-// actor (a dispatcher set the assignee but nobody claimed it, so status stays
-// open) is still an ErrAlreadyClaimed conflict when another actor tries to claim
-// it. The open-but-assigned refusal branch wraps the sentinel so the public
-// IssueClaimer contract (errors.Is / ParseClaimConflict) holds identically on
-// both backends, matching the already-claimed (in_progress) path above.
-func testClaimOpenForeignAssignee(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-fa1", Title: "T", Assignee: "alice", Status: types.StatusOpen}), "dispatcher"))
-	pre, err := s.GetIssue(ctx(), "cl-fa1")
-	must(t, err)
-	if pre.Status != types.StatusOpen || pre.Assignee != "alice" {
-		t.Fatalf("precondition: want open+assigned-to-alice, got status=%q assignee=%q", pre.Status, pre.Assignee)
-	}
-	err = s.ClaimIssue(ctx(), "cl-fa1", "bob")
-	if !errors.Is(err, storage.ErrAlreadyClaimed) {
-		t.Errorf("claim of open issue pre-assigned to another actor: err = %v, want ErrAlreadyClaimed", err)
-	}
-}
-
-// testClaimNotClaimable: claiming a closed issue is ErrNotClaimable.
-func testClaimNotClaimable(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-4", Title: "T"}), "a"))
-	must(t, s.CloseIssue(ctx(), "cl-4", "done", "closer", "sess"))
-	err := s.ClaimIssue(ctx(), "cl-4", "worker")
-	if !errors.Is(err, storage.ErrNotClaimable) {
-		t.Errorf("claim closed issue: err = %v, want ErrNotClaimable", err)
-	}
-}
-
-// testClaimReadyIssue: ClaimReadyIssue picks and claims a ready issue.
-func testClaimReadyIssue(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "cl-r1", Title: "ready", Priority: 1}), "a"))
-	claimed, err := s.ClaimReadyIssue(ctx(), types.WorkFilter{}, "worker")
-	must(t, err)
-	if claimed == nil {
-		t.Fatal("ClaimReadyIssue returned nil, expected a ready issue to claim")
-	}
-	if claimed.ID != "cl-r1" {
-		t.Errorf("claimed id = %q, want cl-r1", claimed.ID)
-	}
-	if claimed.Assignee != "worker" || claimed.Status != types.StatusInProgress {
-		t.Errorf("ready issue not properly claimed: assignee=%q status=%q", claimed.Assignee, claimed.Status)
-	}
-}
+// The claim REFUSALS that used to live here — same-actor idempotence, a foreign
+// holder in progress, a foreign holder on an open row, and an ineligible status
+// — are retired. claimer_contract.go pins every one of them at the role seam
+// against the same issueops.ClaimIssueInTx CAS, and pins more of each: the typed
+// *ClaimConflictError, the raw row read back unchanged, and a zero history
+// delta, on the unit-of-work dual this suite's Factory type cannot reach.
+// storage.ErrAlreadyClaimed and storage.ErrNotClaimable are ALIASES of the
+// issueops sentinels the contract matches (internal/storage/storage.go), so the
+// two seams assert one identity, not two. ClaimIssue itself stays exercised here
+// by testClaim and by the whole lease-recovery block below.
+//
+// testClaimReadyIssue is retired for the same reason against
+// RunReadyClaimerClaimsTheFrontRowAndReturnsThePostClaimState, which additionally
+// pins winner selection, the post-claim snapshot against the stored row and the
+// runner-up left alone; ClaimReadyIssue keeps its seat here through
+// testClaimReadyIssueLabelFilters.
 
 // testClaimReadyIssueLabelFilters: the claim path is FENCED by the label filters it is
 // given. --label-any (LabelsAny, OR-set) used to be dropped on the ready/claim path, so a
