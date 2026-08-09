@@ -245,6 +245,112 @@ func RunBatchCreatorLinksAnEarlierItemOfTheSameBatch(t *testing.T, ctx context.C
 	assertBatchCreatorEdgeCount(t, ctx, fixture, second, first, 1)
 }
 
+// RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane is the case above run
+// on the OTHER plane, and it is a separate case rather than a second arm
+// because the two bodies reach the edge by different routes and one of them
+// has already lost it.
+//
+// The store bodies write every row first and then run ONE dependency-persist
+// pass over the whole batch; the unit-of-work body writes each item's edges as
+// it writes that item. A backend that took the all-ephemeral batch down a
+// per-issue create loop runs no persist pass at all, and every inline edge
+// disappears with no error and no report — which is exactly what happened
+// (audit_molecule_wisp_batch_iter.go testAuditCreateAllWispsInlineDependencies
+// records the regression). The durable case cannot see it: the durable path
+// has never been the one that got special-cased.
+//
+// THE ASSERTION IS PER TABLE, not a sum across both. The two planes hold their
+// edges in different tables (BatchCreateItem.Issue's plane clause), and an
+// edge between two wisps that landed in `dependencies` is a durable row
+// naming ephemeral work — the sync artifact the ignored wisp tables exist to
+// prevent, and invisible to a count that adds the tables together.
+func RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	first := fixture.IssuePrefix + "-bcwlink-first"
+	second := fixture.IssuePrefix + "-bcwlink-second"
+
+	firstIssue := batchCreatorIssue(first, "the ephemeral blocker")
+	firstIssue.Ephemeral = true
+	secondIssue := batchCreatorIssue(second, "the ephemeral blocked")
+	secondIssue.Ephemeral = true
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items: []publicops.BatchCreateItem{
+			batchCreatorItem(firstIssue),
+			{
+				Issue:        secondIssue,
+				Dependencies: []publicops.CreateDependency{{TargetID: first, Type: types.DepBlocks}},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch with an edge onto an earlier EPHEMERAL item: %v", err)
+	}
+	if len(result.Issues) != 2 {
+		t.Fatalf("CreateBatch returned %d issues, want 2", len(result.Issues))
+	}
+	// Both rows on the ephemeral plane, or the edge assertion below is about a
+	// batch that did something else entirely.
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", first, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", second, 1)
+
+	assertBatchCreatorPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", second, first, 1)
+	assertBatchCreatorPlaneEdgeCount(t, ctx, fixture, "dependencies", second, first, 0)
+}
+
+// RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane pins the reach
+// of the all-ephemeral clause (issueops/batchcreator.go's "an all-ephemeral
+// batch writes ONLY to the dolt-ignored wisp tables"): the ITEM's aux rows are
+// covered by it too, not just its issue row.
+//
+// A label is the aux row a create actually writes, and it has its own pair of
+// tables. A wisp's label landing in `labels` is a durable row naming ephemeral
+// work — it ships on the next push, and it survives the wisp it names, because
+// only the wisp tables are swept. RunBatchCreatorRecordsNoHistoryForAnEphemeral
+// Batch cannot see it: it seeds no labels, and its history counter answers the
+// same number whether a label row landed durably or not.
+//
+// The result's Ephemeral flag is checked in the same case because a snapshot
+// that came back durable would make every plane claim above read as luck. The
+// front door prints the issue it got back rather than re-reading it, so a
+// wisp reported as durable is what a caller sees.
+func RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane(t *testing.T, ctx context.Context, fixture BatchCreatorFixture) {
+	t.Helper()
+	labeled := fixture.IssuePrefix + "-bcwlabel"
+	const label = "ephemeral-label"
+
+	issue := batchCreatorIssue(labeled, "ephemeral, and labeled")
+	issue.Ephemeral = true
+	issue.Labels = []string{label}
+
+	result, err := fixture.BatchCreator.CreateBatch(ctx, publicops.CreateBatchRequest{
+		Actor:         "batch-writer",
+		ForceIDPrefix: true,
+		Items:         []publicops.BatchCreateItem{batchCreatorItem(issue)},
+	})
+	if err != nil {
+		t.Fatalf("CreateBatch(1 labeled ephemeral item): %v", err)
+	}
+	if len(result.Issues) != 1 {
+		t.Fatalf("CreateBatch returned %d issues, want 1", len(result.Issues))
+	}
+	assertBatchCreatorRowCount(t, ctx, fixture, "wisps", labeled, 1)
+	assertBatchCreatorRowCount(t, ctx, fixture, "issues", labeled, 0)
+
+	assertBatchCreatorLabelRowCount(t, ctx, fixture, "wisp_labels", labeled, 1)
+	assertBatchCreatorLabelRowCount(t, ctx, fixture, "labels", labeled, 0)
+
+	if !result.Issues[0].Ephemeral {
+		t.Errorf("result issue %s came back Ephemeral=false for an item that asked to be ephemeral; the front door prints this snapshot rather than re-reading the row",
+			labeled)
+	}
+	if labels := result.Issues[0].Labels; len(labels) != 1 || labels[0] != label {
+		t.Errorf("result issue %s labels = %v, want [%s]: the snapshot is promised hydrated with labels on either plane", labeled, labels, label)
+	}
+}
+
 // RunBatchCreatorRefusesAnAbsentEdgeTarget pins the edge clause
 // (issueops/batchcreator.go:125-131): every requested edge is written or the
 // batch refuses, with ErrValidation wrapping ErrNotFound and nothing created.
@@ -484,6 +590,40 @@ func assertBatchCreatorEdgeCount(t *testing.T, ctx context.Context, fixture Batc
 	}
 	if got != want {
 		t.Errorf("edges %s -> %s = %d, want %d", source, target, got, want)
+	}
+}
+
+// assertBatchCreatorPlaneEdgeCount is assertBatchCreatorEdgeCount narrowed to
+// ONE of the two dependency tables. Where the placement of a durable edge is a
+// detail this role does not promise, WHICH PLANE an edge landed on is the
+// promise itself, and a sum across both tables cannot state it.
+func assertBatchCreatorPlaneEdgeCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, table, source, target string, want int) {
+	t.Helper()
+	var got int
+	//nolint:gosec // G201: table is one of the contract's two hardcoded names.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ?" +
+		" AND (depends_on_issue_id = ? OR depends_on_wisp_id = ? OR depends_on_external = ?)"
+	if err := fixture.QueryScalar(ctx, query, []any{source, target, target, target}, &got); err != nil {
+		t.Fatalf("count %s rows %s -> %s: %v", table, source, target, err)
+	}
+	if got != want {
+		t.Errorf("%s rows %s -> %s = %d, want %d", table, source, target, got, want)
+	}
+}
+
+// assertBatchCreatorLabelRowCount counts one issue's rows in one plane's label
+// table. The label tables are keyed by issue_id rather than id, so they need
+// their own counter.
+func assertBatchCreatorLabelRowCount(t *testing.T, ctx context.Context, fixture BatchCreatorFixture, table, issueID string, want int) {
+	t.Helper()
+	var got int
+	//nolint:gosec // G201: table is one of the contract's two hardcoded names.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ?"
+	if err := fixture.QueryScalar(ctx, query, []any{issueID}, &got); err != nil {
+		t.Fatalf("count %s rows for %s: %v", table, issueID, err)
+	}
+	if got != want {
+		t.Errorf("%s rows for %s = %d, want %d", table, issueID, got, want)
 	}
 }
 

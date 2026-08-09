@@ -44,6 +44,8 @@ var roleContractCases = []roleContract{
 		RunBatchCreatorRejectsAnUnusableRequest,
 		RunBatchCreatorRefusesACrossPlaneInBatchEdge,
 		RunBatchCreatorLinksAnEarlierItemOfTheSameBatch,
+		RunBatchCreatorLinksAnEarlierItemOnTheEphemeralPlane,
+		RunBatchCreatorKeepsAnEphemeralItemsLabelsOffTheDurablePlane,
 		RunBatchCreatorRefusesAnAbsentEdgeTarget,
 		RunBatchCreatorAcceptsAForeignEdgeTarget,
 		RunBatchCreatorRecordsOneHistoryEntry,
