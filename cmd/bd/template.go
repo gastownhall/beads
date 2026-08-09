@@ -5,16 +5,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// configReader is the narrow read surface flattenUnregisteredIssueTypes
+// needs; transaction-bound writers (storeMolWriter) satisfy it with reads
+// that see in-transaction config writes.
+type configReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
 
 // BeadsTemplateLabel is the label used to identify Beads-based templates
 const BeadsTemplateLabel = "template"
@@ -559,15 +569,20 @@ func getRelativeID(oldID, rootID string) string {
 	return ""
 }
 
-// ensureCustomTypesForIssues scans the issues for types that are not
-// built-in and ensures they are registered as custom types in the
-// database. This is needed because formula cooking can produce issues
-// with types like "gate" (for async coordination beads) that are not in
-// the default type whitelist. Without this, issue creation fails with
-// "invalid issue type" on the first non-built-in bead. (GH#3213)
-func ensureCustomTypesForIssues(ctx context.Context, s molConfigWriter, issues []*types.Issue) error {
+// flattenUnregisteredIssueTypes flattens issue types that are neither
+// built-in nor already registered in types.custom, printing a warning
+// naming each flattened type. Issues with children (the DependsOnID side
+// of a parent-child dep) flatten to epic — matching the default for
+// undeclared parent step types — and leaves flatten to task.
+// Materializing a formula must not silently grow the type whitelist — a
+// typo'd step type would become a permanently registered custom type — so
+// unregistered types degrade instead; operators opt in with bd config set
+// types.custom before pouring. Without the flatten, issue creation fails
+// with "invalid issue type" on the first unregistered bead.
+// (GH#3213, GH#5443)
+func flattenUnregisteredIssueTypes(ctx context.Context, s configReader, issues []*types.Issue, deps []*types.Dependency) error {
 	// Collect non-built-in types used by the issues. IsBuiltIn (not
-	// IsValid) matches the validator this registration exists to satisfy:
+	// IsValid) matches the validator this check exists to satisfy:
 	// IsValidWithCustom short-circuits on IsBuiltIn, so types like "event"
 	// need no types.custom entry.
 	needed := make(map[string]bool)
@@ -582,39 +597,57 @@ func ensureCustomTypesForIssues(ctx context.Context, s molConfigWriter, issues [
 		return nil
 	}
 
-	// Read the current custom types and check which are missing.
+	// Match insert validation's sources: the types.custom config value
+	// (kept in step with the custom_types table by SyncConfigTables)
+	// overlaid with config.yaml-declared types. Read through s so a
+	// transaction-bound caller sees in-transaction registration.
 	existing, err := s.GetConfig(ctx, "types.custom")
 	if err != nil {
-		existing = ""
+		// Don't degrade to "nothing registered": a transient read failure
+		// would silently flatten types the operator did register.
+		return fmt.Errorf("reading types.custom: %w", err)
 	}
-	current := issueops.ParseTypesConfigValue(existing)
-	currentSet := make(map[string]bool, len(current))
-	for _, t := range current {
-		currentSet[t] = true
+	registered := make(map[string]bool)
+	for _, t := range issueops.ParseTypesConfigValue(existing) {
+		registered[t] = true
+	}
+	for _, t := range config.GetCustomTypesFromYAML() {
+		registered[t] = true
 	}
 
-	var toAdd []string
+	unknown := make(map[types.IssueType]bool)
 	for t := range needed {
-		if !currentSet[t] {
-			toAdd = append(toAdd, t)
+		if !registered[t] {
+			unknown[types.IssueType(t)] = true
 		}
 	}
-	if len(toAdd) == 0 {
+	if len(unknown) == 0 {
 		return nil
 	}
 
-	// Merge and write back. SetConfig triggers SyncCustomTypesTable
-	// which populates the normalized custom_types table used by
-	// PrepareIssueForInsert → ValidateWithCustom.
-	merged := append(current, toAdd...)
-	// Serialize as JSON array for consistency with bd config set.
-	// json.Marshal (rather than hand-rolled string building) so a type
-	// containing a quote or backslash cannot corrupt the config value.
-	data, err := json.Marshal(merged)
-	if err != nil {
-		return fmt.Errorf("serializing types.custom: %w", err)
+	names := make([]string, 0, len(unknown))
+	for t := range unknown {
+		names = append(names, string(t))
 	}
-	return s.SetConfig(ctx, "types.custom", string(data))
+	sort.Strings(names)
+	fmt.Fprintf(os.Stderr, "Warning: flattening unregistered issue type(s) to task (epic for steps with children): %s (register with bd config set types.custom to keep them)\n", strings.Join(names, ", "))
+
+	hasChildren := make(map[string]bool)
+	for _, dep := range deps {
+		if dep.Type == types.DepParentChild {
+			hasChildren[dep.DependsOnID] = true
+		}
+	}
+	for _, issue := range issues {
+		if unknown[issue.IssueType] {
+			if hasChildren[issue.ID] {
+				issue.IssueType = types.TypeEpic
+			} else {
+				issue.IssueType = types.TypeTask
+			}
+		}
+	}
+	return nil
 }
 
 // cloneSubgraph creates new issues from the template with variable substitution.
@@ -640,8 +673,8 @@ func cloneSubgraph(ctx context.Context, s storage.DoltStorage, subgraph *Templat
 }
 
 func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgraph, opts CloneOptions) (*InstantiateResult, error) {
-	if err := ensureCustomTypesForIssues(ctx, w, subgraph.Issues); err != nil {
-		return nil, fmt.Errorf("registering custom types for subgraph: %w", err)
+	if err := flattenUnregisteredIssueTypes(ctx, w, subgraph.Issues, subgraph.Dependencies); err != nil {
+		return nil, fmt.Errorf("checking custom types for subgraph: %w", err)
 	}
 
 	idMapping := make(map[string]string)

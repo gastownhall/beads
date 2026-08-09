@@ -432,8 +432,8 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 	// live on the ignored session, but the validation context (config,
 	// custom_types) lives in regular dolt-tracked tables — reading it
 	// through regularTx keeps types registered earlier in this transaction
-	// (ensureCustomTypesForIssues during a wisp pour) visible. Both
-	// sessions are pinned to the same branch (GH#5443).
+	// (tx.SetConfig("types.custom", ...)) visible. Both sessions are
+	// pinned to the same branch (GH#5443).
 	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
@@ -1292,15 +1292,20 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 	t.dirty.MarkDirty("config")
 
 	// ResolveCustomTypesInTx reads the normalized tables first, so without
-	// this sync a type registered in-transaction (e.g. by
-	// ensureCustomTypesForIssues during pour) stays invisible to validation
-	// whenever the table already has rows.
+	// this sync a type registered in-transaction stays invisible to
+	// validation whenever the table already has rows.
 	table, err := issueops.SyncConfigTables(ctx, t.regularTx, key, value)
 	if err != nil {
 		return err
 	}
 	if table != "" {
 		t.dirty.MarkDirty(table)
+	}
+
+	// Keep store-level caches (GetCustomTypes and friends) coherent with
+	// in-transaction config writes; see invalidateConfigCaches.
+	if t.store != nil {
+		t.store.invalidateConfigCaches(key)
 	}
 	return nil
 }

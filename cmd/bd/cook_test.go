@@ -1026,9 +1026,9 @@ func TestStepTypeToIssueType(t *testing.T) {
 		{"story", types.TypeStory},
 		// Aliases normalize to their canonical form.
 		{"enhancement", types.TypeFeature},
-		// Non-built-in types pass through so pour can register them as
-		// custom types (ensureCustomTypesForIssues) and the storage layer
-		// can validate them against types.custom — matching bd create.
+		// Non-built-in types pass through; at pour/cook time,
+		// flattenUnregisteredIssueTypes degrades them to task unless they
+		// are already registered in types.custom.
 		{"duty", types.IssueType("duty")},
 	}
 	for _, tt := range tests {

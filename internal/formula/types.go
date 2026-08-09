@@ -208,8 +208,9 @@ type Step struct {
 
 	// Type is the issue type: any built-in type (task by default; bug,
 	// feature, epic, chore, decision, spike, story, milestone, ...) or a
-	// custom type, which is registered in types.custom when the formula
-	// is cooked or poured.
+	// custom type already registered in types.custom. Unregistered types
+	// are flattened to task, with a warning, when the formula is cooked
+	// or poured.
 	Type string `json:"type,omitempty"`
 
 	// Priority is the issue priority (0-4).

@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // multiRepoYAMLConfig represents the types section of config.yaml for YAML unmarshaling.
@@ -181,11 +182,11 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 	}
 	defer func() { _ = store.Close() }()
 
-	// Collect all known types (core work types + parent custom + all child custom)
-	// Only core work types are built-in; orchestrator types require types.custom config.
-	knownTypes := map[string]bool{
-		"bug": true, "feature": true, "task": true, "epic": true, "chore": true, "decision": true,
-	}
+	// Collect known custom types (parent custom + all child custom).
+	// Built-in types — including orchestrator types like gate, molecule,
+	// spike, story, and milestone — are recognized via IsBuiltIn below, so
+	// this map only needs the configured custom types.
+	knownTypes := make(map[string]bool)
 
 	// Add parent's custom types
 	parentTypes, err := store.GetConfig(ctx, "types.custom")
@@ -221,7 +222,7 @@ func findUnknownTypesInHydratedIssues(repoPath string, multiRepo *config.MultiRe
 		if err := rows.Scan(&issueType); err != nil {
 			continue
 		}
-		if !knownTypes[issueType] && !seen[issueType] {
+		if !types.IssueType(issueType).IsBuiltIn() && !knownTypes[issueType] && !seen[issueType] {
 			unknownTypes = append(unknownTypes, issueType)
 			seen[issueType] = true
 		}

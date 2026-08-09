@@ -17,9 +17,10 @@ import (
 
 // stepTypeToIssueType converts a formula step type string to a types.IssueType.
 // Returns types.TypeTask for empty types. Non-empty types pass through
-// (trimmed and normalized) rather than being validated here: pour and
-// cook --persist register non-built-in types via ensureCustomTypesForIssues,
-// and the storage layer validates them against types.custom — the same
+// (trimmed and normalized) rather than being validated here: at pour and
+// cook --persist time, flattenUnregisteredIssueTypes degrades types that
+// are neither built-in nor registered in types.custom to task (with a
+// warning), and the storage layer validates what remains — the same
 // division of labor as bd create --type.
 func stepTypeToIssueType(stepType string) types.IssueType {
 	stepType = strings.TrimSpace(stepType)
@@ -898,12 +899,12 @@ func cookFormula(ctx context.Context, s storage.DoltStorage, f *formula.Formula,
 	// Create issues, labels, and dependencies in a single atomic transaction.
 	// This prevents orphaned issues if label/dependency creation fails.
 	err := transact(ctx, s, fmt.Sprintf("bd: cook formula %s", protoID), func(tx storage.Transaction) error {
-		// Register non-built-in step types before inserting, mirroring
-		// cloneSubgraphInto (pour). Without this, PrepareIssueForInsert
-		// rejects them with "invalid issue type" and the whole cook
-		// --persist transaction rolls back.
-		if err := ensureCustomTypesForIssues(ctx, storeMolWriter{DoltStorage: s, tx: tx}, issues); err != nil {
-			return fmt.Errorf("registering custom types: %w", err)
+		// Flatten unregistered step types to task (with a warning) before
+		// inserting, mirroring cloneSubgraphInto (pour). Without this,
+		// PrepareIssueForInsert rejects them with "invalid issue type" and
+		// the whole cook --persist transaction rolls back.
+		if err := flattenUnregisteredIssueTypes(ctx, storeMolWriter{DoltStorage: s, tx: tx}, issues, deps); err != nil {
+			return fmt.Errorf("checking custom types: %w", err)
 		}
 
 		// Create all issues

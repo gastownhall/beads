@@ -1125,3 +1125,48 @@ func TestExtractRequiredVariables_IgnoresUndeclaredVars(t *testing.T) {
 		})
 	}
 }
+
+// stubConfigReader serves config values from a map for
+// flattenUnregisteredIssueTypes tests.
+type stubConfigReader map[string]string
+
+func (s stubConfigReader) GetConfig(_ context.Context, key string) (string, error) {
+	return s[key], nil
+}
+
+// TestFlattenUnregisteredIssueTypes verifies that pour/cook honor built-in
+// and already-registered custom types but never auto-register: an
+// unregistered type degrades (with a warning) instead of silently growing
+// types.custom — to epic when the issue has children, task otherwise.
+func TestFlattenUnregisteredIssueTypes(t *testing.T) {
+	cfg := stubConfigReader{"types.custom": `["duty"]`}
+	issues := []*types.Issue{
+		{ID: "f.a", IssueType: types.TypeBug},
+		{ID: "f.b", IssueType: types.IssueType("gate")}, // built-in orchestrator type
+		{ID: "f.c", IssueType: types.IssueType("duty")}, // registered custom type
+		{ID: "f.d", IssueType: types.IssueType("typo")}, // unregistered leaf — flattens to task
+		{ID: "f.e", IssueType: ""},
+		{ID: "f.p", IssueType: types.IssueType("typo")}, // unregistered parent — flattens to epic
+	}
+	deps := []*types.Dependency{
+		{IssueID: "f.d", DependsOnID: "f.p", Type: types.DepParentChild},
+	}
+
+	if err := flattenUnregisteredIssueTypes(context.Background(), cfg, issues, deps); err != nil {
+		t.Fatalf("flattenUnregisteredIssueTypes: %v", err)
+	}
+
+	want := []types.IssueType{
+		types.TypeBug,
+		types.IssueType("gate"),
+		types.IssueType("duty"),
+		types.TypeTask,
+		"",
+		types.TypeEpic,
+	}
+	for i, issue := range issues {
+		if issue.IssueType != want[i] {
+			t.Errorf("issues[%d] (%s) IssueType = %q, want %q", i, issue.ID, issue.IssueType, want[i])
+		}
+	}
+}

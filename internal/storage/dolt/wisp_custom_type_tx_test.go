@@ -76,8 +76,7 @@ func setupLocalServerStore(t *testing.T) (*DoltStore, func()) {
 // in the same transaction that registers its custom type validates against
 // the fresh registration. Wisp rows are written on the ignored-tables
 // session, but the validation context (config, custom_types) must be read
-// from the regular session, or in-transaction registration — how
-// ensureCustomTypesForIssues works during a wisp pour — stays invisible
+// from the regular session, or in-transaction registration stays invisible
 // (GH#5443).
 func TestWispSeesCustomTypeRegisteredInTransaction(t *testing.T) {
 	store, cleanup := setupAnyServerStore(t)
