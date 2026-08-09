@@ -12,6 +12,10 @@ import (
 	issueops "github.com/steveyegge/beads/issueops"
 )
 
+const (
+	BearerTokenScopes = "bearerToken.Scopes"
+)
+
 // Defines values for ApplyItemKind.
 const (
 	ApplyItemKindClose  ApplyItemKind = "close"
@@ -1309,7 +1313,7 @@ type Problem struct {
 	// BlockerIsAncestor With `dependency_cycle`, hierarchy refusal only: true when `blocker_id` is an ANCESTOR of `issue_id` (which cannot close until its descendants finish, so the gate would never clear), false when it is a DESCENDANT (blocked status cascades, so it would inherit the block and never close). Both polarities are reported; this member is never omitted to mean false. See `issue_id`.
 	BlockerIsAncestor *bool `json:"blocker_is_ancestor,omitempty"`
 
-	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
+	// Code The stable machine-readable reason, and the ONLY member a client may dispatch on. v0's vocabulary: `invalid_argument` (400, also emitted by the Host-header middleware on any route), `invalid_cursor` (400), `unauthenticated` (401, only on a server configured with a token file), `not_found` (404), `already_claimed` (409), `not_claimable` (409), `not_closable` (409), `not_releasable` (409), `dependency_cycle` (409), `dependency_exists` (409), `already_exists` (409), `precondition_failed` (409), `events_journal_disabled` (409), `events_journal_truncated` (410), `busy` (503), `db_unavailable` (503), `events_watch_saturated` (503), `internal` (500). Renaming or removing a status+code pair is a breaking change; ADDING one is not, so clients MUST default-branch on unknown values and fall back to the status class (unknown 4xx → client bug, fail loud; unknown 503 → retry per `Retry-After`; other unknown 5xx → server fault).
 	Code string `json:"code"`
 
 	// DeclaredLater With `invalid_argument` on a batch operation whose items may name each other: whether the unresolvable key IS declared by the request, at a LATER index.
@@ -1317,7 +1321,7 @@ type Problem struct {
 	// True is an ORDERING mistake — a key reaches backward only — and false is a key nothing in the request declares, which is a typo or a missing item. A client acts differently on each. Both polarities are emitted and the member is never omitted to mean false: an absent member says the refusal was not about a key at all.
 	DeclaredLater *bool `json:"declared_later,omitempty"`
 
-	// Detail Optional prose, never load-bearing. For 5xx codes it is a FIXED string per code and carries nothing about the underlying failure: driver and dial errors routinely embed the DSN, database user and host:port, and this API supports binding beyond loopback. 4xx details reflect the caller's own input back and are specific.
+	// Detail Optional prose, never load-bearing. For 5xx codes it is a FIXED string per code and carries nothing about the underlying failure: driver and dial errors routinely embed the DSN, database user and host:port, and this API supports binding beyond loopback. It is fixed for `unauthenticated` too, and for the mirror-image reason: the caller's own input there is a credential, so echoing it would write the token into every client log and proxy trace on the way back. Other 4xx details reflect the caller's own input back and are specific.
 	Detail *string `json:"detail,omitempty"`
 
 	// ExistingType With `dependency_exists`: the type of the edge the pair already carries, read inside the refusing transaction.
@@ -1753,6 +1757,9 @@ type InvalidArgument = Problem
 
 // NotFound RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type NotFound = Problem
+
+// Unauthenticated RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
+type Unauthenticated = Problem
 
 // Unavailable RFC 9457 problem detail. This is the only error shape on this surface. The core declares `type`; this server never emits it, so `about:blank` is implied throughout.
 type Unavailable = Problem

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"time"
 
@@ -30,9 +31,27 @@ const serveCmdName = "serve"
 // itself. It is not the drain budget — the server has already drained by then.
 const providerCloseTimeout = 10 * time.Second
 
+// serveTokenFileEnv is the environment fallback for --auth-token-file, which an
+// operator would otherwise have to thread through a container spec. It follows
+// the BEADS_* convention the rest of the binary uses, and applies ONLY when the
+// flag was not passed.
+//
+// It is read here and nowhere else. internal/httpapi never reads the
+// environment, so the library, its tests and an embedded caller cannot be
+// reconfigured by an exported variable in somebody's shell.
+const (
+	// #nosec G101 -- this is the NAME of an environment variable that holds a
+	// file PATH. No credential appears in this source file, and none may: a
+	// token reaches the process only by being read out of that file.
+	serveTokenFileEnv = "BEADS_SERVE_TOKEN_FILE"
+)
+
 var (
 	serveAddr             string
 	serveAllowNonLoopback bool
+	serveAuthTokenFile    string
+	serveInsecureNoAuth   bool
+	serveAllowedHosts     []string
 )
 
 var serveCmd = &cobra.Command{
@@ -64,12 +83,40 @@ PROBES
   readiness use GET /v0/beads/ready?limit=1 — a real query, where 200 means
   ready and 503 means live but not ready.
 
+AUTHENTICATION
+
+  Optional, and off by default on loopback — where the trust model is the
+  loopback boundary itself, the same one the database behind it already relies
+  on. --auth-token-file turns it on: every operation except GET /healthz then
+  requires an "Authorization: Bearer <token>" header, GET /v0/beads/context
+  included, because it reports the repo root, beads directory and database name.
+
+  The file holds ONE TOKEN PER LINE and every line is accepted. That is the
+  rotation mechanism: write the new token alongside the old, roll the clients
+  over, then delete the old line. The file is re-read while the server runs, so
+  both the addition and the removal take effect within about a second and
+  neither needs a restart. Write it atomically (a temp file plus rename; a
+  Kubernetes secret mount already does this).
+
+  There is deliberately no --auth-token flag. A credential passed as an
+  argument is readable by every local user in the process listing.
+
+  --allow-non-loopback REQUIRES a token file. Beyond loopback, reaching the
+  address would otherwise be the whole authorization: any peer could read every
+  issue and claim work as any actor. --insecure-no-auth is the explicit,
+  auditable way to say you meant that anyway.
+
+  The Host allowlist is what a service deployment usually trips over first. The
+  DNS-rebinding check answers only to loopback spellings and the bind address,
+  so a client dialing a service name gets 400 on every request; enumerate the
+  names it dials with --allowed-host (repeatable). Matching is exact — no
+  wildcards — and the startup log line prints the effective allowlist.
+
 WHAT THIS DOES NOT DO
 
-  No authentication and no TLS. The trust model is the loopback boundary, which
-  is the same one the database behind it already relies on. --allow-non-loopback
-  extends the surface to every network peer that can reach the address; nothing
-  else about the server changes.
+  No TLS. Even with a token, the credential and every issue body travel in
+  plaintext, so a deployment beyond loopback has to supply confidentiality
+  itself — a service mesh, or a network boundary you already trust.
 
   Hooks do not fire. A hook is a user-controlled subprocess per mutation: in a
   concurrent server that is an unbounded latency multiplier and an orphaned
@@ -121,13 +168,91 @@ func registerServeFlags(cmd *cobra.Command) {
 	cmd.Flags().StringVar(&serveAddr, "addr", "127.0.0.1:0",
 		"Address to bind as IP:PORT; the host must be a numeric IP literal, and port 0 takes an ephemeral port")
 	cmd.Flags().BoolVar(&serveAllowNonLoopback, "allow-non-loopback", false,
-		"Permit a bind beyond loopback. bd serve has no authentication: every peer that can reach the address gets full read and claim access")
+		"Permit a bind beyond loopback. Requires --auth-token-file, since reaching the address would otherwise be the whole authorization")
+	cmd.Flags().StringVar(&serveAuthTokenFile, "auth-token-file", "",
+		"Require an Authorization: Bearer token from this file, one token per line, all accepted. Re-read while running, so rewriting it rotates tokens without a restart (env "+serveTokenFileEnv+")")
+	cmd.Flags().BoolVar(&serveInsecureNoAuth, "insecure-no-auth", false,
+		"Serve a non-loopback bind with NO authentication. Every peer that can reach the address gets full read and claim access")
+	cmd.Flags().StringArrayVar(&serveAllowedHosts, "allowed-host", nil,
+		"Additional Host header value to answer to, e.g. a service DNS name. Repeatable; matched exactly, with no wildcards")
+}
+
+// serveOptions is the part of a server's configuration that depends on NEITHER
+// the workspace nor its database source: the operator's flags, and the
+// environment fallbacks behind them.
+//
+// It is deliberately not an httpapi.Config. Every Config bd builds names the
+// one database source it serves from, and that source is not known until the
+// workspace has been classified — so a Config filled in this early would be a
+// server configuration that cannot yet describe a server. The field names match
+// Config's because they become those fields verbatim, in applyTo.
+type serveOptions struct {
+	Addr             string
+	AllowNonLoopback bool
+	InsecureNoAuth   bool
+	AllowedHosts     []string
+	Auth             *httpapi.TokenFileAuth
+}
+
+// applyTo writes the operator's choices onto the configuration a database arm
+// built. It is the ONLY place they are set, so an arm can add a source but can
+// never be the one that forgot the credential or the host allowlist.
+func (o serveOptions) applyTo(cfg *httpapi.Config) {
+	cfg.Addr = o.Addr
+	cfg.AllowNonLoopback = o.AllowNonLoopback
+	cfg.InsecureNoAuth = o.InsecureNoAuth
+	cfg.AllowedHosts = o.AllowedHosts
+	cfg.Auth = o.Auth
+}
+
+// resolveServeConfig turns the flags and their environment fallbacks into the
+// parts of the server configuration that depend on NEITHER the workspace nor a
+// listener.
+//
+// It is separate from runServe, and runs first, for the reason every other
+// validation in this command does: a refusal for a posture that cannot be
+// served must not depend on which workspace the operator happened to be
+// standing in, and must not arrive after a database has been opened.
+func resolveServeConfig() (serveOptions, error) {
+	cfg := serveOptions{
+		Addr:             serveAddr,
+		AllowNonLoopback: serveAllowNonLoopback,
+		InsecureNoAuth:   serveInsecureNoAuth,
+		AllowedHosts:     serveAllowedHosts,
+	}
+	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
+		return cfg, err
+	}
+
+	tokenFile := serveAuthTokenFile
+	if tokenFile == "" {
+		tokenFile = os.Getenv(serveTokenFileEnv)
+	}
+	if err := httpapi.ValidateAuthPosture(serveAllowNonLoopback, tokenFile != "", serveInsecureNoAuth); err != nil {
+		return cfg, err
+	}
+	if tokenFile != "" {
+		auth, err := httpapi.NewTokenFileAuth(tokenFile)
+		if err != nil {
+			return cfg, fmt.Errorf("--auth-token-file: %w", err)
+		}
+		cfg.Auth = auth
+	}
+
+	for _, host := range serveAllowedHosts {
+		if err := httpapi.ValidateAllowedHost(host); err != nil {
+			return cfg, err
+		}
+	}
+	return cfg, nil
 }
 
 func runServe() error {
 	// Flag validation first: it depends on nothing about the workspace, so the
-	// refusal for a bad --addr is the same in every mode.
-	if _, err := httpapi.ValidateBindAddr(serveAddr, serveAllowNonLoopback); err != nil {
+	// refusal for a bad --addr or an unservable auth posture is the same in
+	// every mode, and it lands before anything opens a database.
+	opts, err := resolveServeConfig()
+	if err != nil {
 		return HandleError("%v", err)
 	}
 	if readonlyMode {
@@ -152,14 +277,6 @@ func runServe() error {
 		return HandleError("%v", err)
 	}
 
-	if serveAllowNonLoopback {
-		fmt.Fprintf(os.Stderr,
-			"bd serve: WARNING: --allow-non-loopback binds %s beyond loopback. "+
-				"This API has no authentication and no TLS: any peer that can reach it can read every issue, claim work as any actor, "+
-				"bulk-delete closed beads, and delete any bead it can name.\n",
-			serveAddr)
-	}
-
 	if db.source == serveSourceStore {
 		// Nothing to create. PersistentPreRunE already opened this workspace
 		// through the same backends.Lookup dispatch every ordinary bd command
@@ -179,9 +296,7 @@ func runServe() error {
 			return HandleError("bd serve: %v", err)
 		}
 		defer startServeEventsJournalMaintenance(info.BeadsDir, store)()
-		return serveListen(httpapi.Config{
-			Addr:              serveAddr,
-			AllowNonLoopback:  serveAllowNonLoopback,
+		return serveListen(opts, httpapi.Config{
 			Reader:            roles.reader,
 			Claimer:           roles.claimer,
 			BatchCloser:       roles.batchCloser,
@@ -268,10 +383,8 @@ func runServe() error {
 
 	defer startServeEventsJournalMaintenance(info.BeadsDir, provider)()
 
-	return serveListen(httpapi.Config{
-		Addr:             serveAddr,
-		AllowNonLoopback: serveAllowNonLoopback,
-		Provider:         provider,
+	return serveListen(opts, httpapi.Config{
+		Provider: provider,
 		// No EventsJournal field on this arm: the provider carries the journal
 		// read as one of its own capability accessors, exactly as it carries
 		// every other role Listen would otherwise need spelled out. Activation
@@ -321,6 +434,11 @@ func startServeEventsJournalMaintenance(beadsDir string, source any) func() {
 // serveListen binds and runs. It is where the two database sources converge:
 // everything past the source is the same server.
 //
+// The operator's options and the database source arrive separately because they
+// are resolved at different times — the flags before anything opens a database,
+// the source only once the workspace has been classified — and this is where
+// they meet, once, for every arm.
+//
 // Graceful shutdown rides the signal context the root command already sets up
 // (SIGINT/SIGTERM/SIGHUP). A proxied provider is closed where every proxied
 // command closes it, in PersistentPostRunE — which in proxied mode does nothing
@@ -329,12 +447,46 @@ func startServeEventsJournalMaintenance(beadsDir string, source any) func() {
 // PersistentPostRunE that opened it. None of those paths runs the auto-commit,
 // export or push maintenance: proxied mode never had it, and serve is excluded
 // from it by name (runsPostCommandMaintenance, cmd/bd/main.go).
-func serveListen(cfg httpapi.Config) error {
+func serveListen(opts serveOptions, cfg httpapi.Config) error {
+	opts.applyTo(&cfg)
+
+	// The posture warning belongs here rather than on either source arm: it
+	// reports what this bind does not protect, which is a property of the
+	// listener both arms share.
+	warnServePosture(os.Stderr, opts)
+
 	srv, err := httpapi.Listen(cfg)
 	if err != nil {
 		return HandleError("%v", err)
 	}
 	return srv.Serve(rootCtx)
+}
+
+// warnServePosture says out loud what this deployment does not protect.
+//
+// Two different warnings, because they are two different exposures. Running
+// unauthenticated beyond loopback is the one that was always here, and the
+// operator now has to have asked for it by name. Running authenticated beyond
+// loopback is the remaining gap: the token itself crosses the network in
+// plaintext on every request, so a network that can read it can replay it.
+//
+// Nothing is printed for the loopback default, which is what it has always
+// been.
+func warnServePosture(w io.Writer, opts serveOptions) {
+	if !opts.AllowNonLoopback {
+		return
+	}
+	if opts.Auth == nil {
+		fmt.Fprintf(w,
+			"bd serve: WARNING: --insecure-no-auth binds %s beyond loopback with no authentication. "+
+				"Any peer that can reach it can read every issue and claim work as any actor.\n",
+			opts.Addr)
+		return
+	}
+	fmt.Fprintf(w,
+		"bd serve: WARNING: %s is bound beyond loopback with bearer authentication but NO TLS. "+
+			"Tokens and issue data travel in plaintext; deploy it inside a trusted network boundary.\n",
+		opts.Addr)
 }
 
 // serveSource names which of httpapi.Config's two database sources a workspace

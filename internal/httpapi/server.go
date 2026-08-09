@@ -115,10 +115,23 @@ type Config struct {
 	// Addr is the host:port to bind. The host must be a numeric IP literal;
 	// see ValidateBindAddr.
 	Addr string
-	// AllowNonLoopback permits a bind beyond loopback. v0 has no
-	// authentication and no TLS, so this is an operator decision that is never
-	// taken by default.
+	// AllowNonLoopback permits a bind beyond loopback. There is no TLS, so
+	// this is an operator decision that is never taken by default, and it
+	// requires either Auth or InsecureNoAuth — see ValidateAuthPosture.
 	AllowNonLoopback bool
+	// Auth verifies bearer credentials. NIL MEANS NO AUTHENTICATION, which is
+	// the pre-existing behavior and stays the default on loopback: a zero
+	// Config serves exactly what it served before this field existed.
+	Auth *TokenFileAuth
+	// InsecureNoAuth is the operator's explicit waiver for serving a
+	// non-loopback bind with no credential. It only ever permits; it never
+	// disables a configured Auth (that combination is refused).
+	InsecureNoAuth bool
+	// AllowedHosts are extra Host header values to answer to, beyond the
+	// loopback spellings and the bind address. In a cluster the client dials a
+	// service DNS name, which the rebinding defense would otherwise refuse;
+	// see newHostPolicy. Empty leaves today's policy exactly as it was.
+	AllowedHosts []string
 	// Provider is where every database-touching handler opens its one unit of
 	// work per request.
 	Provider uow.UnitOfWorkProvider
@@ -329,6 +342,8 @@ type Server struct {
 	// sem bounds handlers that touch the database. Buffered channel rather
 	// than sync.Semaphore so the acquisition can select on a timer.
 	sem chan struct{}
+	// auth is nil on an unauthenticated server, which is the loopback default.
+	auth *TokenFileAuth
 	// semTimeout, semWarn, writeStall, watchPoll and watchBeat default to the
 	// constants above. They are fields rather than constants at the point of use
 	// so the queueing, stalled-write and streaming behavior can be exercised in
@@ -397,7 +412,7 @@ func ValidateBindAddr(addr string, allowNonLoopback bool) (net.IP, error) {
 		return nil, fmt.Errorf("--addr %q: host must be a numeric IP literal, not a name — use 127.0.0.1 rather than localhost", addr)
 	}
 	if !ip.IsLoopback() && !allowNonLoopback {
-		return nil, fmt.Errorf("--addr %q binds beyond loopback; bd serve has no authentication, so this requires --allow-non-loopback", addr)
+		return nil, fmt.Errorf("--addr %q binds beyond loopback, which requires --allow-non-loopback (and, with it, --auth-token-file)", addr)
 	}
 	return ip, nil
 }
@@ -419,6 +434,17 @@ func Listen(cfg Config) (*Server, error) {
 	ip, err := ValidateBindAddr(cfg.Addr, cfg.AllowNonLoopback)
 	if err != nil {
 		return nil, err
+	}
+	// The same posture and allowlist rules the CLI applies, applied again here
+	// so a second caller of this package cannot assemble a Config that serves
+	// the whole surface to a network with no credential.
+	if err := ValidateAuthPosture(cfg.AllowNonLoopback, cfg.Auth != nil, cfg.InsecureNoAuth); err != nil {
+		return nil, err
+	}
+	for _, host := range cfg.AllowedHosts {
+		if err := ValidateAllowedHost(host); err != nil {
+			return nil, err
+		}
 	}
 	if cfg.Stdout == nil {
 		cfg.Stdout = os.Stdout
@@ -468,7 +494,8 @@ func Listen(cfg Config) (*Server, error) {
 		log:      log.New(cfg.Stderr, "bd serve: ", log.LstdFlags|log.LUTC),
 		stdout:   cfg.Stdout,
 		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, Capabilities()),
-		hosts:    newHostPolicy(ip),
+		hosts:    newHostPolicy(ip, cfg.AllowedHosts),
+		auth:     cfg.Auth,
 		idPrefix: prefix,
 		maxConns: maxConns,
 	}
@@ -1391,7 +1418,14 @@ func (s *Server) closeStreams() {
 }
 
 // route wraps one operation with the limits that apply to it: the per-request
-// deadline, and — unless the operation is exempt — a database slot.
+// deadline, the bearer credential unless the operation is exempt, and — unless
+// the operation is exempt — a database slot.
+//
+// The credential check runs BEFORE the semaphore, which is the load-bearing
+// ordering: a storm of refused requests then costs one SHA-256 each and can
+// never occupy the slots, or the SQL connections pinned to them, that
+// authenticated clients are waiting for. It runs inside withRequestContext, so
+// a 401 gets a request id and a request log line like every other refusal.
 func (s *Server) route(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := requestInfo(r.Context())
@@ -1408,6 +1442,10 @@ func (s *Server) route(rt route) http.Handler {
 			r = r.WithContext(ctx)
 		}
 
+		if !rt.authExempt && s.auth != nil && !s.authorize(w, r, rec) {
+			return
+		}
+
 		if !rt.bypassSemaphore {
 			release, err := s.acquire(r.Context(), rec)
 			if err != nil {
@@ -1419,6 +1457,70 @@ func (s *Server) route(rt route) http.Handler {
 
 		rt.handler(s, w, r)
 	})
+}
+
+// authorize verifies the request's bearer credential, writing the 401 itself
+// and reporting whether the handler may run.
+//
+// The presented credential appears in NO log field and NO response byte. It is
+// deliberately not recorded through rec.refuse, which is defined as an echoed
+// CALLER VALUE and goes on the request line: a Host header or a parameter name
+// is attacker-controlled text worth attributing, and a token is a secret. What
+// the log gets instead is the reason — which of the three client mistakes it
+// was — and the request id that ties it to the response.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, rec *reqInfo) bool {
+	token, reason := bearerCredential(r.Header.Get("Authorization"))
+	if reason == "" {
+		ok, reloadErr := s.auth.Verify(token)
+		if reloadErr != nil {
+			// A reload that failed leaves the last-good token set in force, so
+			// this is not a refusal on its own — but it means the file the
+			// operator is rotating is unreadable, and nothing else would say so.
+			s.event("auth_reload_error", "request_id", rec.id, "error", reloadErr.Error())
+		}
+		if ok {
+			return true
+		}
+		reason = "unknown_token"
+	}
+
+	s.event("auth_refused", "request_id", rec.id, "op", rec.op,
+		"reason", reason, "remote_addr", r.RemoteAddr)
+	s.fail(w, r, newResult(CodeUnauthenticated, ""))
+	return false
+}
+
+// bearerCredential extracts the token from an Authorization header value. It
+// returns a non-empty reason instead when there is nothing to verify, so the
+// log can separate a misconfigured client from a wrong or stale token.
+//
+// The scheme is matched case-insensitively, which RFC 9110 requires.
+func bearerCredential(header string) (token, reason string) {
+	if strings.TrimSpace(header) == "" {
+		return "", "missing"
+	}
+	rest, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok {
+		scheme, tail, split := strings.Cut(header, " ")
+		if !split || !strings.EqualFold(scheme, "Bearer") {
+			return "", "malformed"
+		}
+		rest = tail
+	}
+	if token = strings.TrimSpace(rest); token == "" {
+		return "", "malformed"
+	}
+	return token, ""
+}
+
+// authLabel describes the credential posture for the startup line. It names the
+// token FILE, never a token: the path is configuration an operator already
+// knows, and the contents are the secret.
+func (s *Server) authLabel() string {
+	if s.auth == nil {
+		return "none"
+	}
+	return "bearer (" + s.auth.path + ")"
 }
 
 // fail writes a problem response and records what it was for the log line.
@@ -1524,9 +1626,10 @@ type hostPolicy struct {
 	// are the same hosts as ::1 and 127.0.0.1, and a client that spells one of
 	// them the long way is not an attacker.
 	ips []net.IP
-	// names are the allowed non-numeric Host values, lowercased. There is
-	// exactly one, "localhost", and no mechanism to add another: a DNS name in
-	// a Host header is precisely what the rebinding attack carries.
+	// names are the allowed non-numeric Host values, lowercased. "localhost"
+	// is always there; an operator may enumerate more with --allowed-host, and
+	// nothing else can add one. Matching is EXACT — no wildcard and no suffix
+	// syntax — so the allowlist is precisely what was enumerated.
 	names map[string]bool
 	// anyIP additionally allows ANY numeric Host literal. Only a wildcard bind
 	// sets it; see newHostPolicy for why that is still a rebinding defense.
@@ -1549,7 +1652,14 @@ type hostPolicy struct {
 // would instead surrender the defense on the serving host's own loopback
 // interface, which is rebinding's canonical target, and on every LAN browser
 // behind a firewall the attacker cannot otherwise reach.
-func newHostPolicy(bind net.IP) hostPolicy {
+// EXTRA is the operator's enumerated additions (--allowed-host). A deployment
+// where clients dial a service DNS name is refused by the policy above on every
+// single request, so without this the server is unreachable rather than
+// protected. Admitting a name the operator named does not weaken the defense
+// the check exists for: a rebound page still cannot make a browser send that
+// Host to 127.0.0.1, and the in-cluster clients that do send it are not
+// browsers. Numeric values land in ips, so a pod IP can be enumerated too.
+func newHostPolicy(bind net.IP, extra []string) hostPolicy {
 	p := hostPolicy{
 		ips:   []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		names: map[string]bool{"localhost": true},
@@ -1558,7 +1668,46 @@ func newHostPolicy(bind net.IP) hostPolicy {
 	if !p.anyIP && !containsIP(p.ips, bind) {
 		p.ips = append(p.ips, bind)
 	}
+	for _, host := range extra {
+		h := hostOnly(host)
+		if ip := net.ParseIP(h); ip != nil {
+			if !containsIP(p.ips, ip) {
+				p.ips = append(p.ips, ip)
+			}
+			continue
+		}
+		p.names[h] = true
+	}
 	return p
+}
+
+// ValidateAllowedHost refuses an allowlist entry that is not a bare host.
+//
+// The Host header's port is stripped before matching (hostOnly), so an entry
+// carrying one would silently never match — and an operator who wrote it would
+// reasonably read the startup line as proof that it does. A URL, a path or
+// embedded whitespace is the same mistake in a louder form.
+func ValidateAllowedHost(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return errors.New("--allowed-host is empty; pass the Host header value clients send, such as bd-myproject.beads.svc.cluster.local")
+	}
+	if strings.ContainsAny(v, " \t\r\n") {
+		return fmt.Errorf("--allowed-host %q contains whitespace; it must be a bare host name or IP", v)
+	}
+	if strings.ContainsAny(v, "/@") {
+		return fmt.Errorf("--allowed-host %q looks like a URL; pass just the host, with no scheme and no path", v)
+	}
+	// An IPv6 address is spelled in brackets in a Host header, so an operator
+	// copying one off the wire types it that way. hostOnly strips them before
+	// matching, so the entry works; refusing it here — with a message about a
+	// port it does not have — would be the validation lying about the policy.
+	if net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")) != nil {
+		return nil
+	}
+	if strings.Contains(v, ":") {
+		return fmt.Errorf("--allowed-host %q carries a port; the port is stripped from a request's Host before matching, so an entry with one could never match", v)
+	}
+	return nil
 }
 
 // allows reports whether a Host header value is one this server answers to.
@@ -1626,6 +1775,10 @@ func (s *Server) logStartup() {
 		"database", s.cfg.Workspace.Database,
 		"host_allowlist", s.hosts.label(),
 		"capabilities", strings.Join(s.ctxBody.Capabilities, ","),
+		// Whether this server requires a credential is the first thing an
+		// operator checks after a deploy, and the last thing they should have
+		// to infer from the absence of a flag in a process listing.
+		"auth", s.authLabel(),
 	)
 
 	limits := []any{

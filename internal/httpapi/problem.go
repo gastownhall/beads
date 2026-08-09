@@ -201,6 +201,13 @@ const (
 	// does not offer, namely the paged read, which holds nothing between
 	// requests and is never refused for this reason.
 	CodeEventsWatchSaturated Code = "events_watch_saturated"
+	// CodeUnauthenticated is a missing, malformed or unrecognized bearer
+	// credential on a server that was configured with one. It is a DEPLOYMENT
+	// posture, not a property of the operation: a server started with no token
+	// file never emits it. The three client mistakes are deliberately one code
+	// — telling them apart on the wire would tell an unauthenticated caller
+	// which of its guesses was closer.
+	CodeUnauthenticated Code = "unauthenticated"
 	// CodeBusy is retryable contention: the transaction retry budget was
 	// exhausted, or the in-flight request limit was saturated.
 	CodeBusy Code = "busy"
@@ -222,6 +229,7 @@ const codeClientClosed Code = "client_closed"
 var codeStatus = map[Code]int{
 	CodeInvalidArgument:  http.StatusBadRequest,
 	CodeInvalidCursor:    http.StatusBadRequest,
+	CodeUnauthenticated:  http.StatusUnauthorized,
 	CodeNotFound:         http.StatusNotFound,
 	CodeAlreadyClaimed:   http.StatusConflict,
 	CodeNotClaimable:     http.StatusConflict,
@@ -265,18 +273,28 @@ const (
 	ReasonInvalidValue Reason = "invalid_value"
 )
 
-// staticDetail is the ONLY `detail` a 5xx may carry. The underlying error goes
-// to the server log and nowhere else: driver and dial errors routinely embed
-// the DSN — go-sql-driver renders connection targets as
-// user@tcp(127.0.0.1:PORT)/db, net dial errors carry the same host:port — and
-// query errors can carry SQL fragments. The moment the server is bound with
-// --allow-non-loopback, a verbose 5xx detail is an information-disclosure
-// channel to network peers. 4xx details stay specific: they reflect the
-// caller's own input back, not server internals.
+// staticDetail is the set of codes whose `detail` is FIXED, whatever the
+// caller or the call site passed. newResult overrides the supplied detail for
+// every code listed here, which is what makes the guarantee structural rather
+// than a rule each call site has to remember.
+//
+// Every 5xx is on it. The underlying error goes to the server log and nowhere
+// else: driver and dial errors routinely embed the DSN — go-sql-driver renders
+// connection targets as user@tcp(127.0.0.1:PORT)/db, net dial errors carry the
+// same host:port — and query errors can carry SQL fragments. The moment the
+// server is bound with --allow-non-loopback, a verbose 5xx detail is an
+// information-disclosure channel to network peers.
+//
+// The 401 is on it for the mirror-image reason, and it is the one row that is
+// not a 5xx: the caller's own input here is a CREDENTIAL. Ordinary 4xx details
+// stay specific precisely because they reflect the caller's input back, which
+// is exactly what must never happen to a presented token — it would land in
+// every client log and proxy trace between here and the caller.
 var staticDetail = map[Code]string{
-	CodeBusy:          "the server is busy; retry shortly",
-	CodeDBUnavailable: "database temporarily unavailable; retry",
-	CodeInternal:      "internal server error",
+	CodeUnauthenticated: "missing or invalid bearer token",
+	CodeBusy:            "the server is busy; retry shortly",
+	CodeDBUnavailable:   "database temporarily unavailable; retry",
+	CodeInternal:        "internal server error",
 }
 
 // Retry-After values, in seconds.
@@ -480,6 +498,11 @@ const (
 	OpCompareAndSetMetadata = "compareAndSetMetadata"
 )
 
+// specBearerScheme is the name of the document's securityScheme for the bearer
+// token. It is a constant so TestSpecSecurityMatchesRouteTable compares the
+// route table's exemption column against the same string the document uses.
+const specBearerScheme = "bearerToken"
+
 // operationCodes is the per-operation problem vocabulary: exactly the codes
 // that operation's handler can produce, and therefore exactly what the spec
 // documents for it. TestSpecStatusCodesMatchHandlerTable asserts set-equality
@@ -494,65 +517,76 @@ const (
 // every operation; these rows carry what an operation produces beyond them.
 // Keep the two documents in step: a row here and the document-level prose are
 // the only two places that carve-out exists.
+//
+// The 401 is NOT one of those uniform rules and does appear in the rows below.
+// It is per-operation surface, and the policy is every operation except
+// liveness: auth is enforced in route() for every row whose authExempt column
+// is false, and OpHealth is the only row that sets it, so a probe can answer
+// with no credential. Stating it per-operation rather than once at the document
+// level is what makes TestSpecStatusCodesMatchHandlerTable require the 401s to
+// be documented in the same change as the check that emits them — including for
+// an operation added later, which inherits enforcement the moment it is routed
+// and so must carry CodeUnauthenticated here from its first commit.
 var operationCodes = map[string][]Code{
-	// Liveness answers from the process and touches nothing that can fail.
+	// Liveness answers from the process, touches nothing that can fail, and
+	// carries no credential: it is the one auth-exempt row of the route table.
 	OpHealth: nil,
 	// v0 serves a startup snapshot without touching the database, so there is
 	// no 503 here. If a later slice makes this a DB-probing readiness
 	// endpoint, db_unavailable joins this row and the spec in the same change.
-	OpGetContext:    {CodeInternal},
-	OpListReadyWork: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
-	OpListIssues:    {CodeInvalidArgument, CodeInvalidCursor, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetContext:    {CodeUnauthenticated, CodeInternal},
+	OpListReadyWork: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListIssues:    {CodeInvalidArgument, CodeInvalidCursor, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 is this operation's own, the getStats precedent: a malformed
 	// `include_comments` or `include_dependents` is a bad value on a parameter
 	// this server knows, not the document-level unknown-key rule this table
 	// omits.
-	OpGetIssue: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetIssue: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// No 400 of its own: the operation takes no parameters, so the only
 	// invalid_argument it can raise is the document-level unknown-query-key
 	// rule this table deliberately omits.
-	OpListSettings: {CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListSettings: {CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// No 404: a key nothing stored and a key stored as the empty string are one
 	// answer on this surface, so the only refusal a key can earn is the 400
 	// that says it was not a key.
-	OpGetSetting: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 here is this operation's own, not the document-level
 	// unknown-parameter rule: a malformed `skip_blocked`, and the EMPTY
 	// `assignee` the document refuses rather than answering with the rows that
 	// have no assignee.
-	OpGetStats: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetStats: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The cycle sweep takes no parameters at all, so it has no 400 of its own:
 	// the two uniform ones above are the whole of its invalid-argument story.
-	OpListDependencyCycles: {CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListDependencyCycles: {CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// No not_found here, deliberately: an id that names nothing is reported in
 	// the response's `missing` member, so a batch keeps the answers for the ids
 	// that were found. A 404 would discard them.
-	OpListDependencies: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListDependencies: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The same vocabulary as the stored-edge read beside it, and no not_found
 	// for a stronger version of the same reason: this operation probes no id's
 	// existence at all, so there is nothing it could 404 on.
-	OpListBlockingAnnotations: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListBlockingAnnotations: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 404 is the difference from the row above: this operation has ONE
 	// anchor, so there is no other answer to preserve by reporting the miss in
 	// the body. Its 400 is its own — an empty root, a direction outside the
 	// closed set, a non-positive max_depth — all three the ROLE's ErrValidation
 	// reaching the wire.
-	OpGetDependencyTree: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetDependencyTree: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The same vocabulary as the listing it sizes: it takes the same filters
 	// and can refuse them the same way. limit=0's mode-dependent refusal has no
 	// analog here because there is no limit to pass.
-	OpCountReadyWork: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpCountReadyWork: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an
 	// invalid_argument on `q` rather than a code of its own — a client's
 	// recovery is the same as for any other malformed parameter value.
-	OpQueryIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpQueryIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 here is the widest on this surface, and most of it is not this
 	// handler's: the unfiltered durable sweep, the unrecognized tier and the
 	// malformed glob are all the ROLE's ErrValidation reaching the wire through
 	// failSweepErr. No 404 — this operation names no id — and no 409: a bead
 	// another sweep already took is simply not in the set.
-	OpSweepIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpSweepIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// CodeNotFound is the one this operation has and the sweep does not: a
 	// sweep describes a set that can legitimately be empty, while a delete
 	// names beads and an id that resolves to nothing is a caller mistake.
@@ -567,11 +601,11 @@ var operationCodes = map[string][]Code{
 	// The ARITY refusal is a 400 rather than a second conflict: a token beside
 	// two distinct ids is a malformed request, not a statement about state.
 	OpDeleteIssues: {
-		CodeInvalidArgument, CodeNotFound, CodePreconditionFailed,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodePreconditionFailed,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	OpClaimIssue: {
-		CodeInvalidArgument, CodeNotFound, CodeAlreadyClaimed, CodeNotClaimable,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeAlreadyClaimed, CodeNotClaimable,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// The NARROWEST write vocabulary on this surface, and the narrowness is the
@@ -581,7 +615,7 @@ var operationCodes = map[string][]Code{
 	// item's outcome inside a 200. A 404 here would say the operation went to
 	// the wrong place, and a 409 would say the whole batch was refused, and
 	// neither is ever true of a per-item refusal.
-	OpBatchCloseIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpBatchCloseIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// NO 409 AND NO 404, and both absences are this operation's contract rather
 	// than an omission. There is no id to have missed, and a row a racing agent
 	// took is simply not in the set this claim scanned — the role walks past it
@@ -591,7 +625,7 @@ var operationCodes = map[string][]Code{
 	// The 400 is the ready listing's filter vocabulary plus this operation's own
 	// `limit` refusal plus the body rules, and the ROLE's ErrValidation behind
 	// them, which is defensively unreachable.
-	OpClaimNextIssue: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpClaimNextIssue: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// THREE conflict codes, and only one of them is new. `already_claimed` is
 	// the ownership fence, inherited from updateIssue's assignee arm: the same
 	// situation — a live foreign owner refusing a write — with the same two
@@ -606,7 +640,7 @@ var operationCodes = map[string][]Code{
 	// `not_claimable` here even though the claim's status refusal is the nearest
 	// neighbor — see CodeNotReleasable for why that reuse was refused.
 	OpReleaseIssue: {
-		CodeInvalidArgument, CodeNotFound,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodeAlreadyClaimed, CodeNotReleasable, CodePreconditionFailed,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
@@ -625,7 +659,7 @@ var operationCodes = map[string][]Code{
 	// (issueops.Lifecycle.Close). `force` bypasses policy and never it: the two
 	// members make unrelated claims.
 	OpCloseIssue: {
-		CodeInvalidArgument, CodeNotFound, CodeNotClosable, CodePreconditionFailed,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeNotClosable, CodePreconditionFailed,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// ONE 409, and it is a PRECONDITION rather than a policy. Close has a policy
@@ -636,7 +670,7 @@ var operationCodes = map[string][]Code{
 	// own premise, which every write can have wrong. The idempotent case is
 	// still a 200 carrying `already_open`, unless a guard came with it.
 	OpReopenIssue: {
-		CodeInvalidArgument, CodeNotFound, CodePreconditionFailed,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodePreconditionFailed,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// FOUR conflict codes, and the three members that publish them are exactly
@@ -660,7 +694,7 @@ var operationCodes = map[string][]Code{
 	// could not spell, a field-length refusal that slipped the edge check —
 	// through failUpdate.
 	OpUpdateIssue: {
-		CodeInvalidArgument, CodeNotFound,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
@@ -674,7 +708,7 @@ var operationCodes = map[string][]Code{
 	// No conflict code either: this operation publishes no `id` member, so no
 	// item can collide with a stored row and the role's ErrAlreadyExists is
 	// unreachable from the wire.
-	OpBatchCreateIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpBatchCreateIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The batch's row plus the two codes its narrower vocabulary cannot earn,
 	// and both additions are members rather than judgement calls.
 	//
@@ -698,7 +732,7 @@ var operationCodes = map[string][]Code{
 	// stored edge can name a pair whose endpoint is an id this request is
 	// minting.
 	OpCreateIssue: {
-		CodeInvalidArgument, CodeAlreadyExists, CodeDependencyCycle,
+		CodeInvalidArgument, CodeUnauthenticated, CodeAlreadyExists, CodeDependencyCycle,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// The widest row here, and every code on it is inherited from an operation
@@ -722,7 +756,7 @@ var operationCodes = map[string][]Code{
 	// conforming to addDependencies — nothing in that refusal is about a
 	// resource this operation was asked to address.
 	OpApplyBatch: {
-		CodeInvalidArgument, CodeNotFound,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeAlreadyExists,
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
@@ -731,7 +765,7 @@ var operationCodes = map[string][]Code{
 	// key, so there is no resource it can fail to address and no row it can
 	// collide with. Its 400 is the body vocabulary plus the ROLE's two
 	// refusals — empty content, and content no key can be derived from.
-	OpRememberMemory: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpRememberMemory: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// THE 404 IS THE DIVERGENCE, and it is deliberate. OpGetSetting has none
 	// because on that plane an absent key and a key stored empty are one answer
 	// the CLI itself prints identically, so a 404 would publish an invented
@@ -739,17 +773,17 @@ var operationCodes = map[string][]Code{
 	// an exit-code contract for it — and the role answers Found rather than a
 	// value, so the 404 reports a distinction that exists. The stored-empty row
 	// falls on the miss side of it, which the document states.
-	OpGetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpGetMemory: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The read's vocabulary exactly, because the two operations address the same
 	// resource the same way and this one's Found false is the same answer: a key
 	// nothing stored is a 404 and nothing was removed. No 409 — a memory another
 	// caller already forgot is simply not there, which is what the 404 says.
-	OpForgetMemory: {CodeInvalidArgument, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpForgetMemory: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 here IS this operation's own, unlike listSettings' absent row: it
 	// has one parameter, and a repeated `q` is refused rather than resolved to
 	// one of its values. No 404 — a search matching nothing is an empty page,
 	// because a question about a set has an answer even when the set is empty.
-	OpListMemories: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpListMemories: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The two journal codes are this operation's alone and neither has a
 	// precedent elsewhere on this surface, because no other operation reads a
 	// LOG. The 400 is its own too: `since` is required, and a negative or
@@ -762,7 +796,7 @@ var operationCodes = map[string][]Code{
 	// missing resource, and a poller that got a 404 for being up to date would
 	// have to treat the surface's miss vocabulary as a normal steady state.
 	OpListEvents: {
-		CodeInvalidArgument, CodeEventsJournalDisabled, CodeEventsJournalTruncated,
+		CodeInvalidArgument, CodeUnauthenticated, CodeEventsJournalDisabled, CodeEventsJournalTruncated,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// THE PAGED READ'S VOCABULARY PLUS ONE, and the shared part is the point:
@@ -777,7 +811,7 @@ var operationCodes = map[string][]Code{
 	// therefore documents three codes where every other operation's documents
 	// two.
 	OpWatchEvents: {
-		CodeInvalidArgument, CodeEventsJournalDisabled, CodeEventsJournalTruncated,
+		CodeInvalidArgument, CodeUnauthenticated, CodeEventsJournalDisabled, CodeEventsJournalTruncated,
 		CodeEventsWatchSaturated, CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 	// NO 404, for a stronger version of the batch create's reason: an edge that
@@ -793,10 +827,10 @@ var operationCodes = map[string][]Code{
 	// that loop needs next into a problem extension member. The 404 is here for
 	// the id, which is the one refusal a caller cannot converge on.
 	OpCompareAndSetMetadata: {
-		CodeInvalidArgument, CodeNotFound,
+		CodeInvalidArgument, CodeUnauthenticated, CodeNotFound,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
-	OpRemoveDependency: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	OpRemoveDependency: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The two conflict codes are this operation's alone, and both say the same
 	// kind of thing: the request is fine as a request and the GRAPH refuses it,
 	// which the caller cannot know without reading state it does not have. That
@@ -810,7 +844,7 @@ var operationCodes = map[string][]Code{
 	// so it joins the 400 with every other body refusal (batchCreateIssues'
 	// argument). Nothing was written in any of these cases.
 	OpAddDependencies: {
-		CodeInvalidArgument, CodeDependencyCycle, CodeDependencyExists,
+		CodeInvalidArgument, CodeUnauthenticated, CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
 }
@@ -1221,6 +1255,12 @@ func Write(w http.ResponseWriter, res Result) {
 	h.Set("Content-Type", "application/problem+json; charset=utf-8")
 	if res.RetryAfterSeconds > 0 {
 		h.Set("Retry-After", strconv.Itoa(res.RetryAfterSeconds))
+	}
+	// RFC 9110 requires the challenge on a 401, and it is set here rather than
+	// at the refusal so a second 401 site could not forget it — the same reason
+	// Retry-After is set from the code above.
+	if res.Problem.Code == string(CodeUnauthenticated) {
+		h.Set("WWW-Authenticate", "Bearer")
 	}
 	w.WriteHeader(res.Problem.Status)
 	_ = json.NewEncoder(w).Encode(res.Problem)

@@ -100,6 +100,43 @@ info:
     are only `404`/`500`/`503`.
 
 
+    ## Authentication is a deployment posture
+
+
+    Bearer authentication is CONFIGURED PER DEPLOYMENT, not implied by this
+    document. A server started without a token file requires no credential and
+    never emits `401`; a server started with one requires
+    `Authorization: Bearer <token>` on every operation that declares the
+    `bearerToken` scheme below — which is all of them except `GET /healthz`, so
+    that a liveness probe can answer with no credential. `GET
+    /v0/beads/context` is NOT exempt: it reveals the repository root, the beads
+    directory and the database name.
+
+
+    The refusal is `401` / `code: unauthenticated`, with `WWW-Authenticate:
+    Bearer`. Its `detail` is a fixed string and NEVER echoes the presented
+    credential — a missing header, a wrong scheme and an unrecognized token are
+    one code deliberately, because distinguishing them would tell an
+    unauthenticated caller which guess was closer.
+
+
+    The `404` for a path this document does not define needs no credential:
+    paths are public spec, so refusing them first would disclose nothing and
+    hide nothing.
+
+
+    A token ROTATES by rewriting the token file, with no restart: every
+    non-empty line is an accepted token, so an operator writes the new token
+    alongside the old, rolls clients over, then removes the old one. Both the
+    addition and the removal take effect within about a second.
+
+
+    There is NO TLS on this surface. A deployment beyond loopback is expected
+    to supply confidentiality itself — a service mesh, or a trusted network
+    boundary — because otherwise both the token and the issue data travel in
+    plaintext.
+
+
     The unknown-parameter rule is deliberate and load-bearing: silently
     ignoring an unrecognized FILTER parameter widens the result set, so a
     client one version ahead of the server would receive — and act on — rows it
@@ -239,6 +276,8 @@ paths:
         configuration, and in particular never carries a sync remote URL (those
         routinely embed credentials). v0 answers from the snapshot without
         touching the database, which is why no 503 is documented here.
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: Workspace and API identity.
@@ -246,6 +285,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ContextResponse'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
 
@@ -437,6 +478,8 @@ paths:
             type: integer
             minimum: 0
             default: 100
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: A page of ready work.
@@ -446,6 +489,8 @@ paths:
                 $ref: '#/components/schemas/ReadyPage'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -516,6 +561,8 @@ paths:
           schema:
             type: boolean
             default: false
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The workspace summary.
@@ -525,6 +572,8 @@ paths:
                 $ref: '#/components/schemas/StatsResponse'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -563,6 +612,8 @@ paths:
         cycles in the workspace, which in a healthy one is zero. `has_more` is
         present so that adding a bound later is additive rather than a new
         envelope.
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: Every dependency cycle, canonically ordered.
@@ -570,6 +621,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/CyclesPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -693,6 +746,8 @@ paths:
             an unrecognized status simply matches nothing.
           schema:
             type: string
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The walked tree, flat, in depth-first pre-order.
@@ -702,6 +757,8 @@ paths:
                 $ref: '#/components/schemas/DependencyTreePage'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -844,6 +901,8 @@ paths:
           schema:
             type: boolean
             default: false
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The size of the ready set.
@@ -853,6 +912,8 @@ paths:
                 $ref: '#/components/schemas/ReadyCount'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -1098,6 +1159,8 @@ paths:
             type: integer
             minimum: 0
             default: 50
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: A page of issues in `(created_at DESC, id ASC)` order.
@@ -1114,6 +1177,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -1208,6 +1273,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CreateIssueRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -1246,6 +1313,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '409':
           description: >-
             The request is well-formed and the STATE refuses it, and NOTHING WAS
@@ -1388,6 +1457,8 @@ paths:
             type: integer
             minimum: 0
             default: 50
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: A page of the issues the expression matched.
@@ -1404,6 +1475,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -1449,6 +1522,8 @@ paths:
           schema:
             type: boolean
             default: false
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The issue.
@@ -1458,6 +1533,8 @@ paths:
                 $ref: '#/components/schemas/IssueDetails'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1587,6 +1664,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/UpdateIssueRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -1621,6 +1700,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -1700,6 +1781,8 @@ paths:
         `issue_status`. Neither needs the client to parse prose.
       parameters:
         - $ref: '#/components/parameters/IssueID'
+      security:
+        - bearerToken: []
       requestBody:
         required: true
         content:
@@ -1724,6 +1807,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -1855,6 +1940,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ReleaseIssueRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -1906,6 +1993,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -2055,6 +2144,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CloseIssueRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The issue is closed.
@@ -2075,6 +2166,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -2186,6 +2279,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ReopenIssueRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The issue is open.
@@ -2206,6 +2301,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '409':
@@ -2318,6 +2415,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/CompareAndSetMetadataRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -2338,6 +2437,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -2402,6 +2503,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/SweepRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -2425,6 +2528,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -2534,6 +2639,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/DeleteIssuesRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -2556,6 +2663,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
             At least one id named no stored bead, and nothing was deleted.
@@ -2639,6 +2748,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/BatchCreateRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -2662,6 +2773,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -2809,6 +2922,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ApplyBatchRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -2868,6 +2983,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
             A `target` of an `update` or a `close` named no stored row, and
@@ -3056,6 +3173,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/BatchCloseRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -3077,6 +3196,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3320,6 +3441,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ClaimNextRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -3340,6 +3463,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3383,6 +3508,8 @@ paths:
         collection to scan, so the whole plane is returned in one page. The
         envelope is used anyway because entries are ordered by key, which makes
         a keyset cursor expressible later without a breaking change.
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The stored settings.
@@ -3390,6 +3517,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SettingsPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3412,6 +3541,8 @@ paths:
         this server would have to invent.
       parameters:
         - $ref: '#/components/parameters/SettingKey'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The setting.
@@ -3428,6 +3559,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3524,6 +3657,8 @@ paths:
             type: array
             items:
               type: string
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The stored edges of the named issues.
@@ -3533,6 +3668,8 @@ paths:
                 $ref: '#/components/schemas/DependencyEdges'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3610,6 +3747,8 @@ paths:
             maxItems: 100
             items:
               type: string
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The blocking decoration of the named issues.
@@ -3619,6 +3758,8 @@ paths:
                 $ref: '#/components/schemas/BlockingAnnotations'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3682,6 +3823,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/AddDependenciesRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -3713,6 +3856,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '409':
           description: >-
             The graph refuses the requested edge set, and NOTHING WAS WRITTEN.
@@ -3789,6 +3934,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/RemoveDependencyRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -3810,6 +3957,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3881,6 +4030,8 @@ paths:
             what matching means; a client sends what its user typed.
           schema:
             type: string
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The stored memories, ordered by key.
@@ -3899,6 +4050,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -3948,6 +4101,8 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/RememberRequest'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -3969,6 +4124,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '500':
           $ref: '#/components/responses/InternalError'
         '503':
@@ -4019,6 +4176,8 @@ paths:
         not by path.
       parameters:
         - $ref: '#/components/parameters/MemoryKey'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: The stored memory.
@@ -4035,6 +4194,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
             This workspace holds no memory under that key — or holds one stored
@@ -4095,6 +4256,8 @@ paths:
         `dry_run`: one named row is not a set to cost first.
       parameters:
         - $ref: '#/components/parameters/MemoryKey'
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -4115,6 +4278,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '404':
           description: >-
             This workspace holds no memory under that key — or holds one stored
@@ -4275,6 +4440,8 @@ paths:
             minimum: 1
             maximum: 10000
             default: 1000
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -4293,6 +4460,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '409':
           description: >-
             The durable events journal is NOT ENABLED on this workspace, so it
@@ -4480,6 +4649,8 @@ paths:
             type: integer
             format: int64
             minimum: 0
+      security:
+        - bearerToken: []
       responses:
         '200':
           description: >-
@@ -4543,6 +4714,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
         '409':
           description: >-
             The durable events journal is NOT ENABLED on this workspace, so
@@ -4601,6 +4774,15 @@ paths:
 
 components:
 
+  securitySchemes:
+    bearerToken:
+      type: http
+      scheme: bearer
+      description: >-
+        A shared bearer token from the server's token file. It carries no
+        identity and no scopes: presenting an accepted token grants every
+        operation. Which token is presented is never observable in a response.
+
   parameters:
     SettingKey:
       name: key
@@ -4636,6 +4818,23 @@ components:
         type: string
 
   responses:
+    Unauthenticated:
+      description: >-
+        The bearer credential was missing, malformed, or is not one this server
+        accepts. Emitted only by a server configured with a token file; one
+        without never emits it. `detail` is a fixed string, which is what
+        guarantees the presented credential is never echoed back to the client
+        or into any log between here and the caller.
+      x-bd-codes: [unauthenticated]
+      headers:
+        WWW-Authenticate:
+          description: The challenge, always `Bearer`.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
     InvalidArgument:
       description: >-
         Invalid request: an unknown query parameter, or a malformed parameter
@@ -8882,9 +9081,10 @@ components:
             The stable machine-readable reason, and the ONLY member a client
             may dispatch on. v0's vocabulary: `invalid_argument` (400, also
             emitted by the Host-header middleware on any route),
-            `invalid_cursor` (400), `not_found` (404), `already_claimed` (409),
-            `not_claimable` (409), `not_closable` (409),
-            `not_releasable` (409),
+            `invalid_cursor` (400), `unauthenticated` (401, only on a server
+            configured with a token file), `not_found` (404),
+            `already_claimed` (409), `not_claimable` (409),
+            `not_closable` (409), `not_releasable` (409),
             `dependency_cycle` (409), `dependency_exists` (409),
             `already_exists` (409), `precondition_failed` (409),
             `events_journal_disabled` (409), `events_journal_truncated` (410),
@@ -8901,8 +9101,12 @@ components:
             Optional prose, never load-bearing. For 5xx codes it is a FIXED
             string per code and carries nothing about the underlying failure:
             driver and dial errors routinely embed the DSN, database user and
-            host:port, and this API supports binding beyond loopback. 4xx
-            details reflect the caller's own input back and are specific.
+            host:port, and this API supports binding beyond loopback. It is
+            fixed for `unauthenticated` too, and for the mirror-image reason:
+            the caller's own input there is a credential, so echoing it would
+            write the token into every client log and proxy trace on the way
+            back. Other 4xx details reflect the caller's own input back and are
+            specific.
         param:
           type: string
           description: >-

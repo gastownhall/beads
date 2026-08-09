@@ -1477,3 +1477,76 @@ func equalStrings(a, b []string) bool {
 	}
 	return true
 }
+
+// TestSpecSecurityMatchesRouteTable is the auth half of route/spec parity: an
+// operation declares the bearer scheme in the document exactly when its route
+// row is not auth-exempt. Without this the exemption column and the document's
+// `security` blocks are two independent statements about the same thing, and
+// the one clients read could quietly become the wrong one.
+//
+// Authentication is a DEPLOYMENT posture — a server started with no token file
+// never emits a 401 — so the spec's job here is to say which operations are
+// guarded when it is enabled, not to claim it always is. The scheme is declared
+// per operation rather than at the document level for the same reason the
+// exemption is a route-table column: healthz is exempt, and a top-level
+// `security` block with a per-operation override would state that twice.
+func TestSpecSecurityMatchesRouteTable(t *testing.T) {
+	doc := loadSpec(t)
+	ops := specOps(t, doc)
+
+	schemes := mapAt(t, mapAt(t, doc, "components"), "securitySchemes")
+	bearer := mapAt(t, schemes, specBearerScheme)
+	if got, _ := bearer["type"].(string); got != "http" {
+		t.Errorf("securityScheme %s type = %q, want http", specBearerScheme, got)
+	}
+	if got, _ := bearer["scheme"].(string); got != "bearer" {
+		t.Errorf("securityScheme %s scheme = %q, want bearer", specBearerScheme, got)
+	}
+	if _, ok := doc["security"]; ok {
+		t.Error("the document declares a top-level `security` block; the exemption is per operation, so declaring it globally states the policy twice")
+	}
+
+	for _, rt := range routeTable {
+		so, ok := ops[rt.op]
+		if !ok {
+			t.Errorf("route %q is not in the spec", rt.op)
+			continue
+		}
+		declared := specDeclaresBearer(t, so)
+		if rt.authExempt && declared {
+			t.Errorf("%s is auth-exempt in the route table but declares %s in the spec", rt.op, specBearerScheme)
+		}
+		if !rt.authExempt && !declared {
+			t.Errorf("%s is guarded by the route table but declares no security in the spec", rt.op)
+		}
+
+		// And the 401 travels with the declaration, so a generated client of a
+		// guarded operation always has the status in its response set.
+		_, has401 := mapAt(t, so.op, "responses")["401"]
+		if declared != has401 {
+			t.Errorf("%s declares security = %v but documents a 401 = %v; the two must move together", rt.op, declared, has401)
+		}
+	}
+}
+
+func specDeclaresBearer(t *testing.T, so specOp) bool {
+	t.Helper()
+	raw, ok := so.op["security"]
+	if !ok {
+		return false
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("%s: security is %T, want a sequence", so.path, raw)
+	}
+	for _, item := range list {
+		req, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: security item is %T, want a mapping", so.path, item)
+		}
+		if _, ok := req[specBearerScheme]; ok {
+			return true
+		}
+	}
+	return false
+}
