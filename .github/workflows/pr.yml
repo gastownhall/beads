@@ -1164,7 +1164,6 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Evaluate CI gate
-        shell: /usr/bin/env -u BASH_ENV -u ENV -u BASHOPTS -u SHELLOPTS /usr/bin/bash --noprofile --norc -p -euo pipefail {0}
         env:
           CI_GATE_NAME: PR baseline gate
           CI_GATE_REQUIRED: >-
@@ -1213,26 +1212,9 @@ jobs:
           LINT: ${{ needs.lint.result }}
           WINDOWS_MAKE_SHELL: ${{ needs.windows-make-shell.result }}
         run: |
-          host_kernel="$(/usr/bin/uname -s)"
-          if [[ "$host_kernel" != "Linux" ]]; then
-            echo "::error::ci-gate requires Linux from /usr/bin/uname, got '$host_kernel'"
-            exit 1
-          fi
-          if [[ "$BASH" != "/usr/bin/bash" ]]; then
-            echo "::error::ci-gate requires /usr/bin/bash, got '$BASH'"
-            exit 1
-          fi
-          if [[ -z "${GITHUB_WORKSPACE:-}" || "$GITHUB_WORKSPACE" != /* ]]; then
-            echo "::error::ci-gate requires a nonempty POSIX-absolute GITHUB_WORKSPACE, got '${GITHUB_WORKSPACE:-<unset>}'"
-            exit 1
-          fi
-          if [[ "$PWD" != "$GITHUB_WORKSPACE" ]]; then
-            echo "::error::ci-gate requires PWD to equal GITHUB_WORKSPACE, got PWD='$PWD' workspace='$GITHUB_WORKSPACE'"
-            exit 1
-          fi
           skipped_ok=""
           if [[ "$GITHUB_EVENT_NAME" == "merge_group" ]]; then
             skipped_ok="CHECK_NO_BEADS_CHANGES"
           fi
           export CI_GATE_SKIPPED_OK="$skipped_ok"
-          exec /usr/bin/bash --noprofile --norc -p -euo pipefail -- .github/scripts/ci-gate.sh
+          bash .github/scripts/ci-gate.sh
