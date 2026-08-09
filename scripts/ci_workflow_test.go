@@ -11,6 +11,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const linuxPrivilegedWorkflowShell = "/usr/bin/env -u BASH_ENV -u ENV -u BASHOPTS -u SHELLOPTS /usr/bin/bash --noprofile --norc -p -euo pipefail {0}"
+
 func TestCIWorkflowArtifactOwnership(t *testing.T) {
 	for _, workflowName := range []string{"pr.yml", "main.yml"} {
 		t.Run(workflowName, func(t *testing.T) {
@@ -90,34 +92,62 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	if execute.If != "" {
 		t.Errorf("js/wasm hook step is conditional: %q", execute.If)
 	}
-	if execute.Shell != "bash" {
-		t.Errorf("js/wasm hook shell = %q, want bash", execute.Shell)
+	if execute.Shell != linuxPrivilegedWorkflowShell {
+		t.Errorf("js/wasm hook shell = %q, want %q", execute.Shell, linuxPrivilegedWorkflowShell)
 	}
 	for key, want := range map[string]string{
-		"CGO_ENABLED": "0",
-		"GOARCH":      "wasm",
-		"GOOS":        "js",
+		"BASH_ENV":     "",
+		"ENV":          "",
+		"CGO_ENABLED":  "0",
+		"GOARCH":       "wasm",
+		"GOENV":        "off",
+		"GOFLAGS":      "",
+		"GOOS":         "js",
+		"GOTOOLCHAIN":  "local",
+		"GOWORK":       "off",
+		"NODE_OPTIONS": "",
 	} {
-		if got := execute.Env[key]; got != want {
-			t.Errorf("js/wasm hook env %s = %q, want %q", key, got, want)
+		got, ok := execute.Env[key]
+		if !ok || got != want {
+			t.Errorf("js/wasm hook env %s = %q (present=%v), want %q", key, got, ok, want)
 		}
 	}
 	for _, required := range []string{
-		`realpath "$(command -v go)"`,
-		`realpath "$(command -v node)"`,
+		`[[ "${BASH:-}" == "/usr/bin/bash" ]]`,
+		`[[ /bin/bash -ef /usr/bin/bash ]]`,
+		`[[ "$-" == *p* ]]`,
+		`[[ ! -v BASH_ENV && ! -v ENV ]]`,
+		`IFS= read -r kernel_family < /proc/sys/kernel/ostype`,
+		`type -P go`,
+		`type -P node`,
+		`require("node:fs").realpathSync(process.argv[1])`,
 		`env GOVERSION`,
 		`go1.26.5`,
 		`WebAssembly.instantiate`,
+		`[[ -x "$go_root/bin/go" && "$go_bin" -ef "$go_root/bin/go" ]]`,
 		`lib/wasm/wasm_exec_node.js`,
 		`test -tags gms_pure_go -c`,
 		`-test.run '^TestRunHookReportsUnsupportedExecution$'`,
-		`grep -c '^=== RUN   TestRunHookReportsUnsupportedExecution$'`,
-		`grep -Ec '^--- PASS: TestRunHookReportsUnsupportedExecution`,
-		`grep -Ec '^--- (FAIL|SKIP): TestRunHookReportsUnsupportedExecution`,
+		`test_output="$("$node_bin"`,
+		`|| test_status=$?`,
+		`while IFS= read -r line`,
+		`=== RUN   TestRunHookReportsUnsupportedExecution`,
+		`^--- PASS: TestRunHookReportsUnsupportedExecution`,
+		`--- FAIL: TestRunHookReportsUnsupportedExecution`,
+		`--- SKIP: TestRunHookReportsUnsupportedExecution`,
 	} {
 		if !strings.Contains(execute.Run, required) {
 			t.Errorf("js/wasm hook command does not contain %q", required)
 		}
+	}
+	for _, tool := range []string{"uname", "realpath", "tee", "grep"} {
+		pattern := regexp.MustCompile(`(?m)(^|[|;&[:space:]'"])([^|;&[:space:]'"]*/)?` + regexp.QuoteMeta(tool) + `([[:space:]'"]|$)`)
+		if pattern.MatchString(execute.Run) {
+			t.Errorf("js/wasm hook command delegates proof authority to external %s", tool)
+		}
+	}
+	if strings.Contains(execute.Run, "command -v ") {
+		t.Errorf("js/wasm hook command performs ambient command lookup after startup")
 	}
 
 	gate := workflow.job(t, "ci-gate")

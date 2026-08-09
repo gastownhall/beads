@@ -110,60 +110,107 @@ jobs:
           node-version: '24'
 
       - name: Run js/wasm hook boundary
-        shell: bash
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u BASHOPTS -u SHELLOPTS /usr/bin/bash --noprofile --norc -p -euo pipefail {0}
         env:
+          BASH_ENV: ""
+          ENV: ""
           CGO_ENABLED: "0"
           GOARCH: wasm
+          GOENV: "off"
+          GOFLAGS: ""
           GOOS: js
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          NODE_OPTIONS: ""
         run: |
           set -euo pipefail
 
-          test "$(uname -s)" = "Linux"
-          for tool in grep realpath tee; do
-            command -v "$tool" >/dev/null
-          done
+          [[ -n "${BASH_VERSION:-}" ]]
+          [[ "${BASH:-}" == "/usr/bin/bash" ]]
+          [[ /bin/bash -ef /usr/bin/bash ]]
+          [[ "$-" == *p* ]]
+          [[ ! -v BASH_ENV && ! -v ENV ]]
+          [[ "${CGO_ENABLED:-}" == "0" ]]
+          [[ "${GOARCH:-}" == "wasm" ]]
+          [[ "${GOENV:-}" == "off" ]]
+          [[ -z "${GOFLAGS:-}" ]]
+          [[ "${GOOS:-}" == "js" ]]
+          [[ "${GOTOOLCHAIN:-}" == "local" ]]
+          [[ "${GOWORK:-}" == "off" ]]
+          [[ -z "${NODE_OPTIONS:-}" ]]
+          [[ "${RUNNER_TEMP:-}" == /* ]]
+          IFS= read -r kernel_family < /proc/sys/kernel/ostype
+          [[ "$kernel_family" == "Linux" ]]
 
-          go_bin="$(realpath "$(command -v go)")"
-          node_bin="$(realpath "$(command -v node)")"
-          test -x "$go_bin"
-          test -x "$node_bin"
+          go_candidate="$(type -P go)"
+          node_candidate="$(type -P node)"
+          [[ "$go_candidate" == /* && -x "$go_candidate" ]]
+          [[ "$node_candidate" == /* && -x "$node_candidate" ]]
+
+          node_bin="$("$node_candidate" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$node_candidate")"
+          go_bin="$("$node_bin" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$go_candidate")"
+          [[ "$node_bin" == /* && -x "$node_bin" && "$node_candidate" -ef "$node_bin" ]]
+          [[ "$go_bin" == /* && -x "$go_bin" && "$go_candidate" -ef "$go_bin" ]]
 
           go_version="$("$go_bin" env GOVERSION)"
           node_version="$("$node_bin" --version)"
           printf 'Go host: %s (%s)\n' "$go_bin" "$go_version"
           printf 'Node host: %s (%s)\n' "$node_bin" "$node_version"
 
-          test "$go_version" = "go1.26.5"
-          test "$("$go_bin" env GOHOSTOS)" = "linux"
-          test "$("$go_bin" env GOOS)" = "js"
-          test "$("$go_bin" env GOARCH)" = "wasm"
-          test "$("$go_bin" env CGO_ENABLED)" = "0"
+          [[ "$go_version" == "go1.26.5" ]]
+          [[ "$("$go_bin" env GOHOSTOS)" == "linux" ]]
+          [[ "$("$go_bin" env GOOS)" == "js" ]]
+          [[ "$("$go_bin" env GOARCH)" == "wasm" ]]
+          [[ "$("$go_bin" env CGO_ENABLED)" == "0" ]]
           case "$node_version" in
             v24.*) ;;
             *) printf 'unexpected Node version: %s\n' "$node_version" >&2; exit 1 ;;
           esac
           "$node_bin" -e 'if (typeof WebAssembly !== "object" || typeof WebAssembly.instantiate !== "function") process.exit(1)'
 
-          go_root="$(realpath "$("$go_bin" env GOROOT)")"
+          go_root="$("$node_bin" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$("$go_bin" env GOROOT)")"
+          [[ -x "$go_root/bin/go" && "$go_bin" -ef "$go_root/bin/go" ]]
           wasm_exec_node="$go_root/lib/wasm/wasm_exec_node.js"
           wasm_exec_runtime="$go_root/lib/wasm/wasm_exec.js"
           wasm_test="$RUNNER_TEMP/internal-hooks.test.wasm"
-          test_log="$RUNNER_TEMP/js-wasm-hooks-test.log"
-          test -r "$wasm_exec_node"
-          test -r "$wasm_exec_runtime"
+          [[ -r "$wasm_exec_node" ]]
+          [[ -r "$wasm_exec_runtime" ]]
 
           "$go_bin" test -tags gms_pure_go -c -o "$wasm_test" ./internal/hooks
-          test -s "$wasm_test"
-          "$node_bin" --stack-size=8192 "$wasm_exec_node" "$wasm_test" \
+          [[ -s "$wasm_test" ]]
+          test_status=0
+          test_output="$("$node_bin" --stack-size=8192 "$wasm_exec_node" "$wasm_test" \
             -test.v -test.timeout=2m \
             -test.run '^TestRunHookReportsUnsupportedExecution$' \
-            2>&1 | tee "$test_log"
+            2>&1)" || test_status=$?
+          printf '%s\n' "$test_output"
+          (( test_status == 0 )) || exit "$test_status"
 
-          run_count="$(grep -c '^=== RUN   ' "$test_log" || true)"
-          exact_run_count="$(grep -c '^=== RUN   TestRunHookReportsUnsupportedExecution$' "$test_log" || true)"
-          exact_pass_count="$(grep -Ec '^--- PASS: TestRunHookReportsUnsupportedExecution \([0-9.]+s\)$' "$test_log" || true)"
-          nonpass_count="$(grep -Ec '^--- (FAIL|SKIP): TestRunHookReportsUnsupportedExecution([[:space:]]|$)' "$test_log" || true)"
-          suite_pass_count="$(grep -c '^PASS$' "$test_log" || true)"
+          run_count=0
+          exact_run_count=0
+          exact_pass_count=0
+          nonpass_count=0
+          suite_pass_count=0
+          pass_pattern='^--- PASS: TestRunHookReportsUnsupportedExecution \([0-9.]+s\)$'
+          while IFS= read -r line; do
+            if [[ "$line" == "=== RUN   "* ]]; then
+              ((run_count += 1))
+            fi
+            if [[ "$line" == "=== RUN   TestRunHookReportsUnsupportedExecution" ]]; then
+              ((exact_run_count += 1))
+            fi
+            if [[ "$line" =~ $pass_pattern ]]; then
+              ((exact_pass_count += 1))
+            fi
+            case "$line" in
+              "--- FAIL: TestRunHookReportsUnsupportedExecution"*|"--- SKIP: TestRunHookReportsUnsupportedExecution"*)
+                ((nonpass_count += 1))
+                ;;
+            esac
+            if [[ "$line" == "PASS" ]]; then
+              ((suite_pass_count += 1))
+            fi
+          done <<< "$test_output"
           if [[ "$run_count" != 1 || "$exact_run_count" != 1 || "$exact_pass_count" != 1 || "$nonpass_count" != 0 || "$suite_pass_count" != 1 ]]; then
             printf 'expected one exact js/wasm hook test run and pass; got runs=%s exact-runs=%s exact-passes=%s nonpasses=%s suite-passes=%s\n' \
               "$run_count" "$exact_run_count" "$exact_pass_count" "$nonpass_count" "$suite_pass_count" >&2
