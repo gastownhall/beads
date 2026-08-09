@@ -928,6 +928,15 @@ func testMetadataSlots(t *testing.T, f Factory) {
 
 // --- Statistics ---
 
+// testStatistics is dominated on its own terms —
+// RunStatsReporterCountsEveryDurableRowByStatus rides the same
+// store.GetStatistics through internal/workapi/storestats, which passes the
+// struct through verbatim, and asserts per-bucket deltas over five statuses
+// where this asserts a total and a closed count. It stays anyway, because it is
+// one of the three arms of RunDeferredReads, a SECOND exported entry point with
+// no in-tree caller: retiring it would silently narrow a published gate to two
+// of the three reads its doc names, which is an API decision rather than a
+// cleanup. If that gate is ever blessed for shrinking, this case goes with it.
 func testStatistics(t *testing.T, f Factory) {
 	s := f(t)
 	seedStore(t, s)

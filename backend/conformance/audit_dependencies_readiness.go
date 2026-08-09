@@ -306,6 +306,13 @@ func testAuditDetectCyclesBlocksOnly(t *testing.T, f Factory) {
 	}
 }
 
+// testAuditDependencyTree survives a retirement pass despite tree_walker_contract.go
+// pinning the same GetDependencyTreeInTx body harder (Depth/ParentID/EdgeFromParent,
+// title hydration, `related` included as well as relates-to excluded). It is the
+// only call to DoltStorage.GetDependencyTree anywhere in RunAll, and RunAll is
+// what an out-of-tree backend proves itself with — the role contracts are wired
+// per-backend and are not part of that gate. Deleting this leaves the method
+// uncalled by the suite that exists to call it.
 func testAuditDependencyTree(t *testing.T, f Factory) {
 	s := f(t)
 	for _, id := range []string{"g1", "g2", "g3", "g4"} {

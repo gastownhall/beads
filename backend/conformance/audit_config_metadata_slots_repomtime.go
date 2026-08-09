@@ -92,6 +92,17 @@ func testAuditCustomStatusesOrder(t *testing.T, f Factory) {
 // value and returns an error for an invalid one, rolling back the whole write tx.
 // So SetConfig returns an error AND nothing is stored (GetConfig empty). A backend
 // that skips the sync would silently store the invalid value and return nil.
+//
+// NOT DOMINATED by RunWorkspaceConfigRefusesAnUnparseableCustomStatus, however
+// alike the two read. The role refuses in workapi.ValidateSettingWrite, which
+// parses the value BEFORE calling the store at all ("Checking here rather than
+// leaving it to SyncCustomStatusesTable is what makes the refusal a validation
+// error rather than a storage failure"). The store's own in-transaction refusal
+// is therefore reachable only from this seam: make the store swallow the sync
+// error and the whole workspaceconfig contract stays green while this case goes
+// red (measured with scripts/mutation-equivalence.sh). The two also drive
+// different parser branches — a name-shaped refusal here, a built-in collision
+// there.
 func testAuditSetConfigInvalidStatusRollsBack(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -128,6 +139,12 @@ func testAuditCustomTypesOrder(t *testing.T, f Factory) {
 // earlier SetConfig populated. So after deleting status.custom the reference still
 // reports the custom statuses (stale table). A backend that never synced the table
 // would instead report empty.
+//
+// RunWorkspaceConfigUnsetLeavesTheProjectionBehind pins the same bd-yby99.33
+// clause on three legs and reads the projection table raw rather than through
+// GetCustomStatuses, so on promises alone this case is dominated. It survives
+// because it is the only call to DoltStorage.DeleteConfig anywhere in RunAll,
+// the gate an out-of-tree backend proves itself with.
 func testAuditDeleteConfigLeavesNormalizedTable(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
