@@ -74,6 +74,9 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseSettlesTheClosedRowItselfAndItsChild", func(t *testing.T) {
 		conformance.RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t, ctx, fixture)
 	})
+	t.Run("CloseOnASpawnersLastChildSatisfiesAWaitsForGate", func(t *testing.T) {
+		conformance.RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t, ctx, fixture)
+	})
 	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
 		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
 	})

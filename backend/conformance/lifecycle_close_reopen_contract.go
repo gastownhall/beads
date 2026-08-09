@@ -1358,6 +1358,105 @@ func RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t *testing.T, ctx con
 		"a closed row is never blocked, and settling it settles its own parent-child child with it")
 }
 
+// RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate pins the third
+// arm of the blocking predicate — "a waits-for edge whose gate over the
+// spawner's children is not yet satisfied" — on the side of it that no case
+// reached.
+//
+// THE ARM, BY NAME. internal/storage/issueops/blocked_state.go's
+// AffectedByStatusChangeInTx builds the affected set from three loads, and one
+// of them, loadWaitersWhoseSpawnerIsParentOfInTx, exists for exactly this
+// shape: the row whose status moved is a CHILD, and the row that has to settle
+// is a waiter on that child's PARENT — a row the other two loads cannot reach,
+// because it holds no blocking edge onto the child (so the depender load misses
+// it) and it waits on the spawner rather than on the child (so the waiter load
+// misses it too). Delete that one call and this case is the only thing that
+// goes red. The DependencyEditor's gate case covers the ADD side of a gate; it
+// runs through AffectedByDepChangeInTx and never touches this load.
+//
+// WHAT THE FIXTURE MAKES OBSERVABLE, and it is the whole design: the spawner
+// has EXACTLY ONE open child, asserted before the close in both planes. A
+// spawner with a second open child leaves an all-children gate unsatisfied
+// after the close, so the subject could not flip and the case would pass
+// against a body that never recomputed it — an unfalsifiable case wearing a
+// correct assertion, which is the defect this program already shipped once.
+//
+// TWO CONTROLS, one on each side of the affected set. edgedWaiter waits on the
+// SAME spawner, so the same recompute visits it, and stays blocked because it
+// also holds a blocks edge onto a live row: it separates "the gate was
+// re-evaluated" from "the flag was cleared". otherWaiter is gated on a
+// different spawner whose own child nobody touched, so it separates a correct
+// affected set from a blanket pass over every waiter in the workspace.
+//
+// All three legs reach ONE body here (internal/storage/issueops.closeIssueInTx),
+// so this is a wrapper and engine check rather than a third vote, exactly as
+// blocked_state.go's header says of the whole Close family.
+func RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	spawner := fixture.IssuePrefix + "-bswait-spawner"
+	lastChild := fixture.IssuePrefix + "-bswait-lastchild"
+	waiter := fixture.IssuePrefix + "-bswait-waiter"
+	edgedWaiter := fixture.IssuePrefix + "-bswait-edgedwaiter"
+	edgeBlocker := fixture.IssuePrefix + "-bswait-edgeblocker"
+	otherSpawner := fixture.IssuePrefix + "-bswait-otherspawner"
+	otherChild := fixture.IssuePrefix + "-bswait-otherchild"
+	otherWaiter := fixture.IssuePrefix + "-bswait-otherwaiter"
+	for _, id := range []string{spawner, lastChild, waiter, edgedWaiter, edgeBlocker, otherSpawner, otherChild, otherWaiter} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+
+	// The hierarchies land FIRST. A gate over a spawner with no children at all
+	// is already satisfied, so a waits-for edge seeded before its spawner had a
+	// child would leave the waiter unblocked and give this case nothing to flip.
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, lastChild, spawner, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, otherChild, otherSpawner, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, edgedWaiter, edgeBlocker, types.DepBlocks)
+	for _, edge := range []struct{ waiter, spawner string }{
+		{waiter, spawner}, {edgedWaiter, spawner}, {otherWaiter, otherSpawner},
+	} {
+		lifecycleCloseReopenSeedWaitsForEdge(t, ctx, fixture, edge.waiter, edge.spawner, types.WaitsForAllChildren)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	// The trap this case is built around: one open child, so closing it is the
+	// transition that satisfies the gate.
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, spawner, 1)
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, otherSpawner, 1)
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(waiter),
+		"the subject's block is the GATE — the flag with no blocking edge of its own is what says so")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(edgedWaiter), blockedIssue(edgeBlocker),
+		"the in-set control is blocked by a cause this close does not touch")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(otherWaiter),
+		"the out-of-set control is gated on a spawner whose child nobody closes")
+	probe.requireUnblocked(t, blockedIssue(lastChild), "the row being closed carries no block of its own to confuse the flip with")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(waiter)},
+		[]blockedStateRow{blockedIssue(edgedWaiter), blockedIssue(otherWaiter)})
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: lastChild})
+	if err != nil {
+		t.Fatalf("close the spawner's last open child %s: %v", lastChild, err)
+	}
+	if !closed.Changed {
+		t.Fatalf("close of %s reported Changed = false, want a committed close", lastChild)
+	}
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, spawner, 0)
+
+	flip.requireFlippedTo(t, 0,
+		"closing a spawner's LAST open child satisfies an all-children gate, and the closing transaction settles the waiter")
+
+	// The flip is attributable to the GATE and to nothing else: the spawner
+	// itself never moved, and the waits-for edge that gated the waiter is still
+	// there. A 0 read off a row whose edge had vanished would be a different
+	// fact wearing the same value.
+	if got := probe.rawStatus(t, blockedIssue(spawner)); got != string(types.StatusOpen) {
+		t.Fatalf("spawner %s status = %q, want it still open: the waiter's flip must come from the gate, not from its target closing", spawner, got)
+	}
+	assertLifecycleCloseReopenWaitsForEdgeCount(t, ctx, fixture, waiter, spawner, 1)
+}
+
 // RunLifecycleReopenReblocksItsDependers is the other direction, and it is what
 // makes the pair complete: the unmark template and the mark template are
 // separate SQL, so a case that only ever watches a flag fall exercises one of
@@ -1532,6 +1631,59 @@ func lifecycleCloseReopenSeedEdge(t *testing.T, ctx context.Context, fixture Lif
 		IssueID: from, DependsOnID: to, Type: kind,
 	}, "seed"); err != nil {
 		t.Fatalf("seed %s %s -> %s: %v", kind, from, to, err)
+	}
+}
+
+// lifecycleCloseReopenSeedWaitsForEdge seeds a waits-for edge carrying its GATE.
+// It goes through the constructor rather than a literal because the gate lives
+// in edge metadata whose spelling the derivation engine reads, and a hand-built
+// JSON blob here would be this file's guess at that spelling.
+func lifecycleCloseReopenSeedWaitsForEdge(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, waiter, spawner, gate string) {
+	t.Helper()
+	edge, err := types.NewWaitsForDependency(waiter, spawner, gate)
+	if err != nil {
+		t.Fatalf("build the %s waits-for edge %s -> %s: %v", gate, waiter, spawner, err)
+	}
+	if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+		t.Fatalf("seed the %s waits-for edge %s -> %s: %v", gate, waiter, spawner, err)
+	}
+}
+
+// assertLifecycleCloseReopenOpenChildCount counts a spawner's parent-child
+// children that are neither closed nor pinned, IN BOTH PLANES. The gate case
+// reads it as a fixture check on both sides of the close: a spawner with a
+// second open child would leave an all-children gate unsatisfied afterwards, so
+// the subject could not flip and the case could not fail.
+func assertLifecycleCloseReopenOpenChildCount(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, spawner string, want int) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx, `
+		SELECT (
+		    SELECT COUNT(*) FROM dependencies d JOIN issues c ON c.id = d.issue_id
+		    WHERE d.type = 'parent-child' AND d.depends_on_issue_id = ?
+		      AND c.status <> 'closed' AND c.status <> 'pinned'
+		  ) + (
+		    SELECT COUNT(*) FROM wisp_dependencies d JOIN wisps c ON c.id = d.issue_id
+		    WHERE d.type = 'parent-child' AND d.depends_on_issue_id = ?
+		      AND c.status <> 'closed' AND c.status <> 'pinned'
+		  )`, []any{spawner, spawner}, &got); err != nil {
+		t.Fatalf("count the open children of %s: %v", spawner, err)
+	}
+	if got != want {
+		t.Fatalf("%s has %d open children, want %d: an all-children gate case is about the LAST one closing", spawner, got, want)
+	}
+}
+
+func assertLifecycleCloseReopenWaitsForEdgeCount(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, waiter, spawner string, want int) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = ?",
+		[]any{waiter, spawner, string(types.DepWaitsFor)}, &got); err != nil {
+		t.Fatalf("count waits-for edges %s -> %s: %v", waiter, spawner, err)
+	}
+	if got != want {
+		t.Errorf("waits-for edges %s -> %s = %d, want %d", waiter, spawner, got, want)
 	}
 }
 
