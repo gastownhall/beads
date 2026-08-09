@@ -40,6 +40,9 @@ func TestWorkspaceConfigContract(t *testing.T) {
 	t.Run("ListExcludesTheKVPlane", func(t *testing.T) {
 		conformance.RunWorkspaceConfigListExcludesTheKVPlane(t, ctx, fixture)
 	})
+	t.Run("PointReadRefusesTheKVPlane", func(t *testing.T) {
+		conformance.RunWorkspaceConfigPointReadRefusesTheKVPlane(t, ctx, fixture)
+	})
 	t.Run("UnsetRemovesTheSetting", func(t *testing.T) {
 		conformance.RunWorkspaceConfigUnsetRemovesTheSetting(t, ctx, fixture)
 	})

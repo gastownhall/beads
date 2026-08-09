@@ -42,6 +42,16 @@ func (c *workspaceConfig) GetSetting(ctx context.Context, req publicops.GetSetti
 	if err != nil {
 		return publicops.SettingResult{}, err
 	}
+	// Same refusal as the store-backed body, from the same place, for the same
+	// reason the enumeration filter is shared: the config table holds the KV
+	// plane too, and what a settings read may carry is one decision.
+	//
+	// It is decided BEFORE the unit of work is opened, like the validation
+	// above: a refusal is not a read that found nothing, and there is nothing
+	// for it to read.
+	if refused, ok := workapi.FilterSettingsPointRead(key); ok {
+		return refused, nil
+	}
 	return RunTxRead(ctx, c.provider, func(ctx context.Context, uw UnitOfWork) (publicops.SettingResult, error) {
 		value, err := uw.ConfigUseCase().GetConfig(ctx, key)
 		if err != nil {

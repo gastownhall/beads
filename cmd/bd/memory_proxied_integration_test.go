@@ -50,10 +50,17 @@ func TestProxiedServerMemory(t *testing.T) {
 		}
 
 		// Memories land under kv.memory.<key> in the config table — the
-		// namespace `bd export --all` sweeps — visible via bd config get.
+		// namespace `bd export --all` sweeps — but the settings plane does not
+		// serve them. A point read answers exactly as an unset key does, so a
+		// caller cannot tell a refusal from an absence. This is the proxied
+		// leg of the same firewall the role contract pins; recall below is the
+		// route that still reads the content.
 		out = bdProxiedMem(t, bd, p.dir, "config", "get", "kv.memory.dolt-phantoms")
-		if strings.TrimSpace(out) != content {
-			t.Errorf("expected memory at kv.memory.dolt-phantoms, got: %q", out)
+		if !strings.Contains(out, "(not set)") {
+			t.Errorf("expected kv.memory.dolt-phantoms to read as unset through config get, got: %q", out)
+		}
+		if strings.Contains(out, content) {
+			t.Errorf("config get leaked memory content: %q", out)
 		}
 
 		// List all.

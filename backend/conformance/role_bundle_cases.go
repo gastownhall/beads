@@ -636,6 +636,7 @@ var roleContractCases = []roleContract{
 		RunWorkspaceConfigConflatesAnUnsetKeyWithAnEmptyValue,
 		RunWorkspaceConfigListsEveryStoredSetting,
 		RunWorkspaceConfigListExcludesTheKVPlane,
+		RunWorkspaceConfigPointReadRefusesTheKVPlane,
 		RunWorkspaceConfigUnsetRemovesTheSetting,
 		RunWorkspaceConfigUnsetOfAnAbsentKeySucceeds,
 		RunWorkspaceConfigRefusesAnEmptyKey,

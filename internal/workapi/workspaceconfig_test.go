@@ -163,3 +163,67 @@ func TestFilterSettingsEnumerationIsEmptyNeverNil(t *testing.T) {
 		}
 	}
 }
+
+// TestBothSettingsFiltersDrawTheSameBoundary is the guard against the failure
+// mode a second predicate would introduce: an enumeration that hides a key a
+// point read still hands over. The two filters are the two halves of one
+// firewall, so they are asserted against ONE key list rather than against each
+// other's expectations.
+func TestBothSettingsFiltersDrawTheSameBoundary(t *testing.T) {
+	for key, onThePlane := range map[string]bool{
+		"kv.deploy-token":              true,
+		"kv.memory.architecture":       true,
+		"kv.":                          true,
+		"issue_prefix":                 false,
+		"status.custom":                false,
+		"kvetch":                       false,
+		"memory.not-under-kv":          false,
+		"custom.mentions.kv.somewhere": false,
+		"":                             false,
+	} {
+		if got := KeyIsOnTheKVPlane(key); got != onThePlane {
+			t.Errorf("KeyIsOnTheKVPlane(%q) = %v, want %v", key, got, onThePlane)
+		}
+		_, enumerated := FilterSettingsEnumeration(map[string]string{key: "v"})[key]
+		if enumerated == onThePlane {
+			t.Errorf("FilterSettingsEnumeration kept %q = %v, want kept = %v", key, enumerated, !onThePlane)
+		}
+		_, refused := FilterSettingsPointRead(key)
+		if refused != onThePlane {
+			t.Errorf("FilterSettingsPointRead(%q) refused = %v, want %v — the two filters must draw the same boundary",
+				key, refused, onThePlane)
+		}
+	}
+}
+
+// TestFilterSettingsPointReadAnswersExactlyLikeAnAbsentKey pins what makes the
+// refusal a refusal a caller cannot detect: the absent-key answer, which
+// SettingResult.Value documents as the echoed key, "" and a nil error. There is
+// no ErrNotFound on this role to return instead, and an error of any kind would
+// confirm the guessed key to the caller.
+func TestFilterSettingsPointReadAnswersExactlyLikeAnAbsentKey(t *testing.T) {
+	const key = "kv.memory.deploy-notes"
+
+	result, refused := FilterSettingsPointRead(key)
+	if !refused {
+		t.Fatalf("FilterSettingsPointRead(%q) let the key through", key)
+	}
+	if want := (issueops.SettingResult{Key: key}); result != want {
+		t.Errorf("FilterSettingsPointRead(%q) = %+v, want %+v — the same result a key nothing stored produces", key, result, want)
+	}
+}
+
+// TestFilterSettingsPointReadLeavesASettingToTheStore pins the other direction:
+// the filter must not answer for a key it does not own, or every settings read
+// would return "" without ever reaching the database.
+func TestFilterSettingsPointReadLeavesASettingToTheStore(t *testing.T) {
+	for _, key := range []string{"issue_prefix", "status.custom", "custom.thing"} {
+		result, refused := FilterSettingsPointRead(key)
+		if refused {
+			t.Errorf("FilterSettingsPointRead(%q) refused a settings key", key)
+		}
+		if result != (issueops.SettingResult{}) {
+			t.Errorf("FilterSettingsPointRead(%q) = %+v alongside refused=false, want the zero result the caller ignores", key, result)
+		}
+	}
+}

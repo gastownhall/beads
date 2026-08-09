@@ -245,14 +245,17 @@ func RunWorkspaceConfigListsEveryStoredSetting(t *testing.T, ctx context.Context
 }
 
 // RunWorkspaceConfigListExcludesTheKVPlane pins workspaceconfig.go's
-// ListSettings: no key under `kv.` is enumerated, and the asymmetry that stops
-// the exclusion there — GetSetting still answers each of those keys by name.
+// ListSettings: no key under `kv.` is enumerated.
 //
 // The two planes share one table, so this is the case that tells a body
 // filtering the SETTINGS plane from one that just happens to hold no memories.
 // Both probes are written THROUGH the role, because SetSetting still accepts
 // them: a write that lands and an enumeration that omits it is the whole claim,
 // and seeding out of band would leave the write half untested.
+//
+// THE OTHER HALF OF THE FIREWALL IS ITS OWN CASE.
+// RunWorkspaceConfigPointReadRefusesTheKVPlane pins what GetSetting answers for
+// these keys, which is what says the rows this case cannot see are still there.
 //
 // The generic key and the memory key are both here because the exclusion is the
 // whole prefix. A body that reached for kvkeys.MemoryConfigKeyPrefix — the
@@ -286,11 +289,89 @@ func RunWorkspaceConfigListExcludesTheKVPlane(t *testing.T, ctx context.Context,
 		}
 	}
 
-	// And the stated asymmetry: the exclusion is on the ENUMERATION only, so a
-	// caller naming an exact key still gets it. Removing this half would not
-	// fail any other case — it is pinned here or nowhere.
-	assertWorkspaceConfigValue(t, ctx, fixture, generic, "kv row")
-	assertWorkspaceConfigValue(t, ctx, fixture, memory, "the deploy token is sk-live-000")
+	// The rows the enumeration did not carry are still THERE. Without this the
+	// case passes against a SetSetting that dropped the writes on the floor,
+	// which is an exclusion of nothing.
+	assertWorkspaceConfigRowCount(t, ctx, fixture, generic, 1)
+	assertWorkspaceConfigRowCount(t, ctx, fixture, memory, 1)
+}
+
+// RunWorkspaceConfigPointReadRefusesTheKVPlane pins the half of the read
+// firewall a caller reaches by NAMING a key: GetSetting answers a `kv.` key
+// exactly as it answers a key nothing ever stored, whether or not the row is
+// there.
+//
+// This half is the one that matters. The enumeration exclusion assumed a caller
+// who knew the exact key was a different class of caller, and `bd remember`
+// derives its key from the content it stores, so the keys are guessable and
+// GET /v0/beads/config/kv.memory.<slug> walked around the wall — on a surface
+// with no authentication, whose redaction decides on the key NAME while a
+// memory's secret is in the VALUE.
+//
+// WHAT IT ASSERTS IS AN INDISTINGUISHABILITY, and it takes four probes to say
+// so:
+//
+//   - A stored kv row and a stored memory both answer "" with a NIL ERROR. An
+//     error of any kind — including one wrapping ErrValidation, which this role
+//     already uses for an empty key — would confirm to the caller who guessed
+//     the key that it named something.
+//   - A `kv.` key nothing ever wrote answers the SAME THING, asserted through
+//     the same helper, so the refusal and the absence are one answer rather
+//     than two that happen to render alike.
+//   - The ROWS SURVIVE, read out of band. A body that satisfied the read by
+//     deleting the row would pass every assertion above and destroy the user's
+//     memories; and the rows are what the write half of this plane still owns.
+//   - A SETTINGS key still reads back its value. A GetSetting that answered ""
+//     for everything is the other way to pass this case for the wrong reason,
+//     and it would take out `bd config get` entirely.
+//
+// AND THE WRITES ARE UNTOUCHED, asserted last: UnsetSetting still removes a
+// `kv.` row. That is the escape hatch for a wedged memory, it is the only thing
+// left on this role that can reach the plane, and it leaves the workspace as
+// this case found it.
+func RunWorkspaceConfigPointReadRefusesTheKVPlane(t *testing.T, ctx context.Context, fixture WorkspaceConfigFixture) {
+	t.Helper()
+	setting := workspaceConfigKey(fixture, "point-read-neighbor")
+	generic := kvkeys.Prefix + fixture.IssuePrefix + "-point-read"
+	memory := kvkeys.MemoryConfigKeyPrefix + fixture.IssuePrefix + "-point-read-slug"
+	absent := kvkeys.MemoryConfigKeyPrefix + fixture.IssuePrefix + "-never-remembered"
+
+	setWorkspaceConfigSetting(t, ctx, fixture, setting, "settings row")
+	setWorkspaceConfigSetting(t, ctx, fixture, generic, "kv row")
+	setWorkspaceConfigSetting(t, ctx, fixture, memory, "the deploy token is sk-live-000")
+	// The writes landed, so the empty answers below are a refusal rather than a
+	// pair of keys that were never stored.
+	assertWorkspaceConfigRowCount(t, ctx, fixture, generic, 1)
+	assertWorkspaceConfigRowCount(t, ctx, fixture, memory, 1)
+
+	// The settings plane FIRST: a role answering "" to everything would satisfy
+	// the refusals and mean nothing.
+	assertWorkspaceConfigValue(t, ctx, fixture, setting, "settings row")
+
+	for _, key := range []string{generic, memory, absent} {
+		result, err := fixture.WorkspaceConfig.GetSetting(ctx, publicops.GetSettingRequest{Key: key})
+		if err != nil {
+			t.Fatalf("GetSetting(%q) = %v, want the absent-key answer: an error tells the caller who guessed the key that it named something", key, err)
+		}
+		if result.Key != key {
+			t.Fatalf("GetSetting(%q) echoed key %q; the refusal is the absent-key answer, which echoes the request", key, result.Key)
+		}
+		if result.Value != "" {
+			t.Fatalf("GetSetting(%q) = %q, want \"\": the kv plane is user data riding in the settings table and this role does not serve it", key, result.Value)
+		}
+	}
+
+	// The refusal did not eat the rows. Out of band, because the role has just
+	// promised it will not show them.
+	assertWorkspaceConfigRowCount(t, ctx, fixture, generic, 1)
+	assertWorkspaceConfigRowCount(t, ctx, fixture, memory, 1)
+
+	// The write half still reaches the plane, which is the escape hatch for a
+	// memory whose value has wedged something.
+	unsetWorkspaceConfigSetting(t, ctx, fixture, generic)
+	unsetWorkspaceConfigSetting(t, ctx, fixture, memory)
+	assertWorkspaceConfigRowCount(t, ctx, fixture, generic, 0)
+	assertWorkspaceConfigRowCount(t, ctx, fixture, memory, 0)
 }
 
 // RunWorkspaceConfigUnsetRemovesTheSetting pins that a removed key is gone from
@@ -790,6 +871,24 @@ func listWorkspaceConfigSettings(t *testing.T, ctx context.Context, fixture Work
 		t.Fatalf("ListSettings: %v", err)
 	}
 	return result.Settings
+}
+
+// assertWorkspaceConfigRowCount reads the config table directly to say whether
+// one key has a row.
+//
+// It is the only way to observe a key the role has stopped answering for: the
+// two kv-plane cases need "the row is there and the read refuses it" to be a
+// different fact from "there is no row", and every verb on this role conflates
+// them by design.
+func assertWorkspaceConfigRowCount(t *testing.T, ctx context.Context, fixture WorkspaceConfigFixture, key string, want int) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM config WHERE `key` = ?", []any{key}, &got); err != nil {
+		t.Fatalf("count the config rows keyed %q: %v", key, err)
+	}
+	if got != want {
+		t.Fatalf("the config table holds %d rows keyed %q, want %d", got, key, want)
+	}
 }
 
 // assertWorkspaceConfigTableCount reads a normalized projection table directly.
