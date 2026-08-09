@@ -131,20 +131,30 @@ func RunCounterCountsClosedRows(t *testing.T, ctx context.Context, fixture Count
 	t.Helper()
 	open := fixture.IssuePrefix + "-status-open"
 	closed := fixture.IssuePrefix + "-status-closed"
+	wip := fixture.IssuePrefix + "-status-wip"
 	seedCounterIssue(t, ctx, fixture, counterSeed(open))
 	closedSeed := counterSeed(closed)
 	closedSeed.Status = types.StatusClosed
 	seedCounterIssue(t, ctx, fixture, closedSeed)
+	// The in-progress row is the third status class, and it is here because the
+	// unfiltered count is the one assertion that says which statuses the default
+	// admits. With only open and closed seeded, a body defaulting to
+	// `status IN ('open','closed')` answers every number below correctly. This
+	// seed came off the retired audit case conformance.go testCountIssues, whose
+	// fixture carried it.
+	wipSeed := counterSeed(wip)
+	wipSeed.Status = types.StatusInProgress
+	seedCounterIssue(t, ctx, fixture, wipSeed)
 
-	scope := counterScope(open, closed)
-	assertCounterTotal(t, ctx, fixture, scope, 2)
+	scope := counterScope(open, closed, wip)
+	assertCounterTotal(t, ctx, fixture, scope, 3)
 
 	scope.Status = "closed"
 	assertCounterTotal(t, ctx, fixture, scope, 1)
 
 	// "all" is the other spelling of every status, and it must not narrow.
 	scope.Status = "all"
-	assertCounterTotal(t, ctx, fixture, scope, 2)
+	assertCounterTotal(t, ctx, fixture, scope, 3)
 }
 
 // RunCounterAnUnknownStatusMatchesNothing pins counter.go:50-56 and :237-241:
