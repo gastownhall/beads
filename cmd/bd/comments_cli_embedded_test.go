@@ -48,7 +48,7 @@ func TestEmbeddedCommentsCLI(t *testing.T) {
 
 	t.Run("comments_add_json", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "JSON comment", "--type", "task")
-		cmd := exec.Command(bd, "comments", "add", issue.ID, "JSON comment text", "--json")
+		cmd := exec.Command(bd, "comments", "add", issue.ID, "JSON", "comment", "text", "--json")
 		cmd.Dir = dir
 		cmd.Env = bdEnv(dir)
 		stdout, stderr, err := runCommandBuffers(t, cmd)

@@ -2,13 +2,16 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runLabelAddProxiedServer(ctx context.Context, args []string) error {
@@ -42,9 +45,12 @@ func labelMutateProxied(ctx context.Context, args []string, operation string) er
 	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
 		resolvedIDs = resolvedIDs[:0]
 		for _, inputID := range issueIDs {
-			issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, inputID)
-			if issue == nil {
+			issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), inputID)
+			if errors.Is(rerr, storage.ErrNotFound) {
 				return "", fmt.Errorf("resolving issue ID %q: not found", inputID)
+			}
+			if rerr != nil {
+				return "", fmt.Errorf("resolving issue ID %q: %w", inputID, rerr)
 			}
 			for _, label := range labels {
 				var e error
@@ -106,12 +112,12 @@ func runLabelListProxiedServer(ctx context.Context, args []string) error {
 	}
 	defer uw.Close(ctx)
 
-	issue, isWisp, err := proxiedGetIssueOrWisp(ctx, uw, args[0])
+	issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
+	if errors.Is(err, storage.ErrNotFound) {
+		return HandleErrorRespectJSON("resolving %s: not found", args[0])
+	}
 	if err != nil {
 		return HandleErrorRespectJSON("resolving %s: %v", args[0], err)
-	}
-	if issue == nil {
-		return HandleErrorRespectJSON("resolving %s: not found", args[0])
 	}
 	issueID := issue.ID
 
@@ -244,9 +250,12 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		parentID string
 	)
 	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		parent, _ := proxiedResolveIssueOrWisp(ctx, uw, args[0])
-		if parent == nil {
+		parent, _, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), args[0])
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return "", fmt.Errorf("resolving parent %q: not found", args[0])
+		}
+		if rerr != nil {
+			return "", fmt.Errorf("resolving parent %q: %w", args[0], rerr)
 		}
 		parentID = parent.ID
 

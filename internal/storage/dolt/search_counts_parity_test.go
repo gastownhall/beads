@@ -65,7 +65,7 @@ func TestSearchCountsFilterBeforeJoinParity(t *testing.T) {
 
 			// Predicate form (nil ids): the form this PR reshapes. The by-IDs
 			// form keeps the plain driver and is unaffected.
-			newSQL, genArgs := sqlbuild.SearchCountsSQL(sqlbuild.IssuesFilterTables, nil, whereSQL, orderBy, limitSQL, true, tc.filter.SkipLabels)
+			newSQL, genArgs := sqlbuild.SearchCountsSQL(sqlbuild.IssuesFilterTables, nil, whereSQL, orderBy, limitSQL, true, sqlbuild.CountsHydration{SkipLabels: tc.filter.SkipLabels})
 			if genArgs != nil {
 				t.Fatalf("predicate form must not generate args, got %d", len(genArgs))
 			}

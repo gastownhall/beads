@@ -1206,6 +1206,60 @@ func TestIsAgentsImportStub(t *testing.T) {
 			agentsFile: "AGENTS.md",
 			want:       false,
 		},
+		{
+			// A file that documents the pattern is not using it. Claude Code
+			// does not expand an @-import shown as code, and treating this as a
+			// stub relocates the managed block and deletes it from here.
+			name:       "directive inside a fenced code block",
+			content:    "# Claude Code\n\nTo adopt the redirect, put this in CLAUDE.md:\n\n```\n@AGENTS.md\n```\n\nFull instructions follow.\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "directive inside a fence with an info string",
+			content:    "# Claude Code\n\n```markdown\n@AGENTS.md\n```\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			name:       "directive inside a tilde fence",
+			content:    "# Claude Code\n\n~~~\n@AGENTS.md\n~~~\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			// A backtick run inside a tilde block is content, not a terminator;
+			// if it closed the block the directive after it would leak through.
+			name:       "unmatched fence character does not end the block",
+			content:    "# Claude Code\n\n~~~\n```\n@AGENTS.md\n~~~\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			// The whole point is that fencing suppresses only what is fenced.
+			name:       "real directive after a fenced example still counts",
+			content:    "# Claude Code\n\n```\n@OTHER.md\n```\n\n@AGENTS.md\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
+		{
+			// An unterminated fence swallows the rest of the file. That is what
+			// a Markdown renderer does too, so the conservative reading (not a
+			// stub) is the correct one rather than an accident.
+			name:       "unclosed fence suppresses the rest of the file",
+			content:    "# Claude Code\n\n```\n@AGENTS.md\n",
+			agentsFile: "AGENTS.md",
+			want:       false,
+		},
+		{
+			// Four-space indentation is deliberately NOT treated as code: it is
+			// equally a list continuation, which is a plausible home for a real
+			// directive.
+			name:       "indented directive still counts",
+			content:    "# Claude Code\n\n- Shared instructions:\n\n    @AGENTS.md\n",
+			agentsFile: "AGENTS.md",
+			want:       true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1256,6 +1310,56 @@ func TestInstallClaudeRedirectsToAgentsMD(t *testing.T) {
 	}
 	if !strings.Contains(string(agentsData), "profile:minimal") {
 		t.Fatalf("AGENTS.md should have minimal profile:\n%s", agentsData)
+	}
+}
+
+// The unit cases above pin the predicate; this pins what the predicate costs
+// when it is wrong. A CLAUDE.md that is authoritative but happens to SHOW the
+// redirect directive in a fenced example is not a stub, and misreading it is
+// destructive rather than merely misrouted: the redirect activates and
+// stripStaleClaudeBlock then removes the managed block from the file that was
+// actually in charge of it.
+func TestInstallClaudeKeepsBlockWhenTheDirectiveIsOnlyDocumented(t *testing.T) {
+	stubDetectRenderOpts(t)
+	env, _, _ := newClaudeTestEnv(t)
+
+	// Authoritative CLAUDE.md that documents the stub pattern rather than using it.
+	claudePath := filepath.Join(env.projectDir, claudeInstructionsFile)
+	documented := "# Claude Code\n\nFull project instructions live here.\n\n" +
+		"To redirect this file to AGENTS.md instead, reduce it to:\n\n" +
+		"```markdown\n@AGENTS.md\n```\n\n" +
+		"Until then, this file is authoritative.\n"
+	if err := os.WriteFile(claudePath, []byte(documented), 0o644); err != nil {
+		t.Fatalf("write CLAUDE.md: %v", err)
+	}
+
+	// AGENTS.md exists, so the redirect would fire if the stub check said yes.
+	agentsPath := filepath.Join(env.projectDir, "AGENTS.md")
+	if err := os.WriteFile(agentsPath, []byte("# Agent Instructions\n\nShared notes.\n"), 0o644); err != nil {
+		t.Fatalf("write AGENTS.md: %v", err)
+	}
+
+	if err := installClaude(env, false, false); err != nil {
+		t.Fatalf("installClaude: %v", err)
+	}
+
+	claudeData, err := os.ReadFile(claudePath)
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	if !strings.Contains(string(claudeData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("CLAUDE.md is authoritative and must carry the beads block; a fenced example redirected it away:\n%s", claudeData)
+	}
+	if !strings.Contains(string(claudeData), "Until then, this file is authoritative.") {
+		t.Fatalf("CLAUDE.md lost its own content:\n%s", claudeData)
+	}
+
+	agentsData, err := os.ReadFile(agentsPath)
+	if err != nil {
+		t.Fatalf("read AGENTS.md: %v", err)
+	}
+	if strings.Contains(string(agentsData), "BEGIN BEADS INTEGRATION") {
+		t.Fatalf("AGENTS.md must not receive the block when CLAUDE.md is not a stub:\n%s", agentsData)
 	}
 }
 

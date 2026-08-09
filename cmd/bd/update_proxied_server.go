@@ -5,26 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/fs"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
-
-// proxiedUpdateRetryMaxElapsed bounds the whole-attempt retry loop for one
-// issue's update (matches uow.CommitWithRetries' budget). A var so tests can
-// shrink it when exercising conflict exhaustion.
-var proxiedUpdateRetryMaxElapsed = 15 * time.Second
 
 func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
 	if len(args) == 0 {
@@ -78,235 +67,253 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	return nil
 }
 
-// applyUpdateProxiedOne applies one issue's update, redoing the WHOLE
-// read-merge-write in a fresh unit of work when Dolt reports a serialization
-// failure (the withRetryTx idiom from internal/storage/dolt).
-//
-// The retry must wrap the whole attempt, never just the commit: a
-// serialization failure means the server already rolled the transaction back,
-// so re-committing the same session (the old uow.CommitWithRetries call) can
-// only ever produce "nothing to commit" — which the old code swallowed,
-// printing "✓ Updated" and exiting 0 for a write that was silently lost.
-// Redoing the attempt re-reads the winner's committed row, so merge
-// operations (metadata edits, note appends) resolve against authoritative
-// state instead of erasing it.
-func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure, error) {
+// proxiedIssueLifecycle asks the unit-of-work provider for the write role, the
+// same way proxiedIssueReader asks it for the read one.
+func proxiedIssueLifecycle() (issueops.Lifecycle, error) {
 	if uowProvider == nil {
-		return nil, nil, HandleError("proxied-server UOW provider not initialized")
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-
-	var issue *types.Issue
-	var fail *updateIDFailure
-	bo := backoff.NewExponentialBackOff()
-	bo.InitialInterval = 25 * time.Millisecond
-	bo.MaxElapsedTime = proxiedUpdateRetryMaxElapsed
-	err := backoff.Retry(func() error {
-		var retryable bool
-		var attemptErr error
-		issue, fail, retryable, attemptErr = applyUpdateProxiedAttempt(ctx, id, in)
-		if attemptErr == nil {
-			return nil
-		}
-		if retryable {
-			return attemptErr
-		}
-		return backoff.Permanent(attemptErr)
-	}, backoff.WithContext(bo, ctx))
-	if err != nil {
-		if uow.IsSerializationError(err) {
-			// Retries exhausted while losing Dolt's commit-time merge. The
-			// write did NOT land; fail loudly instead of exiting 0.
-			fmt.Fprintf(os.Stderr, "Error updating %s: retries exhausted on write conflicts: %v\n", id, err)
-			return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("retries exhausted on write conflicts: %v", err)}, nil
-		}
-		return nil, nil, err
+	src, ok := uowProvider.(uow.IssueLifecycleSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the issue-lifecycle surface", uowProvider)
 	}
-	return issue, fail, nil
+	return src.IssueLifecycle()
 }
 
-// applyUpdateProxiedAttempt runs one full read-merge-write attempt in a fresh
-// unit of work. retryable is true only for serialization failures, where the
-// server-side rollback guarantees nothing landed and the whole attempt is safe
-// to redo. Terminal per-issue failures (not found, claim conflicts, commit
-// errors) print to stderr and return a non-nil fail with no error, so the
-// multi-ID loop records the failed ID, keeps going, and still exits non-zero
-// — matching the non-proxied path. A guard refusal sets fail.GuardMismatch so
-// the exit code distinguishes it (ExitGuardMismatch vs 1).
-func applyUpdateProxiedAttempt(ctx context.Context, id string, in *updateInput) (issue *types.Issue, fail *updateIDFailure, retryable bool, err error) {
-	uw, err := uowProvider.NewUOW(ctx)
+// applyUpdateProxiedOne applies one issue's update — plain or --claim —
+// through issueops.Lifecycle. What stays here is this surface's own protocol:
+// the template guard, the advisory reassign pre-read, the per-id failure
+// taxonomy the multi-id batch needs and the notes-overwrite warning. Hooks are
+// NOT among them: they fire from the write plumbing now (the notifying provider
+// wired in main.go), which is what makes an update fire the same events here as
+// it does on the embedded path.
+//
+// Provenance carries the commit message this path has always written, so `bd
+// dolt log` reads the same after the move as before it. The plane is
+// deliberately NOT restricted: `bd update` has always resolved a wisp id,
+// unlike the HTTP claim endpoint, which serves durable issues only.
+//
+// The pre-read is a read of its own, one transaction earlier than the
+// mutation, so the guards it applies are ADVISORY. The mutation's own guards
+// are all inside the contract's transaction, including the fence and the close
+// policy.
+func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure, error) {
+	ops, err := proxiedIssueLifecycle()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error opening unit of work for %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("opening unit of work: %v", err)}, false, nil
+		return nil, nil, HandleError("%v", err)
 	}
-	defer uw.Close(ctx)
-
-	issueUC := uw.IssueUseCase()
-	current, err := issueUC.GetIssue(ctx, id)
-	if err != nil || current == nil {
-		wispCurrent, wispErr := issueUC.GetWisp(ctx, id)
-		if wispErr == nil && wispCurrent != nil {
-			current = wispCurrent
-		} else if err != nil {
-			fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
-			return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}, false, nil
-		} else {
-			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
-			return nil, &updateIDFailure{ID: id, Error: "issue not found"}, false, nil
-		}
+	before, fail := proxiedUpdateTarget(ctx, id, in)
+	if fail != nil {
+		return nil, fail, nil
 	}
-	if err := validateIssueUpdatable(id, current); err != nil {
-		fmt.Fprintf(os.Stderr, "%s\n", err)
-		return nil, &updateIDFailure{ID: id, Error: err.Error()}, false, nil
-	}
-
-	// bd-98s5c: an unguarded assignee update must not silently overwrite
-	// another actor's live claim. Skipped under --if-assignee: that CAS names
-	// the holder explicitly (park stays possible without --force). Also
-	// skipped under --claim: the claim CAS is itself the anti-steal gate (a
-	// foreign live claim fails it with the canonical "already claimed" copy),
-	// and an assignee edit that rides a WON claim only ever touches the
-	// actor's own fresh claim. The proxied-server path is where cross-actor
-	// collisions actually happen — every shared-dolt-server clone writes
-	// through here. A policy refusal: terminal per-issue failure, exit 1,
-	// never GuardMismatch/13.
-	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
-		if err := validateIssueReassignable(id, current, actor, newAssignee,
-			uowClaimPoolAliases(ctx, uw), in.force); err != nil {
-			fmt.Fprintf(os.Stderr, "%s\n", err)
-			return nil, &updateIDFailure{ID: id, Error: err.Error()}, false, nil
-		}
-	}
-
-	spec := buildUpdateSpecForIssue(current, in)
-	notesOverwritten := replacesExistingNotes(current.Notes, in.fields)
-
-	updated, err := issueUC.ApplyUpdate(ctx, id, spec, actor)
+	patch, err := proxiedUpdatePatch(in, before)
 	if err != nil {
-		if uow.IsSerializationError(err) {
-			return nil, nil, true, err
-		}
-		if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
-			fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-			return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("claiming issue: %v", err)}, false, nil
-		}
-		if isGuardMismatch(err) {
-			// bd-wsqvw guard verdict: the precondition no longer holds, nothing
-			// was written. Loud and non-zero, never collapsed to success —
-			// GuardMismatch routes the batch to ExitGuardMismatch.
-			fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-			return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("precondition failed: %v", err), GuardMismatch: true}, false, nil
-		}
 		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
-		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}, false, nil
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}, nil
+	}
+	notesOverwritten := replacesExistingNotes(before.Notes, in.fields)
+
+	var expectedStatus *issueops.Status
+	if in.ifStatus != nil {
+		// gatherUpdateInput refuses --if-assignee/--if-status alongside
+		// --claim, which is also what the request contract requires of a claim,
+		// so a claim reaches the contract with both guards nil by construction.
+		expected := issueops.Status(*in.ifStatus)
+		expectedStatus = &expected
+	}
+	result, err := runCommandUpdateMutation(ctx, ops, commandUpdateMutation{
+		actor:            actor,
+		issueID:          id,
+		patch:            patch,
+		claim:            in.claim,
+		force:            in.force,
+		expectedAssignee: in.ifAssignee,
+		expectedStatus:   expectedStatus,
+		provenance:       fmt.Sprintf("bd: update %s", id),
+	})
+	if err != nil {
+		// Cancellation is not a verdict on this issue — SIGINT cancels bd's
+		// root context, and every remaining id in the batch would fail the same
+		// way, so abort the batch. A commit that itself failed with a context
+		// error is indistinguishable from a cancellation between attempts;
+		// aborting is the right call for both.
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, nil, err
+		}
+		return nil, proxiedUpdateFailure(id, err), nil
+	}
+	updated := result.Issue
+	if updated == nil {
+		fmt.Fprintf(os.Stderr, "Error updating %s: the update reported no issue\n", id)
+		return nil, &updateIDFailure{ID: id, Error: "updating: no issue returned"}, nil
+	}
+	// `bd update` has never printed dependency records; the direct route drops
+	// them for the same reason.
+	updated.Dependencies = nil
+	if in.claim {
+		// A CLAIM answers an already-published surface, and that surface is the
+		// bare row: issueops.ClaimResult omits labels, dependency records and
+		// comments, but routing this path through Lifecycle hydrates labels.
+		// Stripping them keeps `bd update --claim --json` byte-identical to the
+		// v0 claim response, which TestProxiedServerServeClaim asserts with an
+		// EMPTY allowlist. A plain update carries labels, as the direct route
+		// does.
+		updated.Labels = nil
+		updated.Comments = nil
 	}
 
-	if err := uw.Commit(ctx, fmt.Sprintf("bd: update %s", id)); err != nil {
-		if uow.IsSerializationError(err) {
-			// Dolt rolled the whole transaction back server-side; nothing
-			// landed. Signal the caller to redo the read-merge-write.
-			return nil, nil, true, err
-		}
-		if !isDoltNothingToCommit(err) {
-			fmt.Fprintf(os.Stderr, "Error committing %s: %v\n", id, err)
-			return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("committing: %v", err)}, false, nil
-		}
-		// "Nothing to commit" here is the legitimately-empty working set:
-		// wisp-only updates live in dolt_ignored tables, so a successful
-		// ApplyUpdate can leave nothing for the Dolt commit layer. The
-		// lost-write flavor — nothing-to-commit from re-committing a
-		// rolled-back session — cannot reach this branch because each attempt
-		// commits its own fresh unit of work exactly once.
-	}
+	// Post-commit reporting: the write has landed, so these run exactly once no
+	// matter how many attempts the contract's conflict retry burned.
 	if notesOverwritten {
 		warnNotesReplacement(id)
 	}
-
-	if err := fireProxiedUpdateHooks(ctx, current, updated); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", id, err)
-	}
-	return updated, nil, false, nil
+	return updated, nil, nil
 }
 
-func fireProxiedUpdateHooks(ctx context.Context, before, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
+// proxiedUpdateTarget reads the row an update is about through the query role,
+// for the things the mutation's own result cannot answer: whether the target is
+// a template, whether an unguarded assignee edit is about to take the issue
+// from a live foreign holder, whether --notes is about to replace existing
+// notes, and whether --defer="" should also clear a deferred status. It no
+// longer reads the pre-state to decide a hook: a status-crossing update fires
+// on_update and nothing else, from the plumbing, exactly as it does on the
+// embedded path.
+func proxiedUpdateTarget(ctx context.Context, id string, in *updateInput) (*types.Issue, *updateIDFailure) {
+	rd, err := proxiedIssueReader()
 	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
+		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
 	}
-	if runner == nil {
-		return nil
+	details, err := rd.Get(ctx, issueops.GetRequest{ID: id})
+	if err != nil {
+		if errors.Is(err, issueops.ErrNotFound) {
+			fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+			return nil, &updateIDFailure{ID: id, Error: "issue not found"}
+		}
+		fmt.Fprintf(os.Stderr, "Error resolving %s: %v\n", id, err)
+		return nil, &updateIDFailure{ID: id, Error: fmt.Sprintf("resolving issue: %v", err)}
 	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
+	current := &details.Issue
+	if err := validateIssueUpdatable(id, current); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		return nil, &updateIDFailure{ID: id, Error: err.Error()}
 	}
-	if before != nil &&
-		before.Status != types.StatusClosed &&
-		after.Status == types.StatusClosed {
-		if err := runner.RunSync(hooks.EventClose, after); err != nil {
-			return fmt.Errorf("on_close hook: %w", err)
+	// bd-98s5c: an unguarded assignee update must not silently overwrite
+	// another actor's live claim. Skipped under --if-assignee, whose CAS names
+	// the holder explicitly (park stays possible without --force), and under
+	// --claim, whose CAS is itself the anti-steal gate. The contract fences the
+	// same transfer inside the mutation with ErrAlreadyClaimed; this pre-read is
+	// what keeps the advice a user reads identical on both routes. A policy
+	// refusal: terminal per-issue failure, exit 1, never GuardMismatch/13.
+	if newAssignee, ok := in.fields["assignee"].(string); ok && in.ifAssignee == nil && !in.claim {
+		if err := validateIssueReassignable(id, current, actor, newAssignee,
+			proxiedClaimPoolAliases(ctx), in.force); err != nil {
+			fmt.Fprintf(os.Stderr, "%s\n", err)
+			return nil, &updateIDFailure{ID: id, Error: err.Error()}
 		}
 	}
-	return nil
+	return current, nil
 }
 
-func proxiedHookRunner(ctx context.Context) (*hooks.Runner, error) {
-	if hookRunner != nil {
-		return hookRunner, nil
+// proxiedClaimPoolAliases is uowClaimPoolAliases for a caller that owns no unit
+// of work: the pre-read fence's claim.pools lookup opens a short-lived unit of
+// work of its own, and only when the fence is otherwise about to refuse, which
+// is what the thunk is for. A read that fails yields no aliases, the same
+// fail-closed answer its siblings give.
+func proxiedClaimPoolAliases(ctx context.Context) func() []string {
+	return func() []string {
+		if uowProvider == nil {
+			return nil
+		}
+		uw, err := uowProvider.NewUOW(ctx)
+		if err != nil {
+			return nil
+		}
+		defer uw.Close(ctx)
+		return uowClaimPoolAliases(ctx, uw)()
 	}
-	cwd, err := os.Getwd()
+}
+
+// proxiedUpdateFailure sorts a refused update into the per-id verdicts. A guard
+// refusal sets GuardMismatch so the batch exits 13 rather than 1.
+//
+// The one verdict it cannot reproduce is stage attribution: "opening unit of
+// work" and "committing" were told apart by watching the provider this path no
+// longer owns, so both now read as the generic update failure. The id still
+// fails, loudly and non-zero.
+func proxiedUpdateFailure(id string, err error) *updateIDFailure {
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+		fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+		return &updateIDFailure{ID: id, Error: "issue not found"}
+	case errors.Is(err, storage.ErrAlreadyClaimed), errors.Is(err, storage.ErrNotClaimable):
+		fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
+		return &updateIDFailure{ID: id, Error: fmt.Sprintf("claiming issue: %v", err)}
+	case errors.Is(err, storage.ErrCloseOpenChildren):
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return &updateIDFailure{ID: id, Error: err.Error()}
+	case errors.Is(err, storage.ErrCloseBlocked):
+		fmt.Fprintf(os.Stderr, "%v (use --force to override)\n", err)
+		return &updateIDFailure{ID: id, Error: fmt.Sprintf("%v (use --force to override)", err)}
+	case uow.IsSerializationError(err):
+		// The contract spent its retry budget losing Dolt's commit-time merge.
+		// The write did NOT land; fail loudly instead of exiting 0.
+		fmt.Fprintf(os.Stderr, "Error updating %s: retries exhausted on write conflicts: %v\n", id, err)
+		return &updateIDFailure{ID: id, Error: fmt.Sprintf("retries exhausted on write conflicts: %v", err)}
+	case isGuardMismatch(err):
+		// bd-wsqvw guard verdict: the precondition no longer holds, nothing was
+		// written. Loud and non-zero, never collapsed to success —
+		// GuardMismatch routes the batch to ExitGuardMismatch.
+		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+		return &updateIDFailure{ID: id, Error: fmt.Sprintf("precondition failed: %v", err), GuardMismatch: true}
+	default:
+		fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+		return &updateIDFailure{ID: id, Error: fmt.Sprintf("updating: %v", err)}
+	}
+}
+
+// proxiedUpdatePatch reshapes gathered CLI input into the contract's typed
+// patch. The field map goes through the same builder the direct route uses; the
+// edits this input keeps beside that map (labels, reparent, the merge-shaped
+// note and metadata edits) are folded in here, so both routes end up describing
+// the same mutation.
+//
+// The merge-shaped edits stay merge-shaped: the contract resolves them against
+// the row re-read inside the mutation transaction. Pre-merging them against
+// `before` is what silently erased keys a concurrent writer had committed.
+func proxiedUpdatePatch(in *updateInput, before *types.Issue) (issueops.IssuePatch, error) {
+	patch, err := buildUpdatePatch(in.fields)
 	if err != nil {
-		return nil, fmt.Errorf("getwd: %w", err)
+		return issueops.IssuePatch{}, err
 	}
-	fsProvider := fs.NewFileSystemProvider(cwd, newBeadsDirTemplates(), newFileSystemAdapters())
-	resolution := fsProvider.BeadsDirFSUseCase().ResolveBeadsDir(ctx)
-	if resolution.BeadsDir == "" {
-		return nil, nil
+	patch.Labels.Add = in.addLabels
+	patch.Labels.Remove = in.removeLabels
+	if in.setLabels != nil {
+		patch.Labels.Replace = setField(*in.setLabels)
 	}
-	return hooks.NewRunner(filepath.Join(resolution.BeadsDir, "hooks")), nil
-}
-
-// buildUpdateSpecForIssue translates gathered CLI input into a domain
-// UpdateSpec. It never pre-merges row state: merge-shaped edits are passed as
-// operation keys and resolved by the repository inside the mutation
-// transaction.
-func buildUpdateSpecForIssue(current *types.Issue, in *updateInput) domain.UpdateSpec {
-	fields := make(map[string]any, len(in.fields))
-	for k, v := range in.fields {
-		fields[k] = v
+	if in.reparent != nil {
+		patch.ParentID = setField(*in.reparent)
 	}
-
-	if in.clearDeferStatus && current.Status == types.StatusDeferred {
-		fields["status"] = string(types.StatusOpen)
-	}
-	// Metadata edits and note appends pass through as merge OPERATIONS: the
-	// repository resolves them against the row re-read inside the mutation
-	// transaction (issueops.ResolveMergeOps via the domain/db Update path).
-	// Merging here against `current` — a read from this unit of work's MVCC
-	// snapshot — silently erased keys a concurrent writer committed after our
-	// snapshot was taken: both processes exited 0, one write vanished.
 	if in.hasAppendNotes {
-		fields[issueops.OpAppendNotes] = in.appendNotes
+		patch.AppendNotes = setField(in.appendNotes)
 	}
 	if len(in.mergeMetadataIn) > 0 {
-		fields[issueops.OpMergeMetadata] = in.mergeMetadataIn
+		patch.Metadata.Merge = setField(in.mergeMetadataIn)
 	}
 	if len(in.setMetadata) > 0 {
-		fields[issueops.OpSetMetadata] = in.setMetadata
+		set, err := parseSetMetadataFlags(in.setMetadata)
+		if err != nil {
+			return issueops.IssuePatch{}, err
+		}
+		patch.Metadata.Set = set
 	}
 	if len(in.unsetMetadata) > 0 {
-		fields[issueops.OpUnsetMetadata] = in.unsetMetadata
+		patch.Metadata.Unset = in.unsetMetadata
 	}
-
-	return domain.UpdateSpec{
-		Fields:           fields,
-		Claim:            in.claim,
-		AddLabels:        in.addLabels,
-		RemoveLabels:     in.removeLabels,
-		SetLabels:        in.setLabels,
-		Reparent:         in.reparent,
-		ExpectedAssignee: in.ifAssignee,
-		ExpectedStatus:   in.ifStatus,
+	// GH#3233: --defer="" restores ready visibility only if the issue was
+	// actually deferred, exactly as the direct route decides it.
+	if in.clearDeferStatus && before.Status == types.StatusDeferred {
+		patch.Status = setField(types.StatusOpen)
 	}
+	return patch, nil
 }

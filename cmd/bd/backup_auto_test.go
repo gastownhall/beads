@@ -79,6 +79,16 @@ func TestIsBackupAutoEnabled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Isolate CWD and BEADS_DIR before config.Initialize() below.
+			// Without this, a leaked BEADS_DIR (or cwd left inside the repo
+			// tree by an earlier no-DB command in the same test binary) lets
+			// Initialize() load a real ambient config.yaml with an explicit
+			// backup.enabled value, which wins over the computed default
+			// these cases assert on (be-yjp4z).
+			t.Chdir(t.TempDir())
+			t.Setenv("BEADS_DIR", "")
+			t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+
 			// Stub primeHasGitRemote
 			orig := primeHasGitRemote
 			primeHasGitRemote = func() bool { return tt.hasRemote }

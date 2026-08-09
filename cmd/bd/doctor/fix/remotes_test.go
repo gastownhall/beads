@@ -4,11 +4,15 @@ package fix
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
@@ -16,16 +20,15 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// newIdentityTestStore is a variant of newFixTestStore that additionally
-// sets CreateIfMissing on the dolt.Config (newFixTestStore's connect-only
-// config depends on the test database already existing, which this Dolt
-// server build does not do implicitly) and seeds a project_id shared by
-// metadata.json and the database, matching what a real `bd init` produces.
+// newIdentityTestStore is a variant of newFixTestStore that seeds a
+// project_id shared by metadata.json and the database, matching what a real
+// `bd init` produces.
 func newIdentityTestStore(t *testing.T, dir, prefix string) (store *dolt.DoltStore, beadsDir, projectID string) {
 	t.Helper()
 	testutil.RequireDoltBinary(t)
 	ctx := context.Background()
 
+	requireFixDoltContainer(t)
 	port := fixTestServerPort()
 
 	beadsDir = filepath.Join(dir, ".beads")
@@ -33,8 +36,10 @@ func newIdentityTestStore(t *testing.T, dir, prefix string) (store *dolt.DoltSto
 		t.Fatalf("create .beads: %v", err)
 	}
 
-	dbName := "fixident_" + strings.ToLower(t.Name())
-	dbName = strings.NewReplacer("/", "_", " ", "_").Replace(dbName)
+	// Hash the test name: subtest names blow past Dolt's database-name
+	// length limit if used verbatim (bd-nxt5e).
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	dbName := "fixident_" + hex.EncodeToString(h[:6])
 
 	projectID = configfile.GenerateProjectID()
 	cfg := &configfile.Config{
@@ -58,7 +63,7 @@ func newIdentityTestStore(t *testing.T, dir, prefix string) (store *dolt.DoltSto
 		MaxOpenConns:    1,
 	})
 	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
+		t.Fatalf("dolt.New against running test container: %v", err)
 	}
 
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {

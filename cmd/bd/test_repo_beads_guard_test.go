@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // beforeTestsHook is set by CGO-tagged test files to perform setup before tests run
@@ -100,6 +101,12 @@ func testMainInner(m *testing.M) int {
 		}
 	}
 
+	// The docker CLI's active context also lives under HOME
+	// (~/.docker/config.json); resolve it into DOCKER_HOST now or every
+	// container-gated test skips "Docker not available" on context-routed
+	// daemons like OrbStack (bd-84kos).
+	testutil.PinDockerHostFromContext()
+
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
 	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(tmp, "xdg-config"))
@@ -157,6 +164,26 @@ func testMainInner(m *testing.M) int {
 	defer func() {
 		if origBeadsDir != "" {
 			os.Setenv("BEADS_DIR", origBeadsDir)
+		}
+	}()
+
+	// Clear BD_BACKUP_ENABLED / BEADS_BACKUP_ENABLED (legacy alias) so tests
+	// asserting on backup.enabled's auto-detected default aren't overridden by
+	// whatever the invoking shell happens to export for real bd usage
+	// (be-yjp4z). Tests that need a specific value set it explicitly via
+	// t.Setenv.
+	origBackupEnabled := os.Getenv("BD_BACKUP_ENABLED")
+	os.Unsetenv("BD_BACKUP_ENABLED")
+	defer func() {
+		if origBackupEnabled != "" {
+			os.Setenv("BD_BACKUP_ENABLED", origBackupEnabled)
+		}
+	}()
+	origBeadsBackupEnabled := os.Getenv("BEADS_BACKUP_ENABLED")
+	os.Unsetenv("BEADS_BACKUP_ENABLED")
+	defer func() {
+		if origBeadsBackupEnabled != "" {
+			os.Setenv("BEADS_BACKUP_ENABLED", origBeadsBackupEnabled)
 		}
 	}()
 

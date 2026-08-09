@@ -2,22 +2,25 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func proxiedStateLabels(ctx context.Context, uw uow.UnitOfWork, issueID string) (string, []string, error) {
-	issue, isWisp, err := proxiedGetIssueOrWisp(ctx, uw, issueID)
+	issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), issueID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return "", nil, HandleErrorRespectJSON("resolving %s: not found", issueID)
+	}
 	if err != nil {
 		return "", nil, HandleErrorRespectJSON("resolving %s: %v", issueID, err)
-	}
-	if issue == nil {
-		return "", nil, HandleErrorRespectJSON("resolving %s: not found", issueID)
 	}
 	var labels []string
 	if isWisp {
@@ -88,9 +91,12 @@ func runSetStateProxiedServer(ctx context.Context, issueID, dimension, newValue,
 	newLabel := dimension + ":" + newValue
 
 	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (setStateResult, string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, issueID)
-		if issue == nil {
+		issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), issueID)
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return setStateResult{}, "", fmt.Errorf("issue %s not found", issueID)
+		}
+		if rerr != nil {
+			return setStateResult{}, "", fmt.Errorf("resolving %s: %w", issueID, rerr)
 		}
 		fullID := issue.ID
 

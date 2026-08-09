@@ -1,13 +1,46 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/utils"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// createDependencyRequests translates parsed --deps specs into the create
+// request's edge list. The specs are already alias-normalized and deduped by
+// parseDepSpecs; the facade rejects the exact duplicates that dedupe removes.
+func createDependencyRequests(specs []domain.DependencySpec) []issueops.CreateDependency {
+	if len(specs) == 0 {
+		return nil
+	}
+	requests := make([]issueops.CreateDependency, 0, len(specs))
+	for _, spec := range specs {
+		requests = append(requests, issueops.CreateDependency{
+			TargetID: spec.TargetID,
+			Type:     spec.Type,
+			Reverse:  spec.SwapDirection,
+			Metadata: spec.Metadata,
+			ThreadID: spec.ThreadID,
+		})
+	}
+	return requests
+}
+
+// waitsForRequest translates the parsed --waits-for spec into the create
+// request's spawner gate.
+func waitsForRequest(spec *domain.WaitsForSpec) *issueops.WaitsFor {
+	if spec == nil {
+		return nil
+	}
+	return &issueops.WaitsFor{SpawnerID: spec.SpawnerID, Gate: spec.Gate}
+}
 
 func parseDepSpecs(deps []string) ([]domain.DependencySpec, error) {
 	// deps arrives already comma-split: cobra's StringSlice flag CSV-decodes
@@ -59,6 +92,37 @@ func dedupeDepSpecs(specs []domain.DependencySpec) ([]domain.DependencySpec, err
 	}
 	if len(out) == 0 {
 		return nil, nil
+	}
+	return out, nil
+}
+
+// resolveDepSpecTargets rewrites each non-external TargetID through the same
+// partial-ID resolution path as `bd dep add` (utils.ResolvePartialID).
+//
+// Without this, `bd create --deps discovered-from:8vezf` stores the bare
+// token as depends_on_id, producing a dangling edge that `bd dep list` cannot
+// see and that `bd dep remove … 8vezf` then mis-targets after resolving the
+// good fully-qualified row (GH#5005).
+func resolveDepSpecTargets(ctx context.Context, st storage.Storage, specs []domain.DependencySpec) ([]domain.DependencySpec, error) {
+	if len(specs) == 0 {
+		return specs, nil
+	}
+	out := make([]domain.DependencySpec, len(specs))
+	for i, spec := range specs {
+		out[i] = spec
+		target := strings.TrimSpace(spec.TargetID)
+		if target == "" {
+			return nil, fmt.Errorf("--deps target is empty")
+		}
+		if strings.HasPrefix(target, "external:") {
+			out[i].TargetID = target
+			continue
+		}
+		resolved, err := utils.ResolvePartialID(ctx, st, target)
+		if err != nil {
+			return nil, fmt.Errorf("resolving --deps target %q: %w", target, err)
+		}
+		out[i].TargetID = resolved
 	}
 	return out, nil
 }
@@ -118,8 +182,8 @@ func canonicalDependencyType(t types.DependencyType) types.DependencyType {
 // commands stay in lockstep.
 func validateDependencyType(t types.DependencyType) error {
 	if !t.IsValid() {
-		return fmt.Errorf("invalid dependency type %q (must be non-empty, max 50 chars); valid types: %s",
-			t, createDepsAcceptedTypeList())
+		return fmt.Errorf("invalid dependency type %q (must be non-empty, max %d chars); valid types: %s",
+			t, types.MaxDependencyTypeLen, createDepsAcceptedTypeList())
 	}
 	if !t.IsWellKnown() {
 		return fmt.Errorf("unknown dependency type %q; valid types: %s",

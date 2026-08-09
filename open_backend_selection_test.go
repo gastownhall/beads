@@ -2,13 +2,36 @@ package beads_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads"
+	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/backends"
 )
+
+var errRegistryBackendOpen = errors.New("registry backend open sentinel")
+
+// registerWorkspaceBackend registers a fake WorkspaceIsBeadsDir backend whose
+// Open/OpenReadOnly report a sentinel instead of touching a store, so tests can
+// assert that discovery and open dispatch to the registry without provisioning
+// Dolt. Register requires both hooks to be non-nil.
+func registerWorkspaceBackend(t *testing.T, name string) {
+	t.Helper()
+	backends.Register(name, backends.Backend{
+		Open: func(context.Context, string) (storage.DoltStorage, error) {
+			return nil, errRegistryBackendOpen
+		},
+		OpenReadOnly: func(context.Context, string) (storage.DoltStorage, error) {
+			return nil, errRegistryBackendOpen
+		},
+		WorkspaceIsBeadsDir: true,
+	})
+	t.Cleanup(func() { backends.Deregister(name) })
+}
 
 func writeBackendMetadata(t *testing.T, backend string) string {
 	t.Helper()
@@ -118,5 +141,67 @@ func TestOpenBestAvailableRejectsCorruptMetadata(t *testing.T) {
 	}
 	if _, statErr := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(statErr) {
 		t.Fatalf("corrupt metadata created embedded Dolt storage (stat error: %v)", statErr)
+	}
+}
+
+// TestOpenBestAvailableDispatchesRegisteredBackend covers the public library
+// open path for a registered extension backend: OpenBestAvailable must call the
+// backend rather than opening Dolt (CGO) or returning the embedded-Dolt error
+// (non-CGO), mirroring the CLI store factories.
+func TestOpenBestAvailableDispatchesRegisteredBackend(t *testing.T) {
+	const name = "registry-open"
+	registerWorkspaceBackend(t, name)
+
+	beadsDir := writeBackendMetadata(t, name)
+	store, err := beads.OpenBestAvailable(context.Background(), beadsDir)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("registered backend dispatch returned a store instead of the backend's own result")
+	}
+	if !errors.Is(err, errRegistryBackendOpen) {
+		t.Fatalf("OpenBestAvailable error = %v, want registered backend Open result", err)
+	}
+	// Dispatch must not fall through and provision an embedded Dolt store.
+	for _, artifact := range []string{"embeddeddolt", "dolt"} {
+		if _, statErr := os.Stat(filepath.Join(beadsDir, artifact)); !os.IsNotExist(statErr) {
+			t.Fatalf("registered backend dispatch created %s (stat error: %v)", artifact, statErr)
+		}
+	}
+}
+
+// TestFindDatabasePathDiscoversRegisteredWorkspace covers public discovery
+// parity: a registered WorkspaceIsBeadsDir backend has no local Dolt database,
+// so FindDatabasePath must return the .beads directory itself instead of the
+// empty "no database" result the Dolt-only search would give.
+func TestFindDatabasePathDiscoversRegisteredWorkspace(t *testing.T) {
+	const name = "registry-discovery"
+	registerWorkspaceBackend(t, name)
+
+	beadsDir := writeBackendMetadata(t, name)
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	got := beads.FindDatabasePath()
+	if got == "" {
+		t.Fatal("FindDatabasePath returned empty for a WorkspaceIsBeadsDir backend")
+	}
+	// Path canonicalization (symlinked temp dirs) can rewrite the string, so
+	// compare the workspace by identity rather than raw path equality.
+	gotInfo, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("stat discovered path %q: %v", got, err)
+	}
+	wantInfo, err := os.Stat(beadsDir)
+	if err != nil {
+		t.Fatalf("stat beads dir %q: %v", beadsDir, err)
+	}
+	if !os.SameFile(gotInfo, wantInfo) {
+		t.Fatalf("FindDatabasePath = %q, want the .beads workspace dir %q", got, beadsDir)
+	}
+	// The registry-only workspace carries no local Dolt database and discovery
+	// must not create one.
+	for _, artifact := range []string{"embeddeddolt", "dolt"} {
+		if _, statErr := os.Stat(filepath.Join(beadsDir, artifact)); !os.IsNotExist(statErr) {
+			t.Fatalf("registry workspace discovery created %s (stat error: %v)", artifact, statErr)
+		}
 	}
 }

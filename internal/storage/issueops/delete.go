@@ -7,6 +7,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // deleteBatchSize controls the maximum number of IDs per IN-clause query
@@ -32,6 +34,11 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
 		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
+		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
+	}
 	if err := deleteIssueRowInTx(ctx, tx, id, isWisp); err != nil {
 		return err
 	}
@@ -60,6 +67,14 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 		// this parity across not-found paths.
 		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
+	// Journal the delete in the same transaction. This worker backs single
+	// deletes (DeleteIssueInTx) and the per-wisp branch of the bulk delete
+	// (DeleteResolvedSetInTx); the bulk regular-issue branch journals its own
+	// ids directly. The rows==0 return above is what keeps this
+	// actually-deleted-only.
+	if err := RecordDeleteInTx(ctx, tx, id); err != nil {
+		return err
+	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
 			return err
@@ -71,134 +86,161 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 	return nil
 }
 
-//nolint:gosec // G201: inClause contains only ? placeholders
+// DeletionSet is the EXACT set of rows one delete removes, split by the plane
+// each row lives in.
+//
+// IT EXISTS BECAUSE THE SET USED TO BE COMPUTED TWICE, from different roots, so
+// `bd delete <wisp> --cascade` left a durable row reachable only through that
+// wisp alive and then rewrote its neighbors' text to say `[deleted:<id>]` about
+// it. The neighborhood read, the deletion and the reference rewrite all take
+// THIS value.
+type DeletionSet struct {
+	// WispIDs and RegularIDs partition All by plane. The two tiers are deleted
+	// through different tables and their associated rows counted from
+	// different ones, so the split is carried rather than recomputed.
+	WispIDs    []string
+	RegularIDs []string
+	// All is the whole set in one slice — what a caller scopes a neighborhood
+	// read or a citation rewrite to, and what nothing else may recompute.
+	All []string
+}
+
+// ResolveDeletionSetInTx decides WHICH rows a delete removes: the named ids,
+// plus — under cascade — the transitive closure of everything that depends on
+// them, in BOTH planes.
+//
+// THE CASCADE IS ROOTED AT EVERY NAMED ID, WISPS INCLUDED. Rooting it at the
+// durable half is what made `bd wisp gc` (which hardcodes cascade) silently
+// under-delete. It does not read the caller's slice destructively either: the
+// non-cascade set is a copy, because DeleteRequest promises IDs is never
+// sorted in place.
+func ResolveDeletionSetInTx(ctx context.Context, tx DBTX, ids []string, cascade bool) (DeletionSet, error) {
+	all := append([]string(nil), ids...)
+	if cascade {
+		closure, err := FindAllDependentsInTx(ctx, tx, ids)
+		if err != nil {
+			return DeletionSet{}, fmt.Errorf("expand cascade: %w", err)
+		}
+		all = workapi.SortedDeleteIDs(closure)
+	}
+	if len(all) == 0 {
+		return DeletionSet{}, nil
+	}
+	wispIDs, regularIDs, err := PartitionWispIDsInTx(ctx, tx, all)
+	if err != nil {
+		return DeletionSet{}, fmt.Errorf("partition delete ids: %w", err)
+	}
+	return DeletionSet{WispIDs: wispIDs, RegularIDs: regularIDs, All: all}, nil
+}
+
 func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade bool, force bool, dryRun bool) (*types.DeleteIssuesResult, error) {
 	if len(ids) == 0 {
 		return &types.DeleteIssuesResult{}, nil
 	}
 
-	initialWispIDs, regularIDs, err := PartitionWispIDsInTx(ctx, tx, ids)
+	set, err := ResolveDeletionSetInTx(ctx, tx, ids, cascade)
 	if err != nil {
 		return nil, err
 	}
 
-	idSet := make(map[string]bool, len(ids))
-	for _, id := range ids {
-		idSet[id] = true
-	}
-
-	result := &types.DeleteIssuesResult{}
-
-	expandedRegularIDs := regularIDs
-	if cascade {
-		allToDelete, err := FindAllDependentsInTx(ctx, tx, regularIDs)
-		if err != nil {
-			return nil, fmt.Errorf("find dependents: %w", err)
+	var orphaned []string
+	if !cascade {
+		// The guard here is the STORAGE SEAM's, and it stays durable-only: the
+		// server-backed store peels wisps off before it ever reaches this
+		// function (dolt/issues.go DeleteIssues), so widening it would make the
+		// embedded store refuse where the server-backed one cannot. The ROLE's
+		// guard, which does cover both planes, is in DeleteInTx.
+		idSet := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			idSet[id] = true
 		}
-		expandedRegularIDs = make([]string, 0, len(allToDelete))
-		for id := range allToDelete {
-			expandedRegularIDs = append(expandedRegularIDs, id)
-		}
-	} else if !force {
-		for i := 0; i < len(regularIDs); i += deleteBatchSize {
-			end := i + deleteBatchSize
-			if end > len(regularIDs) {
-				end = len(regularIDs)
-			}
-			batch := regularIDs[i:end]
-			inClause, args := buildSQLInClause(batch)
-
-			externalBySource := make(map[string][]string)
-			for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-				rows, err := tx.QueryContext(ctx,
-					fmt.Sprintf(`SELECT %s AS depends_on_id, issue_id FROM %s WHERE %s`, DepTargetExpr, depTable, depTargetIn("", inClause)),
-					args...)
-				if err != nil {
-					if optionalBlockedTable(depTable) && isTableNotExistError(err) {
-						continue
-					}
-					return nil, fmt.Errorf("check dependents from %s: %w", depTable, err)
-				}
-
-				for rows.Next() {
-					var depOnID, issueID string
-					if err := rows.Scan(&depOnID, &issueID); err != nil {
-						_ = rows.Close()
-						return nil, fmt.Errorf("scan dependent: %w", err)
-					}
-					if !idSet[issueID] {
-						externalBySource[depOnID] = append(externalBySource[depOnID], issueID)
-					}
-				}
-				_ = rows.Close()
-				if err := rows.Err(); err != nil {
-					return nil, fmt.Errorf("iterate dependents from %s: %w", depTable, err)
-				}
-			}
-
-			for _, id := range batch {
-				if deps, ok := externalBySource[id]; ok {
-					result.OrphanedIssues = deps
-					return result, fmt.Errorf("issue %s has dependents not in deletion set; use --cascade to delete them or --force to orphan them", id)
-				}
-			}
-		}
-	} else {
-		orphans, err := findExternalDependentsBatchedInTx(ctx, tx, regularIDs, idSet)
+		// One scan of the dependency planes answers both modes: the guard needs
+		// to know WHICH id is blocked, and the forced path needs the union of
+		// what it orphans.
+		external, err := ExternalDependentsBySourceInTx(ctx, tx, set.RegularIDs, idSet)
 		if err != nil {
 			return nil, fmt.Errorf("get dependents: %w", err)
 		}
-		result.OrphanedIssues = orphans
+		if !force {
+			for _, id := range set.RegularIDs {
+				if deps := external[id]; len(deps) > 0 {
+					return &types.DeleteIssuesResult{OrphanedIssues: deps},
+						&publicops.DependentsOutsideRequestError{IssueID: id, Dependents: deps}
+				}
+			}
+		} else {
+			orphans := make(map[string]bool)
+			for _, deps := range external {
+				for _, id := range deps {
+					orphans[id] = true
+				}
+			}
+			orphaned = workapi.SortedDeleteIDs(orphans)
+		}
 	}
 
-	cascadeWispIDs, finalRegularIDs, err := PartitionWispIDsInTx(ctx, tx, expandedRegularIDs)
+	result, err := DeleteResolvedSetInTx(ctx, tx, set, dryRun)
 	if err != nil {
-		return nil, fmt.Errorf("partition expanded delete IDs: %w", err)
+		return nil, err
+	}
+	result.OrphanedIssues = orphaned
+	return result, nil
+}
+
+// DeleteResolvedSetInTx deletes EXACTLY set — no expansion, no re-partition,
+// no guard — and reports the associated rows that went with it.
+//
+// It is split out of DeleteIssuesInTx so the role body can read the
+// neighborhood BEFORE the delete and rewrite it AFTER against the SAME
+// DeletionSet the delete was handed.
+//
+//nolint:gosec // G201: inClause contains only ? placeholders
+func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dryRun bool) (*types.DeleteIssuesResult, error) {
+	result := &types.DeleteIssuesResult{}
+	if len(set.All) == 0 {
+		return result, nil
 	}
 
-	allWispIDs := append(append([]string{}, initialWispIDs...), cascadeWispIDs...)
-	allDeletedSet := make(map[string]bool, len(finalRegularIDs)+len(allWispIDs))
-	for _, id := range finalRegularIDs {
-		allDeletedSet[id] = true
-	}
-	for _, id := range allWispIDs {
-		allDeletedSet[id] = true
+	deletedSet := make(map[string]bool, len(set.All))
+	for _, id := range set.All {
+		deletedSet[id] = true
 	}
 
 	var depsCount, labelsCount, eventsCount int
-	if depsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "dependencies", finalRegularIDs); err != nil {
+	var err error
+	if depsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "dependencies", set.RegularIDs); err != nil {
 		return nil, fmt.Errorf("count dependencies: %w", err)
 	}
-	wispDepsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_dependencies", cascadeWispIDs)
+	wispDepsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_dependencies", set.WispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp dependencies: %w", err)
 	}
 	depsCount += wispDepsCount
 
-	if labelsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "labels", finalRegularIDs); err != nil {
+	if labelsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "labels", set.RegularIDs); err != nil {
 		return nil, fmt.Errorf("count labels: %w", err)
 	}
-	wispLabelsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_labels", cascadeWispIDs)
+	wispLabelsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_labels", set.WispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp labels: %w", err)
 	}
 	labelsCount += wispLabelsCount
 
-	if eventsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "events", finalRegularIDs); err != nil {
+	if eventsCount, err = CountRowsForIssueIDsInTx(ctx, tx, "events", set.RegularIDs); err != nil {
 		return nil, fmt.Errorf("count events: %w", err)
 	}
-	wispEventsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_events", cascadeWispIDs)
+	wispEventsCount, err := CountRowsForIssueIDsInTx(ctx, tx, "wisp_events", set.WispIDs)
 	if err != nil {
 		return nil, fmt.Errorf("count wisp events: %w", err)
 	}
 	eventsCount += wispEventsCount
 
-	for i := 0; i < len(expandedRegularIDs); i += deleteBatchSize {
+	for i := 0; i < len(set.All); i += deleteBatchSize {
 		end := i + deleteBatchSize
-		if end > len(expandedRegularIDs) {
-			end = len(expandedRegularIDs)
+		if end > len(set.All) {
+			end = len(set.All)
 		}
-		batch := expandedRegularIDs[i:end]
+		batch := set.All[i:end]
 		batchInClause, batchArgs := buildSQLInClause(batch)
 
 		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
@@ -217,7 +259,7 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 					_ = rows.Close()
 					return nil, fmt.Errorf("scan inbound dependency: %w", err)
 				}
-				if !allDeletedSet[issID] {
+				if !deletedSet[issID] {
 					depsCount++
 				}
 			}
@@ -231,30 +273,44 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 	result.DependenciesCount = depsCount
 	result.LabelsCount = labelsCount
 	result.EventsCount = eventsCount
-	result.DeletedCount = len(finalRegularIDs) + len(allWispIDs)
+	result.DeletedCount = len(set.RegularIDs) + len(set.WispIDs)
 
 	if dryRun {
 		return result, nil
 	}
 
-	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, finalRegularIDs, allWispIDs)
+	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, set.RegularIDs, set.WispIDs)
 	if aerr != nil {
 		return nil, fmt.Errorf("affected by batch delete: %w", aerr)
 	}
 
-	for _, id := range allWispIDs {
+	// Resolve WHICH regular ids this delete actually removes before the batched
+	// DELETE runs: afterwards the rows are gone, and RowsAffected reports a
+	// count, not a set. A journal record for an id that was already absent would
+	// tell a consumer to drop a bead this transaction never touched.
+	journaledDeletes, err := journalableDeletesInTx(ctx, tx, "issues", set.RegularIDs)
+	if err != nil {
+		return nil, err
+	}
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, set.All); err != nil {
+		return nil, fmt.Errorf("journal dependency removals for batch delete: %w", err)
+	}
+
+	for _, id := range set.WispIDs {
 		if err := deleteIssueRowInTx(ctx, tx, id, true); err != nil {
 			return nil, fmt.Errorf("delete wisp %s: %w", id, err)
 		}
 	}
 
 	totalRegularsDeleted := 0
-	for i := 0; i < len(finalRegularIDs); i += deleteBatchSize {
+	for i := 0; i < len(set.RegularIDs); i += deleteBatchSize {
 		end := i + deleteBatchSize
-		if end > len(finalRegularIDs) {
-			end = len(finalRegularIDs)
+		if end > len(set.RegularIDs) {
+			end = len(set.RegularIDs)
 		}
-		batch := finalRegularIDs[i:end]
+		batch := set.RegularIDs[i:end]
 		batchInClause, batchArgs := buildSQLInClause(batch)
 
 		deleteResult, err := tx.ExecContext(ctx,
@@ -273,13 +329,71 @@ func DeleteIssuesInTx(ctx context.Context, tx *sql.Tx, ids []string, cascade boo
 			return nil, fmt.Errorf("delete leases: %w", err)
 		}
 	}
-	result.DeletedCount = totalRegularsDeleted + len(allWispIDs)
+	result.DeletedCount = totalRegularsDeleted + len(set.WispIDs)
+
+	// Journal every regular issue this bulk/cascade delete removed. Wisps went
+	// through deleteIssueRowInTx above, which journals each itself; set.All is
+	// cascade-expanded, so this records cascade deletes too.
+	for _, id := range journaledDeletes {
+		if err := RecordDeleteInTx(ctx, tx, id); err != nil {
+			return nil, err
+		}
+	}
 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
 	}
 
 	return result, nil
+}
+
+// ExistingIssueIDsInTableInTx returns the requested IDs that currently exist
+// in the selected issue table. It preserves caller ordering so delete and
+// journal records are deterministic across batches.
+func ExistingIssueIDsInTableInTx(ctx context.Context, tx DBTX, table string, ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	switch table {
+	case "issues", "wisps":
+	default:
+		return nil, fmt.Errorf("unsupported issue table %q", table)
+	}
+	exists := make(map[string]struct{}, len(ids))
+	for i := 0; i < len(ids); i += deleteBatchSize {
+		end := i + deleteBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		inClause, args := buildSQLInClause(ids[i:end])
+		//nolint:gosec // table is validated above and inClause contains only placeholders.
+		rows, err := tx.QueryContext(ctx, "SELECT id FROM "+table+" WHERE id IN ("+inClause+")", args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			exists[id] = struct{}{}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	actual := make([]string, 0, len(exists))
+	for _, id := range ids {
+		if _, ok := exists[id]; ok {
+			actual = append(actual, id)
+		}
+	}
+	return actual, nil
 }
 
 // findAllDependentsRecursiveInTx finds all issues that depend on the given
@@ -337,54 +451,6 @@ func FindAllDependentsInTx(ctx context.Context, tx DBTX, ids []string) (map[stri
 		}
 	}
 
-	return result, nil
-}
-
-// findExternalDependentsBatchedInTx finds all dependents of the given IDs
-// that are NOT in the idSet.
-//
-//nolint:gosec // G201: inClause contains only ? placeholders
-func findExternalDependentsBatchedInTx(ctx context.Context, tx *sql.Tx, ids []string, idSet map[string]bool) ([]string, error) {
-	orphanSet := make(map[string]bool)
-	for i := 0; i < len(ids); i += deleteBatchSize {
-		end := i + deleteBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		batch := ids[i:end]
-		inClause, args := buildSQLInClause(batch)
-
-		for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
-			rows, err := tx.QueryContext(ctx,
-				fmt.Sprintf(`SELECT issue_id FROM %s WHERE %s`, depTable, depTargetIn("", inClause)),
-				args...)
-			if err != nil {
-				if optionalBlockedTable(depTable) && isTableNotExistError(err) {
-					continue
-				}
-				return nil, fmt.Errorf("query dependents from %s: %w", depTable, err)
-			}
-			for rows.Next() {
-				var depID string
-				if err := rows.Scan(&depID); err != nil {
-					_ = rows.Close()
-					return nil, fmt.Errorf("scan dependent: %w", err)
-				}
-				if !idSet[depID] {
-					orphanSet[depID] = true
-				}
-			}
-			_ = rows.Close()
-			if err := rows.Err(); err != nil {
-				return nil, fmt.Errorf("iterate dependents from %s: %w", depTable, err)
-			}
-		}
-	}
-
-	result := make([]string, 0, len(orphanSet))
-	for id := range orphanSet {
-		result = append(result, id)
-	}
 	return result, nil
 }
 

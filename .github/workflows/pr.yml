@@ -24,20 +24,29 @@ jobs:
           fetch-depth: 0
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
-      - name: Install golangci-lint
-        run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
-      - name: Run policy checks
-        run: make ci-pr-policy
-
-      - name: Run lint checks
-        run: make ci-pr-lint
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Build reusable Linux artifacts
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: |
           set -euo pipefail
           mkdir -p artifacts
@@ -93,6 +102,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
         env:
@@ -117,6 +127,27 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
+  # The lingering-handle liveness regression test is //go:build windows: the
+  # Ubuntu job above selects it by name but compiles it out, and main.yml's
+  # Windows job runs only on pushes to main (build/smoke, no go test). Run
+  # exactly the liveness pair on windows-latest so the regression guard
+  # actually executes at PR time.
+  test-windows-liveness:
+    name: Test (Windows) cmd/bd liveness regression
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run Windows liveness regression test
+        run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
+
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
@@ -128,13 +159,30 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Run native Windows worktree removal boundary tests
         env:
           CGO_ENABLED: "0"
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
   # Fast check to ensure all version files are in sync
@@ -180,6 +228,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Build bd
         run: CGO_ENABLED=0 go build -tags gms_pure_go -o bd ./cmd/bd/
@@ -216,9 +265,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Exercise native date and Bash process boundary
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts
@@ -235,9 +293,18 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Exercise the real Bash process boundary
         shell: bash
@@ -393,6 +460,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Run PR policy wrapper
         run: make ci-pr-policy
@@ -405,9 +473,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -435,6 +519,7 @@ jobs:
       - name: Run PR core wrapper
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: make ci-pr-core
 
   pr-lint-wrapper:
@@ -447,6 +532,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
@@ -471,6 +557,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install Dolt CLI
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -488,7 +575,7 @@ jobs:
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
         # Without this, RequireDoltContainer reports doltNoImage and TestDomainDB skips.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -507,6 +594,95 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
         run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+
+      # The doctor/fix DB-backed suite spins its own Dolt container in
+      # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
+      # hard failure so the suite can never silently skip in CI again
+      # (bd-nxt5e: it was dark for months); this job pulls the image above.
+      - name: Test doctor/fix (Dolt-backed, hard-require container)
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          BEADS_FIX_REQUIRE_DOLT: "1"
+        run: go test -tags gms_pure_go -race -count=1 -v ./cmd/bd/doctor/fix/
+
+  # macOS-only regressions were landing on main undetected: main.yml's Test
+  # (macos-latest) leg only runs `if: github.event_name == 'push' &&
+  # github.ref == 'refs/heads/main'`, so no PR ever exercises it. On
+  # 2026-08-01 that leg went red from three separately-merged PRs in a single
+  # day, all $TMPDIR=/var/folders symlink/path-depth consequences that only
+  # reproduce on macOS - none of the three could have seen the failure
+  # pre-merge, and the local bisect lane can't diagnose it either (Linux
+  # host, macOS-only failure). This job mirrors that leg's steps on every PR
+  # so the same class of regression fails here instead of on main. It is
+  # self-contained (no build-artifacts dependency): the macOS leg in main.yml
+  # never downloads or verifies the Linux build-artifacts bundle, it just
+  # builds and tests directly.
+  #
+  # Deliberately NOT continue-on-error: unlike the advisory legs elsewhere in
+  # this file that tolerate infrastructure flakiness, a red macOS test here is
+  # a real regression, and blocking the merge lane on it is the entire point.
+  #
+  # Deliberately NOT yet added to ci-gate's `needs`/`CI_GATE_REQUIRED`:
+  # promoting a new job to required-for-merge, once it has run clean for a
+  # while, is a separate maintainer call - same pattern as other jobs in this
+  # file that run on every PR without yet gating the merge.
+  test-macos:
+    name: Test (macos-latest)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
+
+      - name: Install Dolt (Linux/macOS)
+        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+
+      - name: Verify dolt on PATH
+        run: dolt version
+
+      - name: Configure Git and Dolt identity
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+
+      - name: Build
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
+        run: go build -v -tags gms_pure_go ./cmd/bd
+
+      - name: Test
+        env:
+          BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
+          GOCACHE: ${{ runner.temp }}/go-cache/race
+        run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
@@ -535,6 +711,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Install Dolt CLI
         run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
@@ -548,7 +725,7 @@ jobs:
 
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Protocol conformance + corpus golden + determinism
         # Require a live Dolt store here: this is the gate that must exercise the
@@ -572,6 +749,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: Check gofmt
         run: make fmt-check
@@ -586,6 +764,7 @@ jobs:
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
 
       - name: golangci-lint
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
@@ -801,6 +980,7 @@ jobs:
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - test-windows-liveness
       - worktree-remove-windows
       - check-version-consistency
       - check-migration-hygiene
@@ -830,6 +1010,7 @@ jobs:
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            TEST_WINDOWS_LIVENESS
             WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
@@ -851,6 +1032,7 @@ jobs:
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}

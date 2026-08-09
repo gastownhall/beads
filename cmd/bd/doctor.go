@@ -212,7 +212,9 @@ Examples:
 		if err != nil {
 			return HandleError("failed to resolve path: %v", err)
 		}
-		if err := validateDoctorWorkspaceBackend(absPath); err != nil {
+		if err := validateDoctorWorkspaceBackend(absPath); isLegacyUpgradeRefusal(err) {
+			return printLegacyUpgradeDiagnostic(err)
+		} else if err != nil {
 			return HandleError("%v", err)
 		}
 
@@ -362,11 +364,30 @@ func shouldSkipDoctorNetworkChecks() bool {
 // metadata must be rejected before version tracking or any database check begins.
 func validateDoctorWorkspaceBackend(path string) error {
 	beadsDir := doctor.ResolveBeadsDirForRepo(path)
-	cfg, err := configfile.Load(beadsDir)
+	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+		return err
+	}
+	cfg, err := configfile.LoadForDiscovery(beadsDir)
 	if err != nil {
 		return fmt.Errorf("failed to load %s: %w; no storage database was opened or modified; fix or restore metadata.json and retry", configfile.ConfigPath(beadsDir), err)
 	}
 	return validateConfiguredBackend(cfg)
+}
+
+// printLegacyUpgradeDiagnostic preserves doctor as a store-free repair path:
+// the workspace is recognized, but no storage or metadata migration is opened.
+func printLegacyUpgradeDiagnostic(err error) error {
+	if jsonOutput || doctorAgent {
+		return outputJSON(map[string]any{
+			"status":  "warning",
+			"code":    "legacy_upgrade_required",
+			"message": err.Error(),
+			"guide":   "docs/getting-started/upgrading.md#cross-era-upgrades",
+		})
+	}
+	_, _ = fmt.Fprintf(os.Stdout, "Warning: %v\n", err)
+	_, _ = fmt.Fprintln(os.Stdout, "Follow docs/getting-started/upgrading.md#cross-era-upgrades for the layout-specific migration path.")
+	return nil
 }
 
 // printEmbeddedUnsupported reports that a doctor variant is not yet wired up
@@ -447,6 +468,11 @@ func runDiagnostics(path string) doctorResult {
 	// Check for stale .legacy hook sidecars calling removed "bd hook" command (GH#2398)
 	legacyCheck := convertWithCategory(doctor.CheckStaleLegacyHooks(), doctor.CategoryGit)
 	result.Checks = append(result.Checks, legacyCheck)
+
+	// Check for a dangling core.hooksPath pointing at a missing directory (GH#4440)
+	hooksPathCheck := convertWithCategory(doctor.CheckHooksPath(), doctor.CategoryGit)
+	result.Checks = append(result.Checks, hooksPathCheck)
+	// Warning-class check — don't fail overall check, matching the neighboring hooks checks.
 
 	// Check git hooks Dolt compatibility (hooks without Dolt check cause errors)
 	doltHooksCheck := convertWithCategory(doctor.CheckGitHooksDoltCompatibility(path), doctor.CategoryGit)
@@ -858,6 +884,11 @@ func runDiagnostics(path string) doctorResult {
 	orphanedDepsCheck := convertDoctorCheck(doctor.CheckOrphanedDependencies(path))
 	result.Checks = append(result.Checks, orphanedDepsCheck)
 	// Don't fail overall check for orphaned deps, just warn
+
+	// Check 21b: Clone-local FKs severed by hard resets (bd-7bpkd)
+	cloneLocalFKCheck := convertDoctorCheck(doctor.CheckCloneLocalFKs(path))
+	result.Checks = append(result.Checks, cloneLocalFKCheck)
+	// Don't fail overall check for severed clone-local FKs, just warn
 
 	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))

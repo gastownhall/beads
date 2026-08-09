@@ -10,10 +10,12 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 type InsertIssueOpts struct {
 	UseWispsTable bool
+	CreateOnly    bool
 }
 
 type IssueTableOpts struct {
@@ -36,6 +38,8 @@ type ClaimRowResult struct {
 type IssueSQLRepository interface {
 	Insert(ctx context.Context, issue *types.Issue, actor string, opts InsertIssueOpts) error
 	InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts InsertIssueOpts) error
+	MovePersistence(ctx context.Context, id string, mode types.PersistenceMode) (changed bool, err error)
+	PromoteFromEphemeral(ctx context.Context, id, actor string) error
 	Update(ctx context.Context, id string, updates map[string]any, actor string, opts IssueTableOpts) error
 	Claim(ctx context.Context, id, actor string, opts IssueTableOpts) (ClaimRowResult, error)
 	Get(ctx context.Context, id string, opts IssueTableOpts) (*types.Issue, error)
@@ -58,6 +62,7 @@ type IssueSQLRepository interface {
 	AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) (affectedIssues, affectedWisps []string, err error)
 	RecomputeIsBlocked(ctx context.Context, issueIDs, wispIDs []string) error
 	Close(ctx context.Context, id string, params CloseRowParams, actor string, opts IssueTableOpts) (CloseRowResult, error)
+	CloseChecked(ctx context.Context, id string, params CloseRowParams, actor string, force bool) (CloseRowResult, error)
 	Reopen(ctx context.Context, id string, params ReopenRowParams, actor string, opts IssueTableOpts) (ReopenRowResult, error)
 	GetNewlyUnblockedByClose(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ClaimReadyIssue(ctx context.Context, filter types.WorkFilter, actor string) (*types.Issue, error)
@@ -71,7 +76,10 @@ type IssueSQLRepository interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	UnclaimIssue(ctx context.Context, id, actor string, force bool) error
+	UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	HeartbeatIssue(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 }
 
 type CloseRowParams struct {
@@ -83,6 +91,7 @@ type CloseRowResult struct {
 	Updated       bool
 	AlreadyClosed bool
 	IsWisp        bool
+	OpenChildren  int
 }
 
 type ReopenRowParams struct {
@@ -102,13 +111,17 @@ type DeleteIssuesParams struct {
 	UpdateTextReferences bool
 
 	// EnforceCascadePolicy selects embedded-parity dependent handling
-	// (issueops.DeleteIssuesInTx). When false — the legacy default used by the
-	// proxied-server delete command, which always cascades — deletion expands to
-	// all transitive dependents regardless of Cascade/Force. When true,
-	// Cascade/Force choose the behavior:
+	// (issueops.DeleteIssuesInTx). When false — the legacy default kept for the
+	// wisp/mol/gc/purge proxied paths and the single-ID convenience wrappers —
+	// cascade expansion follows params.Cascade alone and Force is ignored. When
+	// true, Cascade/Force choose the behavior:
 	//   Cascade=true               → delete all transitive dependents
 	//   Cascade=false, Force=false → refuse if any external dependent exists
+	//                                (*DeleteBlockedError, naming the blockers)
 	//   Cascade=false, Force=true  → orphan external dependents (delete only IDs)
+	// One deliberate divergence from embedded: a wisp NAMED in IDs counts like
+	// any other issue here and can trip the refusal, where embedded partitions
+	// wisps out before the dependent check. Strictly safer; kept on purpose.
 	EnforceCascadePolicy bool
 	Force                bool
 }
@@ -119,9 +132,15 @@ type DeleteIssuesResult struct {
 	LabelsCount       int
 	EventsCount       int
 	ReferencesUpdated int
-	// OrphanedIssues lists external dependents left behind by a force delete
-	// (Cascade=false, Force=true), or the blocking dependents reported with the
-	// refusal error (Cascade=false, Force=false). Empty on the cascade path.
+	// OrphanedIssues is NOT POPULATED BY ANY PATH TODAY, and is kept only
+	// because `bd wisp gc --json` publishes it (always null) and this commit is
+	// not changing that command's wire shape.
+	//
+	// It once described a force-delete policy this layer never implemented: the
+	// two params that were supposed to select that policy were declared,
+	// documented in detail and never read. The policy now lives in
+	// issueops.Deleter, above the use case, and DeleteResult.Orphaned is where
+	// the answer comes out.
 	OrphanedIssues []string
 }
 
@@ -152,6 +171,8 @@ type CreateIssueParams struct {
 	WaitsFor                *WaitsForSpec
 	DiscoveredFromParent    string
 	ForcePrefix             bool
+	CreateOnly              bool
+	Comments                []*types.Comment
 }
 
 type DependencySpec struct {
@@ -159,6 +180,7 @@ type DependencySpec struct {
 	TargetID      string
 	SwapDirection bool
 	Metadata      string
+	ThreadID      string
 }
 
 type WaitsForSpec struct {
@@ -230,12 +252,16 @@ type ClaimReadyResult struct {
 }
 
 type UpdateSpec struct {
-	Fields       map[string]any
-	Claim        bool
-	AddLabels    []string
-	RemoveLabels []string
-	SetLabels    *[]string
-	Reparent     *string
+	Fields map[string]any
+	Claim  bool
+	// ExpectedVersion requires the current row version to match before any
+	// claim or field writes.
+	ExpectedVersion *int64
+	Persistence     *types.PersistenceMode
+	AddLabels       []string
+	RemoveLabels    []string
+	SetLabels       *[]string
+	Reparent        *string
 
 	// ExpectedAssignee and ExpectedStatus are the bd-wsqvw compare-and-set
 	// guards (`bd update --if-assignee/--if-status`): when non-nil, the whole
@@ -270,7 +296,10 @@ type IssueUseCase interface {
 	GetStaleIssues(ctx context.Context, filter types.StaleFilter) ([]*types.Issue, error)
 	GetEpicsEligibleForClosure(ctx context.Context) ([]*types.EpicStatus, error)
 	Unclaim(ctx context.Context, id, actor string, force bool) error
+	UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error
+	Heartbeat(ctx context.Context, id, actor string) error
 	ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error)
+	WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error)
 
 	CreateIssue(ctx context.Context, params CreateIssueParams, actor string) (CreateIssueResult, error)
 	CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error)
@@ -306,6 +335,7 @@ type IssueUseCase interface {
 	GetNewlyUnblockedByCloseWisp(ctx context.Context, closedID string) ([]*types.Issue, error)
 	ApplyWispGraph(ctx context.Context, plan GraphPlan, actor string) (GraphApplyResult, error)
 	ClaimReadyWisp(ctx context.Context, filter types.WorkFilter, actor string) (ClaimReadyResult, error)
+	PromoteWisp(ctx context.Context, id, actor string) error
 }
 
 type CloseIssueParams struct {
@@ -314,8 +344,9 @@ type CloseIssueParams struct {
 }
 
 type CloseIssueResult struct {
-	Issue  *types.Issue
-	Closed bool
+	Issue        *types.Issue
+	Closed       bool
+	OpenChildren int
 }
 
 type ReopenIssueParams struct {
@@ -433,18 +464,86 @@ func (u *issueUseCaseImpl) update(ctx context.Context, id string, updates map[st
 	if len(updates) == 0 {
 		return nil
 	}
-	if rawType, ok := updates["issue_type"]; ok {
-		if issueType, ok := rawType.(string); ok && issueType != "" {
-			customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
-			if err != nil {
-				return fmt.Errorf("update: read custom types: %w", err)
-			}
-			if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
-				return fmt.Errorf("invalid issue type: %s", issueType)
-			}
-		}
+	if err := validateCanonicalIssueUpdates(updates); err != nil {
+		return err
+	}
+	if err := u.validateIssueTypeUpdate(ctx, updates); err != nil {
+		return err
 	}
 	return u.issueRepo.Update(ctx, id, updates, actor, IssueTableOpts{UseWispsTable: useWisp})
+}
+
+// validateIssueTypeUpdate rejects an issue_type the configuration does not
+// define. It reads the configured custom types, so unlike
+// validateCanonicalIssueUpdates it needs the use case and a context.
+func (u *issueUseCaseImpl) validateIssueTypeUpdate(ctx context.Context, updates map[string]any) error {
+	rawType, ok := updates["issue_type"]
+	if !ok {
+		return nil
+	}
+	issueType, ok := rawType.(string)
+	if !ok {
+		return nil
+	}
+	customTypes, err := u.cfgRepo.GetCustomTypes(ctx)
+	if err != nil {
+		return fmt.Errorf("update: read custom types: %w", err)
+	}
+	if !types.IssueType(issueType).IsValidWithCustom(customTypes) {
+		return fmt.Errorf("%w: invalid issue type: %s", storage.ErrValidation, issueType)
+	}
+	return nil
+}
+
+// validateCanonicalIssueUpdates rejects out-of-range values for the canonical
+// scalar columns, and rejects values whose Go type the column cannot carry. An
+// unsupported type used to fall through unvalidated and reach the SQL layer,
+// which coerced it silently -- a title of 7 was stored as "7", and an int64
+// priority or estimate skipped its range check entirely.
+func validateCanonicalIssueUpdates(updates map[string]any) error {
+	if value, ok := updates["title"]; ok {
+		title, isString := value.(string)
+		if !isString {
+			return canonicalIssueUpdateTypeError("title", value, "string")
+		}
+		if err := types.ValidateIssueTitle(title); err != nil {
+			return canonicalIssueUpdateValidationError("title", err)
+		}
+	}
+	if value, ok := updates["priority"]; ok {
+		priority, isInt := value.(int)
+		if !isInt {
+			return canonicalIssueUpdateTypeError("priority", value, "int")
+		}
+		if err := types.ValidateIssuePriority(priority); err != nil {
+			return canonicalIssueUpdateValidationError("priority", err)
+		}
+	}
+	if value, ok := updates["estimated_minutes"]; ok {
+		var estimatedMinutes *int
+		switch value := value.(type) {
+		case int:
+			estimatedMinutes = &value
+		case *int:
+			estimatedMinutes = value
+		case nil:
+			// Clearing the estimate; a nil estimate validates.
+		default:
+			return canonicalIssueUpdateTypeError("estimated_minutes", value, "int or *int")
+		}
+		if err := types.ValidateIssueEstimatedMinutes(estimatedMinutes); err != nil {
+			return canonicalIssueUpdateValidationError("estimated_minutes", err)
+		}
+	}
+	return nil
+}
+
+func canonicalIssueUpdateValidationError(field string, err error) error {
+	return fmt.Errorf("%w: update field %q: %w", storage.ErrValidation, field, err)
+}
+
+func canonicalIssueUpdateTypeError(field string, value any, want string) error {
+	return fmt.Errorf("%w: update field %q: expected %s, got %T", storage.ErrValidation, field, want, value)
 }
 
 func (u *issueUseCaseImpl) ClaimIssue(ctx context.Context, id, actor string) (ClaimResult, error) {
@@ -472,23 +571,47 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
 		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
 	}
+	// The refusal carries the assignee and status the repository read back in
+	// THIS transaction, so a caller reports who won without parsing the
+	// message. The copy lives on the typed error, shared with the twin
+	// (issueops.ClaimIssueInTx) that used to restate it — that is what bd-at6rc
+	// asked for. The sentinel stays matchable through Unwrap, which the proxied
+	// batch exit code keys on.
+	//
+	// A pool-assigned issue only loses the CAS for a non-assignee reason
+	// (status changed underneath us), so it refuses on the status rather than
+	// with a misleading held-by refusal.
+	// Composed here rather than on the typed error, for the reason
+	// issueops.ClaimIssueInTx gives: ClaimConflictError passes its wrapped
+	// refusal through unchanged, so the fragments have to be in the wrapped
+	// error or beads.ParseClaimConflict recovers nothing. This is the
+	// domain-stack twin of that producer and must answer the same three ways
+	// (bd-at6rc).
+	refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, row.CurrentStatus)
 	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
-		// A pool-assigned issue only loses the CAS for a non-assignee
-		// reason (status changed underneath us): report the status, not a
-		// misleading held-by refusal (mirrors issueops.ClaimIssueInTx).
-		if row.CurrentAssigneeIsPool {
-			return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+		switch {
+		// Pool aliases refuse on the STATUS, checked first so a pool never
+		// reaches the holder-steering copy below.
+		case row.CurrentAssigneeIsPool:
+			// refusal already names the status.
+		case row.CurrentStatus == types.StatusOpen:
+			// Never name a release command here (wy-yuclk): copy that names
+			// one gets pattern-matched by batch agents into an unclaim+claim
+			// steamroller of live claims. bd reclaim is safe to name because
+			// it only recovers claims whose lease has already expired. The
+			// parseable " by <assignee>" tail is deliberately absent, so the
+			// holder is recovered from the typed field instead.
+			refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
+		default:
+			refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, row.CurrentAssignee)
 		}
-		if row.CurrentStatus == types.StatusOpen {
-			// Same guidance as issueops.ClaimIssueInTx's open-but-assigned
-			// refusal (bd-at6rc): steer toward the holder, never name an
-			// eviction command. Keep the %w wrap — the proxied batch exit
-			// code keys on errors.Is(err, ErrAlreadyClaimed).
-			return ClaimResult{}, fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, row.CurrentAssignee)
-		}
-		return ClaimResult{}, fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, row.CurrentAssignee)
 	}
-	return ClaimResult{}, fmt.Errorf("%w: status %s", storage.ErrNotClaimable, row.CurrentStatus)
+	return ClaimResult{}, &publicops.ClaimConflictError{
+		IssueID:  id,
+		Assignee: row.CurrentAssignee,
+		Status:   row.CurrentStatus,
+		Err:      refusal,
+	}
 }
 
 func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec UpdateSpec, actor string) (*types.Issue, error) {
@@ -501,13 +624,7 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		return nil, fmt.Errorf("ApplyUpdate %s: %w", id, err)
 	}
 
-	// bd-wsqvw field guards: refuse the whole spec atomically on a stale
-	// assignee/status. The read shares this unit of work's transaction, and
-	// every field update rewrites row_lock, so a writer that commits during
-	// the attempt collides at commit time and the caller's whole-attempt
-	// retry re-checks here on the redo — same CAS invariant as the store-level
-	// UpdateIssueChecked path.
-	if spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
+	if spec.ExpectedVersion != nil || spec.ExpectedAssignee != nil || spec.ExpectedStatus != nil {
 		var current *types.Issue
 		if useWisp {
 			current, err = u.GetWisp(ctx, id)
@@ -520,6 +637,9 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 		if current == nil {
 			return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 		}
+		if spec.ExpectedVersion != nil && current.RowVersion != *spec.ExpectedVersion {
+			return nil, fmt.Errorf("%w: expected %d, got %d", storage.ErrVersionMismatch, *spec.ExpectedVersion, current.RowVersion)
+		}
 		if spec.ExpectedAssignee != nil && current.Assignee != *spec.ExpectedAssignee {
 			return nil, fmt.Errorf("%w: %s is held by %q, expected %q",
 				storage.ErrAssigneeMismatch, id, current.Assignee, *spec.ExpectedAssignee)
@@ -528,6 +648,17 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			return nil, fmt.Errorf("%w: %s has status %q, expected %q",
 				storage.ErrStatusMismatch, id, current.Status, *spec.ExpectedStatus)
 		}
+	}
+
+	// Validate the requested field values before anything mutates. The claim
+	// below writes assignee and status, so a spec that pairs Claim with an
+	// invalid field used to leave the issue claimed by an update that never
+	// applied.
+	if err := validateCanonicalIssueUpdates(spec.Fields); err != nil {
+		return nil, err
+	}
+	if err := u.validateIssueTypeUpdate(ctx, spec.Fields); err != nil {
+		return nil, err
 	}
 
 	if spec.Claim {
@@ -564,27 +695,26 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 				return nil, err
 			}
 		}
-	} else {
-		if len(spec.AddLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.AddLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.AddWispLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.AddLabels(ctx, id, spec.AddLabels, actor); err != nil {
+				return nil, err
 			}
 		}
-		if len(spec.RemoveLabels) > 0 {
-			if useWisp {
-				if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
-			} else {
-				if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
-					return nil, err
-				}
+	}
+	if len(spec.RemoveLabels) > 0 {
+		if useWisp {
+			if err := u.labelUC.RemoveWispLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
+			}
+		} else {
+			if err := u.labelUC.RemoveLabels(ctx, id, spec.RemoveLabels, actor); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -598,6 +728,16 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			if err := u.depUC.Reparent(ctx, id, *spec.Reparent, actor); err != nil {
 				return nil, err
 			}
+		}
+	}
+
+	if spec.Persistence != nil {
+		if _, err := u.issueRepo.MovePersistence(ctx, id, *spec.Persistence); err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: move persistence for %s: %w", id, err)
+		}
+		useWisp, err = u.isWispID(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("ApplyUpdate: re-locate %s after persistence move: %w", id, err)
 		}
 	}
 
@@ -622,6 +762,18 @@ func (u *issueUseCaseImpl) isWispID(ctx context.Context, id string) (bool, error
 		return false, fmt.Errorf("probe wisps table: %w", err)
 	}
 	return found, nil
+}
+
+// PromoteWisp moves an active wisp to the Dolt-versioned issues plane,
+// preserving its id, wisp_type, labels, dependencies, events, and comments.
+// One-way: the promoted row is no longer ephemeral, so purge won't reclaim
+// it. The repository error passes through unwrapped — the CLI surfaces it
+// verbatim and its text is part of the classic error contract.
+func (u *issueUseCaseImpl) PromoteWisp(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("promote wisp: id must not be empty")
+	}
+	return u.issueRepo.PromoteFromEphemeral(ctx, id, actor)
 }
 
 func (u *issueUseCaseImpl) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) (SearchPage, error) {
@@ -718,15 +870,48 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 		issue.ID = minted
 	}
 
+	if params.CreateOnly && params.ExplicitID != "" && !params.ForcePrefix {
+		configuredPrefix, err := u.cfgRepo.GetConfig(ctx, "issue_prefix")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read issue prefix: %w", err)
+		}
+		allowedPrefixes, err := u.cfgRepo.GetConfig(ctx, "allowed_prefixes")
+		if err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: read allowed prefixes: %w", err)
+		}
+		if err := validateExplicitIDPrefix(issue.ID, strings.TrimSuffix(configuredPrefix, "-"), allowedPrefixes); err != nil {
+			return CreateIssueResult{}, fmt.Errorf("create: explicit ID prefix: %w", err)
+		}
+	}
+
 	if params.DiscoveredFromParent != "" {
 		if parent, err := u.GetIssue(ctx, params.DiscoveredFromParent); err == nil && parent.SourceRepo != "" {
 			issue.SourceRepo = parent.SourceRepo
 		}
 	}
 
-	insertOpts := InsertIssueOpts{UseWispsTable: useWisp}
+	insertOpts := InsertIssueOpts{UseWispsTable: useWisp, CreateOnly: params.CreateOnly}
 	if err := u.issueRepo.Insert(ctx, issue, actor, insertOpts); err != nil {
 		return CreateIssueResult{}, fmt.Errorf("create: insert: %w", err)
+	}
+
+	if len(params.Comments) > 0 {
+		issue.Comments = make([]*types.Comment, 0, len(params.Comments))
+		for _, comment := range params.Comments {
+			if comment == nil {
+				return CreateIssueResult{}, fmt.Errorf("create: comment must not be nil")
+			}
+			copy := *comment
+			copy.IssueID = issue.ID
+			if copy.Author == "" {
+				copy.Author = actor
+			}
+			inserted, err := u.commentRepo.InsertRecord(ctx, &copy, CommentOpts{UseWispsTable: useWisp})
+			if err != nil {
+				return CreateIssueResult{}, fmt.Errorf("create: insert comment: %w", err)
+			}
+			issue.Comments = append(issue.Comments, inserted)
+		}
 	}
 
 	result := CreateIssueResult{Issue: issue}
@@ -744,7 +929,11 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	if params.InheritLabelsFromParent && params.ParentID != "" {
-		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: useWisp})
+		parentIsWisp, err := u.isWispID(ctx, params.ParentID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine parent tier for label inheritance from %s: %w", params.ParentID, err)
+		}
+		parentLabels, err := u.labelRepo.List(ctx, params.ParentID, LabelOpts{UseWispsTable: parentIsWisp})
 		switch {
 		case dberrors.IsTableNotExist(err):
 			// Older schemas may lack the wisp label table; nothing to inherit.
@@ -785,11 +974,16 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 			DependsOnID: spec.TargetID,
 			Type:        spec.Type,
 			Metadata:    spec.Metadata,
+			ThreadID:    spec.ThreadID,
 		}
 		if spec.SwapDirection {
 			dep.IssueID, dep.DependsOnID = dep.DependsOnID, dep.IssueID
 		}
-		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp}); err != nil {
+		depSourceIsWisp, err := u.isWispID(ctx, dep.IssueID)
+		if err != nil {
+			return result, fmt.Errorf("create: determine dep source tier for %s: %w", dep.IssueID, err)
+		}
+		if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: depSourceIsWisp}); err != nil {
 			return result, fmt.Errorf("create: add dep %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		result.PostCreateWrites = true
@@ -808,6 +1002,19 @@ func (u *issueUseCaseImpl) create(ctx context.Context, params CreateIssueParams,
 	}
 
 	return result, nil
+}
+
+func validateExplicitIDPrefix(id, prefix, allowedPrefixes string) error {
+	if strings.HasPrefix(id, prefix+"-") {
+		return nil
+	}
+	for _, allowed := range strings.Split(allowedPrefixes, ",") {
+		allowed = strings.TrimSpace(allowed)
+		if allowed != "" && strings.HasPrefix(id, allowed+"-") {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: issue ID %s does not match configured prefix %s", storage.ErrPrefixMismatch, id, prefix)
 }
 
 func (u *issueUseCaseImpl) CreateIssues(ctx context.Context, params []CreateIssueParams, actor string) (CreateIssuesResult, error) {
@@ -1388,82 +1595,32 @@ func (u *issueUseCaseImpl) CloseWisp(ctx context.Context, id string, params Clos
 	return u.close(ctx, id, params, actor, true)
 }
 
-// CloseIssueChecked closes an issue, refusing with storage.ErrCloseBlocked when
-// the issue has a live, open direct blocker unless force is set. The blocker
-// check (IsBlocked) and the close (CloseIssue) run through the same unit-of-work
-// transaction, so this is a single enforcement point rather than a re-check of
-// separate reads. When force is set or the guard passes it delegates to the
-// unchecked CloseIssue, preserving its CloseIssueResult semantics exactly.
+// CloseIssueChecked closes an issue through the shared guarded close path.
 func (u *issueUseCaseImpl) CloseIssueChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, false)
 }
 
-// CloseWispChecked is the wisp twin of CloseIssueChecked: it applies the same
-// live-direct-blocker guard (via IsWispBlocked) before delegating to the
-// unchecked CloseWisp.
+// CloseWispChecked is the wisp twin of CloseIssueChecked.
 func (u *issueUseCaseImpl) CloseWispChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force bool) (CloseIssueResult, error) {
 	return u.closeChecked(ctx, id, params, actor, force, true)
 }
 
-// isClosed reports whether the issue (or wisp) identified by id is already in
-// the closed status, read in the same unit of work as the close so the check
-// and the close cannot straddle a concurrent state change. A missing row (or,
-// for a wisp source, a missing optional wisps table) reports not-closed so
-// closeChecked falls through to u.close, whose repo Close surfaces the not-found
-// result — mirroring issueops.isClosedInTx on the embedded checked-close path.
-func (u *issueUseCaseImpl) isClosed(ctx context.Context, id string, useWisp bool) (bool, error) {
-	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: useWisp})
-	if err != nil {
-		if dberrors.IsNoRows(err) || dberrors.IsTableNotExist(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	if issue == nil {
-		return false, nil
-	}
-	return issue.Status == types.StatusClosed, nil
-}
-
 func (u *issueUseCaseImpl) closeChecked(ctx context.Context, id string, params CloseIssueParams, actor string, force, useWisp bool) (CloseIssueResult, error) {
-	if !force {
-		// The blocked guard only has meaning for an open→closed transition. An
-		// already-closed row is an idempotent no-op (Closed=false per the
-		// Storage.CloseIssueChecked contract), so detect that first: a closed row
-		// can still carry a stale is_blocked=1 (e.g. after a cross-clone Dolt
-		// merge, a state GetStatistics filters as `is_blocked = 1 AND status <>
-		// 'closed'`) whose live direct blocker would otherwise refuse the
-		// idempotent re-close with ErrCloseBlocked. This mirrors
-		// issueops.CloseIssueCheckedInTx, which runs isClosedInTx before the
-		// is_blocked guard; u.close below is the sole detector of the
-		// already-closed no-op (matching the Force path, which reaches
-		// Closed=false by skipping the guard).
-		closed, err := u.isClosed(ctx, id, useWisp)
-		if err != nil {
-			return CloseIssueResult{}, err
-		}
-		if !closed {
-			var (
-				blocked  bool
-				blockers []string
-			)
-			if useWisp {
-				blocked, blockers, err = u.depUC.IsWispBlocked(ctx, id)
-			} else {
-				blocked, blockers, err = u.depUC.IsBlocked(ctx, id)
-			}
-			if err != nil {
-				return CloseIssueResult{}, err
-			}
-			// Refuse only on a live, open direct blocker. A bare is_blocked=1 with no
-			// live direct blocker (a purely transitive block) closes — matching the
-			// historical `bd close` predicate and the embedded checked-close path.
-			if blocked && len(blockers) > 0 {
-				return CloseIssueResult{}, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
-			}
-		}
+	if id == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: id must not be empty")
 	}
-	return u.close(ctx, id, params, actor, useWisp)
+	if actor == "" {
+		return CloseIssueResult{}, fmt.Errorf("close: actor must not be empty")
+	}
+	row, err := u.issueRepo.CloseChecked(ctx, id, CloseRowParams{Reason: params.Reason, Session: params.Session}, actor, force)
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: %w", id, err)
+	}
+	issue, err := u.issueRepo.Get(ctx, id, IssueTableOpts{UseWispsTable: row.IsWisp || useWisp})
+	if err != nil {
+		return CloseIssueResult{}, fmt.Errorf("close %s: reload: %w", id, err)
+	}
+	return CloseIssueResult{Issue: issue, Closed: !row.AlreadyClosed, OpenChildren: row.OpenChildren}, nil
 }
 
 func (u *issueUseCaseImpl) close(ctx context.Context, id string, params CloseIssueParams, actor string, useWisp bool) (CloseIssueResult, error) {
@@ -1512,7 +1669,7 @@ func (u *issueUseCaseImpl) reopen(ctx context.Context, id string, params ReopenI
 	}
 	return ReopenIssueResult{
 		Issue:    issue,
-		Reopened: !row.AlreadyOpen,
+		Reopened: row.Updated,
 	}, nil
 }
 
@@ -1671,6 +1828,52 @@ func (u *issueUseCaseImpl) Unclaim(ctx context.Context, id, actor string, force 
 		return fmt.Errorf("Unclaim: %w", err)
 	}
 	return nil
+}
+
+// UnclaimIfAssignee is the compare-and-swap release: it clears the claim only
+// while the issue is still assigned to expectedAssignee, and otherwise returns
+// storage.ErrAssigneeMismatch having written nothing. It is the conditional
+// twin of Unclaim and runs the SAME transition (assignee cleared, status
+// reopened, started_at cleared, lease dropped, row_lock rewritten, "unclaimed"
+// event recorded) because both reach the one classic implementation in
+// issueops — which is what makes `bd unclaim --if-assignee` behave identically
+// on the proxied-server and embedded backends.
+func (u *issueUseCaseImpl) UnclaimIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+	if id == "" {
+		return fmt.Errorf("UnclaimIfAssignee: id must not be empty")
+	}
+	if err := u.issueRepo.UnclaimIssueIfAssignee(ctx, id, actor, expectedAssignee); err != nil {
+		return fmt.Errorf("UnclaimIfAssignee: %w", err)
+	}
+	return nil
+}
+
+// Heartbeat refreshes the lease on an issue actor holds in_progress. The
+// write touches ONLY the ephemeral leases table (bd-lrgn1), so the caller
+// must run it under uow.RunTxEphemeral's no-Dolt-commit form — a heartbeat
+// mints no Dolt commit and no history in any mode (bd-aq0ql).
+func (u *issueUseCaseImpl) Heartbeat(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return fmt.Errorf("Heartbeat: id must not be empty")
+	}
+	if err := u.issueRepo.HeartbeatIssue(ctx, id, actor); err != nil {
+		return fmt.Errorf("Heartbeat: %w", err)
+	}
+	return nil
+}
+
+// WakeExpiredDefers returns every expired DATED defer to open (see
+// issueops.WakeExpiredDefersInTx) and reports how many permanent issues and
+// wisps woke. The caller owns persistence: commit with a wake message iff
+// issues > 0, and with the ephemeral plain-COMMIT form iff only wisps woke
+// (wisp tables are dolt_ignored, so their wake needs a SQL commit but must
+// mint no version commit).
+func (u *issueUseCaseImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	issues, wisps, err = u.issueRepo.WakeExpiredDefers(ctx)
+	if err != nil {
+		return 0, 0, fmt.Errorf("WakeExpiredDefers: %w", err)
+	}
+	return issues, wisps, nil
 }
 
 func (u *issueUseCaseImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

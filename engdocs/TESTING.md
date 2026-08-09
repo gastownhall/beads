@@ -1,286 +1,194 @@
 # Testing Guide
 
-## Overview
+`TESTING.md` is the single authority for test commands, test selection, and
+test design in this repository. Use the commands here for local work. For the
+exact command behind a current CI check, inspect its workflow and corresponding
+`Makefile` target; the CI audit and cleanup plan are dated maintainer context.
 
-The beads project uses Go tests plus repository wrapper scripts. Prefer the
-wrapper scripts for local validation because they apply the repository's normal
-local build flags, skip policy, and timeout policy. The current GitHub Actions
-PR contract still runs direct `go test` commands; the CI cleanup plan will move
-that contract behind dedicated `scripts/ci/*` wrappers.
+## Choose the Smallest Useful Test
 
-## Test Performance
+Test at the lowest seam that can fail for the user-visible reason. Add a
+higher tier only when it covers a distinct risk that the lower tier cannot
+show: integration wiring, a real persistence property, a process boundary, or
+an external contract.
 
-- Go compilation dominates full-suite runtime.
-- Target package/test runs are usually the fastest way to validate focused changes.
-- Docker-backed Dolt integration tests auto-detect prerequisites and skip when unavailable.
+This keeps feedback fast and failures readable. It does not mean every test is
+a unit test: use the real boundary when the defect could live there.
 
-## Running Tests
+| Need | Run | When |
+|---|---|---|
+| Docs-only validation | `git diff --check`, `go test -tags=gms_pure_go ./test/docsync`, and `./scripts/check-doc-freshness.sh` | For prose-only changes; add any generated-doc or surface-specific link check the changed paths require. Do not run the full Go suite merely because a Markdown file changed. |
+| Focused red/green loop | `./scripts/test.sh -run '^TestExactName$' ./path/to/package/...` | While writing or fixing one behavior. |
+| Affected-package confidence | `./scripts/test.sh ./path/to/package/...` | After the focused test passes; include directly affected neighbors when their contract changed. |
+| Final Go baseline | `make test` | Once after focused work on Go code is green. It applies the normal local build flags, coverage, and local skip handling. |
+| Named CI wrapper | `make ci-pr-core`, `make ci-pr-policy`, or `make ci-pr-lint` | Run the wrapper whose risk or surface is affected, or use it to reproduce that CI check. Do not run all three routinely for every edit. |
 
-### Quick Start
+Do not replace the focused loop with repeated full-suite runs. Run the final
+`make test` once the affected Go tests are green. For docs-only changes, use
+the docs, link, and diff checks instead.
+
+## Commands and Local Environment
+
+`./scripts/test.sh` is the normal runner. It sources `.buildflags`, creates an
+isolated test environment, applies `.test-skip`, and defaults to a **25m
+per-package** Go-test timeout. The timeout is a hang backstop, not a target
+runtime. Override it only when diagnosing a legitimate slow path:
 
 ```bash
-# Run all tests (auto-skips known broken tests)
-make test
+TEST_TIMEOUT=30m ./scripts/test.sh ./cmd/bd/...
+TEST_VERBOSE=1 ./scripts/test.sh ./cmd/bd/...
+TEST_RUN='^TestExactName$' ./scripts/test.sh ./cmd/bd/...
 
-# Or directly:
-./scripts/test.sh
+# Equivalent command-line options.
+./scripts/test.sh -v -run '^TestExactName$' ./cmd/bd/...
+./scripts/test.sh -timeout 30m ./cmd/bd/...
+```
 
-# Run opt-in ICU regex path tests (maintainer-only, not normal validation)
+Use the opt-in ICU regex path only when the change requires it:
+
+```bash
 make test-icu-path
-
-# Run specific package
-./scripts/test.sh ./cmd/bd/...
-
-# Run specific test pattern
-./scripts/test.sh -run TestCreate ./cmd/bd/...
-
-# Verbose output
-./scripts/test.sh -v
 ```
 
-### Environment Variables
+It is maintainer-only and not part of normal validation. `make test-full-cgo`
+and `./scripts/test-cgo.sh` remain deprecated compatibility aliases.
+
+Use a named specialized target only when its risk is in scope:
 
 ```bash
-# Set custom timeout (default: 3m)
-TEST_TIMEOUT=5m ./scripts/test.sh
-
-# Enable verbose output
-TEST_VERBOSE=1 ./scripts/test.sh
-
-# Run specific pattern
-TEST_RUN=TestCreate ./scripts/test.sh
+make test-regression
+make test-upgrade
+make test-cross-version
+make test-migration
 ```
 
-### Docker (Dolt Integration Tests)
+For a failing GitHub Actions check, follow the current workflow and its
+`Makefile` target when exact reproduction matters. The local runner and CI
+intentionally have different contracts in some cases.
 
-Dolt integration tests require Docker with the exact Dolt image cached locally.
-Tests auto-detect the environment and skip gracefully — no manual configuration
-needed.
+### Test Environment and Readiness
 
-#### Readiness states
+The runner isolates `HOME`, Git configuration, and Dolt state. By default its
+test environment adds `dolt` to `BEADS_TEST_SKIP`; set
+`BEADS_TEST_ENV_RUN_DOLT=1` only when deliberately exercising the Dolt path
+and its prerequisites are available. Do not make ordinary tests depend on a
+developer's database, daemon, global Git configuration, or filesystem state.
 
-```csv
-State,Condition,Behavior
-doltSkipped,BEADS_TEST_SKIP contains "dolt",Silent skip (no warning)
-doltNoDocker,Docker daemon not reachable,WARN + skip
-doltNoImage,No Dolt image at all,WARN + skip with pull instruction
-doltWrongVersion,Image repo cached but wrong tag,WARN + skip with pull instruction
-doltReady,Exact image cached and Docker running,Run tests
-```
-
-States are checked once per test binary and cached. Order of evaluation:
-`BEADS_TEST_SKIP` → Docker availability → exact image → any image version.
-
-#### Skipping Dolt tests explicitly
-
-Set `BEADS_TEST_SKIP` to opt out without Docker overhead (~1s `docker info`):
+To skip an optional service explicitly, use the existing skip mechanism:
 
 ```bash
-# Skip Dolt tests silently
-BEADS_TEST_SKIP=dolt ./scripts/test.sh
-
-# Skip multiple services (comma-separated)
-BEADS_TEST_SKIP=dolt,slow ./scripts/test.sh
+BEADS_TEST_SKIP=dolt ./scripts/test.sh ./...
 ```
 
-### Short Mode and Test Boundaries
+Tests that need a temporary repository or store should use `t.TempDir()` and
+`t.Cleanup()`. Temporary repositories must set a repository-local hooks path;
+do not inherit the developer's global hooks configuration.
 
-`testing.Short()` is reserved for true runtime, stress, and large-fixture skips.
-It must not be used as an implicit integration, e2e, API, Docker, or external
-dependency boundary.
-
-Use these mechanisms instead:
-
-- `//go:build integration` or `//go:build e2e` for named suites.
-- Environment readiness checks such as `BEADS_TEST_SKIP=dolt`,
-  `BEADS_TEST_EMBEDDED_DOLT=1`, or required API-key checks.
-- Named wrappers such as `make ci-pr-core`, the main integration shards, and the
-  package gate wrappers.
-
-Run `make check-testing-short` to verify that new `testing.Short()` usage stays
-within the approved runtime/stress/large-fixture allowlist. The PR policy wrapper
-runs the same check.
-
-#### Enabling Dolt tests
+For manual CLI experiments, run both initialization and subsequent commands
+from a disposable working directory:
 
 ```bash
-# Pull the exact Dolt image to enable integration tests
-docker pull dolthub/dolt-sql-server:2.2.0
-
-# Point tests at an existing Dolt server (skips container startup)
-BEADS_DOLT_PORT=3308 ./scripts/test.sh
+beads_manual_dir="$(mktemp -d)"
+(
+  set -e
+  cd "$beads_manual_dir"
+  bd init --quiet --prefix test --skip-hooks --skip-agents
+  bd create "Test issue" -p 1
+)
+rm -rf -- "$beads_manual_dir"
 ```
 
-`BEADS_DOLT_PORT` — when set, tests reuse the server at that port instead of
-starting a container. Port 3307 is hardcoded as production and always rejected.
+`BEADS_DB` selects a database for database-opening commands, but it does not by
+itself redirect `bd init` workspace setup. Never run a manual `bd init` from a
+production workspace merely because `BEADS_DB` points elsewhere.
 
-### Advanced Usage
+`testing.Short()` is for genuine runtime, stress, or large-fixture skips. It
+is not a substitute for declaring an integration, end-to-end, API, Docker, or
+external-dependency boundary. Keep new uses within the repository policy:
 
 ```bash
-# Skip additional tests beyond .test-skip
-./scripts/test.sh -skip SomeSlowTest
-
-# Run with custom timeout
-./scripts/test.sh -timeout 5m
-
-# Combine flags
-./scripts/test.sh -v -run TestCreate ./internal/beads/...
+make check-testing-short
 ```
 
-## Known Broken Tests
+## Test Design
 
-Tests in `.test-skip` are automatically skipped by `scripts/test.sh`.
+### Seams, Scenarios, and Doubles
 
-At the time of this review, `.test-skip` contains only comments and no active
-test-name patterns. Treat any new skip as a temporary exception: file the
-upstream issue first, record it in `.test-skip`, and remove the skip when the
-test is fixed.
+Write one scenario at the smallest seam that demonstrates the behavior. Cover
+the boundary or failure mode that changes the user result; use table-driven
+subtests when examples share setup. Do not repeat the same scenario through a
+helper, every caller, and the CLI merely because all are available.
 
-## For Claude Code / AI Agents
+A recording double or fake should be narrow: model only the calls, inputs,
+outputs, and failures the test needs. It should not recreate a storage engine,
+process manager, or another subsystem just to make a unit test look realistic.
 
-When running tests during development:
+A behavioral fake is different. If it stands in for a contract shared by
+multiple production implementations, give it the same semantic-conformance
+suite as those implementations. That shared suite defines observable behavior;
+it prevents the fake from teaching callers a contract production code does not
+honor.
 
-### Best Practices
+Semantic conformance asks whether an implementation produces the promised
+results, errors, and state transitions for the same operation. Persistence
+conformance asks whether the real persistence boundary preserves its required
+durability, transaction, migration, and recovery properties. They answer
+different questions. Do not claim backend parity unless a stated contract and
+its conformance suite establish it.
 
-1. **Use the test script:** Always use `./scripts/test.sh` instead of `go test` directly
-   - Automatically skips known broken tests
-   - Uses appropriate timeouts
-   - Matches local default validation; use future `scripts/ci/*` wrappers when
-     reproducing exact CI jobs
-   - Only if intentionally exercising the ICU regex path, use `./scripts/test-icu-path.sh` (or deprecated `make test-full-cgo`)
+### Tier Admission
 
-2. **Target specific tests when possible:**
-   ```bash
-   # Instead of running everything:
-   ./scripts/test.sh
+An integration test belongs above the unit seam only when it covers a distinct
+boundary that a narrow double cannot prove, such as configuration wiring, a
+real filesystem or Git interaction, a subprocess protocol, or persistence
+behavior.
 
-   # Run just what you changed:
-   ./scripts/test.sh -run TestSpecificFeature ./cmd/bd/...
-   ```
+An end-to-end test is admitted only when all of these are true:
 
-3. **Compilation is the bottleneck:**
-   - The 180-second compilation time dominates
-   - Individual tests are fast
-   - Use `-run` to avoid recompiling unnecessarily
+1. The failure would be user-visible.
+2. A real process, setup, or wiring boundary owns a distinct failure risk that
+   no lower seam can prove.
+3. Lower-tier tests cover the underlying behavior where practical, leaving the
+   end-to-end test focused on that boundary.
+4. No existing end-to-end test already covers the same boundary risk.
 
-4. **Check for new failures:**
-   ```bash
-   # If you see a new failure, check if it's known:
-   cat .test-skip
-   ```
+Lower-tier coverage of the same user journey does not disqualify the
+end-to-end test; duplicate coverage of the same boundary risk does. State that
+risk in the test name or nearby documentation.
 
-### Adding Tests to Skip List
+### Avoid Incidental Complexity
 
-If you discover a broken test:
+Avoid these patterns unless they are the behavior under test:
 
-1. File a GitHub issue documenting the problem
-2. Add to `.test-skip`:
-   ```bash
-   # Issue #NNN: Brief description
-   TestNameToSkip
-   ```
-3. Tests in `.test-skip` support regex patterns
+- Duplicate scenarios at several layers.
+- Global-state reset choreography. Prefer per-test state and cleanup.
+- Subprocesses, listeners, sleeps, or real-store setup for a unit-level claim.
+- Assertions on private implementation shape when observable behavior is the
+  contract.
+- Performance claims without a repeatable measurement and stated workload.
 
-## Test Organization
+Sleeps, listeners, and real stores are appropriate when the test is specifically
+about timing, lifecycle, protocol, or persistence. Keep the setup scoped and
+make that reason apparent.
 
-### Slowest Tests (>0.05s)
+## Failures, Skips, and Review
 
-The top slow tests in cmd/bd:
-- `TestDoctorWithBeadsDir` (1.68s) - Only significantly slow test
-- `TestFlushManagerDebouncing` (0.21s)
-- `TestDebouncer_*` tests (0.06-0.12s each) - Intentional sleeps for concurrency testing
-- `TestMultiWorkspaceDeletionSync` (0.12s)
+`.test-skip` is a local, temporary exception list. If an unrelated failure is
+already listed, report it rather than silently broadening the skip. Before
+adding a new skip, record the issue it tracks and remove the skip when the
+underlying failure is fixed.
 
-Most tests are <0.01s and very fast.
+Before opening a PR:
 
-### Package Structure
+1. For docs-only changes, run the applicable docs, link, freshness, and diff
+   checks; do not run the full Go suite by default.
+2. For Go code, keep the focused and affected-package tests green, then run one
+   final `make test`.
+3. Run only the named CI wrapper, specialized target, or risk gate required by
+   the changed surface, or the one needed to reproduce a CI result.
 
-```
-cmd/bd/           - Main CLI tests (82 test files, most of the suite)
-internal/beads/   - Core beads library tests
-internal/storage/ - Storage backend tests (Dolt embedded/server, conformance)
-internal/rpc/     - RPC protocol tests
-internal/*/       - Various internal package tests
-```
-
-## Continuous Integration
-
-The current CI workflow does not yet call the `scripts/ci/*` wrappers for every
-job. Until workflow migration is complete, use the command documented in the
-failing workflow when reproducing an existing status check exactly.
-
-Use `scripts/test.sh` for local default validation and targeted development
-runs.
-
-Use the CI wrappers for the accepted target PR contracts:
-
-```bash
-make ci-pr-core
-make ci-pr-policy
-make ci-pr-lint
-```
-
-Use the package gate wrappers when touching package or docs surfaces:
-
-```bash
-make ci-package-mcp
-make ci-package-npm
-```
-
-### Coverage Signal Policy
-
-PR confidence is based on behavior checks, not raw coverage percentage.
-
-- Treat Codecov percentages as informational trend data.
-- Prefer focused tests for risky paths (storage, sync/git, migrations, state
-  transitions, and corruption/integrity handling) over broad line-coverage
-  churn.
-- Add or extend at least one targeted regression test when fixing risky logic.
-- Do not block a change solely on overall coverage movement when behavioral
-  checks are strong.
-
-For the current CI/test-surface inventory and cleanup roadmap, see
-[CI_TEST_SURFACE_AUDIT.md](CI_TEST_SURFACE_AUDIT.md). That audit documents
-where local commands and GitHub Actions currently diverge before the CI cleanup
-work starts changing workflow behavior.
-
-For accepted CI tier decisions and the implementation order, see
-[CI_CLEANUP_PLAN.md](CI_CLEANUP_PLAN.md).
-
-## Debugging Test Failures
-
-### Get detailed output
-```bash
-./scripts/test.sh -v ./path/to/package/...
-```
-
-### Run a single test
-```bash
-./scripts/test.sh -run '^TestExactName$' ./cmd/bd/...
-```
-
-### Check which tests are being skipped
-```bash
-./scripts/test.sh 2>&1 | head -5
-```
-
-Output shows:
-```
-Running: go test -timeout 3m -skip TestFoo|TestBar ./...
-Skipping: TestFoo|TestBar
-```
-
-## Contributing
-
-When adding new tests:
-
-1. Keep tests fast (<0.1s if possible)
-2. Use `t.Parallel()` for independent tests
-3. Clean up resources in `t.Cleanup()` or `defer`
-4. Avoid sleeps unless testing concurrency
-
-When tests break:
-
-1. Fix them if possible
-2. If unfixable right now, file an issue and add to `.test-skip`
-3. Document the issue in `.test-skip` with issue number
+For historical CI inventory and maintainer planning context, consult
+[CI_TEST_SURFACE_AUDIT.md](CI_TEST_SURFACE_AUDIT.md) and
+[CI_CLEANUP_PLAN.md](CI_CLEANUP_PLAN.md). For current commands, use the
+workflow files and `Makefile`; these context documents are not a second testing
+guide or a live CI inventory.

@@ -117,6 +117,7 @@ var agentEnrichers = map[string]enricher{
 	"Duplicate Issues":             enrichDuplicateIssues,
 	"Test Pollution":               enrichTestPollution,
 	"Orphaned Dependencies":        enrichOrphanedDeps,
+	"Clone-Local FKs":              enrichCloneLocalFKs,
 	"Child-Parent Dependencies":    enrichChildParentDeps,
 	"Classic Artifacts":            enrichClassicArtifacts,
 	"Pending Migrations":           enrichPendingMigrations,
@@ -456,6 +457,17 @@ func enrichOrphanedDeps(dc DoctorCheck) agentEnrichment {
 		expected:    "All dependency edges reference existing issues",
 		commands:    []string{"bd doctor --check=validate --fix"},
 		sourceFiles: []string{"cmd/bd/doctor/validation.go:CheckOrphanedDependencies"},
+	}
+}
+
+func enrichCloneLocalFKs(dc DoctorCheck) agentEnrichment {
+	return agentEnrichment{
+		severity:    "advisory",
+		explanation: fmt.Sprintf("Severed clone-local FK(s): %s. A hard reset (flatten/compact squash, merge abort, migration error recovery) silently drops foreign keys from dolt_ignored tables onto the tracked plane; enforcement stays off across server restarts and orphaned rows accumulate until the constraint is re-added.", dc.Message),
+		observed:    dc.Message + "\n" + dc.Detail,
+		expected:    "Every FK on clone-local tables (events, wisp_dependencies, wisp_labels, wisp_comments, wisp_events, wisp_child_counters) present and enforcing",
+		commands:    []string{"bd doctor --fix"},
+		sourceFiles: []string{"cmd/bd/doctor/clone_local_fks.go:CheckCloneLocalFKs"},
 	}
 }
 

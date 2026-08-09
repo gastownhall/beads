@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,10 +10,13 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runCommentsProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -25,12 +29,12 @@ func runCommentsProxiedServer(cmd *cobra.Command, ctx context.Context, args []st
 	}
 	defer uw.Close(ctx)
 
-	issue, isWisp, err := proxiedGetIssueOrWisp(ctx, uw, issueID)
+	issue, isWisp, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), issueID)
+	if errors.Is(err, storage.ErrNotFound) {
+		return HandleErrorRespectJSON("issue %s not found", issueID)
+	}
 	if err != nil {
 		return HandleErrorRespectJSON("resolving %s: %v", issueID, err)
-	}
-	if issue == nil {
-		return HandleErrorRespectJSON("issue %s not found", issueID)
 	}
 	issueID = issue.ID
 
@@ -127,7 +131,7 @@ func runCommentsAddProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 	} else if len(args) < 2 {
 		return HandleErrorRespectJSON("comment text required (use -f to read from file)")
 	} else {
-		commentText = args[1]
+		commentText = strings.Join(args[1:], " ")
 	}
 
 	if strings.TrimSpace(commentText) == "" {
@@ -151,39 +155,70 @@ func runCommentsAddProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 	return nil
 }
 
-type addCommentProxiedResult struct {
-	comment *types.Comment
-	issue   *types.Issue
+// proxiedCommenter hands back the guarded add-comment surface for the
+// proxied-server provider, through the provider's OWN capability accessor —
+// the same two-step proxiedIssueReader performs, and for the same reason: the
+// accessor is where each layer is added.
+func proxiedCommenter() (issueops.Commenter, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.CommenterSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the add-comment surface", uowProvider)
+	}
+	return src.Commenter()
 }
 
+// addCommentProxied appends one comment through the Commenter role and returns
+// it with the issue it landed on.
+//
+// The RESOLVE stays here, in a read-only pre-flight, for the reason the
+// proxied close keeps its own policy pre-flight: `bd comment` refuses a
+// template, and refusing a template is not library policy. The pre-flight is
+// also where the TITLE comes from — the confirmation line prints it, and a
+// result type carrying presentation for one front door is a result type that
+// grows one field per front door. The role is handed the canonical id the
+// pre-flight resolved, exactly as `bd show` hands Reader.Get one.
 func addCommentProxied(ctx context.Context, id, author, text string) (*types.Comment, *types.Issue, error) {
-	if uowProvider == nil {
-		return nil, nil, HandleError("proxied-server UOW provider not initialized")
-	}
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (addCommentProxiedResult, string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-		if issue == nil {
-			return addCommentProxiedResult{}, "", fmt.Errorf("issue %s not found", id)
-		}
-		if err := validateIssueUpdatable(id, issue); err != nil {
-			return addCommentProxiedResult{}, "", err
-		}
-		var (
-			comment *types.Comment
-			cerr    error
-		)
-		if isWisp {
-			comment, cerr = uw.CommentUseCase().AddCommentToWisp(ctx, issue.ID, author, text)
-		} else {
-			comment, cerr = uw.CommentUseCase().AddCommentToIssue(ctx, issue.ID, author, text)
-		}
-		if cerr != nil {
-			return addCommentProxiedResult{}, "", fmt.Errorf("adding comment: %w", cerr)
-		}
-		return addCommentProxiedResult{comment: comment, issue: issue}, fmt.Sprintf("bd: comment %s", issue.ID), nil
-	})
+	issue, err := resolveCommentTargetProxied(ctx, id)
 	if err != nil {
 		return nil, nil, err
 	}
-	return res.comment, res.issue, nil
+	commenter, err := proxiedCommenter()
+	if err != nil {
+		return nil, nil, err
+	}
+	result, err := commenter.AddComment(ctx, issueops.AddCommentRequest{
+		Author:  author,
+		IssueID: issue.ID,
+		Text:    text,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("adding comment: %w", err)
+	}
+	return result.Comment, issue, nil
+}
+
+// resolveCommentTargetProxied resolves the anchor and applies the CLI's own
+// pre-flight policy. It reads in a unit of work of its own and writes nothing,
+// so the role's request stays the whole of the transaction.
+func resolveCommentTargetProxied(ctx context.Context, id string) (*types.Issue, error) {
+	uw, err := proxiedOpenReadUOW(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer uw.Close(ctx)
+
+	issue, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, fmt.Errorf("issue %s not found", id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("resolving %s: %w", id, err)
+	}
+	if err := validateIssueUpdatable(id, issue); err != nil {
+		return nil, err
+	}
+	return issue, nil
 }

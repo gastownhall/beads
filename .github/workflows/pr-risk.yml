@@ -20,6 +20,13 @@ jobs:
     outputs:
       full_embedded: ${{ steps.tier.outputs.full_embedded }}
       reason: ${{ steps.tier.outputs.reason }}
+      shadow_embedded_cli: ${{ steps.shadow-selector.outputs.embedded_cli }}
+      shadow_proxied_cli: ${{ steps.shadow-selector.outputs.proxied_cli }}
+      shadow_embedded_storage: ${{ steps.shadow-selector.outputs.embedded_storage }}
+      shadow_embedded_conformance: ${{ steps.shadow-selector.outputs.embedded_conformance }}
+      shadow_server_conformance: ${{ steps.shadow-selector.outputs.server_conformance }}
+      shadow_full: ${{ steps.shadow-selector.outputs.full }}
+      shadow_reason: ${{ steps.shadow-selector.outputs.reason }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         with:
@@ -31,6 +38,22 @@ jobs:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: bash .github/scripts/ci-embedded-tier.sh
+
+      - name: Shadow CI capability selector
+        id: shadow-selector
+        continue-on-error: true
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -o pipefail
+          selection="$(bash .github/scripts/ci-capability-selector.sh)"
+          printf '%s\n' "$selection"
+          {
+            echo '### Shadow CI capability selector'
+            printf '%s\n' "$selection" | sed 's/^/- `/' | sed 's/$/`/'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # End-to-end coverage for proxied-server CLI subcommands, sharded across the
   # CI matrix. Each sub-test drives the bd CLI subprocess against a real dolt
@@ -80,7 +103,7 @@ jobs:
         # The shared proxied harness requires the image cached locally
         # (isDoltImageCached); without it every proxied test self-skips. Keep the
         # tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test proxied-server cmd shard
         env:
@@ -104,23 +127,54 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
       - name: Set up Go
+        id: setup-go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
+          cache: false
+
+      - name: Restore Go module cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Restore race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
+
+      - name: Restore non-race Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/go-cache/non-race
+          key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
+          restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Build embedded bd binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go build -tags gms_pure_go -race -o /tmp/bd-embedded-test ./cmd/bd/
 
       - name: Build embedded storage test binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -race -c -o /tmp/embeddeddolt-test ./internal/storage/embeddeddolt/
 
       - name: Build embedded cmd test binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/race
         run: go test -tags gms_pure_go -race -c -o /tmp/bd-cmd-test ./cmd/bd/
 
       # Non-race bd used as the proxied-server test subprocess. The proxied
       # tests spawn bd many times per sub-test; a -race subprocess would slow
       # every invocation, so build a plain binary for BEADS_TEST_BD_BINARY.
       - name: Build proxied bd subprocess binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -tags gms_pure_go -o /tmp/bd-proxied ./cmd/bd/
 
       # Server-Dolt conformance binary. No -race: the Dolt server runs
@@ -128,6 +182,8 @@ jobs:
       # job's timeout. The dolt package self-skips without the docker image, so
       # the binary is harmless if its job is gated off.
       - name: Build server Dolt conformance test binary
+        env:
+          GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags=integration,gms_pure_go -c -o /tmp/dolt-conformance-test ./internal/storage/dolt/
 
       - name: Upload binaries
@@ -259,7 +315,7 @@ jobs:
         # Presence of this image flips isDoltImageCached() true, so the suite
         # exercises server Dolt instead of self-skipping. Keep the tag in sync
         # with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Test
         # Server twin of test-embedded-conformance: same conformance.RunAll, but
@@ -306,7 +362,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-      - uses: DeterminateSystems/determinate-nix-action@d96678350ffd6a456235832eb11e1c491589b7bb # v3
+      - uses: DeterminateSystems/determinate-nix-action@61cbfe2efc2d4e7a8a6d56967c3c1058e846c858 # v3
       - name: Run bd help via Nix
         id: nix_help
         run: |

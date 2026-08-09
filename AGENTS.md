@@ -88,16 +88,10 @@ echo 'Description with `backticks` and "quotes"' | bd create "Title" --descripti
 echo 'Updated text' | bd update <id> --description=-
 ```
 
-## Testing Commands (No Ambiguity)
+## Testing
 
-- Default local test command: `make test` (or `./scripts/test.sh`).
-- Opt-in ICU regex path: `make test-icu-path` (or `./scripts/test-icu-path.sh ./...`).
-- This ICU path is maintainer-only and not part of normal validation; `make test-full-cgo` and `./scripts/test-cgo.sh` are deprecated aliases.
-- For package- or test-scoped shipped-config CGO runs, prefer:
-```bash
-CGO_ENABLED=1 go test -tags gms_pure_go ./cmd/bd/...
-CGO_ENABLED=1 go test -tags gms_pure_go -run '^TestName$' ./cmd/bd/...
-```
+Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
+test-design guidance, and PR-readiness gates.
 
 ## Non-Interactive Shell Commands
 
@@ -133,7 +127,7 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed):
-   - `golangci-lint run ./...` (or `pre-commit run --all-files` if pre-commit is installed)
+   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
    - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
    - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items

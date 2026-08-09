@@ -679,7 +679,11 @@ func TestIssueCompoundHelpers(t *testing.T) {
 }
 
 func TestDependencyTypeIsValid(t *testing.T) {
-	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
+	// IsValid accepts any non-empty string the type column can hold (Decision
+	// 004 for the open vocabulary; MaxDependencyTypeLen for the bound). The
+	// boundary cases below are the load-bearing ones: at the limit the type is
+	// storable and must be accepted, one past it no edge could carry it and a
+	// filter built from it would match nothing, so it is refused up front.
 	tests := []struct {
 		depType DependencyType
 		valid   bool
@@ -698,6 +702,8 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DependencyType("custom-type"), true}, // Custom types are now valid
 		{DependencyType("any-string"), true},  // Any non-empty string is valid
 		{DependencyType(""), false},           // Empty is still invalid
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen)), true},                            // Exactly the column width
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen+1)), false},                         // One past it: unstorable
 		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
@@ -939,13 +945,10 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
-// TestRowVersionNeverSerialized locks in the Go-only decision for RowVersion:
-// it is a live Go field (library call sites build an optimistic-concurrency
-// token from it) but json:"-", so its random-per-write value never reaches any
-// bd --json surface or bd export. Serializing it would break stable protocol
-// goldens and export round-trips because the value is regenerated on every
-// write. The value must be absent from the bare Issue and from the two
-// embedding wrappers that back show/list/ready (IssueDetails, IssueWithCounts).
+// TestRowVersionNeverSerialized locks in the storage/interchange boundary:
+// RowVersion stays absent from generic Issue JSON and its embedding wrappers.
+// A CLI adapter may project it separately under a public wire name without
+// leaking the storage field into JSONL exports or the shared object model.
 func TestRowVersionNeverSerialized(t *testing.T) {
 	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
 

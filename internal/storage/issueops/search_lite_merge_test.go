@@ -19,7 +19,7 @@ func liteColumnNames() []string {
 		"status",
 		"priority", "issue_type", "assignee", "estimated_minutes",
 		"created_at", "created_by", "owner", "updated_at", "started_at", "closed_at", "external_ref", "spec_id",
-		"compaction_level", "compacted_at", "compacted_at_commit", "original_size", "source_repo", "close_reason",
+		"compaction_level", "compacted_at", "compacted_at_commit", "original_size", "source_repo", "close_reason", "closed_by_session",
 		"sender", "ephemeral", "no_history", "wisp_type", "pinned", "is_template",
 		"await_type", "await_id", "timeout_ns",
 		"mol_type",
@@ -39,7 +39,7 @@ func liteMergeRow(id string, createdAt time.Time) []driver.Value {
 		"open",              // status
 		2, "task", nil, nil, // priority, issue_type, assignee, estimated_minutes
 		createdAt.Format(time.RFC3339), nil, nil, nil, nil, nil, nil, nil, // created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id
-		0, nil, nil, nil, nil, nil, // compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason
+		0, nil, nil, nil, nil, nil, nil, // compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session
 		nil, nil, nil, nil, nil, nil, // sender, ephemeral, no_history, wisp_type, pinned, is_template
 		nil, nil, nil, // await_type, await_id, timeout_ns
 		nil,           // mol_type

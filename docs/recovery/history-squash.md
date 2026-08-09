@@ -112,6 +112,19 @@ then `bd dolt push --force`. Every other clone must re-clone after a squash
 regardless, so replacing the remote costs nothing extra.
 </Warning>
 
+On a *git-backed* remote (issue data riding your code remote under
+`refs/dolt/data`) there is no fresh path to pick — the storage is the git
+repository itself, and its manifest lists every historical table file as
+current, so the full old store stays reachable even after the force-push.
+Replace the data plane in place instead: delete the Dolt data refs on the
+git remote, then force-push to rebuild a fresh store holding only live
+chunks. Code branches are untouched.
+
+```bash
+git push origin :refs/dolt/data :refs/heads/__dolt_remote_info__
+bd dolt push --force
+```
+
 **Step 5:** Verify, then re-clone everywhere else. On this machine:
 
 ```bash
@@ -122,9 +135,19 @@ bd list -n 5
 Every other clone of this database must be re-created from the squashed
 remote. Old clones must not pull: the two chains still share the root, so a
 pull can "succeed" as a cross-merge that re-anchors the entire old history —
-and a later push resurrects the bloat on the squashed remote. Re-enable each
-machine's sync jobs only after that machine has re-cloned; unfence your
-writers last.
+and a later push resurrects the bloat on the squashed remote.
+
+Treat sync jobs and writers as separate switches. Re-enable each machine's
+sync job only after *that machine* has re-cloned — verified, not assumed —
+and unfence writers last; unfencing writers must never implicitly restart a
+peer's sync job. One peer syncing from its old clone re-uploads the entire
+pre-squash store to the fresh remote.
+
+The first push from a re-cloned machine can be far larger than a routine
+sync. If that machine's scheduled sync job enforces a timeout, the capped
+push can die mid-upload on every tick, orphaning partial uploads on the
+remote — run one manual `bd dolt push` (no timeout) right after re-cloning
+and hand back to the schedule once it completes.
 
 ## Prevention
 

@@ -3,16 +3,285 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	mysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// TestRunInTransactionCallbackConnectionErrorIsNotReplayed establishes the
+// public at-most-once callback contract. The callback's error looks transient,
+// but the caller may have performed external work before returning it.
+func TestRunInTransactionCallbackConnectionErrorIsNotReplayed(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	calls := 0
+	err := store.RunInTransaction(ctx, "test: callback at most once", func(storage.Transaction) error {
+		calls++
+		if calls == 1 {
+			return errors.New("invalid connection")
+		}
+		return nil
+	})
+	if err == nil {
+		t.Fatal("callback connection error returned nil")
+	}
+	if calls != 1 {
+		t.Fatalf("callback calls = %d, want 1", calls)
+	}
+}
+
+// TestRunInIssueLifecycleTransactionRollbackDoesNotReplayCallback keeps the
+// public lifecycle callback outside withRetryTx's rollback-safe retry loop.
+// The SQL transaction may safely be retried internally elsewhere, but this
+// callback can perform caller-owned work and therefore runs at most once.
+func TestRunInIssueLifecycleTransactionRollbackDoesNotReplayCallback(t *testing.T) {
+	rollback := &mysql.MySQLError{
+		Number:  1105,
+		Message: "Merge conflict detected, @autocommit transaction rolled back",
+	}
+	store := &DoltStore{}
+	calls := 0
+	runnerCalls := 0
+
+	err := store.runInIssueLifecycleTransaction(context.Background(), "test: lifecycle callback at most once", func(storage.IssueLifecycleTransaction) error {
+		calls++
+		return nil
+	}, func(_ context.Context, fn func(*sql.Tx) error) error {
+		runnerCalls++
+		if err := fn(nil); err != nil {
+			return err
+		}
+		return rollback
+	})
+	if !errors.Is(err, rollback) {
+		t.Fatalf("RunInIssueLifecycleTransaction() error = %v, want %v", err, rollback)
+	}
+	if calls != 1 {
+		t.Fatalf("lifecycle callback calls = %d, want 1", calls)
+	}
+	if runnerCalls != 1 {
+		t.Fatalf("lifecycle transaction attempts = %d, want 1", runnerCalls)
+	}
+}
+
+func TestPublicTransactionSetupRetriesRollbackSafeErrorsBeforeCallback(t *testing.T) {
+	rollback1105 := &mysql.MySQLError{
+		Number:  1105,
+		Message: "Merge conflict detected, @autocommit transaction rolled back",
+	}
+	tests := []struct {
+		name string
+		err  error
+		run  func(*DoltStore, error, *int, *int) error
+	}{
+		{
+			name: "transaction exact Dolt rollback",
+			err:  rollback1105,
+			run: func(store *DoltStore, setupErr error, attempts, callbacks *int) error {
+				return store.runInTransaction(context.Background(), "test: setup retry", func(storage.Transaction) error {
+					*callbacks++
+					return nil
+				}, func(_ context.Context, _ string, fn func(storage.Transaction) error) error {
+					*attempts++
+					if *attempts == 1 {
+						return setupErr
+					}
+					return fn(nil)
+				})
+			},
+		},
+		{
+			name: "transaction deadlock",
+			err:  &mysql.MySQLError{Number: 1213, Message: "deadlock"},
+			run: func(store *DoltStore, setupErr error, attempts, callbacks *int) error {
+				return store.runInTransaction(context.Background(), "test: setup retry", func(storage.Transaction) error {
+					*callbacks++
+					return nil
+				}, func(_ context.Context, _ string, fn func(storage.Transaction) error) error {
+					*attempts++
+					if *attempts == 1 {
+						return setupErr
+					}
+					return fn(nil)
+				})
+			},
+		},
+		{
+			name: "lifecycle lock timeout",
+			err:  &mysql.MySQLError{Number: 1205, Message: "lock wait timeout"},
+			run: func(store *DoltStore, setupErr error, attempts, callbacks *int) error {
+				return store.runInIssueLifecycleTransaction(context.Background(), "test: setup retry", func(storage.IssueLifecycleTransaction) error {
+					*callbacks++
+					return nil
+				}, func(_ context.Context, fn func(*sql.Tx) error) error {
+					*attempts++
+					if *attempts == 1 {
+						return setupErr
+					}
+					return fn(nil)
+				})
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &DoltStore{}
+			attempts := 0
+			callbacks := 0
+			if err := tt.run(store, tt.err, &attempts, &callbacks); err != nil {
+				t.Fatalf("transaction wrapper error = %v, want nil", err)
+			}
+			if attempts != 2 {
+				t.Fatalf("setup attempts = %d, want 2", attempts)
+			}
+			if callbacks != 1 {
+				t.Fatalf("callback calls = %d, want 1", callbacks)
+			}
+		})
+	}
+}
+
+// TestRunInTransactionSerializationConflictInvokesCallbacksOnce orders two
+// independent handles so the stale transaction loses at commit. The public
+// callbacks must still each run once, and the winner's content must survive.
+func TestRunInTransactionSerializationConflictInvokesCallbacksOnce(t *testing.T) {
+	storeA, cleanupA := setupConcurrentTestStore(t)
+	defer cleanupA()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	storeB, err := New(ctx, &Config{
+		Path:           t.TempDir(),
+		CommitterName:  "test",
+		CommitterEmail: "test@example.com",
+		ServerHost:     "127.0.0.1",
+		ServerPort:     testServerPort,
+		Database:       storeA.database,
+		MaxOpenConns:   2,
+	})
+	if err != nil {
+		t.Fatalf("open second store for %s: %v", storeA.database, err)
+	}
+	defer storeB.Close()
+
+	issue := &types.Issue{
+		ID:          "test-tx-at-most-once",
+		Title:       "at-most-once transaction",
+		Description: "initial",
+		Status:      types.StatusOpen,
+		Priority:    2,
+		IssueType:   types.TypeTask,
+	}
+	if err := storeA.CreateIssue(ctx, issue, "tester"); err != nil {
+		t.Fatalf("create issue: %v", err)
+	}
+
+	var callsA, callsB atomic.Int32
+	aPrepared := make(chan struct{})
+	bPrepared := make(chan struct{})
+	releaseA := make(chan struct{})
+	releaseB := make(chan struct{})
+	errA := make(chan error, 1)
+	errB := make(chan error, 1)
+
+	go func() {
+		errA <- storeA.RunInTransaction(ctx, "test: winner transaction", func(tx storage.Transaction) error {
+			callsA.Add(1)
+			if err := tx.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+				"description": "winner",
+			}, "winner"); err != nil {
+				return err
+			}
+			close(aPrepared)
+			return waitForTransactionRelease(ctx, releaseA)
+		})
+	}()
+
+	go func() {
+		errB <- storeB.RunInTransaction(ctx, "test: stale transaction", func(tx storage.Transaction) error {
+			callsB.Add(1)
+			if err := tx.UpdateIssue(ctx, issue.ID, map[string]interface{}{
+				"description": "stale",
+			}, "stale"); err != nil {
+				return err
+			}
+			close(bPrepared)
+			return waitForTransactionRelease(ctx, releaseB)
+		})
+	}()
+
+	waitForTransactionPrepared(t, ctx, aPrepared, "winner")
+	waitForTransactionPrepared(t, ctx, bPrepared, "stale")
+	close(releaseA)
+	if err := <-errA; err != nil {
+		t.Fatalf("winner transaction: %v", err)
+	}
+	close(releaseB)
+	err = <-errB
+	if err == nil {
+		t.Fatal("stale transaction succeeded, want serialization conflict")
+	}
+	var mysqlErr *mysql.MySQLError
+	if !errors.As(err, &mysqlErr) || (mysqlErr.Number != 1213 && mysqlErr.Number != 1205) {
+		t.Fatalf("stale transaction error = %v, want MySQL 1213 or 1205", err)
+	}
+	if errors.Is(err, ErrCommitIndeterminate) {
+		t.Fatalf("stale transaction error = %v unexpectedly marks an indeterminate commit", err)
+	}
+	if got := callsA.Load(); got != 1 {
+		t.Errorf("winner callback calls = %d, want 1", got)
+	}
+	if got := callsB.Load(); got != 1 {
+		t.Errorf("stale callback calls = %d, want 1", got)
+	}
+
+	freshDB, err := sql.Open("mysql", storeA.connStr)
+	if err != nil {
+		t.Fatalf("open fresh SQL handle: %v", err)
+	}
+	defer freshDB.Close()
+	var description string
+	if err := freshDB.QueryRowContext(ctx,
+		"SELECT description FROM issues WHERE id = ?", issue.ID).Scan(&description); err != nil {
+		t.Fatalf("read winner result from fresh SQL handle: %v", err)
+	}
+	if description != "winner" {
+		t.Errorf("fresh SQL description = %q, want winner", description)
+	}
+}
+
+func waitForTransactionPrepared(t *testing.T, ctx context.Context, prepared <-chan struct{}, name string) {
+	t.Helper()
+	select {
+	case <-prepared:
+	case <-ctx.Done():
+		t.Fatalf("%s transaction was not prepared: %v", name, ctx.Err())
+	}
+}
+
+func waitForTransactionRelease(ctx context.Context, release <-chan struct{}) error {
+	select {
+	case <-release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 func TestRunInTransactionIgnoredWritesStayOnActiveBranch(t *testing.T) {
 	store, cleanup := setupTestStore(t)
@@ -123,7 +392,7 @@ func TestRunInTransactionCloseIssueEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction CloseIssue: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
 }
 
 func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) {
@@ -162,17 +431,21 @@ func TestRunInTransactionAlreadyClosedDoesNotCommitUnrelatedEvent(t *testing.T) 
 		t.Fatalf("RunInTransaction CloseIssue already closed: %v", err)
 	}
 
+	// events is dolt_ignored since 0062: the stray row can never leak into a
+	// commit because nothing events-shaped is committed at all — but it must
+	// still be durable in the working set alongside the close event.
+	assertEventsNotCommitted(ctx, t, store.db)
 	var got int
 	if err := store.db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ? AND comment = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ? AND comment = ?",
 		issue.ID, types.EventCommented, strayComment,
 	).Scan(&got); err != nil {
-		t.Fatalf("count committed stray events: %v", err)
+		t.Fatalf("count stray events: %v", err)
 	}
-	if got != 0 {
-		t.Fatalf("committed stray event count = %d, want 0", got)
+	if got != 1 {
+		t.Fatalf("stray event count = %d, want 1", got)
 	}
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventClosed, 1)
 }
 
 func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
@@ -200,7 +473,7 @@ func TestRunInTransactionAddLabelEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction AddLabel: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelAdded, 1)
 }
 
 func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
@@ -231,21 +504,43 @@ func TestRunInTransactionRemoveLabelEmitsEvent(t *testing.T) {
 		t.Fatalf("RunInTransaction RemoveLabel: %v", err)
 	}
 
-	assertCommittedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
+	assertRecordedEventCount(ctx, t, store.db, issue.ID, types.EventLabelRemoved, 1)
 }
 
-func assertCommittedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
+// assertRecordedEventCount counts audit rows in the working-set events table.
+// events is dolt_ignored since migration 0062 (bd-red8u): rows are durable and
+// visible to every client of the store but never part of committed history,
+// so there is no committed variant of this assertion anymore — see
+// assertEventsNotCommitted for the plane check.
+func assertRecordedEventCount(ctx context.Context, t *testing.T, db *sql.DB, issueID string, eventType types.EventType, want int) {
 	t.Helper()
 
 	var got int
 	if err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM events AS OF 'HEAD' WHERE issue_id = ? AND event_type = ?",
+		"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = ?",
 		issueID, eventType,
 	).Scan(&got); err != nil {
-		t.Fatalf("count committed %s events for %s: %v", eventType, issueID, err)
+		t.Fatalf("count recorded %s events for %s: %v", eventType, issueID, err)
 	}
 	if got != want {
-		t.Fatalf("committed %s event count for %s = %d, want %d", eventType, issueID, got, want)
+		t.Fatalf("recorded %s event count for %s = %d, want %d", eventType, issueID, got, want)
+	}
+}
+
+// assertEventsNotCommitted pins the 0062 plane contract: no events ROW ever
+// reaches committed history. On a production-shaped database the table itself
+// is absent at HEAD (the AS OF probe errors — the embedded contract tests
+// assert that stronger form), but the shared branch-per-test database
+// deliberately materializes an EMPTY events shell at HEAD so branches inherit
+// the schema (testutil.MaterializeLocalTableSchemasForBranchTests), so here
+// the probe may also succeed with zero rows. Any committed row is a
+// regression on both shapes.
+func assertEventsNotCommitted(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	var got int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM events AS OF 'HEAD'").Scan(&got); err == nil && got != 0 {
+		t.Fatalf("events has %d rows at HEAD; want none in committed history (dolt_ignored, 0062)", got)
 	}
 }
 

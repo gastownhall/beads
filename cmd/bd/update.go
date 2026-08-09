@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,13 +14,55 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// commandIssueUpdater is the lifecycle capability the update command needs.
+// issueops.Lifecycle satisfies it without an adapter.
+type commandIssueUpdater interface {
+	Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error)
+}
+
+// commandUpdateMutation contains the command-derived values for one lifecycle
+// update. Both routes of `bd update` fill it in: the direct one below, and the
+// proxied-server claim path in update_proxied_server.go.
+type commandUpdateMutation struct {
+	actor            string
+	issueID          string
+	patch            issueops.IssuePatch
+	claim            bool
+	force            bool
+	expectedAssignee *string
+	expectedStatus   *issueops.Status
+	// provenance names the history entry the write records. Empty takes the
+	// backend's default, which is what the direct route wants; the proxied
+	// route spells the message it has always written.
+	provenance string
+}
+
+// runCommandUpdateMutation maps a command update into its lifecycle request and
+// returns the lifecycle result unchanged. It is the ONE place the command's
+// flag semantics become a request — in particular the one --force that means
+// two overrides, whose assignee half only applies to an assignee edit.
+func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, mutation commandUpdateMutation) (issueops.UpdateResult, error) {
+	return updater.Update(ctx, issueops.UpdateRequest{
+		Actor:                 mutation.actor,
+		IssueID:               mutation.issueID,
+		Patch:                 mutation.patch,
+		Claim:                 mutation.claim,
+		ForceAssigneeTransfer: mutation.force && mutation.patch.Assignee.Set,
+		ForceClosePolicy:      mutation.force,
+		ExpectedAssignee:      mutation.expectedAssignee,
+		ExpectedStatus:        mutation.expectedStatus,
+		Provenance:            mutation.provenance,
+	})
+}
 
 var updateCmd = &cobra.Command{
 	Use:     "update [id...]",
@@ -28,7 +71,11 @@ var updateCmd = &cobra.Command{
 	Long: `Update one or more issues.
 
 If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).
+create, update, show, or close operation). This fallback only applies in
+interactive sessions (stdin is a terminal); in scripts and agent sessions a
+missing ID is an error, so a command built from an empty variable cannot
+silently mutate an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
+the fallback anywhere, or =0 to disable it entirely.
 
 Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
@@ -38,7 +85,17 @@ Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
 pointless).`,
-	Args:          cobra.MinimumNArgs(0),
+	// The non-interactive no-ID refusal lives in argument validation, which
+	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
+	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can
+	// open the store, run a version-bump migration, or auto-import JSONL
+	// (bd-m00pb). The interactive fallback itself is resolved in RunE.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && !AllowLastTouchedFallback() {
+			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
+		}
+		return nil
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -55,7 +112,8 @@ pointless).`,
 			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
-		// If no IDs provided, use last touched issue
+		// If no IDs provided, use last touched issue (interactive only;
+		// the non-interactive case was already refused in Args validation)
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
@@ -145,7 +203,7 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("append-notes") {
 			appendNotes, _ := cmd.Flags().GetString("append-notes")
-			updates[issueops.OpAppendNotes] = appendNotes
+			updates[storageissueops.OpAppendNotes] = appendNotes
 		}
 		if cmd.Flags().Changed("acceptance") || cmd.Flags().Changed("acceptance-criteria") {
 			var acceptanceCriteria string
@@ -239,7 +297,7 @@ pointless).`,
 				inPast := t.Before(time.Now())
 				if inPast && !jsonOutput {
 					fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-						ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+						ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 					fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 				}
 				updates["defer_until"] = t
@@ -302,7 +360,7 @@ pointless).`,
 			// Passed as a merge OPERATION, not a pre-merged value: the storage
 			// layer re-reads and merges inside the mutation transaction so a
 			// concurrent writer's keys survive (lost-update fix).
-			updates[issueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
+			updates[storageissueops.OpMergeMetadata] = json.RawMessage(metadataJSON)
 		}
 
 		// Incremental metadata edits (GH#1406)
@@ -312,10 +370,10 @@ pointless).`,
 			return HandleErrorRespectJSON("cannot combine --metadata with --set-metadata or --unset-metadata")
 		}
 		if len(setMetadataFlags) > 0 {
-			updates[issueops.OpSetMetadata] = setMetadataFlags
+			updates[storageissueops.OpSetMetadata] = setMetadataFlags
 		}
 		if len(unsetMetadataFlags) > 0 {
-			updates[issueops.OpUnsetMetadata] = unsetMetadataFlags
+			updates[storageissueops.OpUnsetMetadata] = unsetMetadataFlags
 		}
 
 		// Get claim flag
@@ -337,8 +395,24 @@ pointless).`,
 		if err != nil {
 			return err
 		}
+		var expectedStatus *issueops.Status
+		if ifStatus != nil {
+			expected := issueops.Status(*ifStatus)
+			expectedStatus = &expected
+		}
 
+		// One typed patch for the whole batch. The flag-derived map is still
+		// the source (the guard rules and the notes-overwrite warning read it);
+		// this reshapes it once instead of once per issue.
+		basePatch, err := buildUpdatePatch(updates)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		ctx := rootCtx
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 
 		updatedIssues := []*types.Issue{}
 		var firstUpdatedID string // Track first successful update for last-touched
@@ -424,166 +498,78 @@ pointless).`,
 				}
 			}
 
-			// Handle claim operation atomically using compare-and-swap semantics
-			if claimFlag {
-				if err := issueStore.ClaimIssue(ctx, result.ResolvedID, actor); err != nil {
-					fmt.Fprintf(os.Stderr, "Error claiming %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("claiming issue: %v", err))
-					closeIfUnmutated(result)
-					continue
-				}
-				trackMutation(result)
-			}
-
-			// Apply regular field updates if any. Metadata edits (--metadata,
-			// --set-metadata, --unset-metadata) and --append-notes pass through
-			// as merge OPERATIONS: the storage layer resolves them against the
-			// row re-read inside the mutation transaction. Merging here against
-			// the `issue` snapshot (read in an earlier transaction) silently
-			// erased concurrent writers' keys — both processes exited 0, one
-			// process's committed write vanished.
-			regularUpdates := make(map[string]interface{})
-			for k, v := range updates {
-				if k != "add_labels" && k != "remove_labels" && k != "set_labels" && k != "parent" {
-					regularUpdates[k] = v
-				}
-			}
+			// One atomic operation carries the claim, every field edit, the
+			// label edits, the metadata edits and the reparent. Metadata edits
+			// (--metadata, --set-metadata, --unset-metadata) and --append-notes
+			// still resolve against the row re-read inside the mutation
+			// transaction: merging against the `issue` snapshot (read in an
+			// earlier transaction) silently erased concurrent writers' keys —
+			// both processes exited 0, one process's committed write vanished.
+			patch := basePatch
 			// GH#3233: --defer="" restores ready visibility only if the issue
 			// was actually deferred. Other statuses (blocked, in_progress, …)
 			// shouldn't be clobbered just because defer_until was stale.
 			if clearDeferStatus && issue.Status == types.StatusDeferred {
-				regularUpdates["status"] = string(types.StatusOpen)
+				patch.Status = issueops.Field[issueops.Status]{Set: true, Value: types.StatusOpen}
 			}
 			notesOverwritten := replacesExistingNotes(issue.Notes, updates)
 
-			if len(regularUpdates) > 0 {
-				// With guards present, route through the checked (CAS) path: a
-				// stale assignee/status refuses atomically with a typed
-				// mismatch error and MUST surface as a non-zero exit — never
-				// collapse it to success (finding #10).
-				var updateErr error
-				if ifAssignee != nil || ifStatus != nil {
-					updateErr = issueStore.UpdateIssueChecked(ctx, result.ResolvedID, regularUpdates, actor,
-						storage.UpdateIssueOptions{ExpectedAssignee: ifAssignee, ExpectedStatus: ifStatus})
-				} else {
-					updateErr = issueStore.UpdateIssue(ctx, result.ResolvedID, regularUpdates, actor)
-				}
-				if updateErr != nil {
-					fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
-					failures = append(failures, updateIDFailure{
-						ID:            id,
-						Error:         fmt.Sprintf("updating issue: %v", updateErr),
-						GuardMismatch: isGuardMismatch(updateErr),
-					})
-					closeIfUnmutated(result)
-					continue
-				}
-				trackMutation(result)
-				if notesOverwritten {
-					notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
-				}
-				// Audit log key field changes (survives Dolt GC flatten)
-				if s, ok := regularUpdates["status"].(string); ok {
-					audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), s, actor, "")
-				}
-				if a, ok := regularUpdates["assignee"].(string); ok {
-					audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, a, actor, "")
-				}
-				if p, ok := regularUpdates["priority"].(int); ok {
-					audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", p), actor, "")
-				}
+			ops, err := writeOps(issueStore)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, err)
+				recordFailure(id, fmt.Sprintf("updating issue: %v", err))
+				closeIfUnmutated(result)
+				continue
+			}
+			// Guards ride the operation itself: a stale assignee/status refuses
+			// atomically with a typed mismatch error and MUST surface as a
+			// non-zero exit — never collapse it to success (finding #10).
+			// One --force, two overrides. The assignee half only applies to an
+			// assignee edit — asserting it without one is an invalid request,
+			// which is why it is conditioned here rather than passed straight
+			// through: `--force -s closed` is now a legitimate way to ask for
+			// the close-policy half alone.
+			updateResult, updateErr := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
+				actor:            actor,
+				issueID:          result.ResolvedID,
+				patch:            patch,
+				claim:            claimFlag,
+				force:            forceFlag,
+				expectedAssignee: ifAssignee,
+				expectedStatus:   expectedStatus,
+			})
+			if updateErr != nil {
+				fmt.Fprintf(os.Stderr, "Error updating %s: %v\n", id, updateErr)
+				failures = append(failures, updateIDFailure{
+					ID:            id,
+					Error:         fmt.Sprintf("updating issue: %v", updateErr),
+					GuardMismatch: isGuardMismatch(updateErr),
+				})
+				closeIfUnmutated(result)
+				continue
+			}
+			updatedIssue := updateResult.Issue
+			trackMutation(result)
+			if notesOverwritten {
+				notesOverwriteWarnings[issueStore] = append(notesOverwriteWarnings[issueStore], id)
+			}
+			// Audit log key field changes (survives Dolt GC flatten)
+			if patch.Status.Set {
+				audit.LogFieldChange(result.ResolvedID, "status", string(issue.Status), string(patch.Status.Value), actor, "")
+			}
+			if patch.Assignee.Set {
+				audit.LogFieldChange(result.ResolvedID, "assignee", issue.Assignee, patch.Assignee.Value, actor, "")
+			}
+			if patch.Priority.Set {
+				audit.LogFieldChange(result.ResolvedID, "priority", fmt.Sprintf("%d", issue.Priority), fmt.Sprintf("%d", patch.Priority.Value), actor, "")
 			}
 
-			// Handle label operations
-			var setLabels, addLabels, removeLabels []string
-			if v, ok := updates["set_labels"].([]string); ok {
-				setLabels = v
+			// The operation's own post-state snapshot replaces the re-read.
+			// Dependency records are dropped from it because `bd update` has
+			// never printed them: GetIssue did not hydrate them either.
+			if updatedIssue != nil {
+				updatedIssue.Dependencies = nil
 			}
-			if v, ok := updates["add_labels"].([]string); ok {
-				addLabels = v
-			}
-			if v, ok := updates["remove_labels"].([]string); ok {
-				removeLabels = v
-			}
-			if len(setLabels) > 0 || len(addLabels) > 0 || len(removeLabels) > 0 {
-				if err := applyLabelUpdates(ctx, issueStore, result.ResolvedID, actor, setLabels, addLabels, removeLabels); err != nil {
-					fmt.Fprintf(os.Stderr, "Error updating labels for %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("updating labels: %v", err))
-					closeIfUnmutated(result)
-					continue
-				}
-				trackMutation(result)
-			}
-
-			// Handle parent reparenting
-			if newParent, ok := updates["parent"].(string); ok {
-				// Validate new parent exists (unless empty string to remove parent)
-				if newParent != "" {
-					parentIssue, err := issueStore.GetIssue(ctx, newParent)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "Error getting parent %s: %v\n", newParent, err)
-						recordFailure(id, fmt.Sprintf("getting parent %s: %v", newParent, err))
-						closeIfUnmutated(result)
-						continue
-					}
-					if parentIssue == nil {
-						fmt.Fprintf(os.Stderr, "Error: parent issue %s not found\n", newParent)
-						recordFailure(id, fmt.Sprintf("parent issue %s not found", newParent))
-						closeIfUnmutated(result)
-						continue
-					}
-				}
-
-				// Find and remove existing parent-child dependency
-				deps, err := issueStore.GetDependencyRecords(ctx, result.ResolvedID)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error getting dependencies for %s: %v\n", id, err)
-					recordFailure(id, fmt.Sprintf("getting dependencies: %v", err))
-					closeIfUnmutated(result)
-					continue
-				}
-				oldParentRemoveFailed := false
-				for _, dep := range deps {
-					if dep.Type == types.DepParentChild {
-						if err := issueStore.RemoveDependency(ctx, result.ResolvedID, dep.DependsOnID, actor); err != nil {
-							// Reparenting removes the old parent edge before adding
-							// the new one; if removal fails, adding the new edge would
-							// leave the issue with two parents. Record the failed ID
-							// and stop so it surfaces in the nonzero-exit report
-							// instead of being silently counted as a success.
-							fmt.Fprintf(os.Stderr, "Error removing old parent dependency: %v\n", err)
-							recordFailure(id, fmt.Sprintf("removing old parent dependency: %v", err))
-							oldParentRemoveFailed = true
-						} else {
-							trackMutation(result)
-						}
-						break
-					}
-				}
-				if oldParentRemoveFailed {
-					closeIfUnmutated(result)
-					continue
-				}
-
-				// Add new parent-child dependency (if not removing parent)
-				if newParent != "" {
-					newDep := &types.Dependency{
-						IssueID:     result.ResolvedID,
-						DependsOnID: newParent,
-						Type:        types.DepParentChild,
-					}
-					if err := issueStore.AddDependency(ctx, newDep, actor); err != nil {
-						fmt.Fprintf(os.Stderr, "Error adding parent dependency: %v\n", err)
-						recordFailure(id, fmt.Sprintf("adding parent dependency: %v", err))
-						closeIfUnmutated(result)
-						continue
-					}
-					trackMutation(result)
-				}
-			}
-
-			// Re-fetch for display
-			updatedIssue, _ := issueStore.GetIssue(ctx, result.ResolvedID)
 			updateTitle := ""
 			if updatedIssue != nil {
 				updateTitle = updatedIssue.Title
@@ -643,6 +629,167 @@ pointless).`,
 		}
 		return nil
 	},
+}
+
+// setField marks a patch field as supplied, including when the value is a zero
+// value the caller meant to write.
+func setField[T any](value T) issueops.Field[T] {
+	return issueops.Field[T]{Set: true, Value: value}
+}
+
+// buildUpdatePatch reshapes the flag-derived update map into the facade's typed
+// patch. Every key it handles is a key the flag parsing above wrote, so an
+// unrecognized one is a bug in this file rather than user input.
+func buildUpdatePatch(updates map[string]interface{}) (issueops.IssuePatch, error) {
+	var patch issueops.IssuePatch
+	var wisp, noHistory *bool
+	for key, value := range updates {
+		var ok bool
+		switch key {
+		case "title":
+			patch.Title, ok = stringField(value)
+		case "description":
+			patch.Description, ok = stringField(value)
+		case "design":
+			patch.Design, ok = stringField(value)
+		case "acceptance_criteria":
+			patch.AcceptanceCriteria, ok = stringField(value)
+		case "notes":
+			patch.Notes, ok = stringField(value)
+		case storageissueops.OpAppendNotes:
+			patch.AppendNotes, ok = stringField(value)
+		case "spec_id":
+			patch.SpecID, ok = stringField(value)
+		case "await_id":
+			patch.AwaitID, ok = stringField(value)
+		case "closed_by_session":
+			patch.ClosedBySession, ok = stringField(value)
+		case "assignee":
+			patch.Assignee, ok = stringField(value)
+		case "parent":
+			patch.ParentID, ok = stringField(value)
+		case "status":
+			var status issueops.Field[string]
+			if status, ok = stringField(value); ok {
+				patch.Status = setField(issueops.Status(status.Value))
+			}
+		case "issue_type":
+			var issueType issueops.Field[string]
+			if issueType, ok = stringField(value); ok {
+				patch.IssueType = setField(issueops.IssueType(issueType.Value))
+			}
+		case "priority":
+			var priority int
+			if priority, ok = value.(int); ok {
+				patch.Priority = setField(priority)
+			}
+		case "estimated_minutes":
+			var estimate int
+			if estimate, ok = value.(int); ok {
+				patch.EstimatedMinutes = setField(&estimate)
+			}
+		case "external_ref":
+			ok = true
+			if value == nil {
+				patch.ExternalRef = setField[*string](nil)
+			} else if ref, isString := value.(string); isString {
+				patch.ExternalRef = setField(&ref)
+			} else {
+				ok = false
+			}
+		case "due_at":
+			patch.DueAt, ok = optionalTimeField(value)
+		case "defer_until":
+			patch.DeferUntil, ok = optionalTimeField(value)
+		case "add_labels":
+			patch.Labels.Add, ok = value.([]string)
+		case "remove_labels":
+			patch.Labels.Remove, ok = value.([]string)
+		case "set_labels":
+			var labels []string
+			if labels, ok = value.([]string); ok {
+				patch.Labels.Replace = setField(labels)
+			}
+		case storageissueops.OpMergeMetadata:
+			var merge json.RawMessage
+			if merge, ok = value.(json.RawMessage); ok {
+				patch.Metadata.Merge = setField(merge)
+			}
+		case storageissueops.OpSetMetadata:
+			var flags []string
+			if flags, ok = value.([]string); ok {
+				set, err := parseSetMetadataFlags(flags)
+				if err != nil {
+					return issueops.IssuePatch{}, err
+				}
+				patch.Metadata.Set = set
+			}
+		case storageissueops.OpUnsetMetadata:
+			patch.Metadata.Unset, ok = value.([]string)
+		case "wisp":
+			var flag bool
+			if flag, ok = value.(bool); ok {
+				wisp = &flag
+			}
+		case "no_history":
+			var flag bool
+			if flag, ok = value.(bool); ok {
+				noHistory = &flag
+			}
+		default:
+			return issueops.IssuePatch{}, fmt.Errorf("unsupported update field %q", key)
+		}
+		if !ok {
+			return issueops.IssuePatch{}, fmt.Errorf("unsupported value %T for update field %q", value, key)
+		}
+	}
+	// --ephemeral/--persistent/--no-history/--history select one complete
+	// persistence state. The flag parsing already rejects the contradictory
+	// pairs; the remaining combinations resolve most-specific-first, which
+	// reproduces the column pairs the old two-boolean write produced.
+	switch {
+	case wisp != nil && *wisp:
+		patch.Persistence = setField(issueops.PersistenceModeEphemeral)
+	case noHistory != nil && *noHistory:
+		patch.Persistence = setField(issueops.PersistenceModeNoHistory)
+	case wisp != nil || noHistory != nil:
+		patch.Persistence = setField(issueops.PersistenceModePersistent)
+	}
+	return patch, nil
+}
+
+func stringField(value any) (issueops.Field[string], bool) {
+	text, ok := value.(string)
+	if !ok {
+		return issueops.Field[string]{}, false
+	}
+	return setField(text), true
+}
+
+func optionalTimeField(value any) (issueops.Field[*time.Time], bool) {
+	if value == nil {
+		return setField[*time.Time](nil), true
+	}
+	at, ok := value.(time.Time)
+	if !ok {
+		return issueops.Field[*time.Time]{}, false
+	}
+	return setField(&at), true
+}
+
+// parseSetMetadataFlags splits --set-metadata key=value pairs, matching
+// storage.ApplyMetadataEdits' parsing so the CLI contract is unchanged. Values
+// are always stored as JSON strings (GH#4146).
+func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
+	set := make(map[string]json.RawMessage, len(flags))
+	for _, flag := range flags {
+		key, value, ok := strings.Cut(flag, "=")
+		if !ok || key == "" {
+			return nil, fmt.Errorf("invalid --set-metadata: expected key=value, got %q", flag)
+		}
+		set[key] = storage.MetadataEditValue(value)
+	}
+	return set, nil
 }
 
 func replacesExistingNotes(existing string, fields map[string]any) bool {
@@ -816,8 +963,8 @@ func init() {
 	updateCmd.Flags().StringSlice("set-labels", nil, "Set labels, replacing all existing (repeatable)")
 	updateCmd.Flags().String("parent", "", "New parent issue ID (reparents the issue, use empty string to remove parent)")
 	updateCmd.Flags().Bool("claim", false, "Atomically claim the issue (sets assignee to you, status to in_progress; idempotent if already claimed by you; issues assigned to a pool alias listed in the claim.pools config are claimable too)")
-	// Live-claim reassign fence override (bd-98s5c)
-	updateCmd.Flags().Bool("force", false, "Allow -a/--assignee to overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim)")
+	// Overrides the live-claim reassign fence (bd-98s5c) and close policy.
+	updateCmd.Flags().Bool("force", false, "Override two refusals: let -a/--assignee overwrite another actor's live in_progress claim (use only for abandoned claims — crashed agent, expired lease; prefer bd reclaim), and let -s/--status move the issue into closed (or a configured done status) despite open children or a live blocker (same as bd close --force)")
 	// Conditional (compare-and-set) update guards (bd-wsqvw)
 	updateCmd.Flags().String("if-assignee", "", "Apply the update only if the current assignee equals this value (--if-assignee '' requires unassigned); a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
 	updateCmd.Flags().String("if-status", "", "Apply the update only if the current status equals this value; a mismatch writes nothing and exits 13 (vs 1 for other failures). Requires a field update; cannot combine with --claim")
@@ -838,7 +985,7 @@ func init() {
 	//   --defer=+1h         Hidden from bd ready for 1 hour
 	//   --defer=""          Clear defer (show in bd ready immediately)
 	updateCmd.Flags().String("due", "", "Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
-	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then")
+	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open")
 	// Gate fields (bd-z6kw)
 	updateCmd.Flags().String("await-id", "", "Set gate await_id (e.g., GitHub run ID for gh:run gates)")
 	// Ephemeral/persistent flags

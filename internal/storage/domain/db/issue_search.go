@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -69,11 +70,11 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 	}
 
 	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
-	outerLimit := limitOffsetSQL(filter.Limit, filter.Offset)
+	window := searchWindowForFilter(filter)
 
 	//nolint:gosec // G201: subqueries built from hardcoded table names and ? placeholders.
 	unionSQL := fmt.Sprintf("SELECT id, src FROM (%s UNION ALL %s) merged %s %s",
-		iSub, wSub, outerOrderBy, outerLimit)
+		iSub, wSub, outerOrderBy, window.sql)
 
 	args := make([]any, 0, len(iArgs)+len(wArgs))
 	args = append(args, iArgs...)
@@ -87,7 +88,10 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union: %w", err)
 	}
-	hasMore := page.trimToLimit(filter.Limit)
+	hasMore, err := page.finishWindow(window)
+	if err != nil {
+		return domain.SearchPage{}, err
+	}
 
 	issuesByID, err := r.fetchIssuesByIDs(ctx, page.issueIDs, issuesFilterTables, filter)
 	if err != nil {
@@ -195,11 +199,11 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 	}
 
 	orderBy := orderBySQL(filter.SortBy, filter.SortDesc, "")
-	limitSQL := limitOffsetSQL(filter.Limit, filter.Offset)
+	window := searchWindowForFilter(filter)
 
 	//nolint:gosec // G201: SQL fragments from fixed table names and parameterized filters.
 	querySQL := fmt.Sprintf(`%s%s FROM %s %s %s %s %s`,
-		selectKw, issueSelectColumns, plan.FromSQL, sqlbuild.LeaseJoin(tables.Main), whereSQL, orderBy, limitSQL)
+		selectKw, issueSelectColumns, plan.FromSQL, sqlbuild.LeaseJoin(tables.Main), whereSQL, orderBy, window.sql)
 
 	rows, err := r.runner.QueryContext(ctx, querySQL, args...)
 	if err != nil {
@@ -225,7 +229,10 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 		return domain.SearchPage{}, fmt.Errorf("search %s: rows: %w", tables.Main, err)
 	}
 
-	items, hasMore := applyN1Overflow(issues, filter.Limit)
+	items, hasMore, err := finishWindow(issues, window)
+	if err != nil {
+		return domain.SearchPage{}, err
+	}
 
 	if err := r.hydrateIssues(ctx, items, tables, filter.IncludeDependencies, filter.SkipLabels); err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search %s: hydrate: %w", tables.Main, err)
@@ -236,10 +243,10 @@ func (r *issueSQLRepositoryImpl) searchTable(ctx context.Context, query string, 
 
 func (r *issueSQLRepositoryImpl) scanFilterIDs(ctx context.Context, selectKw, fromSQL, whereSQL string, args []any, filter types.IssueFilter, tables filterTables) ([]string, bool, error) {
 	orderBy := orderBySQL(filter.SortBy, filter.SortDesc, tables.Main)
-	limitSQL := limitOffsetSQL(filter.Limit, filter.Offset)
+	window := searchWindowForFilter(filter)
 	//nolint:gosec // G201: SQL fragments from fixed table names and parameterized filters.
 	idQuery := fmt.Sprintf(`%s%s.id FROM %s %s %s %s`,
-		selectKw, tables.Main, fromSQL, whereSQL, orderBy, limitSQL)
+		selectKw, tables.Main, fromSQL, whereSQL, orderBy, window.sql)
 
 	rows, err := r.runner.QueryContext(ctx, idQuery, args...)
 	if err != nil {
@@ -259,8 +266,7 @@ func (r *issueSQLRepositoryImpl) scanFilterIDs(ctx context.Context, selectKw, fr
 		return nil, false, fmt.Errorf("search %s (id scan): rows: %w", tables.Main, err)
 	}
 
-	ids, hasMore := applyN1Overflow(ids, filter.Limit)
-	return ids, hasMore, nil
+	return finishWindow(ids, window)
 }
 
 func (r *issueSQLRepositoryImpl) hydrateIssues(ctx context.Context, issues []*types.Issue, tables filterTables, includeDeps bool, skipLabels bool) error {
@@ -473,11 +479,18 @@ func reassembleBySrc[T comparable](ordered []idSrcRef, issues, wisps map[string]
 	return out
 }
 
-func (p *idSrcPage) trimToLimit(limit int) bool {
-	if limit <= 0 || len(p.ordered) <= limit {
-		return false
+// finishWindow is finishWindow's shape for a merged id page: the same cap,
+// skip and trim, with the per-table id lists rebuilt once from whatever
+// survives.
+func (p *idSrcPage) finishWindow(w searchWindow) (bool, error) {
+	if err := issueops.EnforceMaxRowsCap(len(p.ordered), w.rowCap, w.capSource); err != nil {
+		return false, err
 	}
-	p.ordered = p.ordered[:limit]
+	ordered, hasMore := applyN1Overflow(dropFirst(p.ordered, w.skip), w.limit)
+	if len(ordered) == len(p.ordered) {
+		return hasMore, nil
+	}
+	p.ordered = ordered
 	p.issueIDs = p.issueIDs[:0]
 	p.wispIDs = p.wispIDs[:0]
 	for _, r := range p.ordered {
@@ -488,7 +501,7 @@ func (p *idSrcPage) trimToLimit(limit int) bool {
 			p.wispIDs = append(p.wispIDs, r.id)
 		}
 	}
-	return true
+	return hasMore, nil
 }
 
 type idSrcRef struct{ id, src string }
@@ -508,17 +521,107 @@ func orderBySQL(sortBy string, sortDesc bool, prefix string) string {
 	return sqlbuild.OrderBy(sortBy, sortDesc, prefix)
 }
 
-func limitOffsetSQL(limit, offset int) string {
-	if limit <= 0 {
-		if offset > 0 {
-			return fmt.Sprintf("LIMIT 18446744073709551615 OFFSET %d", offset)
-		}
-		return ""
+// searchWindow is the row window one search runs under: the clause the engine
+// carries, and what this package must still do to the rows that come back. It
+// is one value rather than two decisions at each call site because the halves
+// only add up when they are decided together.
+//
+// WHO CARRIES THE OFFSET is the whole of it, and A CAP DECIDES IT. MaxRows
+// counts the rows the query TOUCHED — offset + limit — because a row the engine
+// skipped is still a row it matched, so an offset walks a caller toward the
+// breaker and must never walk one past it. When a cap is set the skip therefore
+// stays HERE: the bound covers the rows this package is about to drop, and
+// EnforceMaxRowsCap counts them. That is the same window the store-backed seam
+// runs under, which reaches it by widening the filter before it sizes its probe
+// row (internal/workapi.WithRowsBeforeThePage, then WithFetchOneExtra), so one
+// request fires on both.
+//
+// With no cap the engine carries it — LIMIT n OFFSET k — except when there is
+// no LIMIT to hang one on. MySQL has no OFFSET without a LIMIT, and the
+// sentinel this used to render for that shape
+// ("LIMIT 18446744073709551615 OFFSET k") makes the Dolt engine size a result
+// buffer from limit+offset and answer with a recovered "makeslice: cap out of
+// range" out of topRowsIter instead of rows. An unbounded query reads every
+// matching row anyway, so skipping here is the same answer at the same cost.
+//
+// THE CALLERS THAT COMBINE AN OFFSET WITH A CAP are the ones that consume the
+// FILTER as a value and run their own query: proxied `bd list --watch`, with
+// and without --ready, and the proxied hierarchical --parent walk. They used to
+// get the engine's OFFSET and a cap counted on the survivors, which answered a
+// page for the very request `bd list --offset --max-rows` refuses one row of
+// result set earlier. The role that pages — issueops.Reader — hands this seam
+// no offset at all; it applies its own in the shared page epilogue for the
+// reason internal/workapi.FinishPageAt gives. The unit-of-work Querier does set
+// one here, and a query request carries no cap, so that is the shape still
+// pushing the skip down.
+type searchWindow struct {
+	// sql is the LIMIT/OFFSET clause, empty for an unbounded scan.
+	sql string
+	// skip is the offset the clause did not carry.
+	skip int
+	// limit is the page the caller receives; 0 is unlimited.
+	limit int
+	// rowCap and capSource are the defensive cap and its attribution. rowCap is
+	// SearchProbeLimit's cap, not the filter's: at touched == maxRows the probe
+	// row moves it by one.
+	rowCap    int
+	capSource string
+}
+
+func searchWindowFor(limit, offset, maxRows int, maxRowsSource string) searchWindow {
+	// The window the cap is sized against is the one the query TOUCHES, so a
+	// skip this package keeps has to be inside the bound. An unbounded limit
+	// already carries every matching row and needs no widening — the same two
+	// lines WithRowsBeforeThePage runs on the filter for the other seam.
+	skipHere := maxRows > 0 && offset > 0
+	touched := limit
+	if skipHere && limit > 0 {
+		touched += offset
 	}
-	if offset > 0 {
-		return fmt.Sprintf("LIMIT %d OFFSET %d", limit+1, offset)
+	bound, rowCap := issueops.SearchProbeLimit(touched, maxRows)
+	w := searchWindow{limit: limit, rowCap: rowCap, capSource: maxRowsSource}
+	switch {
+	case bound <= 0:
+		w.skip = offset
+	case skipHere:
+		w.skip, w.sql = offset, fmt.Sprintf("LIMIT %d", bound)
+	case offset > 0:
+		w.sql = fmt.Sprintf("LIMIT %d OFFSET %d", bound, offset)
+	default:
+		w.sql = fmt.Sprintf("LIMIT %d", bound)
 	}
-	return fmt.Sprintf("LIMIT %d", limit+1)
+	return w
+}
+
+func searchWindowForFilter(filter types.IssueFilter) searchWindow {
+	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource)
+}
+
+func readyWindowForFilter(filter types.WorkFilter) searchWindow {
+	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource)
+}
+
+// finishWindow is the Go half of a window: the defensive cap against what the
+// query matched, then the offset the engine was not given, then the page trim
+// that produces the has-more verdict. The cap runs first because it counts rows
+// the query MATCHED, skipped ones included — the same count the store-backed
+// seam checks, which skips nothing because its body does.
+func finishWindow[T any](rows []T, w searchWindow) ([]T, bool, error) {
+	if err := issueops.EnforceMaxRowsCap(len(rows), w.rowCap, w.capSource); err != nil {
+		return nil, false, err
+	}
+	items, hasMore := applyN1Overflow(dropFirst(rows, w.skip), w.limit)
+	return items, hasMore, nil
+}
+
+func dropFirst[T any](rows []T, n int) []T {
+	if n <= 0 {
+		return rows
+	}
+	if n >= len(rows) {
+		return rows[:0]
+	}
+	return rows[n:]
 }
 
 func applyN1Overflow[T any](items []T, limit int) ([]T, bool) {

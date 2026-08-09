@@ -36,7 +36,7 @@ const IssueSelectColumns = sqlbuild.IssueSelectColumns
 const IssueSelectColumnsLite = `id, content_hash, title,
 	       status, priority, issue_type, assignee, estimated_minutes,
 	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
+	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session,
 	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
 	       await_type, await_id, timeout_ns,
 	       mol_type,
@@ -83,7 +83,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason sql.NullString
+	var contentHash, sourceRepo, closeReason, closedBySession sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
@@ -97,7 +97,7 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason, &closedBySession,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&molType,
@@ -162,6 +162,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -261,7 +264,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason sql.NullString
+	var contentHash, sourceRepo, closeReason, closedBySession sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target sql.NullString
 	var awaitType, awaitID sql.NullString
@@ -275,7 +278,7 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 		&issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason, &closedBySession,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs,
 		&molType,
@@ -338,6 +341,9 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String

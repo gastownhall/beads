@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func proxiedMutateIssue(ctx context.Context, id, commitMsg string, mutate func(ctx context.Context, uw uow.UnitOfWork, issue *types.Issue, isWisp bool) error) (*types.Issue, error) {
@@ -16,9 +19,12 @@ func proxiedMutateIssue(ctx context.Context, id, commitMsg string, mutate func(c
 	}
 	var updated *types.Issue
 	err := uow.RunTx(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
-		issue, isWisp := proxiedResolveIssueOrWisp(ctx, uw, id)
-		if issue == nil {
+		issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
+		if errors.Is(rerr, storage.ErrNotFound) {
 			return "", fmt.Errorf("issue %s not found", id)
+		}
+		if rerr != nil {
+			return "", fmt.Errorf("resolving %s: %w", id, rerr)
 		}
 		if err := validateIssueUpdatable(id, issue); err != nil {
 			return "", err

@@ -30,6 +30,7 @@ var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -47,9 +48,13 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
-	// readOnly marks a store opened via OpenReadOnly: open-time mutations
-	// (CREATE DATABASE, schema migrations) were skipped and write
-	// transactions are refused (bd-6dnrw.32).
+	// eventsJournalEnabled activates the durable events journal for THIS store
+	// instance only (storage.EventsJournalConfigurer); never process-global.
+	eventsJournalEnabled atomic.Bool
+	// readOnly marks a store opened via OpenReadOnly or
+	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
+	// migrations) were skipped and write transactions are refused
+	// (bd-6dnrw.32).
 	readOnly bool
 	// intent records why this store was opened, controlling how lenient
 	// initSchema is about pending-migration refusals it would otherwise treat
@@ -84,9 +89,6 @@ const (
 
 // errClosed is returned when a method is called after Close.
 var errClosed = errors.New("embeddeddolt: store is closed")
-
-// errReadOnly is returned when a write is attempted on a read-only store.
-var errReadOnly = errors.New("embeddeddolt: store is read-only")
 
 // IsClosed reports whether the store has been closed. Implements
 // storage.LifecycleManager so that callers (e.g., maybeAutoCommit) can
@@ -151,6 +153,20 @@ func newStore(ctx context.Context, beadsDir, database, branch string, intent ope
 // opens of the same directory keep their own lifecycle. Write transactions on
 // the returned store are refused.
 func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, true)
+}
+
+// OpenForPreviewCommand opens an existing embedded database without any
+// open-time mutation and refuses all write transactions. Unlike
+// OpenReadOnly, it permits a behind schema cursor so --dry-run/--inspect can
+// still validate state that is query-compatible with the current binary. A
+// missing column or other genuine incompatibility is reported by the preview
+// query itself; it is never repaired implicitly.
+func OpenForPreviewCommand(ctx context.Context, beadsDir, database, branch string) (*EmbeddedDoltStore, error) {
+	return openReadOnly(ctx, beadsDir, database, branch, false)
+}
+
+func openReadOnly(ctx context.Context, beadsDir, database, branch string, checkBehind bool) (*EmbeddedDoltStore, error) {
 	if database == "" {
 		return nil, fmt.Errorf("embeddeddolt: database name must not be empty (caller should default to %q)", "beads")
 	}
@@ -182,8 +198,10 @@ func OpenReadOnly(ctx context.Context, beadsDir, database, branch string) (*Embe
 	if err := schema.CheckForwardDrift(ctx, db); err != nil {
 		return nil, err
 	}
-	if err := schema.CheckBehindDrift(ctx, db); err != nil {
-		return nil, err
+	if checkBehind {
+		if err := schema.CheckBehindDrift(ctx, db); err != nil {
+			return nil, err
+		}
 	}
 
 	return s, nil
@@ -202,7 +220,7 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 	if commit && s.readOnly {
-		err = errReadOnly
+		err = ErrReadOnly
 		return
 	}
 
@@ -213,8 +231,9 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
+	committed := false
 	defer func() {
-		err = errors.Join(err, cleanup())
+		err = joinTransactionCleanupError(err, cleanup(), committed)
 	}()
 
 	var tx *sql.Tx
@@ -223,6 +242,8 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		return
 	}
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	defer clearJournalScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -234,11 +255,33 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		return
 	}
 
-	if cErr := tx.Commit(); cErr != nil {
-		err = fmt.Errorf("embeddeddolt: commit tx: %w", cErr)
+	if cErr := commitEmbeddedTx(tx); cErr != nil {
+		err = cErr
 		return
 	}
+	committed = true
 	return
+}
+
+// SetEventsJournalEnabled activates the journal for this store instance only.
+func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
+	s.eventsJournalEnabled.Store(enabled)
+}
+
+// commitEmbeddedTx classifies an unconfirmed SQL commit response as
+// indeterminate: the engine may have applied it before the connection failed.
+func commitEmbeddedTx(tx *sql.Tx) error {
+	if err := tx.Commit(); err != nil {
+		return wrapCommitIndeterminate("embeddeddolt: commit tx", err)
+	}
+	return nil
+}
+
+func joinTransactionCleanupError(operationErr, cleanupErr error, committed bool) error {
+	if committed && cleanupErr != nil {
+		cleanupErr = wrapCommitIndeterminate("embeddeddolt: cleanup after SQL commit", cleanupErr)
+	}
+	return errors.Join(operationErr, cleanupErr)
 }
 
 func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
@@ -246,7 +289,7 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 		return 0, errClosed
 	}
 	if s.readOnly {
-		return 0, errReadOnly
+		return 0, ErrReadOnly
 	}
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, s.database, s.branch)
 	if err != nil {
@@ -585,6 +628,40 @@ func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.Even
 	return result, err
 }
 
+// RecordProvenanceEvent appends a provenance event idempotently. inserted is
+// false when the deterministic id already existed. Append-only — no update path.
+func (s *EmbeddedDoltStore) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error) {
+	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var txErr error
+		id, inserted, txErr = issueops.RecordProvenanceEventInTx(ctx, tx, ev)
+		return txErr
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return id, inserted, nil
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceEvents(ctx context.Context, issueID, kindFilter string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceEventsInTx(ctx, tx, issueID, kindFilter)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceByRefInTx(ctx, tx, ref)
+		return err
+	})
+	return result, err
+}
+
 // RunInTransaction is implemented in transaction.go.
 
 // Close decrements the reference count if this store was opened via Open (the
@@ -781,15 +858,17 @@ func (s *EmbeddedDoltStore) ActiveDatabaseSize(ctx context.Context) (int64, erro
 // Branch, Checkout, CurrentBranch, DeleteBranch, ListBranches are
 // implemented in version_control.go via versioncontrolops.
 
+// CommitPending commits all working set changes and reports whether a commit
+// actually landed. It gets that from commitAll's returned bool rather than
+// inspecting Commit's error or reading HEAD before and after: as of GH#3886,
+// Commit itself tolerates Dolt's "nothing to commit" response (matching the
+// server store) and returns nil for it, so an error-based check here would
+// report every clean-store call as "committed", and a HEAD-before/HEAD-after
+// comparison would cost two extra engine opens on every call (this runs on
+// every embedded pull/sync) and race against any concurrent HEAD movement.
 func (s *EmbeddedDoltStore) CommitPending(ctx context.Context, actor string) (bool, error) {
 	msg := fmt.Sprintf("bd: commit pending changes by %s", actor)
-	if err := s.Commit(ctx, msg); err != nil {
-		if issueops.IsNothingToCommitError(err) {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	return s.commitAll(ctx, msg, true)
 }
 
 // CommitExists is implemented in version_control.go via versioncontrolops.
@@ -911,6 +990,20 @@ func (s *EmbeddedDoltStore) PromoteFromEphemeral(ctx context.Context, id string,
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
 		return issueops.PromoteFromEphemeralInTx(ctx, tx, id, actor)
 	})
+}
+
+// PartitionWispIDs reports which of ids currently live in the wisps table
+// (batched membership query; IDs absent from the wisps table are returned as
+// permanent). Export's plane-marker stamping uses this to tell an unpromoted
+// no-history wisp apart from a promoted one, which row flags cannot do
+// (bd-r9uce).
+func (s *EmbeddedDoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, permIDs []string, err error) {
+	err = s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var inErr error
+		wispIDs, permIDs, inErr = issueops.PartitionWispIDsInTx(ctx, tx, ids)
+		return inErr
+	})
+	return wispIDs, permIDs, err
 }
 
 // GetNextChildID is implemented in child_id.go.

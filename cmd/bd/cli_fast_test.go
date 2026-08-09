@@ -558,6 +558,203 @@ func TestCLI_NoteCommand(t *testing.T) {
 	}
 }
 
+// TestCLI_NoteListMisplacedSyntax is a regression test for "note" silently
+// mis-resolving a subcommand-like typo as an issue id (GH#5370). Mirrors
+// TestCLI_CommentListMisplacedSyntax (#5369): "bd note list <text>" used to
+// parse as id="list", text=[<text>...] with no validation on the id — since
+// no issue is literally named "list", ResolvePartialID's substring/prefix
+// fallback would silently match it against whatever existing bead or wisp id
+// happened to contain "list" and append the note there instead of erroring.
+// This asserts both halves of the fix: the command is rejected with a
+// helpful hint, AND no note silently landed on an unrelated real issue.
+func TestCLI_NoteListMisplacedSyntax(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Bystander issue", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	// Snapshot notes BEFORE the rejected command. runBDInProcess reuses the
+	// package-level rootCmd without resetting cobra flag state, so an earlier
+	// test's --notes value can leak into this create. Asserting before==after
+	// is immune to that leak and is a stronger regression check: the rejected
+	// command wrote nothing (GH#5370 review fix-round).
+	beforeShow := runBDInProcess(t, tmpDir, "show", fullID, "--json")
+	var beforeShown []map[string]interface{}
+	if err := json.Unmarshal([]byte(beforeShow), &beforeShown); err != nil {
+		t.Fatalf("Failed to parse pre-reject show JSON: %v\nOutput: %s", err, beforeShow)
+	}
+	if len(beforeShown) == 0 {
+		t.Fatalf("expected show to return the bystander issue before reject, got: %s", beforeShow)
+	}
+	notesBefore, _ := beforeShown[0]["notes"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "note", "list", "accidental stray text")
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd note") || !strings.Contains(combined, "<issue-id>") {
+		t.Fatalf("expected hint pointing at bd note <issue-id>, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	// The regression check: the bystander issue's notes must be UNCHANGED.
+	// Pre-fix, this could silently succeed and land a note on whatever
+	// bead's id happened to contain "list" as a substring.
+	showOut := runBDInProcess(t, tmpDir, "show", fullID, "--json")
+	var shown []map[string]interface{}
+	if err := json.Unmarshal([]byte(showOut), &shown); err != nil {
+		t.Fatalf("Failed to parse show JSON: %v\nOutput: %s", err, showOut)
+	}
+	if len(shown) == 0 {
+		t.Fatalf("expected show to return the bystander issue, got: %s", showOut)
+	}
+	notesAfter, _ := shown[0]["notes"].(string)
+	if notesAfter != notesBefore {
+		t.Fatalf("expected bystander issue %s notes unchanged after rejected 'note list' (before=%q after=%q)", fullID, notesBefore, notesAfter)
+	}
+}
+
+// TestCLI_NoteAddMisplacedSyntax mirrors TestCLI_NoteListMisplacedSyntax
+// for the symmetric "add" typo — a caller who types "bd note add <id> <text>"
+// (confusing note with comments-style "add") would parse as id="add",
+// text=[<id>, <text>...].
+func TestCLI_NoteAddMisplacedSyntax(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Bystander issue for add-typo", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	// Snapshot notes BEFORE the rejected command (same order-independence
+	// rationale as TestCLI_NoteListMisplacedSyntax).
+	beforeShow := runBDInProcess(t, tmpDir, "show", fullID, "--json")
+	var beforeShown []map[string]interface{}
+	if err := json.Unmarshal([]byte(beforeShow), &beforeShown); err != nil {
+		t.Fatalf("Failed to parse pre-reject show JSON: %v\nOutput: %s", err, beforeShow)
+	}
+	if len(beforeShown) == 0 {
+		t.Fatalf("expected show to return the bystander issue before reject, got: %s", beforeShow)
+	}
+	notesBefore, _ := beforeShown[0]["notes"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "note", "add", fullID, "accidental stray text")
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd note") || !strings.Contains(combined, "<issue-id>") {
+		t.Fatalf("expected hint pointing at bd note <issue-id>, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	showOut := runBDInProcess(t, tmpDir, "show", fullID, "--json")
+	var shown []map[string]interface{}
+	if err := json.Unmarshal([]byte(showOut), &shown); err != nil {
+		t.Fatalf("Failed to parse show JSON: %v\nOutput: %s", err, showOut)
+	}
+	if len(shown) == 0 {
+		t.Fatalf("expected show to return the bystander issue, got: %s", showOut)
+	}
+	notesAfter, _ := shown[0]["notes"].(string)
+	if notesAfter != notesBefore {
+		t.Fatalf("expected bystander issue %s notes unchanged after rejected 'note add' (before=%q after=%q)", fullID, notesBefore, notesAfter)
+	}
+}
+
+// TestCLI_NoteMisplacedSyntaxRejectedBeforeStoreOpen proves the guard
+// fires from noteCmd's Args validator, before PersistentPreRunE ever
+// opens a store, mirroring
+// TestCLI_CommentMisplacedSyntaxRejectedBeforeStoreOpen for the comment
+// sibling. Using a directory with no .beads/ at all proves the store was
+// never touched: a RunE-only check would have failed first with "no beads
+// database found".
+func TestCLI_NoteMisplacedSyntaxRejectedBeforeStoreOpen(t *testing.T) {
+	noBeadsCwd := t.TempDir()
+	if _, err := os.Stat(filepath.Join(noBeadsCwd, ".beads")); err == nil {
+		t.Fatalf("test setup: %s unexpectedly has a .beads dir", noBeadsCwd)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, noBeadsCwd, "note", "list", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for misplaced 'note list', got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "no beads database found") {
+		t.Fatalf("Args validation did not run before store open: got the pre-fix error.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd note") {
+		t.Errorf("expected hint pointing to `bd note`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_NoteMisplacedSyntaxRejectedInProxiedServerMode is the
+// proxied-server counterpart, mirroring
+// TestCLI_CommentMisplacedSyntaxRejectedInProxiedServerMode: because
+// validateNoteArgs runs in Args — before RunE ever branches on
+// usesProxiedServer() — the rejection fires identically regardless of
+// backend, without needing a real proxied server.
+func TestCLI_NoteMisplacedSyntaxRejectedInProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "note", "list", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for misplaced 'note list' in proxied-server mode, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd note") {
+		t.Errorf("expected hint pointing to `bd note`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_NoteTextStartingWithReservedWordStillWorks confirms the fix is
+// scoped to the id positional argument only: a real id followed by note
+// TEXT that happens to start with "list" or "add" must still work exactly
+// as before, since args[0] (the id slot) is what's checked, never the text.
+func TestCLI_NoteTextStartingWithReservedWordStillWorks(t *testing.T) {
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Issue for reserved-word-text test", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "note", fullID, "list", "of", "things", "to", "do")
+	if err != nil {
+		t.Fatalf("note with text starting in 'list' unexpectedly failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Note added") {
+		t.Errorf("Expected 'Note added' in output, got: %s", stdout)
+	}
+
+	showOut := runBDInProcess(t, tmpDir, "show", fullID, "--json")
+	if !strings.Contains(showOut, "list of things to do") {
+		t.Fatalf("expected note text to be stored verbatim, got: %s", showOut)
+	}
+}
+
 func TestCLI_Close(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)
@@ -1400,6 +1597,173 @@ func TestCLI_CommentsAddShortID(t *testing.T) {
 			t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
 		}
 	})
+}
+
+// TestCLI_CommentListMisplacedSyntax is a regression test for the singular
+// "comment" shorthand silently mis-resolving a subcommand-like typo as an
+// issue id. "bd comment list <text>" (meant as an attempt to list comments,
+// using the singular noun by mistake) used to parse as id="list",
+// text=[<text>...] with no validation on the id — since no issue is
+// literally named "list", ResolvePartialID's substring/prefix fallback
+// would silently match it against whatever existing bead or wisp id
+// happened to contain "list" and post the comment there instead of
+// erroring. This asserts both halves of the fix: the command is rejected
+// with a helpful hint (mirroring TestCLI_CommentsListMisplacedSyntax for
+// the plural sibling), AND — the part that actually matters for this
+// specific bug — no comment silently landed on an unrelated real issue.
+func TestCLI_CommentListMisplacedSyntax(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Bystander issue", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", "list", "accidental stray text")
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd comments") || !strings.Contains(combined, "<issue-id>") {
+		t.Fatalf("expected hint pointing at bd comments <issue-id>, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	// The regression check: the bystander issue must have received NO
+	// comment. Pre-fix, this could silently succeed and land a comment on
+	// whatever bead's id happened to contain "list" as a substring — this
+	// DB has exactly one issue, so any stray write would show up here.
+	commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+	trimmed := strings.TrimSpace(commentsOut)
+	if trimmed != "[]" && trimmed != "null" {
+		t.Fatalf("expected no comments on bystander issue %s after rejected 'comment list', got: %s", fullID, commentsOut)
+	}
+}
+
+// TestCLI_CommentAddMisplacedSyntax mirrors TestCLI_CommentListMisplacedSyntax
+// for the symmetric "add" typo — a caller who confuses the singular shorthand
+// with the plural's "bd comments add <id> <text>" form might type
+// "bd comment add <id> <text>", which the same unguarded id-resolution bug
+// would parse as id="add", text=[<id>, <text>...].
+func TestCLI_CommentAddMisplacedSyntax(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Bystander issue for add-typo", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", "add", fullID, "accidental stray text")
+	if err == nil {
+		t.Fatalf("expected non-zero exit, got stdout=%q stderr=%q", stdout, stderr)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd comments add") {
+		t.Fatalf("expected hint pointing at bd comments add <issue-id>, got stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+	trimmed := strings.TrimSpace(commentsOut)
+	if trimmed != "[]" && trimmed != "null" {
+		t.Fatalf("expected no comments on bystander issue %s after rejected 'comment add', got: %s", fullID, commentsOut)
+	}
+}
+
+// TestCLI_CommentMisplacedSyntaxRejectedBeforeStoreOpen proves the guard
+// fires from commentCmd's Args validator, before PersistentPreRunE ever
+// opens a store, mirroring
+// TestCLI_CommentsSwappedAddRejectedBeforeStoreOpen for the plural sibling.
+// Using a directory with no .beads/ at all proves the store was never
+// touched: a RunE-only check would have failed first with "no beads
+// database found".
+func TestCLI_CommentMisplacedSyntaxRejectedBeforeStoreOpen(t *testing.T) {
+	noBeadsCwd := t.TempDir()
+	if _, err := os.Stat(filepath.Join(noBeadsCwd, ".beads")); err == nil {
+		t.Fatalf("test setup: %s unexpectedly has a .beads dir", noBeadsCwd)
+	}
+
+	stdout, stderr, err := runBDInProcessAllowError(t, noBeadsCwd, "comment", "list", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for misplaced 'comment list', got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if strings.Contains(combined, "no beads database found") {
+		t.Fatalf("Args validation did not run before store open: got the pre-fix error.\nOutput:\n%s", combined)
+	}
+	if !strings.Contains(combined, "bd comments") {
+		t.Errorf("expected hint pointing to `bd comments`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_CommentMisplacedSyntaxRejectedInProxiedServerMode is the
+// proxied-server counterpart, mirroring
+// TestCLI_CommentsSwappedAddRejectedInProxiedServerMode: because
+// validateCommentArgs runs in Args — before RunE ever branches on
+// usesProxiedServer() — the rejection fires identically regardless of
+// backend, without needing a real proxied server.
+func TestCLI_CommentMisplacedSyntaxRejectedInProxiedServerMode(t *testing.T) {
+	origProxied := proxiedServerMode
+	t.Cleanup(func() { proxiedServerMode = origProxied })
+	proxiedServerMode = true
+
+	tmpDir := setupCLITestDB(t)
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", "list", "should not be stored")
+	if err == nil {
+		t.Fatalf("expected non-zero exit for misplaced 'comment list' in proxied-server mode, got success:\nstdout: %s", stdout)
+	}
+	combined := stdout + stderr
+	if !strings.Contains(combined, "bd comments") {
+		t.Errorf("expected hint pointing to `bd comments`, got:\n%s", combined)
+	}
+}
+
+// TestCLI_CommentTextStartingWithReservedWordStillWorks confirms the fix is
+// scoped to the id positional argument only: a real id followed by comment
+// TEXT that happens to start with "list" or "add" must still work exactly
+// as before, since args[0] (the id slot) is what's checked, never the text.
+func TestCLI_CommentTextStartingWithReservedWordStillWorks(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := setupCLITestDB(t)
+
+	out := runBDInProcess(t, tmpDir, "create", "Issue for reserved-word-text test", "-p", "1", "--json")
+	jsonStart := strings.Index(out, "{")
+	if jsonStart < 0 {
+		t.Fatalf("No JSON found in create output: %s", out)
+	}
+	var issue map[string]interface{}
+	if err := json.Unmarshal([]byte(out[jsonStart:]), &issue); err != nil {
+		t.Fatalf("Failed to parse create JSON: %v\nOutput: %s", err, out)
+	}
+	fullID := issue["id"].(string)
+
+	stdout, stderr, err := runBDInProcessAllowError(t, tmpDir, "comment", fullID, "list", "of", "things", "to", "do")
+	if err != nil {
+		t.Fatalf("comment with text starting in 'list' unexpectedly failed: %v\nstdout: %s\nstderr: %s", err, stdout, stderr)
+	}
+	if !strings.Contains(stdout, "Comment added") {
+		t.Errorf("Expected 'Comment added' in output, got: %s", stdout)
+	}
+
+	commentsOut := runBDInProcess(t, tmpDir, "comments", fullID, "--json")
+	if !strings.Contains(commentsOut, "list of things to do") {
+		t.Fatalf("expected comment text to be stored verbatim, got: %s", commentsOut)
+	}
 }
 
 // TestCLI_CreateRejectsFlagLikeTitles verifies that positional arguments starting

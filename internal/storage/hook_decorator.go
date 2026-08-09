@@ -60,6 +60,48 @@ type Unwrapper interface {
 // Unwrap returns the underlying store, satisfying Unwrapper.
 func (h *HookFiringStore) Unwrap() DoltStorage { return h.inner }
 
+// RoleFiresHooks reports whether an issue role taken off a store carries this
+// decorator's hook layer — that is, whether a landed write through it runs the
+// workspace's user hook scripts.
+//
+// It is the question a caller cannot answer from the role's own type, and the
+// one a NETWORK server has to answer before it serves anything: `bd serve`
+// documents that hooks do not fire (a user-controlled subprocess per mutation
+// is an unbounded latency multiplier and an orphaned child at shutdown), and
+// the accessors on a decorated store return decorated roles by design —
+// IssueClaimer recurses precisely so a CLI claim keeps its on_update. So the
+// exact value the obvious `store.IssueClaimer()` produces on bd's own storage
+// chain is the one value that server must refuse, and this is what lets it.
+//
+// A decorator built with a nil runner still answers true. Whether hooks fire
+// on this instant's configuration is not the property: the type's contract is
+// to fire them, and a server that admitted it would be one config change away
+// from breaking its own.
+//
+// NOT ENFORCED, because the assertion is on the type: a role this decorator
+// produced and something else then wrapped is invisible here, and so is a
+// future decorator elsewhere that fires hooks of its own. Every case that
+// exists today is in the switch, and a new one belongs there too.
+func RoleFiresHooks(role any) bool {
+	switch role.(type) {
+	case *hookIssueClaimer:
+		return true
+	// The lifecycle role fires on_create, on_update and the close hooks for
+	// every mutation it lands (hook_issue_operations.go), so it is the same
+	// value the network server must refuse — and a wider one than the claimer,
+	// because it carries four verbs rather than one.
+	case *hookIssueOperations:
+		return true
+	// The dependency editor fires the update hook once per DISTINCT SOURCE
+	// ISSUE it edits (hook_dependency_editor.go), so one batch runs the
+	// workspace's script several times — the same value to refuse, for the same
+	// reason, and the one that multiplies fastest.
+	case *hookDependencyEditor:
+		return true
+	}
+	return false
+}
+
 // UnwrapStore peels back any chain of Unwrapper decorators and returns
 // the innermost store. Use this before type-asserting to optional
 // interfaces (StoreLocator, BackupStore, Flattener, RawDBAccessor, etc.)
@@ -259,6 +301,26 @@ func (h *HookFiringStore) RunInTransaction(ctx context.Context, commitMsg string
 	return nil
 }
 
+// RunInIssueLifecycleTransaction tracks lifecycle hooks and fires them only
+// after the underlying lifecycle transaction commits.
+func (h *HookFiringStore) RunInIssueLifecycleTransaction(ctx context.Context, commitMsg string, fn func(tx IssueLifecycleTransaction) error) error {
+	var tracked *hookTrackingLifecycleTransaction
+	err := h.inner.RunInIssueLifecycleTransaction(ctx, commitMsg, func(tx IssueLifecycleTransaction) error {
+		tracked = &hookTrackingLifecycleTransaction{
+			hookTrackingTransaction: &hookTrackingTransaction{Transaction: tx},
+			reopener:                tx,
+		}
+		return fn(tracked)
+	})
+	if err != nil || tracked == nil {
+		return err
+	}
+	for _, p := range tracked.pending {
+		h.fireHook(p.event, p.issue)
+	}
+	return nil
+}
+
 // ── Internal helpers ────────────────────────────────────────────────
 
 func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
@@ -266,6 +328,52 @@ func (h *HookFiringStore) fireHook(event string, issue *types.Issue) {
 		return
 	}
 	h.runner.Run(event, issue)
+}
+
+// CompleteIssueOperationCreate fires hooks for a committed guarded create.
+// dependencies is a request-neutral snapshot of the dependency changes whose
+// source issues need update hooks.
+func (h *HookFiringStore) CompleteIssueOperationCreate(ctx context.Context, issue *types.Issue, dependencies []*types.Dependency) {
+	for _, pending := range createHookEvents(issue) {
+		h.fireHook(pending.event, pending.issue)
+	}
+	if h.runner == nil || len(dependencies) == 0 {
+		return
+	}
+	request := &types.Issue{Dependencies: cloneDependenciesForHook(dependencies)}
+	for _, pending := range dependencyHookEvents(ctx, []*types.Issue{request}, h.inner.GetIssue, h.inner.GetDependencyRecords) {
+		h.fireHook(pending.event, pending.issue)
+	}
+}
+
+// CompleteIssueOperationUpdate fires the update hook for a committed guarded
+// operation. The issue is cloned because the hook runner marshals it on its
+// own goroutine while callers (cmd/bd close/update/reopen) go on to mutate
+// the result they handed in.
+func (h *HookFiringStore) CompleteIssueOperationUpdate(issue *types.Issue) {
+	h.fireHook(hooks.EventUpdate, cloneIssueForHook(issue))
+}
+
+// CompleteIssueOperationClose fires the close hook for a committed guarded
+// close. Cloned for the same reason as CompleteIssueOperationUpdate.
+func (h *HookFiringStore) CompleteIssueOperationClose(issue *types.Issue) {
+	h.fireHook(hooks.EventClose, cloneIssueForHook(issue))
+}
+
+// CompleteIssueOperationDependency fires the update hook for an issue whose
+// edges a committed guarded edit changed. It re-reads the issue with its
+// dependency records, exactly as AddDependency and RemoveDependency do, so a
+// hook script sees the graph the edit produced rather than the row alone.
+func (h *HookFiringStore) CompleteIssueOperationDependency(ctx context.Context, issueID string) {
+	h.fireDependencyHookByID(ctx, issueID)
+}
+
+// CompleteIssueOperationComment fires the update hook for a committed guarded
+// comment, which is the event AddIssueComment fires: there is no on_comment
+// event, and a comment is a change to the issue as far as a script is
+// concerned.
+func (h *HookFiringStore) CompleteIssueOperationComment(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
 }
 
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
@@ -433,6 +541,7 @@ func cloneIssueForHook(issue *types.Issue) *types.Issue {
 	clone.LeaseExpiresAt = clonePtr(issue.LeaseExpiresAt)
 	clone.HeartbeatAt = clonePtr(issue.HeartbeatAt)
 	clone.ExternalRef = clonePtr(issue.ExternalRef)
+	clone.WispPlaneOverride = clonePtr(issue.WispPlaneOverride)
 	clone.Labels = append([]string(nil), issue.Labels...)
 	clone.Metadata = append([]byte(nil), issue.Metadata...)
 	clone.CompactedAt = clonePtr(issue.CompactedAt)
@@ -521,6 +630,22 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 		t.pending = append(t.pending, pendingHook{hooks.EventClose, issue})
 	}
 	return nil
+}
+
+type hookTrackingLifecycleTransaction struct {
+	*hookTrackingTransaction
+	reopener IssueLifecycleTransaction
+}
+
+func (t *hookTrackingLifecycleTransaction) ReopenIssueWithResult(ctx context.Context, id string, reason string, actor string) (bool, error) {
+	changed, err := t.reopener.ReopenIssueWithResult(ctx, id, reason, actor)
+	if err != nil || !changed {
+		return changed, err
+	}
+	if issue, getErr := t.Transaction.GetIssue(ctx, id); getErr == nil {
+		t.pending = append(t.pending, pendingHook{hooks.EventUpdate, issue})
+	}
+	return true, nil
 }
 
 func (t *hookTrackingTransaction) AddDependency(ctx context.Context, dep *types.Dependency, actor string) error {
