@@ -278,7 +278,15 @@ type Deleter interface {
 	//
 	// A DRY RUN CHANGES NOTHING, including history: an implementation that
 	// records a version-control entry for a deletion records none for a dry
-	// run. Where an implementation versions at all, one call records AT MOST
-	// ONE entry — a deletion is one act, not one per row.
+	// run. Where an implementation versions at all, a call that deleted
+	// durable rows records EXACTLY ONE entry — a deletion is one act, not one
+	// per row, and not none. A deletion confined to tables the version-control
+	// plane ignores records none, because there is nothing to version.
+	//
+	// EXACTLY ONE IS A STEADY-STATE PROMISE, NOT A CRASH-ATOMIC ONE. An
+	// implementation may write the entry after the transaction that deleted
+	// the rows — the embedded store has no way to mint one inside its own —
+	// so a crash between the two leaves the rows gone and the entry unwritten
+	// until the next flush.
 	Delete(ctx context.Context, req DeleteRequest) (DeleteResult, error)
 }

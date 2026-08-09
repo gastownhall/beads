@@ -57,6 +57,24 @@ type DeleterFixture struct {
 	// A nil hook means "this backend cannot observe history", and the case that
 	// needs it SKIPS with that reason rather than passing quietly.
 	CountHistory func(context.Context) (int, error)
+	// CommitPending puts everything written so far into the version history,
+	// so a later CountHistory delta measures the call under test and nothing
+	// that led up to it.
+	//
+	// IT IS A PRECONDITION OF THE HISTORY CASE, NOT A CONVENIENCE. Deleting a
+	// row that never reached the history is not a change AGAINST the history:
+	// the working set returns to the state HEAD is already at, every backend's
+	// commit finds an empty diff, and none of them records an entry. Two of
+	// the three kits happen to version each seed as a side effect of writing
+	// it and one does not, so without this hook the same case measures a
+	// versioned deletion on two legs and an unversioned one on the third — and
+	// on that third leg it also depends on which OTHER subtests ran first,
+	// because their uncommitted seeds are what keep the working set dirty.
+	//
+	// A nil hook means the backend cannot settle its history on demand, and
+	// the case that needs it SKIPS with that reason rather than passing
+	// quietly.
+	CommitPending func(context.Context) error
 }
 
 // RunDeleterRefusesAMalformedRequest pins the request rules that need no
@@ -620,21 +638,44 @@ func RunDeleterDryRunChangesNothing(t *testing.T, ctx context.Context, fixture D
 	deleterAssertIssueRows(t, ctx, fixture, 0, first, second)
 }
 
-// RunDeleterRecordsAtMostOneHistoryEntry pins the versioning clause
-// (issueops/deleter.go, Deleter.Delete: "one call records AT MOST ONE entry").
+// RunDeleterRecordsExactlyOneHistoryEntry pins the versioning clause
+// (issueops/deleter.go, Deleter.Delete: "one call records EXACTLY ONE entry").
 //
-// AT MOST, not exactly one: only the server-backed store records an entry at
-// all, so asserting exactly one would be asserting a property of one wiring.
-// The DRY RUN half is the sharp one — a preview that left a commit behind
-// would be a mutation wearing a preview's name.
-func RunDeleterRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, fixture DeleterFixture) {
+// EXACTLY ONE, not at most one. The range this case used to assert passed
+// whether or not the entry was written, which is precisely the direction that
+// regressed once already: the port of `bd delete` onto this role reached its
+// transaction through a helper that mints no Dolt commit, embedded deletes
+// stopped being versioned, and no contract case went red — the hole was found
+// by a CLI test and patched at the CLI. A lower bound that cannot fail is not
+// a promise.
+//
+// THE ENTRY IS NOT PROMISED TO BE CRASH-ATOMIC WITH THE DELETION. The
+// server-backed store writes it inside the write transaction; the embedded one
+// writes it after its SQL commit, on a second connection, so a crash in that
+// window leaves the rows gone and the entry unwritten until the next flush.
+// What all three wirings promise, and what this case reads, is the steady
+// state one returned call leaves behind.
+//
+// The DRY RUN half is the other sharp one — a preview that left a commit
+// behind would be a mutation wearing a preview's name.
+//
+// THE SEEDS ARE SETTLED INTO THE HISTORY BEFORE ANYTHING IS MEASURED; see
+// DeleterFixture.CommitPending for why deleting an unversioned row records
+// nothing anywhere.
+func RunDeleterRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context, fixture DeleterFixture) {
 	t.Helper()
 	if fixture.CountHistory == nil {
 		t.Skip("this backend cannot observe history, so the entry-per-call clause is unobservable here")
 	}
+	if fixture.CommitPending == nil {
+		t.Skip("this backend cannot settle its history on demand, so a delete of these seeds is not a change against the history and the clause is unobservable here")
+	}
 	first := deleterSeedIssue(t, ctx, fixture, "hist", "1")
 	second := deleterSeedIssue(t, ctx, fixture, "hist", "2")
 	request := publicops.DeleteRequest{IDs: []string{first, second}, Force: true}
+	if err := fixture.CommitPending(ctx); err != nil {
+		t.Fatalf("CommitPending() after seeding: %v", err)
+	}
 
 	before := deleterHistory(t, ctx, fixture)
 	deleterDelete(t, ctx, fixture, deleterWithDryRun(request, true))
@@ -644,8 +685,9 @@ func RunDeleterRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, f
 
 	before = deleterHistory(t, ctx, fixture)
 	deleterDelete(t, ctx, fixture, request)
-	if after := deleterHistory(t, ctx, fixture); after < before || after > before+1 {
-		t.Errorf("history went %d -> %d across one delete of 2 rows, want at most one more entry", before, after)
+	if after := deleterHistory(t, ctx, fixture); after != before+1 {
+		t.Errorf("history went %d -> %d across one delete of 2 rows, want exactly one more entry: a deletion is one act, not none and not one per row",
+			before, after)
 	}
 }
 
