@@ -425,6 +425,10 @@ jobs:
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
 
+      - name: Exercise test.sh prebuilt binary path
+        shell: bash
+        run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes
