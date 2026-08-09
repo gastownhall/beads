@@ -3,6 +3,8 @@
 package hooks
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -23,12 +25,78 @@ const (
 	HookOnCreate = "on_create"
 	HookOnUpdate = "on_update"
 	HookOnClose  = "on_close"
+	// HookPreWrite is a synchronous admission hook. Unlike the on_* hooks,
+	// it must reply with a PreWriteResponse before a mutation begins.
+	HookPreWrite = "pre_write"
 )
+
+const (
+	// PreWriteProtocolVersion is the version of the JSON request and response
+	// contract for HookPreWrite.
+	PreWriteProtocolVersion = 1
+
+	// maxPreWriteOutputBytes bounds each response stream. A pre-write hook is
+	// an admission check, not a data transport.
+	maxPreWriteOutputBytes = 32 << 10
+)
+
+// ErrPreWriteRejected is the stable sentinel returned when a configured
+// pre-write hook refuses or cannot safely evaluate a mutation.
+var ErrPreWriteRejected = errors.New("pre-write gate rejected mutation")
+
+// PreWriteRequest is the versioned JSON value sent to a pre-write hook on
+// standard input. It intentionally contains operation metadata only; issue
+// fields and command-line arguments are never injected into a hook's
+// environment.
+type PreWriteRequest struct {
+	Version    int                  `json:"version"`
+	Operation  string               `json:"operation"`
+	Repository PreWriteRepositoryID `json:"repository"`
+}
+
+// PreWriteRepositoryID identifies the workspace whose mutation is seeking
+// admission. Both paths are canonical absolute paths when a hook is present.
+type PreWriteRepositoryID struct {
+	Root     string `json:"root"`
+	BeadsDir string `json:"beads_dir"`
+}
+
+// PreWriteResponse is the only valid JSON response from a configured
+// pre-write hook. Hooks must write one object to stdout and may report a
+// bounded, human-readable reason when denying a mutation.
+type PreWriteResponse struct {
+	Allow  *bool  `json:"allow"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// PreWriteError exposes a stable classification for callers while preserving a
+// concise diagnostic for CLI users. Errors of this type always unwrap to
+// ErrPreWriteRejected.
+type PreWriteError struct {
+	Operation string
+	Kind      string
+	Reason    string
+	Err       error
+}
+
+func (e *PreWriteError) Error() string {
+	message := fmt.Sprintf("%s: operation=%s kind=%s", ErrPreWriteRejected, e.Operation, e.Kind)
+	if e.Reason != "" {
+		message += ": " + e.Reason
+	}
+	if e.Err != nil {
+		message += ": " + e.Err.Error()
+	}
+	return message
+}
+
+func (e *PreWriteError) Unwrap() error { return ErrPreWriteRejected }
 
 // Runner handles hook execution
 type Runner struct {
-	hooksDir string
-	timeout  time.Duration
+	hooksDir      string
+	workspaceRoot string
+	timeout       time.Duration
 	// inFlight counts the hooks Run started and has not finished. A bd
 	// command is short: it fires its hooks after the commit and returns, and
 	// the process exit takes every goroutine with it — including one that has
@@ -47,7 +115,18 @@ func NewRunner(hooksDir string) *Runner {
 
 // NewRunnerFromWorkspace creates a hook runner for a workspace.
 func NewRunnerFromWorkspace(workspaceRoot string) *Runner {
-	return NewRunner(filepath.Join(workspaceRoot, ".beads", "hooks"))
+	return NewRunnerForBeadsDir(filepath.Join(workspaceRoot, ".beads"))
+}
+
+// NewRunnerForBeadsDir creates a runner for one resolved Beads directory.
+// Callers that know the directory should prefer this constructor so pre-write
+// requests name the selected workspace even when .beads is redirected.
+func NewRunnerForBeadsDir(beadsDir string) *Runner {
+	return &Runner{
+		hooksDir:      filepath.Join(beadsDir, "hooks"),
+		workspaceRoot: filepath.Dir(beadsDir),
+		timeout:       10 * time.Second,
+	}
 }
 
 // Run executes a hook if it exists.

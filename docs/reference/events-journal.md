@@ -29,6 +29,11 @@ Beads has three things called events, and they answer different questions.
 | **Audit history** | The per-issue trail behind `bd history <id> --events`: who changed what, when, with the old and new value of the field. | A person is asking who closed this bead, and when. |
 | **Events journal** | One workspace-wide, sequence-ordered stream of committed mutations, replayable from a checkpoint. | A machine is keeping its own copy of the graph in step. |
 
+The [pre-write gate](/reference/pre-write-gate) is deliberately not an event
+system. Its synchronous `pre_write` hook admits or rejects a mutation before it
+starts; it is appropriate for an exclusive maintenance protocol, whereas script
+hooks below remain asynchronous post-commit notifications.
+
 ## Turning it on
 
 ```bash

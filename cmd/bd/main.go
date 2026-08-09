@@ -1556,15 +1556,15 @@ var rootCmd = &cobra.Command{
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
 			}
-			// Fire the workspace's script hooks after commits on the
-			// unit-of-work plumbing, which notified no one: hooks now fire on
-			// both write plumbings, from the plumbing rather than from each
-			// command. This is the proxied twin of the wireStorageDecorators
-			// call below. With hooks disabled the sinks are empty and the
-			// provider comes back unwrapped.
+			// Wire the admission runner even when best-effort post-commit hooks
+			// are disabled. --no-hooks must not become a bypass for a configured
+			// synchronous pre_write gate.
 			var uowSinks uow.Sinks
-			if beadsDir != "" && !config.GetBool("no-hooks") {
-				hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
+			if beadsDir != "" {
+				hookRunner = hooks.NewRunnerForBeadsDir(beadsDir)
+				p = uow.NewPreWriteProvider(p, hookRunner)
+			}
+			if hookRunner != nil && !config.GetBool("no-hooks") {
 				uowSinks.Hook = hookRunner
 			}
 			uowProvider = uow.NewNotifyingProvider(p, uowSinks)
@@ -1674,7 +1674,7 @@ var rootCmd = &cobra.Command{
 		// (<repo>/hooks) instead of .beads/hooks; custom dolt_data_dir layouts
 		// can likewise place the Dolt data outside .beads.
 		if beadsDir != "" {
-			hookRunner = hooks.NewRunner(filepath.Join(beadsDir, "hooks"))
+			hookRunner = hooks.NewRunnerForBeadsDir(beadsDir)
 		}
 
 		// Compose the storage decorator chain: OTel instrumentation (no-op
