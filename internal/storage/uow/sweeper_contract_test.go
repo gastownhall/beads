@@ -50,8 +50,8 @@ func TestSweeperContract(t *testing.T) {
 	t.Run("EmptyMatchIsZeroAndNil", func(t *testing.T) {
 		conformance.RunSweeperEmptyMatchIsZeroAndNil(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunSweeperRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunSweeperRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunSweeperDoesNotMutateTheCallerRequest(t, ctx, fixture)
@@ -73,12 +73,13 @@ func newUOWSweeperFixture(t *testing.T, ctx context.Context, prefix string) conf
 	}
 	kit := newUOWRoleFixtureKit(provider, prefix)
 	return conformance.SweeperFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Sweeper:      sweeper,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Sweeper:       sweeper,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
+		CommitPending: uowCommitPending(provider),
 		AddComment: func(ctx context.Context, issueID, author, text string) error {
 			// Through the Commenter ROLE, which resolves the plane itself, so
 			// the case can cite from a wisp's comment without knowing how this

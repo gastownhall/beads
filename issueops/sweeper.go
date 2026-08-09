@@ -275,7 +275,15 @@ type Sweeper interface {
 	// A DRY RUN CHANGES NOTHING, including history: an implementation that
 	// records a version-control entry for a sweep records none for a dry run
 	// and none for a sweep that deleted nothing. Where an implementation
-	// versions at all, one sweep records AT MOST ONE entry — the deletion is
-	// one act, not one per row.
+	// versions at all, a sweep that cleared durable rows records EXACTLY ONE
+	// entry — the deletion is one act, not one per row, and not none. An
+	// ephemeral sweep touches only tables the version-control plane ignores,
+	// so it records none.
+	//
+	// EXACTLY ONE IS A STEADY-STATE PROMISE, NOT A CRASH-ATOMIC ONE. An
+	// implementation may write the entry after the transaction that swept the
+	// rows — the embedded store has no way to mint one inside its own — so a
+	// crash between the two leaves the rows swept and the entry unwritten
+	// until the next flush.
 	Sweep(ctx context.Context, req SweepRequest) (SweepResult, error)
 }
