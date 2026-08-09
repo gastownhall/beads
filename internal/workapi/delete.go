@@ -26,6 +26,10 @@ import (
 // delete request carries no predicate at all, so a caller cannot spell
 // "everything" without typing every id. The guard that does matter — dependents
 // outside the request — needs the graph and therefore lives in the bodies.
+//
+// The ExpectedVersion arity rule is here rather than in the bodies for the
+// reason the rest of this file exists: it needs no database, and a rule the
+// bodies each spelled themselves is a rule that can differ per backend.
 func ValidateDeleteRequest(in issueops.DeleteRequest) error {
 	if len(in.IDs) == 0 {
 		return fmt.Errorf("%w: delete requires at least one issue id", issueops.ErrValidation)
@@ -33,6 +37,16 @@ func ValidateDeleteRequest(in issueops.DeleteRequest) error {
 	for i, id := range in.IDs {
 		if strings.TrimSpace(id) == "" {
 			return fmt.Errorf("%w: delete id at position %d is blank", issueops.ErrValidation, i)
+		}
+	}
+	// DISTINCT ids, not mentions: DeleteRequest.IDs promises duplicates
+	// collapse, so an IDs of {"a", "a"} carrying a version names ONE row and is
+	// legal. Counting the raw slice here would refuse the request the role's own
+	// normalization rule says is fine.
+	if in.ExpectedVersion != nil {
+		if distinct := len(NormalizeDeleteIDs(in.IDs)); distinct > 1 {
+			return fmt.Errorf("%w: expected-version delete names %d issues; one row version cannot describe more than one row",
+				issueops.ErrValidation, distinct)
 		}
 	}
 	return nil

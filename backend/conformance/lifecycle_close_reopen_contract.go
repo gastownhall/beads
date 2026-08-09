@@ -569,8 +569,16 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	lifecycleCloseReopenAssertRow(t, ctx, fixture, id, "after the idempotent re-close", closedRow)
 	events.assertNoneAdded(t, "idempotent re-close")
 
-	// A reopen clears the pair, the other half of the same clause: they
+	// A reopen clears the TRIPLE, the other half of the same clause: all three
 	// describe a closure that no longer holds.
+	//
+	// closed_at is the member with the longest reach and the one no case in
+	// this file used to read on the reopen side — every ClosedAt assertion here
+	// is close-side. A row left carrying a closed_at it no longer earns is an
+	// open bead that reports a completion date: `bd show` renders it, cycle-time
+	// and burn-down arithmetic sums it, and the second close then has a stamp
+	// from the first closure to inherit. audit_issue-lifecycle.go's reopen cases
+	// read the ROLE ANSWER'S ClosedAt pointer; this reads the column.
 	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: id}); err != nil {
 		t.Fatalf("reopen %s: %v", id, err)
 	}
@@ -578,6 +586,14 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	if reopenedRow.CloseReason != "" || reopenedRow.ClosedBySession != "" {
 		t.Errorf("close attribution after reopening %s = (%q, %q), want both cleared",
 			id, reopenedRow.CloseReason, reopenedRow.ClosedBySession)
+	}
+	if reopenedRow.ClosedAt != "" {
+		t.Errorf("closed_at after reopening %s = %q, want it cleared — an open row has no completion date",
+			id, reopenedRow.ClosedAt)
+	}
+	if reopenedRow.Status == closedRow.Status {
+		t.Errorf("status after reopening %s = %q, want it off the closed status — the cleared columns above prove nothing about a row that never reopened",
+			id, reopenedRow.Status)
 	}
 
 	// A forced close of a parent with an open child reports the count, and so

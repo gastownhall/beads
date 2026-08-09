@@ -358,7 +358,7 @@ func testCreateAndGet(t *testing.T, f Factory) {
 	}
 }
 
-// testCreateDuplicate and RunIssueOperationsCreateRefusesAnOccupiedID
+// testCreateDuplicate and RunLifecycleCreateRefusesAnOccupiedID
 // (issue_operations_contract.go) PIN OPPOSITE SEMANTICS OF THE SAME CORE, and
 // both are load-bearing. Do not retire either against the other.
 //

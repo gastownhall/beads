@@ -17,13 +17,13 @@ import (
 //
 // Its other five subtests went to the contract, which states the same promises
 // at three backends and is stronger on each: the occupied-ID refusal is
-// RunIssueOperationsCreateRefusesAnOccupiedID (both planes, both directions,
+// RunLifecycleCreateRefusesAnOccupiedID (both planes, both directions,
 // raw title/type/labels), the foreign prefix is
-// RunIssueOperationsCreateRefusesAForeignIDPrefix, the inherited label is
-// RunIssueOperationsCreateInheritsParentLabels, the CAS and guard legs are
-// RunIssueOperationsUpdateAssigneeTransferFence and
-// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits, the metadata
-// patch is RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset, and the
+// RunLifecycleCreateRefusesAForeignIDPrefix, the inherited label is
+// RunLifecycleCreateInheritsParentLabels, the CAS and guard legs are
+// RunLifecycleUpdateAssigneeTransferFence and
+// RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits, the metadata
+// patch is RunLifecycleUpdateMetadataPatchOrdersMergeSetUnset, and the
 // close/reopen legs are the whole Lifecycle contract.
 //
 // What no contract case does is COUNT the edges one aggregate create produces.
@@ -85,9 +85,9 @@ func TestIssueOperationsCreateAggregatesEveryRelationItWasGiven(t *testing.T) {
 // TestIssueOperationsUpdateClaimCASAndTransferMatrix.
 //
 // Its CAS legs, its claim-eligibility legs and its transfer legs all state
-// promises RunIssueOperationsUpdateAssigneeTransferFence,
+// promises RunLifecycleUpdateAssigneeTransferFence,
 // RunIssueOperationsUpdateClaimConflictCarriesTheLosingState and
-// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits make at three
+// RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits make at three
 // backends, each of them reading the stored row rather than only the result.
 //
 // The table below does not: it is the only pin in the tree on

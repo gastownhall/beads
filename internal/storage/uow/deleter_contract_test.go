@@ -81,6 +81,18 @@ func TestDeleterContract(t *testing.T) {
 	t.Run("SettlesTheChildrenOfADeletedParent", func(t *testing.T) {
 		conformance.RunDeleterSettlesTheChildrenOfADeletedParent(t, ctx, fixture)
 	})
+	t.Run("DeletesOnAMatchingExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterDeletesOnAMatchingExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("RefusesAStaleExpectedVersion", func(t *testing.T) {
+		conformance.RunDeleterRefusesAStaleExpectedVersion(t, ctx, fixture)
+	})
+	t.Run("VersionOutranksForceAndCascade", func(t *testing.T) {
+		conformance.RunDeleterVersionOutranksForceAndCascade(t, ctx, fixture)
+	})
+	t.Run("RefusesAnExpectedVersionAcrossSeveralIDs", func(t *testing.T) {
+		conformance.RunDeleterRefusesAnExpectedVersionAcrossSeveralIDs(t, ctx, fixture)
+	})
 }
 
 func newUOWDeleterFixture(t *testing.T, ctx context.Context, prefix string) conformance.DeleterFixture {

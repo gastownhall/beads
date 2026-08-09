@@ -70,7 +70,7 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: query: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, true)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: %w", err)
 	}

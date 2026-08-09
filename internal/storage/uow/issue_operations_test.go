@@ -322,8 +322,8 @@ func TestIssueOperationsLifecycleWithRealUnitOfWork(t *testing.T) {
 
 	// The three compare-and-set refusals that used to sit here — a stale
 	// --if-assignee, a stale --if-status, and a stale ExpectedVersion on a
-	// claim — are RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits
-	// and the stale-version arm of RunIssueOperationsUpdateClosePolicy, which
+	// claim — are RunLifecycleUpdateConditionalGuardsGateOrdinaryEdits
+	// and the stale-version arm of RunLifecycleUpdateClosePolicy, which
 	// run at this backend and assert the refusal against the raw row and an
 	// event-count delta rather than against a snapshot comparison. Because they
 	// wrote nothing, created.Issue.RowVersion below is still the version the

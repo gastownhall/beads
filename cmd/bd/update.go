@@ -108,6 +108,13 @@ pointless).`,
 			}
 		}()
 
+		// Refuse a mis-typed flag value that cobra parsed as a positional issue
+		// id, before any write path (direct or proxied) can apply a partial
+		// update. See bd-5247.
+		if err := errStrayFlagValuePositional(args); err != nil {
+			return HandleErrorRespectJSON("%s", err)
+		}
+
 		if usesProxiedServer() {
 			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
@@ -825,6 +832,21 @@ type updateIDFailure struct {
 	ID            string `json:"id"`
 	Error         string `json:"error"`
 	GuardMismatch bool   `json:"guard_mismatch,omitempty"`
+}
+
+// errStrayFlagValuePositional refuses, before any write, a positional argument
+// that contains '='. --set-metadata takes ONE key=value per flag, so
+// `--set-metadata a=1 b=2` silently turns `b=2` into a positional issue id;
+// no issue id contains '=', so such a positional is unambiguously a mis-typed
+// flag value. Rejecting it up front prevents a partial write that would apply
+// only the pairs that happened to bind to a flag (bd-5247).
+func errStrayFlagValuePositional(args []string) error {
+	for _, arg := range args {
+		if strings.Contains(arg, "=") {
+			return fmt.Errorf("positional argument %q contains '=', which no issue id does — this is a mis-typed flag value; repeat the flag per pair, e.g. --set-metadata a=1 --set-metadata b=2", arg)
+		}
+	}
+	return nil
 }
 
 // reportUpdateFailures emits a per-ID failure report on stderr and returns a

@@ -366,3 +366,80 @@ func TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens(t *testing.T) {
 		t.Errorf("read request line reports no unit-of-work time though the provider took 5ms; the reader is bound to the untimed provider:\n%s", line)
 	}
 }
+
+// TestListForwardsTheEphemeralPlaneParameter is the handler half of
+// ListRequest.IncludeEphemeral. The parameter decides which TABLES the query
+// reads, and nothing in the response distinguishes a merged page from a durable
+// one when the fixture holds no wisps — so the recorded filter is the only place
+// a dropped plumb-through is visible, which is exactly why the filter is
+// recorded at all.
+//
+// The third case is the one that stops the parameter from being wired to the
+// wrong knob: `include_infra` also admits the plane, so a handler that mapped
+// `include_ephemeral` onto IncludeInfra would pass the first two and silently
+// widen the answer by four issue types.
+func TestListForwardsTheEphemeralPlaneParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		path          string
+		wantSkipWisps bool
+		wantInfraType bool
+	}{
+		{"absent leaves the durable listing alone", "/v0/beads/issues", true, false},
+		{"include_ephemeral admits the plane and takes no type exclusion off", "/v0/beads/issues?include_ephemeral=true", false, false},
+		{"include_infra is the wider one", "/v0/beads/issues?include_infra=true", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, rec := newReadServer(t, Config{})
+			if resp := ts.get(t, tc.path); resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s: status = %d, want 200", tc.path, resp.StatusCode)
+			}
+			filters := rec.searchFilters()
+			if len(filters) != 1 {
+				t.Fatalf("%d list queries, want 1", len(filters))
+			}
+			if got := filters[0].SkipWisps; got != tc.wantSkipWisps {
+				t.Errorf("SkipWisps = %v, want %v", got, tc.wantSkipWisps)
+			}
+			infraExcluded := false
+			for _, excluded := range filters[0].ExcludeTypes {
+				if excluded == types.IssueType("message") {
+					infraExcluded = true
+				}
+			}
+			if infraExcluded == tc.wantInfraType {
+				t.Errorf("ExcludeTypes = %v; the infra types are a TYPE exclusion and only include_infra takes it off", filters[0].ExcludeTypes)
+			}
+		})
+	}
+}
+
+// TestTheEphemeralPlaneParameterIsTheSkewSignal pins the version-skew half.
+//
+// A client that sends `include_ephemeral` to a server built before this
+// parameter existed gets 400 `unknown_parameter` — the designed signal that the
+// server is older than the client thinks, whose recovery is to degrade rather
+// than retry. That behavior is the shared decoder's, so what has to hold HERE
+// is the other side of it: this build must CONSUME the parameter, because a
+// handler that stopped reading it would answer the durable set and report the
+// request as unknown-parameter-free, which is indistinguishable from success.
+func TestTheEphemeralPlaneParameterIsTheSkewSignal(t *testing.T) {
+	ts, _ := newReadServer(t, Config{})
+
+	resp := ts.get(t, "/v0/beads/issues?include_ephemeral=true")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a parameter this build serves must not read as skew", resp.StatusCode)
+	}
+
+	// The neighbouring spelling a client might guess is NOT quietly accepted:
+	// an unknown parameter is refused by name, which is what makes the 200
+	// above mean something.
+	resp = ts.get(t, "/v0/beads/issues?include_ephemerals=true")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body := decodeBody(t, resp)
+	if body["param"] != "include_ephemerals" || body["reason"] != string(ReasonUnknownParameter) {
+		t.Errorf("body = %v, want param=include_ephemerals reason=unknown_parameter", body)
+	}
+}

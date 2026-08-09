@@ -32,8 +32,10 @@ type readyScopeField struct {
 //   - What the projection carries: IssueType, all five label forms, Assignee,
 //     NoAssignee, the exact Priority, ParentID, MolType, WispType,
 //     MetadataFields, HasMetadataKey, ExcludeTypes (and with it IncludeGates
-//     and IncludeInfra's type suppression), Limit, Offset, and the MaxRows cap
-//     with its attribution.
+//     and IncludeInfra's type suppression), IncludeEphemeral (and with it
+//     IncludeInfra's plane half, which the ready query admits through its own
+//     ephemeral gate), Limit, Offset, and the MaxRows cap with its
+//     attribution.
 //
 //   - THE HYDRATION KNOBS, SkipLabels and SkipCounts. They are the one group
 //     the "exactly the intersection" rule above would otherwise sweep in: the

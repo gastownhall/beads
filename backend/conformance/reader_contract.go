@@ -3,6 +3,7 @@ package conformance
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	storageops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -123,13 +125,23 @@ type ReaderFixture struct {
 // against the workspace vocabulary and errors — see
 // RunReaderListRejectsATypeOutsideTheWorkspaceVocabulary, whose comment names
 // the other side of it.
+//
+// THE DEFAULT EXCLUSION IS A SET, not a type. It seeded one member — the gate —
+// so dropping any OTHER member from that set left every assertion here true,
+// and the molecule was the member with no observer anywhere: a molecule is a
+// container for its steps rather than a piece of work, so a ready listing that
+// started offering them offers work that cannot be done. Both members are
+// seeded now, and each is separately shown to come back when its own type is
+// named, so a set that lost one is caught by a row rather than by nothing.
 func RunReaderReadyDefaultTypeExclusionsYieldToAnExplicitType(t *testing.T, ctx context.Context, fixture ReaderFixture) {
 	t.Helper()
 	scope := readerLabel(fixture, "rdytype")
 	task := readerID(fixture, "rdytype", "task")
 	gate := readerID(fixture, "rdytype", "gate")
+	molecule := readerID(fixture, "rdytype", "molecule")
 	seedReaderIssue(t, ctx, fixture, readerIssue(task, types.TypeTask, scope))
 	seedReaderIssue(t, ctx, fixture, readerIssue(gate, types.TypeGate, scope))
+	seedReaderIssue(t, ctx, fixture, readerIssue(molecule, types.TypeMolecule, scope))
 
 	page, err := fixture.Reader.Ready(ctx, publicops.ReadyRequest{Labels: []string{scope}})
 	if err != nil {
@@ -140,15 +152,25 @@ func RunReaderReadyDefaultTypeExclusionsYieldToAnExplicitType(t *testing.T, ctx 
 	// Naming the type drops the default exclusions. ExcludeTypes goes with
 	// them: the field's doc says it is ignored when IssueType is set, so
 	// asking for gates while excluding gates still answers with the gate.
-	page, err = fixture.Reader.Ready(ctx, publicops.ReadyRequest{
-		Labels:       []string{scope},
-		IssueType:    string(types.TypeGate),
-		ExcludeTypes: []string{string(types.TypeGate)},
-	})
-	if err != nil {
-		t.Fatalf("Ready with IssueType=gate: %v", err)
+	for _, excluded := range []struct {
+		issueType types.IssueType
+		want      string
+	}{
+		{types.TypeGate, gate},
+		{types.TypeMolecule, molecule},
+	} {
+		page, err = fixture.Reader.Ready(ctx, publicops.ReadyRequest{
+			Labels:       []string{scope},
+			IssueType:    string(excluded.issueType),
+			ExcludeTypes: []string{string(excluded.issueType)},
+		})
+		if err != nil {
+			t.Fatalf("Ready with IssueType=%s: %v", excluded.issueType, err)
+		}
+		assertReaderPageIDSet(t,
+			"Ready with IssueType="+string(excluded.issueType)+" and ExcludeTypes=["+string(excluded.issueType)+"]",
+			page, []string{excluded.want})
 	}
-	assertReaderPageIDSet(t, "Ready with IssueType=gate and ExcludeTypes=[gate]", page, []string{gate})
 
 	page, err = fixture.Reader.Ready(ctx, publicops.ReadyRequest{
 		Labels:    []string{scope},
@@ -404,6 +426,7 @@ func RunReaderListDefaultExclusionsAndTheirOverrides(t *testing.T, ctx context.C
 	gate := readerID(fixture, "lsdef", "gate")
 	template := readerID(fixture, "lsdef", "template")
 	wisp := readerID(fixture, "lsdef", "wisp")
+	infraWisp := readerID(fixture, "lsdef", "infrawisp")
 	flagOnly := readerID(fixture, "lsdef", "flagonly")
 	statusOnly := readerID(fixture, "lsdef", "statusonly")
 	flagAndStatus := readerID(fixture, "lsdef", "flagandstatus")
@@ -415,6 +438,14 @@ func RunReaderListDefaultExclusionsAndTheirOverrides(t *testing.T, ctx context.C
 	templateIssue.IsTemplate = true
 	wispIssue := readerIssue(wisp, types.TypeTask, "")
 	wispIssue.Ephemeral = true
+	// The SAME plane, an EXCLUDED TYPE. `message` is one of the built-in infra
+	// types, so this row is hidden twice over — once by the plane and once by
+	// the type — and it is the only row that can tell the two knobs apart. The
+	// wisp above is a task: it comes back under either one, so a body that
+	// wired the plane knob to the type branch answers every other row here
+	// correctly.
+	infraWispIssue := readerIssue(infraWisp, types.TypeMessage, "")
+	infraWispIssue.Ephemeral = true
 	// Open, pinned only by the FLAG: no status exclusion can hide it, so it
 	// isolates the flag predicate.
 	flagOnlyIssue := readerIssue(flagOnly, types.TypeTask, "")
@@ -440,12 +471,13 @@ func RunReaderListDefaultExclusionsAndTheirOverrides(t *testing.T, ctx context.C
 	seedReaderIssue(t, ctx, fixture, readerIssue(gate, types.TypeGate, ""))
 	seedReaderIssue(t, ctx, fixture, templateIssue)
 	seedReaderWisp(t, ctx, fixture, wispIssue)
+	seedReaderWisp(t, ctx, fixture, infraWispIssue)
 	seedReaderIssue(t, ctx, fixture, flagOnlyIssue)
 	seedReaderIssue(t, ctx, fixture, statusOnlyIssue)
 	seedReaderIssue(t, ctx, fixture, flagAndStatusIssue)
 	seedReaderIssue(t, ctx, fixture, flagAndClosedIssue)
 
-	scope := readerIDFilter(open, closed, gate, template, wisp, flagOnly, statusOnly, flagAndStatus, flagAndClosed)
+	scope := readerIDFilter(open, closed, gate, template, wisp, infraWisp, flagOnly, statusOnly, flagAndStatus, flagAndClosed)
 	for _, test := range []struct {
 		name string
 		req  publicops.ListRequest
@@ -460,7 +492,18 @@ func RunReaderListDefaultExclusionsAndTheirOverrides(t *testing.T, ctx context.C
 		{"NoPinnedFlag holds the flag predicate under AllFlag", publicops.ListRequest{IDFilter: scope, AllFlag: true, NoPinnedFlag: true}, []string{open, closed, statusOnly}},
 		{"IncludeGates", publicops.ListRequest{IDFilter: scope, IncludeGates: true}, []string{open, gate}},
 		{"IncludeTemplates", publicops.ListRequest{IDFilter: scope, IncludeTemplates: true}, []string{open, template}},
-		{"IncludeInfra reaches the ephemeral plane", publicops.ListRequest{IDFilter: scope, IncludeInfra: true}, []string{open, wisp}},
+		// IncludeInfra is BOTH knobs at once: it admits the plane and takes the
+		// infra-type exclusion off, so it is the only request here that reaches
+		// the infra-typed wisp.
+		{"IncludeInfra reaches the ephemeral plane and the infra types", publicops.ListRequest{IDFilter: scope, IncludeInfra: true}, []string{open, wisp, infraWisp}},
+		// The plane knob alone. It admits the plane and takes NO exclusion off
+		// with it: the gate and the template stay hidden, and so does the
+		// infra-typed wisp in the very plane it just admitted. That last row is
+		// the one that makes this an observation — a field wired to
+		// IncludeInfra's branch answers with it.
+		{"IncludeEphemeral reaches the plane and takes no type exclusion off", publicops.ListRequest{IDFilter: scope, IncludeEphemeral: true}, []string{open, wisp}},
+		// And they compose rather than fight: the union of the two answers.
+		{"IncludeEphemeral with IncludeInfra", publicops.ListRequest{IDFilter: scope, IncludeEphemeral: true, IncludeInfra: true}, []string{open, wisp, infraWisp}},
 	} {
 		page, err := fixture.Reader.List(ctx, test.req)
 		if err != nil {
@@ -1671,6 +1714,911 @@ func RunReaderListStatusAcceptsACommaSeparatedORSet(t *testing.T, ctx context.Co
 	}
 }
 
+// RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded pins what a
+// bounded ready page IS (reader.go:85-100): the front of the answer the same
+// request returns unlimited — row for row AND COUNT FOR COUNT.
+//
+// The counts are the half nothing pinned. Every row of a ready page is an
+// IssueWithCounts (reader.go:11-12), and each cardinality is a function of the
+// whole dependency graph rather than of the page, so bounding the page must not
+// be able to move one. That is not free on either seam. The store-backed body
+// answers a BOUNDED request with a different query from an unbounded one: it
+// resolves the page of ids with the cheap indexed query and then hydrates the
+// cardinalities constrained to exactly those ids, where an unbounded request
+// runs the predicate-form mega-query (issueops.runReadyCountsInTx). The
+// unit-of-work body resolves ids first either way — its own UNION across the
+// two planes — and hydrates them by id (domain/db.fetchCountsByIDs). Three
+// wirings, three routes to one promise, and `bd ready`'s "showing N of M" rides
+// on all of them.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that RunReaderReadyLimitBoundary's does
+// not. That case seeds three interchangeable rows and reads only how many came
+// back, so a seam that hydrated a row's counts from the page rather than the
+// graph, or that paired a row with its neighbor's cardinalities, answers it
+// correctly. Here every row carries its OWN count signature and the comparison
+// is per row, so a mis-keyed hydration join has nowhere to land.
+//
+// THE EDGE TYPES ARE THE OTHER HALF. A ready page's cardinalities are
+// BLOCKS-ONLY, where the detail view's count every edge — the split
+// RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge owns — and every
+// count fixture in this file seeded blocks edges alone, so an implementation
+// that also counted parent-child and relates-to edges passed all of them. The
+// `family` row below has two outgoing edges of neither type and must still
+// report zero dependencies while carrying its Parent.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the label that scopes it, and nothing
+// else. The sort policy is NAMED — `oldest` is created_at ASC, id ASC — and the
+// rows are seeded whole seconds apart, because created_at is a DATETIME with no
+// fractional part and same-second rows would leave the word "prefix" resting on
+// the id tiebreak alone.
+func RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdycnt")
+	id := func(name string) string { return readerID(fixture, "rdycnt", name) }
+	plain, onedep, twodeps := id("plain"), id("onedep"), id("twodeps")
+	depended, commented, family := id("depended"), id("commented"), id("family")
+	closedA, closedB, closedC := id("closed-a"), id("closed-b"), id("closed-c")
+	dependentA, dependentB := id("dependent-a"), id("dependent-b")
+	parent, related := id("parent"), id("related")
+
+	// The ready rows, in the order `oldest` will answer with. Whole seconds
+	// apart; the helpers below are unlabeled, so they are outside the scope
+	// this case queries no matter what state they are in.
+	base := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+	order := []string{plain, onedep, twodeps, depended, commented, family}
+	for i, member := range order {
+		issue := readerIssue(member, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Second)
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	// A CLOSED blocker is a blocks dependency that does not block, which is the
+	// only way a row can be ready and carry a nonzero DependencyCount at once.
+	for _, blocker := range []string{closedA, closedB, closedC} {
+		closedIssue := readerIssue(blocker, types.TypeTask, "")
+		closedIssue.Status = types.StatusClosed
+		seedReaderIssue(t, ctx, fixture, closedIssue)
+	}
+	for _, helper := range []string{dependentA, dependentB, parent, related} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(helper, types.TypeTask, ""))
+	}
+	for _, edge := range []*types.Dependency{
+		{IssueID: onedep, DependsOnID: closedA, Type: types.DepBlocks},
+		{IssueID: twodeps, DependsOnID: closedB, Type: types.DepBlocks},
+		{IssueID: twodeps, DependsOnID: closedC, Type: types.DepBlocks},
+		{IssueID: dependentA, DependsOnID: depended, Type: types.DepBlocks},
+		{IssueID: dependentB, DependsOnID: depended, Type: types.DepBlocks},
+		{IssueID: family, DependsOnID: parent, Type: types.DepParentChild},
+		{IssueID: family, DependsOnID: related, Type: types.DepRelatesTo},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	for _, text := range []string{"first", "second"} {
+		if err := fixture.AddComment(ctx, commented, "seed", text); err != nil {
+			t.Fatalf("seed comment %q: %v", text, err)
+		}
+	}
+
+	request := func(limit int) publicops.ReadyRequest {
+		return publicops.ReadyRequest{Labels: []string{scope}, Sort: "oldest", Limit: readerLimit(limit)}
+	}
+	unbounded, err := fixture.Reader.Ready(ctx, request(0))
+	if err != nil {
+		t.Fatalf("Ready unlimited: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready unlimited", unbounded, order)
+	if unbounded.HasMore {
+		t.Error("Ready unlimited reported HasMore")
+	}
+
+	// The exact cardinalities, on the unbounded answer, before any page is
+	// compared against it. A prefix identity over two answers that were both
+	// wrong the same way is the shape of assertion this program keeps
+	// finding, so the reference is pinned to the seeds first.
+	for _, want := range []readerCounts{
+		{id: plain},
+		{id: onedep, dependencies: 1},
+		{id: twodeps, dependencies: 2},
+		{id: depended, dependents: 2},
+		{id: commented, comments: 2},
+		{id: family, parent: &parent},
+	} {
+		assertReaderRowCounts(t, "Ready unlimited", unbounded, want)
+	}
+
+	for _, limit := range []int{1, 3, len(order), len(order) + 3} {
+		page, pageErr := fixture.Reader.Ready(ctx, request(limit))
+		if pageErr != nil {
+			t.Errorf("Ready --limit %d: %v", limit, pageErr)
+			continue
+		}
+		assertReaderPageIsPrefixWithItsCounts(t, fmt.Sprintf("Ready --limit %d", limit), page, unbounded, min(limit, len(order)))
+		if want := limit < len(order); page.HasMore != want {
+			t.Errorf("Ready --limit %d reported HasMore = %v, want %v", limit, page.HasMore, want)
+		}
+	}
+}
+
+// RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary is the same
+// promise across the plane union (reader.go:62-65 with reader.go:85-100), and
+// the union is where the two seams stop resembling each other. The store-backed
+// body runs the ready-counts query ONCE PER TABLE FAMILY and merges the two
+// results wisp-wins in Go (issueops.GetReadyWorkWithCountsInTx); the
+// unit-of-work body renders one UNION ALL over both planes, orders it in SQL,
+// and then hydrates each plane's ids separately
+// (domain/db.getReadyWorkWithCountsUnion). A page bound that falls INSIDE the
+// interleaved order is what makes those two arrangements answer differently:
+// one of them can trim a plane before the merge, the other after it.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that RunReaderReadyDeferredAndEphemeralGates
+// does not. That case asks only WHICH rows the gate admits, with one wisp and
+// no counts, and reads the answer as a set. Here the two planes ALTERNATE in
+// the answer's order and both a durable row and a WISP row carry a nonzero
+// cardinality, so a merge that ordered one plane after the other, or hydrated
+// the wisp ids against the durable tables, changes the page rather than passing
+// quietly. The wisp's own count is the load-bearing one: the reverse-blocker
+// subquery reads both edge tables, and a wisp hydrated against the wrong family
+// comes back with the zeros a caller cannot tell from a wisp that has none.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the scoping label and the named sort,
+// as above. The two planes' rows are seeded on alternating seconds so their
+// interleaving is a property of the fixture rather than of whichever plane the
+// implementation happens to read first.
+func RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdyeph")
+	id := func(name string) string { return readerID(fixture, "rdyeph", name) }
+	durableOne, durableTwo, durableThree := id("i1"), id("i2"), id("i3")
+	wispOne, wispTwo, wispThree := id("w1"), id("w2"), id("w3")
+	closedBlocker, wispDependent := id("closed"), id("w-dependent")
+
+	base := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+	seeds := []struct {
+		id        string
+		ephemeral bool
+	}{
+		{durableOne, false}, {wispOne, true}, {durableTwo, false},
+		{wispTwo, true}, {durableThree, false}, {wispThree, true},
+	}
+	order := make([]string, 0, len(seeds))
+	for i, seed := range seeds {
+		order = append(order, seed.id)
+		issue := readerIssue(seed.id, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Second)
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		if seed.ephemeral {
+			issue.Ephemeral = true
+			seedReaderWisp(t, ctx, fixture, issue)
+			continue
+		}
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	closedIssue := readerIssue(closedBlocker, types.TypeTask, "")
+	closedIssue.Status = types.StatusClosed
+	seedReaderIssue(t, ctx, fixture, closedIssue)
+	seedReaderIssue(t, ctx, fixture, readerIssue(wispDependent, types.TypeTask, ""))
+	for _, edge := range []*types.Dependency{
+		{IssueID: durableTwo, DependsOnID: closedBlocker, Type: types.DepBlocks},
+		{IssueID: wispDependent, DependsOnID: wispTwo, Type: types.DepBlocks},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+
+	request := func(limit int) publicops.ReadyRequest {
+		return publicops.ReadyRequest{
+			Labels: []string{scope}, Sort: "oldest", IncludeEphemeral: true, Limit: readerLimit(limit),
+		}
+	}
+	unbounded, err := fixture.Reader.Ready(ctx, request(0))
+	if err != nil {
+		t.Fatalf("Ready --include-ephemeral unlimited: %v", err)
+	}
+	assertReaderPageIDs(t, "Ready --include-ephemeral unlimited", unbounded, order)
+	assertReaderRowCounts(t, "Ready --include-ephemeral unlimited", unbounded, readerCounts{id: durableTwo, dependencies: 1})
+	assertReaderRowCounts(t, "Ready --include-ephemeral unlimited", unbounded, readerCounts{id: wispTwo, dependents: 1})
+
+	// Every bound from inside the first plane's run to past the end. The
+	// interesting ones are 3 and 4, where the cut lands between a wisp and the
+	// durable row that follows it.
+	for limit := 1; limit <= len(order)+1; limit++ {
+		page, pageErr := fixture.Reader.Ready(ctx, request(limit))
+		if pageErr != nil {
+			t.Errorf("Ready --include-ephemeral --limit %d: %v", limit, pageErr)
+			continue
+		}
+		assertReaderPageIsPrefixWithItsCounts(t, fmt.Sprintf("Ready --include-ephemeral --limit %d", limit), page, unbounded, min(limit, len(order)))
+		if want := limit < len(order); page.HasMore != want {
+			t.Errorf("Ready --include-ephemeral --limit %d reported HasMore = %v, want %v", limit, page.HasMore, want)
+		}
+	}
+}
+
+// RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix drives the same
+// promise past the point where both seams stop asking one question.
+//
+// Neither implementation binds an unbounded id list into one statement: each
+// hydrates a page's cardinalities in batches of two hundred ids and merges the
+// batches in Go — issueops.runReadyCountsInTx against sqlbuild.QueryBatchSize,
+// domain/db.fetchCountsByIDs against its own constant of the same value, two
+// loops written separately. A page that fits in one batch cannot tell a working
+// merge from a body that returns only the batch it happened to keep, and no
+// fixture in this contract or in any other seeds past the boundary.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE: rows on BOTH SIDES of the boundary carry
+// distinct nonzero counts, so a second batch that was dropped, overwritten by
+// the first, or merged back in the wrong order fails on a row rather than on a
+// length. The page is also driven at a bound that lands one row into the second
+// batch, which is the off-by-one a loop's terminating condition gets wrong.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the scoping label, the named sort and
+// the batch constant itself, which is imported rather than transcribed — a
+// backend that raised its own batching would otherwise leave this case seeding
+// under the boundary it means to cross.
+func RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	scope := readerLabel(fixture, "rdybatch")
+	total := sqlbuild.QueryBatchSize + 5
+	// The two rows that straddle the boundary: the last of the first batch and
+	// the first of the second.
+	lastOfFirst, firstOfSecond := sqlbuild.QueryBatchSize-1, sqlbuild.QueryBatchSize
+	closedBlocker := readerID(fixture, "rdybatch", "closed")
+	commentAnchor := readerID(fixture, "rdybatch", "anchor")
+
+	base := time.Now().UTC().Truncate(time.Second).Add(-24 * time.Hour)
+	order := make([]string, 0, total)
+	for i := range total {
+		// Zero-padded so the id tiebreak agrees with the seeded order rather
+		// than sorting 10 before 2 if two rows ever share a second.
+		member := readerID(fixture, "rdybatch", fmt.Sprintf("%04d", i))
+		order = append(order, member)
+		issue := readerIssue(member, types.TypeTask, scope)
+		at := base.Add(time.Duration(i) * time.Second)
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	closedIssue := readerIssue(closedBlocker, types.TypeTask, "")
+	closedIssue.Status = types.StatusClosed
+	seedReaderIssue(t, ctx, fixture, closedIssue)
+	seedReaderIssue(t, ctx, fixture, readerIssue(commentAnchor, types.TypeTask, ""))
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: order[firstOfSecond], DependsOnID: closedBlocker, Type: types.DepBlocks,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the edge on the first row past the batch boundary: %v", err)
+	}
+	if err := fixture.AddComment(ctx, order[lastOfFirst], "seed", "the last row of the first batch"); err != nil {
+		t.Fatalf("seed the comment on the last row of the first batch: %v", err)
+	}
+
+	request := func(limit int) publicops.ReadyRequest {
+		return publicops.ReadyRequest{Labels: []string{scope}, Sort: "oldest", Limit: readerLimit(limit)}
+	}
+	unbounded, err := fixture.Reader.Ready(ctx, request(0))
+	if err != nil {
+		t.Fatalf("Ready unlimited over %d rows: %v", total, err)
+	}
+	assertReaderPageIDs(t, "Ready unlimited", unbounded, order)
+	assertReaderRowCounts(t, "Ready unlimited", unbounded, readerCounts{id: order[lastOfFirst], comments: 1})
+	assertReaderRowCounts(t, "Ready unlimited", unbounded, readerCounts{id: order[firstOfSecond], dependencies: 1})
+
+	for _, limit := range []int{firstOfSecond + 1, total} {
+		page, pageErr := fixture.Reader.Ready(ctx, request(limit))
+		if pageErr != nil {
+			t.Errorf("Ready --limit %d: %v", limit, pageErr)
+			continue
+		}
+		assertReaderPageIsPrefixWithItsCounts(t, fmt.Sprintf("Ready --limit %d", limit), page, unbounded, min(limit, total))
+	}
+}
+
+// RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge pins the exact
+// cardinalities on BOTH read planes at once, and with them the fact that the
+// two planes count different things.
+//
+// A page row's DependencyCount and DependentCount are BLOCKS-ONLY — outgoing
+// blocks edges and reverse blockers — while a detail view's count EVERY
+// outgoing and incoming edge whatever its type. Two vocabularies on one role,
+// and a user sees both: `bd list` prints the first, `bd show` the second.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE. Every existing count fixture in this file
+// seeds blocks edges alone — RunReaderGetDetailShapeMatchesTheSeededIssue,
+// RunReaderGetOptionalRowListsAreOffByDefault and
+// RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse all do — so under
+// them the two vocabularies produce identical numbers and an implementation
+// that swapped them, or that answered the page with the detail view's counts,
+// passes every one. The subject below carries three outgoing edges of three
+// types and three incoming ones, so the two answers are REQUIRED TO DIFFER and
+// the case fails if they agree.
+//
+// The list plane's numbers are also pinned exactly rather than as nonzero.
+// RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse needs its
+// premise-check to see nonzero counts and asks for no more than that, so a
+// mega-query that answered all three cardinalities with the same total edge
+// count satisfied it. Here CommentCount is 2, DependencyCount is 1 and
+// DependentCount is 2 — three different numbers on one row.
+//
+// PARENT IS THE FOURTH COLUMN and rides the same query as the counts without
+// being one. Its value is pinned against the seeded edge, and a second row with
+// no parent-child edge pins the nil, which is the arm a body returning the
+// row's own id or an empty string would fail.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the id set it scopes on. Both reads
+// name one subject explicitly, so no other case's rows can reach either answer.
+func RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "cntsplit", name) }
+	subject, orphan := id("subject"), id("orphan")
+	blocker, parent, related := id("blocker"), id("parent"), id("related")
+	blockedBy, alsoBlockedBy, child := id("blocked-by"), id("also-blocked-by"), id("child")
+
+	for _, member := range []string{subject, orphan, blocker, parent, related, blockedBy, alsoBlockedBy, child} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(member, types.TypeTask, ""))
+	}
+	// Three out, three in, one type each way that the page counts and two it
+	// does not.
+	for _, edge := range []*types.Dependency{
+		{IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks},
+		{IssueID: subject, DependsOnID: parent, Type: types.DepParentChild},
+		{IssueID: subject, DependsOnID: related, Type: types.DepRelatesTo},
+		{IssueID: blockedBy, DependsOnID: subject, Type: types.DepBlocks},
+		{IssueID: alsoBlockedBy, DependsOnID: subject, Type: types.DepBlocks},
+		{IssueID: child, DependsOnID: subject, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+	for _, text := range []string{"one", "two"} {
+		if err := fixture.AddComment(ctx, subject, "seed", text); err != nil {
+			t.Fatalf("seed comment %q: %v", text, err)
+		}
+	}
+
+	page, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: readerIDFilter(subject, orphan)})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	assertReaderRowCounts(t, "List", page, readerCounts{
+		id: subject, dependencies: 1, dependents: 2, comments: 2, parent: &parent,
+	})
+	assertReaderRowCounts(t, "List", page, readerCounts{id: orphan})
+
+	details, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	assertReaderCount(t, "Get DependencyCount", details.DependencyCount, 3)
+	assertReaderCount(t, "Get DependentCount", details.DependentCount, 3)
+	assertReaderCount(t, "Get CommentCount", details.CommentCount, 2)
+
+	// Said once more as the thing itself, so a future change that quietly
+	// unified the two vocabularies fails on the promise rather than on an
+	// arithmetic detail of this fixture.
+	row := readerRowByID(t, "List", page, subject)
+	if row == nil {
+		return
+	}
+	if details.DependencyCount != nil && int64(row.DependencyCount) == *details.DependencyCount {
+		t.Errorf("the page and the detail view both answered DependencyCount = %d; the page counts blocks edges and the detail view counts every edge, and this subject has both kinds",
+			row.DependencyCount)
+	}
+	if details.DependentCount != nil && int64(row.DependentCount) == *details.DependentCount {
+		t.Errorf("the page and the detail view both answered DependentCount = %d; the page counts reverse blockers and the detail view counts every incoming edge, and this subject has both kinds",
+			row.DependentCount)
+	}
+}
+
+// RunReaderReadyParentScopesToItsTransitiveDescendants pins
+// ReadyRequest.ParentID (reader.go:57-58) — a documented public field with no
+// coverage at any leg until now.
+//
+// The promise is RECURSIVE DESCENDANTS, and it is served two ways at once. Both
+// seams resolve the descendant id set by walking parent-child edges — one
+// through issueops.GetDescendantIDsInTx, the other through the unit-of-work
+// repository's own getDescendantIDs — and then OR that set with an id-prefix
+// clause that admits dotted rows carrying no parent-child edge at all
+// (sqlbuild.BuildReadyWorkWhere). A one-hop subquery in place of the walk is
+// the defect this field already shipped once, GH#3396.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE. The audit leaf this came from gave every
+// descendant BOTH a dotted id and a parent-child edge, so either mechanism
+// alone answered it and neither could be shown to run: dropping the walk left
+// the id prefix covering for it, and dropping the prefix left the walk covering
+// for it. Here the two are separated. The ADOPTED row is a descendant by edge
+// with an id under no prefix, so only the walk reaches it; the DOTTED row is a
+// descendant by id with no edge, so only the prefix reaches it; and the
+// GRANDCHILD is two hops down AND carries an edge, which puts it outside the
+// prefix arm — the clause excludes rows that have a parent-child edge — so it
+// is the one row that can only arrive through a walk that recurses.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing. ParentID is the scope, and
+// the decoy is a sibling of the parent rather than an unrelated row, so a
+// prefix rendered without its separator (`LIKE 'p%'` rather than `LIKE 'p.%'`)
+// takes the decoy and fails.
+func RunReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	parent := readerID(fixture, "rdypar", "p")
+	child := parent + ".1"
+	grandchild := parent + ".1.1"
+	dotted := parent + ".9"
+	adopted := readerID(fixture, "rdypar", "adopted")
+	decoy := parent + "x"
+
+	for _, member := range []string{parent, child, grandchild, dotted, adopted, decoy} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(member, types.TypeTask, ""))
+	}
+	for _, edge := range []*types.Dependency{
+		{IssueID: child, DependsOnID: parent, Type: types.DepParentChild},
+		{IssueID: grandchild, DependsOnID: child, Type: types.DepParentChild},
+		{IssueID: adopted, DependsOnID: parent, Type: types.DepParentChild},
+	} {
+		if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+			t.Fatalf("seed edge %s -> %s: %v", edge.IssueID, edge.DependsOnID, err)
+		}
+	}
+
+	page, err := fixture.Reader.Ready(ctx, publicops.ReadyRequest{ParentID: parent, Sort: "oldest"})
+	if err != nil {
+		t.Fatalf("Ready --parent: %v", err)
+	}
+	// The parent itself is not its own descendant, and neither the sibling
+	// decoy nor anything else in the workspace belongs to this answer.
+	assertReaderPageIDSet(t, "Ready --parent", page, []string{child, grandchild, dotted, adopted})
+}
+
+// RunReaderListParentReachesEveryDescendantAndOnlyItsOwn is the same field on
+// the listing plane (reader.go:213), where it is rendered differently: one
+// clause with a parent-child subquery ORed against the id prefix
+// (sqlbuild/filter.go), no precomputed id set and therefore no walk. That is
+// why it gets a case of its own rather than an arm — the ready arm's descendant
+// set is computed in Go and this one is not, so a break in either is invisible
+// from the other.
+//
+// THE SIBLING PARENTS DIFFER ONLY IN CASE, which is the half no id-prefix case
+// can borrow from elsewhere. The prefix is a LIKE against a binary-collated
+// column, and a backend that folded case there would answer one parent's
+// listing with the other parent's child — the bd-oyvc2.10 class. Both
+// directions are driven, because a fold is symmetric and asserting one of them
+// would leave the other reading as a pass.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that the reader contract could not: no
+// case in this file or in the querier's drives ParentID at all, so the whole
+// field — descendant reach, case sensitivity, and the exclusion of the parent
+// itself — was unpinned on all three legs.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing beyond ParentID, which is the
+// scope. The rows carry no parent-child edges at all, so what is measured is
+// the prefix arm rather than the subquery arm; the ready case above owns the
+// edge-derived half.
+func RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	lower := readerID(fixture, "lspar", "pc")
+	upper := readerID(fixture, "lspar", "PC")
+	lowerChild, upperChild := lower+".1", upper+".1"
+	lowerGrandchild := lower + ".1.1"
+
+	for _, member := range []string{lower, upper, lowerChild, upperChild, lowerGrandchild} {
+		seedReaderIssue(t, ctx, fixture, readerIssue(member, types.TypeTask, ""))
+	}
+
+	for _, test := range []struct {
+		parent string
+		want   []string
+	}{
+		{lower, []string{lowerChild, lowerGrandchild}},
+		{upper, []string{upperChild}},
+	} {
+		page, err := fixture.Reader.List(ctx, publicops.ListRequest{ParentID: test.parent})
+		if err != nil {
+			t.Fatalf("List --parent %s: %v", test.parent, err)
+		}
+		assertReaderPageIDSet(t, "List --parent "+test.parent, page, test.want)
+	}
+}
+
+// RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing
+// drives the keyset position the way its doc says a caller should
+// (reader.go:292-296, "it does not skip or repeat rows when the result set
+// changes underneath a walk") — page after page, to the end.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that
+// RunReaderListKeysetPositionResumesTheCreatedDescIDAscOrder's does not. That
+// case reads ONE page from one hand-written position, over a group of two rows
+// sharing a second. Both of its properties survive a body that walks correctly
+// once and then stalls, and neither can see the shape that actually loses
+// records: a same-second group LARGER THAN THE PAGE, where the position has to
+// resume in the middle of a tie the timestamp alone cannot break. Five rows
+// share one second here against a page of two, so the walk crosses that group
+// twice.
+//
+// The walk is also where the two seams stop agreeing by construction. The
+// keyset PREDICATE is one shared builder, but the page around it is not: one
+// body over-fetches a probe row and the other reports has-more natively, and
+// the trim runs in the shared epilogue after that. A body that fed the next
+// position from the probe row rather than from the last DELIVERED row skips one
+// record per page, which no single-page read can see.
+//
+// THE ONE-SHOT ORDER IS READ FIRST, so a backend that agrees with itself but
+// orders differently from the reference fails on the sequence rather than on
+// the walk — two different defects that would otherwise report the same way.
+//
+// THE EMPTY AfterID is the documented group-start form (types.go: an empty id
+// starts the same-second group from its first id) and is driven on the same
+// fixture, because it is the position a decoded cursor carries when it points
+// at a second rather than at a row.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the id set it scopes on, and nothing
+// about the workspace. Every timestamp is a whole second, deliberately: the
+// column has no fractional part, so a fixture written in milliseconds would
+// have the engine, not the case, decide which rows tie.
+func RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	newer := readerID(fixture, "kswalk", "newer")
+	older := readerID(fixture, "kswalk", "older")
+	group := []string{
+		readerID(fixture, "kswalk", "a1"), readerID(fixture, "kswalk", "a2"),
+		readerID(fixture, "kswalk", "a3"), readerID(fixture, "kswalk", "a4"),
+		readerID(fixture, "kswalk", "a5"),
+	}
+	groupSecond := time.Now().UTC().Truncate(time.Second).Add(-1 * time.Hour)
+
+	seed := func(memberID string, at time.Time) {
+		issue := readerIssue(memberID, types.TypeTask, "")
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	seed(newer, groupSecond.Add(time.Second))
+	for _, member := range group {
+		seed(member, groupSecond)
+	}
+	seed(older, groupSecond.Add(-time.Second))
+
+	want := append([]string{newer}, group...)
+	want = append(want, older)
+	idScope := readerIDFilter(want...)
+
+	oneShot, err := fixture.Reader.List(ctx, publicops.ListRequest{IDFilter: idScope, SortBy: "created"})
+	if err != nil {
+		t.Fatalf("List unpaged: %v", err)
+	}
+	assertReaderPageIDs(t, "List unpaged", oneShot, want)
+
+	const pageSize = 2
+	var walked []string
+	seen := make(map[string]bool, len(want))
+	var afterCreatedAt *time.Time
+	afterID := ""
+	for page := 0; page <= len(want); page++ {
+		got, pageErr := fixture.Reader.List(ctx, publicops.ListRequest{
+			IDFilter: idScope, SortBy: "created", Limit: readerLimit(pageSize),
+			AfterCreatedAt: afterCreatedAt, AfterID: afterID,
+		})
+		if pageErr != nil {
+			t.Fatalf("List page %d: %v", page, pageErr)
+		}
+		if len(got.Items) == 0 {
+			if got.HasMore {
+				t.Errorf("List page %d came back empty with HasMore set", page)
+			}
+			break
+		}
+		if len(got.Items) > pageSize {
+			t.Fatalf("List page %d answered %d rows over a Limit of %d", page, len(got.Items), pageSize)
+		}
+		for _, item := range got.Items {
+			if item == nil || item.Issue == nil {
+				t.Fatalf("List page %d returned a nil row", page)
+			}
+			if seen[item.ID] {
+				t.Fatalf("List page %d repeated %s: the same-second group is larger than the page, and the position re-delivered a row it had already handed out",
+					page, item.ID)
+			}
+			seen[item.ID] = true
+			walked = append(walked, item.ID)
+		}
+		last := got.Items[len(got.Items)-1]
+		at := last.CreatedAt.UTC()
+		afterCreatedAt = &at
+		afterID = last.ID
+	}
+	if !slices.Equal(walked, want) {
+		t.Errorf("the keyset walk delivered %v, want the one-shot sequence %v with nothing dropped and nothing repeated", walked, want)
+	}
+
+	// The group-start form: a position naming the second with no id starts that
+	// second from its first row rather than skipping the group.
+	fromGroupStart, err := fixture.Reader.List(ctx, publicops.ListRequest{
+		IDFilter: idScope, SortBy: "created", AfterCreatedAt: &groupSecond, AfterID: "",
+	})
+	if err != nil {
+		t.Fatalf(`List from (the group's second, ""): %v`, err)
+	}
+	assertReaderPageIDs(t, `List from (the group's second, "")`, fromGroupStart, append(slices.Clone(group), older))
+}
+
+// RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates pins the
+// keyset position as a CONJUNCT. It narrows what the rest of the request
+// matched; it does not become the request.
+//
+// The three legs are cumulative on one fixture, so each predicate is shown to
+// be load-bearing by the row only it excludes: the unpositioned read fixes what
+// the id set and the status matched, adding the position drops the cursor row
+// and everything newer, and adding CreatedBefore drops the same-second survivor
+// the position had admitted. That last leg is the one worth having. The keyset
+// renders its own upper bound on created_at, and that bound is INCLUSIVE —
+// same-second rows are exactly what it exists to admit — where CreatedBefore's
+// is strict. A body that let one displace the other answers this request with a
+// row that is not before the time the caller named.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that the existing keyset case's does not:
+// that case sends a position and NOTHING ELSE, so composition is unpinned in
+// both directions — a body that dropped the other predicates when a position
+// arrived, and a body that dropped the position when other predicates did,
+// both pass it.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: nothing. The shadow rows share every
+// timestamp with the scoped ones and are excluded by the id set alone, so a
+// position that widened its own scope collects them.
+func RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "kscompose", name) }
+	newest, cursor := id("a1"), id("b1")
+	closedSibling, sameSecond := id("b2"), id("b3")
+	older, closedOlder, oldest := id("c1"), id("c2"), id("d1")
+
+	second := func(offset int) time.Time {
+		return time.Now().UTC().Truncate(time.Second).Add(-1 * time.Hour).Add(time.Duration(offset) * time.Minute)
+	}
+	oldestAt, olderAt, cursorAt, newestAt := second(0), second(1), second(2), second(3)
+	seed := func(memberID string, at time.Time, status types.Status) {
+		issue := readerIssue(memberID, types.TypeTask, "")
+		issue.Status = status
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		seedReaderIssue(t, ctx, fixture, issue)
+	}
+	seed(newest, newestAt, types.StatusOpen)
+	seed(cursor, cursorAt, types.StatusOpen)
+	seed(closedSibling, cursorAt, types.StatusClosed)
+	seed(sameSecond, cursorAt, types.StatusOpen)
+	seed(older, olderAt, types.StatusOpen)
+	seed(closedOlder, olderAt, types.StatusClosed)
+	seed(oldest, oldestAt, types.StatusOpen)
+	// A second population sharing every timestamp, kept out by the id set alone.
+	for i, at := range []time.Time{newestAt, cursorAt, olderAt, oldestAt} {
+		seed(id(fmt.Sprintf("shadow%d", i)), at, types.StatusOpen)
+	}
+
+	base := publicops.ListRequest{
+		IDFilter: readerIDFilter(newest, cursor, closedSibling, sameSecond, older, closedOlder, oldest),
+		Status:   string(types.StatusOpen),
+		SortBy:   "created",
+	}
+	matched, err := fixture.Reader.List(ctx, base)
+	if err != nil {
+		t.Fatalf("List over the id set: %v", err)
+	}
+	assertReaderPageIDs(t, "List over the id set", matched, []string{newest, cursor, sameSecond, older, oldest})
+
+	positioned := base
+	positioned.AfterCreatedAt = &cursorAt
+	positioned.AfterID = cursor
+	resumed, err := fixture.Reader.List(ctx, positioned)
+	if err != nil {
+		t.Fatalf("List resumed from the cursor: %v", err)
+	}
+	assertReaderPageIDs(t, "List resumed from the cursor", resumed, []string{sameSecond, older, oldest})
+
+	bounded := positioned
+	bounded.CreatedBefore = &cursorAt
+	narrowed, err := fixture.Reader.List(ctx, bounded)
+	if err != nil {
+		t.Fatalf("List resumed from the cursor under CreatedBefore: %v", err)
+	}
+	assertReaderPageIDs(t, "List resumed from the cursor under CreatedBefore", narrowed, []string{older, oldest})
+}
+
+// RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder pins what
+// ListRequest.IncludeEphemeral ANSWERS WITH, which is the half of that promise
+// an admission assertion cannot see: not the durable page with the ephemeral
+// rows appended to it, but ONE page ordered across both planes as if they were
+// a single table. That is what makes Limit and the keyset position mean the
+// same thing under the flag that they mean without it.
+//
+// WHAT THIS FIXTURE MAKES OBSERVABLE that the admission row in
+// RunReaderListDefaultExclusionsAndTheirOverrides does not. That row asks only
+// WHICH rows the flag admits and reads the answer as a SET, so a body that
+// concatenated one plane after the other passes it. Here the planes ALTERNATE
+// in the created order, so a concatenation is a different SEQUENCE; a Limit
+// that lands inside the interleaving keeps a different SET; and the keyset walk
+// resumes from positions that fall on both sides of the merge.
+//
+// It is a genuine two-body case. The store-backed seam runs the search once per
+// table family and merge-sorts the two independently ordered legs in Go before
+// trimming (issueops.searchInTx, sortMergedResults); the unit-of-work seam
+// renders one UNION ALL and lets SQL order it (domain/db.searchUnion). A trim
+// applied before the merge, or an order applied after it, is a different page
+// on exactly this fixture.
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the id set that scopes it and the
+// named sort. The rows are seeded on alternating seconds, so the interleaving
+// is a property of the fixture rather than of whichever plane an implementation
+// happens to read first.
+func RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "lseph", name) }
+	seeds := []struct {
+		id        string
+		ephemeral bool
+	}{
+		{id("i1"), false}, {id("w1"), true}, {id("i2"), false},
+		{id("w2"), true}, {id("i3"), false}, {id("w3"), true},
+	}
+
+	firstSecond := time.Now().UTC().Truncate(time.Second).Add(-2 * time.Hour)
+	var merged, durableOnly []string
+	for i, seed := range seeds {
+		issue := readerIssue(seed.id, types.TypeTask, "")
+		at := firstSecond.Add(time.Duration(i) * time.Second)
+		issue.CreatedAt = at
+		issue.UpdatedAt = at
+		if seed.ephemeral {
+			issue.Ephemeral = true
+			seedReaderWisp(t, ctx, fixture, issue)
+		} else {
+			seedReaderIssue(t, ctx, fixture, issue)
+			durableOnly = append(durableOnly, seed.id)
+		}
+		merged = append(merged, seed.id)
+	}
+	// The answer is (created_at DESC, id ASC), so both expectations run
+	// youngest first — the reverse of the seeding order.
+	slices.Reverse(merged)
+	slices.Reverse(durableOnly)
+
+	scoped := publicops.ListRequest{IDFilter: readerIDFilter(merged...), SortBy: "created"}
+	durable, err := fixture.Reader.List(ctx, scoped)
+	if err != nil {
+		t.Fatalf("List over both planes' ids without the flag: %v", err)
+	}
+	assertReaderPageIDs(t, "List without IncludeEphemeral", durable, durableOnly)
+
+	admitted := scoped
+	admitted.IncludeEphemeral = true
+	all, err := fixture.Reader.List(ctx, admitted)
+	if err != nil {
+		t.Fatalf("List --include-ephemeral: %v", err)
+	}
+	assertReaderPageIDs(t, "List --include-ephemeral", all, merged)
+
+	// Every bound from inside the first plane's run to past the end. The
+	// interesting ones are the cuts that land between a wisp and the durable
+	// row next to it, which is where a body that trimmed one plane before
+	// merging keeps the wrong row.
+	for limit := 1; limit <= len(merged)+1; limit++ {
+		bounded := admitted
+		bounded.Limit = readerLimit(limit)
+		page, pageErr := fixture.Reader.List(ctx, bounded)
+		if pageErr != nil {
+			t.Errorf("List --include-ephemeral --limit %d: %v", limit, pageErr)
+			continue
+		}
+		assertReaderPageIDs(t, fmt.Sprintf("List --include-ephemeral --limit %d", limit), page, merged[:min(limit, len(merged))])
+		if want := limit < len(merged); page.HasMore != want {
+			t.Errorf("List --include-ephemeral --limit %d reported HasMore = %v, want %v", limit, page.HasMore, want)
+		}
+	}
+
+	// The keyset walk across the merge. The position is a created-order pair
+	// and neither half of it names a plane, so a walk that resumes correctly on
+	// one plane and skips the other is the failure this looks for: every page
+	// but the first resumes from a row of the plane the previous page ended on.
+	const pageSize = 2
+	var walked []string
+	seen := make(map[string]bool, len(merged))
+	var afterCreatedAt *time.Time
+	afterID := ""
+	for page := 0; page <= len(merged); page++ {
+		req := admitted
+		req.Limit = readerLimit(pageSize)
+		req.AfterCreatedAt = afterCreatedAt
+		req.AfterID = afterID
+		got, pageErr := fixture.Reader.List(ctx, req)
+		if pageErr != nil {
+			t.Fatalf("List --include-ephemeral page %d: %v", page, pageErr)
+		}
+		if len(got.Items) == 0 {
+			if got.HasMore {
+				t.Errorf("List --include-ephemeral page %d came back empty with HasMore set", page)
+			}
+			break
+		}
+		if len(got.Items) > pageSize {
+			t.Fatalf("List --include-ephemeral page %d answered %d rows over a Limit of %d", page, len(got.Items), pageSize)
+		}
+		for _, item := range got.Items {
+			if item == nil || item.Issue == nil {
+				t.Fatalf("List --include-ephemeral page %d returned a nil row", page)
+			}
+			if seen[item.ID] {
+				t.Fatalf("List --include-ephemeral page %d repeated %s: a position that crossed the plane boundary re-delivered a row it had already handed out",
+					page, item.ID)
+			}
+			seen[item.ID] = true
+			walked = append(walked, item.ID)
+		}
+		last := got.Items[len(got.Items)-1]
+		at := last.CreatedAt.UTC()
+		afterCreatedAt = &at
+		afterID = last.ID
+	}
+	if !slices.Equal(walked, merged) {
+		t.Errorf("the keyset walk over the merged planes delivered %v, want the one-shot sequence %v with nothing dropped and nothing repeated", walked, merged)
+	}
+}
+
+// RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt pins
+// ListRequest.WispType's interaction with the plane knob beside it.
+//
+// wisp_type is a COLUMN BOTH TABLES CARRY, so the field is a predicate and not
+// a plane selector: it narrows whatever the rest of the request admitted. On a
+// default listing that is the durable rows, which carry no classification, so
+// the answer is EMPTY rather than "the wisps of that type" — the reading a
+// caller is most likely to assume, and the one that would make the field a
+// second, undocumented way to reach the ephemeral plane.
+//
+// The combination is LAWFUL rather than refused, and this asserts it composes
+// as an ordinary AND: admit the plane, then narrow it to one classification.
+// The second wisp carries a different type so the narrowing is visible as an
+// exclusion rather than as a limit, and the durable row is inside the scope
+// throughout so a body that dropped the predicate on the durable leg — the leg
+// where matching it is pointless — fails on a row it let through.
+func RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	id := func(name string) string { return readerID(fixture, "lswtyp", name) }
+	durable, heartbeat, patrol := id("i1"), id("w-heartbeat"), id("w-patrol")
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(durable, types.TypeTask, ""))
+	for _, seed := range []struct {
+		id       string
+		wispType types.WispType
+	}{
+		{heartbeat, types.WispTypeHeartbeat},
+		{patrol, types.WispTypePatrol},
+	} {
+		wisp := readerIssue(seed.id, types.TypeTask, "")
+		wisp.Ephemeral = true
+		wisp.WispType = seed.wispType
+		seedReaderWisp(t, ctx, fixture, wisp)
+	}
+
+	scope := readerIDFilter(durable, heartbeat, patrol)
+	wispType := func(w types.WispType) *publicops.WispType { return &w }
+	for _, test := range []struct {
+		name string
+		req  publicops.ListRequest
+		want []string
+	}{
+		{"WispType alone admits no plane", publicops.ListRequest{IDFilter: scope, WispType: wispType(types.WispTypeHeartbeat)}, nil},
+		{"IncludeEphemeral alone admits every classification", publicops.ListRequest{IDFilter: scope, IncludeEphemeral: true}, []string{durable, heartbeat, patrol}},
+		{"the two compose as an AND", publicops.ListRequest{IDFilter: scope, IncludeEphemeral: true, WispType: wispType(types.WispTypeHeartbeat)}, []string{heartbeat}},
+		{"and the other classification is reachable the same way", publicops.ListRequest{IDFilter: scope, IncludeEphemeral: true, WispType: wispType(types.WispTypePatrol)}, []string{patrol}},
+	} {
+		page, err := fixture.Reader.List(ctx, test.req)
+		if err != nil {
+			t.Fatalf("List (%s): %v", test.name, err)
+		}
+		assertReaderPageIDSet(t, "List ("+test.name+")", page, test.want)
+	}
+}
+
 // readerIssue builds the seed every case starts from: an open, unassigned,
 // unblocked task that qualifies for ready work. A case that needs it to fail one
 // of those tests changes the field it means to test and nothing else.
@@ -1857,6 +2805,92 @@ func assertReaderItemsCarryLabel(t *testing.T, what string, page publicops.Issue
 		}
 		if !slices.Contains(item.Labels, label) {
 			t.Errorf("%s returned %s with labels %v, want it to carry %q: labels are hydrated on this arm either way", what, item.ID, item.Labels, label)
+		}
+	}
+}
+
+// readerCounts is one row's expected cardinalities on a PAGE — the blocks-only
+// vocabulary, which is not the detail view's. The zero value is the row that
+// has none of them, so a case names only what it seeded.
+type readerCounts struct {
+	id           string
+	dependencies int
+	dependents   int
+	comments     int
+	parent       *string
+}
+
+func readerCountsOf(row *types.IssueWithCounts) readerCounts {
+	return readerCounts{
+		id:           row.ID,
+		dependencies: row.DependencyCount,
+		dependents:   row.DependentCount,
+		comments:     row.CommentCount,
+		parent:       row.Parent,
+	}
+}
+
+func (c readerCounts) String() string {
+	return fmt.Sprintf("%s{dependencies:%d dependents:%d comments:%d parent:%s}",
+		c.id, c.dependencies, c.dependents, c.comments, readerParentText(c.parent))
+}
+
+func (c readerCounts) equal(other readerCounts) bool {
+	return c.id == other.id &&
+		c.dependencies == other.dependencies &&
+		c.dependents == other.dependents &&
+		c.comments == other.comments &&
+		readerSameParent(c.parent, other.parent)
+}
+
+// assertReaderRowCounts pins one row's cardinalities EXACTLY. Nonzero is not
+// enough: the three aggregates hang off separate joins over the same edge
+// table, and a body that answered every one of them with the row's total edge
+// count would satisfy "nonzero" everywhere it matters.
+func assertReaderRowCounts(t *testing.T, what string, page publicops.IssuePage, want readerCounts) {
+	t.Helper()
+	row := readerRowByID(t, what, page, want.id)
+	if row == nil {
+		return
+	}
+	if got := readerCountsOf(row); !got.equal(want) {
+		t.Errorf("%s returned %s, want %s", what, got, want)
+	}
+}
+
+// assertReaderPageIsPrefixWithItsCounts compares a bounded page against the
+// answer the same request gives unbounded, CARDINALITIES INCLUDED. It is the
+// stronger sibling of assertReaderPageIsPrefixOf, which compares ids alone:
+// each count is a function of the whole graph, so the page a bound produces
+// carries the same numbers the unbounded answer did for those rows.
+//
+// wantN is the length the bound calls for, and it is a SEPARATE argument
+// because a row-for-row comparison over whatever came back agrees with itself:
+// a body that delivered only the first of the batches it hydrates answers a
+// short page every one of whose rows is correct.
+func assertReaderPageIsPrefixWithItsCounts(t *testing.T, what string, page, unbounded publicops.IssuePage, wantN int) {
+	t.Helper()
+	assertReaderPageNotNil(t, what, page)
+	if len(page.Items) != wantN {
+		t.Errorf("%s returned %d rows, want %d: %v against the unbounded answer %v",
+			what, len(page.Items), wantN, readerPageIDs(page), readerPageIDs(unbounded))
+		return
+	}
+	if len(page.Items) > len(unbounded.Items) {
+		t.Errorf("%s returned %v, which is longer than the unbounded answer %v",
+			what, readerPageIDs(page), readerPageIDs(unbounded))
+		return
+	}
+	for i, item := range page.Items {
+		reference := unbounded.Items[i]
+		if item == nil || item.Issue == nil || reference == nil || reference.Issue == nil {
+			t.Errorf("%s returned a nil row at position %d", what, i)
+			continue
+		}
+		got, want := readerCountsOf(item), readerCountsOf(reference)
+		if !got.equal(want) {
+			t.Errorf("%s at position %d returned %s, want %s — a bound chooses how many rows a caller receives, never what any of them says",
+				what, i, got, want)
 		}
 	}
 }

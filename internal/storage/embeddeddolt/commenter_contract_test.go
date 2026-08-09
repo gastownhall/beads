@@ -33,6 +33,9 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("AdvancesALiveStampPastTheThreadsNewestComment", func(t *testing.T) {
 		conformance.RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t, ctx, fixture)
 	})
+	t.Run("TakesTheClockWhenTheThreadIsBehindIt", func(t *testing.T) {
+		conformance.RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t, ctx, fixture)
+	})
 	t.Run("CommentOnAWispLandsOnTheWispThread", func(t *testing.T) {
 		conformance.RunCommenterCommentOnAWispLandsOnTheWispThread(t, ctx, fixture)
 	})

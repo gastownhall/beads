@@ -15,20 +15,111 @@ import (
 	publicops "github.com/steveyegge/beads/issueops"
 )
 
-// This file holds the behavior contract every implementation of
-// publicops.Lifecycle must satisfy, independent of how it reaches storage.
-// There are three of them — the direct store, the embedded store, and the
-// unit-of-work backend — and the first two share an execution path the third
-// does not. Behavior asserted only against one backend has repeatedly drifted
-// on the others, so each of these runs against all three from one spec.
+// This file holds the PERSISTENCE-SEAM half of the behavior contract every
+// implementation of publicops.Lifecycle must satisfy. There are three of them —
+// the direct store, the embedded store, and the unit-of-work backend — and the
+// first two share an execution path the third does not. Behavior asserted only
+// against one backend has repeatedly drifted on the others, so each of these
+// runs against all three from one spec.
+//
+// EVERY CASE HERE TAKES IssueOperationsStagingFixture, whose QueryScalar and
+// UpdateRaw fields are a raw-SQL seam, and whose Operations field is BOTH the
+// seed route and the subject. A backend that cannot open a SQL connection, or
+// whose composition refuses Create, can run none of them. That used to be the
+// whole Lifecycle contract; the accessor-reachable half now lives in
+// lifecycle_create_contract.go, lifecycle_update_contract.go and
+// lifecycle_close_reopen_contract.go, and what remains here is what genuinely
+// needs the seam. Do not add a case to this file that one of those three could
+// hold.
+//
+// WHY EACH SURVIVOR IS STILL HERE, in three honest buckets. Only the first
+// names an obstacle that was checked against the destination fixture; a case in
+// the third is here because nobody has moved it yet, and saying so is the point.
+//
+// A SEAM THE ROLE SURFACE DOES NOT PUBLISH:
+//
+//   - RunIssueOperationsUpdateClosedFieldsMatchClose and
+//     RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes drive
+//     UpdateRaw, and that IS their subject: the closed_at coherence guard and
+//     the raw funnel's accepted value shapes are reachable only through the
+//     untyped column map an external-sync or backfill caller uses. The typed
+//     patch carries no closed_at at all.
+//   - RunIssueOperationsUpdateMetadataReplaceClearsAndValidates ends on
+//     `SELECT metadata IS NULL`. A hydrated issue reads a NULL column and the
+//     empty document back as the same nil bytes (issueops/scan.go), so the
+//     clause it pins — metadata is NEVER SQL NULL, which is the predicate a
+//     consumer filtering on cleared metadata writes — is only observable as a
+//     column probe.
+//   - RunIssueOperationsUpdateStatusCrossingSettlesDependers,
+//     RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender,
+//     RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction and
+//     RunIssueOperationsClaimLeavesBlockedStateAlone all assert the persisted
+//     `is_blocked` projection through the shared blocked-state probe. No read on
+//     any role hydrates that column, so the flag is a raw-row fact by
+//     construction.
+//   - RunIssueOperationsCreateRoutesInfraTypesToWisps installs BARE
+//     workspace-global type vocabulary (types.custom, types.infra) and leaves it
+//     installed. That is the hazard RoleContractBundle names as the reason these
+//     contracts pay for a fixture PER CASE; the accessor-reachable create
+//     contract shares one workspace across its cases, so this belongs where the
+//     per-case fixture is.
+//
+// A PLAUSIBLE OBSTACLE NOBODY HAS CONFIRMED:
+//
+//   - RunIssueOperationsUpdateClaimHonorsConfiguredActiveStatuses needs its rows
+//     to sit at a status the workspace defines only through config
+//     ("ready:active"), which is not a types.Status constant. It reaches that
+//     state through the raw funnel because the CREATE path validates against a
+//     vocabulary that does not parse the `name:category` spelling. Whether a
+//     plain seed hook would write a non-canonical status is a per-backend
+//     question nobody has answered, so the move is not claimed to be free.
+//
+// NO SEAM OBSTACLE — NOT IN THIS SLICE, and each is a candidate for the same
+// treatment:
+//
+//   - RunIssueOperationsUpdateClaimConflictCarriesTheLosingState. Its one
+//     raw-funnel step moves a row to `deferred`, which reads like the case
+//     above and is not: deferred IS a types.Status constant, and the seed hook
+//     the destination fixture carries writes an arbitrary status directly (the
+//     close/reopen contract seeds `closed` through exactly that hook). The
+//     obstacle is the staging fixture's own seed route, which this contract no
+//     longer has to use.
+//   - RunIssueOperationsUpdateWritesEveryScalarPatchField,
+//     RunIssueOperationsUpdateLabelPatchOrdering,
+//     RunIssueOperationsUpdateLabelPatchValueRules,
+//     RunIssueOperationsUpdateFoldsMetadataIntoOneEvent,
+//     RunIssueOperationsRequestValuesAreNotMutated,
+//     RunIssueOperationsUpdateIssuePlaneOnlyRefusesWisps,
+//     RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary,
+//     RunIssueOperationsCreateUnderAParentMintsTheNextChildID,
+//     RunIssueOperationsCreateClosedDerivesTheClosedStamp and
+//     RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress.
 
 // RunIssueOperationsCreateRoutesInfraTypesToWisps pins the facade create
 // against the same infra-type routing the stores' own CreateIssue applies: a
 // configured infra type is ephemeral and lives in the wisp tables, never in
 // issues.
+//
+// THE LAST ARM IS THE ONE THE FIXTURE USED TO HIDE. Every arm above it
+// configures types.infra to "agent", which is ALREADY in the built-in infra set
+// (agent/role/message), so a backend that unioned the configured names with the
+// defaults, or that ignored the key outright, answers identically to one that
+// replaced them. The promise is replacement: a workspace that names its own
+// infra types has said which types are ephemeral, and the ones it did not name
+// are durable. Getting that backwards versions rows the workspace asked to keep
+// out of history, or drops rows it expected versioned — silently, at create.
+//
+// audit_config_metadata_slots_repomtime.go's testAuditConfiguredInfraTypes pins
+// the replacement on the CONFIG READ. This pins it where it is consumed, on all
+// three legs, and the unit-of-work provider resolves the set through its own
+// config use case.
 func RunIssueOperationsCreateRoutesInfraTypesToWisps(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
-	for key, value := range map[string]string{"types.custom": "agent", "types.infra": "agent"} {
+	// "gate" is in the vocabulary from the start but not yet infra: the last
+	// arm needs a name that is creatable AND outside the built-in infra set, so
+	// that promoting it proves the configured value was read rather than
+	// defaulted.
+	for key, value := range map[string]string{"types.custom": "agent,gate", "types.infra": "agent"} {
 		if err := fixture.SetConfig(ctx, key, value); err != nil {
 			t.Fatalf("SetConfig(%s): %v", key, err)
 		}
@@ -75,421 +166,125 @@ func RunIssueOperationsCreateRoutesInfraTypesToWisps(t *testing.T, ctx context.C
 	}
 	assertIssueOperationsRowCount(t, ctx, fixture, "issues", durable.Issue.ID, 1)
 	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", durable.Issue.ID, 0)
-}
 
-// RunIssueOperationsCreateRejectsMissingDependencyTargets pins the facade
-// create against reporting success for an issue whose requested relationships
-// were never written. The batch engine tolerates a dangling edge so a partial
-// import still lands; a guarded single create must refuse the whole request
-// with a typed error naming the target, and leave nothing behind.
-func RunIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-	seed := &types.Issue{ID: fixture.IssuePrefix + "-skipdep-seed", Title: "seed", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-	if err := fixture.CreateIssue(ctx, seed, "seed"); err != nil {
-		t.Fatalf("seed: %v", err)
+	// A configured set REPLACES the built-in one rather than adding to it. The
+	// workspace now says gate is its only infra type, so agent — a built-in
+	// infra name, and ephemeral in every arm above — has to come back durable.
+	if err := fixture.SetConfig(ctx, "types.infra", "gate"); err != nil {
+		t.Fatalf("SetConfig(types.infra, gate): %v", err)
 	}
-
-	cases := []struct {
-		name    string
-		id      string
-		request publicops.CreateRequest
-		target  string
-	}{
-		{
-			name:   "explicit dependency",
-			id:     fixture.IssuePrefix + "-skipdep-explicit",
-			target: fixture.IssuePrefix + "-skipdep-missing-dep",
-			request: publicops.CreateRequest{
-				Dependencies: []publicops.CreateDependency{{TargetID: fixture.IssuePrefix + "-skipdep-missing-dep", Type: types.DepBlocks}},
-			},
-		},
-		{
-			name:    "parent",
-			id:      fixture.IssuePrefix + "-skipdep-parent",
-			target:  fixture.IssuePrefix + "-skipdep-missing-parent",
-			request: publicops.CreateRequest{ParentID: fixture.IssuePrefix + "-skipdep-missing-parent"},
-		},
-		{
-			name:   "waits-for spawner",
-			id:     fixture.IssuePrefix + "-skipdep-waits",
-			target: fixture.IssuePrefix + "-skipdep-missing-spawner",
-			request: publicops.CreateRequest{
-				WaitsFor: &publicops.WaitsFor{SpawnerID: fixture.IssuePrefix + "-skipdep-missing-spawner"},
-			},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			request := tc.request
-			request.Actor = "writer"
-			request.ForceIDPrefix = true
-			request.Issue = &types.Issue{ID: tc.id, Title: tc.name, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-			_, err := fixture.Operations.Create(ctx, request)
-			if err == nil {
-				t.Fatal("Create returned nil error, want a refusal for the missing dependency target")
-			}
-			if !errors.Is(err, publicops.ErrNotFound) {
-				t.Errorf("Create error = %v, want ErrNotFound", err)
-			}
-			if !errors.Is(err, publicops.ErrValidation) {
-				t.Errorf("Create error = %v, want ErrValidation", err)
-			}
-			if !strings.Contains(err.Error(), tc.target) {
-				t.Errorf("Create error = %v, want it to name the missing target %q", err, tc.target)
-			}
-			assertIssueOperationsRowCount(t, ctx, fixture, "issues", tc.id, 0)
-			assertIssueOperationsRowCount(t, ctx, fixture, "wisps", tc.id, 0)
-		})
-	}
-
-	// A create whose targets all exist is unaffected.
-	result, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue:         &types.Issue{ID: fixture.IssuePrefix + "-skipdep-ok", Title: "ok", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
-		Dependencies:  []publicops.CreateDependency{{TargetID: seed.ID, Type: types.DepBlocks}},
+	evicted, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		Issue: &types.Issue{Title: "evicted infra type", Status: types.StatusOpen, Priority: 2, IssueType: types.IssueType("agent")},
 	})
 	if err != nil {
-		t.Fatalf("Create with existing target: %v", err)
+		t.Fatalf("Create agent once the configured infra set no longer names it: %v", err)
 	}
-	if len(result.Issue.Dependencies) != 1 || result.Issue.Dependencies[0].DependsOnID != seed.ID {
-		t.Fatalf("Create result dependencies = %#v, want one edge to %s", result.Issue.Dependencies, seed.ID)
+	if evicted.Issue.Ephemeral {
+		t.Errorf("create result Ephemeral = true for type agent, want false: a configured types.infra REPLACES the built-in set, it does not extend it")
 	}
-}
+	assertIssueOperationsRowCount(t, ctx, fixture, "issues", evicted.Issue.ID, 1)
+	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", evicted.Issue.ID, 0)
 
-// RunIssueOperationsCreateRefusesAnOccupiedID pins the create-only half of the
-// Lifecycle.Create clause: "an occupied ID returns ErrAlreadyExists and leaves
-// persistent state unchanged" (issueops/issueops.go, Lifecycle.Create). The
-// issue and wisp tables share one ID space, so ACROSS is asserted in both
-// directions here, not only for the plane the create happens to target.
-//
-// The proxied-server `bd create` route asked its use case for a plain create
-// with no create-only guard, so `bd create --id <occupied>` silently UPSERTED
-// the stored row and reported success while the direct route refused.
-//
-// THIS CASE AND conformance.go's testCreateDuplicate PIN OPPOSITE SEMANTICS OF
-// THE SAME CORE. That one drives the raw CreateIssue verb, which UPSERTS, and
-// asserts only that the second write leaves exactly one row; this one drives
-// the create-only role and asserts a typed refusal with the stored row
-// unchanged. They read like duplicates and are not: retiring either against
-// the other deletes the only proof of one of the two behaviors.
-func RunIssueOperationsCreateRefusesAnOccupiedID(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	// seedIssueOperationsLabeledIssue titles the issue after its own ID, which
-	// is what the refusal must leave in place.
-	occupied := fixture.IssuePrefix + "-occupied-issue"
-	seedIssueOperationsLabeledIssue(t, ctx, fixture, occupied, "seeded")
-
-	_, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: occupied, Title: "overwriting title", Status: types.StatusOpen,
-			Priority: 1, IssueType: types.TypeBug, Labels: []string{"overwriting"},
-		},
+	// The control: without it, a backend that had simply stopped routing
+	// anything to the wisps plane would pass the arm above.
+	promoted, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor: "writer",
+		Issue: &types.Issue{Title: "promoted infra type", Status: types.StatusOpen, Priority: 2, IssueType: types.IssueType("gate")},
 	})
-	assertIssueOperationsAlreadyExists(t, err, "durable create over an occupied durable ID", occupied)
-	assertIssueOperationsRowCount(t, ctx, fixture, "issues", occupied, 1)
-	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", occupied, 0)
-	// "leaves persistent state unchanged" is the load-bearing half: an upsert
-	// reported as a refusal would still have rewritten every column.
-	assertIssueOperationsScalarValue(t, ctx, fixture, "occupied issue title", occupied,
-		"SELECT title FROM issues WHERE id = ?", []any{occupied})
-	assertIssueOperationsScalarValue(t, ctx, fixture, "occupied issue type", string(types.TypeTask),
-		"SELECT issue_type FROM issues WHERE id = ?", []any{occupied})
-	assertIssueOperationsLabels(t, ctx, fixture, occupied, "after refused durable create", "seeded")
-
-	// An ID occupied by a WISP refuses a durable create.
-	wispID := fixture.IssuePrefix + "-occupied-wisp"
-	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: wispID, Title: "resident wisp", Status: types.StatusOpen,
-			Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
-		},
-	}); err != nil {
-		t.Fatalf("seed resident wisp: %v", err)
-	}
-	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", wispID, 1)
-
-	_, err = fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: wispID, Title: "durable squatter", Status: types.StatusOpen,
-			Priority: 2, IssueType: types.TypeTask,
-		},
-	})
-	assertIssueOperationsAlreadyExists(t, err, "durable create over an occupied wisp ID", wispID)
-	assertIssueOperationsRowCount(t, ctx, fixture, "issues", wispID, 0)
-	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", wispID, 1)
-	assertIssueOperationsScalarValue(t, ctx, fixture, "resident wisp title", "resident wisp",
-		"SELECT title FROM wisps WHERE id = ?", []any{wispID})
-
-	// And the other direction: an ID occupied by a durable issue refuses an
-	// ephemeral create.
-	_, err = fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: occupied, Title: "wisp squatter", Status: types.StatusOpen,
-			Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
-		},
-	})
-	assertIssueOperationsAlreadyExists(t, err, "ephemeral create over an occupied durable ID", occupied)
-	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", occupied, 0)
-	assertIssueOperationsScalarValue(t, ctx, fixture, "occupied issue title after wisp squat", occupied,
-		"SELECT title FROM issues WHERE id = ?", []any{occupied})
-}
-
-// assertIssueOperationsAlreadyExists checks the refusal an occupied ID gets.
-// The message must name the ID: a caller refused with a bare "issue already
-// exists" cannot act on it.
-func assertIssueOperationsAlreadyExists(t *testing.T, err error, label, id string) {
-	t.Helper()
-	if err == nil {
-		t.Fatalf("%s: Create returned nil error, want ErrAlreadyExists", label)
-	}
-	if !errors.Is(err, publicops.ErrAlreadyExists) {
-		t.Errorf("%s: Create error = %v, want ErrAlreadyExists", label, err)
-	}
-	if !strings.Contains(err.Error(), id) {
-		t.Errorf("%s: Create error = %v, want it to name the occupied ID %q", label, err, id)
-	}
-}
-
-// RunIssueOperationsCreateRefusesAForeignIDPrefix pins the guard
-// CreateRequest.ForceIDPrefix exists to lift: the flag "permits an explicit ID
-// outside the configured prefix" (issueops/issueops.go:208-209), so without it
-// such an ID is ErrPrefixMismatch — "returned when an issue ID does not match
-// the configured prefix" (issueops/errors.go:81-82) — under Create's standing
-// promise that "a refusal or validation error also leaves no partial persistent
-// state".
-//
-// Every other create case in this file sets ForceIDPrefix, which is what makes
-// this one necessary: the flag is asserted only from the side that bypasses the
-// check, so nothing here says the check exists. The refusal is TYPED because
-// both front doors decide whether to re-offer the create with --force from
-// errors.Is rather than from the message, and it is checked on BOTH planes
-// because an ephemeral create routes to a different table and could plausibly
-// skip a guard the durable one applies.
-func RunIssueOperationsCreateRefusesAForeignIDPrefix(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	// A prefix no fixture configures, so the ID is foreign whatever this
-	// workspace calls itself.
-	foreign := "lcrforeign-" + fixture.IssuePrefix + "-1"
-	foreignWisp := "lcrforeign-" + fixture.IssuePrefix + "-2"
-
-	for _, tc := range []struct {
-		name      string
-		id        string
-		ephemeral bool
-		table     string
-	}{
-		{name: "durable", id: foreign, table: "issues"},
-		{name: "ephemeral", id: foreignWisp, ephemeral: true, table: "wisps"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			_, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-				Actor: "writer",
-				Issue: &types.Issue{
-					ID: tc.id, Title: tc.name, Status: types.StatusOpen,
-					Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral,
-				},
-			})
-			if !errors.Is(err, publicops.ErrPrefixMismatch) {
-				t.Fatalf("unforced create at the foreign ID %q: err = %v, want ErrPrefixMismatch", tc.id, err)
-			}
-			assertIssueOperationsRowCount(t, ctx, fixture, "issues", tc.id, 0)
-			assertIssueOperationsRowCount(t, ctx, fixture, "wisps", tc.id, 0)
-
-			// The same request with the flag lands, which is what makes the
-			// refusal a policy the caller can override rather than a hard limit.
-			forced, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-				Actor: "writer", ForceIDPrefix: true,
-				Issue: &types.Issue{
-					ID: tc.id, Title: tc.name, Status: types.StatusOpen,
-					Priority: 2, IssueType: types.TypeTask, Ephemeral: tc.ephemeral,
-				},
-			})
-			if err != nil {
-				t.Fatalf("forced create at the foreign ID %q: %v", tc.id, err)
-			}
-			if forced.Issue.ID != tc.id {
-				t.Errorf("forced create result ID = %q, want the requested %q", forced.Issue.ID, tc.id)
-			}
-			assertIssueOperationsRowCount(t, ctx, fixture, tc.table, tc.id, 1)
-		})
-	}
-}
-
-// RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset pins the sentence
-// MetadataPatch opens with: "Replace is mutually exclusive with Merge, Set, and
-// Unset. Without Replace, operations apply Merge, then Set keys in
-// deterministic order, then Unset" (issueops/issueops.go:83-86).
-//
-// The order is only observable when the three edits COLLIDE, so every key here
-// appears in more than one of them: a key merged in and then set and then unset
-// must end up absent, and one merged in and unset must not survive because the
-// merge ran later. A body applying Unset before Set leaves the same document
-// looking plausible — it just carries a key the caller asked to remove — which
-// is why the existing metadata cases, none of which collide, cannot see it.
-//
-// The exclusivity half is asserted through the stored document rather than the
-// error alone: a body that refused the combination AFTER applying the Replace
-// would return the right sentinel over a rewritten row.
-func RunIssueOperationsUpdateMetadataPatchOrdersMergeSetUnset(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	id := fixture.IssuePrefix + "-metadata-order"
-	if err := fixture.CreateIssue(ctx, &types.Issue{
-		ID: id, Title: "metadata order", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
-		Metadata: json.RawMessage(`{"keep":"seeded","drop":"seeded"}`),
-	}, "seed"); err != nil {
-		t.Fatalf("seed %s: %v", id, err)
-	}
-
-	ordered, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
-		Metadata: publicops.MetadataPatch{
-			Merge: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"keep":"merged","contested":"merged","merged":true}`)},
-			Set: map[string]json.RawMessage{
-				"added":     json.RawMessage(`"set"`),
-				"keep":      json.RawMessage(`"set"`),
-				"contested": json.RawMessage(`"set"`),
-				// NOT STRINGS, deliberately. Every other Set value in this file
-				// is a JSON string, so a body that accepted only strings — uow
-				// validates Set values by shape in its own gate, before the
-				// shared apply — passed every case here. A number and a nested
-				// object are the two shapes a caller actually stores.
-				"count":  json.RawMessage(`7`),
-				"nested": json.RawMessage(`{"a":[1,2],"b":{"c":true}}`),
-			},
-			Unset: []string{"keep", "drop"},
-		},
-	}})
 	if err != nil {
-		t.Fatalf("ordered metadata patch on %s: %v", id, err)
+		t.Fatalf("Create the newly configured infra type gate: %v", err)
 	}
-	if !ordered.Changed {
-		t.Errorf("ordered metadata patch on %s reported Changed = false, want a committed edit", id)
+	if !promoted.Issue.Ephemeral {
+		t.Errorf("create result Ephemeral = false for the configured infra type gate, want true")
 	}
-	// "keep" was merged, then set, then unset — removal is last, so it is gone.
-	// "drop" was seeded and unset. "merged" and "added" are what survives.
-	//
-	// "contested" is what makes the MERGE≺SET half of this case falsifiable, and
-	// it is the reason a key colliding in Merge and Set is not enough on its own:
-	// "keep" collides too, but Unset removes it, so a body running Set BEFORE
-	// Merge produces the identical document and this case would pass over a
-	// broken order. "contested" survives the patch, so it records which of the
-	// two wrote last — Set does, per issueops.go's Merge≺Set≺Unset promise.
-	assertIssueOperationsMetadata(t, "ordered metadata patch", ordered.Issue.Metadata,
-		`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
-	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after the ordered metadata patch",
-		`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
-
-	// Replace beside any incremental edit is refused, and the document the
-	// replacement would have written never lands.
-	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
-	for name, patch := range map[string]publicops.MetadataPatch{
-		"replace with set": {
-			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
-			Set:     map[string]json.RawMessage{"must_not_persist": json.RawMessage(`true`)},
-		},
-		"replace with merge": {
-			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
-			Merge:   publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"must_not_persist":true}`)},
-		},
-		"replace with unset": {
-			Replace: publicops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"replacement":true}`)},
-			Unset:   []string{"added"},
-		},
-	} {
-		t.Run(name, func(t *testing.T) {
-			if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-				Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{Metadata: patch},
-			}); !errors.Is(err, publicops.ErrValidation) {
-				t.Fatalf("%s: err = %v, want ErrValidation", name, err)
-			}
-			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after "+name,
-				`{"added":"set","contested":"set","count":7,"merged":true,"nested":{"a":[1,2],"b":{"c":true}}}`)
-		})
-	}
-	events.assert(t, "refused replace-plus-incremental patches", 0, nil)
+	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", promoted.Issue.ID, 1)
+	assertIssueOperationsRowCount(t, ctx, fixture, "issues", promoted.Issue.ID, 0)
 }
 
-// RunIssueOperationsCreateInheritsParentLabels pins
-// CreateRequest.InheritLabelsFromParent — "copies the parent's labels at
-// creation" — against CreateRequest.Issue's own "Labels are authoritative"
-// (both issueops/issueops.go, CreateRequest). One create must satisfy both.
+// RunIssueOperationsCreateUnderAParentMintsTheNextChildID pins the ID a create
+// with a ParentID and no id of its own comes back with. The minting itself is
+// already DRIVEN by RunIssueOperationsCreateInheritsParentLabels — which reads
+// the labels that ride along and never looks at the id — so the shape of the id
+// is unpinned on every leg today.
 //
-// The two `bd create --parent` front doors spell it differently — the direct
-// route merges the parent's labels itself so its --dry-run preview can show
-// them and leaves the flag off, the proxied route sets the flag — so the merge
-// has to be the same set either way.
-func RunIssueOperationsCreateInheritsParentLabels(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+// TWO GENUINELY DIFFERENT BODIES ANSWER IT. The two stores reach
+// issueops.GetNextChildIDTx through the role's create; the unit-of-work
+// provider mints in internal/storage/domain/db/child_counter.go, which scans
+// and parses the suffix itself against its own parent-table probe. Neither is
+// pinned by any contract case, and the id is the one part of a create the
+// caller could not have supplied and cannot correct afterwards: it is the
+// handle every later command uses.
+//
+// THE FIXTURE IS THE MIGRATION, in two places.
+//
+// A SIBLING IS SEEDED OUT OF BAND, at .5, with no .3 or .4 beside it. A counter
+// that merely incremented per call would answer .3 here; the promise is that
+// the mint SELF-HEALS to one past the highest direct child that exists, which
+// is what keeps a restored or hand-edited workspace from minting an id that is
+// already taken. A case that only ever creates children in order cannot state
+// the difference.
+//
+// A GRANDCHILD IS SEEDED AT .5.1, which is the trap the scan is written around:
+// the ids are matched with a prefix pattern, and a pattern that does not stop
+// at the first separator counts .5.1 as a direct child and mints past it.
+//
+// The last arm carries the collation half (bd-oyvc2.10): two parents whose ids
+// differ ONLY IN CASE keep separate counters, because the scan's comparison is
+// case-sensitive. Where it is not, one team's beads silently advance another's.
+//
+// Residue left where it is: GetNextChildID's "advance the counter WITHOUT
+// creating an issue" and its wisp-parent routing stay audit-only. Neither is
+// expressible here — no role reserves an id, and this fixture has no hook that
+// seeds a wisp parent.
+func RunIssueOperationsCreateUnderAParentMintsTheNextChildID(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
-	parent := fixture.IssuePrefix + "-inherit-parent"
-	seedIssueOperationsLabeledIssue(t, ctx, fixture, parent, "shared", "from-parent")
+	parent := fixture.IssuePrefix + "-childmint"
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, parent)
 
-	inherited, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:                   "writer",
-		ForceIDPrefix:           true,
-		ParentID:                parent,
-		InheritLabelsFromParent: true,
+	assertIssueOperationsMintedChildID(t, ctx, fixture, parent, parent+".1", "the first child of a childless parent")
+	assertIssueOperationsMintedChildID(t, ctx, fixture, parent, parent+".2", "the second child")
+
+	// The out-of-band sibling and its own child. Neither is created through the
+	// role, so the counter never saw them go in.
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, parent+".5")
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, parent+".5.1")
+	assertIssueOperationsMintedChildID(t, ctx, fixture, parent, parent+".6",
+		"the child after a seeded .5 with a grandchild at .5.1")
+
+	lower := fixture.IssuePrefix + "-childcase"
+	upper := fixture.IssuePrefix + "-childCASE"
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, lower)
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, upper)
+	seedIssueOperationsLabeledIssue(t, ctx, fixture, upper+".7")
+	assertIssueOperationsMintedChildID(t, ctx, fixture, lower, lower+".1",
+		"the first child of a parent whose differently-cased twin already has one")
+}
+
+// assertIssueOperationsMintedChildID creates one child under parent with no id
+// of its own and holds the minted id to want, then checks the row is really
+// there: an id the caller cannot resolve afterwards is not an answer.
+func assertIssueOperationsMintedChildID(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, parent, want, label string) {
+	t.Helper()
+	created, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:    "writer",
+		ParentID: parent,
 		Issue: &types.Issue{
-			Title: "inheriting child", Status: types.StatusOpen, Priority: 2,
-			IssueType: types.TypeTask, Labels: []string{"own", "shared"},
+			Title: label, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
 		},
 	})
 	if err != nil {
-		t.Fatalf("Create inheriting child: %v", err)
+		t.Fatalf("create %s under %s: %v", label, parent, err)
 	}
-	// A label the child and the parent both carry is one label, not two: the
-	// count assertion inside this helper is what says so.
-	assertIssueOperationsLabels(t, ctx, fixture, inherited.Issue.ID, "inheriting child", "own", "shared", "from-parent")
-	// CreateResult.Issue is "a detached snapshot with labels", so the same set
-	// has to come back on the result rather than only from the row.
-	assertIssueOperationsStringSet(t, "inheriting child result labels", inherited.Issue.Labels, "own", "shared", "from-parent")
-
-	// With inheritance off, the request's own labels are the whole set — the
-	// authoritative clause standing alone.
-	own, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		ParentID:      parent,
-		Issue: &types.Issue{
-			Title: "own labels only", Status: types.StatusOpen, Priority: 2,
-			IssueType: types.TypeTask, Labels: []string{"own"},
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create child without inheritance: %v", err)
+	if created.Issue == nil {
+		t.Fatalf("create %s under %s returned no issue", label, parent)
 	}
-	assertIssueOperationsLabels(t, ctx, fixture, own.Issue.ID, "child without inheritance", "own")
-	assertIssueOperationsStringSet(t, "child without inheritance result labels", own.Issue.Labels, "own")
-
-	// Inheriting from a label-less parent adds nothing rather than failing.
-	bare := fixture.IssuePrefix + "-inherit-bare-parent"
-	seedIssueOperationsLabeledIssue(t, ctx, fixture, bare)
-	none, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:                   "writer",
-		ForceIDPrefix:           true,
-		ParentID:                bare,
-		InheritLabelsFromParent: true,
-		Issue: &types.Issue{
-			Title: "nothing to inherit", Status: types.StatusOpen, Priority: 2,
-			IssueType: types.TypeTask,
-		},
-	})
-	if err != nil {
-		t.Fatalf("Create child of label-less parent: %v", err)
+	if created.Issue.ID != want {
+		t.Errorf("%s was minted %q, want %q", label, created.Issue.ID, want)
+		return
 	}
-	assertIssueOperationsLabels(t, ctx, fixture, none.Issue.ID, "child of label-less parent")
-	assertIssueOperationsStringSet(t, "child of label-less parent result labels", none.Issue.Labels)
+	assertIssueOperationsRowCount(t, ctx, fixture, "issues", want, 1)
 }
 
 // RunIssueOperationsUpdateFoldsMetadataIntoOneEvent pins a compound update to a
@@ -543,121 +338,6 @@ func RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T, ctx context
 	events.assert(t, "no-op metadata update", 0, nil)
 }
 
-// RunIssueOperationsUpdateClosePolicy pins what a generic status update does
-// when it crosses from a non-done status into the done category: it answers to
-// the same policy `bd close` does — the open-children refusal and the
-// live-direct-blocker refusal — and ForceClosePolicy is how a caller overrides
-// them. Until now the contract had no boundary-crossing case at all, and that
-// gap is exactly how two earlier attempts at a shared policy check reached a
-// backend that could not satisfy them without any test noticing.
-func RunIssueOperationsUpdateClosePolicy(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	parentID := fixture.IssuePrefix + "-closepolicy-parent"
-	seedClosePolicyIssue(t, ctx, fixture, parentID, publicops.CreateRequest{})
-	seedClosePolicyIssue(t, ctx, fixture, fixture.IssuePrefix+"-closepolicy-child", publicops.CreateRequest{ParentID: parentID})
-
-	blockerID := fixture.IssuePrefix + "-closepolicy-blocker"
-	blockedID := fixture.IssuePrefix + "-closepolicy-blocked"
-	seedClosePolicyIssue(t, ctx, fixture, blockerID, publicops.CreateRequest{})
-	seedClosePolicyIssue(t, ctx, fixture, blockedID, publicops.CreateRequest{
-		Dependencies: []publicops.CreateDependency{{TargetID: blockerID, Type: types.DepBlocks}},
-	})
-
-	// An open child refuses, with the typed error and its count, and writes
-	// nothing — not the row, not an event.
-	events := newIssueOperationsEventCounter(t, ctx, fixture, parentID)
-	var openChildrenErr *publicops.CloseOpenChildrenError
-	_, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
-	if !errors.As(err, &openChildrenErr) {
-		t.Fatalf("update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
-	}
-	if openChildrenErr.OpenChildren != 1 {
-		t.Errorf("refusal reported %d open children, want 1", openChildrenErr.OpenChildren)
-	}
-	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
-	events.assert(t, "refused crossing", 0, nil)
-
-	// A claim rides the same atomic update. An open-child refusal must leave
-	// every part of that compound request inert, including the would-be claim.
-	var beforeAssignee string
-	var beforeRowVersion, beforeClosedAt string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &beforeAssignee, &beforeRowVersion, &beforeClosedAt); err != nil {
-		t.Fatalf("read compound-refusal state for %s: %v", parentID, err)
-	}
-	claimAndClose := closePolicyStatusRequest(parentID, false)
-	claimAndClose.Claim = true
-	_, err = fixture.Operations.Update(ctx, claimAndClose)
-	openChildrenErr = nil
-	if !errors.As(err, &openChildrenErr) {
-		t.Fatalf("claiming update %s into done with an open child: err = %v, want CloseOpenChildrenError", parentID, err)
-	}
-	var afterAssignee string
-	var afterRowVersion, afterClosedAt string
-	if err := fixture.QueryScalar(ctx, "SELECT COALESCE(assignee, ''), CAST(row_lock AS CHAR), COALESCE(CAST(closed_at AS CHAR), '') FROM issues WHERE id = ?", []any{parentID}, &afterAssignee, &afterRowVersion, &afterClosedAt); err != nil {
-		t.Fatalf("read compound-refusal state after %s: %v", parentID, err)
-	}
-	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
-	if afterAssignee != beforeAssignee {
-		t.Errorf("compound refusal assignee = %q, want unchanged %q", afterAssignee, beforeAssignee)
-	}
-	if afterRowVersion != beforeRowVersion {
-		t.Errorf("compound refusal row version = %q, want unchanged %q", afterRowVersion, beforeRowVersion)
-	}
-	if afterClosedAt != beforeClosedAt {
-		t.Errorf("compound refusal closed_at = %v, want unchanged %v", afterClosedAt, beforeClosedAt)
-	}
-	events.assert(t, "refused claiming crossing", 0, nil)
-
-	// A live direct blocker refuses too.
-	_, err = fixture.Operations.Update(ctx, closePolicyStatusRequest(blockedID, false))
-	if !errors.Is(err, publicops.ErrCloseBlocked) {
-		t.Fatalf("update %s into done with a live blocker: err = %v, want ErrCloseBlocked", blockedID, err)
-	}
-	assertClosePolicyStatus(t, ctx, fixture, blockedID, types.StatusOpen)
-
-	// Force bypasses close policy and nothing else. A stale ExpectedVersion is
-	// an orthogonal precondition, checked ahead of the policy and never waived
-	// by it — the same ordering a checked close applies.
-	stale := int64(-1)
-	staleRequest := closePolicyStatusRequest(parentID, true)
-	staleRequest.ExpectedVersion = &stale
-	if _, err := fixture.Operations.Update(ctx, staleRequest); !errors.Is(err, publicops.ErrVersionMismatch) {
-		t.Fatalf("forced crossing with a stale version: err = %v, want ErrVersionMismatch", err)
-	}
-	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusOpen)
-
-	// ForceClosePolicy bypasses both, and only those.
-	for _, id := range []string{parentID, blockedID} {
-		forced, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(id, true))
-		if err != nil {
-			t.Fatalf("forced update %s into done: %v", id, err)
-		}
-		if !forced.Changed || forced.Issue.Status != types.StatusClosed {
-			t.Fatalf("forced update %s into done = %#v, want a committed close", id, forced)
-		}
-	}
-
-	// A done-to-done restatement is filtered out as a no-op before any policy
-	// could observe it, so it needs no force even though the child is still open.
-	reclose, err := fixture.Operations.Update(ctx, closePolicyStatusRequest(parentID, false))
-	if err != nil {
-		t.Fatalf("restate %s as done: %v", parentID, err)
-	}
-	if reclose.Changed {
-		t.Errorf("restating %s as done reported Changed = true, want a no-op", parentID)
-	}
-
-	// A status change that does not reach the done category is untouched by any
-	// of this, open child or not.
-	nonCrossing := closePolicyStatusRequest(parentID, false)
-	nonCrossing.Patch.Status.Value = types.StatusInProgress
-	if _, err := fixture.Operations.Update(ctx, nonCrossing); err != nil {
-		t.Fatalf("non-crossing status update on %s: %v", parentID, err)
-	}
-	assertClosePolicyStatus(t, ctx, fixture, parentID, types.StatusInProgress)
-}
-
 // RunIssueOperationsUpdateClosedFieldsMatchClose pins the close-lifecycle
 // columns a generic update leaves behind (ga-kjkv1). A status update that
 // crosses into closed is a close by another name, so it must land the row a
@@ -677,7 +357,7 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	// close's reason or session. This is the misattribution ga-kjkv1 fixes:
 	// `bd show` renders a stale closed_by_session as "Closed by session".
 	recloseID := fixture.IssuePrefix + "-closedfields-reclose"
-	seedClosePolicyIssue(t, ctx, fixture, recloseID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, recloseID)
 	if _, err := fixture.Operations.Close(ctx, publicops.CloseRequest{
 		Actor: "writer", IssueID: recloseID, Reason: "first pass", Session: "session-one",
 	}); err != nil {
@@ -700,7 +380,7 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	// An explicit key still wins over its default, so the CLI's own
 	// closed_by_session pass-through keeps working.
 	explicitID := fixture.IssuePrefix + "-closedfields-explicit"
-	seedClosePolicyIssue(t, ctx, fixture, explicitID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, explicitID)
 	if err := fixture.UpdateRaw(ctx, explicitID, map[string]any{
 		"status": string(types.StatusClosed), "closed_by_session": "session-two", "close_reason": "handled",
 	}, "writer"); err != nil {
@@ -716,7 +396,7 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	// values onto an OPEN row does: the columns are allowlisted by name, and
 	// with no closed_at in the map the coherence guard has nothing to refuse.
 	staleID := fixture.IssuePrefix + "-closedfields-stale"
-	seedClosePolicyIssue(t, ctx, fixture, staleID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, staleID)
 	if err := fixture.UpdateRaw(ctx, staleID, map[string]any{
 		"close_reason": "stale", "closed_by_session": "stale-sess",
 	}, "writer"); err != nil {
@@ -732,7 +412,7 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	// The coherence guard. Stamping closed_at on a row that stays open is
 	// refused by name, typed as a validation error, and writes nothing.
 	guardID := fixture.IssuePrefix + "-closedfields-guard"
-	seedClosePolicyIssue(t, ctx, fixture, guardID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, guardID)
 	stamp := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
 	events := newIssueOperationsEventCounter(t, ctx, fixture, guardID)
 	err := fixture.UpdateRaw(ctx, guardID, map[string]any{"closed_at": stamp}, "writer")
@@ -804,7 +484,7 @@ func RunIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T, ctx context.Co
 	// result issue: a result hydrated from the pre-move struct reports a session
 	// that is no longer in any table.
 	moveID := fixture.IssuePrefix + "-closedfields-move"
-	seedClosePolicyIssue(t, ctx, fixture, moveID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, moveID)
 	if _, err := fixture.Operations.Close(ctx, publicops.CloseRequest{
 		Actor: "writer", IssueID: moveID, Reason: "moved", Session: "move-session",
 	}); err != nil {
@@ -891,128 +571,6 @@ func assertClosedFieldsInTable(t *testing.T, ctx context.Context, fixture IssueO
 	}
 }
 
-// RunIssueOperationsUpdateAssigneeTransferFence pins what an assignee edit does
-// when it takes an issue away from a live foreign holder: it is refused with
-// ErrAlreadyClaimed, and ForceAssigneeTransfer, an ExpectedAssignee
-// compare-and-set, or a configured claim.pools alias are the only ways past it.
-// The contract had no assignee-transfer case at all, and that gap is exactly how
-// one backend came to permit a transfer the other two refuse.
-func RunIssueOperationsUpdateAssigneeTransferFence(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	heldID := fixture.IssuePrefix + "-xferfence-held"
-	seedClosePolicyIssue(t, ctx, fixture, heldID, publicops.CreateRequest{})
-	claimed, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true})
-	if err != nil {
-		t.Fatalf("claim %s for holder: %v", heldID, err)
-	}
-	if !claimed.Changed {
-		t.Fatalf("claiming %s reported Changed = false, want a committed claim", heldID)
-	}
-	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
-
-	// The fence itself: an unforced transfer away from the live holder is
-	// refused, and the refusal writes nothing — not the row, not an event.
-	events := newIssueOperationsEventCounter(t, ctx, fixture, heldID)
-	if _, err := fixture.Operations.Update(ctx, assigneeTransferRequest(heldID, "rival", "rival")); !errors.Is(err, publicops.ErrAlreadyClaimed) {
-		t.Fatalf("unforced transfer of %s away from its holder: err = %v, want ErrAlreadyClaimed", heldID, err)
-	}
-	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
-	events.assert(t, "refused transfer", 0, nil)
-
-	// A stale precondition is orthogonal to the fence and is checked ahead of
-	// it, so a request that fails both reports the precondition — the same
-	// ordering a forced close-policy crossing gets.
-	staleVersion := int64(-1)
-	staleVersionRequest := assigneeTransferRequest(heldID, "rival", "rival")
-	staleVersionRequest.ExpectedVersion = &staleVersion
-	if _, err := fixture.Operations.Update(ctx, staleVersionRequest); !errors.Is(err, publicops.ErrVersionMismatch) {
-		t.Fatalf("fenced transfer of %s with a stale version: err = %v, want ErrVersionMismatch", heldID, err)
-	}
-	staleStatus := types.StatusOpen
-	staleStatusRequest := assigneeTransferRequest(heldID, "rival", "rival")
-	staleStatusRequest.ExpectedStatus = &staleStatus
-	if _, err := fixture.Operations.Update(ctx, staleStatusRequest); !errors.Is(err, publicops.ErrStatusMismatch) {
-		t.Fatalf("fenced transfer of %s with a stale status: err = %v, want ErrStatusMismatch", heldID, err)
-	}
-	assertLiveAssignee(t, ctx, fixture, heldID, "holder")
-
-	// Restating the holder's own name is not a transfer, so a third party may
-	// do it unforced — and it changes nothing.
-	reassert, err := fixture.Operations.Update(ctx, assigneeTransferRequest(heldID, "bystander", "holder"))
-	if err != nil {
-		t.Fatalf("reassert %s's current assignee: %v", heldID, err)
-	}
-	if reassert.Changed {
-		t.Errorf("reasserting %s's current assignee reported Changed = true, want a no-op", heldID)
-	}
-
-	// An ExpectedAssignee compare-and-set naming the holder replaces the fence:
-	// the caller proved its view of the claim is current.
-	casRequest := assigneeTransferRequest(heldID, "rival", "rival")
-	holder := "holder"
-	casRequest.ExpectedAssignee = &holder
-	cas, err := fixture.Operations.Update(ctx, casRequest)
-	if err != nil {
-		t.Fatalf("compare-and-set transfer of %s: %v", heldID, err)
-	}
-	if !cas.Changed || cas.Issue.Assignee != "rival" {
-		t.Fatalf("compare-and-set transfer of %s = %#v, want a committed transfer to rival", heldID, cas.Issue)
-	}
-	assertLiveAssignee(t, ctx, fixture, heldID, "rival")
-
-	// ForceAssigneeTransfer is the unconditional override.
-	forcedRequest := assigneeTransferRequest(heldID, "usurper", "usurper")
-	forcedRequest.ForceAssigneeTransfer = true
-	forced, err := fixture.Operations.Update(ctx, forcedRequest)
-	if err != nil {
-		t.Fatalf("forced transfer of %s: %v", heldID, err)
-	}
-	if !forced.Changed || forced.Issue.Assignee != "usurper" {
-		t.Fatalf("forced transfer of %s = %#v, want a committed transfer to usurper", heldID, forced.Issue)
-	}
-	assertLiveAssignee(t, ctx, fixture, heldID, "usurper")
-
-	// A holder that is a configured claim.pools alias is a group placeholder,
-	// not an owner, so taking work from the pool needs no force.
-	if err := fixture.SetConfig(ctx, "claim.pools", "pool-crew"); err != nil {
-		t.Fatalf("SetConfig(claim.pools): %v", err)
-	}
-	pooledID := fixture.IssuePrefix + "-xferfence-pooled"
-	seedClosePolicyIssue(t, ctx, fixture, pooledID, publicops.CreateRequest{})
-	pooledRequest := assigneeTransferRequest(pooledID, "seed", "pool-crew")
-	pooledRequest.Claim = true
-	if _, err := fixture.Operations.Update(ctx, pooledRequest); err != nil {
-		t.Fatalf("assign %s to the pool: %v", pooledID, err)
-	}
-	assertLiveAssignee(t, ctx, fixture, pooledID, "pool-crew")
-	taken, err := fixture.Operations.Update(ctx, assigneeTransferRequest(pooledID, "member", "member"))
-	if err != nil {
-		t.Fatalf("unforced transfer of pooled %s: %v", pooledID, err)
-	}
-	if !taken.Changed || taken.Issue.Assignee != "member" {
-		t.Fatalf("unforced transfer of pooled %s = %#v, want a committed transfer to member", pooledID, taken.Issue)
-	}
-	assertLiveAssignee(t, ctx, fixture, pooledID, "member")
-
-	// The alias set is the only carve-out: a real holder is still fenced while
-	// pools are configured.
-	if _, err := fixture.Operations.Update(ctx, assigneeTransferRequest(pooledID, "rival", "rival")); !errors.Is(err, publicops.ErrAlreadyClaimed) {
-		t.Fatalf("unforced transfer of %s away from a non-pool holder: err = %v, want ErrAlreadyClaimed", pooledID, err)
-	}
-	assertLiveAssignee(t, ctx, fixture, pooledID, "member")
-}
-
-// assigneeTransferRequest builds the bare assignee edit whose fencing this case
-// pins: actor asks for the issue to be assigned to newAssignee.
-func assigneeTransferRequest(id, actor, newAssignee string) publicops.UpdateRequest {
-	return publicops.UpdateRequest{
-		Actor:   actor,
-		IssueID: id,
-		Patch:   publicops.IssuePatch{Assignee: publicops.Field[string]{Set: true, Value: newAssignee}},
-	}
-}
-
 // assertLiveAssignee checks the stored holder of an in-progress issue. Every
 // state this case asserts is a live claim — the fence only speaks over one — so
 // the expected status is fixed, and reading it back proves an assignee edit
@@ -1031,17 +589,6 @@ func assertLiveAssignee(t *testing.T, ctx context.Context, fixture IssueOperatio
 	}
 }
 
-// closePolicyStatusRequest builds the generic status update that crosses into
-// the done category — the operation whose policy this case pins.
-func closePolicyStatusRequest(id string, force bool) publicops.UpdateRequest {
-	return publicops.UpdateRequest{
-		Actor:            "writer",
-		IssueID:          id,
-		ForceClosePolicy: force,
-		Patch:            publicops.IssuePatch{Status: publicops.Field[publicops.Status]{Set: true, Value: types.StatusClosed}},
-	}
-}
-
 func assertClosePolicyStatus(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, want types.Status) {
 	t.Helper()
 	var got string
@@ -1053,16 +600,23 @@ func assertClosePolicyStatus(t *testing.T, ctx context.Context, fixture IssueOpe
 	}
 }
 
-// seedClosePolicyIssue creates one open task at an explicit ID, carrying any
-// relationships the close-policy case needs. It goes through Create rather than
-// the fixture's raw seed hook so the edges recompute is_blocked exactly as a
-// real create would.
-func seedClosePolicyIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, request publicops.CreateRequest) {
+// seedIssueOperationsPlainIssue creates one bare open task at an explicit ID. It
+// goes through Create rather than the fixture's raw seed hook so the row starts
+// out exactly as a real create leaves one — is_blocked settled, the create event
+// recorded — which is the state every case below then mutates.
+//
+// It takes no request of its own. The graph-shaped seeds that used to travel
+// through here moved out with the cases that needed them
+// (lifecycle_update_contract.go seeds its own edges through AddDependency), and
+// a parameter every caller fills with the zero value is one a reader has to
+// check rather than read.
+func seedIssueOperationsPlainIssue(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string) {
 	t.Helper()
-	request.Actor = "seed"
-	request.ForceIDPrefix = true
-	request.Issue = &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
-	if _, err := fixture.Operations.Create(ctx, request); err != nil {
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "seed",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	}); err != nil {
 		t.Fatalf("seed %s: %v", id, err)
 	}
 }
@@ -1164,7 +718,7 @@ func RunIssueOperationsUpdateClaimConflictCarriesTheLosingState(t *testing.T, ct
 	t.Helper()
 
 	heldID := fixture.IssuePrefix + "-claimconflict-held"
-	seedClosePolicyIssue(t, ctx, fixture, heldID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, heldID)
 	if _, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "holder", IssueID: heldID, Claim: true}); err != nil {
 		t.Fatalf("claim %s for holder: %v", heldID, err)
 	}
@@ -1195,7 +749,7 @@ func RunIssueOperationsUpdateClaimConflictCarriesTheLosingState(t *testing.T, ct
 	// An ineligible status: nobody holds the issue, so the refusal carries the
 	// status rather than an assignee, and wears the other sentinel.
 	deferredID := fixture.IssuePrefix + "-claimconflict-deferred"
-	seedClosePolicyIssue(t, ctx, fixture, deferredID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, deferredID)
 	if err := fixture.UpdateRaw(ctx, deferredID, map[string]any{"status": string(types.StatusDeferred)}, "writer"); err != nil {
 		t.Fatalf("defer %s: %v", deferredID, err)
 	}
@@ -1230,7 +784,7 @@ func RunIssueOperationsUpdateClaimConflictCarriesTheLosingState(t *testing.T, ct
 	// elsewhere and passes even when the guard is bypassed entirely, so the
 	// refusal is the half that carries the promise.
 	fencedID := fixture.IssuePrefix + "-claimfence"
-	seedClosePolicyIssue(t, ctx, fixture, fencedID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, fencedID)
 	var currentVersion int64
 	if err := fixture.QueryScalar(ctx, "SELECT row_lock FROM issues WHERE id = ?", []any{fencedID}, &currentVersion); err != nil {
 		t.Fatalf("read row_lock for %s: %v", fencedID, err)
@@ -1297,7 +851,7 @@ func RunIssueOperationsUpdateClaimHonorsConfiguredActiveStatuses(t *testing.T, c
 		id     string
 		status types.Status
 	}{{readyID, "ready"}, {reviewingID, "reviewing"}} {
-		seedClosePolicyIssue(t, ctx, fixture, seed.id, publicops.CreateRequest{})
+		seedIssueOperationsPlainIssue(t, ctx, fixture, seed.id)
 		if err := fixture.UpdateRaw(ctx, seed.id, map[string]any{"status": string(seed.status)}, "writer"); err != nil {
 			t.Fatalf("move %s to %s: %v", seed.id, seed.status, err)
 		}
@@ -1378,7 +932,7 @@ func RunIssueOperationsUpdateIssuePlaneOnlyRefusesWisps(t *testing.T, ctx contex
 	// The restriction is about the PLANE, not about the flag: a durable issue
 	// updates normally with it set.
 	durableID := fixture.IssuePrefix + "-planeonly-durable"
-	seedClosePolicyIssue(t, ctx, fixture, durableID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, durableID)
 	durable, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
 		Actor: "writer", IssueID: durableID, IssuePlaneOnly: true,
 		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "durable title"}},
@@ -1546,118 +1100,6 @@ func RunIssueOperationsUpdateLabelPatchValueRules(t *testing.T, ctx context.Cont
 	assertIssueOperationsLabels(t, ctx, fixture, id, "after the mixed replace", "kept")
 }
 
-// RunIssueOperationsUpdateParentIDReplacesTheParentEdge pins what a set
-// IssuePatch.ParentID does (issueops/issueops.go:144-147): a nonempty value
-// replaces the parent with exactly that target and "does not inherit labels" —
-// the create-time InheritLabelsFromParent behavior must NOT follow a reparent —
-// and a set empty value removes the parent-child edge. Both restatements are
-// no-ops.
-//
-// The label clause is asserted nowhere today, and the unit-of-work backend
-// reparents through its own use case (internal/storage/domain/dependency.go:296)
-// rather than the shared target-set body the two stores share.
-func RunIssueOperationsUpdateParentIDReplacesTheParentEdge(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	oldParentID := fixture.IssuePrefix + "-reparent-old"
-	newParentID := fixture.IssuePrefix + "-reparent-new"
-	childID := fixture.IssuePrefix + "-reparent-child"
-	seedClosePolicyIssue(t, ctx, fixture, oldParentID, publicops.CreateRequest{})
-	seedIssueOperationsLabeledIssue(t, ctx, fixture, newParentID, "parent-only-label")
-	seedClosePolicyIssue(t, ctx, fixture, childID, publicops.CreateRequest{ParentID: oldParentID})
-	assertIssueOperationsParents(t, ctx, fixture, childID, "seeded", oldParentID)
-
-	reparented, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
-		ParentID: publicops.Field[string]{Set: true, Value: newParentID},
-	}})
-	if err != nil {
-		t.Fatalf("reparent %s: %v", childID, err)
-	}
-	if !reparented.Changed {
-		t.Errorf("reparenting %s reported Changed = false, want a committed edit", childID)
-	}
-	assertIssueOperationsParents(t, ctx, fixture, childID, "after reparent", newParentID)
-	assertIssueOperationsStringSet(t, "reparent result labels", reparented.Issue.Labels)
-	assertIssueOperationsLabels(t, ctx, fixture, childID, "after reparent")
-
-	restated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
-		ParentID: publicops.Field[string]{Set: true, Value: newParentID},
-	}})
-	if err != nil {
-		t.Fatalf("restate %s's parent: %v", childID, err)
-	}
-	if restated.Changed {
-		t.Errorf("restating %s's parent reported Changed = true, want a no-op", childID)
-	}
-	assertIssueOperationsParents(t, ctx, fixture, childID, "after restated parent", newParentID)
-
-	cleared, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
-		ParentID: publicops.Field[string]{Set: true, Value: ""},
-	}})
-	if err != nil {
-		t.Fatalf("clear %s's parent: %v", childID, err)
-	}
-	if !cleared.Changed {
-		t.Errorf("clearing %s's parent reported Changed = false, want a committed edit", childID)
-	}
-	assertIssueOperationsParents(t, ctx, fixture, childID, "after cleared parent")
-
-	recleared, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
-		ParentID: publicops.Field[string]{Set: true, Value: ""},
-	}})
-	if err != nil {
-		t.Fatalf("re-clear %s's parent: %v", childID, err)
-	}
-	if recleared.Changed {
-		t.Errorf("re-clearing %s's parent reported Changed = true, want a no-op", childID)
-	}
-}
-
-// RunIssueOperationsUpdateParentIDReplacesEveryParent pins the word ALL in the
-// leaf's ParentID clause (issueops/issueops.go:144-147): a set nonempty value
-// "atomically replaces all parents with exactly that target". A child can carry
-// more than one parent edge — create takes ParentID and an explicit
-// DepParentChild dependency in the same request — so "all" is a load-bearing
-// word and not a restatement of the single-parent case.
-func RunIssueOperationsUpdateParentIDReplacesEveryParent(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	firstID := fixture.IssuePrefix + "-multiparent-first"
-	secondID := fixture.IssuePrefix + "-multiparent-second"
-	thirdID := fixture.IssuePrefix + "-multiparent-third"
-	childID := fixture.IssuePrefix + "-multiparent-child"
-	for _, id := range []string{firstID, secondID, thirdID} {
-		seedClosePolicyIssue(t, ctx, fixture, id, publicops.CreateRequest{})
-	}
-	seedClosePolicyIssue(t, ctx, fixture, childID, publicops.CreateRequest{
-		ParentID:     firstID,
-		Dependencies: []publicops.CreateDependency{{TargetID: secondID, Type: types.DepParentChild}},
-	})
-	assertIssueOperationsParents(t, ctx, fixture, childID, "seeded with two parents", firstID, secondID)
-
-	replaced, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: childID, Patch: publicops.IssuePatch{
-		ParentID: publicops.Field[string]{Set: true, Value: thirdID},
-	}})
-	if err != nil {
-		t.Fatalf("replace every parent of %s: %v", childID, err)
-	}
-	if !replaced.Changed {
-		t.Errorf("replacing every parent of %s reported Changed = false, want a committed edit", childID)
-	}
-	assertIssueOperationsParents(t, ctx, fixture, childID, "after replacing every parent", thirdID)
-	for _, stale := range []string{firstID, secondID} {
-		var present int
-		if err := fixture.QueryScalar(ctx,
-			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = ?",
-			[]any{childID, stale, string(types.DepParentChild)}, &present); err != nil {
-			t.Fatalf("look up replaced parent %s of %s: %v", stale, childID, err)
-		}
-		if present != 0 {
-			t.Errorf("%s kept its edge to replaced parent %s, want every prior parent removed", childID, stale)
-		}
-	}
-}
-
 // RunIssueOperationsUpdateMetadataReplaceClearsAndValidates pins
 // MetadataPatch.Replace itself: it "replaces the complete metadata document",
 // "a nil or empty Value clears metadata", and "a nonempty Value must be valid
@@ -1763,7 +1205,7 @@ func RunIssueOperationsRequestValuesAreNotMutated(t *testing.T, ctx context.Cont
 	t.Helper()
 
 	targetID := fixture.IssuePrefix + "-detach-target"
-	seedClosePolicyIssue(t, ctx, fixture, targetID, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, targetID)
 
 	externalRef := "caller-ref"
 	callerLabels := []string{"caller-label"}
@@ -1853,304 +1295,89 @@ func RunIssueOperationsRequestValuesAreNotMutated(t *testing.T, ctx context.Cont
 	assertIssueOperationsStoredMetadata(t, ctx, fixture, createdID, "after corrupting the update result", `{"caller":"owned","added":"value"}`)
 }
 
-// RunIssueOperationsUpdateProvenanceLabelsHistory pins
-// UpdateRequest.Provenance against the history the backend actually writes
-// (issueops/issueops.go:261-270): the entry reads as the caller's own string,
-// and the label "NEVER changes WHETHER history is recorded" — an update that
-// records one records one with the field empty, and one that records none
-// records none with it set.
+// RunIssueOperationsCreateClosedDerivesTheClosedStamp pins what a create that
+// arrives already closed does about the column it did not fill: a closed issue
+// with no closed_at gets one derived from the timestamps it DID carry, one
+// second past the later of created_at and updated_at
+// (internal/storage/issueops/create.go PrepareIssueForInsert).
 //
-// Every existing assertion about this reads a stub's captured commit message.
-// All three fixtures are Dolt-backed, so the real log is readable here, which is
-// the only place the claim "the entry reads as the caller's string" can be
-// settled.
-func RunIssueOperationsUpdateProvenanceLabelsHistory(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+// The path is `bd import` and every restore and tracker-sync: rows arrive
+// closed, from a system that recorded when they were made and last touched but
+// not when they were finished. A backend that left the column NULL produces a
+// closed backlog with no completion dates — every cycle-time and throughput
+// report over the imported range silently drops those rows — and a backend that
+// stamped "now" dates the whole import to the day it ran.
+//
+// THE AUDIT CASE'S FIXTURE CANNOT SEE WHICH TIMESTAMP THE BODY READ.
+// audit_issue-lifecycle.go's testAuditCreateClosedDerivesClosedAt seeds
+// created_at and updated_at to the SAME instant, so max(created, updated) and
+// created and updated are all the same number, and a body that read any one of
+// them passes. The second arm below moves them apart, which is the whole of
+// what "max" means.
+//
+// The third arm is the guard on the other side: the derivation is a default,
+// not a policy. A caller that supplied its own completion time keeps it, and a
+// body that derived unconditionally would overwrite the one fact the import
+// actually knew.
+//
+// HOW MANY VOTES: one. All three legs reach PrepareIssueForInsert through
+// issueops.PreparePublicCreateRequest before any backend-specific create body
+// runs — the unit-of-work provider included (internal/storage/uow calls it in
+// Create before handing the issue to its own domain use case). The case is
+// worth having as a stated promise, but it is one body read three times, not a
+// second opinion.
+func RunIssueOperationsCreateClosedDerivesTheClosedStamp(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
 	t.Helper()
 
-	id := fixture.IssuePrefix + "-provenance"
-	seedClosePolicyIssue(t, ctx, fixture, id, publicops.CreateRequest{})
-
-	const label = "conformance: provenance label"
-	history := newIssueOperationsHistoryCounter(t, ctx, fixture)
-	labeled, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "writer", IssueID: id, Provenance: label,
-		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "labeled title"}},
-	})
-	if err != nil {
-		t.Fatalf("labeled update of %s: %v", id, err)
-	}
-	if !labeled.Changed {
-		t.Fatalf("labeled update of %s reported Changed = false, want a durable mutation to label", id)
-	}
-	history.assertTotal(t, "labeled update", 1)
-	history.assertMessage(t, "labeled update", label, 1)
-
-	// The label decides how the entry reads, never whether one exists: a no-op
-	// update carrying it records nothing.
-	const noopLabel = "conformance: provenance no-op"
-	noOp, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "writer", IssueID: id, Provenance: noopLabel,
-		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "labeled title"}},
-	})
-	if err != nil {
-		t.Fatalf("no-op labeled update of %s: %v", id, err)
-	}
-	if noOp.Changed {
-		t.Fatalf("restating %s's title reported Changed = true, want a no-op", id)
-	}
-	history.assertTotal(t, "no-op labeled update", 0)
-	history.assertMessage(t, "no-op labeled update", noopLabel, 0)
-
-	// And an update with no label still records its one entry, under whatever
-	// default the implementation picked.
-	unlabeled, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "writer", IssueID: id,
-		Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "unlabeled title"}},
-	})
-	if err != nil {
-		t.Fatalf("unlabeled update of %s: %v", id, err)
-	}
-	if !unlabeled.Changed {
-		t.Fatalf("unlabeled update of %s reported Changed = false, want a durable mutation", id)
-	}
-	history.assertTotal(t, "unlabeled update", 1)
-	history.assertMessage(t, "unlabeled update", label, 1)
-}
-
-// RunIssueOperationsUpdatePersistentPreservesUnversionedClass pins the half of
-// the Persistence clause nobody asserts: "Persistent preserves an existing
-// durable unversioned class" (issueops/issueops.go:135-136). The refusal beside
-// it — an unversioned row cannot be demoted to a wisp mode — is pinned; this
-// clause says the legal direction is a no-op that does NOT normalize the row
-// into versioned storage.
-func RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	id := fixture.IssuePrefix + "-unversioned"
-	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor: "seed", ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: id, Title: "unversioned", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
-			StorageClass: types.StorageClassUnversioned,
+	base := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
+	supplied := time.Date(2019, 6, 7, 8, 9, 10, 0, time.UTC)
+	for index, test := range []struct {
+		name         string
+		createdAt    time.Time
+		updatedAt    time.Time
+		closedAt     *time.Time
+		wantClosedAt time.Time
+	}{
+		{
+			name: "from a row whose stamps agree", createdAt: base, updatedAt: base,
+			wantClosedAt: base.Add(time.Second),
 		},
-	}); err != nil {
-		t.Fatalf("seed unversioned %s: %v", id, err)
-	}
-	assertIssueOperationsScalarValue(t, ctx, fixture, "seeded storage class", string(types.StorageClassUnversioned),
-		"SELECT COALESCE(storage_class, '') FROM issues WHERE id = ?", []any{id})
-
-	restated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
-		Persistence: publicops.Field[publicops.PersistenceMode]{Set: true, Value: publicops.PersistenceModePersistent},
-	}})
-	if err != nil {
-		t.Fatalf("restate %s as persistent: %v", id, err)
-	}
-	if restated.Changed {
-		t.Errorf("restating unversioned %s as persistent reported Changed = true, want a no-op", id)
-	}
-	assertIssueOperationsScalarValue(t, ctx, fixture, "storage class after a persistent restatement", string(types.StorageClassUnversioned),
-		"SELECT COALESCE(storage_class, '') FROM issues WHERE id = ?", []any{id})
-	assertIssueOperationsRowCount(t, ctx, fixture, "issues", id, 1)
-	assertIssueOperationsRowCount(t, ctx, fixture, "wisps", id, 0)
-}
-
-// RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits pins the two
-// compare-and-set preconditions as PRECONDITIONS ON A PLAIN EDIT. The
-// assignee-transfer case above pins the ORDER the two guards resolve in beside
-// a fenced transfer; here they gate an ordinary field update that no fence
-// would touch, which is how `bd update --if-status`/`--if-assignee` actually
-// reach the contract.
-//
-// The clauses: ExpectedAssignee "requires the current assignee to match" and
-// ExpectedStatus "requires the current status to match"
-// (issueops/issueops.go:250-256), under Lifecycle's standing promise that a
-// "refusal or validation error leaves persistent state unchanged"
-// (issueops/issueops.go:406-408). The SENTINELS come from
-// RunIssueOperationsUpdateAssigneeTransferFence in this file.
-//
-// Both routes of `bd update` now send these guards to this contract instead of
-// applying them beside their own read; the proxied one joined when its
-// hand-rolled read-merge-write was deleted (bd-xt6de). A refusal that leaked a
-// partial write would exit 13 — "another actor won the race, nothing was
-// written, do not retry" — while having written.
-func RunIssueOperationsUpdateConditionalGuardsGateOrdinaryEdits(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	id := fixture.IssuePrefix + "-guardgate"
-	seedClosePolicyIssue(t, ctx, fixture, id, publicops.CreateRequest{})
-	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
-
-	priorityEdit := func(priority int) publicops.UpdateRequest {
-		return publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
-			Priority: publicops.Field[int]{Set: true, Value: priority},
-		}}
-	}
-	assertPriority := func(label string, want int) {
-		t.Helper()
-		assertIssueOperationsScalarValue(t, ctx, fixture, label, strconv.Itoa(want),
-			"SELECT priority FROM issues WHERE id = ?", []any{id})
-	}
-
-	// The seeded row is open and unassigned, so the empty string is a real
-	// "expected unassigned" guard rather than the absence of one — the
-	// distinction `--if-assignee ''` depends on.
-	unassigned := ""
-	matching := priorityEdit(1)
-	matching.ExpectedAssignee = &unassigned
-	openStatus := types.StatusOpen
-	matching.ExpectedStatus = &openStatus
-	if result, err := fixture.Operations.Update(ctx, matching); err != nil || !result.Changed {
-		t.Fatalf("guarded edit with both preconditions holding = %#v, %v; want the edit applied", result, err)
-	}
-	assertPriority("priority after a satisfied guard", 1)
-	events.assert(t, "satisfied guard", 1, nil)
-
-	// A stale status refuses, and the refusal writes nothing — not the field
-	// the request carried, not an event.
-	staleStatus := types.StatusInProgress
-	staleStatusEdit := priorityEdit(0)
-	staleStatusEdit.ExpectedStatus = &staleStatus
-	if _, err := fixture.Operations.Update(ctx, staleStatusEdit); !errors.Is(err, publicops.ErrStatusMismatch) {
-		t.Fatalf("edit guarded on a stale status: err = %v, want ErrStatusMismatch", err)
-	}
-	assertPriority("priority after a stale status guard", 1)
-	events.assert(t, "stale status guard", 0, nil)
-
-	// A stale assignee refuses the same way, including when the status guard
-	// beside it still holds: both preconditions must hold, not either.
-	staleAssignee := "nobody"
-	staleAssigneeEdit := priorityEdit(0)
-	staleAssigneeEdit.ExpectedAssignee = &staleAssignee
-	staleAssigneeEdit.ExpectedStatus = &openStatus
-	if _, err := fixture.Operations.Update(ctx, staleAssigneeEdit); !errors.Is(err, publicops.ErrAssigneeMismatch) {
-		t.Fatalf("edit guarded on a stale assignee: err = %v, want ErrAssigneeMismatch", err)
-	}
-	assertPriority("priority after a stale assignee guard", 1)
-	events.assert(t, "stale assignee guard", 0, nil)
-
-	// The guard tracks the row rather than the request that set it: once an
-	// assignee lands, the empty-string guard that just held is the stale one.
-	assign := publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: publicops.IssuePatch{
-		Assignee: publicops.Field[string]{Set: true, Value: "holder"},
-	}}
-	if _, err := fixture.Operations.Update(ctx, assign); err != nil {
-		t.Fatalf("assign %s: %v", id, err)
-	}
-	events.assert(t, "assign", 1, nil)
-	nowStale := priorityEdit(0)
-	nowStale.ExpectedAssignee = &unassigned
-	if _, err := fixture.Operations.Update(ctx, nowStale); !errors.Is(err, publicops.ErrAssigneeMismatch) {
-		t.Fatalf("edit guarded on unassigned after an assignment: err = %v, want ErrAssigneeMismatch", err)
-	}
-	assertPriority("priority after the once-current guard went stale", 1)
-	events.assert(t, "once-current guard", 0, nil)
-
-	holder := "holder"
-	nowCurrent := priorityEdit(0)
-	nowCurrent.ExpectedAssignee = &holder
-	if result, err := fixture.Operations.Update(ctx, nowCurrent); err != nil || !result.Changed {
-		t.Fatalf("edit guarded on the current holder = %#v, %v; want the edit applied", result, err)
-	}
-	assertPriority("priority after a guard naming the current holder", 0)
-
-	// THE ORDER-DEPENDENT COMPOSITION, and the one arm above that nothing else
-	// covers: an EARLIER guard that holds beside a LATER guard that is stale.
-	//
-	// Every refusal above puts the stale guard first, so a body that checked
-	// only the first present precondition — an `else if` where an `if` belongs,
-	// which is one refactor slip — refused all of them correctly and let this
-	// one through. The assignee guard names the current holder and the status
-	// guard names a status the row does not have, so the answer must be the
-	// LATER guard's sentinel, not silence.
-	// A fresh counter: the edit above committed and this arm is about what a
-	// REFUSAL writes, so it must start from zero rather than inherit that one.
-	maskedEvents := newIssueOperationsEventCounter(t, ctx, fixture, id)
-	maskedEdit := priorityEdit(3)
-	maskedEdit.ExpectedAssignee = &holder
-	maskedEdit.ExpectedStatus = &staleStatus
-	if _, err := fixture.Operations.Update(ctx, maskedEdit); !errors.Is(err, publicops.ErrStatusMismatch) {
-		t.Fatalf("edit with a holding assignee guard and a stale status guard: err = %v, want ErrStatusMismatch", err)
-	}
-	assertPriority("priority after a stale guard behind a holding one", 0)
-	maskedEvents.assert(t, "guard masked by the one before it", 0, nil)
-}
-
-// RunIssueOperationsCreateWritesEveryScalarField is the create-side twin of the
-// case below, over the same seventeen fields. Lifecycle.Create takes a whole
-// issue rather than a patch, and each backend copies that issue into its own
-// create shape — the two stores through issueops.PreparePublicCreateRequest into
-// CreateIssuesInTxWithResult, the unit-of-work backend through its own
-// createParams — so a field dropped on the way in is a column the caller asked
-// for and did not get, reported as a success.
-//
-// THE UPDATE CASE CANNOT ANSWER THIS, and the reason is its FIXTURE rather than
-// its assertions. It seeds through the fixture's raw hook, which is the
-// backend's own CreateIssue and not the guarded Create, and every seeded value
-// is overwritten by the patch before anything is read back. A guarded create
-// that blanked a field would leave all of it green. Seeding it through Create
-// instead is not the fix: Create refuses a closed_at on an open row, so the
-// close-lifecycle end of the surface cannot be seeded that way at all.
-//
-// EVERY VALUE IS DISTINCT AND NON-ZERO, which is what makes a dropped field
-// observable — a field the body never copied arrives at its zero value, and a
-// seed that agreed with that zero value could not tell the two apart. The status
-// is in_progress rather than open for exactly that reason: open is what an empty
-// status defaults to.
-//
-// The ROW is the subject, because a result hydrated from the request would echo
-// what the caller just handed in. The result is then held to the same
-// expectation table, because it is what a front door renders: a create that
-// stored every column and hydrated one of them away is a field the caller still
-// cannot see.
-func RunIssueOperationsCreateWritesEveryScalarField(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	id := fixture.IssuePrefix + "-createsurface"
-	minutes := 33
-	externalRef := "created-ref"
-	dueAt := time.Date(2033, 5, 6, 7, 8, 9, 0, time.UTC)
-	deferUntil := time.Date(2033, 4, 5, 6, 7, 8, 0, time.UTC)
-	created, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
-		Actor:         "writer",
-		ForceIDPrefix: true,
-		Issue: &types.Issue{
-			ID: id, Title: "created title", Description: "created description", Design: "created design",
-			AcceptanceCriteria: "created acceptance", Notes: "created notes",
-			SpecID: "created-spec", AwaitID: "created-await",
-			Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeBug,
-			Assignee: "created-assignee", Owner: "created-owner", ClosedBySession: "created-session",
-			EstimatedMinutes: &minutes, ExternalRef: &externalRef,
-			DueAt: &dueAt, DeferUntil: &deferUntil,
+		{
+			// updated_at is LATER, so a body reading created_at alone lands a
+			// second past the wrong one.
+			name: "from the later of the two stamps", createdAt: base, updatedAt: base.Add(72 * time.Hour),
+			wantClosedAt: base.Add(72*time.Hour + time.Second),
 		},
-	})
-	if err != nil {
-		t.Fatalf("full scalar create of %s: %v", id, err)
+		{
+			name: "never over a stamp the caller supplied", createdAt: base, updatedAt: base,
+			closedAt: &supplied, wantClosedAt: supplied,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			id := fixture.IssuePrefix + "-createclosed-" + strconv.Itoa(index)
+			if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+				Actor:         "writer",
+				ForceIDPrefix: true,
+				Issue: &types.Issue{
+					ID: id, Title: id, Status: types.StatusClosed, Priority: 2, IssueType: types.TypeTask,
+					CreatedAt: test.createdAt, UpdatedAt: test.updatedAt, ClosedAt: test.closedAt,
+				},
+			}); err != nil {
+				t.Fatalf("create closed %s: %v", id, err)
+			}
+			// The two source columns are read back first: a create that
+			// normalized them to "now" would leave the expectation below
+			// describing a row that does not exist, and the case would fail
+			// somewhere unhelpful instead of saying so.
+			assertIssueOperationsStoredColumns(t, ctx, fixture, id, "the stamps the derivation reads", []issueOperationsColumnValue{
+				{"created_at", test.createdAt.Format(issueOperationsStoredTimeLayout)},
+				{"updated_at", test.updatedAt.Format(issueOperationsStoredTimeLayout)},
+			})
+			assertIssueOperationsStoredColumns(t, ctx, fixture, id, "the derived close stamp", []issueOperationsColumnValue{
+				{"closed_at", test.wantClosedAt.Format(issueOperationsStoredTimeLayout)},
+			})
+		})
 	}
-	if created.Issue == nil {
-		t.Fatalf("full scalar create of %s returned no issue", id)
-	}
-
-	stored := []issueOperationsColumnValue{
-		{"title", "created title"},
-		{"description", "created description"},
-		{"design", "created design"},
-		{"acceptance_criteria", "created acceptance"},
-		{"notes", "created notes"},
-		{"spec_id", "created-spec"},
-		{"await_id", "created-await"},
-		{"status", string(types.StatusInProgress)},
-		{"priority", "1"},
-		{"issue_type", string(types.TypeBug)},
-		{"assignee", "created-assignee"},
-		{"owner", "created-owner"},
-		{"closed_by_session", "created-session"},
-		{"estimated_minutes", "33"},
-		{"external_ref", "created-ref"},
-		{"due_at", dueAt.Format(issueOperationsStoredTimeLayout)},
-		{"defer_until", deferUntil.Format(issueOperationsStoredTimeLayout)},
-	}
-	assertIssueOperationsStoredColumns(t, ctx, fixture, id, "after the full scalar create", stored)
-	assertIssueOperationsColumnValues(t, id, "in the create result", issueOperationsIssueScalars(created.Issue), stored)
 }
 
 // RunIssueOperationsUpdateWritesEveryScalarPatchField pins the whole scalar and
@@ -2284,6 +1511,153 @@ func RunIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T, ctx conte
 	events.assert(t, "restated scalar patch", 0, nil)
 }
 
+// RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress pins the
+// started_at lifecycle a plain status update carries with it
+// (internal/storage/issueops/update.go ManageStartedAt: "auto-sets started_at
+// when transitioning to in_progress. If the issue already has a started_at, it
+// is preserved"). It drives the UNTYPED FUNNEL, because IssuePatch has no
+// started_at member and the funnel is what every `bd update -s` and every
+// external-sync caller reaches.
+//
+// STAMPING AND PRESERVING FAIL IN OPPOSITE DIRECTIONS, so both are here. A body
+// that never stamps leaves an in_progress row that has never started, and
+// nothing downstream can say how long the work has been running — the lease
+// reclaim reads exactly this column. A body that RE-stamps resets that clock
+// every time an agent bounces a bead through open and back, which is the shape
+// a retry loop produces, and the row then looks freshly started forever.
+//
+// The closest existing case is
+// RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow, which
+// pins preservation of a seeded started_at under CLAIM. Neither the stamp on an
+// empty column nor preservation across a plain status patch is pinned anywhere.
+//
+// THE PRESERVING ROW'S STAMP IS SEEDED YEARS IN THE PAST, and that is the
+// fixture doing the work rather than the assertion. started_at is DATETIME(0):
+// a row stamped by the first transition and re-stamped by the second, both
+// inside one second, holds the same bytes either way, so a case that stamped
+// its own precondition could not tell preservation from a rewrite. The stamping
+// row therefore proves only that a stamp lands, in a measured window, and the
+// preserving row — seeded, never stamped by this case — carries the whole
+// preservation claim across a full open/in_progress/open/in_progress cycle.
+func RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+	if fixture.UpdateRaw == nil {
+		t.Skip("fixture has no UpdateRaw: this backend's untyped update funnel is unreachable, so ManageStartedAt is UNPINNED here")
+	}
+
+	stamping := fixture.IssuePrefix + "-startstamp"
+	if err := fixture.CreateIssue(ctx, &types.Issue{
+		ID: stamping, Title: stamping, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", stamping, err)
+	}
+	assertIssueOperationsStartedAt(t, ctx, fixture, stamping, "before any transition", "")
+
+	lower := time.Now().UTC().Add(-issueOperationsClockSlack).Format(issueOperationsStoredTimeLayout)
+	issueOperationsUpdateStatus(t, ctx, fixture, stamping, types.StatusInProgress)
+	upper := time.Now().UTC().Add(issueOperationsClockSlack).Format(issueOperationsStoredTimeLayout)
+	stamped := issueOperationsStartedAt(t, ctx, fixture, stamping, "after the first in_progress")
+	// The stored layout sorts lexicographically, so string bounds are time
+	// bounds. A bare "not empty" check would accept the zero time, which is
+	// what a body writing an unset *time.Time lands.
+	if stamped < lower || stamped > upper {
+		t.Errorf("%s started_at = %q after its first in_progress, want a stamp between %q and %q", stamping, stamped, lower, upper)
+	}
+
+	preserving := fixture.IssuePrefix + "-startkeep"
+	seededStart := time.Date(2019, 3, 4, 5, 6, 7, 0, time.UTC)
+	if err := fixture.CreateIssue(ctx, &types.Issue{
+		ID: preserving, Title: preserving, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		StartedAt: &seededStart,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", preserving, err)
+	}
+	want := seededStart.Format(issueOperationsStoredTimeLayout)
+	// The precondition, not an assumption: a seed hook that dropped the preset
+	// stamp would leave every check below comparing a rewrite with a rewrite.
+	assertIssueOperationsStartedAt(t, ctx, fixture, preserving, "as seeded", want)
+
+	for _, step := range []types.Status{types.StatusInProgress, types.StatusOpen, types.StatusInProgress} {
+		issueOperationsUpdateStatus(t, ctx, fixture, preserving, step)
+		assertIssueOperationsStartedAt(t, ctx, fixture, preserving, "after a status update to "+string(step), want)
+	}
+}
+
+// issueOperationsUpdateStatus drives one status change through the untyped
+// funnel, which is the only route to it that carries no patch of its own.
+func issueOperationsUpdateStatus(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id string, status types.Status) {
+	t.Helper()
+	if err := fixture.UpdateRaw(ctx, id, map[string]any{"status": string(status)}, "writer"); err != nil {
+		t.Fatalf("raw status update of %s to %q: %v", id, status, err)
+	}
+}
+
+func issueOperationsStartedAt(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label string) string {
+	t.Helper()
+	return readIssueOperationsStoredColumns(t, ctx, fixture, id, label, []string{"started_at"})[0].value
+}
+
+func assertIssueOperationsStartedAt(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label, want string) {
+	t.Helper()
+	if got := issueOperationsStartedAt(t, ctx, fixture, id, label); got != want {
+		t.Errorf("%s started_at %s = %q, want %q", id, label, got, want)
+	}
+}
+
+// RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes pins what the
+// UNTYPED update funnel accepts in its metadata slot. The typed
+// IssuePatch.Metadata surface is an ordered merge/set/unset document with its
+// own owning cases; this is the OTHER entry, the one every `bd update
+// --metadata` and every backfill script reaches, where the value arrives as
+// whatever the caller's JSON decoder produced.
+//
+// The shapes are the contract. The two stores funnel through
+// storage.NormalizeMetadataValue, which names string, []byte and
+// json.RawMessage; the unit-of-work backend funnels through its own
+// normalizeUpdateValue in internal/storage/domain/db. Two maps, and nothing
+// held them to the same accepted set — a backend that took only one of the
+// three would refuse a caller the others serve, or worse, store the Go
+// rendering of a []byte as the document.
+//
+// audit_issue-lifecycle.go's testAuditMetadataJSONRoundTrip drives []byte alone
+// and only at the storage seam. The document is compared parsed rather than
+// byte-for-byte because a JSON column may reformat and reorder, and the NOT
+// NULL probe is the half a value comparison cannot make: a NULL column reads
+// back as the literal "null" and compares equal to an empty document.
+func RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+	if fixture.UpdateRaw == nil {
+		t.Skip("fixture has no UpdateRaw: this backend's untyped update funnel is unreachable, so its metadata slot is UNPINNED here")
+	}
+
+	id := fixture.IssuePrefix + "-rawmeta"
+	if err := fixture.CreateIssue(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		Metadata: json.RawMessage(`{"team":"seeded"}`),
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+	assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "as seeded", `{"team":"seeded"}`)
+
+	for _, shape := range []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{"a []byte", []byte(`{"team":"ops"}`), `{"team":"ops"}`},
+		{"a string", `{"team":"sre"}`, `{"team":"sre"}`},
+		{"a json.RawMessage", json.RawMessage(`{"team":"platform"}`), `{"team":"platform"}`},
+	} {
+		t.Run(shape.name, func(t *testing.T) {
+			if err := fixture.UpdateRaw(ctx, id, map[string]any{"metadata": shape.value}, "writer"); err != nil {
+				t.Fatalf("raw metadata update of %s with %s: %v", id, shape.name, err)
+			}
+			assertIssueOperationsStoredMetadata(t, ctx, fixture, id, "after a raw update with "+shape.name, shape.want)
+			assertIssueOperationsMetadataIsNotNull(t, ctx, fixture, id, "after a raw update with "+shape.name)
+		})
+	}
+}
+
 // RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary pins the
 // WRITE side of the issue-type vocabulary. The read side is pinned by
 // RunReaderListRejectsATypeOutsideTheWorkspaceVocabulary; on the write side each
@@ -2306,7 +1680,7 @@ func RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testin
 	t.Helper()
 
 	id := fixture.IssuePrefix + "-typevocab"
-	seedClosePolicyIssue(t, ctx, fixture, id, publicops.CreateRequest{})
+	seedIssueOperationsPlainIssue(t, ctx, fixture, id)
 
 	before := readIssueOperationsRowMarks(t, ctx, fixture, id)
 	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
@@ -2344,188 +1718,15 @@ func issueOperationsTypeRequest(id string, issueType publicops.IssueType) public
 	}
 }
 
-// RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow pins what
-// UpdateResult.Changed counts when a claim rides an update: the claim ITSELF is
-// the mutation, so a request that grants a lease reports Changed even though
-// the patch beside it puts every public field back where it was.
-//
-// Every other claim case in this file claims an unclaimed row with no patch, so
-// the field diff alone already reports true and nothing distinguishes "the
-// claim is the mutation" from "the fields happened to differ". A backend that
-// derived Changed purely from a before/after comparison of the public issue —
-// which is exactly how the unit-of-work backend derives it — would answer false
-// here and tell a polling caller its claim did nothing.
-//
-// Both edges are asserted, because a flag with only one is a flag that cannot
-// fail on its own claim:
-//
-//   - The CONTROL runs the same restoring patch WITHOUT the claim and must
-//     report false. Without it, a body that hardcoded Changed = true would pass.
-//   - The IDEMPOTENT RE-CLAIM by the holder must report false. Without it, a
-//     body that reported Changed for any request carrying Claim would pass, and
-//     a caller polling for work would see a fresh grant on every call.
-//
-// It is a different line from the history promise in
-// RunIssueOperationsUpdateProvenanceLabelsHistory: that one decides whether an
-// entry is recorded, this one decides what the result says.
-//
-// THE TWO BACKEND SHAPES NEED OPPOSITE PATCHES, which is why this case carries
-// both. The two stores claim FIRST and then diff the patch against the row the
-// claim left, so a patch that RESTORES the pre-claim state is a genuine write
-// there and would report Changed with the claim accounting removed entirely.
-// The unit-of-work backend applies one spec and compares the post-state to the
-// PRE-claim snapshot, so a patch that RESTATES the post-claim state is the one
-// it would report Changed for anyway. Each patch isolates the claim on the
-// backends the other one masks.
-//
-// Both rows are seeded WITH a started_at. A claim stamps that column on the
-// first transition into in_progress, and a stamp landing on an empty column is
-// a field difference of its own — enough to report Changed on every backend
-// with the claim accounting gone. The precondition is read back from the raw
-// row rather than assumed, because a seed hook that dropped it would leave this
-// case unable to fail on its own claim.
-//
-// THE OTHER HALF IS THE CLAIM'S FOOTPRINT: assignee and status are the only
-// public columns it may write. Changed alone cannot say so — a claim that also
-// grabbed, say, ownership would report the same true — and neither can a
-// three-column assertion, which never looks at the rest of the row. So every
-// column outside the claim's own two is snapshotted and held.
-//
-// The snapshot is taken ONCE, before any claim, and asserted after each of
-// them. Re-reading it between claims would re-anchor it to whatever the last
-// claim wrote, and a body writing the same derived value on every claim would
-// then read as writing nothing at all. The seeded values are all distinct from
-// the actor name and from the empty column a claim would otherwise be
-// indistinguishable against, so a claim writing anything it derives from the
-// request lands a value that differs from the snapshot.
-func RunIssueOperationsUpdateClaimIsAMutationWhenThePatchRestoresTheRow(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
-	t.Helper()
-
-	startedAt := time.Date(2030, 1, 2, 3, 4, 5, 0, time.UTC)
-	seededMinutes := 7
-	seededRef := "claim-ref"
-	seededDue := time.Date(2033, 9, 8, 7, 6, 5, 0, time.UTC)
-	seededDefer := time.Date(2033, 8, 7, 6, 5, 4, 0, time.UTC)
-	restoringID := fixture.IssuePrefix + "-claimrestore"
-	restatingID := fixture.IssuePrefix + "-claimrestate"
-	for _, id := range []string{restoringID, restatingID} {
-		if err := fixture.CreateIssue(ctx, &types.Issue{
-			ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
-			StartedAt: &startedAt,
-			// The bystanders. None of them is a value a claim could write by
-			// coincidence: not the actor, not a status, not empty.
-			Description: "claim description", Design: "claim design",
-			AcceptanceCriteria: "claim acceptance", Notes: "claim notes",
-			SpecID: "claim-spec", AwaitID: "claim-await",
-			Owner: "claim-owner", ClosedBySession: "claim-session",
-			EstimatedMinutes: &seededMinutes, ExternalRef: &seededRef,
-			DueAt: &seededDue, DeferUntil: &seededDefer,
-		}, "seed"); err != nil {
-			t.Fatalf("seed %s: %v", id, err)
-		}
-		assertIssueOperationsScalarValue(t, ctx, fixture, "seeded started_at for "+id,
-			startedAt.Format(issueOperationsStoredTimeLayout),
-			"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{id})
-	}
-	restoringBystanders := readIssueOperationsStoredColumns(t, ctx, fixture, restoringID,
-		"before any claim", issueOperationsClaimBystanderColumns)
-	restatingBystanders := readIssueOperationsStoredColumns(t, ctx, fixture, restatingID,
-		"before any claim", issueOperationsClaimBystanderColumns)
-
-	// Open and unassigned is the seeded state, so this patch restores it.
-	restoring := publicops.IssuePatch{
-		Status:   publicops.Field[publicops.Status]{Set: true, Value: types.StatusOpen},
-		Assignee: publicops.Field[string]{Set: true, Value: ""},
-	}
-
-	control, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Patch: restoring})
-	if err != nil {
-		t.Fatalf("restating %s's status and assignee: %v", restoringID, err)
-	}
-	if control.Changed {
-		t.Fatalf("restating %s's status and assignee reported Changed = true, want a no-op: the claim below has to be the only difference", restoringID)
-	}
-
-	claiming, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "claimant", IssueID: restoringID, Claim: true, Patch: restoring,
-	})
-	if err != nil {
-		t.Fatalf("claiming update of %s with a restoring patch: %v", restoringID, err)
-	}
-	if !claiming.Changed {
-		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restoringID)
-	}
-	if claiming.Issue.Status != types.StatusOpen || claiming.Issue.Assignee != "" {
-		t.Errorf("claiming update of %s = status %q assignee %q, want the restored open/unassigned state",
-			restoringID, claiming.Issue.Status, claiming.Issue.Assignee)
-	}
-	// The row says the same thing, which is what makes Changed above an answer
-	// about the claim rather than about a field the patch failed to restore.
-	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, restoringID, "", types.StatusOpen)
-	assertIssueOperationsScalarValue(t, ctx, fixture, "started_at after the restoring claim",
-		startedAt.Format(issueOperationsStoredTimeLayout),
-		"SELECT COALESCE(CAST(started_at AS CHAR), '') FROM issues WHERE id = ?", []any{restoringID})
-	assertIssueOperationsStoredColumns(t, ctx, fixture, restoringID, "after the restoring claim", restoringBystanders)
-
-	// The mirror shape. There is no control for it — the same patch without a
-	// claim moves an unclaimed row for real — so it leans on the control above
-	// for the "reports Changed for everything" direction and carries only the
-	// claim's own arm.
-	restating := publicops.IssuePatch{
-		Status:   publicops.Field[publicops.Status]{Set: true, Value: types.StatusInProgress},
-		Assignee: publicops.Field[string]{Set: true, Value: "claimant"},
-	}
-	restated, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{
-		Actor: "claimant", IssueID: restatingID, Claim: true, Patch: restating,
-	})
-	if err != nil {
-		t.Fatalf("claiming update of %s with a restating patch: %v", restatingID, err)
-	}
-	if !restated.Changed {
-		t.Errorf("claiming update of %s reported Changed = false, want true: the claim is the mutation", restatingID)
-	}
-	assertIssueOperationsAssigneeAndStatus(t, ctx, fixture, restatingID, "claimant", types.StatusInProgress)
-	assertIssueOperationsStoredColumns(t, ctx, fixture, restatingID, "after the restating claim", restatingBystanders)
-
-	// The other edge, on the row the first shape left open and unassigned. A
-	// first claim grants the lease and counts.
-	granted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Claim: true})
-	if err != nil {
-		t.Fatalf("claim %s: %v", restoringID, err)
-	}
-	if !granted.Changed {
-		t.Errorf("claiming unclaimed %s reported Changed = false, want a committed claim", restoringID)
-	}
-	assertLiveAssignee(t, ctx, fixture, restoringID, "claimant")
-
-	// The same actor re-claiming its own live claim grants nothing, so it does
-	// not count.
-	regranted, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "claimant", IssueID: restoringID, Claim: true})
-	if err != nil {
-		t.Fatalf("re-claim %s: %v", restoringID, err)
-	}
-	if regranted.Changed {
-		t.Errorf("re-claiming %s as its own holder reported Changed = true, want a no-op", restoringID)
-	}
-	assertLiveAssignee(t, ctx, fixture, restoringID, "claimant")
-	// Still the pre-claim snapshot, three claims later.
-	assertIssueOperationsStoredColumns(t, ctx, fixture, restoringID, "after the bare claim and re-claim", restoringBystanders)
-}
-
-// issueOperationsClaimBystanderColumns are the stored columns a claim must
-// leave alone: everything the public issue carries except the assignee and
-// status it grants, the started_at it stamps, and the row marks every write
-// moves.
-var issueOperationsClaimBystanderColumns = []string{
-	"title", "description", "design", "acceptance_criteria", "notes",
-	"spec_id", "await_id", "priority", "issue_type", "owner",
-	"closed_by_session", "estimated_minutes", "external_ref",
-	"due_at", "defer_until", "metadata",
-}
-
 // issueOperationsStoredTimeLayout is how Dolt renders a DATETIME cast to CHAR.
 // The columns carry no fractional seconds, so this round-trips exactly.
 const issueOperationsStoredTimeLayout = "2006-01-02 15:04:05"
+
+// issueOperationsClockSlack widens the window a case allows around a stamp the
+// implementation wrote from its own clock. Every backend here stamps in Go, in
+// this process, so the two clocks are the same one; the slack covers the
+// truncation to whole seconds and a slow call, not a clock skew.
+const issueOperationsClockSlack = 5 * time.Second
 
 // issueOperationsColumnValue names one stored column and the value it holds, so
 // a field-surface assertion reports WHICH column disagreed.
@@ -2582,54 +1783,6 @@ func assertIssueOperationsColumnValues(t *testing.T, id, label string, got, want
 			t.Errorf("%s %s %s = %q, want %q", id, label, field.column, got[i].value, field.value)
 		}
 	}
-}
-
-// issueOperationsIssueScalars renders the seventeen-field scalar surface off a
-// returned issue, in the column vocabulary the stored-row assertions use, so a
-// case can hold the row and the result to ONE expectation table.
-func issueOperationsIssueScalars(issue *types.Issue) []issueOperationsColumnValue {
-	return []issueOperationsColumnValue{
-		{"title", issue.Title},
-		{"description", issue.Description},
-		{"design", issue.Design},
-		{"acceptance_criteria", issue.AcceptanceCriteria},
-		{"notes", issue.Notes},
-		{"spec_id", issue.SpecID},
-		{"await_id", issue.AwaitID},
-		{"status", string(issue.Status)},
-		{"priority", strconv.Itoa(issue.Priority)},
-		{"issue_type", string(issue.IssueType)},
-		{"assignee", issue.Assignee},
-		{"owner", issue.Owner},
-		{"closed_by_session", issue.ClosedBySession},
-		{"estimated_minutes", issueOperationsIntText(issue.EstimatedMinutes)},
-		{"external_ref", issueOperationsStringText(issue.ExternalRef)},
-		{"due_at", issueOperationsTimeText(issue.DueAt)},
-		{"defer_until", issueOperationsTimeText(issue.DeferUntil)},
-	}
-}
-
-// The three renderers below spell an unset pointer as the empty string, which
-// is how COALESCE reports the NULL it stores as.
-func issueOperationsIntText(value *int) string {
-	if value == nil {
-		return ""
-	}
-	return strconv.Itoa(*value)
-}
-
-func issueOperationsStringText(value *string) string {
-	if value == nil {
-		return ""
-	}
-	return *value
-}
-
-func issueOperationsTimeText(value *time.Time) string {
-	if value == nil {
-		return ""
-	}
-	return value.UTC().Format(issueOperationsStoredTimeLayout)
 }
 
 // issueOperationsRowMarks are the two columns that record THAT a row was
@@ -3002,29 +2155,6 @@ func assertIssueOperationsLabels(t *testing.T, ctx context.Context, fixture Issu
 	}
 }
 
-// assertIssueOperationsParents reads the stored outgoing parent-child edges.
-func assertIssueOperationsParents(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture, id, label string, want ...string) {
-	t.Helper()
-	var total int
-	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = ?", []any{id, string(types.DepParentChild)}, &total); err != nil {
-		t.Fatalf("count parents for %s (%s): %v", id, label, err)
-	}
-	if total != len(want) {
-		t.Errorf("%s %s parent edge count = %d, want %d (%v)", id, label, total, len(want), want)
-	}
-	for _, parent := range want {
-		var present int
-		if err := fixture.QueryScalar(ctx,
-			"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = ?",
-			[]any{id, parent, string(types.DepParentChild)}, &present); err != nil {
-			t.Fatalf("look up parent %s of %s (%s): %v", parent, id, label, err)
-		}
-		if present != 1 {
-			t.Errorf("%s %s parent edge to %s count = %d, want 1", id, label, parent, present)
-		}
-	}
-}
-
 // assertIssueOperationsStringSet compares a result slice as a set, because no
 // leaf clause promises an order for labels.
 func assertIssueOperationsStringSet(t *testing.T, label string, got []string, want ...string) {
@@ -3095,64 +2225,5 @@ func assertIssueOperationsAssigneeAndStatus(t *testing.T, ctx context.Context, f
 	}
 	if types.Status(status) != wantStatus {
 		t.Errorf("%s status = %q, want %q", id, status, wantStatus)
-	}
-}
-
-// issueOperationsHistoryCounter reports how many version-control entries each
-// operation adds. It takes deltas rather than reading the top of the log
-// because two commits made inside one second tie on date, so their relative
-// order is not something to assert on.
-type issueOperationsHistoryCounter struct {
-	ctx     context.Context
-	fixture IssueOperationsStagingFixture
-	total   int
-}
-
-// newIssueOperationsHistoryCounter is the single choke point for the fixture's
-// history hook, so it is also where a backend that cannot observe history skips
-// LOUDLY rather than passing quietly — including for any case that reaches for
-// the counter later.
-func newIssueOperationsHistoryCounter(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) *issueOperationsHistoryCounter {
-	t.Helper()
-	if fixture.CountHistoryMatching == nil {
-		t.Skip("fixture has no CountHistoryMatching: this backend cannot observe history, so issueops.go:261-270 is UNPINNED here")
-	}
-	counter := &issueOperationsHistoryCounter{ctx: ctx, fixture: fixture}
-	counter.total = counter.count(t, "")
-	return counter
-}
-
-// count answers the entries carrying message exactly, or every entry when
-// message is empty.
-func (c *issueOperationsHistoryCounter) count(t *testing.T, message string) int {
-	t.Helper()
-	pattern := ""
-	if message != "" {
-		pattern = historyPatternForExactMessage(t, message)
-	}
-	got, err := c.fixture.CountHistoryMatching(c.ctx, pattern)
-	if err != nil {
-		t.Fatalf("count history entries (%q): %v", message, err)
-	}
-	return got
-}
-
-// assertTotal checks the entries added since the previous assertTotal and
-// re-baselines.
-func (c *issueOperationsHistoryCounter) assertTotal(t *testing.T, label string, want int) {
-	t.Helper()
-	total := c.count(t, "")
-	if got := total - c.total; got != want {
-		t.Errorf("%s recorded %d history entries, want %d", label, got, want)
-	}
-	c.total = total
-}
-
-// assertMessage checks how many entries carry an exact message, which is the
-// only way to tell the caller's spelling from the implementation's default.
-func (c *issueOperationsHistoryCounter) assertMessage(t *testing.T, label, message string, want int) {
-	t.Helper()
-	if got := c.count(t, message); got != want {
-		t.Errorf("%s left %d history entries reading %q, want %d", label, got, message, want)
 	}
 }

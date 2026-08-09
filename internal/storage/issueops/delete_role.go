@@ -57,6 +57,40 @@ func DeleteInTx(ctx context.Context, tx *sql.Tx, req publicops.DeleteRequest) (p
 		return publicops.DeleteResult{}, &publicops.NotFoundError{IDs: missing}
 	}
 
+	// The version precondition sits between the existence probe and the
+	// dependents guard, where issueops.Deleter.Delete puts it: a version is a
+	// fact about a row, so a request naming a typo reports the typo; and a
+	// caller holding a stale token is not yet in a position to choose --cascade
+	// or --force, so the mismatch outranks that refusal.
+	//
+	// It reads ids[0] because ValidateDeleteRequest has already refused a
+	// multi-id request carrying one and NormalizeDeleteIDs has already
+	// collapsed duplicates, so exactly one distinct id is here. The read shares
+	// this transaction with the deletion below, which is what makes the pair a
+	// compare-and-delete; CheckVersionInTx is the same guard the update and
+	// close paths use, over the same row_lock token and with the same
+	// plane routing.
+	//
+	// IT RE-READS A ROW THE PROBE ABOVE ALREADY RETURNED, and that is a real
+	// trade rather than an oversight: `found` carries this row's RowVersion, so
+	// the comparison could be made here without a second SELECT. What the second
+	// SELECT buys is ONE definition of the guard — the same function the update
+	// and close paths call, so a change to how a version is read or how a
+	// mismatch is worded reaches all three together — at the cost of one indexed
+	// single-row read inside a transaction that is about to delete rows and
+	// rewrite their neighbors.
+	//
+	// THE UNIT-OF-WORK LEG ANSWERS THAT TRADE THE OTHER WAY, comparing the row
+	// its own probe loaded, and the two are not in disagreement: that leg
+	// reaches the domain use cases rather than a transaction, so this function
+	// is not available to it and there is no shared guard for it to prefer. The
+	// conformance contract is where the two are held equal.
+	if req.ExpectedVersion != nil {
+		if err := CheckVersionInTx(ctx, tx, ids[0], *req.ExpectedVersion); err != nil {
+			return publicops.DeleteResult{}, err
+		}
+	}
+
 	idSet := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		idSet[id] = true

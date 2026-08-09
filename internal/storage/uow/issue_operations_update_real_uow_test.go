@@ -20,7 +20,7 @@ import (
 //
 // WHAT MOVED OUT, and what covers it now:
 //
-//   - Cross-tier ID collisions on create. RunIssueOperationsCreateRefusesAn-
+//   - Cross-tier ID collisions on create. RunLifecycleCreateRefusesAn-
 //     OccupiedID asserts all three directions (durable over durable, durable
 //     over wisp, ephemeral over durable) against the raw rows of both tables,
 //     which is a superset of what the case here seeded.
@@ -43,7 +43,7 @@ import (
 //     configured custom type accepted — against all three backends rather than
 //     only the domain use case this one reached.
 //   - A claim counting as a mutation when the patch beside it restores the
-//     prior state. RunIssueOperationsUpdateClaimIsAMutationWhenThePatch-
+//     prior state. RunLifecycleUpdateClaimIsAMutationWhenThePatch-
 //     RestoresTheRow carries BOTH patch shapes, so the claim's own accounting
 //     is load-bearing at the two stores as well as here, where the case below
 //     could only reach this backend's claimChanged line.

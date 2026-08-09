@@ -85,8 +85,11 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 	result := publicops.DeleteResult{DryRun: req.DryRun}
 
 	// The existence probe comes FIRST, so a request naming a typo reports the
-	// typo rather than whatever the graph says about the ids that resolved.
-	present := make(map[string]bool, len(req.IDs))
+	// typo rather than whatever the graph says about the ids that resolved. It
+	// keeps the ROWS rather than a set of ids, because the version precondition
+	// below needs their RowVersion and re-reading them for it would be a second
+	// read of the same rows in the same transaction.
+	present := make(map[string]*types.Issue, len(req.IDs))
 	for _, load := range []func(context.Context, []string) ([]*types.Issue, error){
 		issueUC.GetIssuesByIDs,
 		issueUC.GetWispsByIDs,
@@ -97,18 +100,38 @@ func deleteInUOW(ctx context.Context, uw UnitOfWork, req publicops.DeleteRequest
 		}
 		for _, row := range rows {
 			if row != nil {
-				present[row.ID] = true
+				present[row.ID] = row
 			}
 		}
 	}
 	var missing []string
 	for _, id := range req.IDs {
-		if !present[id] {
+		if present[id] == nil {
 			missing = append(missing, id)
 		}
 	}
 	if len(missing) > 0 {
 		return publicops.DeleteResult{}, &publicops.NotFoundError{IDs: missing}
+	}
+
+	// The version precondition, between the existence probe and the dependents
+	// guard exactly as issueops.Deleter.Delete orders them.
+	//
+	// This leg compares the row the probe already loaded rather than issuing
+	// its own guard read, which is what updatePreconditionsHold does for the
+	// same token on the update path. The row was read inside this unit of work,
+	// so the comparison and the deletion still see one snapshot; the sentinel
+	// and the message are the shared ones, because a caller matching
+	// ErrVersionMismatch must not have to know which backend answered.
+	//
+	// req.IDs[0] is the only distinct id: ValidateDeleteRequest refused a
+	// multi-id request carrying a version and NormalizeDeleteIDs collapsed the
+	// duplicates before either ran.
+	if req.ExpectedVersion != nil {
+		if current := present[req.IDs[0]].RowVersion; current != *req.ExpectedVersion {
+			return publicops.DeleteResult{}, fmt.Errorf("%w: expected %d, got %d",
+				publicops.ErrVersionMismatch, *req.ExpectedVersion, current)
+		}
 	}
 
 	// The guard runs only when the request did not already say what to do

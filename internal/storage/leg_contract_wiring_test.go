@@ -27,12 +27,30 @@ var neverSatisfiedTags = map[string]bool{"ignore": true, "never": true}
 // conformance package's own waiver list does: an entry has to name a real
 // entrypoint and a real leg, carry a reason, and stop being waived the moment
 // the leg wires it.
+// importerOneAccessorWaiverReason records why the Importer contract runs on one
+// leg. publicops.Importer has exactly one accessor anywhere — uow.ImporterSource
+// — and it is the only capability source in internal/storage/uow with no
+// storage.DoltStorage counterpart: on both store legs `bd import` still runs the
+// raw CreateIssuesWithFullOptions seam. Wiring the other two is a new interface
+// method plus a new body at each backend, not a test change. The waiver stops
+// the moment either leg grows the accessor.
+const importerOneAccessorWaiverReason = "Importer has one accessor (uow.ImporterSource); " +
+	"the store legs run bd import through the raw seam and implement no Importer role"
+
 var unwiredContractEntrypoints = map[string]map[string]string{
 	"dolt": {
-		"RunBootstrapperRecordsExactlyOneHistoryEntry": bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
 	},
 	"embeddeddolt": {
-		"RunBootstrapperRecordsExactlyOneHistoryEntry": bootstrapSplitWaiverReason,
+		"RunImporterRejectsAStaleRowAndNamesIt":          importerOneAccessorWaiverReason,
+		"RunImporterReportsTheAbsentTargetItDroppedOnce": importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCrossPlaneEdgeItDropped":   importerOneAccessorWaiverReason,
+		"RunImporterReportsTheCycleEdgeItDropped":        importerOneAccessorWaiverReason,
+		"RunBootstrapperRecordsExactlyOneHistoryEntry":   bootstrapSplitWaiverReason,
 	},
 	"uow": {
 		"RunBootstrapperRecordsNoHistoryEntryOfItsOwn":                   bootstrapSplitWaiverReason,

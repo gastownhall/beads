@@ -1269,6 +1269,32 @@ const (
 	WaitsForAnyChildren = "any-children" // Proceed when first child completes (future)
 )
 
+// IsSchedulingEdge reports whether a dependency type belongs to the static
+// COMBINED-CYCLE SET: blocks, conditional-blocks and parent-child. It is the
+// set every cycle probe and every whole-graph gate walks, and parent-child is
+// in it because a blocked parent propagates its blocked state to its children
+// in the ready-work computation — so a chain mixing blocks and parent-child
+// edges can form a livelock that leaves nothing ready.
+//
+// WAITS-FOR IS DELIBERATELY OUTSIDE IT. That edge also affects readiness, but
+// its gate clears on the spawner's CHILDREN rather than on the spawner, so a
+// waits-for edge cannot close a cycle the way a blocking one does.
+//
+// IT LIVES HERE, next to the Dep* constants themselves, because four packages
+// walk this set and no two of them can import each other: internal/storage/
+// issueops imports internal/storage/domain, so domain cannot import back, and
+// internal/storage/domain/db and internal/storage/uow are third and fourth. Each
+// had its own spelling of the same three types, so ADDING a fifth scheduling
+// type was four edits with nothing to catch a missed one. It is one edit now.
+func IsSchedulingEdge(t DependencyType) bool {
+	switch t {
+	case DepBlocks, DepConditionalBlocks, DepParentChild:
+		return true
+	default:
+		return false
+	}
+}
+
 // IsValidWaitsForGate reports whether gate names a known waits-for fanout gate.
 func IsValidWaitsForGate(gate string) bool {
 	return gate == WaitsForAllChildren || gate == WaitsForAnyChildren

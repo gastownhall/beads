@@ -54,11 +54,28 @@ func (e *ClaimConflictError) Unwrap() error { return e.Err }
 // Reader can.
 type ErrUnsupported = beadserrors.ErrUnsupported
 
-// ErrAssigneeMismatch is returned by UnclaimIssueIfAssignee when the issue's
-// current assignee does not match the expected assignee (including when the
-// issue is no longer assigned at all). The caller's view of the claim was
-// stale; the issue is left untouched.
+// ErrAssigneeMismatch is returned by a conditional release or update whose
+// ExpectedAssignee does not match the issue's current assignee (including when
+// the issue is no longer assigned at all). The caller's view of the claim was
+// stale; the issue is left untouched. See Releaser.Release and
+// UpdateRequest.ExpectedAssignee.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
+
+// ErrNotOwner is returned when an actor tries to release a claim that a
+// different actor holds. Releasing another actor's claim requires the force
+// escape hatch (ReleaseRequest.Force, `bd unclaim --force`), reserved for
+// abandoned claims — or ReleaseRequest.ExpectedAssignee, which authorizes the
+// same thing by naming the holder instead of ignoring it.
+//
+// It is DECLARED here and re-exported by internal/storage rather than the other
+// way round, which is the direction the memoryops slice settled: a Go alias
+// preserves identity in both directions, so every existing storage.ErrNotOwner
+// reference keeps matching this identical value, and a caller holding only the
+// public role can now classify the refusal without importing an internal
+// package it cannot reach. It is the ownership half of the same vocabulary
+// ErrAssigneeMismatch above belongs to, which is why it is here rather than
+// beside Releaser: both refusals answer "whose claim is this".
+var ErrNotOwner = errors.New("issue claimed by a different actor")
 
 // The namespace-neutral part of this vocabulary is declared by beadserrors and
 // re-exported here. These are ALIASES, so they are the same values: every

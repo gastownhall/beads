@@ -92,7 +92,7 @@ func TestInstrumentedStorageDeclaresEveryRoleAccessor(t *testing.T) {
 	}
 }
 
-// roleAccessorStore is a DoltStorage whose only real methods are the twenty-four
+// roleAccessorStore is a DoltStorage whose only real methods are the twenty-seven
 // role accessors, each answering with a distinguishable sentinel so a test can tell
 // an instrumented surface from a passed-through one.
 //
@@ -159,8 +159,17 @@ func (s *roleAccessorStore) BatchCreator() (issueops.BatchCreator, error) {
 func (s *roleAccessorStore) DependencyEditor() (issueops.DependencyEditor, error) {
 	return s.surface, s.err
 }
+func (s *roleAccessorStore) MetadataCAS() (issueops.MetadataCAS, error) {
+	return s.surface, s.err
+}
+func (s *roleAccessorStore) BatchApplier() (issueops.BatchApplier, error) {
+	return s.surface, s.err
+}
+func (s *roleAccessorStore) Releaser() (issueops.Releaser, error) {
+	return s.surface, s.err
+}
 
-// roleAccessorSentinel implements twenty-three of the twenty-four roles at once.
+// roleAccessorSentinel implements twenty-six of the twenty-seven roles at once.
 // Nothing calls its methods; identity is the whole point.
 type roleAccessorSentinel struct{}
 
@@ -232,6 +241,9 @@ func (*roleAccessorSentinel) AssigneeStats(context.Context, issueops.AssigneeSta
 func (*roleAccessorSentinel) DetectCycles(context.Context, issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
 	return issueops.CycleReport{}, nil
 }
+func (*roleAccessorSentinel) ApplyBatch(context.Context, issueops.ApplyBatchRequest) (issueops.ApplyBatchResult, error) {
+	return issueops.ApplyBatchResult{}, nil
+}
 
 func (*roleAccessorSentinel) CountReady(context.Context, issueops.ReadyRequest) (issueops.ReadyCountResult, error) {
 	return issueops.ReadyCountResult{}, nil
@@ -272,8 +284,15 @@ func (*roleAccessorSentinel) AddDependencies(context.Context, issueops.AddDepend
 func (*roleAccessorSentinel) RemoveDependency(context.Context, issueops.RemoveDependencyRequest) (issueops.RemoveDependencyResult, error) {
 	return issueops.RemoveDependencyResult{}, nil
 }
+func (*roleAccessorSentinel) CompareAndSetKey(context.Context, issueops.CompareAndSetKeyRequest) (issueops.CompareAndSetKeyResult, error) {
+	return issueops.CompareAndSetKeyResult{}, nil
+}
+func (*roleAccessorSentinel) Release(context.Context, issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
+	return issueops.ReleaseResult{}, nil
+}
 
-// memoryRoleSentinel is the twenty-fourth role's sentinel — see
+// memoryRoleSentinel is the memory role's sentinel — see
+// memoryRoleSentinel is the remaining role's sentinel — see
 // roleAccessorStore for why it cannot be a method set on the struct above.
 type memoryRoleSentinel struct{}
 
@@ -342,6 +361,9 @@ func TestInstrumentedStorageInstrumentsEveryRoleAccessor(t *testing.T) {
 		{"BatchCloser", func() (any, error) { return wrapped.BatchCloser() }, sentinel},
 		{"BatchCreator", func() (any, error) { return wrapped.BatchCreator() }, sentinel},
 		{"DependencyEditor", func() (any, error) { return wrapped.DependencyEditor() }, sentinel},
+		{"MetadataCAS", func() (any, error) { return wrapped.MetadataCAS() }, sentinel},
+		{"BatchApplier", func() (any, error) { return wrapped.BatchApplier() }, sentinel},
+		{"Releaser", func() (any, error) { return wrapped.Releaser() }, sentinel},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()
@@ -393,6 +415,9 @@ func TestInstrumentedStorageRoleAccessorsPropagateInnerErrors(t *testing.T) {
 		{"BatchCloser", func() (any, error) { return wrapped.BatchCloser() }},
 		{"BatchCreator", func() (any, error) { return wrapped.BatchCreator() }},
 		{"DependencyEditor", func() (any, error) { return wrapped.DependencyEditor() }},
+		{"MetadataCAS", func() (any, error) { return wrapped.MetadataCAS() }},
+		{"BatchApplier", func() (any, error) { return wrapped.BatchApplier() }},
+		{"Releaser", func() (any, error) { return wrapped.Releaser() }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			surface, err := test.got()

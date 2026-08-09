@@ -82,6 +82,48 @@ const (
 	// CodeDependencyExists is the pair that already carries an edge of a
 	// DIFFERENT type, with both types in `existing_type`/`requested_type`.
 	CodeDependencyExists Code = "dependency_exists"
+	// CodeAlreadyExists is a create whose EXPLICIT id already names a stored
+	// row. `param` names the offending member and, on a batch operation, the
+	// item members name which item carried it.
+	//
+	// A 409 rather than a 400, and the distinction is the one CodeNotClosable
+	// draws: the request is well-formed and stays well-formed: what refuses it
+	// is STATE the client cannot see without reading it, and recovery is to
+	// look at that state — adopt the row, pick another id, or stop. A 400 says
+	// "this body is malformed, fix it and it will work", which is false here:
+	// the identical body succeeded before the id was taken and would succeed
+	// again against a workspace that never took it.
+	//
+	// It is minted rather than folded into CodeInvalidArgument because the two
+	// are not narrowable later: widening a 400 to a 409 changes the status an
+	// existing client dispatches on, while a 409 that turns out to be
+	// unreachable retires for free.
+	CodeAlreadyExists Code = "already_exists"
+	// CodePreconditionFailed is a compare-and-set guard that MISSED on an
+	// operation whose contract is that a miss refuses everything. The expected
+	// values travel in typed extension members; a batch operation adds the
+	// members naming which item carried the guard.
+	//
+	// A 409 for CodeNotClosable's reason: the request is fine as a request and
+	// the STATE refuses it, so the same body succeeds or fails on something the
+	// client cannot see without reading it.
+	//
+	// IT IS NOT THE ANSWER TO EVERY LOST COMPARE-AND-SET on this surface, and
+	// the split is the point. Where a miss is the ordinary path of a retry loop
+	// — the metadata compare-and-set — it is a 200 carrying the current value,
+	// because putting a loop's normal iteration in the error channel would make
+	// the value that loop needs next travel as a problem member. This code is
+	// for the opposite contract: a guard on one step of a plan the caller meant
+	// to land whole, where a miss took the entire request down and there is
+	// nothing to report but the refusal.
+	//
+	// The expected/actual members are SPLIT BY TYPE — expected_version and
+	// actual_version, expected_status and actual_status, expected_assignee and
+	// actual_assignee — rather than one polymorphic pair, because a generic
+	// `expected`/`actual` of "a version or a status or an assignee" is a schema
+	// alternation and this document's x-go-type doctrine admits no composition
+	// keyword to spell one.
+	CodePreconditionFailed Code = "precondition_failed"
 	// CodeEventsJournalDisabled is the events journal being OFF on the served
 	// workspace. It exists because the alternative answer is a lie: a disabled
 	// journal reads as zero rows and a head of zero, which is byte-identical to
@@ -147,6 +189,9 @@ var codeStatus = map[Code]int{
 	CodeNotClosable:      http.StatusConflict,
 	CodeDependencyCycle:  http.StatusConflict,
 	CodeDependencyExists: http.StatusConflict,
+	CodeAlreadyExists:    http.StatusConflict,
+
+	CodePreconditionFailed: http.StatusConflict,
 
 	CodeEventsJournalDisabled:  http.StatusConflict,
 	CodeEventsJournalTruncated: http.StatusGone,
@@ -281,6 +326,17 @@ const (
 	OpDeleteIssues = "deleteIssues"
 	// OpBatchCreateIssues creates many issues as one transaction, or none.
 	OpBatchCreateIssues = "batchCreateIssues"
+	// OpApplyBatch applies an ORDERED, heterogeneous plan — creates, updates,
+	// closes and dependency edges together — as one transaction, or none of it.
+	// It is the only operation here whose request expresses a graph that
+	// references its own items: a create may NAME itself and later items address
+	// it by that name.
+	//
+	// It is therefore the widest refusal vocabulary on this surface, and every
+	// entry is inherited rather than invented: it can earn the lifecycle's
+	// close-policy conflict, the claim's assignee fence and both of the graph's
+	// conflicts, because it performs all three families of write.
+	OpApplyBatch = "applyBatch"
 	// OpRememberMemory stores one memory, behind memoryops.Memories. It is the
 	// first operation on this surface that reaches a role outside issueops: the
 	// memory plane is user data riding in the config table, not settings, and
@@ -322,6 +378,11 @@ const (
 	// races an open stream arrives as a named event rather than as the 410 the
 	// same condition earns at connect.
 	OpWatchEvents = "watchEvents"
+	// OpCompareAndSetMetadata conditionally sets one metadata key on an issue.
+	// It is the only WRITE on this surface whose ordinary refusal is a 200: a
+	// lost race is the answer to the question the caller asked, and the value
+	// that refused the swap is what its retry needs next.
+	OpCompareAndSetMetadata = "compareAndSetMetadata"
 )
 
 // operationCodes is the per-operation problem vocabulary: exactly the codes
@@ -442,6 +503,32 @@ var operationCodes = map[string][]Code{
 	// item can collide with a stored row and the role's ErrAlreadyExists is
 	// unreachable from the wire.
 	OpBatchCreateIssues: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// The widest row here, and every code on it is inherited from an operation
+	// that already has it: this one performs the lifecycle's writes, the claim's
+	// assignee transfer and the graph's edge assertions inside one transaction,
+	// so it can earn any refusal any of them can.
+	//
+	// THERE IS A CONFLICT CODE HERE, unlike the metadata compare-and-set, and
+	// that is the whole difference between the two contracts rather than a
+	// difference of taste. A lost compare-and-set is that operation's ORDINARY
+	// path — a retry loop is its designed caller — so a 409 there would put the
+	// normal iteration in the error channel and force the value the loop needs
+	// next into a problem member. Here a precondition miss refuses every item in
+	// the request, so there is no partial outcome to report on a 200 and nothing
+	// for a client to do with one: the refusal IS the answer, and it belongs
+	// where every other "the state says no" on this surface lives.
+	//
+	// The 404 is the delete's, not the batch create's: `update` and `close`
+	// items NAME rows this request acts on, so a target that resolves to nothing
+	// is a resource the request failed to address. An EDGE endpoint stays a 400,
+	// conforming to addDependencies — nothing in that refusal is about a
+	// resource this operation was asked to address.
+	OpApplyBatch: {
+		CodeInvalidArgument, CodeNotFound,
+		CodePreconditionFailed, CodeNotClosable, CodeAlreadyClaimed, CodeAlreadyExists,
+		CodeDependencyCycle, CodeDependencyExists,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
 	// No 404 and no conflict code: this is an UPSERT with a server-derivable
 	// key, so there is no resource it can fail to address and no row it can
 	// collide with. Its 400 is the body vocabulary plus the ROLE's two
@@ -501,6 +588,16 @@ var operationCodes = map[string][]Code{
 	// nothing it could report a miss on — listBlockingAnnotations' argument,
 	// applied to a write. No conflict code either: the removal is idempotent, so
 	// another caller having got there first is a success rather than a collision.
+	// NO CONFLICT CODE, and the absence is this operation's whole posture. A
+	// lost compare-and-set is a 200 carrying `swapped: false` and the current
+	// value, because a retry loop is the DESIGNED caller and a 409 would put its
+	// ordinary path in the error channel — and would have to smuggle the value
+	// that loop needs next into a problem extension member. The 404 is here for
+	// the id, which is the one refusal a caller cannot converge on.
+	OpCompareAndSetMetadata: {
+		CodeInvalidArgument, CodeNotFound,
+		CodeBusy, CodeDBUnavailable, CodeInternal,
+	},
 	OpRemoveDependency: {CodeInvalidArgument, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The two conflict codes are this operation's alone, and both say the same
 	// kind of thing: the request is fine as a request and the GRAPH refuses it,
@@ -584,6 +681,92 @@ func (r Result) WithHierarchyConflict(issueID, blockerID string, blockerIsAncest
 	r.Problem.BlockerId = &blockerID
 	r.Problem.BlockerIsAncestor = &blockerIsAncestor
 	return r
+}
+
+// WithBatchItem attaches the four extension members that name WHICH item of a
+// batch earned a refusal: its index, its kind, the key it gave itself or the
+// key its target ref named, and the id it had resolved when the refusal
+// happened.
+//
+// They come from *issueops.ItemError's own fields — the typed error the role
+// raises rather than the prose it formats — for the reason every other typed
+// member on this envelope does, and one more that is this operation's alone:
+// the request is all or nothing, so there is no per-item result array for a
+// client to find the offender in. These members are the only place it exists.
+//
+// `item_key` and `item_issue_id` are OMITTED WHEN EMPTY, and both absences mean
+// something. An item that named nothing symbolically has no key; an item
+// refused before its target resolved — a create whose id was never minted, a
+// ref that resolved to nothing — has no id.
+//
+// It is `item_issue_id` rather than `issue_id` deliberately: `issue_id` is
+// already a PRESENCE-DISCRIMINATING member of the `dependency_cycle` hierarchy
+// refusal, and reusing it would make that discriminator fire on a refusal it
+// says nothing about.
+func (r Result) WithBatchItem(index int, kind, key, issueID string) Result {
+	r.Problem.ItemIndex = &index
+	r.Problem.ItemKind = &kind
+	if key != "" {
+		r.Problem.ItemKey = &key
+	}
+	if issueID != "" {
+		r.Problem.ItemIssueId = &issueID
+	}
+	return r
+}
+
+// WithDeclaredLater attaches the `declared_later` member, which tells an
+// unresolvable key that IS declared by a later item from one nothing in the
+// request declares at all. The first is an ordering mistake and the second is a
+// typo, and a client fixes them differently.
+//
+// It is emitted in BOTH polarities and never omitted to mean false, for
+// WithHierarchyConflict's reason applied to a 400: an absent member on this
+// operation's 400s means "this refusal was not about a key" and must not be
+// readable as "the key was not declared later".
+func (r Result) WithDeclaredLater(declaredLater bool) Result {
+	r.Problem.DeclaredLater = &declaredLater
+	return r
+}
+
+// WithExpectedVersion attaches the `expected_version` member of a
+// `precondition_failed`: the row version the request guarded on.
+//
+// It is the REQUEST's value rather than a read, which is why there is no
+// `actual_version` beside it here — see PreconditionFailed.
+func (r Result) WithExpectedVersion(expected int64) Result {
+	r.Problem.ExpectedVersion = &expected
+	return r
+}
+
+// WithExpectedStatus attaches the `expected_status` member of a
+// `precondition_failed`. Same source and same rule as WithExpectedVersion.
+func (r Result) WithExpectedStatus(expected string) Result {
+	r.Problem.ExpectedStatus = &expected
+	return r
+}
+
+// WithExpectedAssignee attaches the `expected_assignee` member of a
+// `precondition_failed`. Same source and same rule as WithExpectedVersion.
+func (r Result) WithExpectedAssignee(expected string) Result {
+	r.Problem.ExpectedAssignee = &expected
+	return r
+}
+
+// PreconditionFailed builds the 409 for a compare-and-set guard that missed on
+// an operation where a miss refuses the whole request.
+//
+// The detail says what a client does next rather than what the row held,
+// because on this contract those are different facts: the transaction that saw
+// the mismatch rolled back, so a value read afterwards describes a row the
+// refusal never saw. The role's refusals carry the expectation and not the
+// observation, so `actual_version`, `actual_status` and `actual_assignee` stay
+// absent here — the envelope declares them for an operation whose role can
+// report what it found, and inventing one from a later read would be worse than
+// omitting it.
+func PreconditionFailed() Result {
+	return newResult(CodePreconditionFailed,
+		"a precondition guard did not match; nothing was written, so re-read the row and recompose the request rather than retrying it")
 }
 
 // WithJournalWindow attaches the three `events_journal_truncated` extension

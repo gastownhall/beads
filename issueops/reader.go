@@ -207,12 +207,69 @@ type ListRequest struct {
 	IncludeTemplates bool
 	IncludeGates     bool
 	IncludeInfra     bool
+	// IncludeEphemeral admits the EPHEMERAL PLANE — the wisps TABLE, which a
+	// default listing does not read at all — and admits nothing else.
+	//
+	// WHAT IS IN THAT PLANE is not only true ephemerals. The wisps table holds
+	// every row the durable plane does not: wisps proper (ephemeral = 1) AND
+	// no-history rows, which live there with ephemeral = 0. Both arrive
+	// together, because this selects a TABLE rather than testing a column.
+	//
+	// False, the zero value, is the listing every caller has today: the durable
+	// issues table alone. True merges the wisps table IN ADDITION, so under the
+	// same filters the answer is a SUPERSET of the false answer. It never
+	// narrows, and it never becomes ephemeral-only.
+	//
+	// IT IS NOT THE SAME MECHANISM AS ReadyRequest.IncludeEphemeral, despite
+	// the shared name and the shared "admit in addition" reading, and the
+	// difference is observable. The ready query reads BOTH planes either way
+	// and its flag adds a per-ROW predicate (ephemeral = 0) when unset; this
+	// one selects which TABLES are read at all. So a no-history row — in the
+	// wisps table with ephemeral = 0 — is already in a DEFAULT ready answer and
+	// is absent from a default listing until this flag is set. Match the two
+	// fields for intent, never for row-level equivalence.
+	//
+	// IT IS A PLANE KNOB, NOT A TYPE KNOB — the difference from the three
+	// fields above it. Each of those takes a TYPE exclusion back off; this
+	// takes none off, so an ephemeral row whose type a default listing already
+	// excludes stays excluded. THAT INCLUDES THE INFRA TYPES, which is the
+	// combination most likely to surprise: the configured infra vocabulary
+	// (agent, role and message by default) is excluded by TYPE, so ephemeral
+	// agent/role/message rows need IncludeInfra as well as — or instead of —
+	// this. IncludeInfra does BOTH, which makes it strictly wider; what this
+	// field alone reaches is the ephemeral rows of the types a listing already
+	// shows.
+	//
+	// THE MERGED ANSWER IS ONE ORDER. Both planes are ordered together by
+	// SortBy as if they were a single table — not the durable rows followed by
+	// the ephemeral ones — so a Limit truncates the merged order rather than
+	// one plane's. Both implementations produce it (one merge-sorts two ordered
+	// legs, the other ORDERs a SQL union), and the keyset position
+	// (AfterCreatedAt/AfterID) is applied to BOTH legs, so a paged walk over
+	// the merged order drops no row and repeats none.
+	//
+	// The caveat that walk inherits is the one every multi-page walk already
+	// has, and this does not deepen it: a page is not a snapshot. A row written
+	// — or, for a wisp, compacted away — between two pages is seen or missed
+	// according to where it falls relative to the position, and the ephemeral
+	// plane merely turns over faster than the durable one.
+	//
+	// On the ReadyFlag arm it is CARRIED rather than dropped; see that field.
+	IncludeEphemeral bool
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 
 	ParentID string
 	NoParent bool
 	MolType  *MolType
+	// WispType matches the wisp_type COLUMN, which both tables carry. It is
+	// therefore a predicate and not a plane selector: it does not admit the
+	// ephemeral plane, and on a default listing — where that plane is
+	// suppressed — it narrows the durable rows to those whose wisp_type
+	// matches, which no ordinary durable row has. The combination that answers
+	// with rows is IncludeEphemeral (or IncludeInfra) plus this, and it is
+	// lawful rather than refused: the two compose as an ordinary AND, admitting
+	// the plane and then narrowing it to one classification.
 	WispType *WispType
 
 	DeferredFlag bool
@@ -234,8 +291,10 @@ type ListRequest struct {
 	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
-	// IncludeGates and IncludeInfra), Limit, Offset and the MaxRows cap with
-	// its attribution. SortBy and Reverse
+	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
+	// ephemeral gate of its own, so the plane bit crosses intact and
+	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
+	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
 	// query rather than inside it. Status and AllFlag are resolved to "open"
 	// and have no further effect: ready work is open work.

@@ -165,6 +165,37 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	}
 }
 
+func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
+	const (
+		storageCommand = "go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/..."
+		doctorCommand  = "go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/"
+		jobTimeout     = 30
+	)
+
+	for _, workflowName := range []string{"pr.yml", "main.yml"} {
+		t.Run(workflowName, func(t *testing.T) {
+			job := readCIWorkflow(t, workflowName).job(t, "test-domain-uow")
+			if job.TimeoutMinutes != jobTimeout {
+				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeout)
+			}
+			assertStepRunsExactly(t, job, "Test domain + uow + tracker", storageCommand)
+			assertStepRunsExactly(t, job, "Test doctor/fix (Dolt-backed, hard-require container)", doctorCommand)
+		})
+	}
+
+	gate := readCIWorkflow(t, "pr.yml").job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "test-domain-uow") {
+		t.Errorf("ci-gate needs test-domain-uow: %v", gate.Needs)
+	}
+	if got, want := gateEnv["TEST_DOMAIN_UOW"], "${{ needs.test-domain-uow.result }}"; got != want {
+		t.Errorf("ci-gate TEST_DOMAIN_UOW = %q, want %q", got, want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "TEST_DOMAIN_UOW") {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include TEST_DOMAIN_UOW: %q", gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
@@ -701,11 +732,12 @@ type ciWorkflow struct {
 }
 
 type ciWorkflowJob struct {
-	Needs    ciWorkflowStringList `yaml:"needs"`
-	Steps    []ciWorkflowStep     `yaml:"steps"`
-	RunsOn   string               `yaml:"runs-on"`
-	If       string               `yaml:"if"`
-	Strategy ciWorkflowStrategy   `yaml:"strategy"`
+	Needs          ciWorkflowStringList `yaml:"needs"`
+	Steps          []ciWorkflowStep     `yaml:"steps"`
+	RunsOn         string               `yaml:"runs-on"`
+	If             string               `yaml:"if"`
+	TimeoutMinutes int                  `yaml:"timeout-minutes"`
+	Strategy       ciWorkflowStrategy   `yaml:"strategy"`
 }
 
 type ciWorkflowStrategy struct {

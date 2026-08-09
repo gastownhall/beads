@@ -111,6 +111,38 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
    — the shared function takes a transaction, so no front door can call it at
    all.
 
+   **CHECK WHETHER THE UNIT OF WORK CAN REACH THE BODY BEFORE PROMISING THAT IT
+   WILL.** `MetadataCAS` and `TreeWalker` collapse all three legs onto one
+   `…InTx` function, and it is tempting to read that as the rule for tx-level
+   bodies. It is not. Those two take a `DBTX`, which is exactly the method set
+   `domain/db.Runner` publishes, so the unit-of-work leg reaches them through
+   the domain repository. `issueops.BatchApplier` cannot: its body COMPOSES
+   `ExecuteCreate`, `ExecuteUpdate` and `ExecuteClose`, every one of which takes
+   a `*sql.Tx`, and a unit of work's runner is a `*sql.Conn` with a transaction
+   open on it. No interface between the two publishes the other, and widening
+   three of the oldest write paths in the tree to take an interface is not a
+   role slice's change.
+
+   So that role has TWO bodies, and its contract says so at the top rather than
+   claiming three legs and one reading. **The test is mechanical: does every
+   function your body calls take an interface `Runner` satisfies?** Ask it
+   before you write the contract header, because the header's vote count is
+   what tells the next reader how much a three-leg run is worth.
+
+   **THEN SHARE EVERYTHING THE FORK DOES NOT FORCE YOU TO DUPLICATE, and be
+   precise about which half that is.** `BatchApplier`'s two bodies share their
+   request VALIDATION and their commit-message rule outright — one function
+   each, called from both. Its end gate is the interesting case, because it is
+   shared at the LEAF and forked at the ORCHESTRATION: both legs reach the same
+   `issueops.CheckBlockingHierarchyInTx` and the same
+   `AppendSchedulingGraphInTx`/`CycleThroughEdgesInGraph` walk (the unit-of-work
+   leg through two repository methods that delegate to them), so the two cannot
+   disagree about what a conflict or a cycle IS — but which edges get collected,
+   in what order, and how the refusal is wrapped are written twice. That is the
+   shape to aim for and the shape to describe honestly: "the legs share their
+   end gate" would be a claim the code does not support, and the next reader
+   would trust it.
+
 4. **The unit-of-work body and its source interface.**
    `internal/storage/uow/<role>.go`, declaring `type <Role>Source interface {
    <Role>() (publicops.<Role>, error) }` and implementing the accessor on
@@ -345,6 +377,13 @@ address is what decides the entry, so a namespace of tx-level bodies has no
 entries at all, and the absence has to be readable as a decision rather than as
 a step someone skipped.
 
+`issueops.BatchApplier` is the second role with no entry, for the same reason
+and one more: its step-3 body is an `…InTx` function AND it has no `cmd/bd`
+front door at all in the slice that introduced it — it landed with the HTTP
+half only. An absent CLI is a decision too, and the place to write it down is
+the leaf doc beside the promises, exactly as `VersionReconciler` writes down
+its absent HTTP half.
+
 The test: **does step 3 have an exported constructor returning the role
 interface, in a package a `cmd/bd` file can import?**
 `internal/workapi/store<role>` does, so it gets an entry. A `…InTx` function
@@ -417,6 +456,101 @@ now carry a per-row `inner` comparand naming the surface each one must not be
 (`internal/telemetry/role_accessor_decorator_test.go:279-282`). **A shared test
 fixture a new namespace cannot satisfy is a signal: the row you add beside it
 may be a row that cannot fail.**
+
+## When all three legs share one body
+
+`issueops.TreeWalker` was the first, and `issueops.MetadataCAS` is the second:
+the two stores wrap the `…InTx` function and the unit of work reaches the SAME
+function through the domain repository. Two things about that arrangement are
+not obvious the first time, and both cost a debugging session here.
+
+**The domain seam pulls the meaning layer DOWN, past step 2's address.** The
+unit-of-work leg reaches the body through `internal/storage/domain`, so
+`domain` has to name whatever request type the body takes — and `internal/workapi`
+already imports `domain`. So step 2's package cannot be workapi for this shape:
+the plan type and the equality rule live in `internal/storage` instead
+(`metadata_cas.go`, beside `ValidateMetadataKey`). Check the direction before
+picking step 2's address; the compiler tells you late and the fix is a move.
+
+**"Nothing to VERSION" and "nothing was WRITTEN" are different facts, and the
+unit-of-work leg is where conflating them bites.** A tx body naturally returns
+the durable tables it changed, for the store legs to stage. An EPHEMERAL write
+changes none of them — `ChangedTables.Add` drops the wisp tables on purpose —
+so an empty set arrives for a swap that really did write a row. The store legs
+survive that: their SQL transaction commits either way and only the Dolt commit
+is skipped. The unit of work does not, because its COMMIT MESSAGE is what
+commits the SQL transaction as well as what versions it, so an empty message
+rolls the write back. Here the wisp case went green on both stores and red on
+the unit of work with the row simply absent. Return the two facts separately
+(`issueops.MetadataCASWrite`), and make sure a wisp case exists on all three
+legs — it is the only case that can tell them apart.
+
+**And one measurement worth copying rather than the conclusion.** Two of this
+role's promises turned out to be held one layer down rather than by the code
+that reads as if it holds them: the metadata column is a Dolt JSON column that
+normalizes on write, so canonicalizing the STORED side is unfalsifiable on every
+in-tree backend, and `DiscardNoopIssueUpdates` already suppresses a metadata
+write that matches the row, so the body's own no-op short-circuit is
+unfalsifiable too. Neither was guessed — each was mutated and watched to stay
+green. One of them cost a case that had already been written, wired into three
+legs and the bundle, and then deleted, because a green case named for a promise
+is worse than no case. Say which mechanism actually holds a promise in the
+contract's coverage paragraph, and name the substrate that would make it
+observable.
+
+## When the role's answer carries a JSON value
+
+Two traps, both found in review of `issueops.MetadataCAS` and both invisible to
+every test that asserts on wire BYTES.
+
+**A `*json.RawMessage` wire member cannot READ a present `null`.** `encoding/json`
+answers a JSON null against a pointer by setting the pointer to nil, before any
+`UnmarshalJSON` runs — so a generated client decoding `{"current":null}` gets
+exactly what it gets for a response with no `current` member at all. If those
+two mean different things on your operation, the generated client cannot tell
+them apart and no round-trip test on the server notices, because the server's
+own handler reads raw members. The fix is
+`x-go-type-skip-optional-pointer: true` beside the `x-go-type`, which makes the
+member a bare `json.RawMessage` — an `Unmarshaler` in its own right, so it
+receives the literal, while an omitted member still leaves it nil and
+`omitempty` still omits it on the way out. **The wire does not change in either
+direction**, which is why nothing else catches the regression: add a test that
+decodes a present null INTO the generated struct, or the next `make api-gen`
+takes the fix away. Add `nullable: true` too — the document is OpenAPI 3.0.3 and
+a validating gateway is entitled to reject a legitimate null without it.
+
+**Do not justify a rule with a precision the SUBSTRATE does not keep.** This
+role shipped with a comparison rule defended, in three places, as protecting
+int64s past 2^53 from a float64 round-trip. The metadata column is a
+go-mysql-server JSON column that decodes numbers through float64 itself:
+measured, `9007199254740993` stores as `...992`, `1.0` as `1`, `-0.0` as `0`,
+and `1e300` as three hundred and one digits. The defense was against a loss that
+had already happened one layer down. Two consequences worth generalizing:
+
+- **Measure the column before writing the promise.** One throwaway probe that
+  seeds a row and reads the raw bytes back settles it in a minute, and the same
+  probe is what tells you whether a canonicalization is observable at all.
+- **A result value the caller feeds back must be READ, not echoed.** Answering
+  with the request's own bytes made the "what you get is what a later read sees"
+  promise false and left the documented retry loop unable to converge on any
+  value the store renormalizes. Re-read it inside the deciding transaction — one
+  extra SELECT — and say in the leaf that the caller composes its next
+  expectation from that value and not from its own spelling.
+
+**And the step with no number: every surface that EMBEDS the store or a use
+case.** A new accessor arrives on each of them PROMOTED rather than declared, so
+the build stays green and the first symptom is a nil dereference in somebody
+else's stub. `issueops.MetadataCAS` was caught by CI in four such places after
+passing every package test its own slice ran: `storage.RoleFiresHooks` (a role
+whose hook decorator WRAPS must gain a case, or `checkDatabaseSource` cannot
+refuse a hook-firing one — missing it is a `bd serve` that runs a user
+subprocess per call); `uow`'s notifying wrapper, in BOTH halves — the recording
+use case, which silently records nothing for an inherited method, and the
+notifying provider, whose missing accessor makes a caller's type assertion stop
+matching; and two `cmd/bd` stub stores that embed `storage.DoltStorage`. Grep
+for the embed, not for the interface. And note that `internal/storage/uow`'s own
+package run is nine minutes — the parity guards live there, so a role slice that
+runs only its contract on the three legs has not run them.
 
 ## Retiring a test against a contract
 

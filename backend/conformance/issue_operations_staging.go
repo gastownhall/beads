@@ -21,15 +21,6 @@ type IssueOperationsStagingFixture struct {
 	Commit        func(context.Context, string) error
 	Exec          func(context.Context, string, ...any) error
 	QueryScalar   func(context.Context, string, []any, ...any) error
-	// CountHistoryMatching counts the history entries whose message matches a
-	// SQL LIKE pattern ("" = every entry). The provenance case needs both
-	// halves: the total, for "an update records one entry", and the exact
-	// message, for "the entry reads as the caller's own string".
-	//
-	// A nil CountHistoryMatching means "this backend cannot observe history",
-	// and that case SKIPS loudly with that reason rather than passing quietly.
-	// See history_matching.go for the convention.
-	CountHistoryMatching func(context.Context, string) (int, error)
 	// UpdateRaw drives the backend's generic update funnel with an untyped
 	// column map, the way an external-sync or backfill caller does. The typed
 	// patch behind Operations.Update carries no closed_at, so this is the only

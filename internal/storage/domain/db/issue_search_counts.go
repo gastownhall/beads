@@ -83,7 +83,7 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, true)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts: %w", err)
 	}

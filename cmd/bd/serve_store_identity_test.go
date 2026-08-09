@@ -211,7 +211,13 @@ func (*serveIdentityStore) BatchCreator() (issueops.BatchCreator, error) {
 func (*serveIdentityStore) DependencyEditor() (issueops.DependencyEditor, error) {
 	return serveIdentityRole{}, nil
 }
+func (*serveIdentityStore) BatchApplier() (issueops.BatchApplier, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
+	return serveIdentityRole{}, nil
+}
+func (*serveIdentityStore) MetadataCAS() (issueops.MetadataCAS, error) {
 	return serveIdentityRole{}, nil
 }
 
@@ -221,6 +227,7 @@ func (*serveIdentityStore) Memories() (memoryops.Memories, error) {
 // being promoted and the build would say so.
 type serveIdentityRole struct {
 	issueops.Lifecycle
+	issueops.MetadataCAS
 	issueops.WorkspaceConfig
 	issueops.StatsReporter
 	issueops.CycleDetector
@@ -233,6 +240,7 @@ type serveIdentityRole struct {
 	issueops.Deleter
 	issueops.BatchCreator
 	issueops.DependencyEditor
+	issueops.BatchApplier
 	memoryops.Memories
 }
 

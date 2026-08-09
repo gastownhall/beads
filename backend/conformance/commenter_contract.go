@@ -46,9 +46,11 @@ import (
 // speed: the second stamp lands one second later either because the body
 // advanced it or because the clock ticked between the two calls, and the two
 // are indistinguishable. Every timing assertion therefore starts from a
-// comment seeded AHEAD of the clock through SeedCommentAt, where no wall-clock
-// reading can produce the value the promise requires — see
-// RunCommenterAdvancesALiveStampPastTheThreadsNewestComment.
+// comment seeded through SeedCommentAt an hour away from the clock, in the
+// direction the branch under test needs, so the right answer and the wrong one
+// are an hour apart rather than a runner's margin: AHEAD for the advance
+// (RunCommenterAdvancesALiveStampPastTheThreadsNewestComment) and BEHIND for
+// the clause that stops it (RunCommenterTakesTheClockWhenTheThreadIsBehindIt).
 
 // CommenterFixture supplies adapter-specific storage access for the
 // add-comment assertions. Every field is named and typed exactly like the
@@ -257,6 +259,103 @@ func RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t *testing.T, ctx
 	want := append([]string{seeded}, live...)
 	if got := readCommenterThreadTexts(t, ctx, fixture, anchor, len(want)); !slices.Equal(got, want) {
 		t.Errorf("thread %s reads back as %v, want %v: the stamps are what carry write order to a reader", anchor, got, want)
+	}
+}
+
+// RunCommenterTakesTheClockWhenTheThreadIsBehindIt pins the OTHER branch of
+// the same stamp rule (storage/issueops.NextLiveCommentTime): the advance
+// applies only "when that comment is at or after `now`", so a thread whose
+// newest comment the clock has already passed gets the clock, not that
+// comment's stamp plus a second.
+//
+// It is the clause that makes the advance's cost bounded rather than
+// permanent — the leaf calls the skew "a bounded forward skew … it drains as
+// wall-clock advances", and draining is precisely this branch. Nothing pins
+// it. A body that dropped the `newest.Before(now)` comparison and always
+// returned newest+1s stamps every comment on an old thread an hour, a day or a
+// year in the past, and passes every other case in this file:
+// RunCommenterAdvancesALiveStampPastTheThreadsNewestComment seeds its thread
+// AHEAD of the clock, and every remaining case comments on a thread with no
+// comment on it, where both branches agree on `now`.
+//
+// WHAT THE FIXTURE DELIBERATELY MAKES OBSERVABLE. The thread starts with a
+// comment seeded AN HOUR BEHIND the clock, the mirror image of the advance
+// case's seed:
+//
+//   - The wrong answer and the right one are an hour apart, so the assertion
+//     is not a race with the runner. A body that always advances lands on
+//     behind+1s, which no reading of the clock during this case can produce.
+//   - `now` is not guessed. The stamp is bounded by two readings taken either
+//     side of the call in this process, so the case asserts what a caller can
+//     actually demand — the comment is stamped at the time it was written —
+//     rather than at an instant it had to predict.
+//
+// ONE live add, not two. A second back-to-back add would land on a thread
+// whose newest comment is now `now`, which is the OTHER branch, and it would
+// land one second later whether the body advanced or the clock simply ticked
+// between the two calls — the runner's speed, not the body's behavior. That is
+// the reading this file refuses to take anywhere (see the file header).
+//
+// WHAT IT DEPENDS ON FROM OUTSIDE ITSELF: the wall clock, and only as a bound
+// it measures itself. The anchor and its whole thread are seeded here under
+// this case's own id, the rule is scoped to one issue_id, and no assertion
+// reads a count, a stamp or a history depth another case could have moved. The
+// seed's own stamp is read back RAW first, because a seeding path that
+// re-stamped it with the clock would leave the thread level with `now` instead
+// of behind it, and then the equality below would hold for a body that
+// advances unconditionally.
+func RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t *testing.T, ctx context.Context, fixture CommenterFixture) {
+	t.Helper()
+	if fixture.SeedCommentAt == nil {
+		t.Skip("fixture cannot seed a comment at a chosen time: SeedCommentAt is nil, so the drain half of the stamp rule is unpinned on this backend")
+	}
+	anchor := fixture.IssuePrefix + "-behind"
+	seedCommenterIssue(t, ctx, fixture, anchor)
+
+	const seeded = "seeded an hour behind the clock"
+	behind := time.Now().UTC().Truncate(time.Second).Add(-time.Hour)
+	if err := fixture.SeedCommentAt(ctx, anchor, "importer", seeded, behind); err != nil {
+		t.Fatalf("seed a comment on %s at %s: %v", anchor, behind, err)
+	}
+	if stored := readCommenterStampOf(t, ctx, fixture, anchor, seeded); !stored.Equal(behind) {
+		t.Fatalf("the seeded comment is stored at %s, want %s verbatim: a seed level with the clock cannot show that a live add declines to advance past it",
+			stored, behind)
+	}
+
+	// The bound is taken around the call, not guessed: floor before, ceiling
+	// after, both at the column's whole-second precision.
+	floor := time.Now().UTC().Truncate(time.Second)
+	result, err := fixture.Commenter.AddComment(ctx, publicops.AddCommentRequest{
+		Author:  "author",
+		IssueID: anchor,
+		Text:    "live, on a thread the clock has passed",
+	})
+	if err != nil {
+		t.Fatalf("AddComment: %v", err)
+	}
+	requireCommenterResult(t, result)
+	ceiling := time.Now().UTC().Truncate(time.Second)
+
+	stored := readCommenterRow(t, ctx, fixture, "comments", result.Comment.ID)
+	got := stored.CreatedAt.UTC()
+	if advanced := behind.Add(time.Second); got.Equal(advanced) {
+		t.Errorf("live comment is stored at %s, which is one second past a comment the clock passed an hour ago: the advance applies only while the thread's newest comment is at or after now, or the skew never drains",
+			got)
+	}
+	if got.Before(floor) || got.After(ceiling) {
+		t.Errorf("live comment is stored at %s, want the instant it was written — inside [%s, %s]: a comment on an old thread is stamped by the clock, not by the thread",
+			got, floor, ceiling)
+	}
+	if resultStamp := result.Comment.CreatedAt.UTC(); !resultStamp.Equal(got) {
+		t.Errorf("AddComment returned created_at %s while the row holds %s: the result must carry the stamp the row got", resultStamp, got)
+	}
+
+	// The order still has to come out right, which is the reason the rule
+	// exists at all: an unconditional advance would sort the live comment an
+	// hour BEFORE the import it was written after.
+	want := []string{seeded, "live, on a thread the clock has passed"}
+	if got := readCommenterThreadTexts(t, ctx, fixture, anchor, len(want)); !slices.Equal(got, want) {
+		t.Errorf("thread %s reads back as %v, want %v", anchor, got, want)
 	}
 }
 

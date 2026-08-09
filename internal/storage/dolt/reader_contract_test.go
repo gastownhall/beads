@@ -164,6 +164,82 @@ func TestReaderDoesNotMutateTheCallerRequest(t *testing.T) {
 	conformance.RunReaderDoesNotMutateTheCallerRequest(t, ctx, fixture)
 }
 
+// The bounded ready page and the unbounded one are two different queries on
+// this body — an id page plus a by-ids hydration against the predicate-form
+// mega-query (internal/storage/issueops/ready_work_counts.go) — so the identity
+// the case asserts is a claim about this wiring specifically, not a tautology.
+func TestReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t, ctx, fixture)
+}
+
+// The plane union is a Go-side merge of two per-family query results here,
+// where the unit-of-work wiring orders one UNION ALL in SQL.
+func TestReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t, ctx, fixture)
+}
+
+func TestReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, fixture)
+}
+
+// The two count vocabularies reach two different store methods here: the page
+// rides sqlbuild's mega-query and the detail view rides CountDependencies /
+// CountDependents, which count every edge type.
+func TestReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t, ctx, fixture)
+}
+
+func TestReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
+}
+
+func TestReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
+}
+
+// The walk is where this body's probe-row over-fetch has to stay out of the
+// caller's way: the next position comes from the last DELIVERED row, and the
+// probe row is not one.
+func TestReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
+}
+
+func TestReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, ctx, fixture)
+}
+
+// The merge arrangement this body actually uses: two independently ordered
+// legs, re-sorted in Go and then trimmed. The bounded arm is where that order
+// has to be applied BEFORE the trim, and the walk is where the probe-row
+// over-fetch has to stay off the next position on both planes at once.
+func TestReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t, ctx, fixture)
+}
+
+func TestReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
+}
+
 // newDoltReaderFixture composes the shared role kit with the reader accessor.
 // One store per case here rather than one per suite: setupTestStore gives each
 // test its own copy-on-write branch and costs a fraction of a second, so the

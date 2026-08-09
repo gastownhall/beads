@@ -836,6 +836,37 @@ func TestReopenRequestMembersMatchTheHandler(t *testing.T) {
 	}
 }
 
+// TestCompareAndSetMetadataRequestMembersMatchTheHandler is the reopen's gate
+// for the compare-and-set body, and it earns its place twice over: this handler
+// reads raw members not only to name an offending one but because the OMISSION
+// of `expected` and `value` is meaningful, so it can never decode into the
+// generated struct and let the compiler hold the two lists together.
+func TestCompareAndSetMetadataRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range metadataCASRequestMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.CompareAndSetMetadataRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated CompareAndSetMetadataRequest declares members the handler refuses as unknown: %v\n"+
+			"teach compareAndSetMetadataRequest to honor them, or the document promises a member the server turns down", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the compare-and-set handler accepts members CompareAndSetMetadataRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "CompareAndSetMetadataRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the CompareAndSetMetadataRequest schema documents members the handler refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the compare-and-set handler accepts members the CompareAndSetMetadataRequest schema does not document: %v", missing)
+	}
+}
+
 // TestDependencyRequestMembersMatchTheHandlers is the same gate for the two
 // dependency bodies, and for the add's NESTED level — the update's table-driven
 // form because, exactly as there, the body has a level below it.
@@ -882,6 +913,153 @@ func TestDependencyRequestMembersMatchTheHandlers(t *testing.T) {
 				t.Errorf("the handler accepts members the %s schema does not document: %v", tc.schema, missing)
 			}
 		})
+	}
+}
+
+// TestApplyBatchRequestMembersMatchTheHandler is the same gate for the apply
+// body, at ALL TEN of its levels — the dependency add's table-driven form,
+// because this body nests four deep and every level is a hand-rolled member
+// list.
+//
+// It carries the most weight of any row in this file, for a reason specific to
+// this operation. The item is a TAGGED SINGLE-SHAPE OBJECT rather than a schema
+// alternation, so the generated type makes all four payload members
+// constructible at once and the compiler can see nothing about which one
+// belongs with which tag; the handler is the only thing enforcing it, and its
+// accepted set at each level is a copy of the document with nothing tying the
+// two together. A spec revision adding an optional member at any level would
+// otherwise leave `make api-check` and every other spec test green while the
+// server refused the newly documented member as unknown_parameter — and the
+// reverse, a member the handler honors that the document never promised, is
+// undisclosed write surface on the widest mutation this API has.
+func TestApplyBatchRequestMembersMatchTheHandler(t *testing.T) {
+	doc := loadSpec(t)
+	schemas := mapAt(t, mapAt(t, doc, "components"), "schemas")
+
+	for _, tc := range []struct {
+		schema   string
+		accepted []string
+		goType   reflect.Type
+	}{
+		{"ApplyBatchRequest", applyBatchRequestMembers, reflect.TypeOf(apigen.ApplyBatchRequest{})},
+		{"ApplyItem", applyItemMembers, reflect.TypeOf(apigen.ApplyItem{})},
+		{"Ref", applyRefMembers, reflect.TypeOf(apigen.Ref{})},
+		{"ApplyCreateItem", applyCreateItemMembers, reflect.TypeOf(apigen.ApplyCreateItem{})},
+		{"ApplyUpdateItem", applyUpdateItemMembers, reflect.TypeOf(apigen.ApplyUpdateItem{})},
+		{"ApplyPatchBody", applyPatchMembers, reflect.TypeOf(apigen.ApplyPatchBody{})},
+		{"ApplyLabelPatch", applyLabelPatchMembers, reflect.TypeOf(apigen.ApplyLabelPatch{})},
+		{"ApplyMetadataPatch", applyMetadataPatchMembers, reflect.TypeOf(apigen.ApplyMetadataPatch{})},
+		{"ApplyCloseItem", applyCloseItemMembers, reflect.TypeOf(apigen.ApplyCloseItem{})},
+		{"ApplyDepAddItem", applyDepAddItemMembers, reflect.TypeOf(apigen.ApplyDepAddItem{})},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			accepted := map[string]bool{}
+			for _, name := range tc.accepted {
+				accepted[name] = true
+			}
+
+			goFields := jsonTagNames(t, tc.goType)
+			if extra := diff(goFields, accepted); len(extra) > 0 {
+				t.Errorf("generated %s declares members the apply handler refuses as unknown: %v\n"+
+					"teach the handler to honor them, or the document promises a member the server turns down", tc.schema, extra)
+			}
+			if missing := diff(accepted, goFields); len(missing) > 0 {
+				t.Errorf("the apply handler accepts members %s does not declare: %v", tc.schema, missing)
+			}
+
+			specProps := schemaProperties(t, doc, mapAt(t, schemas, tc.schema))
+			if extra := diff(specProps, accepted); len(extra) > 0 {
+				t.Errorf("the %s schema documents members the apply handler refuses: %v", tc.schema, extra)
+			}
+			if missing := diff(accepted, specProps); len(missing) > 0 {
+				t.Errorf("the apply handler accepts members the %s schema does not document: %v", tc.schema, missing)
+			}
+		})
+	}
+}
+
+// TestApplyItemKindsAreExactlyTheDocumentsEnum pins the TAG itself, which no
+// other gate can see.
+//
+// The item's four payload members are checked above, and its `kind` is checked
+// as a member name — but the VALUES the tag may take are an enum in the document
+// and a map in the handler, and a value in one and not the other is exactly the
+// drift this spelling invites. A kind the document promises and the handler
+// refuses is an operation a client cannot reach; a kind the handler accepts and
+// the document omits is undisclosed surface on the widest mutation here.
+//
+// It also pins that every tag names a payload member the schema declares, which
+// is the whole content of "exactly one must be present and it must be the one
+// `kind` names".
+func TestApplyItemKindsAreExactlyTheDocumentsEnum(t *testing.T) {
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ApplyItem")
+	documented := map[string]bool{}
+	for _, value := range toStrings(t, mapAt(t, mapAt(t, schema, "properties"), "kind")["enum"]) {
+		documented[value] = true
+	}
+
+	served := map[string]bool{}
+	for kind := range applyItemKinds {
+		served[string(kind)] = true
+	}
+	if missing := diff(documented, served); len(missing) > 0 {
+		t.Errorf("the document promises item kinds the handler refuses: %v", missing)
+	}
+	if extra := diff(served, documented); len(extra) > 0 {
+		t.Errorf("the handler accepts item kinds the document does not declare: %v", extra)
+	}
+
+	// The refusal that spells the vocabulary has to spell the same one.
+	spelled := map[string]bool{}
+	for _, name := range applyKindNames() {
+		spelled[name] = true
+	}
+	if missing := diff(served, spelled); len(missing) > 0 {
+		t.Errorf("the kind vocabulary the refusal prints omits %v", missing)
+	}
+	if extra := diff(spelled, served); len(extra) > 0 {
+		t.Errorf("the refusal prints kinds nothing accepts: %v", extra)
+	}
+
+	// Every tag must name a payload member the item schema actually declares,
+	// or the handler would demand a member a client has no way to send.
+	properties := schemaProperties(t, doc, schema)
+	for kind, member := range applyItemKinds {
+		if !properties[member] {
+			t.Errorf("kind %q names payload member %q, which the ApplyItem schema does not document", kind, member)
+		}
+	}
+}
+
+// TestApplyPatchNullableMembersAreExactlyTheDocumentsNullableOnes is
+// TestNullablePatchMembersAreExactlyTheDocumentsNullableOnes for the apply
+// operation's own patch, and it exists for the same reason with one addition:
+// this body has TWO patch schemas now, and a member marked nullable in one and
+// not the other would let the same field be clearable through one operation and
+// not the other with nothing saying so.
+func TestApplyPatchNullableMembersAreExactlyTheDocumentsNullableOnes(t *testing.T) {
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ApplyPatchBody")
+
+	documented := map[string]bool{}
+	for name, raw := range mapAt(t, schema, "properties") {
+		prop, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("property %q is %T, want a mapping", name, raw)
+		}
+		if nullable, _ := prop["nullable"].(bool); nullable {
+			documented[name] = true
+		}
+	}
+
+	if missing := diff(documented, applyNullablePatchMembers); len(missing) > 0 {
+		t.Errorf("the document marks these apply-patch members nullable and the handler refuses a null on them: %v\n"+
+			"a clear the contract promises would be answered with a 400", missing)
+	}
+	if extra := diff(applyNullablePatchMembers, documented); len(extra) > 0 {
+		t.Errorf("the handler clears these apply-patch members on an explicit null and the document does not declare them nullable: %v\n"+
+			"that is an unannounced clear on a field nobody agreed could be cleared", extra)
 	}
 }
 

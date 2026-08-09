@@ -266,6 +266,15 @@ func (p *notifyingProvider) DependencyEditor() (publicops.DependencyEditor, erro
 	return NewDependencyEditor(p)
 }
 
+// BatchApplier builds on THIS provider, like every role above it, so the
+// notifications its items produce are the ones the recording use cases already
+// emit for a create, an update, a close and an edge. It needs no recorder of
+// its own for that reason: the role composes those use cases rather than
+// reaching past them.
+func (p *notifyingProvider) BatchApplier() (publicops.BatchApplier, error) {
+	return NewBatchApplier(p)
+}
+
 func (p *notifyingProvider) Deleter() (publicops.Deleter, error) { return NewDeleter(p) }
 
 func (p *notifyingProvider) Sweeper() (publicops.Sweeper, error) { return NewSweeper(p) }
@@ -287,6 +296,10 @@ func (p *notifyingProvider) WorkspaceConfig() (publicops.WorkspaceConfig, error)
 func (p *notifyingProvider) VersionReconciler() (publicops.VersionReconciler, error) {
 	return NewVersionReconciler(p)
 }
+
+func (p *notifyingProvider) MetadataCAS() (publicops.MetadataCAS, error) { return NewMetadataCAS(p) }
+
+func (p *notifyingProvider) Releaser() (publicops.Releaser, error) { return NewReleaser(p) }
 
 func (p *notifyingProvider) Memories() (memoryops.Memories, error) { return NewMemories(p) }
 
@@ -879,6 +892,50 @@ func (u *recordingIssueUC) UpdateIssue(ctx context.Context, id string, updates m
 	}
 	u.rec.record(opUpdate, u.snap.issue(ctx, id))
 	return nil
+}
+
+// CompareAndSetMetadataKey records an update for a swap that MOVED the value,
+// and nothing for one that did not — the same line hookMetadataCAS draws on the
+// DoltStorage chain, which fires on_update only when the row changed.
+//
+// It reads the fact rather than inferring it. The use case reports whether a
+// row write landed, which is strictly better than the decorator's comparison of
+// the request's two ends, and it is the only caller of this method that has it.
+//
+// THE SNAPSHOT IS anyPlane, because this role resolves the id across both
+// planes itself: a swap on a wisp is an update to a wisp, and reading only the
+// issues table would record a nil for it.
+func (u *recordingIssueUC) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
+	result, wrote, err := u.IssueUseCase.CompareAndSetMetadataKey(ctx, plan)
+	if err != nil || !wrote {
+		return result, wrote, err
+	}
+	u.rec.record(opUpdate, u.snap.anyPlane(ctx, plan.IssueID))
+	return result, wrote, nil
+}
+
+// ReleaseIssue records an update for a release that landed.
+//
+// It is DECLARED rather than inherited, which is the whole reason this method
+// exists: an accessor promoted onto an embedder compiles perfectly and records
+// nothing, so a release through a notifying unit of work would silently lose
+// the hook the DoltStorage chain fires for the same write.
+//
+// It reads the ROLE'S OWN verdict — ReleaseResult.Changed — which is the same
+// fact the bool beside it carries and the one a notification is about. An
+// ephemeral release changes a wisp and versions nothing, and it is still an
+// update somebody asked to be notified about.
+//
+// THE SNAPSHOT IS anyPlane, because this role resolves the id across both
+// planes itself: releasing a wisp is an update to a wisp, and reading only the
+// issues table would record a nil for it.
+func (u *recordingIssueUC) ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error) {
+	result, wrote, err := u.IssueUseCase.ReleaseIssue(ctx, req)
+	if err != nil || !result.Changed {
+		return result, wrote, err
+	}
+	u.rec.record(opUpdate, u.snap.anyPlane(ctx, req.IssueID))
+	return result, wrote, nil
 }
 
 func (u *recordingIssueUC) UpdateWisp(ctx context.Context, id string, updates map[string]any, actor string) error {

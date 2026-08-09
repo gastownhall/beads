@@ -297,6 +297,24 @@ var routeTable = []route{
 		handler:     (*Server).handleBatchCreate,
 	},
 	{
+		op:     OpApplyBatch,
+		method: http.MethodPost,
+		// A collection-level custom method, spelled the way issues:batchCreate's
+		// is, and preferred over the claim's wildcard for the reason the sweep
+		// row below spells out: that pattern requires a separating slash, this
+		// path has none, and ServeMux prefers the literal in any case.
+		//
+		// A SIBLING of issues:batchCreate rather than a mode of it. The two
+		// answer different questions — one creates N issues, this one applies an
+		// ordered plan of four verbs whose items may reference each other — and a
+		// flag on that operation would have made one operationId carrying two
+		// contracts, two request schemas and two result shapes.
+		pattern:     "/v0/beads/issues:batchApply",
+		capability:  "issues.batchApply",
+		implemented: true,
+		handler:     (*Server).handleApplyBatch,
+	},
+	{
 		op:      OpClaimIssue,
 		method:  http.MethodPost,
 		pattern: customMethodPattern,
@@ -334,6 +352,18 @@ var routeTable = []route{
 		capability:   "issues.close",
 		implemented:  true,
 		handler:      (*Server).handleClose,
+	},
+	{
+		op:     OpCompareAndSetMetadata,
+		method: http.MethodPost,
+		// A fourth row on the shared single-resource dispatcher, spelled the way
+		// the reopen's is.
+		pattern:      customMethodPattern,
+		specPath:     "/v0/beads/issues/{id}:casMetadata",
+		customMethod: ":casMetadata",
+		capability:   "issues.casMetadata",
+		implemented:  true,
+		handler:      (*Server).handleCompareAndSetMetadata,
 	},
 	{
 		op:     OpReopenIssue,

@@ -179,10 +179,17 @@ func TestRecordingDependencyUseCaseCoversItsSurface(t *testing.T) {
 	reads := "reads the graph, changes none"
 	assertPartition(t, "DependencyUseCase", interfaceMethods(reflect.TypeOf((*domain.DependencyUseCase)(nil)).Elem()),
 		reflect.TypeOf((*recordingDepUC)(nil)), map[string]string{
-			"CountByIssueID":            reads,
-			"CountByWispID":             reads,
-			"CountsByIssueIDs":          reads,
-			"CountsByWispIDs":           reads,
+			"CountByIssueID":   reads,
+			"CountByWispID":    reads,
+			"CountsByIssueIDs": reads,
+			"CountsByWispIDs":  reads,
+			// The two halves of the whole-graph gate issueops.BatchApplier
+			// re-runs at the end of a mixed request. Both are repository PROBES
+			// — an ancestry walk and a reachability walk — so there is nothing
+			// for the recorder to notify about; the writes those gates guard are
+			// recorded by AddDependencies, which is declared below.
+			"ValidateBlockingHierarchy": reads,
+			"CycleThroughEdges":         reads,
 			"DetectCycleReport":         reads,
 			"DetectCycles":              reads,
 			"GetBlockingInfo":           reads,

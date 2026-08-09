@@ -84,7 +84,7 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, true)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union: %w", err)
 	}
@@ -420,33 +420,76 @@ type idSrcPage struct {
 	wispIDs  []string
 }
 
-func scanIDSrcPage(rows *sql.Rows, strictCrossTable bool) (idSrcPage, error) {
+// scanIDSrcPage reads the (id, src) projection of a UNION ALL over the issues
+// and wisps legs, in the order the outer ORDER BY produced it, and collapses
+// the duplicates. There are two kinds and they are not the same event.
+//
+// A REPEAT WITHIN ONE LEG is ordinary: a dependency or label subquery can match
+// the same row twice. The first occurrence wins, exactly as the per-table scans
+// resolve it.
+//
+// A CROSS-TABLE DUPLICATE is corruption — one id resident in both planes. No
+// local write path can produce it: issueops.EnsureIssueIDAvailableInTx probes
+// BOTH tables before every insert, and promotion moves a row inside one
+// transaction. Replication can, by merging a durable row into a clone that
+// still holds the wisp.
+//
+// THE WISP COPY IS CANONICAL AND THE READ STILL ANSWERS. This used to be a hard
+// error for the whole query, which made a store with one corrupt id unable to
+// answer any question about the other rows. Three things say that was the wrong
+// verdict. The per-table seam has always resolved it the other way and says why
+// — "hard-erroring breaks every lookup city-wide" (issueops.searchInTx, and the
+// three sibling merges beside it, be-iabdi). `bd doctor` detects the state with
+// a query of its own rather than by watching reads fail, so nothing is blinded
+// by answering; and its fix removes the stale ISSUES copy, calling the wisps row
+// canonical. And its own check text names the hard failure as the damage:
+// "stale issues-table copies break every lookup for the affected IDs".
+//
+// So the durable row is dropped wherever it sits and the wisp row is kept at
+// its own position, which is the page the per-table seam produces for the same
+// data. A page can come back one row short of its limit when this fires; that
+// is a corrupt row being withheld, not a paging bug, and the repair is a doctor
+// run.
+func scanIDSrcPage(rows *sql.Rows) (idSrcPage, error) {
 	defer func() { _ = rows.Close() }()
 
-	var page idSrcPage
-	seen := make(map[string]string)
+	var scanned []idSrcRef
+	seen := make(map[idSrcRef]bool)
+	shadowed := make(map[string]bool)
 	for rows.Next() {
 		var id, src string
 		if err := rows.Scan(&id, &src); err != nil {
 			return idSrcPage{}, fmt.Errorf("scan: %w", err)
 		}
-		if prev, dup := seen[id]; dup {
-			if strictCrossTable && prev != src {
-				return idSrcPage{}, fmt.Errorf("id %q exists in both issues and wisps", id)
-			}
+		ref := idSrcRef{id: id, src: src}
+		if src == "w" {
+			shadowed[id] = true
+		}
+		if seen[ref] {
 			continue
 		}
-		seen[id] = src
-		page.ordered = append(page.ordered, idSrcRef{id: id, src: src})
-		switch src {
-		case "i":
-			page.issueIDs = append(page.issueIDs, id)
-		case "w":
-			page.wispIDs = append(page.wispIDs, id)
-		}
+		seen[ref] = true
+		scanned = append(scanned, ref)
 	}
 	if err := rows.Err(); err != nil {
 		return idSrcPage{}, fmt.Errorf("rows: %w", err)
+	}
+
+	// The wisps leg is known in full only after the scan — the outer ORDER BY
+	// can place either copy first — so the drop is a second pass rather than a
+	// decision taken row by row.
+	var page idSrcPage
+	for _, ref := range scanned {
+		if ref.src == "i" && shadowed[ref.id] {
+			continue
+		}
+		page.ordered = append(page.ordered, ref)
+		switch ref.src {
+		case "i":
+			page.issueIDs = append(page.issueIDs, ref.id)
+		case "w":
+			page.wispIDs = append(page.wispIDs, ref.id)
+		}
 	}
 	return page, nil
 }

@@ -596,7 +596,8 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	want := []string{
 		"config.get", "config.list", "dependencies.add", "dependencies.blocking",
 		"dependencies.cycles", "dependencies.list", "dependencies.remove",
-		"dependencies.tree", "events.list", "events.watch", "issues.batchCreate",
+		"dependencies.tree", "events.list", "events.watch", "issues.batchApply",
+		"issues.batchCreate", "issues.casMetadata",
 		"issues.claim", "issues.close", "issues.delete", "issues.get", "issues.list",
 		"issues.query", "issues.reopen", "issues.sweep", "issues.update",
 		"memories.forget", "memories.get",

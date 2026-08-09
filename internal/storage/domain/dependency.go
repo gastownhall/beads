@@ -211,6 +211,22 @@ type DependencyUseCase interface {
 	// pass per plane: the parent-child-first ordering and the whole-graph
 	// cycle gate both have to see the request as a single graph.
 	AddDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error)
+	// ValidateBlockingHierarchy and CycleThroughEdges are the two halves of the
+	// whole-graph gate AddDependencies runs at the end of its own batch,
+	// published so a caller that writes edges INTERLEAVED with other mutations
+	// can run the same gate over the graph its whole request produced.
+	//
+	// issueops.BatchApplier is that caller and the reason these are here: it
+	// applies items in the caller's declaration order and never reorders, so a
+	// blocking edge can be written before the parent-child edge that makes it a
+	// conflict, and the per-edge probe that ran at the time saw a hierarchy
+	// that had not been built yet. Both must be re-run at the end, against the
+	// same repository methods the per-edge path uses, or the two backends
+	// answer different refusals to the same request.
+	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
+	// CycleThroughEdges reports the path of a scheduling cycle any of edges
+	// closes, or "" when none does. Each pair is (source, target).
+	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 
 	GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
@@ -267,7 +283,7 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 		return fmt.Errorf("add dep: hierarchy check: %w", err)
 	}
 
-	if isSchedulingDep(dep.Type) {
+	if types.IsSchedulingEdge(dep.Type) {
 		cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 		if err != nil {
 			return fmt.Errorf("add dep: cycle check: %w", err)
@@ -587,14 +603,6 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	return out, nil
 }
 
-func isBlockingDep(t types.DependencyType) bool {
-	return t == types.DepBlocks || t == types.DepConditionalBlocks
-}
-
-func isSchedulingDep(t types.DependencyType) bool {
-	return isBlockingDep(t) || t == types.DepParentChild
-}
-
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -706,7 +714,7 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 				}
 				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: hierarchy check: %w", i, err)
 			}
-			if !opts.SkipPerEdgeCycleCheck && isSchedulingDep(dep.Type) {
+			if !opts.SkipPerEdgeCycleCheck && types.IsSchedulingEdge(dep.Type) {
 				cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 				if err != nil {
 					return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
@@ -742,7 +750,7 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 	}
 	var pairs [][2]string
 	for _, dep := range deps {
-		if !isSchedulingDep(dep.Type) {
+		if !types.IsSchedulingEdge(dep.Type) {
 			continue
 		}
 		pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
@@ -757,6 +765,25 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 		}
 	}
 	return BulkAddDepsResult{Added: deps}, nil
+}
+
+// ValidateBlockingHierarchy passes the edge straight to the repository check
+// AddDependencies runs per edge, so a caller re-running the gate at the end of
+// a mixed request raises the identical *DependencyHierarchyConflictError rather
+// than a second opinion about the same graph.
+func (u *dependencyUseCaseImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
+	return u.depRepo.ValidateBlockingHierarchy(ctx, dep)
+}
+
+// CycleThroughEdges passes the pairs straight to the repository walk
+// AddDependencies runs as its own final gate. The caller composes the refusal,
+// because the two callers word it differently and both spellings are already
+// pinned.
+func (u *dependencyUseCaseImpl) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
+	if len(edges) == 0 {
+		return "", nil
+	}
+	return u.depRepo.CycleThroughEdges(ctx, edges)
 }
 
 func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {

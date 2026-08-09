@@ -186,6 +186,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		IncludeTemplates: q.boolean("include_templates"),
 		IncludeGates:     q.boolean("include_gates"),
 		IncludeInfra:     q.boolean("include_infra"),
+		IncludeEphemeral: q.boolean("include_ephemeral"),
 
 		CreatedBefore: q.timestamp("created_before"),
 		CreatedAfter:  q.timestamp("created_after"),

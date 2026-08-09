@@ -78,6 +78,7 @@ import (
 // A fixture per role per workspace contains every one of them.
 type RoleContractBundle struct {
 	// Called ONCE; the whole contract runs against the one fixture.
+	BatchApply           func(t *testing.T) *BatchApplyFixture
 	BatchCloser          func(t *testing.T) *BatchCloserFixture
 	BatchCreator         func(t *testing.T) *BatchCreatorFixture
 	BlockingAnnotator    func(t *testing.T) *BlockingAnnotatorFixture
@@ -89,14 +90,18 @@ type RoleContractBundle struct {
 	Deleter              func(t *testing.T) *DeleterFixture
 	DependencyEditor     func(t *testing.T) *DependencyEditorFixture
 	EdgeReader           func(t *testing.T) *EdgeReaderFixture
+	Importer             func(t *testing.T) *ImporterFixture
 	LifecycleCloseReopen func(t *testing.T) *LifecycleCloseReopenFixture
+	LifecycleCreate      func(t *testing.T) *LifecycleCreateFixture
 	LifecycleUpdate      func(t *testing.T) *LifecycleUpdateFixture
 	Memories             func(t *testing.T) *MemoriesFixture
+	MetadataCAS          func(t *testing.T) *MetadataCASFixture
 	Querier              func(t *testing.T) *QuerierFixture
 	Reader               func(t *testing.T) *ReaderFixture
 	ReadyClaimer         func(t *testing.T) *ReadyClaimerFixture
 	ReadyCounter         func(t *testing.T) *ReadyCounterFixture
 	Relations            func(t *testing.T) *RelationsFixture
+	Releaser             func(t *testing.T) *ReleaserFixture
 	StatsReporter        func(t *testing.T) *StatsReporterFixture
 	Sweeper              func(t *testing.T) *SweeperFixture
 	TreeWalker           func(t *testing.T) *TreeWalkerFixture

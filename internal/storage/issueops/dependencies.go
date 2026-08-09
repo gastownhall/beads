@@ -442,7 +442,7 @@ func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependenc
 	if dep.IssueID == dep.DependsOnID {
 		return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
-	if !isSchedulingEdge(dep.Type) {
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	wouldCycle, err := WouldCreateSchedulingCycleInTx(ctx, tx, dep.IssueID, dep.DependsOnID, depTables)
@@ -512,18 +512,6 @@ func cycleReachabilityQuery(depTables []string) string {
 
 func cycleDetectionTables() []string {
 	return []string{"dependencies", "wisp_dependencies"}
-}
-
-// isSchedulingEdge reports whether a dependency type belongs to the static
-// combined-cycle set: blocks, conditional-blocks, and parent-child. Waits-for
-// also affects readiness but is intentionally outside this validation rule.
-func isSchedulingEdge(t types.DependencyType) bool {
-	switch t {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-		return true
-	default:
-		return false
-	}
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue

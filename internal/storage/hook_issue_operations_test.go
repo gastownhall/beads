@@ -57,6 +57,12 @@ func (r *recordingIssueOperationHooks) CompleteIssueOperationDependency(_ contex
 func (r *recordingIssueOperationHooks) CompleteIssueOperationComment(_ context.Context, issueID string) {
 	r.completions = append(r.completions, "comment:"+issueID)
 }
+func (r *recordingIssueOperationHooks) CompleteIssueOperationMetadata(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "metadata:"+issueID)
+}
+func (r *recordingIssueOperationHooks) CompleteIssueOperationRelease(_ context.Context, issueID string) {
+	r.completions = append(r.completions, "release:"+issueID)
+}
 
 // lifecycleStore is a DoltStorage whose only real method is IssueLifecycle.
 type lifecycleStore struct {

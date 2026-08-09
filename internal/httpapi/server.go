@@ -200,6 +200,22 @@ type Config struct {
 	// dependency graph is a decision for the operator who chose to run bd serve,
 	// not a consequence of whether a caller remembered a field.
 	DependencyEditor issueops.DependencyEditor
+	// MetadataCAS is the conditional single-key metadata write behind
+	// POST /v0/beads/issues/{id}:casMetadata. Required on the same terms as
+	// every other role: a Config missing it would bind and nil-dereference on
+	// the first request that reached that handler.
+	MetadataCAS issueops.MetadataCAS
+	// BatchApplier is the ordered, heterogeneous plan behind
+	// POST /v0/beads/issues:batchApply. Required on the same terms as every
+	// other role: a Config missing it would bind and nil-dereference on the
+	// first request that reached that handler.
+	//
+	// It is the field where the hook-firing refusal below bites HARDEST. A
+	// store's own accessor returns an applier that fires on_create, on_update
+	// AND the close hooks — once per landed item, plus once per distinct edge
+	// source — so a single hundred-item request served unpeeled would run a
+	// hundred of the workspace's subprocesses inside one HTTP call.
+	BatchApplier issueops.BatchApplier
 	// Memories is the workspace's persistent memory plane, and the one field
 	// here that is not an issueops role: memories are user data riding in the
 	// config table under their own merge class, not settings, so they have
@@ -281,6 +297,8 @@ type Server struct {
 	issueDeleter      issueops.Deleter
 	issueBatchCreator issueops.BatchCreator
 	issueDependencies issueops.DependencyEditor
+	issueMetadataCAS  issueops.MetadataCAS
+	issueBatchApplier issueops.BatchApplier
 	workspaceMemories memoryops.Memories
 	eventsJournal     storage.EventsJournalCursor
 
@@ -411,6 +429,8 @@ func Listen(cfg Config) (*Server, error) {
 		issueDeleter:      cfg.Deleter,
 		issueBatchCreator: cfg.BatchCreator,
 		issueDependencies: cfg.DependencyEditor,
+		issueMetadataCAS:  cfg.MetadataCAS,
+		issueBatchApplier: cfg.BatchApplier,
 		workspaceMemories: cfg.Memories,
 		eventsJournal:     cfg.EventsJournal,
 
@@ -516,12 +536,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.Lifecycle, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.Memories}
+	return []any{cfg.Reader, cfg.Claimer, cfg.Lifecycle, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, Lifecycle, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor and Memories"
+const roleSourceNames = "Reader, Claimer, Lifecycle, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -888,6 +908,41 @@ func (s *Server) dependencyEditor(r *http.Request) (issueops.DependencyEditor, e
 	}
 	var src uow.DependencyEditorSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.DependencyEditor()
+}
+
+// metadataCAS returns the conditional metadata write for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.MetadataCASSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED: the role's result is a VALUE whose only pointer member
+// is an optional raw value the handler passes through without dereferencing.
+func (s *Server) metadataCAS(r *http.Request) (issueops.MetadataCAS, error) {
+	if s.provider == nil {
+		return s.issueMetadataCAS, nil
+	}
+	var src uow.MetadataCASSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.MetadataCAS()
+}
+
+// batchApplier returns the ordered-plan write surface for one request, on the
+// same terms as every role above and held by INTERFACE so
+// uow.BatchApplierSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED, like the dependency editor: ApplyBatchResult is a
+// VALUE, and the one pointer its items carry — the post-item issue snapshot —
+// never reaches the wire, so no handler dereferences anything this role
+// returned.
+//
+// The role owns every refusal this operation can raise: the ref graph, the
+// as-modified preconditions, the close policy, the assignee fence and the end
+// gate. That is why the Config field it comes from is required rather than
+// optional.
+func (s *Server) batchApplier(r *http.Request) (issueops.BatchApplier, error) {
+	if s.provider == nil {
+		return s.issueBatchApplier, nil
+	}
+	var src uow.BatchApplierSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.BatchApplier()
 }
 
 // memories returns the persistent-memory surface for one request, on the same

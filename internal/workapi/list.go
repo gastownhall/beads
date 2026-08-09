@@ -406,7 +406,11 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 		return filter, err
 	}
 
-	if !in.IncludeInfra && (in.IssueType == "" || !cfg.IsInfra(in.IssueType)) {
+	// The plane bit. Three requests admit the wisp table: an explicit
+	// IncludeEphemeral, IncludeInfra (which admits the plane AND drops the
+	// infra-type exclusions above), and naming an infra type (which routed to
+	// the plane alone a few lines up). Everything else is the durable listing.
+	if !in.IncludeEphemeral && !in.IncludeInfra && (in.IssueType == "" || !cfg.IsInfra(in.IssueType)) {
 		filter.SkipWisps = true
 	}
 

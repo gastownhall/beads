@@ -30,7 +30,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
-	s.Run("CrossTableCollisionError", s.readyCollisionError)
+	s.Run("CrossTableCollisionKeepsTheWispCopy", s.readyCollisionKeepsTheWispCopy)
 	s.Run("OffsetSkipsLeadingRows", s.readyOffsetSkipsLeadingRows)
 	s.Run("OffsetWithLooseLimitReturnsRemainder", s.readyOffsetWithoutLimit)
 	s.Run("OffsetHasMoreSignaling", s.readyOffsetHasMoreSignaling)
@@ -348,7 +348,17 @@ func (s *testSuite) readySortByPriority() {
 	s.Less(midIdx, loIdx, "priority=2 should sort before priority=3")
 }
 
-func (s *testSuite) readyCollisionError() {
+// readyCollisionKeepsTheWispCopy pins what a CROSS-PLANE DUPLICATE answers with. One id resident in both
+// tables is corruption — no local write path can produce it, only replication —
+// and this read used to fail the whole query over it, which left a store with
+// one bad id unable to answer any question about the others.
+//
+// The canonical copy is the WISPS one, and the read answers with it. That is
+// the verdict the per-table seam has always reached (issueops, be-iabdi) and
+// the one `bd doctor --check=validate --fix` acts on: it deletes the stale
+// ISSUES copy, the same row this drops. scanIDSrcPage carries the full
+// argument.
+func (s *testSuite) readyCollisionKeepsTheWispCopy() {
 	r := s.issueRepo()
 	const id = "bd-rdy-coll-1"
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "perm"), "tester", domain.InsertIssueOpts{}))
@@ -356,9 +366,16 @@ func (s *testSuite) readyCollisionError() {
 	w.Ephemeral = false
 	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 
-	_, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "exists in both issues and wisps")
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	seen := 0
+	for _, iss := range out.Items {
+		if iss != nil && iss.ID == id {
+			seen++
+			s.Equal("wisp", iss.Title, "the wisps copy is canonical; the issues copy is the stale one")
+		}
+	}
+	s.Equal(1, seen, "the id must come back once, not once per plane")
 }
 
 func (s *testSuite) readyOffsetSkipsLeadingRows() {

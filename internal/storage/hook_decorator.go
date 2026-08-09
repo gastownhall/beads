@@ -98,6 +98,24 @@ func RoleFiresHooks(role any) bool {
 	// reason, and the one that multiplies fastest.
 	case *hookDependencyEditor:
 		return true
+	// The releaser fires the update hook for every release it lands
+	// (hook_releaser.go), so it is the same value the network server must
+	// refuse — a reaper draining abandoned claims would otherwise run the
+	// workspace's script once per row it freed.
+	case *hookReleaser:
+		return true
+	// The compare-and-set fires the update hook for every swap that MOVED a
+	// key, which is a coordination write a loop makes repeatedly — so a server
+	// handed an unpeeled one runs the workspace's script once per contended
+	// retry round.
+	case *hookMetadataCAS:
+		return true
+	// The batch applier is the widest of them all: one call fires on_create,
+	// on_update AND the close hooks, once per landed item plus once per
+	// distinct edge source (hook_batch_applier.go). A hundred-item plan served
+	// unpeeled is a hundred user subprocesses inside one request.
+	case *hookBatchApplier:
+		return true
 	}
 	return false
 }
@@ -373,6 +391,23 @@ func (h *HookFiringStore) CompleteIssueOperationDependency(ctx context.Context, 
 // event, and a comment is a change to the issue as far as a script is
 // concerned.
 func (h *HookFiringStore) CompleteIssueOperationComment(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
+// CompleteIssueOperationMetadata fires the update hook for a committed
+// compare-and-set that moved a metadata key, which is the event the generic
+// update path fires for the same write. It re-reads the row rather than taking
+// the caller's, so a script sees the metadata the swap produced.
+func (h *HookFiringStore) CompleteIssueOperationMetadata(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
+// CompleteIssueOperationRelease fires the update hook for a committed release,
+// which is the event the generic update path fires for the same write —
+// assignee and status are exactly the fields a release moves. It re-reads the
+// row rather than taking the caller's, so a script sees the unheld issue the
+// release produced rather than the claim it had.
+func (h *HookFiringStore) CompleteIssueOperationRelease(ctx context.Context, issueID string) {
 	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
 }
 
