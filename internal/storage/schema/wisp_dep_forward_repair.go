@@ -44,13 +44,13 @@ import (
 // Sequence, mirroring the shipped cliMigration0043DropDependenciesGeneratedColumn
 // which performs exactly this operation for the `dependencies` table:
 //
-//	1. delete:    FK orphans and zero-target rows
-//	2. drops:     idx_wisp_dep_type_target, each FK present, PRIMARY KEY, depends_on_id
-//	3. add:       id CHAR(36) DEFAULT (UUID()) PRIMARY KEY FIRST
-//	4. normalize: multi-target rows down to one target
-//	5. dedup:     keep MIN(id) per natural-identity group
-//	6. add:       the three uk_* unique keys and three idx_wisp_dep_type_* indexes
-//	7. add:       all four constraints unconditionally
+//  1. delete:    FK orphans and zero-target rows
+//  2. drops:     idx_wisp_dep_type_target, each FK present, PRIMARY KEY, depends_on_id
+//  3. add:       id CHAR(36) DEFAULT (UUID()) PRIMARY KEY FIRST
+//  4. normalize: multi-target rows down to one target
+//  5. dedup:     keep MIN(id) per natural-identity group
+//  6. add:       the three uk_* unique keys and three idx_wisp_dep_type_* indexes
+//  7. add:       all four constraints unconditionally
 //
 // Normalization sits AFTER the drop, and that placement is load-bearing rather
 // than cosmetic. depends_on_id is COALESCE(issue, wisp, external), so nulling a
@@ -93,7 +93,7 @@ const wispDepTable = "wisp_dependencies"
 
 // wispDepFinalConstraints are the four constraints the final 0021 shape
 // carries. They are added unconditionally at the end of the rebuild, unlike
-// ignored/0005's restore-only-what-was-present-before behaviour: their absence
+// ignored/0005's restore-only-what-was-present-before behavior: their absence
 // is the disease being cured, and a legacy store never had the two target
 // foreign keys to begin with (their columns did not exist yet), which is
 // exactly why 0005 leaves those databases unhealed and 0058 has to exist.
@@ -105,7 +105,7 @@ var wispDepFinalConstraints = []struct{ name, definition string }{
 }
 
 // wispDepFinalKeys are the unique keys and secondary indexes of the final
-// shape, in the order the shipped 0043 analogue adds them.
+// shape, in the order the shipped 0043 analog adds them.
 var wispDepFinalKeys = []struct{ name, definition string }{
 	{"uk_wisp_dep_issue_target", "ADD UNIQUE KEY uk_wisp_dep_issue_target (issue_id, depends_on_issue_id)"},
 	{"uk_wisp_dep_wisp_target", "ADD UNIQUE KEY uk_wisp_dep_wisp_target (issue_id, depends_on_wisp_id)"},
@@ -307,7 +307,7 @@ func normalizeWispDepMultiTargetRows(ctx context.Context, db DBConn) error {
 }
 
 // dropWispDepLegacyShape removes the generated column and everything built on
-// it, in the order the shipped 0043 analogue uses.
+// it, in the order the shipped 0043 analog uses.
 //
 // The order is load-bearing in two places. idx_wisp_dep_type_target is indexed
 // on depends_on_id and must go before the column. Every foreign key must go
