@@ -56,6 +56,15 @@ type LifecycleCloseReopenFixture struct {
 	// category cases are read against.
 	SetConfig   func(context.Context, string, string) error
 	QueryScalar func(context.Context, string, []any, ...any) error
+	// CountHistoryMatching counts the history entries whose message matches a
+	// SQL LIKE pattern ("" = every entry). Only the provenance case needs it,
+	// and it needs the message rather than a bare count: the clause it pins is
+	// that the recorded entry READS as the caller's own string.
+	//
+	// A nil CountHistoryMatching means "this backend cannot observe history by
+	// message", and that case SKIPS loudly with that reason rather than
+	// passing quietly. See history_matching.go for the convention.
+	CountHistoryMatching func(context.Context, string) (int, error)
 	// Exec runs a raw seeding script as ONE session, out of band of the role.
 	//
 	// It exists because the close policy answers to states no supported verb
@@ -1130,6 +1139,10 @@ func RunLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T, ctx context.
 func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
+	if fixture.CountHistoryMatching == nil {
+		t.Skip("fixture has no CountHistoryMatching: this backend cannot observe history BY MESSAGE, so issueops.go:335-344 is UNPINNED here")
+	}
+
 	const label = "conformance: reopen provenance label"
 
 	id := fixture.IssuePrefix + "-lcr-prov"
@@ -1405,8 +1418,8 @@ func RunLifecycleReopenReblocksItsDependers(t *testing.T, ctx context.Context, f
 // would carry their commits too.
 func lifecycleCloseReopenCountHistory(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, message string) int {
 	t.Helper()
-	var count int
-	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM dolt_log WHERE message = ?", []any{message}, &count); err != nil {
+	count, err := fixture.CountHistoryMatching(ctx, historyPatternForExactMessage(t, message))
+	if err != nil {
 		t.Fatalf("count history entries reading %q: %v", message, err)
 	}
 	return count

@@ -91,13 +91,14 @@ func newDoltLifecycleCloseReopenFixture(t *testing.T, prefix string) (conformanc
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
 	fixture := conformance.LifecycleCloseReopenFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Lifecycle:     lifecycle,
-		CreateIssue:   kit.CreateIssue,
-		CreateWisp:    kit.CreateWisp,
-		AddDependency: kit.AddDependency,
-		SetConfig:     kit.SetConfig,
-		QueryScalar:   kit.QueryScalar,
+		IssuePrefix:          kit.IssuePrefix,
+		Lifecycle:            lifecycle,
+		CreateIssue:          kit.CreateIssue,
+		CreateWisp:           kit.CreateWisp,
+		AddDependency:        kit.AddDependency,
+		SetConfig:            kit.SetConfig,
+		QueryScalar:          kit.QueryScalar,
+		CountHistoryMatching: kit.CountHistoryMatching,
 		// The frozen kit exposes reads only, so the raw writes the close-policy
 		// cases need are supplied here — over the same *sql.DB its QueryScalar
 		// reads through, on ONE PINNED CONNECTION so a multi-statement seed
