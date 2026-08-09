@@ -30,6 +30,13 @@ import (
 //     pinned once, at dolt, in dolt/commenter_persistence_test.go;
 //   - the dolt_status pending-row sweep, which needs a planted dirty working
 //     set and has no caller-visible meaning on the unit-of-work route.
+//
+// THE HISTORY COST OF A COMMENT IS THE SAME NUMBER ON ALL THREE WIRINGS, and
+// it is asserted here as a number rather than as a bound: exactly one entry
+// for a durable comment, exactly zero for an ephemeral one. Both were measured
+// on all three legs, so neither is a divergence being papered over — see
+// RunCommenterRecordsExactlyOneHistoryEntry for why a bound would have been
+// worse than no assertion at all.
 
 // CommenterFixture supplies adapter-specific storage access for the
 // add-comment assertions. Every field is named and typed exactly like the
@@ -147,9 +154,9 @@ func RunCommenterResultMirrorsTheStoredRow(t *testing.T, ctx context.Context, fi
 // still passed, because a comments row keyed by an id the issues plane does
 // not have is invisible to every thread read of the wisp.
 //
-// The history assertion is an EQUALITY, not the at-most-one bound the durable
-// path carries: commenter.go:72-79 promises an ephemeral comment records no
-// durable history entry at all. The bound would let a regression that records
+// The history assertion is an EQUALITY at ZERO, where the durable path's is an
+// equality at one: AddComment's ephemeral clause promises "NO durable history
+// entry — none, not 'at most one'". A bound would let a regression that records
 // exactly one entry pass on every backend, and that regression is the one that
 // breaks federation — the wisp tables are dolt-ignored so ephemeral work never
 // ships, and an entry naming a wisp thread ships.
@@ -275,12 +282,38 @@ func RunCommenterDoesNotResolvePrefixes(t *testing.T, ctx context.Context, fixtu
 	assertCommenterRowCount(t, ctx, fixture, "comments", partial, 0)
 }
 
-// RunCommenterRecordsAtMostOneHistoryEntry pins commenter.go:66-67: one
-// comment is ONE atomic mutation with at most one history entry. The upper
-// bound is what the doc promises, so that is what is asserted; the "one
-// mutation" half is the exact-one row count, which catches a body that
-// appended the comment twice while the history bound still held.
-func RunCommenterRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context, fixture CommenterFixture) {
+// RunCommenterRecordsExactlyOneHistoryEntry pins Commenter.AddComment's "ONE
+// atomic mutation, with at most one history entry" at the number every wiring
+// actually records: a durable comment costs EXACTLY one entry.
+//
+// The case is deliberately stricter than the leaf's bound, because the bound
+// cannot fail in the direction that matters. "after <= before+1" holds whether
+// the entry was written or not, so a body that quietly stopped committing
+// keeps it green — and that is not hypothetical. The deleter role stopped
+// versioning embedded deletes, the identically-shaped range in its contract
+// absorbed it, and what noticed months later was a sibling-write test outside
+// the contract suite (e9acfac6e).
+//
+// EXACTLY ONE IS MEASURED, NOT DEMANDED: all three wirings already record one
+// entry for a durable comment — the server-backed store inside its write
+// transaction, the embedded store on a second connection after the SQL commit,
+// the unit-of-work provider from the message it hands RunTxResult — so this
+// tightens the assertion and asks no backend to change. Ratifying the leaf's
+// own wording to match is the owner's call; until then this case is the
+// stricter of the two statements, and the honest one.
+//
+// What the strictness buys a caller: a comment row no entry carries is a row
+// `bd dolt push` does not ship. The thread then reads back locally and exists
+// nowhere else, and the author who published under their name cannot tell the
+// difference.
+//
+// The ephemeral half of the promise is a different number and is pinned
+// separately, at exactly zero, by
+// RunCommenterCommentOnAWispLandsOnTheWispThread.
+//
+// The "one mutation" half is the exact-one row count, which catches a body that
+// appended the comment twice while the entry count still held.
+func RunCommenterRecordsExactlyOneHistoryEntry(t *testing.T, ctx context.Context, fixture CommenterFixture) {
 	t.Helper()
 	anchor := fixture.IssuePrefix + "-history"
 	seedCommenterIssue(t, ctx, fixture, anchor)
@@ -295,8 +328,9 @@ func RunCommenterRecordsAtMostOneHistoryEntry(t *testing.T, ctx context.Context,
 	}
 
 	after := commenterHistoryCount(t, ctx, fixture)
-	if after < before || after > before+1 {
-		t.Errorf("history entries went %d -> %d across one AddComment, want at most one more", before, after)
+	if after != before+1 {
+		t.Errorf("history entries went %d -> %d across one durable AddComment, want exactly one more: a comment no entry carries never leaves this workspace, and a comment carrying two is not one mutation",
+			before, after)
 	}
 	assertCommenterRowCount(t, ctx, fixture, "comments", anchor, 1)
 }
@@ -551,7 +585,7 @@ func assertCommenterRowCount(t *testing.T, ctx context.Context, fixture Commente
 func commenterHistoryCount(t *testing.T, ctx context.Context, fixture CommenterFixture) int {
 	t.Helper()
 	if fixture.CountHistory == nil {
-		t.Skip("fixture cannot observe history: CountHistory is nil, so the at-most-one-entry clause is unpinned on this backend")
+		t.Skip("fixture cannot observe history: CountHistory is nil, so the entry-count clause is unpinned on this backend")
 	}
 	entries, err := fixture.CountHistory(ctx)
 	if err != nil {

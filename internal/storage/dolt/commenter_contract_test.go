@@ -37,8 +37,8 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("DoesNotResolvePrefixes", func(t *testing.T) {
 		conformance.RunCommenterDoesNotResolvePrefixes(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunCommenterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunCommenterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("LeavesTheAnchorIssueUntouched", func(t *testing.T) {
 		conformance.RunCommenterLeavesTheAnchorIssueUntouched(t, ctx, fixture)
