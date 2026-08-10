@@ -114,9 +114,32 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		}
 		return fmt.Errorf("acquire %s: %w", LockFileName, err)
 	}
-	defer lock.Unlock()
+	// proxy.lock is held for the proxy's whole lifetime, but a doomed start
+	// must be able to release it early (before its backend teardown) without
+	// the deferred release double-unlocking. Only the main goroutine touches
+	// this.
+	lockHeld := true
+	releaseLock := func() {
+		if lockHeld {
+			lockHeld = false
+			lock.Unlock()
+		}
+	}
+	defer releaseLock()
 	if err := clearSpawnMarkerAfterLock(p.rootDir); err != nil {
 		return fmt.Errorf("clear proxy spawn marker: %w", err)
+	}
+
+	// Fast-abort: a concurrent `bd dolt stop` advances the stop epoch before
+	// waiting (briefly) for proxy.lock, so an epoch that moved between the
+	// spawning parent's read and this child taking the lock dooms this start.
+	// Abort before opening any listener or booting the backend: the stopper
+	// then observes a free lock within milliseconds instead of after a full
+	// doomed boot-and-teardown cycle.
+	if changed, err := stopEpochChanged(p.rootDir, p.stopEpoch); err != nil {
+		return fmt.Errorf("check proxy stop epoch after acquiring %s: %w", LockFileName, err)
+	} else if changed {
+		return fmt.Errorf("%w for %s: stop epoch advanced before startup", errStartInterrupted, p.rootDir)
 	}
 
 	logPath := filepath.Join(p.rootDir, LogFileName)
@@ -148,6 +171,54 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 			cancel()
 		}
 	}()
+
+	// Watch the stop epoch across the whole startup window (listen, backend
+	// Start, readiness wait). A stop that begins mid-boot advances the epoch
+	// first and then waits only shutdownConfirmDeadline for proxy.lock, which
+	// this child holds throughout the boot; without a watcher the child would
+	// notice the doomed start only at the pre-publish fence, potentially tens
+	// of seconds later. Canceling ctx aborts the backend Start / ready wait
+	// within about one poll interval. Transient epoch read errors are ignored
+	// here; the pre-publish fence remains the authoritative check.
+	epochWatchCtx, epochWatchCancel := context.WithCancel(context.Background())
+	epochWatchDone := make(chan struct{})
+	go func() {
+		defer close(epochWatchDone)
+		ticker := time.NewTicker(openPollInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-epochWatchCtx.Done():
+				return
+			case <-ticker.C:
+				changed, err := stopEpochChanged(p.rootDir, p.stopEpoch)
+				if err != nil {
+					continue
+				}
+				if changed {
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	stopEpochWatch := func() {
+		epochWatchCancel()
+		<-epochWatchDone
+	}
+	defer stopEpochWatch()
+
+	// abortInterruptedStart tears down a doomed start whose stop epoch
+	// advanced mid-boot. The interrupting stop is polling proxy.lock under a
+	// budget (shutdownConfirmDeadline) far smaller than a backend stop can
+	// take, and nothing has been published, so release the lock BEFORE the
+	// backend teardown instead of starving the stopper into its timeout.
+	abortInterruptedStart := func() error {
+		p.stats.IncBackendStop()
+		releaseLock()
+		_ = stopBackendBounded(p.server)
+		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)
+	}
 
 	addr := fmt.Sprintf("127.0.0.1:%d", p.port)
 
@@ -186,10 +257,20 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 
 	p.stats.IncBackendStart()
 	if err := p.server.Start(ctx); err != nil {
+		// Start failed with no backend left running (Start cleans up its own
+		// failure), so there is no teardown to move off the lock; classifying
+		// the epoch-watcher cancellation just keeps the child's exit reason
+		// precise for the spawning parent.
+		if changed, cerr := stopEpochChanged(p.rootDir, p.stopEpoch); cerr == nil && changed {
+			return fmt.Errorf("%w for %s: stop epoch advanced during backend start (%v)", errStartInterrupted, p.rootDir, err)
+		}
 		return fmt.Errorf("start database server: %w", err)
 	}
 
 	if err := waitForServerReady(ctx, p.server, serverReadyTimeout); err != nil {
+		if changed, cerr := stopEpochChanged(p.rootDir, p.stopEpoch); cerr == nil && changed {
+			return abortInterruptedStart()
+		}
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("database server not ready: %w", err)
@@ -219,15 +300,17 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 	// process took proxy.lock, so a `bd dolt stop` that began during a slow
 	// backend start has no record of this attempt. It did advance the stop
 	// epoch first, so re-check it here and abort instead of publishing a
-	// running proxy after that stop returned.
+	// running proxy after that stop returned. The startup epoch watcher is
+	// stopped (synchronously) first: past this fence a stop finds the
+	// published proxy.pid and stops the proxy through it, so a watcher
+	// cancellation must not race the publish.
+	stopEpochWatch()
 	if changed, err := stopEpochChanged(p.rootDir, p.stopEpoch); err != nil {
 		p.stats.IncBackendStop()
 		_ = stopBackendBounded(p.server)
 		return fmt.Errorf("re-check proxy stop epoch before publish: %w", err)
 	} else if changed {
-		p.stats.IncBackendStop()
-		_ = stopBackendBounded(p.server)
-		return fmt.Errorf("%w for %s: stop epoch advanced during startup", errStartInterrupted, p.rootDir)
+		return abortInterruptedStart()
 	}
 
 	if err := pidfile.Write(p.rootDir, PIDFileName, pidfile.PidFile{

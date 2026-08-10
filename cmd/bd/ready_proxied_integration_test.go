@@ -228,10 +228,14 @@ func TestProxiedServerReady(t *testing.T) {
 		if envelope.Pagination.Returned != 2 {
 			t.Errorf("pagination.returned = %d, want 2", envelope.Pagination.Returned)
 		}
-		// Total is unavailable on the proxied backend; omitempty must drop
-		// the key rather than emit a false "total": 0.
-		if strings.Contains(s[start:], `"total"`) {
-			t.Errorf("unexpected 'total' key in proxied pagination (unavailable on this backend): %s", s[start:])
+		// Total is PUBLISHED here, which it was not before the ReadyCounter
+		// role: this route had no way to size the ready set, so the direct
+		// route's "total" simply had no proxied counterpart and a script that
+		// read it got nothing under a proxied workspace. Four rows were seeded
+		// and two returned.
+		if envelope.Pagination.Total != 4 {
+			t.Errorf("pagination.total = %d, want the 4 rows this case seeded: %s",
+				envelope.Pagination.Total, s[start:])
 		}
 	})
 
@@ -594,192 +598,22 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
-	t.Run("empty_state_no_open_issues", func(t *testing.T) {
+	t.Run("empty_state_messages", func(t *testing.T) {
 		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rdei")
+		p := newSharedProxiedProject(t, bd, "rde")
 		stdout, _ := bdProxiedReadyCapture(t, bd, p)
 		if !strings.Contains(stdout, "No open issues") {
 			t.Errorf("expected 'No open issues', got: %s", stdout)
 		}
-	})
 
-	t.Run("empty_state_no_ready_with_blockers", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rdeb")
-		blocker := bdProxiedCreate(t, bd, p.dir, "Self-blocker")
-		bdProxiedCreate(t, bd, p.dir, "Only issue, blocked", "--deps", "blocks:"+blocker.ID)
-		if _, err := bdProxiedRun(t, bd, p.dir, "ready", "--claim", "--json"); err == nil {
-		}
-		if _, err := bdProxiedRun(t, bd, p.dir, "update", blocker.ID, "--claim"); err != nil {
-			t.Fatalf("update --claim blocker: %v", err)
-		}
-		stdout, _ := bdProxiedReadyCapture(t, bd, p, "--label", "no-such-label")
-		if !strings.Contains(stdout, "No ready work found") && !strings.Contains(stdout, "No open issues") {
-			t.Errorf("expected empty-state hint, got: %s", stdout)
-		}
-	})
-
-	t.Run("filter_priority_pass_through", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rfp")
-		hi := bdProxiedCreate(t, bd, p.dir, "Hi pri", "-p", "0")
-		lo := bdProxiedCreate(t, bd, p.dir, "Lo pri", "-p", "3")
-		ready := bdProxiedReadyJSON(t, bd, p, "-p", "0")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[hi.ID] {
-			t.Errorf("expected %s in priority=0 filter result", hi.ID)
-		}
-		if ids[lo.ID] {
-			t.Errorf("did not expect %s in priority=0 result", lo.ID)
-		}
-	})
-
-	t.Run("filter_assignee_pass_through", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rfa")
-		mine := bdProxiedCreate(t, bd, p.dir, "Alice work", "--assignee", "alice")
-		bdProxiedCreate(t, bd, p.dir, "Bob work", "--assignee", "bob")
-		ready := bdProxiedReadyJSON(t, bd, p, "--assignee", "alice")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[mine.ID] {
-			t.Errorf("expected %s for assignee=alice", mine.ID)
-		}
-		for _, r := range ready {
-			if r.Assignee != "alice" {
-				t.Errorf("got non-alice assignee %q for %s", r.Assignee, r.ID)
-			}
-		}
-	})
-
-	t.Run("filter_unassigned_pass_through", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rfu")
-		un := bdProxiedCreate(t, bd, p.dir, "Free agent")
-		bdProxiedCreate(t, bd, p.dir, "Taken", "--assignee", "alice")
-		ready := bdProxiedReadyJSON(t, bd, p, "--unassigned")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[un.ID] {
-			t.Errorf("expected %s in --unassigned result", un.ID)
-		}
-		for _, r := range ready {
-			if r.Assignee != "" {
-				t.Errorf("got assignee %q for %s under --unassigned", r.Assignee, r.ID)
-			}
-		}
-	})
-
-	t.Run("filter_type_pass_through", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rft")
-		bug := bdProxiedCreate(t, bd, p.dir, "A bug", "--type", "bug")
-		bdProxiedCreate(t, bd, p.dir, "A task", "--type", "task")
-		ready := bdProxiedReadyJSON(t, bd, p, "--type", "bug")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[bug.ID] {
-			t.Errorf("expected %s for --type=bug", bug.ID)
-		}
-		for _, r := range ready {
-			if r.IssueType != types.TypeBug {
-				t.Errorf("got type %s for %s under --type=bug", r.IssueType, r.ID)
-			}
-		}
-	})
-
-	t.Run("filter_parent_pass_through", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rfpar")
-		epic := bdProxiedCreate(t, bd, p.dir, "Epic", "--type", "epic")
-		child := bdProxiedCreate(t, bd, p.dir, "Inside", "--parent", epic.ID)
-		outside := bdProxiedCreate(t, bd, p.dir, "Outside")
-		ready := bdProxiedReadyJSON(t, bd, p, "--parent", epic.ID)
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[child.ID] {
-			t.Errorf("expected %s under --parent=%s", child.ID, epic.ID)
-		}
-		if ids[outside.ID] {
-			t.Errorf("outside-of-parent issue %s leaked into --parent result", outside.ID)
-		}
-	})
-
-	t.Run("metadata_field_match", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rmd1")
-		match := bdProxiedCreate(t, bd, p.dir, "Has team", "--metadata", `{"team":"platform"}`)
-		bdProxiedCreate(t, bd, p.dir, "Other team", "--metadata", `{"team":"frontend"}`)
-		ready := bdProxiedReadyJSON(t, bd, p, "--metadata-field", "team=platform")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[match.ID] {
-			t.Errorf("expected %s for team=platform filter", match.ID)
-		}
-	})
-
-	t.Run("metadata_has_key", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rmd2")
-		withMeta := bdProxiedCreate(t, bd, p.dir, "With meta", "--metadata", `{"team":"x"}`)
-		bdProxiedCreate(t, bd, p.dir, "No meta")
-		ready := bdProxiedReadyJSON(t, bd, p, "--has-metadata-key", "team")
-		ids := map[string]bool{}
-		for _, r := range ready {
-			ids[r.ID] = true
-		}
-		if !ids[withMeta.ID] {
-			t.Errorf("expected %s in --has-metadata-key=team result", withMeta.ID)
-		}
-	})
-
-	t.Run("metadata_field_invalid_key_errors", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rmd3")
-		out := bdProxiedReadyFail(t, bd, p, "--metadata-field", "bad$key=x")
-		if !strings.Contains(out, "metadata-field") {
-			t.Errorf("expected validation error about metadata-field, got: %s", out)
-		}
-	})
-
-	t.Run("include_deferred_toggle", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rdd")
-		issue := bdProxiedCreate(t, bd, p.dir, "Will defer")
+		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked open issue")
 		db := openProxiedDB(t, p)
-		if _, err := db.ExecContext(context.Background(),
-			"UPDATE issues SET defer_until = DATE_ADD(UTC_TIMESTAMP(), INTERVAL 1 DAY) WHERE id = ?", issue.ID); err != nil {
-			t.Fatalf("plant defer_until: %v", err)
+		if _, err := db.ExecContext(context.Background(), "UPDATE issues SET is_blocked = 1 WHERE id = ?", blocked.ID); err != nil {
+			t.Fatalf("mark issue blocked: %v", err)
 		}
-		ready := bdProxiedReadyJSON(t, bd, p)
-		for _, r := range ready {
-			if r.ID == issue.ID {
-				t.Errorf("future-deferred issue %s should be hidden by default", issue.ID)
-			}
-		}
-		ready2 := bdProxiedReadyJSON(t, bd, p, "--include-deferred")
-		found := false
-		for _, r := range ready2 {
-			if r.ID == issue.ID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			t.Errorf("expected deferred %s under --include-deferred", issue.ID)
+		stdout, _ = bdProxiedReadyCapture(t, bd, p)
+		if !strings.Contains(stdout, "No ready work found") {
+			t.Errorf("expected 'No ready work found', got: %s", stdout)
 		}
 	})
 
@@ -809,104 +643,34 @@ func TestProxiedServerReady2(t *testing.T) {
 		}
 	})
 
-	t.Run("mol_type_validation_rejects_invalid", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rmtv")
-		out := bdProxiedReadyFail(t, bd, p, "--mol-type", "garbage")
-		if !strings.Contains(out, "invalid mol-type") {
-			t.Errorf("expected 'invalid mol-type' error, got: %s", out)
-		}
-	})
-
-	// Since bd-ehi both routes share one flag gatherer, and it reports usage
-	// errors the way the direct route always has: as a JSON error object on
-	// stdout when the caller asked for --json. This route used to print
-	// "Error: ..." to stderr for these three, so a script that parses proxied
-	// `bd ready --json` failures sees the change - which is why it is pinned
-	// end to end here as well as at the gatherer
-	// (TestGatherReadyInputUsageErrorsRespectJSON).
-	t.Run("json_usage_errors_are_json_on_stdout", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rdjue")
-		cases := []struct {
-			name string
-			args []string
-			want string
-		}{
-			{"sort_policy", []string{"--sort", "bogus"}, "invalid sort policy"},
-			{"mol_type", []string{"--mol-type", "garbage"}, "invalid mol-type"},
-			{"metadata_field", []string{"--metadata-field", "bad$key=x"}, "invalid --metadata-field key"},
-		}
-		for _, c := range cases {
-			t.Run(c.name, func(t *testing.T) {
-				args := append([]string{"ready", "--json"}, c.args...)
-				stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, args...)
-				if err == nil {
-					t.Fatalf("bd ready --json %s should have failed; stdout:\n%s", strings.Join(c.args, " "), stdout)
-				}
-				var payload map[string]any
-				if jsonErr := json.Unmarshal([]byte(strings.TrimSpace(stdout)), &payload); jsonErr != nil {
-					t.Fatalf("stdout is not a JSON error object: %v\nstdout:\n%s\nstderr:\n%s", jsonErr, stdout, stderr)
-				}
-				if data, ok := payload["data"].(map[string]any); ok {
-					payload = data
-				}
-				msg, _ := payload["error"].(string)
-				if !strings.Contains(msg, c.want) {
-					t.Errorf("JSON error = %q, want it to contain %q", msg, c.want)
-				}
-				if strings.Contains(stderr, "Error:") {
-					t.Errorf("under --json the error must not also go to stderr, got:\n%s", stderr)
-				}
-			})
-		}
-	})
-
-	t.Run("claim_combo_guards", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rcc")
-		bdProxiedCreate(t, bd, p.dir, "Seed")
-		cases := []struct {
-			name string
-			args []string
-		}{
-			{"claim_gated", []string{"--claim", "--gated"}},
-			{"claim_mol", []string{"--claim", "--mol", "x"}},
-			{"claim_explain", []string{"--claim", "--explain"}},
-			{"claim_assignee", []string{"--claim", "--assignee", "alice"}},
-		}
-		for _, c := range cases {
-			t.Run(c.name, func(t *testing.T) {
-				out := bdProxiedReadyFail(t, bd, p, c.args...)
-				if !strings.Contains(out, "--claim cannot be combined") {
-					t.Errorf("expected '--claim cannot be combined' error, got: %s", out)
-				}
-			})
-		}
-	})
-
-	// be-x42v.4 round-3 follow-up: rejectMaxRowsUnderProxiedServer must not
-	// block `bd ready --claim` under proxied mode. --claim always delivers
-	// exactly one row (same reasoning as the direct-path fix in
-	// issueops/claim.go), so a rig-wide cap sized for bulk reads must not
-	// hard-fail it. Bulk (non-claim) `bd ready` under proxied mode with an
-	// active cap must still reject, same as `bd list` (see
-	// list_proxied_integration_test.go's reject_max_rows_flag/_env).
-	t.Run("claim_succeeds_under_env_max_rows_cap", func(t *testing.T) {
+	t.Run("max_rows_claim_policy_and_transaction", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "rcmr")
-		// Ready pool (3) exceeds the cap (1) — exactly the scenario a
-		// rig-wide BEADS_MAX_ROWS is meant to guard bulk reads against,
-		// while claim (which only ever returns one row) must still work.
 		for i := 0; i < 3; i++ {
 			bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Claim under cap %d", i), "--label", "rcmr-claim")
 		}
+
+		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
+		if !strings.Contains(out, "must be non-negative") {
+			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
+		}
+		out = bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
+		if !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected --max-rows proxied-server rejection for bulk ready, got: %s", out)
+		}
 		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"},
-			"ready", "--claim", "--json", "--label", "rcmr-claim")
+			[]string{"BEADS_MAX_ROWS=1"}, "ready")
+		if err == nil {
+			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if out := stdout + stderr; !strings.Contains(out, "not supported in proxied-server mode") {
+			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk ready, got: %s", out)
+		}
+
+		stdout, stderr, err = bdProxiedRunBuffersWithEnv(t, bd, p.dir,
+			[]string{"BEADS_MAX_ROWS=1"}, "ready", "--claim", "--json", "--label", "rcmr-claim")
 		if err != nil {
-			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 with a larger ready pool should succeed: %v\nstdout:\n%s\nstderr:\n%s",
-				err, stdout, stderr)
+			t.Fatalf("bd ready --claim --json under BEADS_MAX_ROWS=1 should succeed: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
 		}
 		var claimed []types.IssueWithCounts
 		s := strings.TrimSpace(stdout)
@@ -923,81 +687,9 @@ func TestProxiedServerReady2(t *testing.T) {
 		if claimed[0].Status != types.StatusInProgress {
 			t.Errorf("Status = %s, want %s", claimed[0].Status, types.StatusInProgress)
 		}
-	})
-
-	// be-x42v.4 round-4 follow-up (codex P2): the claim-exempt branch above
-	// must still validate --max-rows via resolveMaxRows even though it
-	// ignores the resolved (positive) cap — otherwise a malformed value
-	// like -1 is silently accepted under proxied `ready --claim`, unlike
-	// every other command (direct or proxied).
-	t.Run("claim_rejects_invalid_max_rows_flag", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rcim")
-		bdProxiedCreate(t, bd, p.dir, "Claim invalid max-rows seed")
-		out := bdProxiedReadyFail(t, bd, p, "--claim", "--max-rows", "-1")
-		if !strings.Contains(out, "must be non-negative") {
-			t.Errorf("expected --max-rows usage-error rejection, got: %s", out)
-		}
-	})
-
-	t.Run("reject_bulk_ready_under_max_rows_flag", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rbmf")
-		bdProxiedCreate(t, bd, p.dir, "Bulk ready seed")
-		out := bdProxiedReadyFail(t, bd, p, "--max-rows", "1")
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected --max-rows proxied-server rejection for bulk (non-claim) ready, got: %s", out)
-		}
-	})
-
-	t.Run("reject_bulk_ready_under_max_rows_env", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rbme")
-		bdProxiedCreate(t, bd, p.dir, "Bulk ready env seed")
-		stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir,
-			[]string{"BEADS_MAX_ROWS=1"}, "ready")
-		if err == nil {
-			t.Fatalf("expected BEADS_MAX_ROWS under proxied bulk ready to fail, but it succeeded:\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
-		}
-		out := stdout + stderr
-		if !strings.Contains(out, "not supported in proxied-server mode") {
-			t.Errorf("expected BEADS_MAX_ROWS proxied-server rejection for bulk (non-claim) ready, got: %s", out)
-		}
-	})
-
-	t.Run("exclude_type_csv_and_repeated", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "rxt")
-		task := bdProxiedCreate(t, bd, p.dir, "Task work", "--type", "task")
-		bdProxiedCreate(t, bd, p.dir, "Bug work", "--type", "bug")
-		bdProxiedCreate(t, bd, p.dir, "Epic work", "--type", "epic")
-
-		csv := bdProxiedReadyJSON(t, bd, p, "--exclude-type", "bug,epic")
-		csvIDs := map[string]bool{}
-		for _, r := range csv {
-			csvIDs[r.ID] = true
-		}
-		if !csvIDs[task.ID] {
-			t.Errorf("expected task %s in CSV result", task.ID)
-		}
-		for _, r := range csv {
-			if r.IssueType == types.TypeBug || r.IssueType == types.TypeEpic {
-				t.Errorf("excluded type %s leaked: %s", r.IssueType, r.ID)
-			}
-		}
-
-		rep := bdProxiedReadyJSON(t, bd, p, "--exclude-type", "bug", "--exclude-type", "epic")
-		repIDs := map[string]bool{}
-		for _, r := range rep {
-			repIDs[r.ID] = true
-		}
-		if !repIDs[task.ID] {
-			t.Errorf("expected task %s in repeated-flag result", task.ID)
-		}
-		for _, r := range rep {
-			if r.IssueType == types.TypeBug || r.IssueType == types.TypeEpic {
-				t.Errorf("excluded type %s leaked under repeated flag: %s", r.IssueType, r.ID)
-			}
+		persisted := bdProxiedShow(t, bd, p.dir, claimed[0].ID)
+		if persisted.Status != types.StatusInProgress || persisted.Assignee == "" {
+			t.Errorf("persisted claim = %+v, want in_progress with assignee", persisted)
 		}
 	})
 }

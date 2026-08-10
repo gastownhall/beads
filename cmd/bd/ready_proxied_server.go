@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
@@ -40,8 +42,14 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 
 	if in.claim {
-		return runReadyProxiedClaim(ctx, nil, in)
+		return runReadyProxiedClaim(ctx, in)
 	}
+
+	// Wake expired dated defers before the read below. The unit of work this
+	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
+	// in a committing UOW of its own first; the claim route above gets the
+	// same sweep from its role (uow.readyClaimer.ClaimNext).
+	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
 
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
@@ -121,14 +129,23 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
 		truncated = truncated && in.filter.Limit > 0
 		// Parity with the direct route: the pagination key is emitted only
-		// when truncated. Total is unavailable from this backend's domain
-		// page (no cheap COUNT(*) equivalent on the proxied path), so it is
-		// left unset (0) unlike the direct route's fully-populated meta.
+		// when truncated, and it now carries the same Total, from the same
+		// role. This route published no total at all until ReadyCounter
+		// existed, so a script that read `pagination.total` got one number
+		// under a direct-mode workspace and no key at all under a proxied one.
+		//
+		// The guard is the direct route's guard: the two queries are not one
+		// snapshot (issueops.ReadyCounter.CountReady), so a close landing
+		// between them must not publish a total smaller than the page beside
+		// it.
 		var pag *PaginationMeta
 		if truncated {
 			pag = &PaginationMeta{
 				Returned:  len(results),
 				Truncated: true,
+			}
+			if n, countErr := proxiedReadyTotal(ctx, in); countErr == nil && n > len(results) {
+				pag.Total = n
 			}
 		}
 		_ = outputJSONWithPagination(results, pag)
@@ -188,40 +205,25 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 	return nil
 }
 
-func runReadyProxiedClaim(ctx context.Context, _ uow.UnitOfWork, in readyInput) error {
+// runReadyProxiedClaim is the proxied route of `bd ready --claim`, on the same
+// ReadyClaimer role the direct route reaches through the store's accessor.
+// Both build their request in claimNextRequest, so the two doors ask one
+// question — and neither opens a unit of work of its own: the role's request
+// IS the transaction, which is what lets the selection, the compare-and-set
+// and the hydration this route prints share it.
+func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 	CheckReadonly("ready --claim")
 
-	type claimResult struct {
-		issue       *types.Issue
-		claimed     bool
-		jsonPayload []*types.IssueWithCounts
+	claimer, err := proxiedReadyClaimer()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
 	}
-
-	res, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (claimResult, string, error) {
-		claimRes, err := uw.IssueUseCase().ClaimReadyIssue(ctx, in.filter, actor)
-		if err != nil {
-			return claimResult{}, "", err
-		}
-		if !claimRes.Claimed {
-			return claimResult{claimed: false}, "", nil
-		}
-
-		var jsonPayload []*types.IssueWithCounts
-		if in.jsonOut {
-			jsonPayload = buildReadyIssueOutputProxied(ctx, uw, []*types.Issue{claimRes.Issue})
-		}
-
-		return claimResult{
-			issue:       claimRes.Issue,
-			claimed:     true,
-			jsonPayload: jsonPayload,
-		}, fmt.Sprintf("bd: ready --claim %s", claimRes.Issue.ID), nil
-	})
+	res, err := claimer.ClaimNext(ctx, claimNextRequest(in))
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	if !res.claimed {
+	if res.Claimed == nil {
 		if in.jsonOut {
 			_ = outputJSON([]*types.IssueWithCounts{})
 		} else {
@@ -230,14 +232,55 @@ func runReadyProxiedClaim(ctx context.Context, _ uow.UnitOfWork, in readyInput) 
 		return nil
 	}
 
-	SetLastTouchedID(res.issue.ID)
+	SetLastTouchedID(res.Claimed.ID)
 
 	if in.jsonOut {
-		_ = outputJSON(res.jsonPayload)
+		_ = outputJSON([]*types.IssueWithCounts{res.Claimed})
 	} else {
-		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.issue.ID, res.issue.Title))
+		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Claimed.ID, res.Claimed.Title))
 	}
 	return nil
+}
+
+// proxiedReadyTotal sizes the whole ready set through the provider's own
+// ReadyCounter accessor — the same role the direct route reaches through the
+// store's accessor, over the request both build in readyRoleRequest.
+//
+// It opens NO unit of work of its own: the role's request IS the transaction,
+// so the count runs in its own read-only unit of work rather than the one the
+// page came from, which is why the two are not one snapshot.
+func proxiedReadyTotal(ctx context.Context, in readyInput) (int, error) {
+	if uowProvider == nil {
+		return 0, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.ReadyCounterSource)
+	if !ok {
+		return 0, fmt.Errorf("proxied-server provider %T does not offer the ready-count surface", uowProvider)
+	}
+	counter, err := src.ReadyCounter()
+	if err != nil {
+		return 0, err
+	}
+	result, err := counter.CountReady(ctx, readyRoleRequest(in))
+	if err != nil {
+		return 0, err
+	}
+	return int(result.Total), nil
+}
+
+// proxiedReadyClaimer hands back the guarded claim surface for the
+// proxied-server provider, through the provider's OWN capability accessor —
+// the same two-step proxiedIssueReader performs, and for the same reason: the
+// accessor is where a decorator adds its layer.
+func proxiedReadyClaimer() (issueops.ReadyClaimer, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.ReadyClaimerSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the ready-claim surface", uowProvider)
+	}
+	return src.ReadyClaimer()
 }
 
 func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput) error {
@@ -452,47 +495,6 @@ func runReadyProxiedGated(ctx context.Context, uw uow.UnitOfWork, _ readyInput) 
 		return HandleErrorRespectJSON("%v", err)
 	}
 	return renderGatedReadyMolecules(molecules)
-}
-
-func buildReadyIssueOutputProxied(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue) []*types.IssueWithCounts {
-	if issues == nil {
-		issues = []*types.Issue{}
-	}
-	ids := make([]string, len(issues))
-	for i, issue := range issues {
-		ids[i] = issue.ID
-	}
-
-	depCounts, _ := uw.DependencyUseCase().CountsByIssueIDs(ctx, ids)
-	allDeps, _ := uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
-	commentCounts, _ := uw.CommentUseCase().GetCommentCounts(ctx, ids)
-
-	for _, issue := range issues {
-		issue.Dependencies = allDeps[issue.ID]
-	}
-
-	out := make([]*types.IssueWithCounts, len(issues))
-	for i, issue := range issues {
-		counts := depCounts[issue.ID]
-		if counts == nil {
-			counts = &types.DependencyCounts{}
-		}
-		var parent *string
-		for _, dep := range allDeps[issue.ID] {
-			if dep.Type == types.DepParentChild {
-				parent = &dep.DependsOnID
-				break
-			}
-		}
-		out[i] = &types.IssueWithCounts{
-			Issue:           issue,
-			DependencyCount: counts.DependencyCount,
-			DependentCount:  counts.DependentCount,
-			CommentCount:    commentCounts[issue.ID],
-			Parent:          parent,
-		}
-	}
-	return out
 }
 
 func buildParentEpicMapProxied(ctx context.Context, uw uow.UnitOfWork, issues []*types.Issue) map[string]string {

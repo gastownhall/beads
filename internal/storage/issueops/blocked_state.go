@@ -116,6 +116,10 @@ func RecomputeIsBlockedInTxWithResult(
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return result, nil
 	}
+	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
+	if err != nil {
+		return result, err
+	}
 	for {
 		var changed int64
 
@@ -134,7 +138,7 @@ func RecomputeIsBlockedInTxWithResult(
 		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return result, nil
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
 		}
 	}
 }
@@ -142,6 +146,10 @@ func RecomputeIsBlockedInTxWithResult(
 func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return nil
+	}
+	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
+	if err != nil {
+		return err
 	}
 	for {
 		var changed int64
@@ -159,7 +167,7 @@ func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string)
 		changed += n
 
 		if changed == 0 {
-			return nil
+			return recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
 		}
 	}
 }

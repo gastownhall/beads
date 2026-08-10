@@ -304,6 +304,31 @@ func TestListDisplayPrettyList(t *testing.T) {
 	if !strings.Contains(out, "bd-1") || !strings.Contains(out, "bd-1.1") || !strings.Contains(out, "Total:") {
 		t.Fatalf("unexpected output: %q", out)
 	}
+	if strings.Contains(out, "Showing ") {
+		t.Fatalf("untruncated list must keep Total: wording, got: %q", out)
+	}
+}
+
+// GH#5362: a page cut by --limit must not label the page size as Total.
+func TestListDisplayPrettyList_TruncatedSummary(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "B", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeFeature},
+	}
+
+	out := captureStdout(t, func() error {
+		displayPrettyListWithDepsMode(issues, false, nil, "", true)
+		return nil
+	})
+	if !strings.Contains(out, "Showing 2 issues") {
+		t.Fatalf("expected honest Showing N summary when truncated, got: %q", out)
+	}
+	if !strings.Contains(out, "truncated by --limit") {
+		t.Fatalf("expected truncation notice in summary, got: %q", out)
+	}
+	if strings.Contains(out, "Total:") {
+		t.Fatalf("truncated summary must not claim Total:, got: %q", out)
+	}
 }
 
 func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
@@ -318,7 +343,7 @@ func TestDisplayWatchedIssueList_UsesDependencyHierarchy(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), store, []*types.Issue{child, parent})
+		displayWatchedIssueList(context.Background(), store, []*types.Issue{child, parent}, false)
 		return nil
 	})
 

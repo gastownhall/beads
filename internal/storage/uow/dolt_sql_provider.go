@@ -5,14 +5,17 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
 	_ "github.com/go-sql-driver/mysql"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	db "github.com/steveyegge/beads/internal/storage/domain/db"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
 
@@ -40,6 +43,23 @@ type doltSQLProvider struct {
 	// non-mutating preview (--dry-run, --inspect). The open creates no
 	// database and applies no migration; see providerOptions.preview.
 	preview bool
+	// eventsJournalEnabled activates the durable events journal for THIS
+	// provider instance only. See SetEventsJournalEnabled.
+	eventsJournalEnabled atomic.Bool
+}
+
+// SetEventsJournalEnabled activates the durable events journal for every unit
+// of work this provider begins from now on. Per instance, never process-global:
+// a process can hold several providers at once, and enabling one must not
+// enable the rest.
+//
+// Emission itself lives at the issueops seam that the domain/db repositories
+// call, but the seam only emits for a transaction activation is BOUND to (see
+// BeginTx). Without that binding the uow plumbing writes mutations while
+// journaling nothing — the failure is invisible, because the code runs and the
+// write lands and the journal is simply empty.
+func (p *doltSQLProvider) SetEventsJournalEnabled(enabled bool) {
+	p.eventsJournalEnabled.Store(enabled)
 }
 
 type bootstrapPreparationError struct {
@@ -102,8 +122,9 @@ func applyProviderOptions(opts []ProviderOption) providerOptions {
 }
 
 var (
-	_ UnitOfWorkProvider = (*doltSQLProvider)(nil)
-	_ TxProvider         = (*doltSQLProvider)(nil)
+	_ UnitOfWorkProvider              = (*doltSQLProvider)(nil)
+	_ TxProvider                      = (*doltSQLProvider)(nil)
+	_ storage.EventsJournalConfigurer = (*doltSQLProvider)(nil)
 )
 
 func (p *doltSQLProvider) NewUOW(ctx context.Context) (UnitOfWork, error) {
@@ -131,8 +152,14 @@ func (p *doltSQLProvider) BeginTx(ctx context.Context) (Tx, error) {
 		return nil, fmt.Errorf("uow: failed to start transaction: %w", err)
 	}
 
+	// Bind journal activation to the connection this unit of work is pinned to,
+	// AFTER START TRANSACTION so the seq allocation's UPDATE and the SELECT that
+	// must observe it are inside one transaction on one session. The scope is
+	// released when the connection is (doltServerTx.releaseConn / poisonConn),
+	// so an entry cannot outlive its transaction.
 	return &doltServerTx{
-		conn: conn,
+		conn:              conn,
+		clearJournalScope: issueops.ScopeEventsJournalTransaction(conn, p.eventsJournalEnabled.Load()),
 	}, nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -216,6 +217,9 @@ func TestDetectBootstrapAction_ServerModeMissingConfiguredDBDoesNotReturnNone(t 
 		return bootstrapServerDBCheck{Exists: false, Reachable: true}
 	}
 	defer func() { checkBootstrapServerDB = origCheck }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
 
 	plan := detectBootstrapAction(beadsDir, cfg)
 	if plan.Action == "none" {
@@ -698,6 +702,9 @@ func TestDetectBootstrapAction_ServerModePlanUsesConfiguredDatabaseName(t *testi
 		return bootstrapServerDBCheck{Exists: false, Reachable: true}
 	}
 	defer func() { checkBootstrapServerDB = origCheck }()
+	origDelay := bootstrapRetryDelay
+	bootstrapRetryDelay = func(time.Duration) {}
+	defer func() { bootstrapRetryDelay = origDelay }()
 
 	plan := detectBootstrapAction(beadsDir, cfg)
 

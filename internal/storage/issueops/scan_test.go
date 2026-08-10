@@ -113,6 +113,46 @@ func TestIssueSelectColumns_LitePlusHeavyEqualsFull(t *testing.T) {
 	}
 }
 
+// TestIssueSelectColumnsLite_IsFullMinusHeavyInOrder is the ORDER half of the
+// guard above, and the set comparison cannot stand in for it. Both lists are
+// scanned POSITIONALLY — ScanIssueFrom and ScanIssueLiteFrom bind destinations
+// by index, and sqlbuild.SearchCountsSQL now renders a qualified variant of
+// each into the counts mega-query — so two columns of the same SQL type can be
+// transposed with no membership change at all: the set test stays green, the
+// scan succeeds, and every row silently carries one column's value in the
+// other's field. Nothing downstream can detect that, which is why it is pinned
+// here rather than left to a case that would have to guess which pair moved.
+//
+// The oracle is the full list itself: deleting the heavy columns from
+// IssueSelectColumns, in place, must reproduce IssueSelectColumnsLite exactly.
+// That makes the lite list a DERIVATION rather than a second hand-maintained
+// copy, so a column added to the full list in the middle cannot be appended to
+// the end of the lite one.
+func TestIssueSelectColumnsLite_IsFullMinusHeavyInOrder(t *testing.T) {
+	t.Parallel()
+
+	dropSet := columnSet(HeavyDropList)
+	var want []string
+	for _, col := range parseSelectColumns(IssueSelectColumns) {
+		if _, heavy := dropSet[col]; !heavy {
+			want = append(want, col)
+		}
+	}
+
+	got := parseSelectColumns(IssueSelectColumnsLite)
+	if len(got) != len(want) {
+		t.Fatalf("IssueSelectColumnsLite has %d columns, want %d (IssueSelectColumns minus HeavyDropList)", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("IssueSelectColumnsLite[%d] = %q, want %q.\n"+
+				"The lite list must be IssueSelectColumns with the heavy columns removed IN PLACE: both are scanned by\n"+
+				"position, so a transposition of two same-typed columns swaps their values on every row without failing\n"+
+				"any membership check.\n got: %v\nwant: %v", i, got[i], want[i], got, want)
+		}
+	}
+}
+
 // TestScanIssueLiteFrom_LeavesHeavyFieldsBlank verifies the happy path for the
 // lite scan helper: identity/metadata hydrate, the six heavy text columns
 // remain zero-valued, and IsLitePartial is set so downstream code can detect

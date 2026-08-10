@@ -38,6 +38,7 @@ import (
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/fdhygiene"
 	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -1009,6 +1010,16 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 // trace, debug, info, warning, error, fatal.
 const doltServerLogLevel = "warning"
 
+// ServerSpawnEnv returns the environment for a spawned dolt sql-server (the
+// directly-managed spawn here and the proxied one in dbproxy/server). The
+// server runs CALL DOLT_PUSH/FETCH itself, so the guards must be in the
+// child's environment: templated git hooks disabled (GH#4272; approach from
+// PR #4281 by pmgledhill102) and stderr-directed git tracing scrubbed (see
+// internal/gittraceenv).
+func ServerSpawnEnv() []string {
+	return githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+}
+
 // buildDoltServerArgs returns the argv passed to `dolt` (excluding argv[0]/
 // the binary itself). It is factored out of Start so it can be asserted on
 // in unit tests without spawning a real server.
@@ -1398,13 +1409,7 @@ func Start(beadsDir string) (*State, error) {
 			cmd.Stderr = logFile
 			cmd.Stdin = nil
 			cmd.SysProcAttr = procAttrDetached()
-			// In server mode the CALL DOLT_PUSH runs inside THIS child, not in
-			// bd, so the hooks override has to be in the child's environment —
-			// setting it on bd's own process (what the embedded path does)
-			// would be invisible here. GH#4272; approach from PR #4281 by
-			// pmgledhill102.
-			cmd.Env = append(os.Environ(), githooksenv.ParametersEnv+"="+
-				githooksenv.AppendParameter(os.Getenv(githooksenv.ParametersEnv), githooksenv.NoHooksParam))
+			cmd.Env = ServerSpawnEnv()
 
 			// GH#4634: the server outlives the caller, so any descriptor the
 			// caller left non-CLOEXEC (a shell `exec 9>lock`, a CI harness, an

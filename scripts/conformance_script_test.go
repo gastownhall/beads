@@ -117,16 +117,16 @@ fi
 `)
 
 	root := sourceRepoRoot(t)
-	binPath := shellPath(t, bin)
-	statePath := shellPath(t, stateDir)
-	path := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
+	pathEnv := shellPathEnv()
+	binPath := shellPathUnderEnv(t, bash, bin, pathEnv)
+	statePath := shellPathUnderEnv(t, bash, stateDir, pathEnv)
+	commandPath := binPath + ":" + os.Getenv("PATH") + ":/usr/bin:/bin"
 	if runtime.GOOS == "windows" {
-		path = binPath + ":/usr/bin:/bin"
+		commandPath = binPath + ":/usr/bin:/bin"
 	}
-	cmd := exec.Command(bash, "scripts/conformance.sh")
-	cmd.Dir = root
-	cmd.Env = []string{
-		"PATH=" + path,
+	env := []string{
+		"PATH=" + os.Getenv("PATH"),
+		"BEADS_TEST_COMMAND_PATH=" + commandPath,
 		"HOME=" + statePath,
 		"LC_ALL=C",
 		"LANG=C",
@@ -137,6 +137,11 @@ fi
 		"GO_FAIL_CALL=" + strconv.Itoa(failCall),
 		"GO_FAIL_EXIT=" + strconv.Itoa(failExit),
 	}
+	requireShellCommandPath(t, bash, root, env, "go", binPath+"/go")
+
+	cmd := bashScriptCommand(bash, "scripts/conformance.sh")
+	cmd.Dir = root
+	cmd.Env = env
 	output, runErr := cmd.CombinedOutput()
 	log, readErr := os.ReadFile(callLog)
 	if readErr != nil {

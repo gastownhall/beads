@@ -116,6 +116,12 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 		return nil, fmt.Errorf("recompute is_blocked after reopen for %s: %w", id, err)
 	}
 
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// A reopen is a status change, so it journals as an update.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return nil, err
+	}
+
 	return &ReopenResult{
 		IsWisp:           isWisp,
 		Changed:          true,

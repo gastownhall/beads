@@ -273,6 +273,12 @@ var (
 // pollutes dolt_status and feeds the dirty-table migration gates. MigrateUp
 // re-asserts the full set idempotently at the top of every write-mode open.
 var doltIgnorePatterns = []string{
+	// The events journal tables (bd-opisf) are seeded here rather than
+	// version-gated: they have never existed on the versioned plane, so
+	// asserting the pattern before 0064 runs is what keeps the CREATE from
+	// landing as tracked-at-HEAD in the first place.
+	"bd_events_journal",
+	"bd_events_seq",
 	"ignored_schema_migrations",
 	"leases",
 	"local_metadata",

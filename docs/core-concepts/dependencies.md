@@ -53,7 +53,7 @@ Dependencies have a type that determines whether they block work.
 | `discovered-from` | Found during work on another issue |
 | `caused-by` | Root cause link |
 | `validates` | Test or verification link |
-| `supersedes` | Replaces another issue |
+| `supersedes` | Replaced by a newer issue (`bd supersede old --with new`) |
 
 Specify with `--type`:
 

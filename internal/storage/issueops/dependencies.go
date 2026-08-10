@@ -72,8 +72,25 @@ func depTargetIn(alias, placeholders string) string {
 	return depTargetExpr(alias) + " IN (" + placeholders + ")"
 }
 
-func ClassifyDepTarget(ctx context.Context, tx *sql.Tx, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
-	if isCrossPrefix || strings.HasPrefix(dep.DependsOnID, "external:") {
+// IsExternalDepTarget reports whether a dependency target is one this database
+// cannot hold a row for. Two shapes qualify: an "external:" reference, which
+// names something outside beads entirely, and a target whose id prefix names
+// ANOTHER REPOSITORY, which lives in that rig's database and not this one.
+// Both belong in depends_on_external — the one target column carrying no
+// foreign key into issues — so this is the single rule every backend must
+// classify by, whether it writes through a tx (ClassifyDepTarget) or through
+// the domain repository (db.pickDepTargetColumn).
+func IsExternalDepTarget(sourceID, targetID string) bool {
+	return strings.HasPrefix(targetID, "external:") ||
+		types.ExtractPrefix(sourceID) != types.ExtractPrefix(targetID)
+}
+
+// ClassifyDepTarget picks the typed target column for an edge. isCrossPrefix is
+// an override for callers that already know the answer from a cached prefix
+// set; leaving it false is safe, because IsExternalDepTarget re-derives the
+// same comparison from the edge itself.
+func ClassifyDepTarget(ctx context.Context, tx DBTX, dep *types.Dependency, isCrossPrefix bool) DepTargetKind {
+	if isCrossPrefix || IsExternalDepTarget(dep.IssueID, dep.DependsOnID) {
 		return DepTargetExternal
 	}
 	if IsActiveWispInTx(ctx, tx, dep.DependsOnID) {
@@ -197,7 +214,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	//nolint:gosec // G201: sourceTable is from WispTableRouting ("issues" or "wisps")
 	if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, sourceTable), dep.IssueID).Scan(&sourceType); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, fmt.Errorf("issue %s not found", dep.IssueID)
+			return false, MissingDependencySource(dep.IssueID, dep.DependsOnID)
 		}
 		return false, fmt.Errorf("failed to check issue existence: %w", err)
 	}
@@ -212,7 +229,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return false, fmt.Errorf("issue %s not found", dep.DependsOnID)
+				return false, MissingDependencyTarget(dep.IssueID, dep.DependsOnID)
 			}
 			return false, fmt.Errorf("failed to check target issue existence: %w", err)
 		}
@@ -254,7 +271,10 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 				metadata, dep.IssueID, dep.DependsOnID); err != nil {
 				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
-			return false, nil
+			// A same-type add refreshes edge metadata. It is an observable graph
+			// mutation, so emit the complete replacement edge for replay even
+			// though no audit event is written.
+			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -273,7 +293,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	//nolint:gosec // G201: writeTable from WispTableRouting; targetCol from DepTargetKind.Column()
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, %s, type, created_at, created_by, metadata, thread_id)
-		VALUES (?, ?, ?, ?, NOW(), ?, ?, ?)
+		VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?)
 	`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return false, fmt.Errorf("failed to add dependency: %w", err)
 	}
@@ -326,12 +346,16 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			return false, fmt.Errorf("recompute is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-		return eventWritten, nil
+		// Snapshot only after all derived blocked-state maintenance has completed.
+		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
-	return eventWritten, nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
+	// as real to a replaying consumer as one added by an explicit dep verb.
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -418,7 +442,7 @@ func CheckDependencyCycleInTx(ctx context.Context, tx DBTX, dep *types.Dependenc
 	if dep.IssueID == dep.DependsOnID {
 		return fmt.Errorf("%w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
-	if !isSchedulingEdge(dep.Type) {
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	wouldCycle, err := WouldCreateSchedulingCycleInTx(ctx, tx, dep.IssueID, dep.DependsOnID, depTables)
@@ -488,18 +512,6 @@ func cycleReachabilityQuery(depTables []string) string {
 
 func cycleDetectionTables() []string {
 	return []string{"dependencies", "wisp_dependencies"}
-}
-
-// isSchedulingEdge reports whether a dependency type belongs to the static
-// combined-cycle set: blocks, conditional-blocks, and parent-child. Waits-for
-// also affects readiness but is intentionally outside this validation rule.
-func isSchedulingEdge(t types.DependencyType) bool {
-	switch t {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-		return true
-	default:
-		return false
-	}
 }
 
 // CheckBlockingHierarchyInTx rejects blocking dependencies between an issue
@@ -915,11 +927,11 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 
 	// Capture the row's type before deleting so we can dispatch the right
 	// affected-set helper. If no row matches, treat as a no-op.
-	var depType string
+	var depType, depMetadata string
 	row := tx.QueryRowContext(ctx, fmt.Sprintf(
-		`SELECT type FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
+		`SELECT type, metadata FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
 		issueID, dependsOnID)
-	if err := row.Scan(&depType); err != nil {
+	if err := row.Scan(&depType, &depMetadata); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
@@ -961,7 +973,10 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		return false, fmt.Errorf("recompute is_blocked after remove dependency %s -> %s: %w", issueID, dependsOnID, err)
 	}
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
-	return eventWritten, nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// Never gated on emitEvent — a structural removal is as real to a replaying
+	// consumer as one from an explicit dep verb.
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

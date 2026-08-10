@@ -86,9 +86,6 @@ normal 'bd' subcommands for interactive/read operations.`,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("batch is not supported in proxied-server mode")
-		}
 		CheckReadonly("batch")
 
 		evt := metrics.NewCommandEvent("batch")
@@ -98,7 +95,8 @@ normal 'bd' subcommands for interactive/read operations.`,
 			}
 		}()
 
-		if store == nil {
+		proxied := usesProxiedServer()
+		if !proxied && store == nil {
 			return fmt.Errorf("no database connection available (%s)", diagHint())
 		}
 
@@ -167,17 +165,26 @@ normal 'bd' subcommands for interactive/read operations.`,
 			ctx = context.Background()
 		}
 
-		results := make([]batchOpResult, 0, len(ops))
-		err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
-			for _, op := range ops {
-				res, rerr := runBatchOp(ctx, tx, op)
-				if rerr != nil {
-					return fmt.Errorf("line %d (%s): %w", op.line, op.raw, rerr)
+		// One transaction, one commit message, whole-batch rollback on the first
+		// failing line — the contract is the same on both backends; only the
+		// transaction primitive differs (uow.RunTx there, transact here), and
+		// both wrap a per-op dispatch that shares this file's parser.
+		var results []batchOpResult
+		if proxied {
+			results, err = runBatchProxiedServer(ctx, ops, commitMsg)
+		} else {
+			results = make([]batchOpResult, 0, len(ops))
+			err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+				for _, op := range ops {
+					res, rerr := runBatchOp(ctx, tx, op)
+					if rerr != nil {
+						return fmt.Errorf("line %d (%s): %w", op.line, op.raw, rerr)
+					}
+					results = append(results, res)
 				}
-				results = append(results, res)
-			}
-			return nil
-		})
+				return nil
+			})
+		}
 		if err != nil {
 			if jsonOutput {
 				if jerr := outputJSONError(err, "batch_error"); jerr != nil {

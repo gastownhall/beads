@@ -202,16 +202,16 @@ rm -rf .beads/dolt           # server mode
 bd init --from-jsonl
 ```
 
-### Import fails with missing parent errors
+### Imported children whose parent is gone
 
-Errors like `parent issue bd-abc does not exist` when bootstrapping from JSONL
-or pulling hierarchical issues (e.g., `bd-abc.1`) mean the parent issue was
-deleted but children still reference it — typically after `bd delete` on a
-parent, a branch merge where one side deleted it, or an incomplete import.
+Bootstrapping from JSONL or pulling hierarchical issues (e.g., `bd-abc.1`) can
+land children whose parent `bd-abc` no longer exists — typically after
+`bd delete` on a parent, a branch merge where one side deleted it, or an
+incomplete import.
 
-Imports accept orphans without validation by default, so the children still
-arrive; the error indicates the parent itself is gone. Recreate the parent
-(or close out the orphaned children) after the import.
+Import accepts these orphans rather than failing, so the children still arrive
+and stay usable. Recreate the parent (or close out the orphaned children) once
+the import finishes.
 
 **Prevention:** use `bd delete --cascade` to also delete children, and review
 children first with `bd children <parent-id>`.

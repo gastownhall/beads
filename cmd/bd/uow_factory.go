@@ -68,44 +68,6 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 	return doltBin, doltID, nil
 }
 
-// doltArchiveLevelSupported reports whether id's dolt build is known to
-// support the auto_gc_behavior.archive_level YAML config key, gating
-// newManagedProxiedServerUOWProvider's decision to write it. Split out from
-// that function so the derivation is independently unit-testable (see
-// uow_factory_test.go) — the archive_level decision has its own failure
-// mode (gastownhall/beads#4986) and deserves a direct test rather than only
-// end-to-end coverage through the UOW provider.
-//
-// Derived directly from id (a doltversion.ProbeWithPolicy result) instead of
-// calling doltserver.SupportsArchiveLevelConfig(doltBin), which would fork a
-// second `dolt version` subprocess purely to re-derive a version the caller
-// already has. Zero/unparsed Version (id.Version.Segments empty — the
-// ErrUnparseableVersion-demoted-to-warning case) fails closed to false, same
-// as SupportsArchiveLevelConfig's own fail-closed default when it can't
-// determine a version. doltserver.Start and gc_config.go's
-// SupportsArchiveLevelConfig/doltVersionAtLeast are untouched — that
-// consolidation (routing doltserver.Start's own probe through this package
-// too) is PR-2 scope, not this fix.
-//
-// Also requires an empty Prerelease. AtLeast deliberately ignores
-// Version.Prerelease (see doltversion.Version.AtLeast) so the warn-only
-// RecommendedMin check treats "2.0.0-dev" as satisfying a ">= 2.0.0" floor.
-// That tolerance is wrong here: this decision writes a config key into the
-// YAML a specific dolt build reads, and a prerelease/dev build of the floor
-// version (e.g. "1.52.1-rc1") is not guaranteed to already have the field —
-// unlike the old doltVersionAtLeast (internal/doltserver/gc_config.go),
-// whose strconv.Atoi on the raw dotted segment fails to parse any
-// prerelease-suffixed string and so already failed closed for exactly this
-// case. Silently dropping this guard would reopen the
-// gastownhall/beads#4986 failure mode: archive_level gets written, dolt
-// sql-server's yaml.UnmarshalStrict rejects the unknown key, and the server
-// refuses to start.
-func doltArchiveLevelSupported(id doltversion.Identity) bool {
-	return len(id.Version.Segments) > 0 &&
-		id.Version.Prerelease == "" &&
-		id.Version.AtLeast(doltversion.MustParse(doltserver.MinDoltVersionForArchiveLevelConfig))
-}
-
 // sqlServerUOWTopology is everything the two unit-of-work providers need that
 // differs between workspaces: which database, whose schema, where the proxy
 // listens, and — when the Dolt SQL server is not one Beads starts itself —
@@ -186,6 +148,12 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	return newSQLServerUOWProvider(ctx, beadsDir, topology, opts...)
 }
 
+// newSQLServerUOWProvider is the single funnel every unit-of-work provider bd
+// builds passes through — the proxied CLI path AND `bd serve`'s own provider
+// for server-mode workspaces. Activation is applied by the two constructors it
+// dispatches to, each alongside its own open; doing it at the CALL SITES
+// instead is what left `bd serve` writing mutations into an empty journal while
+// reporting success. See the note at the top of events_journal.go.
 func newSQLServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	if topology.external != nil {
 		return newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, opts...)
@@ -194,18 +162,21 @@ func newSQLServerUOWProvider(ctx context.Context, beadsDir string, topology sqlS
 }
 
 // resolveProxiedServerUOWTopology reads a proxied-server workspace's topology
-// out of metadata.json and the proxied-server sidecar. Neither read is fatal:
-// an absent or unreadable one leaves the defaults, which is the behavior every
-// proxied command has had, and the provider construction below is where a
-// workspace that cannot be reached actually fails. The one refusal it can
-// return is the team-server workspace with no identity to assert.
+// out of metadata.json and the proxied-server sidecar. An ABSENT file is not
+// fatal — both loads return (nil, nil) then, the defaults apply, and the
+// provider construction below is where a workspace that cannot be reached
+// actually fails. A file that EXISTS but cannot be read or parsed IS fatal
+// (restores f880a985b, reverted in #4418; bd-aj3g5): swallowing it silently
+// falls back to a fresh managed local database — reads return zero issues and
+// writes land in the wrong database (split-brain) — and the identity assertion
+// below silently degrades to no assertion at all.
 func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture identityPosture) (sqlServerUOWTopology, error) {
-	// NOTE: a load error is swallowed here (pre-existing behavior), which
-	// leaves persisted == nil and therefore silently falls back to the default
-	// database with teamServer=false. The identity assertion below inherits
-	// that: an unreadable metadata.json degrades to no assertion rather than a
-	// refusal. Tracked separately with the wider silent-fallback smell.
-	persisted, _ := configfile.Load(beadsDir)
+	persisted, err := configfile.Load(beadsDir)
+	if err != nil {
+		return sqlServerUOWTopology{}, fmt.Errorf(
+			"corrupt workspace config %s: %w — refusing to fall back to a fresh database; repair or remove the file to proceed",
+			configfile.ConfigPath(beadsDir), err)
+	}
 	topology := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase}
 	if persisted != nil {
 		topology.database = persisted.GetDoltDatabase()
@@ -228,7 +199,12 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 		topology.database = databaseOverride
 	}
 
-	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)
+	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+	if err != nil {
+		return sqlServerUOWTopology{}, fmt.Errorf(
+			"corrupt proxied-server sidecar %s: %w — refusing to fall back to a fresh database; repair or remove the file to proceed",
+			configfile.ProxiedServerClientInfoPath(beadsDir), err)
+	}
 	if info != nil {
 		topology.proxyPort = info.Port
 		topology.proxyIdle = info.IdleTimeout
@@ -406,7 +382,8 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the workspace mode: since bd-emv a server-mode workspace lands here too, and
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
-func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: resolve root path: %w", err)
@@ -445,7 +422,8 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 	)
 }
 
-func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	// Resolve and hardened-probe the external dolt binary before spawning
 	// it: an env/sidecar override that is explicitly named but broken
 	// should fail loudly here rather than surface as a confusing spawn
@@ -458,7 +436,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 	// newSQLServerUOWProvider) also lands here, a hardcoded
 	// "newProxiedServerUOWProvider" would mislabel a `bd serve` failure as a
 	// proxied-server one.
-	doltBin, doltID, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider")
+	doltBin, _, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider")
 	if err != nil {
 		return nil, err
 	}
@@ -471,11 +449,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server root (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 	}
 
-	// See doltArchiveLevelSupported for the fail-closed rationale
-	// (gastownhall/beads#4986), including the prerelease guard.
-	archiveLevelSupported := doltArchiveLevelSupported(doltID)
-
-	configPath, err := ensureProxiedServerConfig(beadsDir, archiveLevelSupported)
+	configPath, err := ensureProxiedServerConfig(beadsDir)
 	if err != nil {
 		return nil, err
 	}

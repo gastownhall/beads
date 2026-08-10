@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 // Circuit breaker states.
@@ -442,6 +445,12 @@ func cleanStaleCircuitBreakerFilesIn(dir string, removeClosed bool) {
 // errors (syntax, missing table, etc.) do not.
 func isConnectionError(err error) bool {
 	if err == nil {
+		return false
+	}
+	// A typed 1105 is a semantic response from Dolt, not evidence that the
+	// server is unavailable, even if its message happens to mention a connection.
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) && mysqlErr.Number == 1105 {
 		return false
 	}
 	errStr := strings.ToLower(err.Error())

@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var configCmd = &cobra.Command{
@@ -213,41 +214,62 @@ var configSetCmd = &cobra.Command{
 			return nil
 		}
 
-		if usesProxiedServer() {
-			return runConfigSetProxiedServer(rootCtx, key, value)
-		}
-
-		// Database-stored config requires direct mode
-		if err := ensureDirectMode("config set requires direct database access"); err != nil {
+		// Everything above this line is FRONT-DOOR routing: which source owns
+		// the key, and whether writing it to a file on this machine would leak
+		// a secret into git. From here the key is known to belong to the
+		// workspace database, and the write is the role's.
+		settings, err := openWorkspaceConfig("config set requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		ctx := rootCtx
-
-		if key == "status.custom" && value != "" {
-			if _, err := types.ParseCustomStatusConfig(value); err != nil {
-				return HandleError("invalid status.custom value: %v", err)
-			}
-		}
-
-		if err := store.SetConfig(ctx, key, value); err != nil {
+		result, err := settings.SetSetting(rootCtx, issueops.SetSettingRequest{Key: key, Value: value})
+		if err != nil {
 			return HandleError("setting config: %v", err)
 		}
-		commandDidWrite.Store(true)
+		noteDirectConfigWrite()
 
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key":   key,
-				"value": value,
+				"key":   result.Key,
+				"value": result.Value,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Set %s = %s\n", key, value)
+			fmt.Printf("Set %s = %s\n", result.Key, result.Value)
 		}
-		printConfigSideEffects(checkConfigSetSideEffects(key, value))
+		printConfigSideEffects(checkConfigSetSideEffects(result.Key, result.Value))
 		return nil
 	},
+}
+
+// openWorkspaceConfig hands back the workspace-settings role for whichever
+// route this invocation is on, each through its OWN capability accessor — the
+// store's for the direct route and the provider's for the proxied one.
+//
+// directRequirement is the message `ensureDirectMode` reports when a workspace
+// is reachable by neither route. It is per-verb because the shipped text names
+// the verb.
+func openWorkspaceConfig(directRequirement string) (issueops.WorkspaceConfig, error) {
+	if usesProxiedServer() {
+		return proxiedWorkspaceConfig()
+	}
+	if err := ensureDirectMode(directRequirement); err != nil {
+		return nil, err
+	}
+	return store.WorkspaceConfig()
+}
+
+// noteDirectConfigWrite marks the invocation as having written, which is what
+// the auto-commit epilogue in main.go keys on.
+//
+// It is DIRECT-ROUTE ONLY: a proxied write already committed inside the role's
+// own unit of work, so flagging it here would ask the epilogue to commit a
+// second time on a route that has nothing outstanding.
+func noteDirectConfigWrite() {
+	if !usesProxiedServer() {
+		commandDidWrite.Store(true)
+	}
 }
 
 var configGetCmd = &cobra.Command{
@@ -340,35 +362,27 @@ var configGetCmd = &cobra.Command{
 			return nil
 		}
 
-		if usesProxiedServer() {
-			return runConfigGetProxiedServer(rootCtx, key)
-		}
-
-		// Database-stored config requires direct mode
-		if err := ensureDirectMode("config get requires direct database access"); err != nil {
+		settings, err := openWorkspaceConfig("config get requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		ctx := rootCtx
-		var value string
-		var err error
-
-		value, err = store.GetConfig(ctx, key)
-
+		result, err := settings.GetSetting(rootCtx, issueops.GetSettingRequest{Key: key})
 		if err != nil {
 			return HandleError("getting config: %v", err)
 		}
 
 		if jsonOutput {
 			return outputJSON(map[string]string{
-				"key":   key,
-				"value": value,
+				"key":   result.Key,
+				"value": result.Value,
 			})
 		}
-		if value == "" {
-			fmt.Printf("%s (not set)\n", key)
+		// "(not set)" also prints for a key stored as the empty string: the
+		// role answers "" for both, and issueops.SettingResult.Value says why.
+		if result.Value == "" {
+			fmt.Printf("%s (not set)\n", result.Key)
 		} else {
-			fmt.Printf("%s\n", value)
+			fmt.Printf("%s\n", result.Value)
 		}
 		return nil
 	},
@@ -426,42 +440,40 @@ var configListCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runConfigListProxiedServer(rootCtx)
-		}
-
-		// Config operations work in direct mode only
-		if err := ensureDirectMode("config list requires direct database access"); err != nil {
+		settings, err := openWorkspaceConfig("config list requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		ctx := rootCtx
-		config, err := store.GetAllConfig(ctx)
+		result, err := settings.ListSettings(rootCtx, issueops.ListSettingsRequest{})
 		if err != nil {
 			return HandleError("listing config: %v", err)
 		}
+		stored := result.Settings
 
 		if jsonOutput {
-			return outputJSON(config)
+			return outputJSON(stored)
 		}
 
-		if len(config) == 0 {
+		if len(stored) == 0 {
 			fmt.Println("No configuration set")
 			return nil
 		}
 
-		keys := make([]string, 0, len(config))
-		for k := range config {
+		keys := make([]string, 0, len(stored))
+		for k := range stored {
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)
 
 		fmt.Println("\nConfiguration:")
 		for _, k := range keys {
-			fmt.Printf("  %s = %s\n", k, config[k])
+			fmt.Printf("  %s = %s\n", k, stored[k])
 		}
 
-		showConfigYAMLOverrides(config)
+		// The OTHER sources, reported beside the stored ones rather than merged
+		// into them: the role answers for the database, and config.yaml and the
+		// environment are files and variables of THIS process.
+		showConfigYAMLOverrides(stored)
 		return nil
 	},
 }
@@ -599,31 +611,26 @@ var configUnsetCmd = &cobra.Command{
 			return nil
 		}
 
-		if usesProxiedServer() {
-			return runConfigUnsetProxiedServer(rootCtx, key)
-		}
-
-		// Database-stored config requires direct mode
-		if err := ensureDirectMode("config unset requires direct database access"); err != nil {
+		settings, err := openWorkspaceConfig("config unset requires direct database access")
+		if err != nil {
 			return HandleError("%v", err)
 		}
-
-		ctx := rootCtx
-		if err := store.DeleteConfig(ctx, key); err != nil {
+		result, err := settings.UnsetSetting(rootCtx, issueops.UnsetSettingRequest{Key: key})
+		if err != nil {
 			return HandleError("deleting config: %v", err)
 		}
-		commandDidWrite.Store(true)
+		noteDirectConfigWrite()
 
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key": key,
+				"key": result.Key,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Unset %s\n", key)
+			fmt.Printf("Unset %s\n", result.Key)
 		}
-		printConfigSideEffects(checkConfigUnsetSideEffects(key))
+		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
 		return nil
 	},
 }
@@ -820,6 +827,15 @@ Examples:
 		}
 
 		for _, p := range pairs {
+			// The same refusal `bd config set` makes, and it was MISSING here:
+			// `bd config set-many issue_prefix=x` re-prefixed the workspace
+			// behind the guard the single-key verb enforces. This verb does not
+			// go through issueops.WorkspaceConfig (see the write below), so it
+			// makes the refusal itself, before any pair is written.
+			if msg, rejected := rejectProtectedConfigKey(p.key); rejected {
+				fmt.Fprintln(os.Stderr, msg)
+				return SilentExit()
+			}
 			if p.key == "beads.role" {
 				validRoles := map[string]bool{"maintainer": true, "contributor": true}
 				if !validRoles[p.value] {
@@ -876,6 +892,12 @@ Examples:
 			}
 		}
 
+		// SET-MANY IS NOT ON issueops.WorkspaceConfig, and the reason is the
+		// property TestProxiedServerConfigSetMany pins: the whole batch is ONE
+		// Dolt commit, which is the entire point of the verb ("faster and less
+		// noisy than separate calls, especially in CI"). The role writes one
+		// setting per call and commits each, so routing this through it would
+		// turn a three-key batch into three commits.
 		if len(dbPairs) > 0 {
 			if usesProxiedServer() {
 				keys := make([]string, len(dbPairs))
@@ -891,10 +913,8 @@ Examples:
 				if err := ensureDirectMode("config set-many requires direct database access"); err != nil {
 					return HandleError("%v", err)
 				}
-
-				ctx := rootCtx
 				for _, p := range dbPairs {
-					if err := store.SetConfig(ctx, p.key, p.value); err != nil {
+					if err := store.SetConfig(rootCtx, p.key, p.value); err != nil {
 						return HandleError("setting config %s: %v", p.key, err)
 					}
 				}
@@ -1004,6 +1024,14 @@ var recognizedConfigKeys = map[string]bool{
 	"auto_compact_enabled": true, "schema_version": true,
 	"output.title-length": true,
 	"prime.max-memories":  true, "prime.max-memory-chars": true,
+	// The events-journal family. All four are startup settings that land in
+	// config.yaml (config.YamlOnlyKeys), and every one of them is documented as
+	// a `bd config set` invocation — including the auto-prune opt-out, where an
+	// unrecognized-key warning next to a command that DID take effect reads as
+	// "that did not work" on the one setting whose whole purpose is to stop bd
+	// deleting records.
+	"events-journal": true, "events-journal-auto-prune": true,
+	"events-journal-retain-days": true, "events-journal-retain-rows": true,
 }
 
 func isRecognizedConfigKey(key string) bool {

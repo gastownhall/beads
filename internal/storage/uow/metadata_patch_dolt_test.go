@@ -11,36 +11,17 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-func TestIssueOperationsTypedMetadataPatchUpdateWithRealDolt(t *testing.T) {
-	ctx := context.Background()
-	operations := newMetadataPatchOperations(t, ctx)
-
-	patch := func() issueops.MetadataPatch {
-		return issueops.MetadataPatch{
-			Merge: issueops.Field[json.RawMessage]{Set: true, Value: json.RawMessage(`{"merged":{"source":"merge"},"overlap":"merged"}`)},
-			Set: map[string]json.RawMessage{
-				"nested":  json.RawMessage(`{"enabled":true}`),
-				"number":  json.RawMessage(`7`),
-				"bool":    json.RawMessage(`true`),
-				"overlap": json.RawMessage(`"set"`),
-			},
-			Unset: []string{"overlap", "remove"},
-		}
-	}
-
-	updatedID := createMetadataPatchIssue(t, ctx, operations, "bd-metadata-update")
-	updated, err := operations.Update(ctx, issueops.UpdateRequest{
-		Actor: "tester", IssueID: updatedID, Patch: issueops.IssuePatch{Metadata: patch()},
-	})
-	if err != nil {
-		t.Fatalf("Update() error = %v", err)
-	}
-	if !updated.Changed {
-		t.Fatal("Update() Changed = false, want true")
-	}
-	assertTypedMetadata(t, updated.Issue.Metadata)
-}
-
+// What this file still holds, after the metadata PATCH SEMANTICS moved to the
+// contract: the refusals. RunLifecycleUpdateMetadataPatchOrdersMergeSet-
+// Unset now pins Merge before Set before Unset at all three backends, against
+// the stored document as well as the returned one, and with a key that SURVIVES
+// the patch so the Merge-before-Set half is falsifiable — which the case that
+// used to live here could not do, because every key it collided was also unset
+// by a later stage.
+//
+// The refusal cases below stay because no contract case sends an invalid typed
+// Set value, an invalid Set KEY, or a non-object Merge through the guarded verb
+// and then re-reads the document.
 func TestIssueOperationsMetadataPatchRejectsInvalidInputWithRealDolt(t *testing.T) {
 	ctx := context.Background()
 	operations := newMetadataPatchOperations(t, ctx)
@@ -135,29 +116,4 @@ func readMetadataPatchIssue(t *testing.T, ctx context.Context, operations issueo
 		t.Fatalf("read issue %q: %v", id, err)
 	}
 	return issue.Issue
-}
-
-func assertTypedMetadata(t *testing.T, raw json.RawMessage) {
-	t.Helper()
-	var metadata map[string]any
-	if err := json.Unmarshal(raw, &metadata); err != nil {
-		t.Fatalf("unmarshal metadata: %v", err)
-	}
-	if metadata["keep"] != "yes" || metadata["number"] != float64(7) || metadata["bool"] != true {
-		t.Fatalf("typed metadata = %#v", metadata)
-	}
-	nested, ok := metadata["nested"].(map[string]any)
-	if !ok || nested["enabled"] != true {
-		t.Fatalf("nested metadata = %#v", metadata["nested"])
-	}
-	merged, ok := metadata["merged"].(map[string]any)
-	if !ok || merged["source"] != "merge" {
-		t.Fatalf("merged metadata = %#v", metadata["merged"])
-	}
-	if _, ok := metadata["overlap"]; ok {
-		t.Fatalf("overlap survived unset: %#v", metadata)
-	}
-	if _, ok := metadata["remove"]; ok {
-		t.Fatalf("remove survived unset: %#v", metadata)
-	}
 }

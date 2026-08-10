@@ -122,15 +122,20 @@ func TestGatherDeleteInput(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects cascade without accessing a store", func(t *testing.T) {
+	t.Run("accepts cascade and projects it (embedded parity, bd-paurh)", func(t *testing.T) {
 		cmd := newCommand(t)
 		if err := cmd.Flags().Set("cascade", "true"); err != nil {
 			t.Fatalf("set cascade: %v", err)
 		}
+		jsonOutput, quietFlag = false, false
 
-		_, err := gatherDeleteInput(cmd, []string{"bd-target"})
-		if err == nil || !strings.Contains(err.Error(), "--cascade") {
-			t.Fatalf("gatherDeleteInput() error = %v, want --cascade rejection", err)
+		got, err := gatherDeleteInput(cmd, []string{"bd-target"})
+		if err != nil {
+			t.Fatalf("gatherDeleteInput() with --cascade: %v", err)
+		}
+		want := &deleteInput{ids: []string{"bd-target"}, cascade: true}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("gatherDeleteInput(): got %#v, want %#v", got, want)
 		}
 	})
 }

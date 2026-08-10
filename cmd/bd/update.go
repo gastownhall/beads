@@ -23,15 +23,16 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-// directIssueUpdater is the lifecycle capability the direct update command
-// needs. issueops.Lifecycle satisfies it without an adapter.
-type directIssueUpdater interface {
+// commandIssueUpdater is the lifecycle capability the update command needs.
+// issueops.Lifecycle satisfies it without an adapter.
+type commandIssueUpdater interface {
 	Update(context.Context, issueops.UpdateRequest) (issueops.UpdateResult, error)
 }
 
-// directUpdateMutation contains the command-derived values for one direct
-// lifecycle update.
-type directUpdateMutation struct {
+// commandUpdateMutation contains the command-derived values for one lifecycle
+// update. Both routes of `bd update` fill it in: the direct one below, and the
+// proxied-server claim path in update_proxied_server.go.
+type commandUpdateMutation struct {
 	actor            string
 	issueID          string
 	patch            issueops.IssuePatch
@@ -39,11 +40,17 @@ type directUpdateMutation struct {
 	force            bool
 	expectedAssignee *string
 	expectedStatus   *issueops.Status
+	// provenance names the history entry the write records. Empty takes the
+	// backend's default, which is what the direct route wants; the proxied
+	// route spells the message it has always written.
+	provenance string
 }
 
-// runDirectUpdateMutation maps a direct command update into its lifecycle
-// request and returns the lifecycle result unchanged.
-func runDirectUpdateMutation(ctx context.Context, updater directIssueUpdater, mutation directUpdateMutation) (issueops.UpdateResult, error) {
+// runCommandUpdateMutation maps a command update into its lifecycle request and
+// returns the lifecycle result unchanged. It is the ONE place the command's
+// flag semantics become a request — in particular the one --force that means
+// two overrides, whose assignee half only applies to an assignee edit.
+func runCommandUpdateMutation(ctx context.Context, updater commandIssueUpdater, mutation commandUpdateMutation) (issueops.UpdateResult, error) {
 	return updater.Update(ctx, issueops.UpdateRequest{
 		Actor:                 mutation.actor,
 		IssueID:               mutation.issueID,
@@ -53,6 +60,7 @@ func runDirectUpdateMutation(ctx context.Context, updater directIssueUpdater, mu
 		ForceClosePolicy:      mutation.force,
 		ExpectedAssignee:      mutation.expectedAssignee,
 		ExpectedStatus:        mutation.expectedStatus,
+		Provenance:            mutation.provenance,
 	})
 }
 
@@ -63,7 +71,11 @@ var updateCmd = &cobra.Command{
 	Long: `Update one or more issues.
 
 If no issue ID is provided, updates the last touched issue (from most recent
-create, update, show, or close operation).
+create, update, show, or close operation). This fallback only applies in
+interactive sessions (stdin is a terminal); in scripts and agent sessions a
+missing ID is an error, so a command built from an empty variable cannot
+silently mutate an unrelated issue. Set BD_LAST_TOUCHED_FALLBACK=1 to allow
+the fallback anywhere, or =0 to disable it entirely.
 
 Updates are applied per issue ID, not atomically across IDs: when some IDs
 fail, the remaining issues are still updated, every failed ID is reported on
@@ -73,7 +85,17 @@ Exit codes: 1 for general failures; 13 when every failure is a stale
 --if-assignee/--if-status guard (the precondition no longer held, nothing was
 written — another actor won the race, so retrying the same guard is
 pointless).`,
-	Args:          cobra.MinimumNArgs(0),
+	// The non-interactive no-ID refusal lives in argument validation, which
+	// cobra runs before root's PersistentPreRunE — so a scripted `bd update
+	// $ID ...` with an empty $ID fails fast, before the pre-run hooks can
+	// open the store, run a version-bump migration, or auto-import JSONL
+	// (bd-m00pb). The interactive fallback itself is resolved in RunE.
+	Args: func(cmd *cobra.Command, args []string) error {
+		if len(args) == 0 && !AllowLastTouchedFallback() {
+			return HandleErrorRespectJSON("no issue ID provided (the last-touched fallback only applies in interactive sessions; pass an explicit issue ID or set BD_LAST_TOUCHED_FALLBACK=1)")
+		}
+		return nil
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -86,11 +108,19 @@ pointless).`,
 			}
 		}()
 
+		// Refuse a mis-typed flag value that cobra parsed as a positional issue
+		// id, before any write path (direct or proxied) can apply a partial
+		// update. See bd-5247.
+		if err := errStrayFlagValuePositional(args); err != nil {
+			return HandleErrorRespectJSON("%s", err)
+		}
+
 		if usesProxiedServer() {
 			return runUpdateProxiedServer(cmd, rootCtx, args)
 		}
 
-		// If no IDs provided, use last touched issue
+		// If no IDs provided, use last touched issue (interactive only;
+		// the non-interactive case was already refused in Args validation)
 		if len(args) == 0 {
 			lastTouched := GetLastTouchedID()
 			if lastTouched == "" {
@@ -274,7 +304,7 @@ pointless).`,
 				inPast := t.Before(time.Now())
 				if inPast && !jsonOutput {
 					fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-						ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+						ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 					fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 				}
 				updates["defer_until"] = t
@@ -506,7 +536,7 @@ pointless).`,
 			// which is why it is conditioned here rather than passed straight
 			// through: `--force -s closed` is now a legitimate way to ask for
 			// the close-policy half alone.
-			updateResult, updateErr := runDirectUpdateMutation(opsCtx, ops, directUpdateMutation{
+			updateResult, updateErr := runCommandUpdateMutation(opsCtx, ops, commandUpdateMutation{
 				actor:            actor,
 				issueID:          result.ResolvedID,
 				patch:            patch,
@@ -804,6 +834,21 @@ type updateIDFailure struct {
 	GuardMismatch bool   `json:"guard_mismatch,omitempty"`
 }
 
+// errStrayFlagValuePositional refuses, before any write, a positional argument
+// that contains '='. --set-metadata takes ONE key=value per flag, so
+// `--set-metadata a=1 b=2` silently turns `b=2` into a positional issue id;
+// no issue id contains '=', so such a positional is unambiguously a mis-typed
+// flag value. Rejecting it up front prevents a partial write that would apply
+// only the pairs that happened to bind to a flag (bd-5247).
+func errStrayFlagValuePositional(args []string) error {
+	for _, arg := range args {
+		if strings.Contains(arg, "=") {
+			return fmt.Errorf("positional argument %q contains '=', which no issue id does — this is a mis-typed flag value; repeat the flag per pair, e.g. --set-metadata a=1 --set-metadata b=2", arg)
+		}
+	}
+	return nil
+}
+
 // reportUpdateFailures emits a per-ID failure report on stderr and returns a
 // nonzero exit error — ExitGuardMismatch when every failure is a
 // --if-assignee/--if-status guard refusal, 1 otherwise. In --json mode the
@@ -962,7 +1007,7 @@ func init() {
 	//   --defer=+1h         Hidden from bd ready for 1 hour
 	//   --defer=""          Clear defer (show in bd ready immediately)
 	updateCmd.Flags().String("due", "", "Due date/time (empty to clear). Formats: +6h, +1d, +2w, tomorrow, next monday, 2025-01-15")
-	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then")
+	updateCmd.Flags().String("defer", "", "Defer until date (empty to clear). Issue hidden from bd ready until then, then auto-wakes to open")
 	// Gate fields (bd-z6kw)
 	updateCmd.Flags().String("await-id", "", "Set gate await_id (e.g., GitHub run ID for gh:run gates)")
 	// Ephemeral/persistent flags

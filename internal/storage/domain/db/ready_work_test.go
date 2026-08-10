@@ -1,6 +1,7 @@
 package db
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -18,13 +19,18 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("ExcludesDefaultTypes", s.readyExcludesDefaultTypes)
 	s.Run("FilterByPriority", s.readyFilterByPriority)
 	s.Run("FilterByAssignee", s.readyFilterByAssignee)
+	s.Run("FilterByType", s.readyFilterByType)
+	s.Run("FilterByParent", s.readyFilterByParent)
+	s.Run("FilterByMetadataEquality", s.readyFilterByMetadataEquality)
+	s.Run("FilterByMetadataKeyPresence", s.readyFilterByMetadataKeyPresence)
+	s.Run("ExcludesRequestedTypes", s.readyExcludesRequestedTypes)
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
-	s.Run("CrossTableCollisionError", s.readyCollisionError)
+	s.Run("CrossTableCollisionKeepsTheWispCopy", s.readyCollisionKeepsTheWispCopy)
 	s.Run("OffsetSkipsLeadingRows", s.readyOffsetSkipsLeadingRows)
 	s.Run("OffsetWithLooseLimitReturnsRemainder", s.readyOffsetWithoutLimit)
 	s.Run("OffsetHasMoreSignaling", s.readyOffsetHasMoreSignaling)
@@ -160,6 +166,92 @@ func (s *testSuite) readyFilterByAssignee() {
 	s.NotContains(got, "bd-rdy-as-theirs")
 }
 
+func (s *testSuite) readyFilterByType() {
+	r := s.issueRepo()
+	bug := newTestIssue("bd-rdy-typ-bug", "bug")
+	bug.IssueType = types.TypeBug
+	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
+	task := newTestIssue("bd-rdy-typ-task", "task")
+	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Type: string(types.TypeBug)})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, bug.ID)
+	s.NotContains(got, task.ID)
+}
+
+func (s *testSuite) readyFilterByParent() {
+	r := s.issueRepo()
+	parent := newTestIssue("bd-rdy-par-root", "parent")
+	parent.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	child := newTestIssue("bd-rdy-par-child", "child")
+	s.Require().NoError(r.Insert(s.Ctx(), child, "tester", domain.InsertIssueOpts{}))
+	outside := newTestIssue("bd-rdy-par-outside", "outside")
+	s.Require().NoError(r.Insert(s.Ctx(), outside, "tester", domain.InsertIssueOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(child.ID, parent.ID, types.DepParentChild), "tester", domain.DepInsertOpts{}))
+
+	parentID := parent.ID
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{ParentID: &parentID})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, child.ID)
+	s.NotContains(got, outside.ID)
+}
+
+func (s *testSuite) readyFilterByMetadataEquality() {
+	r := s.issueRepo()
+	match := newTestIssue("bd-rdy-meta-match", "matches metadata")
+	match.Metadata = json.RawMessage(`{"team":"platform"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), match, "tester", domain.InsertIssueOpts{}))
+	other := newTestIssue("bd-rdy-meta-other", "other metadata")
+	other.Metadata = json.RawMessage(`{"team":"frontend"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), other, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{MetadataFields: map[string]string{"team": "platform"}})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, match.ID)
+	s.NotContains(got, other.ID)
+}
+
+func (s *testSuite) readyFilterByMetadataKeyPresence() {
+	r := s.issueRepo()
+	withKey := newTestIssue("bd-rdy-metakey-yes", "has metadata key")
+	withKey.Metadata = json.RawMessage(`{"team":"platform"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), withKey, "tester", domain.InsertIssueOpts{}))
+	withoutKey := newTestIssue("bd-rdy-metakey-no", "missing metadata key")
+	withoutKey.Metadata = json.RawMessage(`{"area":"cli"}`)
+	s.Require().NoError(r.Insert(s.Ctx(), withoutKey, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{HasMetadataKey: "team"})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, withKey.ID)
+	s.NotContains(got, withoutKey.ID)
+}
+
+func (s *testSuite) readyExcludesRequestedTypes() {
+	r := s.issueRepo()
+	task := newTestIssue("bd-rdy-excl-task", "task")
+	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
+	bug := newTestIssue("bd-rdy-excl-bug", "bug")
+	bug.IssueType = types.TypeBug
+	s.Require().NoError(r.Insert(s.Ctx(), bug, "tester", domain.InsertIssueOpts{}))
+	epic := newTestIssue("bd-rdy-excl-epic", "epic")
+	epic.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), epic, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{ExcludeTypes: []types.IssueType{types.TypeBug, types.TypeEpic}})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, task.ID)
+	s.NotContains(got, bug.ID)
+	s.NotContains(got, epic.ID)
+}
+
 func (s *testSuite) readyUnassigned() {
 	r := s.issueRepo()
 	unassigned := newTestIssue("bd-rdy-un-yes", "unassigned")
@@ -256,7 +348,17 @@ func (s *testSuite) readySortByPriority() {
 	s.Less(midIdx, loIdx, "priority=2 should sort before priority=3")
 }
 
-func (s *testSuite) readyCollisionError() {
+// readyCollisionKeepsTheWispCopy pins what a CROSS-PLANE DUPLICATE answers with. One id resident in both
+// tables is corruption — no local write path can produce it, only replication —
+// and this read used to fail the whole query over it, which left a store with
+// one bad id unable to answer any question about the others.
+//
+// The canonical copy is the WISPS one, and the read answers with it. That is
+// the verdict the per-table seam has always reached (issueops, be-iabdi) and
+// the one `bd doctor --check=validate --fix` acts on: it deletes the stale
+// ISSUES copy, the same row this drops. scanIDSrcPage carries the full
+// argument.
+func (s *testSuite) readyCollisionKeepsTheWispCopy() {
 	r := s.issueRepo()
 	const id = "bd-rdy-coll-1"
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "perm"), "tester", domain.InsertIssueOpts{}))
@@ -264,9 +366,16 @@ func (s *testSuite) readyCollisionError() {
 	w.Ephemeral = false
 	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 
-	_, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "exists in both issues and wisps")
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{})
+	s.Require().NoError(err)
+	seen := 0
+	for _, iss := range out.Items {
+		if iss != nil && iss.ID == id {
+			seen++
+			s.Equal("wisp", iss.Title, "the wisps copy is canonical; the issues copy is the stale one")
+		}
+	}
+	s.Equal(1, seen, "the id must come back once, not once per plane")
 }
 
 func (s *testSuite) readyOffsetSkipsLeadingRows() {

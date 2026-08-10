@@ -38,13 +38,6 @@ type molReader interface {
 
 var _ molReader = storage.DoltStorage(nil)
 
-type molConfigWriter interface {
-	molReader
-	SetConfig(ctx context.Context, key, value string) error
-}
-
-var _ molConfigWriter = storage.DoltStorage(nil)
-
 type molWriter interface {
 	molReader
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
@@ -88,6 +81,19 @@ func (w storeMolWriter) DeleteIssue(ctx context.Context, id, _ string) error {
 
 func (w storeMolWriter) SetConfig(ctx context.Context, key, value string) error {
 	return w.tx.SetConfig(ctx, key, value)
+}
+
+// GetConfig reads through the transaction when one is bound. Without this,
+// config readers (flattenUnregisteredIssueTypes) would go to the embedded
+// store, which opens a second pool connection — a deadlock when
+// MaxOpenConns=1 and the transaction already holds the only one. It also
+// keeps the read consistent with any config written earlier in the same
+// transaction rather than seeing the last committed value.
+func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, error) {
+	if w.tx != nil {
+		return w.tx.GetConfig(ctx, key)
+	}
+	return w.DoltStorage.GetConfig(ctx, key)
 }
 
 func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {

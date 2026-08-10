@@ -11,6 +11,9 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
 
 // bdDep runs "bd dep" with the given args and returns raw stdout.
@@ -575,4 +578,111 @@ func TestEmbeddedDepBulkNoCycleCheckKeepsWholeGraphGate(t *testing.T) {
 	if !strings.Contains(cycles, "No dependency cycles detected") {
 		t.Fatalf("expected rolled-back bulk add to leave the graph acyclic, got: %s", cycles)
 	}
+}
+
+// TestEmbeddedDepAddWispSource is the front-door test for a wisp-sourced
+// dependency edge: `bd dep add <wisp-id> <target>` on the real CLI against a
+// real embedded store. Coverage of source routing otherwise stops at the
+// storage role's own contract, and the behaviour this pins is the user-visible
+// one — pinning an edge's source to the issues plane refused every one of
+// these with "issue <id> not found", because a wisp has no row there.
+//
+// It also discharges the CHANGELOG's staging claim: every edge here is
+// wisp-sourced, so all of them land in the dolt-ignored wisp plane, nothing
+// versioned is staged, and the adds must record no Dolt commit and leave the
+// working set clean.
+func TestEmbeddedDepAddWispSource(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "dws")
+
+	// --ephemeral is the front door's route to a wisp: the row lands in the
+	// dolt-ignored `wisps` table, which is what the routing probe reads.
+	wispA := bdCreate(t, bd, dir, "Wisp dep source", "--ephemeral").ID
+	wispB := bdCreate(t, bd, dir, "Wisp dep target", "--ephemeral").ID
+	wispC := bdCreate(t, bd, dir, "Wisp dep source two", "--ephemeral").ID
+	issue := bdCreate(t, bd, dir, "Issue dep target", "--type", "task").ID
+
+	// Baseline AFTER the fixtures, so a commit or a dirty table left by
+	// creation cannot be misread as one the dependency adds produced.
+	beforeCommits, beforeDirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+	if len(beforeDirty) != 0 {
+		t.Fatalf("fixture setup left a dirty working set, so later state cannot be attributed: %v", beforeDirty)
+	}
+
+	t.Run("wisp_to_wisp", func(t *testing.T) {
+		out := bdDep(t, bd, dir, "add", wispA, wispB)
+		if !strings.Contains(out, "Added dependency") {
+			t.Fatalf("expected wisp-sourced dep add to succeed, got: %s", out)
+		}
+		if list := bdDep(t, bd, dir, "list", wispA); !strings.Contains(list, wispB) {
+			t.Errorf("expected %s in dep list of wisp %s, got: %s", wispB, wispA, list)
+		}
+	})
+
+	t.Run("wisp_to_issue", func(t *testing.T) {
+		out := bdDep(t, bd, dir, "add", wispC, issue)
+		if !strings.Contains(out, "Added dependency") {
+			t.Fatalf("expected wisp->issue dep add to succeed, got: %s", out)
+		}
+		if list := bdDep(t, bd, dir, "list", wispC); !strings.Contains(list, issue) {
+			t.Errorf("expected %s in dep list of wisp %s, got: %s", issue, wispC, list)
+		}
+		// The edge lives on the wisp's plane, so walking up from the issue
+		// finds it only if the reverse read scans wisp_dependencies too.
+		if up := bdDep(t, bd, dir, "list", issue, "--direction", "up"); !strings.Contains(up, wispC) {
+			t.Errorf("expected wisp dependent %s walking up from %s, got: %s", wispC, issue, up)
+		}
+	})
+
+	// Both adds were wisp-sourced. ChangedTables drops the wisp tables, so the
+	// staged set was empty each time and the auto-commit had nothing to write.
+	afterCommits, afterDirty := embeddedLogCountAndDirtyTables(t, beadsDir)
+	if afterCommits != beforeCommits {
+		t.Errorf("wisp-sourced dep adds recorded %d Dolt commit(s); the wisp plane is dolt-ignored and must record none",
+			afterCommits-beforeCommits)
+	}
+	if len(afterDirty) != 0 {
+		t.Errorf("wisp-sourced dep adds left versioned tables dirty: %v", afterDirty)
+	}
+}
+
+// embeddedLogCountAndDirtyTables reports the embedded store's Dolt commit
+// count and the tables its working set currently reports as changed.
+func embeddedLogCountAndDirtyTables(t *testing.T, beadsDir string) (commits int, dirty []string) {
+	t.Helper()
+	cfg, _ := configfile.Load(beadsDir)
+	database := ""
+	if cfg != nil {
+		database = cfg.GetDoltDatabase()
+	}
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), filepath.Join(beadsDir, "embeddeddolt"), database, "main")
+	if err != nil {
+		t.Fatalf("OpenSQL: %v", err)
+	}
+	defer cleanup()
+
+	if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&commits); err != nil {
+		t.Fatalf("query dolt_log: %v", err)
+	}
+	rows, err := db.QueryContext(t.Context(), "SELECT table_name, status FROM dolt_status")
+	if err != nil {
+		t.Fatalf("query dolt_status: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var table, status string
+		if err := rows.Scan(&table, &status); err != nil {
+			t.Fatalf("scan dolt_status: %v", err)
+		}
+		dirty = append(dirty, table+":"+status)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate dolt_status: %v", err)
+	}
+	return commits, dirty
 }

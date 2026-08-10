@@ -64,6 +64,11 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		HasMetadataKey: filter.HasMetadataKey,
 		MaxRows:        filter.MaxRows,
 		MaxRowsSource:  filter.MaxRowsSource,
+		// Carried, where SkipLabels and SkipCounts are dropped: those two hide
+		// a number the ready renderings print, and this bounds a body no
+		// listing prints. Dropping it here would answer `bd list --ready
+		// --brief` with full rows and nothing to say why.
+		Lite: filter.Lite,
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)
@@ -77,7 +82,22 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 	if filter.NoAssignee {
 		wf.Unassigned = true
 	}
-	if filter.Ephemeral != nil && *filter.Ephemeral {
+	// The ephemeral PLANE, which the two filters spell differently: a list
+	// filter admits it by leaving SkipWisps off (or, for an infra type, by
+	// routing to it outright), and a work filter by setting IncludeEphemeral.
+	// Reading both spellings is what carries ListRequest.IncludeEphemeral —
+	// and IncludeInfra's plane half with it — onto the --ready arm instead of
+	// dropping it there, which would answer a request that named the plane
+	// with the durable set and no error.
+	//
+	// THE PREDICATE IS NEGATIVE, on a field whose ZERO VALUE means admit. That
+	// is deliberate but it is a footgun worth naming: this fires for any filter
+	// that merely never set SkipWisps, not only for one that asked. Every
+	// caller today is handed a filter built by BuildListFilter, which decides
+	// that field for every request, so "unset" is not reachable here — a
+	// hand-built types.IssueFilter{} passed in from somewhere new would get the
+	// wisp plane it never asked for. Keep the construction on the builder.
+	if (filter.Ephemeral != nil && *filter.Ephemeral) || !filter.SkipWisps {
 		wf.IncludeEphemeral = true
 	}
 	return wf
@@ -107,12 +127,53 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 // EffectiveSearchLimit's branch selection there is unaffected by a one-row bump
 // to Limit, and MaxRows is left untouched, so a genuine tighter-cap violation
 // still fires with the correct (unbumped) Cap value in the error message.
+// The pair of steps this performs — bump the cap in lockstep at Limit==MaxRows,
+// then bump Limit — is also written as one function for the seam that renders
+// its probe row inside the query rather than onto a filter; see
+// internal/storage/issueops.SearchProbeLimit. Change one and change the other,
+// or the two implementations of issueops.Reader.List stop agreeing about when a
+// cap fires.
 func WithFetchOneExtra(filter types.IssueFilter) types.IssueFilter {
 	if filter.Limit > 0 {
 		if filter.MaxRows > 0 && filter.Limit == filter.MaxRows {
 			filter.MaxRows++
 		}
 		filter.Limit++
+	}
+	return filter
+}
+
+// WithRowsBeforeThePage moves an OFFSET off the query and onto the epilogue: it
+// widens the filter's row bound to cover the rows the epilogue will skip, and
+// clears the Offset the builder carried so the query does not skip them too.
+// An unbounded filter needs no widening — it already carries every matching row.
+//
+// It is the filter half of FinishPageAt, and the reason both halves exist is
+// there: the skip belongs after the display order, and the rows it drops are
+// rows the MaxRows cap has to have counted. Apply it BEFORE WithFetchOneExtra,
+// which sizes the probe row against the bound this leaves.
+//
+// The builders still write Offset onto the filter, for the callers that consume
+// it as a VALUE and run their own query — `bd list --watch`, the proxied
+// hierarchical --parent walk, proxied `bd ready` — where there is no shared
+// epilogue to move it to. Those callers get the same cap boundary anyway: the
+// seam beneath them widens its own bound by the offset and keeps the skip
+// whenever a cap is set, for the reason stated above (internal/storage/domain/db,
+// searchWindow).
+func WithRowsBeforeThePage(filter types.IssueFilter, offset int) types.IssueFilter {
+	filter.Offset = 0
+	if offset > 0 && filter.Limit > 0 {
+		filter.Limit += offset
+	}
+	return filter
+}
+
+// WithReadyRowsBeforeThePage is WithRowsBeforeThePage for the ready-work filter,
+// which is a different type carrying the same two fields.
+func WithReadyRowsBeforeThePage(filter types.WorkFilter, offset int) types.WorkFilter {
+	filter.Offset = 0
+	if offset > 0 && filter.Limit > 0 {
+		filter.Limit += offset
 	}
 	return filter
 }

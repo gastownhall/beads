@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -196,6 +197,10 @@ func runWorktreeCreate(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("failed to create worktree: %w\n%s", err, string(output))
 		}
+	}
+
+	if err := checkCreatedWorktreeClean(ctx, worktreePath); err != nil {
+		return err
 	}
 
 	// Tracked .beads/ checked out by git worktree add can inherit umask defaults (0755).
@@ -435,6 +440,22 @@ func runWorktreeInfo(cmd *cobra.Command, args []string) error {
 }
 
 // Helper functions
+
+var checkCreatedWorktreeClean = ensureCreatedWorktreeClean
+
+func ensureCreatedWorktreeClean(ctx context.Context, worktreePath string) error {
+	gitCmd := gitCmdInDir(ctx, worktreePath, "status", "--porcelain=v1", "--untracked-files=all")
+	output, err := gitCmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to inspect created worktree cleanliness: %w\n%s", err, string(output))
+	}
+
+	if status := strings.TrimSpace(string(output)); status != "" {
+		return fmt.Errorf("created worktree is dirty after checkout; refusing to continue: %s\n%s", worktreePath, status)
+	}
+
+	return nil
+}
 
 // gitCmdInDir creates a git command that runs in the specified directory.
 // This is used for worktree operations that need to run in a specific location
@@ -2295,8 +2316,25 @@ func (plan *gitignoreCleanupPlan) validate() error {
 }
 
 func truncate(s string, maxLen int) string {
+	// Byte budget (len counts bytes), but never split a UTF-8 code point.
+	// Compact prime memories and other display paths call this; a mid-rune
+	// cut emits invalid UTF-8 and breaks SessionStart hosts that decode strictly.
+	if maxLen <= 0 {
+		return ""
+	}
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	if maxLen <= 3 {
+		cut := maxLen
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		return s[:cut]
+	}
+	cut := maxLen - 3
+	for cut > 0 && !utf8.ValidString(s[:cut]) {
+		cut--
+	}
+	return s[:cut] + "..."
 }

@@ -127,6 +127,64 @@ func TestRenderMarkdownReturnsRawMarkdownInAgentMode(t *testing.T) {
 	}
 }
 
+// TestRenderMarkdownPreservesAngleBracketSpans is the regression guard for
+// ra-peoy7: RenderMarkdown must never delete tag-shaped "<...>" spans from
+// body text (goldmark parses them as raw HTML, and glamour's ANSI renderer
+// sanitizes those nodes down to nothing). Multi-line unclosed tags are the
+// worst case — the deletion used to swallow every line up to the next ">".
+func TestRenderMarkdownPreservesAngleBracketSpans(t *testing.T) {
+	withMarkdownEnv(t, map[string]string{
+		"NO_COLOR":        "1",
+		"TERM":            "dumb",
+		"CLICOLOR_FORCE":  "",
+		"FORCE_HYPERLINK": "",
+		"BD_AGENT_MODE":   "",
+		"CLAUDE_CODE":     "",
+	})
+
+	t.Run("intra-line tag-shaped and comparison-operator spans", func(t *testing.T) {
+		input := "LINE1: run foo <PLACEHOLDER> bar\n" +
+			"LINE2: literal a<b and c>d\n" +
+			"LINE3: html-ish <em>text</em> tail\n"
+		out := RenderMarkdown(input)
+		for _, want := range []string{
+			"LINE1: run foo <PLACEHOLDER> bar",
+			"LINE2: literal a<b and c>d",
+			"LINE3: html-ish <em>text</em> tail",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected rendered output to contain %q, got %q", want, out)
+			}
+		}
+	})
+
+	t.Run("unclosed tag-shaped token does not eat following lines", func(t *testing.T) {
+		input := "P: start <unclosed\n" +
+			"Q: middle line one\n" +
+			"R: middle line two\n" +
+			"S: end > tail\n"
+		out := RenderMarkdown(input)
+		for _, want := range []string{
+			"P: start <unclosed",
+			"Q: middle line one",
+			"R: middle line two",
+			"S: end > tail",
+		} {
+			if !strings.Contains(out, want) {
+				t.Fatalf("expected rendered output to contain %q, got %q", want, out)
+			}
+		}
+	})
+
+	t.Run("non-tag-shaped angle brackets stay intact (control)", func(t *testing.T) {
+		input := "E1: <_foo> and <123> and < b > survive already"
+		out := RenderMarkdown(input)
+		if !strings.Contains(out, "<_foo>") || !strings.Contains(out, "<123>") {
+			t.Fatalf("expected already-preserved spans to remain intact, got %q", out)
+		}
+	})
+}
+
 func withMarkdownEnv(t *testing.T, values map[string]string) {
 	t.Helper()
 

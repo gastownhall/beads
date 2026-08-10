@@ -31,14 +31,14 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Restore non-race Go build cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
@@ -85,15 +85,15 @@ jobs:
       - run: ./scripts/check-build-tags.sh
       - run: ./scripts/check-go-install-guidance.sh
 
-  # Lock in the cgo-test-contamination fix (mybd-ycx / GH#3683 follow-up).
-  # cmd/bd carries a mix of cgo-only test helpers (embedded Dolt, sql.DB) and
-  # pure-Go tests. Untagged test files that reach for cgo-only helpers break
-  # the entire package's CGO_ENABLED=0 compile, silently neutering pure-Go
-  # tests (the original symptom in PR #3704). This job compiles the cmd/bd
-  # test binary with CGO_ENABLED=0 and runs the pure-Go subset, so a
-  # regression that re-introduces cgo coupling fails fast.
+  # Lock in two CGO-disabled portability boundaries. cmd/bd carries a mix of
+  # cgo-only test helpers (embedded Dolt, sql.DB) and pure-Go tests; compiling
+  # and running its pure-Go subset prevents test contamination (mybd-ycx /
+  # GH#3683 follow-up). internal/hooks also declares a js/wasm boundary where
+  # process execution must fail explicitly, so this required leaf job compiles
+  # the complete package test binary and executes that exact contract under
+  # Node rather than allowing a missing platform implementation to recur.
   check-cmd-bd-puregeo-tests:
-    name: Check cmd/bd pure-Go tests compile (CGO_ENABLED=0)
+    name: Check pure-Go and js/wasm boundaries (CGO_ENABLED=0)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -103,6 +103,121 @@ jobs:
         with:
           go-version-file: 'go.mod'
           cache: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        with:
+          node-version: '24'
+
+      - name: Run js/wasm hook boundary
+        shell: /usr/bin/env -u BASH_ENV -u ENV -u BASHOPTS -u SHELLOPTS /usr/bin/bash --noprofile --norc -p -euo pipefail {0}
+        env:
+          BASH_ENV: ""
+          ENV: ""
+          CGO_ENABLED: "0"
+          GOARCH: wasm
+          GOENV: "off"
+          GOFLAGS: ""
+          GOOS: js
+          GOTOOLCHAIN: local
+          GOWORK: "off"
+          NODE_OPTIONS: ""
+        run: |
+          set -euo pipefail
+
+          [[ -n "${BASH_VERSION:-}" ]]
+          [[ "${BASH:-}" == "/usr/bin/bash" ]]
+          [[ /bin/bash -ef /usr/bin/bash ]]
+          [[ "$-" == *p* ]]
+          [[ ! -v BASH_ENV && ! -v ENV ]]
+          [[ "${CGO_ENABLED:-}" == "0" ]]
+          [[ "${GOARCH:-}" == "wasm" ]]
+          [[ "${GOENV:-}" == "off" ]]
+          [[ -z "${GOFLAGS:-}" ]]
+          [[ "${GOOS:-}" == "js" ]]
+          [[ "${GOTOOLCHAIN:-}" == "local" ]]
+          [[ "${GOWORK:-}" == "off" ]]
+          [[ -z "${NODE_OPTIONS:-}" ]]
+          [[ "${RUNNER_TEMP:-}" == /* ]]
+          IFS= read -r kernel_family < /proc/sys/kernel/ostype
+          [[ "$kernel_family" == "Linux" ]]
+
+          go_candidate="$(type -P go)"
+          node_candidate="$(type -P node)"
+          [[ "$go_candidate" == /* && -x "$go_candidate" ]]
+          [[ "$node_candidate" == /* && -x "$node_candidate" ]]
+
+          node_bin="$("$node_candidate" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$node_candidate")"
+          go_bin="$("$node_bin" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$go_candidate")"
+          [[ "$node_bin" == /* && -x "$node_bin" && "$node_candidate" -ef "$node_bin" ]]
+          [[ "$go_bin" == /* && -x "$go_bin" && "$go_candidate" -ef "$go_bin" ]]
+
+          go_version="$("$go_bin" env GOVERSION)"
+          node_version="$("$node_bin" --version)"
+          printf 'Go host: %s (%s)\n' "$go_bin" "$go_version"
+          printf 'Node host: %s (%s)\n' "$node_bin" "$node_version"
+
+          [[ "$("$go_bin" env GOHOSTOS)" == "linux" ]]
+          [[ "$("$go_bin" env GOOS)" == "js" ]]
+          [[ "$("$go_bin" env GOARCH)" == "wasm" ]]
+          [[ "$("$go_bin" env CGO_ENABLED)" == "0" ]]
+          case "$node_version" in
+            v24.*) ;;
+            *) printf 'unexpected Node version: %s\n' "$node_version" >&2; exit 1 ;;
+          esac
+          "$node_bin" -e 'if (typeof WebAssembly !== "object" || typeof WebAssembly.instantiate !== "function") process.exit(1)'
+
+          go_root="$("$node_bin" -e 'process.stdout.write(require("node:fs").realpathSync(process.argv[1]))' "$("$go_bin" env GOROOT)")"
+          [[ -x "$go_root/bin/go" && "$go_bin" -ef "$go_root/bin/go" ]]
+          wasm_exec_node="$go_root/lib/wasm/wasm_exec_node.js"
+          wasm_exec_runtime="$go_root/lib/wasm/wasm_exec.js"
+          wasm_test="$RUNNER_TEMP/internal-hooks.test.wasm"
+          [[ -r "$wasm_exec_node" ]]
+          [[ -r "$wasm_exec_runtime" ]]
+
+          "$go_bin" test -tags gms_pure_go -c -o "$wasm_test" ./internal/hooks
+          [[ -s "$wasm_test" ]]
+          # This required lane owns the exact js/wasm refusal contract. If the
+          # wasm test surface grows, widen this selector and its count guard
+          # together rather than assuming compilation executes new tests.
+          test_status=0
+          test_output="$("$node_bin" --stack-size=8192 "$wasm_exec_node" "$wasm_test" \
+            -test.v -test.timeout=2m \
+            -test.run '^TestRunHookReportsUnsupportedExecution$' \
+            2>&1)" || test_status=$?
+          printf '%s\n' "$test_output"
+          (( test_status == 0 )) || exit "$test_status"
+
+          run_count=0
+          exact_run_count=0
+          exact_pass_count=0
+          nonpass_count=0
+          suite_pass_count=0
+          pass_pattern='^--- PASS: TestRunHookReportsUnsupportedExecution \([0-9.]+s\)$'
+          while IFS= read -r line; do
+            if [[ "$line" == "=== RUN   "* ]]; then
+              ((run_count += 1))
+            fi
+            if [[ "$line" == "=== RUN   TestRunHookReportsUnsupportedExecution" ]]; then
+              ((exact_run_count += 1))
+            fi
+            if [[ "$line" =~ $pass_pattern ]]; then
+              ((exact_pass_count += 1))
+            fi
+            case "$line" in
+              "--- FAIL: TestRunHookReportsUnsupportedExecution"*|"--- SKIP: TestRunHookReportsUnsupportedExecution"*)
+                ((nonpass_count += 1))
+                ;;
+            esac
+            if [[ "$line" == "PASS" ]]; then
+              ((suite_pass_count += 1))
+            fi
+          done <<< "$test_output"
+          if [[ "$run_count" != 1 || "$exact_run_count" != 1 || "$exact_pass_count" != 1 || "$nonpass_count" != 0 || "$suite_pass_count" != 1 ]]; then
+            printf 'expected one exact js/wasm hook test run and pass; got runs=%s exact-runs=%s exact-passes=%s nonpasses=%s suite-passes=%s\n' \
+              "$run_count" "$exact_run_count" "$exact_pass_count" "$nonpass_count" "$suite_pass_count" >&2
+            exit 1
+          fi
 
       - name: Build cmd/bd (CGO_ENABLED=0, gms_pure_go)
         env:
@@ -127,6 +242,27 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
+  # The lingering-handle liveness regression test is //go:build windows: the
+  # Ubuntu job above selects it by name but compiles it out, and main.yml's
+  # Windows job runs only on pushes to main (build/smoke, no go test). Run
+  # exactly the liveness pair on windows-latest so the regression guard
+  # actually executes at PR time.
+  test-windows-liveness:
+    name: Test (Windows) cmd/bd liveness regression
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run Windows liveness regression test
+        run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
+
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.
@@ -145,14 +281,14 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Restore non-race Go build cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
@@ -251,7 +387,7 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
@@ -279,7 +415,7 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
@@ -288,6 +424,10 @@ jobs:
       - name: Exercise the real Bash process boundary
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
+      - name: Exercise test.sh prebuilt binary path
+        shell: bash
+        run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
 
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
@@ -459,14 +599,14 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Restore race Go build cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
@@ -506,6 +646,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # --new-from-merge-base below walks real history.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -516,7 +659,13 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
+      # Scope the wrapper's lint to what this PR introduces, matching the
+      # `lint` job's only-new-issues below. main.yml runs the same wrapper with
+      # this unset, so the whole tree is still swept on every push to main.
+      # Both PR triggers (pull_request, merge_group) target main.
       - name: Run PR lint wrapper
+        env:
+          BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
 
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
@@ -529,6 +678,9 @@ jobs:
     name: Test (storage domain + uow)
     runs-on: ubuntu-latest
     needs: build-artifacts
+    # The race-enabled storage package has outgrown Go's implicit 10-minute
+    # timeout. Keep both per-package deadlines inside one finite job budget.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -572,7 +724,7 @@ jobs:
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-        run: go test -tags gms_pure_go -race -count=1 -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
+        run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
       # The doctor/fix DB-backed suite spins its own Dolt container in
       # TestMain. BEADS_FIX_REQUIRE_DOLT=1 turns a missing container into a
@@ -582,7 +734,7 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -race -count=1 -v ./cmd/bd/doctor/fix/
+        run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 
   # macOS-only regressions were landing on main undetected: main.yml's Test
   # (macos-latest) leg only runs `if: github.event_name == 'push' &&
@@ -619,21 +771,21 @@ jobs:
           cache: false
 
       - name: Restore Go module cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/go/pkg/mod
           key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Restore non-race Go build cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/non-race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-${{ github.sha }}
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-non-race-
 
       - name: Restore race Go build cache
-        uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/go-cache/race
           key: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-${{ github.sha }}
@@ -733,11 +885,30 @@ jobs:
       - name: Check gofmt
         run: make fmt-check
 
+  # Lint lanes are split deliberately: the PR lane reports only the issues a PR
+  # introduces, and main.yml's identical job sweeps the whole tree on every
+  # push. The tradeoff is that a pre-existing issue in untouched code no longer
+  # blocks a PR — but a lint word that lands on main now reds main's own run,
+  # where it belongs, instead of reddening every open PR for a change it did
+  # not make.
+  #
+  # "New" is measured off the diff, so MOVED CODE READS AS NEW: a pre-existing
+  # violation carried into a PR by a move or a rename is reported against that
+  # PR and blocks it. Fix it or //nolint it there — that is the accepted cost of
+  # the trade above.
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # only-new-issues reads the PR patch from the API.
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # On merge_group there is no PR patch, so the action falls back to
+          # --new-from-rev and needs real history.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -751,6 +922,7 @@ jobs:
           GOWORK: "off"
         with:
           version: v2.10.1
+          only-new-issues: true
           args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   windows-make-shell:
@@ -959,6 +1131,7 @@ jobs:
       - build-artifacts
       - check-build-tags
       - check-cmd-bd-puregeo-tests
+      - test-windows-liveness
       - worktree-remove-windows
       - check-version-consistency
       - check-migration-hygiene
@@ -988,6 +1161,7 @@ jobs:
             BUILD_ARTIFACTS
             CHECK_BUILD_TAGS
             CHECK_CMD_BD_PUREGEO_TESTS
+            TEST_WINDOWS_LIVENESS
             WORKTREE_REMOVE_WINDOWS
             CHECK_VERSION_CONSISTENCY
             CHECK_MIGRATION_HYGIENE
@@ -1009,6 +1183,7 @@ jobs:
           BUILD_ARTIFACTS: ${{ needs.build-artifacts.result }}
           CHECK_BUILD_TAGS: ${{ needs.check-build-tags.result }}
           CHECK_CMD_BD_PUREGEO_TESTS: ${{ needs.check-cmd-bd-puregeo-tests.result }}
+          TEST_WINDOWS_LIVENESS: ${{ needs.test-windows-liveness.result }}
           WORKTREE_REMOVE_WINDOWS: ${{ needs.worktree-remove-windows.result }}
           CHECK_VERSION_CONSISTENCY: ${{ needs.check-version-consistency.result }}
           CHECK_MIGRATION_HYGIENE: ${{ needs.check-migration-hygiene.result }}

@@ -35,6 +35,7 @@ var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
 	{"schema_migrations", 41}: repairPartial0041NonlocalDelete,
 	{"schema_migrations", 47}: ensureWispTablesForMixedBlockedRecompute,
 	{"schema_migrations", 53}: repairV53RigAndSplitTargets,
+	{"schema_migrations", 58}: repairWispDependenciesForwardShape,
 }
 
 // preMigrationRepair dispatches any repair registered for (source, version).
@@ -622,6 +623,48 @@ func schemaHasPrimaryKey(ctx context.Context, db DBConn, table string) (bool, er
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// schemaIndexExists reports whether table carries an index (or unique key) of
+// the given name. STATISTICS rather than TABLE_CONSTRAINTS because plain
+// secondary indexes are not constraints and never appear in the latter.
+func schemaIndexExists(ctx context.Context, db DBConn, table, index string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+	`, table, index).Scan(&count); err != nil {
+		return false, fmt.Errorf("checking index %s on %s: %w", index, table, err)
+	}
+	return count > 0, nil
+}
+
+// schemaConstraintExists reports whether table carries a named constraint --
+// foreign key or check. Unlike schemaHasPrimaryKey it asks about one specific
+// name, which is what an add-if-absent step needs.
+func schemaConstraintExists(ctx context.Context, db DBConn, table, constraint string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?
+	`, table, constraint).Scan(&count); err != nil {
+		return false, fmt.Errorf("checking constraint %s on %s: %w", constraint, table, err)
+	}
+	return count > 0, nil
+}
+
+// schemaShowCreateTable returns a table's CREATE statement. It is the only
+// place Dolt exposes generated-column shape: INFORMATION_SCHEMA.COLUMNS returns
+// EXTRA and GENERATION_EXPRESSION empty for a generated column, and IS_GENERATED
+// does not exist there at all.
+func schemaShowCreateTable(ctx context.Context, db DBConn, table string) (string, error) {
+	var name, ddl string
+	// table is a package constant, never caller input; SHOW CREATE TABLE takes
+	// no placeholders.
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`").Scan(&name, &ddl); err != nil {
+		return "", fmt.Errorf("reading SHOW CREATE TABLE %s: %w", table, err)
+	}
+	return ddl, nil
 }
 
 // schemaColumnInPrimaryKey reports whether column is (one of) table's PRIMARY

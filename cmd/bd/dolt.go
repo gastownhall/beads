@@ -1940,6 +1940,7 @@ func showDoltConfig(testConnection bool) error {
 				result["host"] = showHost
 				result["port"] = showPort
 				result["user"] = cfg.GetDoltServerUser()
+				result["tls"] = cfg.GetDoltServerTLS()
 				result["shared_server"] = doltserver.IsSharedServerMode()
 				if testConnection {
 					result["connection_ok"] = testServerConnection(showHost, showPort)
@@ -1967,6 +1968,7 @@ func showDoltConfig(testConnection bool) error {
 		fmt.Printf("  Host:     %s\n", showHost)
 		fmt.Printf("  Port:     %d\n", showPort)
 		fmt.Printf("  User:     %s\n", cfg.GetDoltServerUser())
+		fmt.Printf("  TLS:      %t\n", cfg.GetDoltServerTLS())
 		if doltserver.IsSharedServerMode() {
 			fmt.Println("  Mode:     shared server")
 			if sharedDir, err := doltserver.SharedServerDir(); err == nil {

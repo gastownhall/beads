@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // ClaimResult holds the result of a ClaimIssueInTx call.
@@ -75,94 +76,122 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve claim pools: %w", err)
 	}
-	assigneePredicate := "assignee = '' OR assignee IS NULL OR assignee = ?"
-	assigneeArgs := []interface{}{actor}
-	if len(pools) > 0 {
-		poolPlaceholders, poolArgs := buildSQLInClause(pools)
-		assigneePredicate += " OR assignee IN (" + poolPlaceholders + ")"
-		assigneeArgs = append(assigneeArgs, poolArgs...)
-	}
 
-	// Conditional UPDATE: only succeeds while the issue is still claimable.
-	// Also set started_at on first transition to in_progress (GH#2796); preserve
-	// any existing value so re-claims don't overwrite the original start time.
-	var (
-		result sql.Result
-	)
-	if oldIssue.StartedAt == nil {
-		args := append([]interface{}{actor, now, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
-			WHERE id = ? AND status IN (%s) AND (%s)
-		`, issueTable, rowLockClause, statusPlaceholders, assigneePredicate), args...)
-	} else {
-		args := append([]interface{}{actor, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		result, err = tx.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
-			WHERE id = ? AND status IN (%s) AND (%s)
-		`, issueTable, rowLockClause, statusPlaceholders, assigneePredicate), args...)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to claim issue: %w", err)
-	}
+	// Claimability of the assignee slot, judged in Go against oldIssue (the
+	// pre-image read above, inside this same transaction) rather than as a
+	// spelling-sensitive SQL predicate (ga-v2k49, same shape as ga-5ksp5's
+	// unclaim.go fix): empty/unassigned, already this actor — including an
+	// idempotent re-claim spelled under a different layer's separator
+	// convention (ga-wzl83) — or assigned to a claim-pool alias. That last
+	// membership test is deliberately exact-string, unlike actorMatches right
+	// beside it: a pool alias (e.g. "fable-crew") is a literal claim.pools
+	// config value, not a Gas Town identity that gets respelled per layer, so
+	// there is no cross-spelling variant to reconcile — canonicalizing it
+	// could only blur two administratively-distinct pool names into one.
+	assigneeOK := oldIssue.Assignee == "" || actorMatches(oldIssue.Assignee, actor) || slices.Contains(pools, oldIssue.Assignee)
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get rows affected: %w", err)
+	// Conditional UPDATE: only attempted while the issue was still claimable
+	// as of oldIssue, and even then CASed on row_lock rather than re-checking
+	// assignee/status in SQL — row_lock is rewritten by every path that
+	// mutates status/assignee/started_at (see the freshRowLock invariant in
+	// lease.go), so requiring it to still equal oldIssue.RowVersion detects a
+	// race (reassigned, unclaimed, or transitioned between our read and this
+	// write) exactly as precisely as the old predicate did, without
+	// embedding a spelling-sensitive string comparison in SQL. When
+	// assigneeOK is false, skip the UPDATE entirely (there is nothing this
+	// actor could win) and fall straight into the same rowsAffected==0
+	// disambiguation path below — matches today's behavior without a wasted
+	// write attempt. Also set started_at on first transition to in_progress
+	// (GH#2796); preserve any existing value so re-claims don't overwrite the
+	// original start time.
+	var rowsAffected int64
+	if assigneeOK {
+		var result sql.Result
+		if oldIssue.StartedAt == nil {
+			args := append([]interface{}{actor, now, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			result, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND status IN (%s)
+			`, issueTable, rowLockClause, statusPlaceholders), args...)
+		} else {
+			args := append([]interface{}{actor, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			result, err = tx.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND status IN (%s)
+			`, issueTable, rowLockClause, statusPlaceholders), args...)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to claim issue: %w", err)
+		}
+		rowsAffected, err = result.RowsAffected()
+		if err != nil {
+			return nil, fmt.Errorf("failed to get rows affected: %w", err)
+		}
 	}
 
 	if rowsAffected == 0 {
-		// Query current state inside the same transaction for consistency.
-		var currentAssignee sql.NullString
-		var currentStatus types.Status
-		err := tx.QueryRowContext(ctx, fmt.Sprintf(
-			`SELECT assignee, status FROM %s WHERE id = ?`, issueTable), id).Scan(&currentAssignee, &currentStatus)
+		assignee, currentStatus, err := readClaimStateInTx(ctx, tx, issueTable, id)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get current claim state: %w", err)
 		}
-		assignee := ""
-		if currentAssignee.Valid {
-			assignee = currentAssignee.String
-		}
-		// Idempotent: if already claimed in_progress by the same actor, treat as success.
-		// This supports agent retry workflows where claim may be called multiple
-		// times after transient failures (GH#8).
-		if assignee == actor && currentStatus == types.StatusInProgress {
+		// Idempotent: if already claimed in_progress by the same actor —
+		// including a spelling difference across layers (ga-wzl83) — treat as
+		// success. This supports agent retry workflows where claim may be
+		// called multiple times after transient failures (GH#8).
+		if actorMatches(assignee, actor) && currentStatus == types.StatusInProgress {
 			return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
 		}
-		if assignee != "" && assignee != actor {
+		// The refusal carries the state that lost the CAS, read just above in
+		// THIS transaction, so a caller learns who won without parsing the
+		// message. The typed wrapper carries the fields; the PROSE is composed
+		// here, because ClaimConflictError.Error() passes its wrapped refusal
+		// through byte-for-byte — a bare sentinel would reach the caller as
+		// "issue already claimed" with the holder dropped and
+		// beads.ParseClaimConflict unable to recover it. The fragments are the
+		// storage layer's exported ones, which is what keeps the parser and
+		// this producer in step. The sentinel stays matchable through both
+		// wraps, which errors.Is, ParseClaimConflict and the proxied batch
+		// exit code all key on.
+		refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
+		if assignee != "" && !actorMatches(assignee, actor) {
+			switch {
 			// A pool-assigned issue reaches here only when the CAS lost for a
 			// non-assignee reason (status changed underneath us): report the
-			// status rather than a misleading held-by-someone refusal.
-			if slices.Contains(pools, assignee) {
-				return nil, fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
-			}
-			if currentStatus == types.StatusOpen {
+			// status rather than a misleading held-by-someone refusal. Checked
+			// FIRST, so a pool alias never falls into the holder-steering copy.
+			// Exact-string membership, same reason as assigneeOK's identical
+			// term above: a pool alias is a literal config value, not a
+			// respelled identity.
+			case slices.Contains(pools, assignee):
+				// refusal already names the status.
+			case currentStatus == types.StatusOpen:
 				// Do not name a release command here — not `bd unclaim`, not
 				// `bd unclaim --force`. Refusal copy that names one gets
 				// pattern-matched by batch agents into an unclaim+claim
 				// steamroller of live claims (wy-yuclk). Point at the holder;
 				// bd reclaim is safe to name because it only recovers claims
-				// whose lease has already expired. Keep the %w wrap so this
-				// open-but-assigned refusal is still a classifiable claim
-				// conflict: the public IssueClaimer contract promises wrapped
-				// ErrAlreadyClaimed, and errors.Is / ParseClaimConflict (and the
-				// proxied batch exit code) key on it. This mirrors the
-				// domain-stack twin (domain.issueUseCaseImpl.claim, bd-at6rc),
-				// which already wraps the same message.
-				return nil, fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, assignee)
+				// whose lease has already expired.
+				//
+				// This copy deliberately omits the parseable " by <assignee>"
+				// tail, so ParseClaimConflict recovers the holder from the
+				// typed field rather than the prose (bd-at6rc).
+				refusal = fmt.Errorf("%w: already assigned to %q — coordinate with the holder; if their claim is abandoned (crashed agent), lease expiry will surface it for bd reclaim", storage.ErrAlreadyClaimed, assignee)
+			default:
+				refusal = fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, assignee)
 			}
-			return nil, fmt.Errorf("%w%s%s", storage.ErrAlreadyClaimed, storage.ClaimedByFragment, assignee)
 		}
-		return nil, fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, currentStatus)
+		return nil, &publicops.ClaimConflictError{
+			IssueID:  id,
+			Assignee: assignee,
+			Status:   currentStatus,
+			Err:      refusal,
+		}
 	}
 
 	// Grant the lease: what makes the claim recoverable — a worker that dies
@@ -187,7 +216,30 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 		return nil, fmt.Errorf("failed to record claim event: %w", err)
 	}
 
+	// A claim changes assignee and status, so it journals as an update. The
+	// idempotent re-claim path returns above without writing and journals
+	// nothing.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return nil, err
+	}
+
 	return &ClaimResult{OldIssue: oldIssue, IsWisp: isWisp}, nil
+}
+
+// readClaimStateInTx reads one row's coordination columns inside tx — the
+// state a lost compare-and-set reports. Shared by the CAS itself and by the
+// public claim role, so the two cannot disagree about what "the state that
+// refused this claim" means.
+//
+//nolint:gosec // G201: issueTable comes from WispTableRouting (hardcoded constants)
+func readClaimStateInTx(ctx context.Context, tx DBTX, issueTable, id string) (string, types.Status, error) {
+	var assignee sql.NullString
+	var status types.Status
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf(
+		`SELECT assignee, status FROM %s WHERE id = ?`, issueTable), id).Scan(&assignee, &status); err != nil {
+		return "", "", err
+	}
+	return assignee.String, status, nil
 }
 
 // ClaimReadyIssueInTx claims the first currently ready issue matching filter in
