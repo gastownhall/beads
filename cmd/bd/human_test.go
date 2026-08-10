@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -100,10 +101,38 @@ func TestHumanCmdSubcommands(t *testing.T) {
 	}
 }
 
-func TestHumanRespondRequiresResponseFlag(t *testing.T) {
+// TestHumanRespondDismissArgs pins the Args policy for respond and dismiss:
+// an issue ID is required and trailing args are free text, not extra IDs
+// (MinimumNArgs(1), not ExactArgs(1)). End-to-end coverage lives in the
+// embedded tests, which are env-gated — this always-run check guards the
+// declaration itself.
+func TestHumanRespondDismissArgs(t *testing.T) {
+	for _, cmd := range []*cobra.Command{humanRespondCmd, humanDismissCmd} {
+		if err := cmd.Args(cmd, []string{"bd-123", "free", "text"}); err != nil {
+			t.Errorf("%s should accept positional free text after the ID: %v", cmd.Name(), err)
+		}
+		if err := cmd.Args(cmd, []string{}); err == nil {
+			t.Errorf("%s should still require an issue ID", cmd.Name())
+		}
+	}
+}
+
+func TestHumanRespondTextSourceFlags(t *testing.T) {
+	for _, name := range []string{"file", "stdin"} {
+		if humanRespondCmd.Flags().Lookup(name) == nil {
+			t.Errorf("respond command should have --%s flag", name)
+		}
+	}
+
+	// --response must not be marked required: the response can also come from
+	// --file, --stdin, or positional args, and cobra rejects those invocations
+	// before RunE if the flag carries the required annotation.
 	flag := humanRespondCmd.Flags().Lookup("response")
 	if flag == nil {
 		t.Fatal("respond command should have --response flag")
+	}
+	if len(flag.Annotations[cobra.BashCompOneRequiredFlag]) > 0 {
+		t.Error("--response must not be hard-required; --file/--stdin/positional text are valid sources")
 	}
 }
 

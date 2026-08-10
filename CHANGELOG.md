@@ -173,6 +173,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Text-input commands now REFUSE two sources instead of silently picking
+  one** (#5332). `bd comment`, `bd note` and `bd comments add` used to apply a
+  precedence order when a caller gave both positional text and `--stdin` or
+  `--file`: the flag won and the positional text was dropped with no message.
+  Naming two sources is now an error — `cannot combine positional text "..."
+  with --stdin` — because the dropped half was, in every case we could find,
+  the text the caller actually meant. Single-source invocations are unchanged.
+  Scripts that relied on the old precedence (passing both and expecting the
+  flag to win) must drop the redundant argument.
+
+  `bd human respond` gains the same layer, so its response text can come from
+  positional args, `--response`, `--file` or `--stdin`; `--response` is no
+  longer a required flag. `bd human dismiss` takes its reason positionally as
+  well as via `--reason`. Both now accept trailing positional text
+  (`<id> [text...]`), matching `bd comment`'s contract — a second argument is
+  free text, never a second issue id.
+
+- **`bd list --status=all` no longer hides boolean-pinned beads** (#5332).
+  `all` promises every status, but the pinned exclusion was decided by
+  comparing the raw selector string to `pinned`/`hooked`, so `all` fell through
+  and kept forcing `Pinned=false`. The same string comparison also missed every
+  multi-status set containing them, so `--status=pinned,closed` excluded the
+  pinned beads it explicitly asked for. Both now lift the exclusion. **Scripts
+  that used `--status=all` as a way to list everything EXCEPT pinned beads will
+  see pinned beads appear**; add `--no-pinned` to keep the old result.
+  `--ready` is unaffected: it forces status `open` and ignores the selector, so
+  an `all` it never applies has no pinned side effect either.
+
+- **`bd human list` matches `bd list`'s status handling, and hides no bead
+  type** (#5332). It used to pass `--status` through unvalidated and show
+  closed beads by default. Now done/frozen statuses and pinned beads are hidden
+  by default, `--status` is validated against the built-in and custom status
+  names (comma-separated sets and `all` supported, so a typo is an error rather
+  than an empty list), and every bead TYPE still shows — gates, wisps, infra
+  beads and templates — because a `human` label is an explicit request for a
+  person's attention. `bd human stats` counts across every status, as before.
+
+- **`bd human stats` classifies dismissals by close-reason PREFIX** (#5332).
+  It matched the substring `dismiss` case-insensitively anywhere in the close
+  reason; it now requires the `Dismissed` prefix that `bd human dismiss`
+  writes, shared as one constant so the writer and the classifier cannot drift.
+  Beads closed before this with a lowercase or mid-string "dismiss" in their
+  reason move from the Dismissed count to the Responded count. Forward
+  behavior is unchanged.
+
 - **The settings plane no longer serves the KV plane by any read** (bd-rfwtv,
   bd-klko9). `bd kv` keys and the `bd remember` memories nested under them are
   user data stored as config rows; they ride in the settings table without being

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -166,6 +167,16 @@ Examples:
 	},
 }
 
+// warnIfNotHumanLabeled warns on stderr when the bead lacks the 'human'
+// label. The check is advisory — respond/dismiss act on whichever bead the
+// user named. The issue must carry its labels; anything returned by
+// GetIssue/resolveAndGetIssueForMutation does.
+func warnIfNotHumanLabeled(issue *types.Issue) {
+	if !slices.Contains(issue.Labels, "human") {
+		fmt.Fprintf(os.Stderr, "Warning: Issue %s does not have 'human' label\n", issue.ID)
+	}
+}
+
 func printHumanList(issues []*types.Issue) {
 	if len(issues) == 0 {
 		fmt.Println("No human-needed beads found.")
@@ -187,19 +198,24 @@ func printHumanList(issues []*types.Issue) {
 
 // human respond command
 var humanRespondCmd = &cobra.Command{
-	Use:   "respond <issue-id>",
+	Use:   "respond <issue-id> [response...]",
 	Short: "Respond to a human-needed bead",
 	Long: `Respond to a human-needed bead by adding a comment and closing it.
 
 The response is added as a comment and the issue is closed with reason "Responded".
+The response text can be given as positional arguments, --response, --file, or --stdin.
 
 Examples:
-  bd human respond bd-123 --response "Use OAuth2 for authentication"
-  bd human respond bd-123 -r "Approved, proceed with implementation"`,
-	Args:          cobra.ExactArgs(1),
+  bd human respond bd-123 "Use OAuth2 for authentication"
+  bd human respond bd-123 -r "Approved, proceed with implementation"
+  bd human respond bd-123 --file response.md
+  echo "Approved" | bd human respond bd-123 --stdin`,
+	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("human respond")
+
 		evt := metrics.NewCommandEvent("human-respond")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -207,19 +223,23 @@ Examples:
 			}
 		}()
 
-		response, _ := cmd.Flags().GetString("response")
-
-		if response == "" {
-			return HandleErrorRespectJSON("--response is required")
+		src := cmdTextSources(cmd, args[1:])
+		src.flagText, _ = cmd.Flags().GetString("response")
+		src.flagName = "--response"
+		src.flagSet = cmd.Flags().Changed("response")
+		response, err := requireTextFromSources("response text", "use positional args, --response, --file, or --stdin", src)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
-
-		CheckReadonly("human respond")
 
 		ctx := rootCtx
 		issueID := args[0]
+		// Formatted once here so the direct and proxied backends store
+		// identically-shaped comments.
+		commentText := fmt.Sprintf("Response: %s", response)
 
 		if usesProxiedServer() {
-			return runHumanRespondProxiedServer(ctx, issueID, response)
+			return runHumanRespondProxiedServer(ctx, issueID, commentText)
 		}
 
 		// Direct mode
@@ -248,20 +268,8 @@ Examples:
 			return HandleErrorRespectJSON("issue %s is already closed", resolvedID)
 		}
 
-		labelsMap, _ := targetStore.GetLabelsForIssues(ctx, []string{resolvedID})
-		hasHumanLabel := false
-		for _, label := range labelsMap[resolvedID] {
-			if label == "human" {
-				hasHumanLabel = true
-				break
-			}
-		}
+		warnIfNotHumanLabeled(issue)
 
-		if !hasHumanLabel {
-			fmt.Fprintf(os.Stderr, "Warning: Issue %s does not have 'human' label\n", resolvedID)
-		}
-
-		commentText := fmt.Sprintf("Response: %s", response)
 		_, err = targetStore.AddIssueComment(ctx, resolvedID, actor, commentText)
 		if err != nil {
 			return HandleErrorRespectJSON("adding comment: %v", err)
@@ -278,19 +286,23 @@ Examples:
 
 // human dismiss command
 var humanDismissCmd = &cobra.Command{
-	Use:   "dismiss <issue-id>",
+	Use:   "dismiss <issue-id> [reason...]",
 	Short: "Dismiss a human-needed bead",
 	Long: `Dismiss a human-needed bead permanently without responding.
 
 The issue is closed with a "Dismissed" reason and optional note.
+The reason can be given as positional arguments or --reason.
 
 Examples:
   bd human dismiss bd-123
+  bd human dismiss bd-123 "No longer applicable"
   bd human dismiss bd-123 --reason "No longer applicable"`,
-	Args:          cobra.ExactArgs(1),
+	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		CheckReadonly("human dismiss")
+
 		evt := metrics.NewCommandEvent("human-dismiss")
 		defer func() {
 			if c := metrics.Global(); c != nil {
@@ -298,15 +310,32 @@ Examples:
 			}
 		}()
 
-		reason, _ := cmd.Flags().GetString("reason")
+		reasonFlag, _ := cmd.Flags().GetString("reason")
 
-		CheckReadonly("human dismiss")
+		// A dismissal reason is optional, so this is textFromSources rather
+		// than requireTextFromSources: no source at all is fine, but naming
+		// two is still the same hard error every other text input gives.
+		reason, _, err := textFromSources(textSources{
+			flagText:   reasonFlag,
+			flagName:   "--reason",
+			flagSet:    cmd.Flags().Changed("reason"),
+			positional: args[1:],
+		})
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		reason = strings.TrimSpace(reason)
+
+		closeReason := dismissedCloseReason
+		if reason != "" {
+			closeReason = fmt.Sprintf("%s: %s", dismissedCloseReason, reason)
+		}
 
 		ctx := rootCtx
 		issueID := args[0]
 
 		if usesProxiedServer() {
-			return runHumanDismissProxiedServer(ctx, issueID, reason)
+			return runHumanDismissProxiedServer(ctx, issueID, closeReason)
 		}
 
 		// Direct mode
@@ -335,23 +364,7 @@ Examples:
 			return HandleErrorRespectJSON("issue %s is already closed", resolvedID)
 		}
 
-		labelsMap, _ := targetStore.GetLabelsForIssues(ctx, []string{resolvedID})
-		hasHumanLabel := false
-		for _, label := range labelsMap[resolvedID] {
-			if label == "human" {
-				hasHumanLabel = true
-				break
-			}
-		}
-
-		if !hasHumanLabel {
-			fmt.Fprintf(os.Stderr, "Warning: Issue %s does not have 'human' label\n", resolvedID)
-		}
-
-		closeReason := "Dismissed"
-		if reason != "" {
-			closeReason = fmt.Sprintf("Dismissed: %s", reason)
-		}
+		warnIfNotHumanLabeled(issue)
 
 		if err := targetStore.CloseIssue(ctx, resolvedID, closeReason, actor, ""); err != nil {
 			return HandleErrorRespectJSON("closing bead: %v", err)
@@ -408,6 +421,11 @@ Example:
 	},
 }
 
+// dismissedCloseReason prefixes the close reason `human dismiss` writes;
+// printHumanStats classifies dismissed beads by this same prefix so the
+// writer and the classifier cannot drift apart.
+const dismissedCloseReason = "Dismissed"
+
 func printHumanStats(issues []*types.Issue) {
 	total := len(issues)
 	pending := 0
@@ -418,7 +436,7 @@ func printHumanStats(issues []*types.Issue) {
 		switch issue.Status {
 		case "closed":
 			closed++
-			if strings.Contains(strings.ToLower(issue.CloseReason), "dismiss") {
+			if strings.HasPrefix(issue.CloseReason, dismissedCloseReason) {
 				dismissed++
 			}
 		default:
@@ -452,8 +470,8 @@ func init() {
 
 	// Add flags for subcommands
 	humanListCmd.Flags().StringP("status", "s", "", "Filter by status (open, closed, etc.)")
-	humanRespondCmd.Flags().StringP("response", "r", "", "Response text (required)")
-	_ = humanRespondCmd.MarkFlagRequired("response")
+	humanRespondCmd.Flags().StringP("response", "r", "", "Response text")
+	registerTextSourceFlags(humanRespondCmd, "response text", "response")
 	humanDismissCmd.Flags().StringP("reason", "", "", "Reason for dismissal (optional)")
 
 	// Register with root command

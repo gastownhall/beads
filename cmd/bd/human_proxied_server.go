@@ -112,7 +112,10 @@ func proxiedHumanCloseTarget(ctx context.Context, uw uow.UnitOfWork, issueID str
 	return false, nil
 }
 
-func runHumanRespondProxiedServer(ctx context.Context, issueID, response string) error {
+// runHumanRespondProxiedServer takes the fully-formatted comment text, not the
+// raw response: `bd human respond` resolves its text sources and applies the
+// "Response: " shape once, so both backends store identically-shaped comments.
+func runHumanRespondProxiedServer(ctx context.Context, issueID, commentText string) error {
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
 	}
@@ -122,7 +125,6 @@ func runHumanRespondProxiedServer(ctx context.Context, issueID, response string)
 		if err != nil {
 			return false, "", err
 		}
-		commentText := fmt.Sprintf("Response: %s", response)
 		if _, err := uw.CommentUseCase().AddCommentToIssue(ctx, issueID, actor, commentText); err != nil {
 			return false, "", fmt.Errorf("adding comment: %w", err)
 		}
@@ -143,14 +145,12 @@ func runHumanRespondProxiedServer(ctx context.Context, issueID, response string)
 	return nil
 }
 
-func runHumanDismissProxiedServer(ctx context.Context, issueID, reason string) error {
+// runHumanDismissProxiedServer takes the fully-formatted close reason, not the
+// raw dismissal note: `bd human dismiss` resolves its text sources and applies
+// the shared dismissedCloseReason prefix once for both backends.
+func runHumanDismissProxiedServer(ctx context.Context, issueID, closeReason string) error {
 	if uowProvider == nil {
 		return HandleErrorRespectJSON("proxied-server UOW provider not initialized")
-	}
-
-	closeReason := "Dismissed"
-	if reason != "" {
-		closeReason = fmt.Sprintf("Dismissed: %s", reason)
 	}
 
 	hasHumanLabel, err := uow.RunTxResult(ctx, uowProvider, func(ctx context.Context, uw uow.UnitOfWork) (bool, string, error) {
