@@ -37,7 +37,11 @@ var doltVersionWarnOnce sync.Once
 // identical advisory twice and forked `dolt version` twice. errPrefix is
 // used to keep call-site-specific error context (e.g. "bd init
 // --proxied-server" vs "newProxiedServerUOWProvider") in the wrapped error.
-func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string, doltID doltversion.Identity, err error) {
+// The probed identity is deliberately not returned: its only consumer (the
+// auto_gc_behavior.archive_level gate) was removed upstream from
+// proxied-server mode, and PR-2's revalidation consumer will re-widen the
+// signature when it lands.
+func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string, err error) {
 	doltBin, doltSrc, err := doltversion.Resolve(doltversion.ResolveOptions{
 		EnvValue: doltversion.ReadEnvOverride(),
 		// SidecarValue is a hook point only in this PR — the clone-local
@@ -45,14 +49,14 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 		SidecarValue: "",
 	})
 	if err != nil {
-		return "", doltversion.Identity{}, fmt.Errorf(
+		return "", fmt.Errorf(
 			"%s: resolving dolt binary (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
 			errPrefix, doltSrc, err,
 		)
 	}
-	doltID, doltWarn, err := doltversion.ProbeWithPolicy(ctx, doltBin)
+	_, doltWarn, err := doltversion.ProbeWithPolicy(ctx, doltBin)
 	if err != nil {
-		return doltBin, doltID, fmt.Errorf(
+		return doltBin, fmt.Errorf(
 			"%s: probing dolt binary %q (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
 			errPrefix, doltBin, doltSrc, err,
 		)
@@ -65,7 +69,7 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", doltWarn.Message())
 		})
 	}
-	return doltBin, doltID, nil
+	return doltBin, nil
 }
 
 // sqlServerUOWTopology is everything the two unit-of-work providers need that
@@ -436,7 +440,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 	// newSQLServerUOWProvider) also lands here, a hardcoded
 	// "newProxiedServerUOWProvider" would mislabel a `bd serve` failure as a
 	// proxied-server one.
-	doltBin, _, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider")
+	doltBin, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider")
 	if err != nil {
 		return nil, err
 	}

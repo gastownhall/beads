@@ -75,7 +75,7 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// version advisory prints at most once for the command, not once per
 	// call site.
 	if in.externalConfig == nil {
-		if _, _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server"); err != nil {
+		if _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server"); err != nil {
 			return err
 		}
 	}
