@@ -835,6 +835,46 @@ func TestCLI_DepAdd_TypeBlockedByAliasGates(t *testing.T) {
 	}
 }
 
+// TestCLI_Show_SupersedesIsNotABlocker is the regression test for bd show
+// grouping every dependency type it did not name explicitly into the blocks
+// bucket. A supersedes edge printed under "DEPENDS ON" on the replaced issue
+// and "BLOCKS" on the replacement — a blocking claim that is false, since
+// supersedes takes no part in the ready-work calculation.
+func TestCLI_Show_SupersedesIsNotABlocker(t *testing.T) {
+	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
+	tmpDir := setupCLITestDB(t)
+
+	outOld := runBDInProcess(t, tmpDir, "create", "V1 spec", "-p", "1", "--json")
+	outNew := runBDInProcess(t, tmpDir, "create", "V2 spec", "-p", "1", "--json")
+
+	var oldIssue, newIssue map[string]interface{}
+	json.Unmarshal([]byte(outOld), &oldIssue)
+	json.Unmarshal([]byte(outNew), &newIssue)
+
+	oldID := oldIssue["id"].(string)
+	newID := newIssue["id"].(string)
+
+	runBDInProcess(t, tmpDir, "supersede", oldID, "--with", newID)
+
+	// `bd supersede old --with new` stores (old, new), so the replaced issue is
+	// the edge's source and names its replacement.
+	replaced := runBDInProcess(t, tmpDir, "show", oldID)
+	if !strings.Contains(replaced, "SUPERSEDED BY") {
+		t.Errorf("expected SUPERSEDED BY section on the replaced issue, got: %s", replaced)
+	}
+	if strings.Contains(replaced, "DEPENDS ON") {
+		t.Errorf("replaced issue must not claim it depends on its replacement, got: %s", replaced)
+	}
+
+	replacement := runBDInProcess(t, tmpDir, "show", newID)
+	if !strings.Contains(replacement, "SUPERSEDES") {
+		t.Errorf("expected SUPERSEDES section on the replacement, got: %s", replacement)
+	}
+	if strings.Contains(replacement, "BLOCKS") {
+		t.Errorf("replacement must not claim it blocks the issue it replaced, got: %s", replacement)
+	}
+}
+
 func TestCLI_DepRemove(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)

@@ -428,8 +428,8 @@ Examples:
 			})
 		}
 
-		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
+		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
 		return nil
 	},
 }
@@ -774,7 +774,7 @@ func printDepListEdges(anchors []issueops.AnchorEdges) error {
 			fmt.Printf("\n%s has no dependencies\n", anchor.ID)
 			continue
 		}
-		fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), anchor.ID)
+		fmt.Printf("\n%s Dependencies of %s:\n\n", ui.RenderAccent("📋"), anchor.ID)
 		for _, dep := range anchor.Edges {
 			fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
 		}
@@ -1063,7 +1063,7 @@ var depRemoveCmd = &cobra.Command{
 			})
 		}
 
-		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
+		fmt.Printf("%s Removed dependency: %s → %s\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
 		return nil
 	},

@@ -231,110 +231,20 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-
-			if len(depsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, parent, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range depsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						parent = append(parent, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(parent) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
-					for _, dep := range parent {
-						fmt.Println(formatDependencyLine("↑", dep))
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("→", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
-				}
+			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
 			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
-			if len(dependentsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, children, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range dependentsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						children = append(children, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(children) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
-					for _, dep := range children {
-						fmt.Println(formatDependencyLine("↳", dep))
-					}
-					// Epic progress summary
-					if issue.IssueType == types.TypeEpic {
-						closedCount := 0
-						for _, dep := range children {
-							if dep.Issue.Status == types.StatusClosed {
-								closedCount++
-							}
-						}
-						pct := 0
-						if len(children) > 0 {
-							pct = (closedCount * 100) / len(children)
-						}
-						if closedCount == len(children) {
-							fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
-						} else {
-							fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
-						}
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("←", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
+			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+				printDepSection(sec)
+				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
+					printEpicChildProgress(sec.Deps)
 				}
 			}
 
-			// Print deduplicated RELATED section (bidirectional links shown once)
-			if len(relatedSeen) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-				for _, dep := range relatedSeen {
-					fmt.Println(formatDependencyLine("↔", dep))
-				}
-			}
+			printRelatedSection(relatedSeen)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
