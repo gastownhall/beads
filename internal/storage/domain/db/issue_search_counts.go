@@ -59,20 +59,25 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWispsWithCounts(ctx contex
 }
 
 func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, query string, filter types.IssueFilter, wispDepsExist bool) (domain.SearchCountsPage, error) {
-	iSub, iArgs, err := r.buildUnionSubquery(query, filter, issuesFilterTables, "i")
+	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
+	window := searchWindowForFilter(filter)
+	legWindow := legWindowSQL(outerOrderBy, window)
+
+	iSub, iArgs, err := r.buildUnionSubquery(query, filter, issuesFilterTables, "i", legWindow)
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (issues): %w", err)
 	}
-	wSub, wArgs, err := r.buildUnionSubquery(query, filter, wispsFilterTables, "w")
+	wSub, wArgs, err := r.buildUnionSubquery(query, filter, wispsFilterTables, "w", legWindow)
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts (wisps): %w", err)
 	}
 
-	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
-	window := searchWindowForFilter(filter)
-
+	// EACH LEG IS PARENTHESIZED, and it is not decoration. A leg that carries
+	// its own ORDER BY and LIMIT (legWindowSQL) is a syntax error inside a bare
+	// UNION ALL — the engine reads the clause as belonging to the union — so the
+	// parentheses are what let the window be pushed down at all.
 	//nolint:gosec // G201: subqueries built from hardcoded table names and ? placeholders.
-	unionSQL := fmt.Sprintf("SELECT id, src FROM (%s UNION ALL %s) merged %s %s",
+	unionSQL := fmt.Sprintf("SELECT id, src FROM ((%s) UNION ALL (%s)) merged %s %s",
 		iSub, wSub, outerOrderBy, window.sql)
 
 	args := make([]any, 0, len(iArgs)+len(wArgs))
@@ -87,6 +92,7 @@ func (r *issueSQLRepositoryImpl) searchUnionWithCounts(ctx context.Context, quer
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("search union with counts: %w", err)
 	}
+	page.sortGoSide(filter.SortBy, filter.SortDesc)
 	hasMore, err := page.finishWindow(window)
 	if err != nil {
 		return domain.SearchCountsPage{}, err

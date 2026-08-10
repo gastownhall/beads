@@ -56,8 +56,10 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 	// it is not one — it collapses a cross-table duplicate to the canonical wisp
 	// row and answers (be-iabdi), as the union seam now does too. So a store
 	// holding one dual-resident id counts it TWICE here while the listing shows
-	// it once. `bd doctor --check=cross-table` is the detector, and
-	// `--check=validate --fix` the repair.
+	// it once. `bd doctor`'s Cross-Table Duplicates check is the detector, and
+	// `--check=validate --fix` the repair. (There is no `--check=cross-table`
+	// selector: the four the flag accepts are artifacts, conventions, pollution
+	// and validate, and the cross-table check runs in the default sweep.)
 	wispCount, wispErr := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
 	if wispErr != nil && !isTableNotExistError(wispErr) {
 		return 0, fmt.Errorf("count wisps (merge): %w", wispErr)

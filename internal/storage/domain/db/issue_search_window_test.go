@@ -23,9 +23,11 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 		limit    int
 		offset   int
 		maxRows  int
+		goSide   bool
 		wantSQL  string
 		wantSkip int
 		wantCap  int
+		wantLeg  int
 	}{
 		{
 			// The divergence this table exists for. `--limit 10 --offset 2
@@ -40,6 +42,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 4",
 			wantSkip: 2,
 			wantCap:  3,
+			wantLeg:  4,
 		},
 		{
 			// What issueops.Reader hands this seam for that same request,
@@ -52,6 +55,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 4",
 			wantSkip: 0,
 			wantCap:  3,
+			wantLeg:  4,
 		},
 		{
 			// Limit+Offset == MaxRows. The probe row must not fire a cap the
@@ -65,6 +69,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 4",
 			wantSkip: 1,
 			wantCap:  4,
+			wantLeg:  4,
 		},
 		{
 			what:     "one more row of offset, and the same request is over the cap",
@@ -74,6 +79,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 4",
 			wantSkip: 2,
 			wantCap:  3,
+			wantLeg:  4,
 		},
 		{
 			what:     "under the cap the bound is the touched window plus the probe row",
@@ -83,6 +89,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 3",
 			wantSkip: 1,
 			wantCap:  3,
+			wantLeg:  3,
 		},
 		{
 			// An unlimited page needs no widening: it already touches every
@@ -94,6 +101,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 4",
 			wantSkip: 2,
 			wantCap:  3,
+			wantLeg:  4,
 		},
 		{
 			// NO CAP, so nothing counts rows and the engine does the skipping —
@@ -106,6 +114,7 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSQL:  "LIMIT 3 OFFSET 1",
 			wantSkip: 0,
 			wantCap:  0,
+			wantLeg:  4,
 		},
 		{
 			// No LIMIT to hang an OFFSET on. MySQL has none, and the sentinel
@@ -118,9 +127,48 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			wantSkip: 1,
 			wantCap:  0,
 		},
+		{
+			// THE GO-SIDE SORT, and the case F5 was. `--sort id` renders no
+			// ORDER BY, so a LIMIT here cuts n arbitrary rows out of a
+			// two-plane concatenation. The page bound comes off entirely and
+			// the comparator upstream does the cutting.
+			what:     "a Go-side sort takes no page bound at all",
+			limit:    5,
+			offset:   0,
+			maxRows:  0,
+			goSide:   true,
+			wantSQL:  "",
+			wantSkip: 0,
+			wantCap:  0,
+			wantLeg:  0,
+		},
+		{
+			// The CAP is not waived with the page bound: an unordered scan
+			// still answers ErrTooManyRows rather than reading a workspace.
+			what:     "a Go-side sort keeps the cap's bound and pushes none of it down",
+			limit:    5,
+			offset:   0,
+			maxRows:  3,
+			goSide:   true,
+			wantSQL:  "LIMIT 4",
+			wantSkip: 0,
+			wantCap:  3,
+			wantLeg:  0,
+		},
+		{
+			what:     "a Go-side sort keeps its own offset, the way an unbounded scan does",
+			limit:    5,
+			offset:   2,
+			maxRows:  0,
+			goSide:   true,
+			wantSQL:  "",
+			wantSkip: 2,
+			wantCap:  0,
+			wantLeg:  0,
+		},
 	} {
 		t.Run(tc.what, func(t *testing.T) {
-			w := searchWindowFor(tc.limit, tc.offset, tc.maxRows, "--max-rows")
+			w := searchWindowFor(tc.limit, tc.offset, tc.maxRows, "--max-rows", tc.goSide)
 			where := fmt.Sprintf("Limit=%d Offset=%d MaxRows=%d", tc.limit, tc.offset, tc.maxRows)
 			if w.sql != tc.wantSQL {
 				t.Errorf("%s rendered %q, want %q", where, w.sql, tc.wantSQL)
@@ -130,6 +178,9 @@ func TestSearchWindowForCountsTheOffsetIntoTheCap(t *testing.T) {
 			}
 			if w.rowCap != tc.wantCap {
 				t.Errorf("%s enforces rowCap=%d, want %d", where, w.rowCap, tc.wantCap)
+			}
+			if w.legLimit != tc.wantLeg {
+				t.Errorf("%s pushes legLimit=%d into each union leg, want %d", where, w.legLimit, tc.wantLeg)
 			}
 			if w.limit != tc.limit {
 				t.Errorf("%s trims to %d, want the page the caller asked for", where, w.limit)

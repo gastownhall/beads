@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/storage/dberrors"
@@ -60,20 +61,25 @@ func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWisps(ctx context.Context,
 }
 
 func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchPage, error) {
-	iSub, iArgs, err := r.buildUnionSubquery(query, filter, issuesFilterTables, "i")
+	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
+	window := searchWindowForFilter(filter)
+	legWindow := legWindowSQL(outerOrderBy, window)
+
+	iSub, iArgs, err := r.buildUnionSubquery(query, filter, issuesFilterTables, "i", legWindow)
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union (issues): %w", err)
 	}
-	wSub, wArgs, err := r.buildUnionSubquery(query, filter, wispsFilterTables, "w")
+	wSub, wArgs, err := r.buildUnionSubquery(query, filter, wispsFilterTables, "w", legWindow)
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union (wisps): %w", err)
 	}
 
-	outerOrderBy := unionOrderBySQL(filter.SortBy, filter.SortDesc)
-	window := searchWindowForFilter(filter)
-
+	// EACH LEG IS PARENTHESIZED, and it is not decoration. A leg that carries
+	// its own ORDER BY and LIMIT (legWindowSQL) is a syntax error inside a bare
+	// UNION ALL — the engine reads the clause as belonging to the union — so the
+	// parentheses are what let the window be pushed down at all.
 	//nolint:gosec // G201: subqueries built from hardcoded table names and ? placeholders.
-	unionSQL := fmt.Sprintf("SELECT id, src FROM (%s UNION ALL %s) merged %s %s",
+	unionSQL := fmt.Sprintf("SELECT id, src FROM ((%s) UNION ALL (%s)) merged %s %s",
 		iSub, wSub, outerOrderBy, window.sql)
 
 	args := make([]any, 0, len(iArgs)+len(wArgs))
@@ -88,6 +94,7 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 	if err != nil {
 		return domain.SearchPage{}, fmt.Errorf("search union: %w", err)
 	}
+	page.sortGoSide(filter.SortBy, filter.SortDesc)
 	hasMore, err := page.finishWindow(window)
 	if err != nil {
 		return domain.SearchPage{}, err
@@ -106,7 +113,19 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 	return domain.SearchPage{Items: out, HasMore: hasMore}, nil
 }
 
-func (r *issueSQLRepositoryImpl) buildUnionSubquery(query string, filter types.IssueFilter, tables filterTables, srcTag string) (string, []any, error) {
+// buildUnionSubquery renders one leg of the wisp-inclusive UNION ALL.
+//
+// legWindow is the ORDER BY and LIMIT the leg carries, from legWindowSQL. It is
+// the leg's whole share of the caller's window, and pushing it down is sound
+// for the reason a top-N is: under a TOTAL order, a row in the union's top-N is
+// in its own leg's top-N too, because anything ahead of it in its leg is ahead
+// of it globally. Every ORDER BY sqlbuild renders ends in `id ASC`, so the
+// order is total and there are no ties for the bound to break arbitrarily.
+//
+// It is empty when the sort has no SQL ORDER BY, and that is not a missed case:
+// a LIMIT on an UNORDERED leg is the bug this exists to remove, one level
+// further down and harder to see.
+func (r *issueSQLRepositoryImpl) buildUnionSubquery(query string, filter types.IssueFilter, tables filterTables, srcTag, legWindow string) (string, []any, error) {
 	plan := buildLabelDrivenSearch(filter, tables)
 	whereClauses, args, err := buildIssueFilterClauses(query, plan.Filter, tables)
 	if err != nil {
@@ -121,10 +140,31 @@ func (r *issueSQLRepositoryImpl) buildUnionSubquery(query string, filter types.I
 	if plan.Distinct {
 		selectKw = "SELECT DISTINCT"
 	}
-	//nolint:gosec // G201: srcTag is a hardcoded 'i' or 'w'; fromSQL/whereSQL composed from fixed table names and ? placeholders.
-	sub := fmt.Sprintf("%s id, '%s' AS src, %s FROM %s %s",
-		selectKw, srcTag, unionSortColumnsSQL, plan.FromSQL, whereSQL)
+	//nolint:gosec // G201: srcTag is a hardcoded 'i' or 'w'; fromSQL/whereSQL/legWindow composed from fixed table names, sort aliases and ? placeholders.
+	sub := fmt.Sprintf("%s id, '%s' AS src, %s FROM %s %s %s",
+		selectKw, srcTag, unionSortColumnsSQL, plan.FromSQL, whereSQL, legWindow)
 	return sub, args, nil
+}
+
+// legWindowSQL is the window each UNION leg carries: the SAME ordering the
+// outer query applies, plus the deepest row index that outer query can reach.
+//
+// THE ORDER CLAUSE IS REUSED VERBATIM rather than rebuilt, and that is what
+// makes the bound safe. unionOrderBySQL names `id` and the `sort_*` aliases,
+// both of which every leg projects, so one string is valid in both positions
+// and the leg cannot come to rest in a different order than the one the outer
+// query is about to cut against.
+//
+// legLimit is the outer bound PLUS any offset the engine carries, because those
+// are rows the outer query reads and discards — a leg cut to the page size
+// alone would starve an offset page of exactly the rows it was going to skip
+// past. An offset this package keeps for itself (the capped case) is already
+// inside the bound.
+func legWindowSQL(outerOrderBy string, w searchWindow) string {
+	if outerOrderBy == "" || w.legLimit <= 0 {
+		return ""
+	}
+	return fmt.Sprintf("%s LIMIT %d", outerOrderBy, w.legLimit)
 }
 
 func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []string, tables filterTables, filter types.IssueFilter) (map[string]*types.Issue, error) {
@@ -445,11 +485,18 @@ type idSrcPage struct {
 // canonical. And its own check text names the hard failure as the damage:
 // "stale issues-table copies break every lookup for the affected IDs".
 //
-// So the durable row is dropped wherever it sits and the wisp row is kept at
-// its own position, which is the page the per-table seam produces for the same
-// data. A page can come back one row short of its limit when this fires; that
-// is a corrupt row being withheld, not a paging bug, and the repair is a doctor
-// run.
+// So the durable row is dropped and the wisp row is kept at its own position,
+// which is the page the per-table seam produces for the same data. A page can
+// come back one row short of its limit when this fires; that is a corrupt row
+// being withheld, not a paging bug, and the repair is a doctor run.
+//
+// THE DROP REACHES ONLY THE SCANNED WINDOW, which is narrower than "wherever it
+// sits" — the phrase this used to use. Both copies have to be inside the rows
+// this query returned for the shadow to be seen at all, and under a bounded
+// search they need not be: legs carry the outer bound now (legWindowSQL), so a
+// durable copy inside the window whose wisp twin ranks past it survives the
+// scan and is reported. That is a corrupt store answering approximately, not a
+// second bug; the detector is `bd doctor`, not this loop.
 func scanIDSrcPage(rows *sql.Rows) (idSrcPage, error) {
 	defer func() { _ = rows.Close() }()
 
@@ -520,6 +567,49 @@ func reassembleBySrc[T comparable](ordered []idSrcRef, issues, wisps map[string]
 		}
 	}
 	return out
+}
+
+// sortGoSide establishes the order for a sort key SQL renders no ORDER BY for,
+// BEFORE finishWindow's trim decides which rows the page keeps.
+//
+// It is the union seam's copy of issueops.sortMergedResults, and it exists for
+// the identical reason that one gives: "a concatenation of two independently-
+// ordered legs" trimmed without a re-sort "keeps an arbitrary prefix of the
+// concatenation" rather than the top-n. Under a Go-side sort the legs are not
+// merely independently ordered, they are UNORDERED — searchWindowFor pushes no
+// bound in that case precisely so the whole matching set arrives here — and
+// this is where the requested order first exists.
+//
+// The only such key is "id", and the id is on the ref already, so no row has to
+// be hydrated to be placed. The comparison is the byte order SQL would apply
+// and the byte order sqlbuild.Less applies for this key; the natural-numeric
+// order a human reads (bd-9 before bd-10) is applied above, on the delivered
+// page, by workapi.CompareIssuesBy. This decides MEMBERSHIP; that decides
+// DISPLAY.
+//
+// It honors sortDesc, which sqlbuild.Less does not for this key — the per-table
+// seam therefore answers a reversed id page with the byte-FIRST rows. That is a
+// live sibling bug, named here rather than mirrored.
+func (p *idSrcPage) sortGoSide(sortBy string, sortDesc bool) {
+	if !sqlbuild.IsGoSideSort(sortBy) || len(p.ordered) <= 1 {
+		return
+	}
+	sort.SliceStable(p.ordered, func(i, j int) bool {
+		if sortDesc {
+			return p.ordered[i].id > p.ordered[j].id
+		}
+		return p.ordered[i].id < p.ordered[j].id
+	})
+	p.issueIDs = p.issueIDs[:0]
+	p.wispIDs = p.wispIDs[:0]
+	for _, r := range p.ordered {
+		switch r.src {
+		case "i":
+			p.issueIDs = append(p.issueIDs, r.id)
+		case "w":
+			p.wispIDs = append(p.wispIDs, r.id)
+		}
+	}
 }
 
 // finishWindow is finishWindow's shape for a merged id page: the same cap,
@@ -609,16 +699,48 @@ type searchWindow struct {
 	// row moves it by one.
 	rowCap    int
 	capSource string
+	// legLimit is the deepest row index the outer query can reach, and so the
+	// bound each UNION leg may carry. 0 means the legs stay unbounded, either
+	// because the search is unbounded or because its order is not one SQL can
+	// express — see legWindowSQL.
+	legLimit int
 }
 
-func searchWindowFor(limit, offset, maxRows int, maxRowsSource string) searchWindow {
+// searchWindowFor sizes one search's window. goSideSort reports a sort key SQL
+// renders no ORDER BY for (sqlbuild.IsGoSideSort — "id", which needs the
+// natural-numeric comparison that puts bd-9 before bd-10).
+//
+// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS, and
+// that is the whole of what goSideSort changes here. A LIMIT with no ORDER BY
+// does not return the first n rows; it returns n rows. Measured on a two-plane
+// store with ids interleaved across the planes, `--sort id --limit 5` answered
+// with five DURABLE rows and no wisp at all — a page whose order was right, and
+// whose membership silently excluded an entire plane.
+//
+// So a Go-side sort takes the same window internal/workapi.SQLLimit gives the
+// reader role for the same reason: none. The query returns the complete
+// matching set, the comparator that can express the order runs over it, and
+// FinishPageAt's cut is the only thing bounding the page — "this is where the
+// requested order first exists", as its doc says. The CAP is not waived with
+// it: maxRows still sizes a bound, so a Go-side sort over a set too large to
+// order in memory reports ErrTooManyRows instead of scanning the workspace.
+//
+// The cost is stated rather than absorbed: a caller combining `--sort id` with
+// a small limit and NO cap now reads every matching row where it used to read
+// limit+1. It read the wrong ones, and the reader role has always paid this
+// price on the same query.
+func searchWindowFor(limit, offset, maxRows int, maxRowsSource string, goSideSort bool) searchWindow {
 	// The window the cap is sized against is the one the query TOUCHES, so a
 	// skip this package keeps has to be inside the bound. An unbounded limit
 	// already carries every matching row and needs no widening — the same two
 	// lines WithRowsBeforeThePage runs on the filter for the other seam.
+	pageLimit := limit
+	if goSideSort {
+		pageLimit = 0
+	}
 	skipHere := maxRows > 0 && offset > 0
-	touched := limit
-	if skipHere && limit > 0 {
+	touched := pageLimit
+	if skipHere && pageLimit > 0 {
 		touched += offset
 	}
 	bound, rowCap := issueops.SearchProbeLimit(touched, maxRows)
@@ -628,20 +750,33 @@ func searchWindowFor(limit, offset, maxRows int, maxRowsSource string) searchWin
 		w.skip = offset
 	case skipHere:
 		w.skip, w.sql = offset, fmt.Sprintf("LIMIT %d", bound)
+		w.legLimit = bound
 	case offset > 0:
 		w.sql = fmt.Sprintf("LIMIT %d OFFSET %d", bound, offset)
+		w.legLimit = bound + offset
 	default:
 		w.sql = fmt.Sprintf("LIMIT %d", bound)
+		w.legLimit = bound
+	}
+	if goSideSort {
+		// The bound that survives above is the CAP's, not the page's, and a cap
+		// is a defensive ceiling on an unordered scan rather than a top-n. It
+		// stays on the outer query, where trimming it is the caller's error;
+		// it must not become a leg's idea of which rows matter.
+		w.legLimit = 0
 	}
 	return w
 }
 
 func searchWindowForFilter(filter types.IssueFilter) searchWindow {
-	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource)
+	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource, sqlbuild.IsGoSideSort(filter.SortBy))
 }
 
+// readyWindowForFilter sizes the ready query's window. types.WorkFilter carries
+// no sort key — ready has one policy order, which SQL renders — so no Go-side
+// sort is reachable here.
 func readyWindowForFilter(filter types.WorkFilter) searchWindow {
-	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource)
+	return searchWindowFor(filter.Limit, filter.Offset, filter.MaxRows, filter.MaxRowsSource, false)
 }
 
 // finishWindow is the Go half of a window: the defensive cap against what the
