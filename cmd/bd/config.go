@@ -168,7 +168,7 @@ var configSetCmd = &cobra.Command{
 			location := "config.yaml"
 			if config.IsUserGlobalKey(key) {
 				setErr = config.SetUserYamlConfig(key, value)
-				location = config.UserConfigYamlPath()
+				location = config.UserConfigYamlDisplayPath()
 			} else {
 				setErr = config.SetYamlConfig(key, value)
 			}
@@ -307,7 +307,7 @@ var configGetCmd = &cobra.Command{
 			// opposite of what `bd metrics` actually honors.
 			if config.IsUserGlobalKey(key) {
 				value := config.GetUserYamlConfig(key)
-				location := config.UserConfigYamlPath()
+				location := config.UserConfigYamlDisplayPath()
 				if jsonOutput {
 					return outputJSON(map[string]interface{}{
 						"key":      key,
@@ -571,7 +571,7 @@ var configUnsetCmd = &cobra.Command{
 			var unsetErr error
 			if config.IsUserGlobalKey(key) {
 				unsetErr = config.UnsetUserYamlConfig(key)
-				location = config.UserConfigYamlPath()
+				location = config.UserConfigYamlDisplayPath()
 			} else {
 				unsetErr = config.UnsetYamlConfig(key)
 			}
@@ -927,7 +927,7 @@ Examples:
 			for _, p := range pairs {
 				location := "database"
 				if config.IsUserGlobalKey(p.key) {
-					location = config.UserConfigYamlPath()
+					location = config.UserConfigYamlDisplayPath()
 				} else if config.IsYamlOnlyKey(p.key) {
 					location = "config.yaml"
 				} else if p.key == "beads.role" {
@@ -946,7 +946,7 @@ Examples:
 			for _, p := range pairs {
 				location := ""
 				if config.IsUserGlobalKey(p.key) {
-					location = fmt.Sprintf(" (in %s)", config.UserConfigYamlPath())
+					location = fmt.Sprintf(" (in %s)", config.UserConfigYamlDisplayPath())
 				} else if config.IsYamlOnlyKey(p.key) {
 					location = " (in config.yaml)"
 				} else if p.key == "beads.role" {

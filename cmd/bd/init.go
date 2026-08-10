@@ -741,7 +741,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				return fmt.Errorf("%s set via %s but server mode is not enabled.\n"+
 					"  Embedded mode has no host/port — these settings require server mode.\n"+
 					"  Set dolt.mode: server in %s or pass --server to bd init.",
-					detail, conflict.source, config.UserConfigYamlPath())
+					detail, conflict.source, config.UserConfigYamlDisplayPath())
 			}
 		}
 
