@@ -1333,6 +1333,57 @@ func RunReaderGetOptionalRowListsAreOffByDefault(t *testing.T, ctx context.Conte
 	}
 }
 
+// RunReaderGetBriefDepsProjectsTheDependencyRows pins BriefDeps on the public
+// Get contract (#5546). Without a case here an out-of-tree Reader can ignore
+// the field and still pass the suite, which is the failure the sibling row
+// options already have a case against.
+func RunReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T, ctx context.Context, fixture ReaderFixture) {
+	t.Helper()
+	subject := readerID(fixture, "briefdeps", "subject")
+	blocker := readerID(fixture, "briefdeps", "blocker")
+	const heavy = "the free-form body a brief projection is meant to drop"
+
+	seedReaderIssue(t, ctx, fixture, readerIssue(subject, types.TypeTask, ""))
+	blockerIssue := readerIssue(blocker, types.TypeTask, "")
+	blockerIssue.Description = heavy
+	blockerIssue.Notes = heavy
+	seedReaderIssue(t, ctx, fixture, blockerIssue)
+	if err := fixture.AddDependency(ctx, &types.Dependency{
+		IssueID: subject, DependsOnID: blocker, Type: types.DepBlocks,
+	}, "seed"); err != nil {
+		t.Fatalf("seed the outgoing edge: %v", err)
+	}
+
+	details, err := fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject})
+	if err != nil {
+		t.Fatalf("Get with BriefDeps off: %v", err)
+	}
+	if len(details.Dependencies) != 1 {
+		t.Fatalf("Get returned %d dependency rows, want 1", len(details.Dependencies))
+	}
+	if got := details.Dependencies[0]; got.Description != heavy || got.Notes != heavy {
+		t.Errorf("BriefDeps off must return the full body, got description=%d notes=%d",
+			len(got.Description), len(got.Notes))
+	}
+
+	details, err = fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject, BriefDeps: true})
+	if err != nil {
+		t.Fatalf("Get with BriefDeps on: %v", err)
+	}
+	if len(details.Dependencies) != 1 {
+		t.Fatalf("BriefDeps returned %d dependency rows, want 1", len(details.Dependencies))
+	}
+	got := details.Dependencies[0]
+	if got.ID != blocker || got.Status != types.StatusOpen || got.IssueType != types.TypeTask ||
+		got.Priority != 2 || got.DependencyType != types.DepBlocks {
+		t.Errorf("BriefDeps dropped an identity field: %+v", got)
+	}
+	if got.Description != "" || got.Design != "" || got.Notes != "" || got.AcceptanceCriteria != "" {
+		t.Errorf("BriefDeps left free-form text on the row: %+v", got)
+	}
+	assertReaderCount(t, "DependencyCount under BriefDeps", details.DependencyCount, 1)
+}
+
 // RunReaderGetDetailShapeMatchesTheSeededIssue pins the shape of the detail view
 // against what was actually stored (reader.go:15, reader.go:364-369): the
 // issue's own fields, its labels, its OUTGOING edges with their types, and the

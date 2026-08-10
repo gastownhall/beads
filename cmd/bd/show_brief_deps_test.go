@@ -21,8 +21,10 @@ func TestShowBriefDepsFlag(t *testing.T) {
 		if err := showCmd.Flags().Set("brief-deps", v); err != nil {
 			t.Fatalf("set brief-deps=%s: %v", v, err)
 		}
+		// pflag.Set leaves Changed true, which outlives the value reset.
 		t.Cleanup(func() {
 			_ = showCmd.Flags().Set("brief-deps", "false")
+			showCmd.Flags().Lookup("brief-deps").Changed = false
 		})
 	}
 

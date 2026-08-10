@@ -518,3 +518,21 @@ func TestListIssuesRowsCarryNoRevision(t *testing.T) {
 		}
 	}
 }
+
+// TestGetIssueBriefDepsReachesTheRequest is the HTTP half of #5546. The CLI and
+// this handler build GetRequest separately, so wiring one leaves the field
+// unreachable from the other.
+func TestGetIssueBriefDepsReachesTheRequest(t *testing.T) {
+	ts, rd := newGetIssueServer(t)
+
+	if resp := ts.get(t, "/v0/beads/issues/bd-1?brief_deps=true"); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	reqs := rd.getRequests()
+	if len(reqs) != 1 {
+		t.Fatalf("%d detail reads, want 1", len(reqs))
+	}
+	if want := (issueops.GetRequest{ID: "bd-1", BriefDeps: true}); reqs[0] != want {
+		t.Errorf("GetRequest = %+v, want %+v", reqs[0], want)
+	}
+}

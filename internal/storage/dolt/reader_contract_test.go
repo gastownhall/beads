@@ -150,6 +150,7 @@ func TestReaderGetOptionalRowListsAreOffByDefault(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
 	conformance.RunReaderGetOptionalRowListsAreOffByDefault(t, ctx, fixture)
+	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
 }
 
 func TestReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {

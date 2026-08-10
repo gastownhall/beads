@@ -149,6 +149,7 @@ func TestEmbeddedReaderGetOptionalRowListsAreOffByDefault(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 	conformance.RunReaderGetOptionalRowListsAreOffByDefault(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
+	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, newEmbeddedReaderFixture(t, "rdr"))
 }
 
 func TestEmbeddedReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {

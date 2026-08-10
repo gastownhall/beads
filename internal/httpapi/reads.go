@@ -465,6 +465,7 @@ func (s *Server) handleGetIssue(w http.ResponseWriter, r *http.Request) {
 	req := issueops.GetRequest{
 		IncludeComments:   q.boolean("include_comments"),
 		IncludeDependents: q.boolean("include_dependents"),
+		BriefDeps:         q.boolean("brief_deps"),
 	}
 
 	// Before the id bound, which is the order this operation had when

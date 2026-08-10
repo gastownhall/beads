@@ -2106,6 +2106,9 @@ type GetIssueParams struct {
 
 	// IncludeDependents Populate `dependents` with the issues that depend on this one, each carrying its edge type — the shape `dependencies` already carries. Default false, for `include_comments`'s reason.
 	IncludeDependents *bool `form:"include_dependents,omitempty" json:"include_dependents,omitempty"`
+
+	// BriefDeps Reduce each row in `dependencies` to its identity-and-shape fields (`id`, `title`, `status`, `issue_type`, `priority`, `dependency_type`), dropping `description`, `design`, `notes` and `acceptance_criteria`. Default false, so the payload is unchanged for a client that does not ask.
+	BriefDeps *bool `form:"brief_deps,omitempty" json:"brief_deps,omitempty"`
 }
 
 // ListRelatedIssuesParams defines parameters for ListRelatedIssues.

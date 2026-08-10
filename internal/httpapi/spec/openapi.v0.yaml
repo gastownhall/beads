@@ -1959,6 +1959,17 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: brief_deps
+          in: query
+          description: >-
+            Reduce each row in `dependencies` to its identity-and-shape fields
+            (`id`, `title`, `status`, `issue_type`, `priority`,
+            `dependency_type`), dropping `description`, `design`, `notes` and
+            `acceptance_criteria`. Default false, so the payload is unchanged
+            for a client that does not ask.
+          schema:
+            type: boolean
+            default: false
       security:
         - bearerToken: []
       responses:
