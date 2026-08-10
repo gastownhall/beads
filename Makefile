@@ -306,17 +306,17 @@ endif
 # Also creates 'beads' symlink as an alias for bd
 # Use install-force to skip the origin/main update check
 install install-force: build
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@rm -f $(INSTALL_DIR)/bd $(INSTALL_DIR)/bd.exe
-	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
+	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/bd.exe"
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@rm -f $(INSTALL_DIR)/bd
-	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/bd
+	@rm -f "$(INSTALL_DIR)/bd"
+	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/bd"
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
-	@rm -f $(INSTALL_DIR)/beads
-	@ln -s bd $(INSTALL_DIR)/beads
+	@rm -f "$(INSTALL_DIR)/beads"
+	@ln -s bd "$(INSTALL_DIR)/beads"
 	@echo "Created 'beads' alias -> bd"
 endif
 	@git config core.hooksPath .githooks 2>/dev/null && echo "Configured git hooks (.githooks/)" || true

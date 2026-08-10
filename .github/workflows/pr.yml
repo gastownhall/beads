@@ -1025,6 +1025,82 @@ jobs:
             throw 'Native Make shell smoke failed'
           }
 
+          function Get-TreeManifest {
+            param([Parameter(Mandatory)][string]$Root)
+
+            @(
+              Get-ChildItem -LiteralPath $Root -Recurse -Force | ForEach-Object {
+                $relative = [IO.Path]::GetRelativePath($Root, $_.FullName).Replace('\', '/')
+                if ($_.PSIsContainer) {
+                  "D $relative"
+                } else {
+                  $hash = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+                  "F $relative $hash"
+                }
+              }
+            ) | Sort-Object
+          }
+
+          $proofRoot = Join-Path $env:RUNNER_TEMP ("make install proof " + [guid]::NewGuid().ToString('N'))
+          $fixtureRepo = Join-Path $proofRoot 'fixture repo'
+          $buildDir = Join-Path $fixtureRepo 'build output'
+          $installRoot = Join-Path $proofRoot 'install sandbox'
+          $installProfile = Join-Path $installRoot 'profile with spaces'
+          New-Item -ItemType Directory -Force -Path $buildDir, $installProfile | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Makefile') -Destination $fixtureRepo
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'go.mod') -Destination $fixtureRepo
+
+          $sentinel = Join-Path $buildDir 'bd.exe'
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel'
+          $sentinelHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+
+          & $git -C $fixtureRepo init --quiet
+          & $git -C $fixtureRepo config core.hooksPath .githooks
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not initialize the isolated install fixture repository'
+          }
+          & $git -C $fixtureRepo -c user.name=install-proof -c user.email=install-proof@example.invalid `
+            -c commit.gpgsign=false commit --allow-empty --quiet -m 'Initialize install proof'
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Could not commit the isolated install fixture repository'
+          }
+          $fixtureBefore = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $installProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed for a spaced USERPROFILE'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $installed = Join-Path $installProfile '.local\bin\bd.exe'
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw "Native Make did not install bd.exe at the exact destination '$installed'"
+          }
+          if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $sentinelHash) {
+            throw 'Native Make installed bd.exe with unexpected contents'
+          }
+
+          $expectedInstall = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            "F profile with spaces/.local/bin/bd.exe $sentinelHash"
+          ) | Sort-Object
+          $actualInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedInstall -DifferenceObject $actualInstall) {
+            throw "Native Make changed paths outside the exact install destination:`n$($actualInstall -join "`n")"
+          }
+
+          $fixtureAfter = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfter) {
+            throw 'Native Make split the spaced install path or otherwise mutated the fixture repository'
+          }
+
       - name: Exercise MSYS2-hosted Make
         if: matrix.host == 'msys2'
         shell: msys2 {0}
