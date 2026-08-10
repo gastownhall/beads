@@ -464,6 +464,19 @@ covers both beads' own work and your entire hook pipeline.
 export BEADS_HOOK_TIMEOUT=600  # 10 minutes (in seconds)
 ```
 
+The value must be a positive whole number of seconds. Invalid values and zero
+warn and fall back to 300 seconds. Beads accepts `timeout` or `gtimeout` only
+when a successful version probe identifies GNU coreutils; native Windows
+`timeout.exe` is not compatible. If neither GNU timeout nor Perl is available,
+the hook warns that it is running directly without a deadline.
+
+GNU timeout sends `TERM`; on POSIX hosts, Perl's alarm applies to the direct
+`bd` process. Git for Windows Perl does not guarantee that alarm across
+`exec`, so GNU coreutils is preferred there. TERM-resistant work and
+descendant processes are not guaranteed to stop. After upgrading from a
+version with the name-only timeout check, run `bd hooks install` once to
+refresh existing canonical sections.
+
 ### Permission denied on git hooks
 
 Git hooks need execute permissions:

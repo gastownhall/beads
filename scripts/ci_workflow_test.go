@@ -165,6 +165,38 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresGeneratedHookTimeoutProcessBoundary(t *testing.T) {
+	const (
+		jobName     = "pr-preflight-platforms"
+		stepName    = "Exercise generated Git hook timeout process boundary"
+		stepCommand = "go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd"
+		gateKey     = "PR_PREFLIGHT_PLATFORMS"
+	)
+
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.RunsOn != "${{ matrix.os }}" || !equalStrings(job.Strategy.Matrix.OS, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+		t.Errorf("generated-hook process job is not the required three-host matrix: runs-on=%q os=%v", job.RunsOn, job.Strategy.Matrix.OS)
+	}
+	if job.TimeoutMinutes != 20 {
+		t.Errorf("generated-hook process job timeout = %d minutes, want 20", job.TimeoutMinutes)
+	}
+	step := job.step(t, stepName)
+	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) || step.Shell != "bash" || step.Run != stepCommand {
+		t.Errorf("generated-hook process step is not required exact Bash execution: if=%q continue-on-error=%v shell=%q run=%q",
+			step.If, step.ContinueOnError, step.Shell, step.Run)
+	}
+	assertStepsBefore(t, job, []string{"Restore Go module cache"}, []string{stepName})
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, jobName) || gateEnv[gateKey] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate does not require the three-host generated-hook lane: needs=%v %s=%q required=%q",
+			gate.Needs, gateKey, gateEnv[gateKey], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
 		storageTimeoutMinutes     = 15
@@ -273,8 +305,8 @@ func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) 
 	if job.RunsOn != "${{ matrix.os }}" {
 		t.Errorf("pr-preflight-platforms runs-on = %q, want matrix.os", job.RunsOn)
 	}
-	if job.If != "" || job.TimeoutMinutes != 10 {
-		t.Errorf("pr-preflight-platforms condition/timeout = %q/%d, want unconditional/10",
+	if job.If != "" || job.TimeoutMinutes != 20 {
+		t.Errorf("pr-preflight-platforms condition/timeout = %q/%d, want unconditional/20",
 			job.If, job.TimeoutMinutes)
 	}
 	if got := job.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {

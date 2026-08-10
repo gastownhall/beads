@@ -399,7 +399,7 @@ jobs:
   pr-preflight-platforms:
     name: PR preflight process (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -428,6 +428,10 @@ jobs:
       - name: Exercise test.sh prebuilt binary path
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
+
+      - name: Exercise generated Git hook timeout process boundary
+        shell: bash
+        run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
