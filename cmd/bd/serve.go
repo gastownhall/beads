@@ -618,6 +618,52 @@ func errServeEmbedded() error {
 		&storage.ErrUnsupported{Op: "serve", Backend: "embedded-dolt"})
 }
 
+// serveRoleSource is the surface serveIssueRoles reaches on the store, spelled
+// out rather than taken as a whole storage.DoltStorage.
+//
+// THE POINT IS THE TEST STUBS. A stub that stands in for a store has to satisfy
+// whatever this function asks for, and the only affordable way to satisfy a
+// hundred-method interface is to embed it and leave it nil — which answers every
+// accessor the stub forgot with a promoted method on a nil interface. That is a
+// segfault inside the loop below rather than a compile error, and it has landed
+// twice: once on GraphCounter in serve_source_test.go, and once on the same role
+// in serve_store_identity_test.go, where no local -run pattern named the test
+// and only a full-package CI shard found it.
+//
+// Named narrowly, a stub can DECLARE this set and assert it, so the next role
+// added to the loop below is a build failure in the file that has to grow a
+// method — with the method's name in the error.
+//
+// A whole store is one of these, which is what the assertion beneath it pins:
+// the production call site passes exactly what it always did.
+type serveRoleSource interface {
+	IssueReader() (issueops.Reader, error)
+	IssueClaimer() (issueops.Claimer, error)
+	BatchCloser() (issueops.BatchCloser, error)
+	ReadyClaimer() (issueops.ReadyClaimer, error)
+	Releaser() (issueops.Releaser, error)
+	IssueLifecycle() (issueops.Lifecycle, error)
+	WorkspaceConfig() (issueops.WorkspaceConfig, error)
+	StatsReporter() (issueops.StatsReporter, error)
+	CycleDetector() (issueops.CycleDetector, error)
+	EdgeReader() (issueops.EdgeReader, error)
+	GraphCounter() (issueops.GraphCounter, error)
+	BlockingAnnotator() (issueops.BlockingAnnotator, error)
+	TreeWalker() (issueops.TreeWalker, error)
+	ReadyCounter() (issueops.ReadyCounter, error)
+	Counter() (issueops.Counter, error)
+	Querier() (issueops.Querier, error)
+	Sweeper() (issueops.Sweeper, error)
+	Deleter() (issueops.Deleter, error)
+	BatchCreator() (issueops.BatchCreator, error)
+	DependencyEditor() (issueops.DependencyEditor, error)
+	MetadataCAS() (issueops.MetadataCAS, error)
+	BatchApplier() (issueops.BatchApplier, error)
+	Memories() (memoryops.Memories, error)
+}
+
+var _ serveRoleSource = storage.DoltStorage(nil)
+
 // serveIssueRoles takes the roles this server answers from off the store the
 // root command already opened.
 //
@@ -637,7 +683,7 @@ func errServeEmbedded() error {
 // It returns the WHOLE set httpapi.Config requires; Listen refuses a partial
 // set (see checkDatabaseSource), so a role missing here is a startup failure
 // rather than a nil dereference on the first request that reaches it.
-func serveIssueRoles(src storage.DoltStorage, journalEnabled bool) (serveRoles, error) {
+func serveIssueRoles(src serveRoleSource, journalEnabled bool) (serveRoles, error) {
 	var roles serveRoles
 	if src == nil {
 		// A set of nil roles would reach Listen as "no database source" —
@@ -686,7 +732,7 @@ func serveIssueRoles(src storage.DoltStorage, journalEnabled bool) (serveRoles, 
 			// assertion has to reach the concrete store or it finds nothing at
 			// all. Nothing is skipped by going the whole way: there is no
 			// journal decorator to peel past.
-			cursor, ok := storage.UnwrapStore(src).(storage.EventsJournalCursor)
+			cursor, ok := serveJournalCursor(src)
 			if ok {
 				roles.eventsJournal = cursor
 				return nil
@@ -708,6 +754,19 @@ func serveIssueRoles(src storage.DoltStorage, journalEnabled bool) (serveRoles, 
 		}
 	}
 	return roles, nil
+}
+
+// serveJournalCursor is storage.UnwrapStore reached from serveRoleSource, which
+// is narrower than the whole store UnwrapStore takes. A source that is not a
+// store has no decorator to peel — the test stubs are exactly that — so it is
+// asked for the seam as it stands.
+func serveJournalCursor(src serveRoleSource) (storage.EventsJournalCursor, bool) {
+	raw := any(src)
+	if store, ok := src.(storage.DoltStorage); ok {
+		raw = storage.UnwrapStore(store)
+	}
+	cursor, ok := raw.(storage.EventsJournalCursor)
+	return cursor, ok
 }
 
 // serveRoles is the store-shaped database source, assembled once before Listen.

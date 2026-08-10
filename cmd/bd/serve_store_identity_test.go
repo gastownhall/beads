@@ -44,7 +44,9 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 
 	var opens atomic.Int64
 	open := func(context.Context, string) (storage.DoltStorage, error) {
-		return &serveIdentityStore{id: fmt.Sprintf("store-%d", opens.Add(1))}, nil
+		return &serveIdentityDoltStore{
+			serveIdentityStore: &serveIdentityStore{id: fmt.Sprintf("store-%d", opens.Add(1))},
+		}, nil
 	}
 	backends.Register(name, backends.Backend{
 		Open:                open,
@@ -115,7 +117,7 @@ func TestServeAnswersFromTheStoreTheRootCommandOpened(t *testing.T) {
 
 // openRegisteredStoreForTest opens the workspace the way PersistentPreRunE
 // does: through the registry, by name, with no knowledge of what is behind it.
-func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIdentityStore, error) {
+func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIdentityDoltStore, error) {
 	t.Helper()
 	backend, ok := backends.Lookup(name)
 	if !ok {
@@ -125,7 +127,7 @@ func openRegisteredStoreForTest(t *testing.T, name, beadsDir string) (*serveIden
 	if err != nil {
 		return nil, err
 	}
-	identified, ok := opened.(*serveIdentityStore)
+	identified, ok := opened.(*serveIdentityDoltStore)
 	if !ok {
 		t.Fatalf("the registry returned %T, not the identified store this test reads by name", opened)
 	}
@@ -155,12 +157,26 @@ func getBody(t *testing.T, url string) string {
 // identity of the value the server was wired to is a substring of the response
 // rather than something a test has to reach inside the server to inspect.
 //
-// The embedded DoltStorage is nil: nothing on this path calls anything else, and
-// a nil-panic naming the method would be a truer failure than a stub that
-// answered.
+// IT EMBEDS NOTHING, and the assertion below is why. This stub used to embed a
+// nil storage.DoltStorage, so a role it had not declared arrived as a promoted
+// method on a nil interface — GraphCounter did, and it surfaced as a segfault on
+// a full-package CI shard rather than as a compile error, because no -run
+// pattern anyone reached for names this test. Declaring the whole of
+// serveRoleSource makes the next role a build failure here.
 type serveIdentityStore struct {
-	storage.DoltStorage
 	id string
+}
+
+var _ serveRoleSource = (*serveIdentityStore)(nil)
+
+// serveIdentityDoltStore is what the registry hands back, because
+// backends.Backend.Open returns a whole storage.DoltStorage. The roles above sit
+// one embed shallower than the nil store in serveStubRest and so shadow it:
+// nothing on this path calls anything else, and a nil panic naming the method
+// would be a truer failure than a stub that answered.
+type serveIdentityDoltStore struct {
+	*serveIdentityStore
+	serveStubRest
 }
 
 func (s *serveIdentityStore) IssueReader() (issueops.Reader, error) {

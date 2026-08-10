@@ -404,10 +404,10 @@ func TestServeRefusesStrictReadonlyOnARegisteredBackend(t *testing.T) {
 		// is what sends the root command down OpenReadOnly, and that is the
 		// posture under test.
 		Open: func(context.Context, string) (storage.DoltStorage, error) {
-			return &serveIdentityStore{id: "read-write"}, nil
+			return &serveIdentityDoltStore{serveIdentityStore: &serveIdentityStore{id: "read-write"}}, nil
 		},
 		OpenReadOnly: func(context.Context, string) (storage.DoltStorage, error) {
-			return &serveIdentityStore{id: "read-only"}, nil
+			return &serveIdentityDoltStore{serveIdentityStore: &serveIdentityStore{id: "read-only"}}, nil
 		},
 		WorkspaceIsBeadsDir: true,
 	})

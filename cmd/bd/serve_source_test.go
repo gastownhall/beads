@@ -92,8 +92,8 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 	// peeling all of them (storage.UnwrapStore) is the mistake that looks
 	// identical on a single-layer chain. The middle store stands in for the
 	// telemetry layer bd wires there, which is an Unwrapper too.
-	stubs := func(inner storage.DoltStorage) *serveRolesStore {
-		return &serveRolesStore{
+	stubs := func(inner storage.DoltStorage) *serveRolesDoltStore {
+		return &serveRolesDoltStore{serveRolesStore: &serveRolesStore{
 			reader:       &serveStubReader{},
 			claimer:      &serveStubClaimer{},
 			batchCloser:  &serveStubBatchCloser{},
@@ -106,7 +106,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 			counter:      &serveStubCounter{},
 			edgeCounter:  &serveStubGraphCounter{},
 			inner:        inner,
-		}
+		}}
 	}
 	inner := stubs(nil)
 	middle := stubs(inner)
@@ -326,11 +326,16 @@ func writeBrokenBeadsConfig(t *testing.T, beadsDir string) {
 	}
 }
 
-// serveRolesStore is the smallest DoltStorage the role extraction can be
-// pointed at: it publishes its own roles and unwraps to an inner store with
-// different ones, so a peel of the wrong depth lands on identifiably wrong
-// values. The embedded DoltStorage is nil, so an accessor serveIssueRoles
-// starts calling without a stub here panics rather than passing quietly.
+// serveRolesStore is the smallest source the role extraction can be pointed at:
+// it publishes its own roles and unwraps to an inner store with different ones,
+// so a peel of the wrong depth lands on identifiably wrong values.
+//
+// IT EMBEDS NOTHING, and the assertion below is why. A stub that embedded a nil
+// storage.DoltStorage would answer every accessor it forgot with a promoted
+// method on a nil interface — a segfault inside serveIssueRoles rather than a
+// compile error, which is how GraphCounter reached this file. Declaring the
+// whole of serveRoleSource means the next role added there stops the build here,
+// naming the method.
 //
 // Only the reader and the claimer carry identifiable values. That is enough to
 // pin the peel DEPTH, which is the whole property under test: serveIssueRoles
@@ -338,7 +343,6 @@ func writeBrokenBeadsConfig(t *testing.T, beadsDir string) {
 // can come from a different layer than these two did. The rest return nil
 // because the extraction does not inspect them.
 type serveRolesStore struct {
-	storage.DoltStorage
 	reader       *serveStubReader
 	claimer      *serveStubClaimer
 	batchCloser  *serveStubBatchCloser
@@ -352,6 +356,28 @@ type serveRolesStore struct {
 	edgeCounter  *serveStubGraphCounter
 	inner        storage.DoltStorage
 }
+
+var _ serveRoleSource = (*serveRolesStore)(nil)
+
+// serveRolesDoltStore is serveRolesStore where a WHOLE store is required:
+// wireStorageDecorators builds the chain this test peels, and it takes a
+// storage.DoltStorage.
+//
+// The roles above sit one embed shallower than the nil store beneath them, so
+// they shadow it: every accessor serveIssueRoles reaches is declared, and only
+// the rest of the interface — none of which this test calls — falls through to
+// the nil embed. A new role therefore fails the assertion above rather than
+// being quietly promoted here.
+type serveRolesDoltStore struct {
+	*serveRolesStore
+	serveStubRest
+}
+
+// serveStubRest carries the remainder of storage.DoltStorage for a stub that
+// declares its own roles, one embed deeper than those roles. It is the shared
+// half of the shadowing described above; serve_store_identity_test.go's stub
+// uses it for the same reason.
+type serveStubRest struct{ storage.DoltStorage }
 
 func (s *serveRolesStore) IssueReader() (issueops.Reader, error)   { return s.reader, nil }
 func (s *serveRolesStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
