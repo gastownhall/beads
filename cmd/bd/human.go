@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,6 +12,8 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var humanCmd = &cobra.Command{
@@ -25,7 +28,7 @@ This command shows the ~15 essential commands that human users need most often.
 For the full command list, run: bd --help
 
 SUBCOMMANDS:
-  human list              List all human-needed beads (issues with 'human' label)
+  human list              List human-needed beads (issues with 'human' label; hides closed by default)
   human respond <id>      Respond to a human-needed bead (adds comment and closes)
   human dismiss <id>      Dismiss a human-needed bead permanently
   human stats             Show summary statistics for human-needed beads`,
@@ -98,14 +101,19 @@ SUBCOMMANDS:
 // human list command
 var humanListCmd = &cobra.Command{
 	Use:   "list",
-	Short: "List all human-needed beads",
-	Long: `List all issues labeled with 'human' tag.
+	Short: "List human-needed beads",
+	Long: `List issues labeled with 'human' tag.
 
-These are issues that require human intervention or input.
+These are issues that require human intervention or input. Every
+human-labeled bead shows regardless of type (including gates and wisps).
+By default closed, pinned, and other done/frozen beads are hidden; use
+--status to select specific statuses, or --status=all to include every
+status.
 
 Examples:
   bd human list
-  bd human list --status=open
+  bd human list --status=closed
+  bd human list --status=all
   bd human list --json`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -119,41 +127,15 @@ Examples:
 
 		status, _ := cmd.Flags().GetString("status")
 
-		ctx := rootCtx
-
-		if usesProxiedServer() {
-			return runHumanListProxiedServer(ctx, status)
-		}
-
-		filter := types.IssueFilter{
-			Labels: []string{"human"},
-		}
-
-		if status != "" {
-			s := types.Status(status)
-			filter.Status = &s
-		}
-
-		if err := ensureStoreActive(); err != nil {
-			return HandleErrorRespectJSON("listing human beads: %v", err)
-		}
-
-		var err error
-		issues, err := store.SearchIssues(ctx, "", filter)
+		issues, err := humanIssues(rootCtx, status)
 		if err != nil {
 			return HandleErrorRespectJSON("listing human beads: %v", err)
 		}
 
 		if jsonOutput {
-			issueIDs := make([]string, len(issues))
-			for i, issue := range issues {
-				issueIDs[i] = issue.ID
-			}
-			labelsMap, _ := store.GetLabelsForIssues(ctx, issueIDs)
-			for _, issue := range issues {
-				issue.Labels = labelsMap[issue.ID]
-			}
-
+			// SearchIssues already hydrated .Labels on both backends (the
+			// filter never sets SkipLabels), so the issues marshal with their
+			// labels attached.
 			data, err := json.MarshalIndent(issues, "", "  ")
 			if err != nil {
 				return HandleErrorRespectJSON("encoding JSON: %v", err)
@@ -165,6 +147,53 @@ Examples:
 		printHumanList(issues)
 		return nil
 	},
+}
+
+// humanIssues loads the human-labeled beads matching the status selector
+// through whichever backend this invocation uses: the direct store, or a
+// proxied-server unit of work. Both routes apply the same humanListFilter.
+func humanIssues(ctx context.Context, status string) ([]*types.Issue, error) {
+	if usesProxiedServer() {
+		return proxiedHumanIssues(ctx, status)
+	}
+
+	if err := ensureStoreActive(); err != nil {
+		return nil, err
+	}
+	cfg, err := workapi.LoadStoreListConfig(ctx, store)
+	if err != nil {
+		return nil, fmt.Errorf("loading status configuration: %w", err)
+	}
+	filter, err := humanListFilter(status, cfg)
+	if err != nil {
+		return nil, err
+	}
+	return store.SearchIssues(ctx, "", filter)
+}
+
+// humanListRequest builds the list request for "human list": every
+// human-labeled bead regardless of type — a human label is an explicit
+// request for a person's attention, and this command is the only place a
+// person sees it, so gates, wisps, infra beads, and templates all show.
+// Status filtering matches `bd list`: done/frozen statuses and pinned beads
+// are hidden by default, an explicit --status selects specific statuses
+// (validated against the built-in and custom status names), and "all" lifts
+// the status defaults entirely.
+func humanListRequest(status string) issueops.ListRequest {
+	unlimited := 0
+	req := issueops.ListRequest{
+		Labels: []string{"human"},
+		Limit:  &unlimited, // human list has never paginated; 0 = unlimited
+		// No bead type is hidden from a human listing.
+		IncludeAllTypes: true,
+	}
+	req.Status = status // "" applies the defaults; "all" lifts them
+	return req
+}
+
+// humanListFilter resolves humanListRequest against loaded status/type config.
+func humanListFilter(status string, cfg workapi.ListConfig) (types.IssueFilter, error) {
+	return workapi.BuildListFilter(humanListRequest(status), cfg)
 }
 
 // warnIfNotHumanLabeled warns on stderr when the bead lacks the 'human'
@@ -185,13 +214,21 @@ func printHumanList(issues []*types.Issue) {
 
 	fmt.Printf("\n%s (%d found)\n\n", ui.RenderBold("Human-needed beads"), len(issues))
 	for _, issue := range issues {
+		if issue.Status == types.StatusClosed {
+			// Closed items fade to muted gray, matching bd list/query. They
+			// only appear under an explicit --status, so the fade is what
+			// distinguishes them from the work still waiting on a person.
+			fmt.Printf("  %s\n", ui.RenderClosedLine(fmt.Sprintf("%s %s", issue.ID, issue.Title)))
+			fmt.Printf("    %s\n", ui.RenderClosedLine(fmt.Sprintf("Status: %s", issue.Status)))
+			fmt.Printf("    %s\n", ui.RenderClosedLine(fmt.Sprintf("Priority: P%d", issue.Priority)))
+			fmt.Println()
+			continue
+		}
 		fmt.Printf("  %s %s\n", ui.RenderCommand(issue.ID), issue.Title)
 		if issue.Status != "open" {
 			fmt.Printf("    Status: %s\n", issue.Status)
 		}
-		if issue.Priority != 0 {
-			fmt.Printf("    Priority: P%d\n", issue.Priority)
-		}
+		fmt.Printf("    Priority: %s\n", ui.RenderPriorityForStatus(issue.Priority, string(issue.Status)))
 		fmt.Println()
 	}
 }
@@ -396,22 +433,9 @@ Example:
 			}
 		}()
 
-		ctx := rootCtx
-
-		if usesProxiedServer() {
-			return runHumanStatsProxiedServer(ctx)
-		}
-
-		filter := types.IssueFilter{
-			Labels: []string{"human"},
-		}
-
-		if err := ensureStoreActive(); err != nil {
-			return HandleErrorRespectJSON("getting human bead stats: %v", err)
-		}
-
-		var err error
-		issues, err := store.SearchIssues(ctx, "", filter)
+		// The stats universe is `human list --status=all`: every human-labeled
+		// bead, every status, every type.
+		issues, err := humanIssues(rootCtx, "all")
 		if err != nil {
 			return HandleErrorRespectJSON("getting human bead stats: %v", err)
 		}
@@ -469,7 +493,7 @@ func init() {
 	humanCmd.AddCommand(humanStatsCmd)
 
 	// Add flags for subcommands
-	humanListCmd.Flags().StringP("status", "s", "", "Filter by status (open, closed, etc.)")
+	humanListCmd.Flags().StringP("status", "s", "", "Filter by status (open, closed, etc.; comma-separated for multiple, 'all' for every status)")
 	humanRespondCmd.Flags().StringP("response", "r", "", "Response text")
 	registerTextSourceFlags(humanRespondCmd, "response text", "response")
 	humanDismissCmd.Flags().StringP("reason", "", "", "Reason for dismissal (optional)")

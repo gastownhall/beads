@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 
@@ -19,71 +18,24 @@ import (
 // of work; each write invocation is exactly ONE RunTx with a real commit
 // message, per the proxied write convention.
 
-// proxiedHumanSearch runs the shared human-label query and hands back the
-// issues, inside the caller's unit of work.
-func proxiedHumanSearch(ctx context.Context, uw uow.UnitOfWork, status string) ([]*types.Issue, error) {
-	filter := types.IssueFilter{
-		Labels: []string{"human"},
+// proxiedHumanIssues is the proxied-server side of humanIssues: the SAME
+// humanListRequest, resolved against the workspace's own status/type config
+// and queried through a unit of work. It goes through openAndPrepare rather
+// than hand-building a filter so `bd human list` cannot mean one thing in
+// direct mode and another behind the proxy — the divergence a second
+// hand-built filter here would reintroduce the next time the defaults move.
+func proxiedHumanIssues(ctx context.Context, status string) ([]*types.Issue, error) {
+	uw, filter, err := openAndPrepare(ctx, listInput{ListRequest: humanListRequest(status)})
+	if err != nil {
+		return nil, err
 	}
-	if status != "" {
-		s := types.Status(status)
-		filter.Status = &s
-	}
+	defer uw.Close(ctx)
+
 	page, err := uw.IssueUseCase().SearchIssues(ctx, "", filter)
 	if err != nil {
 		return nil, err
 	}
 	return page.Items, nil
-}
-
-func runHumanListProxiedServer(ctx context.Context, status string) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("listing human beads: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	issues, err := proxiedHumanSearch(ctx, uw, status)
-	if err != nil {
-		return HandleErrorRespectJSON("listing human beads: %v", err)
-	}
-
-	if jsonOutput {
-		issueIDs := make([]string, len(issues))
-		for i, issue := range issues {
-			issueIDs[i] = issue.ID
-		}
-		labelsMap, _ := uw.LabelUseCase().GetLabelsForIssues(ctx, issueIDs)
-		for _, issue := range issues {
-			issue.Labels = labelsMap[issue.ID]
-		}
-
-		data, err := json.MarshalIndent(issues, "", "  ")
-		if err != nil {
-			return HandleErrorRespectJSON("encoding JSON: %v", err)
-		}
-		fmt.Println(string(data))
-		return nil
-	}
-
-	printHumanList(issues)
-	return nil
-}
-
-func runHumanStatsProxiedServer(ctx context.Context) error {
-	uw, err := proxiedOpenReadUOW(ctx)
-	if err != nil {
-		return HandleErrorRespectJSON("getting human bead stats: %v", err)
-	}
-	defer uw.Close(ctx)
-
-	issues, err := proxiedHumanSearch(ctx, uw, "")
-	if err != nil {
-		return HandleErrorRespectJSON("getting human bead stats: %v", err)
-	}
-
-	printHumanStats(issues)
-	return nil
 }
 
 // proxiedHumanCloseTarget is the shared pre-flight for respond and dismiss,

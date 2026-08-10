@@ -256,6 +256,25 @@ type ListRequest struct {
 	//
 	// On the ReadyFlag arm it is CARRIED rather than dropped; see that field.
 	IncludeEphemeral bool
+	// IncludeAllTypes lifts every default suppression that hides a bead from a
+	// listing on account of WHAT IT IS: the three type knobs above (templates,
+	// gates, infra types) AND the ephemeral plane, so the wisps table is read
+	// too. Frontends whose contract is "never hide a bead" — `bd human list`,
+	// where a human label is an explicit request for a person's attention —
+	// set this one field instead of enumerating the knobs and then drifting
+	// from them when a fourth suppression lands.
+	//
+	// IT IS THE UNION OF THOSE FLAGS, NOT A NEW MECHANISM. Setting it is
+	// equivalent to IncludeTemplates + IncludeGates + IncludeInfra +
+	// IncludeEphemeral; it narrows nothing and admits nothing they cannot.
+	// Both the type suppressions and the plane decision live in workapi's
+	// applyTypeSuppressions, which this flag skips entirely — so a suppression
+	// added there is lifted here automatically, which is the whole point.
+	//
+	// IT SAYS NOTHING ABOUT STATUS. The done/frozen exclusions and the pinned
+	// default are a separate axis and still apply; --status (including "all")
+	// is how a caller lifts those.
+	IncludeAllTypes bool
 	// ExcludeTypes entries may be comma-separated; splitting happens inside.
 	ExcludeTypes []string
 

@@ -99,6 +99,26 @@ func TestEmbeddedHuman(t *testing.T) {
 		bdHuman(t, bd, dir, "respond", id, "--response", "Approved")
 		humanShowClosed(t, bd, dir, id)
 
+		// Closed beads drop out of the default list but show with
+		// --status=closed and --status=all.
+		listOut = bdHuman(t, bd, dir, "list")
+		if strings.Contains(listOut, id) {
+			t.Errorf("closed issue %s should be hidden from default human list:\n%s", id, listOut)
+		}
+		closedOut := bdHuman(t, bd, dir, "list", "--status=closed")
+		if !strings.Contains(closedOut, id) {
+			t.Errorf("expected closed issue %s in human list --status=closed:\n%s", id, closedOut)
+		}
+		allOut := bdHuman(t, bd, dir, "list", "--status=all")
+		if !strings.Contains(allOut, id) {
+			t.Errorf("expected closed issue %s in human list --status=all:\n%s", id, allOut)
+		}
+
+		// An invalid status is an error, not a silent empty list.
+		if out, _ := bdRunFailCode(t, bd, dir, "human", "list", "--status=colsed"); !strings.Contains(out, "invalid status") {
+			t.Errorf("expected invalid-status error, got:\n%s", out)
+		}
+
 		// Test Dismiss
 		id2 := createHumanBead(t, bd, dir, "Dismiss test issue")
 		bdHuman(t, bd, dir, "dismiss", id2, "--reason", "Not needed")

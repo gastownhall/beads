@@ -29,6 +29,13 @@ type listFilterGoldenCase struct {
 // was nothing to record them from. They pin what the leaf promises
 // (issueops.ListRequest.MaxRows and .SkipCounts), which is the same standard
 // the conformance contract holds the implementations to.
+//
+// ONE case has been deliberately RE-recorded rather than preserved:
+// status_all_keyword's Pinned went false -> null. The old builder compared the
+// raw selector string to "pinned"/"hooked", so --status=all — which promises
+// EVERY status — silently kept forcing Pinned=false and hid pinned beads from
+// the one selector that says it hides nothing. TestPinnedDefaultBySelector
+// below owns that behavior now; see the PR body for the compatibility note.
 func TestBuildListFilterGolden(t *testing.T) {
 	blob, err := os.ReadFile(filepath.Join("testdata", "list_filter_golden.json"))
 	if err != nil {

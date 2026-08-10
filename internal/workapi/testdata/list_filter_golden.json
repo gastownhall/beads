@@ -449,7 +449,7 @@
       "PriorityMax": null,
       "SourceRepo": null,
       "Ephemeral": null,
-      "Pinned": false,
+      "Pinned": null,
       "IsBlocked": null,
       "IsTemplate": false,
       "ParentID": null,

@@ -3,9 +3,13 @@
 package main
 
 import (
+	"encoding/json"
 	"os/exec"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 func bdProxiedHuman(t *testing.T, bd, dir string, args ...string) (string, string) {
@@ -200,6 +204,85 @@ func TestProxiedServerHuman(t *testing.T) {
 		}
 		if strings.Contains(listOut, responded.ID) || strings.Contains(listOut, dismissed.ID) {
 			t.Errorf("closed beads leaked into open human list:\n%s", listOut)
+		}
+	})
+
+	// The proxied list must apply the SAME filter as the direct one: closed
+	// hidden by default, --status=all lifting it, an invalid selector refused
+	// rather than silently returning nothing.
+	t.Run("list_filters_and_status_selector", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hm8")
+		open := bdProxiedCreate(t, bd, p.dir, "Open human bead", "--type", "task")
+		bdProxiedLabelAdd(t, bd, p.dir, open.ID, "human")
+		done := bdProxiedCreate(t, bd, p.dir, "Done human bead", "--type", "task")
+		bdProxiedLabelAdd(t, bd, p.dir, done.ID, "human")
+		other := bdProxiedCreate(t, bd, p.dir, "Not for humans", "--type", "task")
+		bdProxiedHuman(t, bd, p.dir, "dismiss", done.ID)
+
+		out, _ := bdProxiedHuman(t, bd, p.dir, "list")
+		if !strings.Contains(out, open.ID) {
+			t.Errorf("expected open human bead in list, got:\n%s", out)
+		}
+		if strings.Contains(out, done.ID) || strings.Contains(out, other.ID) {
+			t.Errorf("expected closed and unlabeled beads hidden, got:\n%s", out)
+		}
+
+		all, _ := bdProxiedHuman(t, bd, p.dir, "list", "--status=all")
+		if !strings.Contains(all, open.ID) || !strings.Contains(all, done.ID) {
+			t.Errorf("expected --status=all to show open and closed beads, got:\n%s", all)
+		}
+
+		if out := bdProxiedHumanFail(t, bd, p.dir, "list", "--status=colsed"); !strings.Contains(out, "invalid status") {
+			t.Errorf("expected invalid-status error, got:\n%s", out)
+		}
+
+		jsonOut, _ := bdProxiedHuman(t, bd, p.dir, "list", "--json")
+		start := strings.Index(jsonOut, "[")
+		if start < 0 {
+			t.Fatalf("no JSON array in human list output:\n%s", jsonOut)
+		}
+		var issues []*types.Issue
+		if err := json.Unmarshal([]byte(jsonOut[start:]), &issues); err != nil {
+			t.Fatalf("parse human list JSON: %v\nraw: %s", err, jsonOut[start:])
+		}
+		if len(issues) != 1 || issues[0].ID != open.ID {
+			t.Fatalf("expected exactly the open human bead in JSON, got %+v", issues)
+		}
+		// The list no longer re-fetches labels for the JSON path; the search
+		// already hydrated them.
+		if !slices.Contains(issues[0].Labels, "human") {
+			t.Errorf("expected hydrated labels in JSON, got %v", issues[0].Labels)
+		}
+	})
+
+	// Positional response/reason text has to reach the proxied backend the
+	// same way the flag does — the text sources are resolved BEFORE the
+	// proxied dispatch, so there is one reading for both routes.
+	t.Run("positional_text_reaches_the_proxy", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hm9")
+
+		answered := bdProxiedCreate(t, bd, p.dir, "Positional respond", "--type", "task")
+		bdProxiedLabelAdd(t, bd, p.dir, answered.ID, "human")
+		bdProxiedHuman(t, bd, p.dir, "respond", answered.ID, "Use", "OAuth2")
+		commentsOut, _, err := bdProxiedRunBuffers(t, bd, p.dir, "comments", "--json", answered.ID)
+		if err != nil {
+			t.Fatalf("bd comments --json failed: %v\n%s", err, commentsOut)
+		}
+		var comments []types.Comment
+		if err := json.Unmarshal([]byte(commentsOut), &comments); err != nil {
+			t.Fatalf("decode comments JSON: %v\nraw: %q", err, commentsOut)
+		}
+		if len(comments) != 1 || comments[0].Text != "Response: Use OAuth2" {
+			t.Fatalf("expected 1 response comment with the joined text, got %+v", comments)
+		}
+
+		dropped := bdProxiedCreate(t, bd, p.dir, "Positional dismiss", "--type", "task")
+		bdProxiedLabelAdd(t, bd, p.dir, dropped.ID, "human")
+		bdProxiedHuman(t, bd, p.dir, "dismiss", dropped.ID, "No", "longer", "applicable")
+		if got := bdProxiedShow(t, bd, p.dir, dropped.ID); got.CloseReason != "Dismissed: No longer applicable" {
+			t.Errorf("close reason: got %q, want %q", got.CloseReason, "Dismissed: No longer applicable")
 		}
 	})
 }
