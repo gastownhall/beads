@@ -116,6 +116,15 @@ func RoleFiresHooks(role any) bool {
 	// unpeeled is a hundred user subprocesses inside one request.
 	case *hookBatchApplier:
 		return true
+	// The commenter fires the update hook for every comment it lands
+	// (hook_commenter.go), because the legacy comment path fired it and a
+	// comment is a change to the issue as far as a hook script is concerned.
+	// It was outside this switch for as long as no front door took the role
+	// off a store — which stopped being true when the add-comment operation
+	// went on the wire, and a comment is exactly the write an agent makes in a
+	// loop.
+	case *hookCommenter:
+		return true
 	}
 	return false
 }

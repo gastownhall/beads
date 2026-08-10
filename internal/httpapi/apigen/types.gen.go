@@ -262,6 +262,21 @@ func (e ListReadyWorkParamsSort) Valid() bool {
 	}
 }
 
+// AddCommentRequest One comment to append. The issue is named by the path, so it is not a member here: a body carrying it too would give one request two spellings of one anchor and a question about what to do when they disagree.
+type AddCommentRequest struct {
+	// Author Who is signing the comment. CALLER-ASSERTED, and not the authenticated principal — see the operation description.
+	//
+	// Trimmed of surrounding space, then refused when the result is empty, when it exceeds 256 bytes or 255 characters (the storage column), or when it carries a control character. The bounds and the character rule are `actor`'s, unchanged, because the value lands in a column of the same width that every renderer of the thread prints, where an unfiltered C1 introducer is an escape-sequence payload.
+	Author string `json:"author"`
+
+	// Text The comment body, stored VERBATIM: newlines, surrounding space and unicode all survive, and nothing trims the value that lands in the row.
+	//
+	// NO LENGTH BOUND AND NO CHARACTER RULE, unlike `author` beside it, and both absences are the column: this one is `TEXT` rather than a 255-character field, and a comment that is a stack trace or a diff is an ordinary comment. The only cap is the 1 MiB every body on this surface shares.
+	//
+	// Blank after trimming is a `400` — a comment of nothing but whitespace carries no information and is almost always a shell quoting accident — and blankness is judged on a TRIMMED COPY while the stored value is untrimmed, so a comment that merely begins with a newline is a comment.
+	Text string `json:"text"`
+}
+
 // AddDependenciesRequest defines model for AddDependenciesRequest.
 type AddDependenciesRequest struct {
 	// Actor Who is asserting the edges, under `ClaimRequest.actor`'s rules and for the same reasons: the server trims it, refuses an empty result, anything longer than 256 BYTES, and any control character including newline. It is attributed on each `dependency_added` event a genuinely new edge records, and interpolated into the storage commit message.
@@ -953,7 +968,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -2473,6 +2488,9 @@ type CreateIssueJSONRequestBody = CreateIssueRequest
 
 // UpdateIssueJSONRequestBody defines body for UpdateIssue for application/json ContentType.
 type UpdateIssueJSONRequestBody = UpdateIssueRequest
+
+// AddCommentJSONRequestBody defines body for AddComment for application/json ContentType.
+type AddCommentJSONRequestBody = AddCommentRequest
 
 // CompareAndSetMetadataJSONRequestBody defines body for CompareAndSetMetadata for application/json ContentType.
 type CompareAndSetMetadataJSONRequestBody = CompareAndSetMetadataRequest

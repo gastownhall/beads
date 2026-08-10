@@ -163,6 +163,35 @@ func (r *roleRelations) relatedRequests() []issueops.RelatedRequest {
 	return append([]issueops.RelatedRequest(nil), r.reqs...)
 }
 
+// roleCommenter is the append-one-comment role of the store-shaped source. It
+// records the whole request, because on this operation the request IS most of
+// what the wire edge has to get right: the anchor comes from the path and the
+// two members come from the body, so a handler that crossed any of the three
+// would still answer 200.
+type roleCommenter struct {
+	comment *issueops.Comment
+	err     error
+
+	mu   sync.Mutex
+	reqs []issueops.AddCommentRequest
+}
+
+func (c *roleCommenter) AddComment(_ context.Context, req issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	c.mu.Lock()
+	c.reqs = append(c.reqs, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.AddCommentResult{}, c.err
+	}
+	return issueops.AddCommentResult{Comment: c.comment}, nil
+}
+
+func (c *roleCommenter) commentRequests() []issueops.AddCommentRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.AddCommentRequest(nil), c.reqs...)
+}
+
 // roleBlockingAnnotator is the derived-decoration role of the store-shaped
 // source. It is its own fake beside roleEdgeReader because the two are separate
 // interfaces for separate questions, and a double answering both would be the
@@ -865,6 +894,9 @@ func rolesConfig(cfg Config) Config {
 	if cfg.Relations == nil {
 		cfg.Relations = &roleRelations{}
 	}
+	if cfg.Commenter == nil {
+		cfg.Commenter = &roleCommenter{}
+	}
 	if cfg.BlockingAnnotator == nil {
 		cfg.BlockingAnnotator = &roleBlockingAnnotator{}
 	}
@@ -1113,6 +1145,14 @@ func TestListenRequiresExactlyOneDatabaseSource(t *testing.T) {
 		{
 			name:    "no edge reader",
 			cfg:     rolesConfigWithout(func(c *Config) { c.EdgeReader = nil }),
+			wantErr: "no database source",
+		},
+		{
+			// The write on the sub-resource: missing it, the server binds,
+			// advertises issues.addComment, and nil-dereferences on the first
+			// request that appends a comment.
+			name:    "no commenter",
+			cfg:     rolesConfigWithout(func(c *Config) { c.Commenter = nil }),
 			wantErr: "no database source",
 		},
 		{
@@ -1824,10 +1864,13 @@ func assertNoPanic(t *testing.T, ts *testServer) {
 // method this test ever reaches through it.
 type hookableStore struct {
 	storage.DoltStorage
-	claimer issueops.Claimer
+	claimer   issueops.Claimer
+	commenter issueops.Commenter
 }
 
 func (s hookableStore) IssueClaimer() (issueops.Claimer, error) { return s.claimer, nil }
+
+func (s hookableStore) Commenter() (issueops.Commenter, error) { return s.commenter, nil }
 
 // TestListenRefusesARoleThatFiresTheWorkspaceHooks.
 //
@@ -1846,7 +1889,7 @@ func TestListenRefusesARoleThatFiresTheWorkspaceHooks(t *testing.T) {
 	// The refusal must not depend on that: the type's job is to fire hooks, and
 	// a server that admitted this one would be a config change away from
 	// breaking its own contract.
-	hooked := storage.NewHookFiringStore(hookableStore{claimer: &roleClaimer{}}, nil)
+	hooked := storage.NewHookFiringStore(hookableStore{claimer: &roleClaimer{}, commenter: &roleCommenter{}}, nil)
 
 	fromTheStore, err := hooked.IssueClaimer()
 	if err != nil {
@@ -1882,6 +1925,29 @@ func TestListenRefusesARoleThatFiresTheWorkspaceHooks(t *testing.T) {
 		t.Fatalf("Listen: %v, want a bound server for the claimer beneath the hook layer", err)
 	}
 	t.Cleanup(func() { _ = srv.http.Close() })
+
+	// THE COMMENTER IS THE SAME REFUSAL, and it is asserted here because it was
+	// the one hook-firing role RoleFiresHooks did not know about. That was
+	// harmless while no front door took the role off a store; publishing
+	// POST /v0/beads/issues/{id}/comments made it live, and an unpeeled
+	// commenter runs the workspace's on_update once per comment — which is what
+	// an agent posting progress into a thread does in a loop.
+	commenterFromTheStore, err := hooked.Commenter()
+	if err != nil {
+		t.Fatalf("Commenter: %v", err)
+	}
+	if !storage.RoleFiresHooks(commenterFromTheStore) {
+		t.Fatal("RoleFiresHooks does not recognize the hook-firing commenter, so Listen would serve one")
+	}
+	cfg := rolesConfig(Config{Commenter: commenterFromTheStore})
+	cfg.Addr = "127.0.0.1:0"
+	cfg.Stdout = io.Discard
+	cfg.Stderr = io.Discard
+	if _, err := Listen(cfg); err == nil {
+		t.Error("Listen bound a server whose comment route runs the workspace's hook scripts")
+	} else if !strings.Contains(err.Error(), "hooks") {
+		t.Errorf("refusal %q does not say what is wrong with the role", err)
+	}
 }
 
 // serveHookRunner stands in for the workspace's script runner. The refusal is

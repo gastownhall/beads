@@ -63,10 +63,11 @@ info:
       outside its own parameter table with `400` / `code: invalid_argument` /
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations that declare no QUERY parameter at all reject every query key
-      the same way. Today that is twenty-two of the thirty-eight operations
+      the same way. Today that is twenty-three of the thirty-nine operations
       here — `GET /healthz`, `GET /v0/beads/context`,
       `GET /v0/beads/dependencies/cycles`, `POST /v0/beads/issues`,
       `PATCH /v0/beads/issues/{id}`,
+      `POST /v0/beads/issues/{id}/comments`,
       `POST /v0/beads/issues/{id}:claim`,
       `POST /v0/beads/issues/{id}:release`,
       `POST /v0/beads/issues/{id}:close`,
@@ -2391,6 +2392,139 @@ paths:
                 $ref: '#/components/schemas/RelatedIssues'
         '400':
           $ref: '#/components/responses/InvalidArgument'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+  /v0/beads/issues/{id}/comments:
+    post:
+      operationId: addComment
+      summary: Append one comment to an issue's thread
+      description: >-
+        Appends ONE comment to the thread the issue owns, as one atomic
+        mutation — the write behind `bd comment`. It leaves every field of the
+        issue untouched: a comment is not a patch, which is why it is not a
+        member of `PATCH /v0/beads/issues/{id}` and why `issueops.Commenter` is
+        its own role rather than a lifecycle verb.
+
+
+        IT IS A SUB-RESOURCE COLLECTION OF THE ISSUE, and the argument is the
+        one `GET /v0/beads/issues/{id}/related` makes, applied to a write: the
+        row this creates is the SAME pinned `Comment`
+        `GET /v0/beads/issues/{id}?include_comments=true` already carries under
+        `comments`, so the operation that appends one belongs on the resource
+        whose members it publishes. A PLAIN collection `POST` rather than a
+        custom method, for `POST /v0/beads/issues`' reason: creating one member
+        of the collection a path names is what `POST` already means, and a
+        `{id}:addComment` spelling would in addition need the claim route's
+        wildcard contortion for no gain. It collides with nothing — the
+        custom-method dispatcher's pattern is one segment shorter, and this
+        path's literal final segment is what ServeMux matches whole.
+
+
+        THIS COLLECTION PUBLISHES NO `GET`, and the absence is a statement
+        rather than a gap. No role answers a comment PAGE: reading the thread is
+        `GET /v0/beads/issues/{id}?include_comments=true`, which returns the
+        bodies in full, and a paged walk is a second question with a cursor of
+        its own — `issueops.Commenter` says exactly that, and a `GET` here would
+        be this surface inventing the role that does not exist. A `GET` on this
+        path is answered `404`, which is what every method mismatch on this
+        surface gets; `405` is not in the v0 status vocabulary.
+
+
+        ## `author` is caller-asserted, and it is not `actor`
+
+
+        The caller always names the author and the server never infers one, for
+        `POST /v0/beads/issues/{id}:claim`'s reason. IT IS NOT THE AUTHENTICATED
+        PRINCIPAL even where a bearer is required: the token a deployment
+        configures admits a client to the whole surface and names nobody, so it
+        can neither confirm nor contradict the name in `author`. A reader of the
+        thread is reading a claim the writer made about itself.
+
+
+        It is spelled `author` rather than the `actor` every issue mutation here
+        carries because it is a different thing. An `actor` is the principal a
+        mutation is attributed to and is not part of what the mutation wrote;
+        this value IS part of the row, echoed back by every read of the thread,
+        and it is spelled the way the `Comment` element that carries it back
+        spells it. `issueops.AddCommentRequest.Author` states the distinction;
+        this member is that field.
+
+
+        ## Planes
+
+
+        The id resolves across BOTH planes, as `POST
+        /v0/beads/issues/{id}:close` does and unlike
+        `POST /v0/beads/issues/{id}:claim`: A WISP IS A LEGAL TARGET. The
+        comment lands on the ephemeral thread and reads back from it, and only
+        the DURABLE trace is missing — a comment on an ephemeral row records NO
+        history entry, none rather than one, because the wisp tables are
+        dolt-ignored precisely so ephemeral work never ships. A caller
+        reconstructing threads from durable history alone will not see it. An id
+        that names neither plane is a `404` and nothing is written.
+
+
+        ## What this operation does not have
+
+
+        NO CONFLICT CODE AND NO `expected_version`. A thread is append-only and
+        this write touches no field of the issue, so there is no row state for a
+        guard to be stale about and no concurrent comment for this one to
+        collide with. Two callers commenting at once both succeed, in whatever
+        order the database commits them.
+
+
+        NO IDEMPOTENCY KEY EITHER: a retried request appends a SECOND comment,
+        because two identical comments are a legitimate thread and nothing here
+        can tell that pair from a retry. A client that must not double-post
+        reads the thread.
+
+
+        Hooks do not fire and the per-command auto-commit machinery does not
+        run, as for every write on this surface. The only durable effect is the
+        single storage commit the role makes inside its own transaction.
+      parameters:
+        - $ref: '#/components/parameters/IssueID'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddCommentRequest'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: >-
+            The stored comment, with the id and `created_at` the row actually
+            got — the stored value at the column's precision, not the wall clock
+            the call happened at, so it is safe to use directly as a
+            comment-page cursor when one exists. It is the row as STORED, never
+            the request reflected back.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Comment'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, a member carrying the wrong
+            JSON type, an explicit `null` on any member, an `author` that is
+            missing, empty after trimming, longer than 256 bytes or carrying
+            control characters, or a `text` that is missing or blank after
+            trimming. Nothing is written in any of these cases.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '401':
           $ref: '#/components/responses/Unauthenticated'
         '404':
@@ -6432,6 +6566,52 @@ components:
         text: { type: string }
         created_at: { type: string, format: date-time }
 
+    AddCommentRequest:
+      type: object
+      additionalProperties: false
+      required: [author, text]
+      description: >-
+        One comment to append. The issue is named by the path, so it is not a
+        member here: a body carrying it too would give one request two spellings
+        of one anchor and a question about what to do when they disagree.
+      properties:
+        author:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[^\u0000-\u001F\u007F-\u009F\u2028\u2029]+$'
+          description: >-
+            Who is signing the comment. CALLER-ASSERTED, and not the
+            authenticated principal — see the operation description.
+
+
+            Trimmed of surrounding space, then refused when the result is empty,
+            when it exceeds 256 bytes or 255 characters (the storage column),
+            or when it carries a control character. The bounds and the character
+            rule are `actor`'s, unchanged, because the value lands in a column
+            of the same width that every renderer of the thread prints, where an
+            unfiltered C1 introducer is an escape-sequence payload.
+        text:
+          type: string
+          description: >-
+            The comment body, stored VERBATIM: newlines, surrounding space and
+            unicode all survive, and nothing trims the value that lands in the
+            row.
+
+
+            NO LENGTH BOUND AND NO CHARACTER RULE, unlike `author` beside it,
+            and both absences are the column: this one is `TEXT` rather than a
+            255-character field, and a comment that is a stack trace or a diff
+            is an ordinary comment. The only cap is the 1 MiB every body on this
+            surface shares.
+
+
+            Blank after trimming is a `400` — a comment of nothing but
+            whitespace carries no information and is almost always a shell
+            quoting accident — and blankness is judged on a TRIMMED COPY while
+            the stored value is untrimmed, so a comment that merely begins with
+            a newline is a comment.
+
     BondRef:
       type: object
       description: A constituent of a compound molecule.
@@ -6726,7 +6906,7 @@ components:
             derived from its route table, and the server-wide BEHAVIORS it
             enforces. v0's operation vocabulary is `ready.list`, `ready.count`,
             `issues.list`, `issues.query`, `issues.count`, `issues.get`,
-            `issues.related`, `issues.create`,
+            `issues.related`, `issues.create`, `issues.addComment`,
             `issues.batchClose`,
             `issues.claim`, `issues.claimNext`, `issues.release`,
             `issues.close`, `issues.reopen`, `issues.update`,

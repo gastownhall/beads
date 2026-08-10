@@ -106,6 +106,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 			counter:      &serveStubCounter{},
 			edgeCounter:  &serveStubGraphCounter{},
 			relations:    &serveStubRelations{},
+			commenter:    &serveStubCommenter{},
 			inner:        inner,
 		}}
 	}
@@ -181,9 +182,28 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		t.Fatal("the store's own accessor no longer returns a hook-firing releaser; this test proves nothing")
 	}
 
+	// And for the commenter, the SEVENTH — and the one that was OUTSIDE the
+	// RoleFiresHooks switch entirely until the add-comment operation went on the
+	// wire. hook_commenter.go has fired the update hook for every comment it
+	// lands since it was written; nothing took the role off a store, so nothing
+	// noticed. An unpeeled one runs the workspace's script once per comment.
+	commenterFromTheStore, err := chained.Commenter()
+	if err != nil {
+		t.Fatalf("Commenter: %v", err)
+	}
+	if !storage.RoleFiresHooks(commenterFromTheStore) {
+		t.Fatal("the store's own accessor no longer returns a hook-firing commenter; this test proves nothing")
+	}
+
 	roles, err := serveIssueRoles(chained, false)
 	if err != nil {
 		t.Fatalf("serveIssueRoles: %v", err)
+	}
+	if storage.RoleFiresHooks(roles.commenter) {
+		t.Error("bd serve would run this workspace's hooks on every HTTP comment")
+	}
+	if roles.commenter != issueops.Commenter(middle.commenter) {
+		t.Errorf("commenter came from %p, want the layer directly beneath the hooks (%p)", roles.commenter, middle.commenter)
 	}
 	if storage.RoleFiresHooks(roles.releaser) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP release")
@@ -356,6 +376,7 @@ type serveRolesStore struct {
 	counter      *serveStubCounter
 	edgeCounter  *serveStubGraphCounter
 	relations    *serveStubRelations
+	commenter    *serveStubCommenter
 	inner        storage.DoltStorage
 }
 
@@ -473,6 +494,25 @@ func (s *serveRolesStore) GraphCounter() (issueops.GraphCounter, error) { return
 // this file, naming the method. Which is the whole return on #5539 landing
 // first, measured on the next role rather than asserted about it.
 func (s *serveRolesStore) IssueRelations() (issueops.Relations, error) { return s.relations, nil }
+
+// Commenter is the SEVENTH role the hook decorator wraps and the second added
+// under the regime IssueRelations describes: omitting it is a build error in
+// this file naming the method, not a nil dereference somewhere else.
+//
+// It carries an identifiable value rather than nil, unlike the reads above,
+// because it IS one of the wrapped roles: hook_commenter.go fires the update
+// hook for every comment it lands, so a peel of the wrong depth would hand
+// bd serve a commenter that runs the workspace's script once per comment — and
+// a comment is exactly the write an agent makes in a loop.
+func (s *serveRolesStore) Commenter() (issueops.Commenter, error) { return s.commenter, nil }
+
+// serveStubCommenter is the add-comment role's stand-in, ErrUnsupported like
+// every stub here.
+type serveStubCommenter struct{}
+
+func (*serveStubCommenter) AddComment(context.Context, issueops.AddCommentRequest) (issueops.AddCommentResult, error) {
+	return issueops.AddCommentResult{}, errors.ErrUnsupported
+}
 
 // serveStubRelations is the neighbor role's stand-in, ErrUnsupported like every
 // stub here.
