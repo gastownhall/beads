@@ -136,6 +136,58 @@ func TestProxiedServerServeAddComment(t *testing.T) {
 		}
 	})
 
+	// THE TWO PLANES AGREE ABOUT HOW BIG A COMMENT MAY BE, which is a claim about
+	// two COLUMNS and therefore has no other home than here.
+	//
+	// The document says the only cap on `text` is the 1 MiB every body shares,
+	// and that was false on one side: 0049 widened comments.text to LONGTEXT and
+	// missed wisp_comments.text, which stayed TEXT — 65535 bytes — since 0021
+	// created the table. So the same comment wrote fine against a durable issue
+	// and failed with Error 1105 against a wisp, on an operation that resolves
+	// its anchor across both planes deliberately, so a caller could not know
+	// which side of the bound it was on until the write failed. 0065 and its
+	// ignored twin close it; this is the case that says so.
+	//
+	// 100 KiB is chosen to sit comfortably past TEXT's 65535 and comfortably
+	// under the 1 MiB body cap, so a failure here is the COLUMN and never the
+	// transport.
+	t.Run("a large comment lands on both planes", func(t *testing.T) {
+		durable := bdProxiedCreate(t, bd, p.dir, "a durable issue with a big comment", "-p", "2")
+		wisp := bdProxiedCreate(t, bd, p.dir, "an ephemeral issue with a big comment", "-p", "2",
+			"--ephemeral", "--wisp-type", "heartbeat")
+
+		big := strings.Repeat("a stack frame that goes on and on\n", 3000)
+		if len(big) <= 65535 {
+			t.Fatalf("the fixture is %d bytes, which TEXT would accept; this test proves nothing", len(big))
+		}
+		raw, err := json.Marshal(map[string]string{"author": "alice", "text": big})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+
+		for _, target := range []struct{ name, id string }{
+			{"durable", durable.ID},
+			{"wisp", wisp.ID},
+		} {
+			status, body := sp.postJSON(t, "/v0/beads/issues/"+target.id+"/comments", string(raw))
+			if status != http.StatusOK {
+				t.Fatalf("a %d-byte comment on the %s plane: status = %d, want 200 — the column, not the transport: %v",
+					len(big), target.name, status, body)
+			}
+			rows := sp.comments(t, target.id)
+			if len(rows) != 1 {
+				t.Fatalf("%s: %d comments, want 1", target.name, len(rows))
+			}
+			// Read back at full length: a silently truncating column would answer
+			// 200 and store a shorter row, which is the failure a status check
+			// alone would miss.
+			if got, _ := rows[0]["text"].(string); len(got) != len(big) {
+				t.Errorf("%s: stored %d bytes of a %d-byte comment; the column truncated it",
+					target.name, len(got), len(big))
+			}
+		}
+	})
+
 	// NOT IDEMPOTENT, and the document says so rather than leaving it to be
 	// discovered: two identical comments are a legitimate thread, so nothing here
 	// can tell that pair from a retry. This is a claim about the table, which is

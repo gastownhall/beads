@@ -161,10 +161,17 @@ func (s *Server) requiredNameMember(
 //
 // NOTHING IS TRIMMED, BOUNDED OR FILTERED. This is storedTextMember's opposite
 // number and the difference is deliberate: that helper serves 255-character
-// columns whose values renderers print, and this one serves a TEXT column whose
-// value is a document. A length bound would refuse a stack trace, and a control
-// rule would refuse the newlines a comment is written in. The only cap is
-// decodeJSONObjectBody's 1 MiB, which every body here shares.
+// columns whose values renderers print, and this one serves a LONGTEXT column
+// whose value is a document. A length bound would refuse a stack trace, and a
+// control rule would refuse the newlines a comment is written in. The only cap
+// is decodeJSONObjectBody's 1 MiB, which every body here shares.
+//
+// THAT IS TRUE ON BOTH PLANES ONLY BECAUSE MIGRATION 0065 MADE IT SO. The
+// ephemeral column was left at TEXT's 65535 bytes when the durable one was
+// widened, so this handler's "no bound" was a bound of 65535 for any anchor that
+// happened to be a wisp — and this operation resolves its anchor across both
+// planes, so nothing above the storage seam could have told the caller which one
+// it had. There is no length check to add here; the fix was the column.
 //
 // Explicit `null` is a 400 naming the member rather than an empty value, for
 // requiredNameMember's reason.

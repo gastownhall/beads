@@ -107,6 +107,7 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 			edgeCounter:  &serveStubGraphCounter{},
 			relations:    &serveStubRelations{},
 			commenter:    &serveStubCommenter{},
+			batchCreator: &serveStubBatchCreator{},
 			inner:        inner,
 		}}
 	}
@@ -195,12 +196,47 @@ func TestServeIssueRolesComeFromBeneathTheHookDecorator(t *testing.T) {
 		t.Fatal("the store's own accessor no longer returns a hook-firing commenter; this test proves nothing")
 	}
 
+	// THE THREE THAT WERE BLIND BESIDE THE COMMENTER. Each is served over a
+	// published operation and each was outside the RoleFiresHooks switch, so
+	// httpapi.Listen admitted a hook-firing value for all three; the class-level
+	// scan that finds the next one is
+	// TestRoleFiresHooksKnowsEveryHookFiringRole in internal/storage, and these
+	// are the store-side halves of the same property.
+	for _, role := range []struct {
+		name string
+		from func() (any, error)
+	}{
+		{"ready claimer", func() (any, error) { return chained.ReadyClaimer() }},
+		{"batch closer", func() (any, error) { return chained.BatchCloser() }},
+		{"batch creator", func() (any, error) { return chained.BatchCreator() }},
+	} {
+		fromTheStore, err := role.from()
+		if err != nil {
+			t.Fatalf("the store's %s accessor: %v", role.name, err)
+		}
+		if !storage.RoleFiresHooks(fromTheStore) {
+			t.Fatalf("the store's own accessor no longer returns a hook-firing %s; this test proves nothing", role.name)
+		}
+	}
+
 	roles, err := serveIssueRoles(chained, false)
 	if err != nil {
 		t.Fatalf("serveIssueRoles: %v", err)
 	}
 	if storage.RoleFiresHooks(roles.commenter) {
 		t.Error("bd serve would run this workspace's hooks on every HTTP comment")
+	}
+	// And the peel really landed on the layer beneath the hooks for all three,
+	// which is what "RoleFiresHooks is false" alone does not say: a peel two
+	// layers deep would also answer false and would drop the telemetry span.
+	if storage.RoleFiresHooks(roles.readyClaimer) || roles.readyClaimer != issueops.ReadyClaimer(middle.readyClaimer) {
+		t.Errorf("ready claimer came from %p, want the layer directly beneath the hooks (%p)", roles.readyClaimer, middle.readyClaimer)
+	}
+	if storage.RoleFiresHooks(roles.batchCloser) || roles.batchCloser != issueops.BatchCloser(middle.batchCloser) {
+		t.Errorf("batch closer came from %p, want the layer directly beneath the hooks (%p)", roles.batchCloser, middle.batchCloser)
+	}
+	if storage.RoleFiresHooks(roles.batchCreator) || roles.batchCreator != issueops.BatchCreator(middle.batchCreator) {
+		t.Errorf("batch creator came from %p, want the layer directly beneath the hooks (%p)", roles.batchCreator, middle.batchCreator)
 	}
 	if roles.commenter != issueops.Commenter(middle.commenter) {
 		t.Errorf("commenter came from %p, want the layer directly beneath the hooks (%p)", roles.commenter, middle.commenter)
@@ -377,6 +413,7 @@ type serveRolesStore struct {
 	edgeCounter  *serveStubGraphCounter
 	relations    *serveStubRelations
 	commenter    *serveStubCommenter
+	batchCreator *serveStubBatchCreator
 	inner        storage.DoltStorage
 }
 
@@ -447,7 +484,6 @@ func (*serveRolesStore) ReadyCounter() (issueops.ReadyCounter, error)           
 func (*serveRolesStore) Querier() (issueops.Querier, error)                     { return nil, nil }
 func (*serveRolesStore) Sweeper() (issueops.Sweeper, error)                     { return nil, nil }
 func (*serveRolesStore) Deleter() (issueops.Deleter, error)                     { return nil, nil }
-func (*serveRolesStore) BatchCreator() (issueops.BatchCreator, error)           { return nil, nil }
 func (*serveRolesStore) Memories() (memoryops.Memories, error)                  { return nil, nil }
 
 // MetadataCAS carries an identifiable value for the same reason, and it is the
@@ -494,6 +530,22 @@ func (s *serveRolesStore) GraphCounter() (issueops.GraphCounter, error) { return
 // this file, naming the method. Which is the whole return on #5539 landing
 // first, measured on the next role rather than asserted about it.
 func (s *serveRolesStore) IssueRelations() (issueops.Relations, error) { return s.relations, nil }
+
+// BatchCreator carries an identifiable value rather than nil, and it moved off
+// nil for the reason the three preconditions below give: it is one of the roles
+// the hook decorator wraps, so a peel of the wrong depth hands bd serve a
+// creator that runs the workspace's on_create once per item of every batch.
+func (s *serveRolesStore) BatchCreator() (issueops.BatchCreator, error) {
+	return s.batchCreator, nil
+}
+
+// serveStubBatchCreator is the batch-create role's stand-in, ErrUnsupported like
+// every stub here.
+type serveStubBatchCreator struct{}
+
+func (*serveStubBatchCreator) CreateBatch(context.Context, issueops.CreateBatchRequest) (issueops.CreateBatchResult, error) {
+	return issueops.CreateBatchResult{}, errors.ErrUnsupported
+}
 
 // Commenter is the SEVENTH role the hook decorator wraps and the second added
 // under the regime IssueRelations describes: omitting it is a build error in
