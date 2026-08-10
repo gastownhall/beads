@@ -18,6 +18,20 @@ func skipOnWindows(t *testing.T) {
 	}
 }
 
+// resolveSymlinks maps an expected path through filepath.EvalSymlinks, the
+// same resolution Probe applies when deriving RealPath. Needed because
+// t.TempDir itself can sit behind a symlink — on macOS /var/folders is a
+// symlink to /private/var/folders — so comparing RealPath against the raw
+// TempDir path fails there even though Probe resolved correctly.
+func resolveSymlinks(t *testing.T, path string) string {
+	t.Helper()
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", path, err)
+	}
+	return resolved
+}
+
 // TestCapBufferTruncates exercises capBuffer directly (rather than only
 // indirectly through TestProbeHugeOutputCapped, which only proves the
 // probe still parses a valid first line past a flood of output — it
@@ -72,8 +86,8 @@ func TestProbeNormalOutput(t *testing.T) {
 	if id.GivenPath != stub {
 		t.Errorf("GivenPath = %q, want %q", id.GivenPath, stub)
 	}
-	if id.RealPath != stub {
-		t.Errorf("RealPath = %q, want %q", id.RealPath, stub)
+	if id.RealPath != resolveSymlinks(t, stub) {
+		t.Errorf("RealPath = %q, want %q", id.RealPath, resolveSymlinks(t, stub))
 	}
 	if id.Version.String() != "1.52.3" {
 		t.Errorf("Version = %v, want 1.52.3", id.Version)
@@ -203,8 +217,8 @@ func TestProbeSymlink(t *testing.T) {
 	if id.GivenPath != link {
 		t.Errorf("GivenPath = %q, want %q", id.GivenPath, link)
 	}
-	if id.RealPath != real {
-		t.Errorf("RealPath = %q, want %q (symlink target)", id.RealPath, real)
+	if id.RealPath != resolveSymlinks(t, real) {
+		t.Errorf("RealPath = %q, want %q (symlink target)", id.RealPath, resolveSymlinks(t, real))
 	}
 	if id.GivenPath == id.RealPath {
 		t.Error("GivenPath and RealPath should differ for a symlink")
