@@ -337,21 +337,7 @@ fmt:
 
 # Check that all Go files are properly formatted (for CI)
 fmt-check:
-	@echo "Checking Go formatting..."
-	@UNFORMATTED=$$(gofmt -l .); \
-	status=$$?; \
-	if [ "$$status" -ne 0 ]; then \
-		echo "gofmt failed while checking formatting" >&2; \
-		exit "$$status"; \
-	fi; \
-	if [ -n "$$UNFORMATTED" ]; then \
-		echo "The following files are not properly formatted:"; \
-		echo "$$UNFORMATTED"; \
-		echo ""; \
-		echo "Run 'make fmt' to fix formatting"; \
-		exit 1; \
-	fi
-	@echo "All Go files are properly formatted"
+	@./scripts/ci/fmt-check.sh
 
 # Validate documentation references against actual CLI flags
 check-docs:
