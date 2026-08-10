@@ -295,6 +295,137 @@ func TestBatchCloseCapsTheItemCount(t *testing.T) {
 	}
 }
 
+// TestBatchCloseRefusesACloserThatMiscountsItsOutcomes pins checkedBatchCloser's
+// whole-batch half, and it is the one refusal on this operation that is NOT a
+// per-item outcome.
+//
+// The array is positional: a client walks it against its own argument list, so
+// an outcome count that does not match the request cannot be attributed to any
+// item at all. Projecting it anyway would report item N's answer under item
+// N+1's id for the rest of the array — silently, inside a 200. So it is
+// checkedBatchCreator's whole-batch refusal exactly: the generic 500, and never
+// a partial projection.
+func TestBatchCloseRefusesACloserThatMiscountsItsOutcomes(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		outcomes []issueops.CloseOutcome
+	}{
+		{"fewer outcomes than items", []issueops.CloseOutcome{
+			{IssueID: "bd-1", Issue: closedIssue("bd-1"), Changed: true},
+		}},
+		{"more outcomes than items", []issueops.CloseOutcome{
+			{IssueID: "bd-1", Issue: closedIssue("bd-1"), Changed: true},
+			{IssueID: "bd-2", Issue: closedIssue("bd-2"), Changed: true},
+			{IssueID: "bd-3", Issue: closedIssue("bd-3"), Changed: true},
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ts := newBatchCloseServer(t, &roleBatchCloser{
+				result: issueops.CloseBatchResult{Outcomes: test.outcomes},
+			})
+
+			resp := ts.batchClose(t, `{"actor":"alice","items":[{"id":"bd-1"},{"id":"bd-2"}]}`)
+			if resp.StatusCode != http.StatusInternalServerError {
+				t.Fatalf("status = %d, want 500: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["code"] != string(CodeInternal) {
+				t.Errorf("code = %v, want %s", body["code"], CodeInternal)
+			}
+			// The body is a problem document rather than a short or long array:
+			// a client that read `outcomes` positionally would misattribute
+			// every entry after the first mismatch.
+			if _, present := body["outcomes"]; present {
+				t.Errorf("a miscounted result was projected onto the wire anyway: %v", body)
+			}
+			// The fault has to arrive as an ERROR NAMING ITSELF, which is what
+			// makes this different from the same status reached by a recovered
+			// panic — checkedReleaser's rule, and the counts say which way the
+			// role was wrong.
+			line := findLogLine(t, ts.stderr.String(), "the closer reported")
+			if !strings.Contains(line, "for 2 items") {
+				t.Errorf("the logged fault does not name the request it answered:\n%s", line)
+			}
+		})
+	}
+}
+
+// TestBatchCloseFoldsAnOutcomeThatIsNeitherAnIssueNorARefusal pins
+// checkedBatchCloser's per-item half.
+//
+// The document says `code`'s absence means the item succeeded AND that `issue`
+// is present, so an outcome carrying neither a row nor a refusal has no honest
+// wire shape: projected as it stands it is a success with no row, which is the
+// exact shape closeOutcome's `default` branch already refuses to produce for an
+// unrecognized item error.
+//
+// It is folded into THAT ITEM rather than failing the request, and the batch's
+// own contract is why: the survivors have already committed, so a whole-batch
+// 500 would hide durable closes from a caller that cannot re-read them. The
+// count above has no such reading — a miscounted array says nothing trustworthy
+// about any item — which is what puts the two halves at different scopes.
+func TestBatchCloseFoldsAnOutcomeThatIsNeitherAnIssueNorARefusal(t *testing.T) {
+	ts := newBatchCloseServer(t, &roleBatchCloser{result: issueops.CloseBatchResult{
+		Outcomes: []issueops.CloseOutcome{
+			{IssueID: "bd-1", Issue: closedIssue("bd-1"), Changed: true},
+			{IssueID: "bd-2", Changed: true},
+		},
+	}})
+
+	resp := ts.batchClose(t, `{"actor":"alice","items":[{"id":"bd-1"},{"id":"bd-2"}]}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a post-commit fault on one item must not hide the others: %s",
+			resp.StatusCode, readAll(t, resp))
+	}
+	outcomes := outcomesOf(t, resp)
+	if len(outcomes) != 2 {
+		t.Fatalf("outcomes = %v, want one per requested item", outcomes)
+	}
+	// The item that landed is untouched, which is the whole reason the fold is
+	// per-item.
+	if _, present := outcomes[0]["code"]; present {
+		t.Errorf("the item that landed was reported as a refusal: %v", outcomes[0])
+	}
+	if _, present := outcomes[0]["issue"]; !present {
+		t.Errorf("the item that landed lost its row: %v", outcomes[0])
+	}
+	if outcomes[1]["code"] != string(CodeInternal) {
+		t.Errorf("code = %v, want %s for an outcome with neither an issue nor a refusal",
+			outcomes[1]["code"], CodeInternal)
+	}
+	if _, present := outcomes[1]["already_closed"]; present {
+		t.Errorf("an outcome with no row was reported as a success: %v", outcomes[1])
+	}
+}
+
+// TestBatchCloseLeavesTheRolesOwnResultAlone is the fold's other half. The
+// outcomes slice belongs to the role, so correcting it in place would carry
+// this server's correction into whatever the role hands back next — which a
+// role that answers from one prepared result does on its very next request.
+func TestBatchCloseLeavesTheRolesOwnResultAlone(t *testing.T) {
+	closer := &roleBatchCloser{result: issueops.CloseBatchResult{
+		Outcomes: []issueops.CloseOutcome{{IssueID: "bd-1", Changed: true}},
+	}}
+	ts := newBatchCloseServer(t, closer)
+
+	const body = `{"actor":"alice","items":[{"id":"bd-1"}]}`
+	if resp := ts.batchClose(t, body); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if err := closer.result.Outcomes[0].Err; err != nil {
+		t.Fatalf("the wrapper wrote its correction into the role's own result: %v", err)
+	}
+	// The second request is the one that would read a poisoned fixture, and it
+	// must reach the same answer as the first.
+	resp := ts.batchClose(t, body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("second request: status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+	}
+	if outcome := outcomesOf(t, resp)[0]; outcome["code"] != string(CodeInternal) {
+		t.Errorf("second request: code = %v, want %s", outcome["code"], CodeInternal)
+	}
+}
+
 // TestBatchCloseAdmitsADuplicateID: `bd close a b a` is a plausible typo, not a
 // failure. The role closes in order and reports the second occurrence as an
 // idempotent re-close at its OWN index, so the handler's job is to forward the

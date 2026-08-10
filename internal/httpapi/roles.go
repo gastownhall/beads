@@ -91,6 +91,67 @@ func (c checkedBatchCreator) CreateBatch(ctx context.Context, req issueops.Creat
 	return result, nil
 }
 
+// checkedBatchCloser is the closer the batch-close handler is handed.
+//
+// It is the one role here whose result is POSITIONAL: the document promises one
+// outcome per requested item in request order, and a client walks the array
+// against its own argument list rather than matching ids back up. So the two
+// broken shapes it folds are at different scopes, and the scope is the whole
+// reasoning.
+//
+//   - AN OUTCOME COUNT THAT DOES NOT MATCH THE REQUEST is the whole batch's
+//     fault: it cannot be walked against the caller's items at all, and
+//     projecting it anyway would report one item's answer under another item's
+//     id for the rest of the array — silently, inside a 200. It is
+//     checkedBatchCreator's whole-batch refusal exactly, and it is the generic
+//     500 with the fault in the log, never a partial projection.
+//
+//   - AN OUTCOME CARRYING NEITHER A ROW NOR A REFUSAL has no honest wire shape:
+//     `code`'s absence promises `issue`, so projected as it stands it is a
+//     success with no row — the shape closeOutcome's `default` branch already
+//     refuses to produce. It is folded into THAT ITEM's Err instead, because
+//     this batch is not all-or-nothing: its survivors have already committed,
+//     and a whole-batch 500 would hide durable closes from a caller with no way
+//     to re-read them. The handler maps it through the branch it wrote for
+//     exactly this, and the rest of the outcomes are untouched.
+//
+// batchCloser() used to hand this role out unwrapped on the reasoning that
+// CloseBatchResult is a value and its issue pointer is forwarded rather than
+// dereferenced. That is true, and it is why there is no panic here to prevent —
+// but it left the two shapes above reaching a client as answers rather than as
+// faults.
+type checkedBatchCloser struct{ inner issueops.BatchCloser }
+
+// CloseBatch refuses a miscounted result and folds a neither-row-nor-refusal
+// outcome into its own item.
+func (c checkedBatchCloser) CloseBatch(ctx context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	result, err := c.inner.CloseBatch(ctx, req)
+	if err != nil {
+		return result, err
+	}
+	if len(result.Outcomes) != len(req.Items) {
+		return issueops.CloseBatchResult{}, fmt.Errorf(
+			"close batch: the closer reported %d outcomes for %d items", len(result.Outcomes), len(req.Items))
+	}
+	corrected := false
+	for i := range result.Outcomes {
+		if result.Outcomes[i].Err != nil || result.Outcomes[i].Issue != nil {
+			continue
+		}
+		if !corrected {
+			// Correct a COPY. The slice is the role's own, and a role that
+			// answers from one prepared result would carry this server's
+			// correction into everything it hands back afterwards.
+			result.Outcomes = append([]issueops.CloseOutcome(nil), result.Outcomes...)
+			corrected = true
+		}
+		result.Outcomes[i].Err = fmt.Errorf(
+			"close batch: the closer reported outcome %d (%q) with neither an issue nor a refusal",
+			i, result.Outcomes[i].IssueID)
+	}
+	return result, nil
+}
+
 // checkedLifecycle is the lifecycle role every mutation handler is handed.
 //
 // All four methods are why it exists: every handler over this role writes

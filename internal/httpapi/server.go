@@ -805,17 +805,21 @@ func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
 // terms as every role above and held by INTERFACE so uow.BatchCloserSource is
 // load-bearing rather than decorative.
 //
-// It goes out UNWRAPPED, like the dependency editor: CloseBatchResult is a
-// VALUE, and the pointer its outcomes carry is forwarded rather than
-// dereferenced — a nil issue on a successful outcome is omitted from that
-// item's body, which is the same absence a refused item produces and is the
-// honest answer either way.
+// Wrapped in checkedBatchCloser from either source, and the hazard it folds is
+// not the one the other wrappers exist for. Nothing here dereferences the issue
+// pointer an outcome carries; what this role owns instead is a POSITIONAL array
+// the client reads against its own argument list, and checkedBatchCloser says
+// what a miscounted or contentless entry in it costs.
 func (s *Server) batchCloser(r *http.Request) (issueops.BatchCloser, error) {
 	if s.provider == nil {
-		return s.issueBatchCloser, nil
+		return checkedBatchCloser{inner: s.issueBatchCloser}, nil
 	}
 	var src uow.BatchCloserSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
-	return src.BatchCloser()
+	closer, err := src.BatchCloser()
+	if err != nil {
+		return nil, err
+	}
+	return checkedBatchCloser{inner: closer}, nil
 }
 
 // readyClaimer returns the take-ready-work surface for one request.
