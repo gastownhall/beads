@@ -84,10 +84,11 @@ func (w storeMolWriter) SetConfig(ctx context.Context, key, value string) error 
 }
 
 // GetConfig reads through the transaction when one is bound. Without this,
-// config readers (flattenUnregisteredIssueTypes) would read the last
-// committed value on a separate session — missing values written earlier
-// in the same transaction, and blocking on a second pool connection when
-// MaxOpenConns=1 while the transaction holds the only one.
+// config readers (flattenUnregisteredIssueTypes) would go to the embedded
+// store, which opens a second pool connection — a deadlock when
+// MaxOpenConns=1 and the transaction already holds the only one. It also
+// keeps the read consistent with any config written earlier in the same
+// transaction rather than seeing the last committed value.
 func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, error) {
 	if w.tx != nil {
 		return w.tx.GetConfig(ctx, key)

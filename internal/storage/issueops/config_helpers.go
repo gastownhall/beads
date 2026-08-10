@@ -377,9 +377,10 @@ func dedupePreservingOrder(in []string) []string {
 	return out
 }
 
-// SyncCustomStatusesTable replaces all rows in custom_statuses with parsed config value.
-// Used by both DoltStore and EmbeddedDoltStore when "status.custom" config changes.
-func SyncCustomStatusesTable(ctx context.Context, tx DBTX, value string) error {
+// syncCustomStatusesTable replaces all rows in custom_statuses with parsed config value.
+// Reached only through SyncConfigTables, which is the single entry point every
+// SetConfig path uses; call that rather than this directly. Triggered when"status.custom" config changes.
+func syncCustomStatusesTable(ctx context.Context, tx DBTX, value string) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_statuses"); err != nil {
 		return err
 	}
@@ -399,9 +400,10 @@ func SyncCustomStatusesTable(ctx context.Context, tx DBTX, value string) error {
 	return nil
 }
 
-// SyncCustomTypesTable replaces all rows in custom_types with parsed config value.
-// Used by both DoltStore and EmbeddedDoltStore when "types.custom" config changes.
-func SyncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
+// syncCustomTypesTable replaces all rows in custom_types with parsed config value.
+// Reached only through SyncConfigTables, which is the single entry point every
+// SetConfig path uses; call that rather than this directly. Triggered when"types.custom" config changes.
+func syncCustomTypesTable(ctx context.Context, tx DBTX, value string) error {
 	if _, err := tx.ExecContext(ctx, "DELETE FROM custom_types"); err != nil {
 		return err
 	}
@@ -450,12 +452,12 @@ func ParseTypesConfigValue(value string) []string {
 func SyncConfigTables(ctx context.Context, tx DBTX, key, value string) (string, error) {
 	switch key {
 	case "status.custom":
-		if err := SyncCustomStatusesTable(ctx, tx, value); err != nil {
+		if err := syncCustomStatusesTable(ctx, tx, value); err != nil {
 			return "", fmt.Errorf("syncing custom_statuses table: %w", err)
 		}
 		return "custom_statuses", nil
 	case "types.custom":
-		if err := SyncCustomTypesTable(ctx, tx, value); err != nil {
+		if err := syncCustomTypesTable(ctx, tx, value); err != nil {
 			return "", fmt.Errorf("syncing custom_types table: %w", err)
 		}
 		return "custom_types", nil

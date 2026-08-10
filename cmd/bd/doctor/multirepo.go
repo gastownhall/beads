@@ -131,10 +131,7 @@ func readTypesFromDB(beadsDir string) ([]string, error) {
 		return nil, err
 	}
 
-	if typesStr == "" {
-		return nil, nil
-	}
-
+	// ParseTypesConfigValue returns nil for an empty or whitespace-only value.
 	return issueops.ParseTypesConfigValue(typesStr), nil
 }
 

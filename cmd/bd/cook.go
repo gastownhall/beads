@@ -560,8 +560,9 @@ func processStepToIssue(step *formula.Step, parentID string) *types.Issue {
 	// Determine issue type. A parent step with no declared type defaults to
 	// epic; a declared type is honored even when the step has children
 	// (GH#5443).
-	issueType := stepTypeToIssueType(step.Type)
-	if len(step.Children) > 0 && strings.TrimSpace(step.Type) == "" {
+	declaredType := strings.TrimSpace(step.Type)
+	issueType := stepTypeToIssueType(declaredType)
+	if len(step.Children) > 0 && declaredType == "" {
 		issueType = types.TypeEpic
 	}
 

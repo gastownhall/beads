@@ -286,14 +286,13 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// covering every accepted issue; skip the redundant per-issue reconcile.
 	// Set the flag on a shallow copy so the caller's context keeps its own
 	// reconcile behavior.
-	local := *bc
-	local.SkipChildCounterReconcile = true
-	bc = &local
+	batch := *bc
+	batch.SkipChildCounterReconcile = true
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
 	for _, issue := range issues {
-		issueResult, err := CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
+		issueResult, err := CreateIssueInTxWithResult(ctx, tx, &batch, issue, actor)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}

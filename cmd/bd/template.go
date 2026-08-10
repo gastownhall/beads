@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -19,8 +18,9 @@ import (
 	"github.com/steveyegge/beads/internal/utils"
 )
 
-// configReader is the narrow read surface flattenUnregisteredIssueTypes
-// needs; transaction-bound writers (storeMolWriter) satisfy it with reads
+// configReader is the minimal slice of storage.Storage that config-reading
+// helpers depend on, letting tests inject a fake without spinning up a Dolt
+// server. Transaction-bound writers (storeMolWriter) satisfy it with reads
 // that see in-transaction config writes.
 type configReader interface {
 	GetConfig(ctx context.Context, key string) (string, error)
@@ -581,19 +581,20 @@ func getRelativeID(oldID, rootID string) string {
 // with "invalid issue type" on the first unregistered bead.
 // (GH#3213, GH#5443)
 func flattenUnregisteredIssueTypes(ctx context.Context, s configReader, issues []*types.Issue, deps []*types.Dependency) error {
-	// Collect non-built-in types used by the issues. IsBuiltIn (not
+	// Seed with every non-built-in type used by the issues, then remove the
+	// registered ones below; what survives is unknown. IsBuiltIn (not
 	// IsValid) matches the validator this check exists to satisfy:
 	// IsValidWithCustom short-circuits on IsBuiltIn, so types like "event"
 	// need no types.custom entry.
-	needed := make(map[string]bool)
+	unknown := make(map[types.IssueType]bool)
 	for _, issue := range issues {
 		t := issue.IssueType
 		if t == "" || t.IsBuiltIn() {
 			continue
 		}
-		needed[string(t)] = true
+		unknown[t] = true
 	}
-	if len(needed) == 0 {
+	if len(unknown) == 0 {
 		return nil
 	}
 
@@ -607,19 +608,11 @@ func flattenUnregisteredIssueTypes(ctx context.Context, s configReader, issues [
 		// would silently flatten types the operator did register.
 		return fmt.Errorf("reading types.custom: %w", err)
 	}
-	registered := make(map[string]bool)
 	for _, t := range issueops.ParseTypesConfigValue(existing) {
-		registered[t] = true
+		delete(unknown, types.IssueType(t))
 	}
 	for _, t := range config.GetCustomTypesFromYAML() {
-		registered[t] = true
-	}
-
-	unknown := make(map[types.IssueType]bool)
-	for t := range needed {
-		if !registered[t] {
-			unknown[types.IssueType(t)] = true
-		}
+		delete(unknown, types.IssueType(t))
 	}
 	if len(unknown) == 0 {
 		return nil
@@ -630,7 +623,7 @@ func flattenUnregisteredIssueTypes(ctx context.Context, s configReader, issues [
 		names = append(names, string(t))
 	}
 	sort.Strings(names)
-	fmt.Fprintf(os.Stderr, "Warning: flattening unregistered issue type(s) to task (epic for steps with children): %s (register with bd config set types.custom to keep them)\n", strings.Join(names, ", "))
+	WarnError("flattening unregistered issue type(s) to task (epic for steps with children): %s (register with bd config set types.custom to keep them)", strings.Join(names, ", "))
 
 	hasChildren := make(map[string]bool)
 	for _, dep := range deps {
