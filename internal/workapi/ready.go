@@ -62,6 +62,7 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		IncludeEphemeral: in.IncludeEphemeral,
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
+		Lite:             in.Brief,
 	}
 
 	if in.Priority != nil {
@@ -122,6 +123,17 @@ func BuildReadyCountFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 	unlimited := 0
 	counted := in
 	counted.Limit = &unlimited
+	// Brief is CARRIED, not refused and not cleared, which is the opposite of
+	// what ClaimNext does with it. A count reads no field of any row, so the
+	// projection cannot make the number wrong; and the count is not always
+	// cheap enough for that to be the end of it. The unit-of-work seam has no
+	// COUNT(*) over the ready predicate and sizes the set by running the
+	// unbounded page and taking its length (uow/ready_counter.go), so clearing
+	// the field here would hydrate every heavy column of the whole ready set to
+	// answer `bd ready --brief`, which is the cost the projection exists to
+	// avoid and larger than the page it was asked for. Carrying it also keeps
+	// the count filter what this builder says it is: the listing's filter with
+	// the PAGE removed, and nothing else removed.
 	return BuildReadyFilter(counted)
 }
 

@@ -8,10 +8,10 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 )
 
-func TestEmbeddedReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T) {
+func TestEmbeddedReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
-	conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcrej"))
+	conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcrej"))
 }
 
 func TestEmbeddedReadyClaimerEmptyFrontIsNormal(t *testing.T) {

@@ -13,9 +13,16 @@ import (
 // the predicate the listing runs, with the page taken off. It is asserted
 // against BuildReadyFilter rather than field by field so a new ReadyRequest
 // field the count builder forgot to carry shows up as a difference.
+//
+// Brief is in the fixture because it is the field most likely to be dropped
+// here by an author reasoning that a count returns no rows: the store-backed
+// counter's indexed COUNT(*) ignores it, but the unit-of-work counter sizes the
+// set by running the unbounded page (uow/ready_counter.go), where dropping it
+// hydrates every heavy column of the entire ready set.
 func TestBuildReadyCountFilterIsTheUnboundedReadyFilter(t *testing.T) {
 	priority := 1
 	request := issueops.ReadyRequest{
+		Brief:            true,
 		IssueType:        "mr",
 		Assignee:         "alice",
 		Labels:           []string{" alpha ", "alpha"},
@@ -53,6 +60,13 @@ func TestBuildReadyCountFilterIsTheUnboundedReadyFilter(t *testing.T) {
 	}
 	if counted.Offset != 0 {
 		t.Errorf("counted filter Offset = %d, want 0", counted.Offset)
+	}
+	// Asserted absolutely and not only through the comparison above, which
+	// holds just as well if BuildReadyFilter stops resolving Brief at all: both
+	// sides would read false together and the projection would be gone from the
+	// count and the listing at once.
+	if !counted.Lite {
+		t.Error("counted filter Lite = false, want true: a request that asked for the projection must not be counted with the full column list")
 	}
 }
 

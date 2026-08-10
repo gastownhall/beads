@@ -1975,11 +1975,19 @@ type IssueFilter struct {
 	// reference columns in WHERE regardless of SELECT shape. Default false preserves
 	// today's behavior at every call site.
 	//
-	// Backend coverage: honored by the issueops-backed stores (Dolt, embedded
-	// Dolt). The proxied-server (domain/db) path does not check this field yet
-	// and always returns fully-hydrated issues with IsLitePartial=false —
-	// correct results, no lite optimization. Wiring Lite through domain/db is
-	// deferred to the CLI-wiring follow-up. See engdocs/EXTENDING.md.
+	// Backend coverage: honored on BOTH stacks for the COUNTED page, which is
+	// every read that returns IssueWithCounts — issueops.Reader.List on either
+	// implementation, and so `bd list --json` on both routes and
+	// GET /v0/beads/issues. It rides the counts mega-query as
+	// sqlbuild.CountsHydration.Lite, which both seams derive from this field
+	// through their hydrationFor helper.
+	//
+	// The UNCOUNTED search is store-backed only: SearchIssuesInTx selects
+	// issueLiteProjection from this field, and the domain/db SearchIssues has
+	// no equivalent, so a caller on that path gets correct rows fully hydrated
+	// rather than an error. That path serves the text renderings, which print
+	// no body, so the gap costs bytes off the wire and no correctness.
+	// See engdocs/EXTENDING.md.
 	Lite bool
 }
 
@@ -2116,6 +2124,19 @@ type WorkFilter struct {
 	// MaxRowsSource attributes which knob set MaxRows. Expected values:
 	// "--max-rows", "BEADS_MAX_ROWS", or "" (library users with no source).
 	MaxRowsSource string
+
+	// Lite mirrors IssueFilter.Lite for ready work: the heavy TEXT columns
+	// (description, design, acceptance_criteria, notes, payload, waiters) are
+	// not selected, and the returned issues carry IsLitePartial=true with those
+	// fields zero-valued. It bounds the SIZE of a row, never which rows match:
+	// a predicate that reads a heavy column keeps working, because WHERE is
+	// independent of the SELECT shape.
+	//
+	// Unlike IssueFilter.Lite it is honored on BOTH backends, through the
+	// counts mega-query's CountsHydration. The two knobs beside it there
+	// (SkipLabels, SkipCounts) have no WorkFilter counterpart on purpose; see
+	// issueops.readyHydrationFor.
+	Lite bool
 }
 
 // StaleFilter is used to filter stale issue queries

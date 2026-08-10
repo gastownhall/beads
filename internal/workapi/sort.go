@@ -64,6 +64,11 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		HasMetadataKey: filter.HasMetadataKey,
 		MaxRows:        filter.MaxRows,
 		MaxRowsSource:  filter.MaxRowsSource,
+		// Carried, where SkipLabels and SkipCounts are dropped: those two hide
+		// a number the ready renderings print, and this bounds a body no
+		// listing prints. Dropping it here would answer `bd list --ready
+		// --brief` with full rows and nothing to say why.
+		Lite: filter.Lite,
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)

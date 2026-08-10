@@ -329,6 +329,9 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	if in.SkipCounts {
 		filter.SkipCounts = true
 	}
+	if in.Brief {
+		filter.Lite = true
+	}
 
 	if in.PriorityMin != nil {
 		p := *in.PriorityMin

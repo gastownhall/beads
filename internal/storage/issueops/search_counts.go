@@ -100,7 +100,7 @@ func SearchIssuesWithCountsInTx(ctx context.Context, tx *sql.Tx, query string, f
 // function rather than two field reads at each call site so a path cannot pick
 // up one of the pair and quietly drop the other.
 func hydrationFor(filter types.IssueFilter) sqlbuild.CountsHydration {
-	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts}
+	return sqlbuild.CountsHydration{SkipLabels: filter.SkipLabels, SkipCounts: filter.SkipCounts, Lite: filter.Lite}
 }
 
 func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, filter types.IssueFilter, tables FilterTables, includeWispReverseDeps bool) ([]*types.IssueWithCounts, error) {
@@ -123,7 +123,7 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes
 func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, whereSQL, orderBySQL, limitSQL string, args []interface{}, includeWispReverseDeps bool, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
 	searchSQL, _ := sqlbuild.SearchCountsSQL(tables, nil, whereSQL, orderBySQL, limitSQL, includeWispReverseDeps, hyd)
-	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args)
+	return scanCountsRowsInTx(ctx, tx, tables.Main, searchSQL, args, hyd)
 }
 
 // scanCountsRowsInTx runs a prebuilt counts mega-query and hydrates each row
@@ -132,7 +132,7 @@ func runSearchQueryInTx(ctx context.Context, tx *sql.Tx, tables FilterTables, wh
 // ready-counts path.
 //
 //nolint:gosec // G201: query is builder-produced; user input rides ? placeholders.
-func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string, args []interface{}) ([]*types.IssueWithCounts, error) {
+func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string, args []interface{}, hyd sqlbuild.CountsHydration) ([]*types.IssueWithCounts, error) {
 	rows, err := tx.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search count %s: %w", mainTable, err)
@@ -142,7 +142,7 @@ func scanCountsRowsInTx(ctx context.Context, tx *sql.Tx, mainTable, query string
 	var out []*types.IssueWithCounts
 	seen := make(map[string]bool)
 	for rows.Next() {
-		iwc, scanErr := ScanReadyWorkRowWithCounts(rows)
+		iwc, scanErr := ScanReadyWorkRowWithCounts(rows, hyd)
 		if scanErr != nil {
 			return nil, scanErr
 		}

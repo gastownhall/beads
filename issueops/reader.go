@@ -105,6 +105,12 @@ type ReadyRequest struct {
 	// to page ready work. A caller that must page across backends pages a
 	// ListRequest instead — see ListRequest.Offset.
 	Offset int
+
+	// Brief drops the free-form text from every row: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters come back zero-valued and
+	// the row carries types.Issue.IsLitePartial. See ListRequest.Brief, which
+	// is the same knob on the other operation and carries the full contract.
+	Brief bool
 }
 
 // ListRequest describes one issue-list query.
@@ -180,6 +186,33 @@ type ListRequest struct {
 	// Like SkipLabels it is NOT carried onto the ReadyFlag arm; the counts are
 	// hydrated there either way, which costs time and not correctness.
 	SkipCounts bool
+
+	// Brief suppresses the FREE-FORM TEXT the way SkipLabels suppresses labels
+	// and SkipCounts the cardinalities: Description, Design,
+	// AcceptanceCriteria, Notes, Payload and Waiters are not selected and come
+	// back zero-valued. Nothing else about the page moves — the rows, their
+	// order, Parent and the has-more verdict are what they would have been —
+	// because this chooses what is HYDRATED, never which rows match. A
+	// predicate over a heavy column (DescContains, NotesContains, EmptyDesc)
+	// keeps selecting exactly the rows it selects today: WHERE is independent
+	// of the SELECT shape.
+	//
+	// A BLANK FIELD IS AMBIGUOUS ON THE WIRE and the row says so in process:
+	// all six are omitempty, so a projected row marshals identically to a
+	// genuinely textless one, and the row carries types.Issue.IsLitePartial to
+	// tell them apart for an in-process caller. That flag is json:"-", so a
+	// wire consumer distinguishes them by having asked — the same shape the
+	// repo has already argued about twice (ga-clgh/CommentsOmitted, #5550).
+	//
+	// UNLIKE SkipLabels and SkipCounts it IS carried onto the ReadyFlag arm,
+	// and onto ReadyRequest.Brief beside it. Those two drop a NUMBER the ready
+	// renderings print; this drops a body no listing prints, so carrying it is
+	// what makes `--ready` and `bd ready` answer the same request the same way.
+	//
+	// It is the storage layer's types.IssueFilter.Lite / types.WorkFilter.Lite
+	// under the name the CLI and the MCP integration already use for a
+	// projection (bd show --brief-deps, the MCP's brief).
+	Brief bool
 
 	// Priority is exact; PriorityMin and PriorityMax bound a range. All three
 	// are pointers for the same reason ReadyRequest.Priority is.

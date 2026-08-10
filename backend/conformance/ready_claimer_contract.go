@@ -73,8 +73,8 @@ type ReadyClaimerFixture struct {
 	CountHistory func(context.Context) (int, error)
 }
 
-// RunReadyClaimerRejectsLimitOffsetAndEmptyActor pins the deterministic
-// request-validation refusals — Limit set, Offset set, Actor empty
+// RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor pins the deterministic
+// request-validation refusals — Limit set, Offset set, Brief set, Actor empty
 // (issueops/readyclaimer.go:15-23 and :7-8) — and the state clause that comes
 // with them: "a validation failure leaves persistent state unchanged"
 // (issueops/readyclaimer.go:56).
@@ -89,6 +89,14 @@ type ReadyClaimerFixture struct {
 // (issueops/reader.go:85-100), and only the first of those is what this request
 // permits.
 //
+// Brief is refused on a sharper version of the same argument. The claim does
+// not read its row through the page's query at all — it refetches the winner
+// whole and hydrates the cardinalities itself — so the projection has nothing
+// to apply to. Accepting it would return a fully-hydrated row, carrying
+// IsLitePartial=false, from a request that has ALREADY MUTATED STATE: the one
+// field a caller could check to notice would be the field asserting nothing
+// went wrong. That is why it is here and not merely documented.
+//
 // The claimable row seeded here is the point of the state half: each refusal
 // runs against a front that WOULD have yielded it, so an implementation that
 // validated after claiming fails on the row rather than on the error.
@@ -98,7 +106,7 @@ type ReadyClaimerFixture struct {
 // so a case checking that the refused call also returned a zero result would be
 // pinning today's implementations rather than the contract. The state
 // assertions below are the part the contract does promise.
-func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
+func RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T, ctx context.Context, fixture ReadyClaimerFixture) {
 	t.Helper()
 	label := fixture.IssuePrefix + "-rcreject"
 	candidate := fixture.IssuePrefix + "-rcreject-a"
@@ -123,6 +131,10 @@ func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Co
 			Actor:  "claimer",
 			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort, Offset: 1},
 		}},
+		{"brief", publicops.ClaimNextRequest{
+			Actor:  "claimer",
+			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort, Brief: true},
+		}},
 		{"empty actor", publicops.ClaimNextRequest{
 			Filter: publicops.ReadyRequest{Labels: []string{label}, Sort: readyClaimerSort},
 		}},
@@ -135,7 +147,7 @@ func RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T, ctx context.Co
 	// Unchanged means unchanged: the row a valid request would have won is
 	// still open and unassigned, and nothing was written to history.
 	assertReadyClaimerRowState(t, ctx, fixture, candidate, string(types.StatusOpen), "")
-	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "four refused requests")
+	assertReadyClaimerHistoryDelta(t, ctx, fixture, before, 0, "five refused requests")
 }
 
 // RunReadyClaimerEmptyFrontIsNormal pins the outcome most likely to diverge: a

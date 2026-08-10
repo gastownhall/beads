@@ -7,10 +7,10 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 )
 
-func TestReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T) {
+func TestReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcrej")
 	defer cleanup()
-	conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t, ctx, fixture)
+	conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t, ctx, fixture)
 }
 
 func TestReadyClaimerEmptyFrontIsNormal(t *testing.T) {
