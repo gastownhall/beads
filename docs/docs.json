@@ -329,6 +329,7 @@
           "reference/protected-branches",
           "reference/advanced",
           "reference/json-schema",
+          "reference/events-journal",
           "reference/observability",
           "reference/troubleshooting",
           "reference/antivirus",

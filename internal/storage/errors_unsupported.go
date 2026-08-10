@@ -1,15 +1,11 @@
 package storage
 
-import "fmt"
+import "github.com/steveyegge/beads/issueops"
 
-// ErrUnsupported reports that a storage backend does not implement an
-// operation. Typed per PROPOSAL-pluggable-storage-backends.md §4.0 error
-// taxonomy; this is the embryo of the seam's ErrUnsupported{Op, Backend}.
-type ErrUnsupported struct {
-	Op      string // method name, e.g. "AddLabel" or "Transaction.CreateIssues"
-	Backend string // e.g. "sqlite"
-}
-
-func (e *ErrUnsupported) Error() string {
-	return fmt.Sprintf("operation %q not supported by the %s backend", e.Op, e.Backend)
-}
+// ErrUnsupported reports an operation unavailable on a storage backend. It is
+// declared and documented by the public contract package,
+// github.com/steveyegge/beads/issueops, so that a caller holding only a role
+// interface can classify a refusal without importing this package. This is the
+// SAME type, so every storage.ErrUnsupported reference and every errors.As site
+// keeps matching.
+type ErrUnsupported = issueops.ErrUnsupported

@@ -15,11 +15,27 @@ const SendMetricsSubcommand = "send-metrics"
 // before control returns to main()'s spawn tail.
 const EnvIsFlusher = "BD_IS_FLUSHER"
 
+// EnvTestMode is the same test-run flag the storage layer already checks
+// (e.g. internal/storage/dolt/open.go, store.go): `os.Getenv(EnvTestMode) ==
+// "1"`. MaybeSpawnFlusher honors it too so test suites no longer need to
+// hand-set BD_DISABLE_EVENT_FLUSH=1 just to stop the detached send-metrics
+// child from racing t.TempDir's RemoveAll (gastownhall/beads#5032).
+const EnvTestMode = "BEADS_TEST_MODE"
+
+// inTestMode reports whether the process is running under a beads test
+// suite, using the same idiom as the rest of the codebase.
+func inTestMode() bool {
+	return os.Getenv(EnvTestMode) == "1"
+}
+
+// shouldSpawnFlusher is the whole spawn gate, extracted so tests can assert
+// the decision without forking a real detached child.
+func shouldSpawnFlusher() bool {
+	return os.Getenv(EnvIsFlusher) != "1" && Enabled() && !flushDisabledByEnv() && !inTestMode()
+}
+
 func MaybeSpawnFlusher() {
-	if os.Getenv(EnvIsFlusher) == "1" {
-		return
-	}
-	if !Enabled() || flushDisabledByEnv() {
+	if !shouldSpawnFlusher() {
 		return
 	}
 	self, err := os.Executable()

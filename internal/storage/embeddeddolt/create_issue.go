@@ -36,7 +36,6 @@ func (s *EmbeddedDoltStore) CreateIssue(ctx context.Context, issue *types.Issue,
 
 func (s *EmbeddedDoltStore) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
 	return s.CreateIssuesWithFullOptions(ctx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: false,
 	})
 }

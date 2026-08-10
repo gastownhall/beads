@@ -2,14 +2,14 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 //nolint:gosec // G201: table names are hardcoded constants
-func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return fmt.Errorf("wisp %s not found", id)
 	}
@@ -22,15 +22,35 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("wisp %s not found", id)
 	}
 
+	// A promoted wisp is fully durable: clear BOTH wisp-plane flags, not just
+	// Ephemeral. A no-history wisp (Ephemeral=false, NoHistory=true) promoted
+	// with NoHistory intact lands in the issues table still flag-marked as
+	// wisp-plane state, and everything that infers the plane from flags —
+	// most damagingly import's table routing — silently re-planes it back
+	// into the (default-export-excluded) wisps table, dropping its relations
+	// on the way (bd-r9uce). Post-promotion the flag has no meaning.
 	issue.Ephemeral = false
-
-	bc, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
-	})
-	if err != nil {
-		return fmt.Errorf("new batch context: %w", err)
+	issue.NoHistory = false
+	// Promotion clears an explicit ephemeral class marker to select normalized
+	// versioned storage (same rule as types.NormalizePersistenceMode); with
+	// both plane flags cleared, a lingering explicit ephemeral class would
+	// fail validation in PrepareIssueForInsert below.
+	if issue.StorageClass == types.StorageClassEphemeral {
+		issue.StorageClass = ""
 	}
-	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
+
+	// Read the custom-status/type config directly (NewBatchContext needs a
+	// *sql.Tx; promote only uses these two fields of it, and the DBTX forms
+	// let the proxied-server repository share this exact implementation).
+	customStatuses, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom statuses: %w", err)
+	}
+	customTypes, err := ResolveCustomTypesInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+	if err := PrepareIssueForInsert(issue, types.CustomStatusNames(customStatuses), customTypes); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
 	if _, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{}); err != nil {
@@ -107,6 +127,13 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 	}
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
+	}
+
+	// The bead keeps its ID across promotion; only its plane changes. Journal
+	// one update carrying the now-durable snapshot, after derived blocked-state
+	// maintenance has settled.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, id); err != nil {
+		return err
 	}
 	return nil
 }

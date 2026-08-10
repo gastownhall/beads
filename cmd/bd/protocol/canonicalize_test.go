@@ -3,6 +3,9 @@ package protocol
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -147,15 +150,23 @@ func TestCanonicalizeDropsProvenance(t *testing.T) {
 	})
 }
 
-// TestCorpusDoubleRunByteIdentical generates the corpus twice, in two fresh
-// stores, and asserts every blob is byte-identical. This is the determinism
-// backstop: if any nondeterministic field survives canonicalization, it fails
-// here at PR time rather than as flaky corpus drift later.
+// TestCorpusDoubleRunByteIdentical proves the generator normalizes two raw
+// corpus runs that vary in the ways live bd output can vary. It deliberately
+// stays pure: the golden test owns the expensive live-store boundary.
 func TestCorpusDoubleRunByteIdentical(t *testing.T) {
-	requireDoltStore(t, "corpus double-run test")
 	for _, envelope := range []bool{false, true} {
-		first := generateCorpus(t, envelope)
-		second := generateCorpus(t, envelope)
+		firstRaw, firstCalls, firstRunner := scriptedCorpusRunner(t, 1)
+		secondRaw, secondCalls, secondRunner := scriptedCorpusRunner(t, 2)
+		first, err := generateCorpus(envelope, firstRunner)
+		if err != nil {
+			t.Fatalf("first corpus (envelope=%v): %v", envelope, err)
+		}
+		second, err := generateCorpus(envelope, secondRunner)
+		if err != nil {
+			t.Fatalf("second corpus (envelope=%v): %v", envelope, err)
+		}
+		assertCaptureCalls(t, *firstCalls, envelope)
+		assertCaptureCalls(t, *secondCalls, envelope)
 		if len(first) != len(second) {
 			t.Fatalf("envelope=%v: blob count differs: %d vs %d", envelope, len(first), len(second))
 		}
@@ -167,6 +178,151 @@ func TestCorpusDoubleRunByteIdentical(t *testing.T) {
 			if !bytes.Equal(a, b) {
 				t.Fatalf("envelope=%v: %q is nondeterministic across runs:\n--- run 1 ---\n%s\n--- run 2 ---\n%s", envelope, name, a, b)
 			}
+			if bytes.Equal((*firstRaw)[name], (*secondRaw)[name]) {
+				t.Fatalf("envelope=%v: %q raw fixture unexpectedly identical", envelope, name)
+			}
+		}
+	}
+}
+
+func TestGenerateCorpusRejectsInvalidCaptures(t *testing.T) {
+	tests := []struct {
+		name     string
+		envelope bool
+		result   func(Capture) captureResult
+		want     string
+	}{
+		{
+			name:   "successful capture exits non-zero",
+			result: func(Capture) captureResult { return captureResult{stdout: []byte(`{"ok":true}`), exitCode: 1} },
+			want:   "capture \"create_root\"",
+		},
+		{
+			name: "error capture exits zero",
+			result: func(c Capture) captureResult {
+				if c.Name == errorCaptureName {
+					return captureResult{stdout: []byte(`{"error":"missing"}`), exitCode: 0}
+				}
+				return captureResult{stdout: []byte(`{"ok":true}`)}
+			},
+			want: "error capture exit code = 0",
+		},
+		{
+			name: "error capture exits wrong code",
+			result: func(c Capture) captureResult {
+				if c.Name == errorCaptureName {
+					return captureResult{stdout: []byte(`{"error":"missing"}`), exitCode: 2}
+				}
+				return captureResult{stdout: []byte(`{"ok":true}`)}
+			},
+			want: "error capture exit code = 2",
+		},
+		{
+			name:   "execution failure",
+			result: func(Capture) captureResult { return captureResult{execErr: errors.New("binary missing")} },
+			want:   "execution failed",
+		},
+		{
+			name:   "malformed JSON",
+			result: func(Capture) captureResult { return captureResult{stdout: []byte(`{`)} },
+			want:   "canonicalize create_root",
+		},
+		{
+			name:   "trailing JSON text",
+			result: func(Capture) captureResult { return captureResult{stdout: []byte("{\"ok\":true} warning")} },
+			want:   "canonicalize create_root",
+		},
+		{
+			name:   "unexpected flat error envelope",
+			result: func(Capture) captureResult { return captureResult{stdout: []byte(`{"error":"unexpected"}`)} },
+			want:   "produced an error envelope",
+		},
+		{
+			name:     "unexpected nested envelope error",
+			envelope: true,
+			result:   func(Capture) captureResult { return captureResult{stdout: []byte(`{"data":{"error":"unexpected"}}`)} },
+			want:     "produced an error envelope",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := generateCorpus(tc.envelope, func(_ bool, c Capture) captureResult {
+				return tc.result(c)
+			})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("generateCorpus() error = %v, want containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+type scriptedCall struct {
+	envelope bool
+	capture  Capture
+	result   captureResult
+}
+
+func scriptedCorpusRunner(t *testing.T, variant int) (*map[string][]byte, *[]scriptedCall, captureRunner) {
+	t.Helper()
+	raw := make(map[string][]byte)
+	var calls []scriptedCall
+	return &raw, &calls, func(envelope bool, capture Capture) captureResult {
+		stdout := scriptedCaptureJSON(capture.Name, envelope, variant)
+		raw[capture.Name] = stdout
+		result := captureResult{stdout: stdout}
+		if capture.Name == errorCaptureName {
+			result.exitCode = errorCaptureExitCode
+		}
+		calls = append(calls, scriptedCall{envelope: envelope, capture: capture, result: result})
+		return result
+	}
+}
+
+func scriptedCaptureJSON(name string, envelope bool, variant int) []byte {
+	timestamp := fmt.Sprintf("2026-08-02T00:00:0%dZ", variant)
+	var payload string
+	switch name {
+	case "list":
+		if variant == 1 {
+			payload = fmt.Sprintf(`[{"id":"b","created_at":%q},{"id":"a","created_at":%q}]`, timestamp, timestamp)
+		} else {
+			payload = fmt.Sprintf(`[{"id":"a","created_at":%q},{"id":"b","created_at":%q}]`, timestamp, timestamp)
+		}
+	case "version":
+		payload = fmt.Sprintf(`{"version":"v%d","branch":"branch-%d","build":"build-%d","commit":"commit-%d","schema_version":1}`, variant, variant, variant, variant)
+	case errorCaptureName:
+		payload = fmt.Sprintf(`{"error":"missing","at":%q,"schema_version":1}`, timestamp)
+	default:
+		payload = fmt.Sprintf(`{"name":%q,"created_at":%q,"schema_version":1}`, name, timestamp)
+	}
+	if !envelope {
+		return []byte(payload)
+	}
+	return []byte(fmt.Sprintf(`{"data":%s,"schema_version":1}`, payload))
+}
+
+func assertCaptureCalls(t *testing.T, got []scriptedCall, envelope bool) {
+	t.Helper()
+	want := CorpusPlan()
+	if len(got) != len(want) {
+		t.Fatalf("runner calls = %d, want %d", len(got), len(want))
+	}
+	for i, call := range got {
+		if call.envelope != envelope {
+			t.Errorf("call %d envelope = %v, want %v", i, call.envelope, envelope)
+		}
+		if !reflect.DeepEqual(call.capture, want[i]) {
+			t.Errorf("call %d capture = %#v, want %#v", i, call.capture, want[i])
+		}
+		wantExitCode := 0
+		if call.capture.Name == errorCaptureName {
+			wantExitCode = errorCaptureExitCode
+		}
+		if call.result.exitCode != wantExitCode {
+			t.Errorf("call %d (%s) exit code = %d, want %d", i, call.capture.Name, call.result.exitCode, wantExitCode)
+		}
+		if call.result.execErr != nil {
+			t.Errorf("call %d (%s) execution error = %v, want nil", i, call.capture.Name, call.result.execErr)
 		}
 	}
 }

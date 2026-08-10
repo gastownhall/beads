@@ -51,16 +51,26 @@ const discoveredFromComment = "beads:discovered-from"
 // adoRelToBeadsDep maps an ADO relation type to a beads dependency type.
 // Returns the dep type and whether the from/to should be swapped
 // (true for reverse link types that need direction normalization).
+// Hierarchy links use beads storage vocabulary "parent-child" (types.DepParentChild),
+// not the legacy "parent" type, which was only ever produced by the pre-fix
+// pull path and is stored backwards (GH#4961, PR #5129).
+//
+// beads stores parent-child deps child → parent: IssueID is the child,
+// DependsOnID is the parent (see types.go ready-item parent computation).
+// RelChild (Hierarchy-Forward) means "this item is the parent of target," so
+// the resulting dep must point from target (child) to this item (parent) —
+// swap. RelParent (Hierarchy-Reverse) means "target is the parent of this
+// item," so this item is already the child — no swap.
 func adoRelToBeadsDep(rel string, attributes map[string]interface{}) (depType string, swap bool) {
 	switch rel {
 	case RelDependsOn: // Dependency-Forward: this item is predecessor (blocks target)
 		return "blocks", false
 	case RelDependencyOf: // Dependency-Reverse: target blocks this item → swap
 		return "blocks", true
-	case RelChild: // Hierarchy-Forward: this item is parent of target
-		return "parent", false
-	case RelParent: // Hierarchy-Reverse: target is parent of this item → swap
-		return "parent", true
+	case RelChild: // Hierarchy-Forward: this item is parent of target → swap so dep is child(target) → parent(this)
+		return "parent-child", true
+	case RelParent: // Hierarchy-Reverse: target is parent of this item; this item is already the child
+		return "parent-child", false
 	case RelRelated:
 		if hasDiscoveredFromAttribute(attributes) {
 			return "discovered-from", false
@@ -89,12 +99,28 @@ func hasDiscoveredFromAttribute(attributes map[string]interface{}) bool {
 }
 
 // beadsDepToADORel maps a beads dependency type to an ADO relation type.
+// Accepts both "parent-child" (canonical storage type) and the obsolete
+// The legacy "parent" type is intentionally not mapped here (GH#4961, PR #5129).
+//
+// A parent-child dep's desired set is built from the child's own outgoing
+// dependency row (IssueID=child, DependsOnID=parent — see
+// GetDependenciesWithMetadata), so PushLinks always runs with workItemID as
+// the child and the target as the parent. RelParent (Hierarchy-Reverse) means
+// "target is parent of this item," which is exactly that relationship;
+// RelChild would instead assert the child is the parent's parent.
 func beadsDepToADORel(depType string) string {
 	switch depType {
 	case "blocks":
 		return RelDependsOn
-	case "parent":
-		return RelChild
+	// The "parent" alias is deliberately NOT accepted here. Rows of that type were
+	// only ever written by the pre-fix pull path, and both old branches stored them
+	// parent -> child — backwards relative to the convention this file now uses. Mapping
+	// them to RelParent would assert the child is the parent's parent and reparent real
+	// hierarchies (maphew, PR #5129). They fall through to RelRelated, i.e. inert, which
+	// is where they have effectively been all along. Retyping and reversing those legacy
+	// rows needs a migration with its own tests, tracked separately.
+	case "parent-child":
+		return RelParent
 	case "related":
 		return RelRelated
 	case "discovered-from":
@@ -184,18 +210,22 @@ type adoLinkKey struct {
 	Commented bool // true if the link has a discovered-from comment
 }
 
-// removableRelTypes are the forward-direction ADO relation types beads emits
-// and therefore owns. Only links of these types may be removed during push.
+// removableRelTypes are the ADO relation types beads emits during push and
+// therefore owns. Only links of these types may be removed during push.
 //
-// Reverse-direction link types — Hierarchy-Reverse (parent) and
-// Dependency-Reverse (predecessor/successor) — are deliberately excluded:
-// beads represents those relationships via the forward link on the *other*
-// work item, so they never appear in the desired set and must not be deleted.
-// Likewise, any other relation type (hyperlinks, attachments, custom link
-// types) is left untouched. See GH#4522.
+// Dependency-Forward and Related are the forward-direction types beads emits
+// for "blocks" and "related" deps. Hierarchy-Reverse is the type beads emits
+// for "parent-child" deps: PushLinks runs with workItemID as the child and
+// the target as the parent, so the link beads creates on the child is
+// Hierarchy-Reverse (RelParent), not Hierarchy-Forward (GH#4961). Hierarchy-
+// Forward and Dependency-Reverse are deliberately excluded: beads represents
+// those relationships via the link it owns on the *other* work item, so they
+// never appear in the desired set and must not be deleted. Likewise, any
+// other relation type (hyperlinks, attachments, custom link types) is left
+// untouched. See GH#4522.
 var removableRelTypes = map[string]bool{
 	RelDependsOn: true, // Dependency-Forward
-	RelChild:     true, // Hierarchy-Forward
+	RelParent:    true, // Hierarchy-Reverse
 	RelRelated:   true, // Related
 }
 
@@ -208,9 +238,9 @@ var removableRelTypes = map[string]bool{
 // managedTargets is the set of ADO work item IDs that beads tracks. A current
 // link is only removed when beads owns it: its relation type is one beads emits
 // (see removableRelTypes) AND its target is in managedTargets. This read-merge-
-// write behavior preserves links beads does not manage — reverse-direction
-// links and human-created Related/Predecessor-Successor links to untracked
-// items — instead of clobbering them. See GH#4522.
+// write behavior preserves links beads does not manage — the opposite-direction
+// hierarchy/dependency links and human-created Related/Predecessor-Successor
+// links to untracked items — instead of clobbering them. See GH#4522.
 func (r *LinkResolver) PushLinks(ctx context.Context, workItemID int, currentRelations []WorkItemRelation, desiredDeps []tracker.DependencyInfo, managedTargets map[int]bool) []error {
 	// Build desired link set.
 	desired := make(map[adoLinkKey]tracker.DependencyInfo)
@@ -256,10 +286,11 @@ func (r *LinkResolver) PushLinks(ctx context.Context, workItemID int, currentRel
 	var errs []error
 
 	// Find relations to remove (in current but not desired).
-	// Only remove links beads owns: a forward-direction type it emits, pointing
-	// at a work item beads tracks. Reverse-direction links and links to
-	// untracked items (e.g. human-created Related / Predecessor-Successor links)
-	// are left untouched so the push does not clobber them. See GH#4522.
+	// Only remove links beads owns: a type it emits (see removableRelTypes),
+	// pointing at a work item beads tracks. Links of the opposite hierarchy/
+	// dependency direction and links to untracked items (e.g. human-created
+	// Related / Predecessor-Successor links) are left untouched so the push
+	// does not clobber them. See GH#4522.
 	// Collect indices and remove in reverse order to avoid index shifting.
 	var removeIndices []int
 	for _, cl := range current {

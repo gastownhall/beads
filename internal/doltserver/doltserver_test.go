@@ -16,7 +16,39 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
+
+// The sql-server outlives the shell that started it: an inherited GIT_TRACE=1
+// would poison every server-side git-protocol transfer until restart. The
+// scrub is value-aware (file targets survive) and the hooks override
+// (GH#4272) must be the effective GIT_CONFIG_PARAMETERS entry.
+func TestServerSpawnEnvIsGuarded(t *testing.T) {
+	absPath := "/tmp/git.trace"
+	if runtime.GOOS == "windows" {
+		absPath = `C:\temp\git.trace`
+	}
+	t.Setenv("GIT_TRACE", "1")
+	t.Setenv("GIT_CURL_VERBOSE", "1")
+	t.Setenv("GIT_TRACE2", absPath)
+
+	env := ServerSpawnEnv()
+	keptFileTarget := false
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "GIT_TRACE=") || strings.HasPrefix(kv, "GIT_CURL_VERBOSE=") {
+			t.Errorf("ServerSpawnEnv() kept %q; stderr-directed git tracing must be scrubbed", kv)
+		}
+		if kv == "GIT_TRACE2="+absPath {
+			keptFileTarget = true
+		}
+	}
+	if !keptFileTarget {
+		t.Errorf("ServerSpawnEnv() dropped file-target GIT_TRACE2=%s; only stderr-directed forms may be scrubbed", absPath)
+	}
+	if got := githooksenv.Extract(env); !strings.Contains(got, githooksenv.NoHooksParam) {
+		t.Errorf("ServerSpawnEnv() effective %s = %q, want the no-hooks override (GH#4272)", githooksenv.ParametersEnv, got)
+	}
+}
 
 func TestAllocateEphemeralPort(t *testing.T) {
 	// Should return a valid port in the ephemeral range
@@ -1562,6 +1594,123 @@ func TestResolveServerMode_ExplicitPort(t *testing.T) {
 	}
 }
 
+func TestResolveServerMode_HostInferredExternal(t *testing.T) {
+	// GH#3545: a non-localhost host with no explicit mode or port means
+	// the server lives on another machine — bd cannot own its lifecycle,
+	// so "bd dolt start" must not launch a repo-local server against it.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltServerHost: "10.0.0.5",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	mode := ResolveServerMode(dir)
+	if mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with non-localhost host, got %v", mode)
+	}
+
+	// Host-only config must fall back to the documented default port,
+	// not 0 — there is no local Start() to allocate one for a remote
+	// server (cross-vendor review P1, 2026-08-02).
+	cfg := DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d for host-only external config", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+	if cfg.PortSource != PortSourceExternalHostDefault {
+		t.Errorf("DefaultConfig.PortSource = %q, want %q", cfg.PortSource, PortSourceExternalHostDefault)
+	}
+
+	// A stale local port file (bd's bookkeeping for a bd-owned LOCAL
+	// server) must not be paired with the remote host (cross-vendor
+	// review round 4): still expect the documented default.
+	if err := os.WriteFile(portPath(dir), []byte("45123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg = DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d: stale local port file must be ignored for a remote host", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+	if err := os.Remove(portPath(dir)); err != nil {
+		t.Fatal(err)
+	}
+
+	// Localhost host stays owned.
+	metaCfg = &configfile.Config{
+		DoltServerHost: "127.0.0.1",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned with localhost host, got %v", mode)
+	}
+}
+
+func TestResolveServerMode_EnvHostBeatsEmbeddedMetadata(t *testing.T) {
+	// GH#2949 precedent applied to the host env var: a runtime remote
+	// host must beat stale dolt_mode=embedded metadata, and the two mode
+	// resolvers (IsDoltServerMode, ResolveServerMode) must agree — or
+	// data commands select SQL-server storage while lifecycle/port
+	// resolution runs embedded (cross-vendor review round 4).
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltMode: configfile.DoltModeEmbedded,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal with remote env host over embedded metadata, got %v", mode)
+	}
+	cfg := DefaultConfig(dir)
+	if cfg.Port != configfile.DefaultDoltServerPort {
+		t.Errorf("DefaultConfig.Port = %d, want %d", cfg.Port, configfile.DefaultDoltServerPort)
+	}
+
+	// Proxied-server workspaces are exempt, matching the inference gate.
+	metaCfg = &configfile.Config{
+		DoltMode: configfile.DoltModeProxiedServer,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode == ServerModeExternal {
+		t.Errorf("proxied-server workspace must not be reclassified external by env host; got %v", mode)
+	}
+
+	// An EMPTY env host behaves as unset (matching GetDoltServerHost,
+	// cross-vendor review round 6): the remote metadata host stays
+	// effective, so inference still fires. Suppression requires an
+	// explicit localhost value.
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+	metaCfg = &configfile.Config{
+		DoltServerHost: "10.0.0.5",
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+	if mode := ResolveServerMode(dir); mode != ServerModeExternal {
+		t.Errorf("expected ServerModeExternal: empty env host must not mask the effective remote metadata host, got %v", mode)
+	}
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+	if mode := ResolveServerMode(dir); mode != ServerModeOwned {
+		t.Errorf("expected ServerModeOwned with explicit localhost env override, got %v", mode)
+	}
+}
+
 func TestResolveServerMode_ServerModeEnv(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "1")
@@ -2394,4 +2543,112 @@ func TestEnsureGlobalDatabase_ServerNotReachable(t *testing.T) {
 	if err == nil {
 		t.Error("expected error when server is not reachable")
 	}
+}
+
+// TestExternalNonLocalhostHost_GH3518 covers the helper that drives the
+// host-aware error-message branching in EnsureRunning. When the
+// configured Dolt server is non-localhost, EnsureRunning's "external
+// server unreachable" path now suggests verifying the external server
+// rather than running `bd dolt start` (which would not help).
+func TestExternalNonLocalhostHost_GH3518(t *testing.T) {
+	t.Run("env host non-localhost returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		// IsDoltServerMode now infers from non-localhost host (GH#3545)
+		// so we don't need to set BEADS_DOLT_SERVER_MODE here — that's
+		// the whole point of the sibling fix.
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "192.0.2.10" {
+			t.Errorf("host = %q, want 192.0.2.10", host)
+		}
+	})
+
+	t.Run("env host localhost returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "localhost")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		host, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Errorf("externalNonLocalhostHost: ok=true, want false (host=%q)", host)
+		}
+	})
+
+	t.Run("env host 127.0.0.1 returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "127.0.0.1")
+		config.ResetForTesting()
+		dir := t.TempDir()
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for 127.0.0.1")
+		}
+	})
+
+	t.Run("metadata.json DoltServerHost non-localhost + dolt_mode server returns (host, true)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:        configfile.BackendDolt,
+			DoltMode:       configfile.DoltModeServer,
+			DoltServerHost: "10.0.0.5",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+
+		host, ok := externalNonLocalhostHost(dir)
+		if !ok {
+			t.Fatalf("externalNonLocalhostHost: ok=false, want true")
+		}
+		if host != "10.0.0.5" {
+			t.Errorf("host = %q, want 10.0.0.5", host)
+		}
+	})
+
+	t.Run("no config returns (\"\", false)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		// No metadata.json — configfile.Load returns nil cfg, no error.
+		// (Or an error; either way, helper returns false.)
+
+		_, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Error("externalNonLocalhostHost: ok=true, want false for empty beadsDir")
+		}
+	})
+
+	t.Run("non-server mode does NOT yield external", func(t *testing.T) {
+		// Force backend off-dolt to exercise the !IsDoltServerMode
+		// gate. On this codebase GetBackend() recognizes "sqlite" as
+		// a distinct registered backend (BackendSQLite), unlike the
+		// GH#3563 reference PR where GetBackend() normalized any
+		// input back to BackendDolt — so here the backend gate at
+		// the top of IsDoltServerMode fires and short-circuits
+		// *before* env-host inference is ever consulted, regardless
+		// of BEADS_DOLT_SERVER_HOST. Pin current behavior so future
+		// changes to the gate are intentional.
+		t.Setenv("BEADS_DOLT_SERVER_HOST", "192.0.2.10")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		config.ResetForTesting()
+		dir := t.TempDir()
+		metaCfg := &configfile.Config{
+			Backend:  "sqlite",
+			DoltMode: "embedded",
+		}
+		if err := metaCfg.Save(dir); err != nil {
+			t.Fatal(err)
+		}
+		host, ok := externalNonLocalhostHost(dir)
+		if ok {
+			t.Errorf("with backend=sqlite, externalNonLocalhostHost should be false (backend gate precedes host inference); got ok=true host=%q", host)
+		}
+	})
 }

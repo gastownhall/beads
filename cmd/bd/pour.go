@@ -1,11 +1,13 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -121,6 +123,12 @@ func runPour(cmd *cobra.Command, args []string) error {
 		if sg.Phase == "vapor" {
 			warnPourVaporFormula(in.protoArg, in.varFlags)
 		}
+	} else if errors.Is(err, formula.ErrVarValidation) {
+		// in.protoArg IS a formula; the --var values it was given fail
+		// enum/pattern/required-empty constraints. Report that directly
+		// instead of falling through to the proto-ID lookup below, which
+		// would otherwise mask this as "not found as formula or proto ID".
+		return HandleError("%v", err)
 	}
 
 	if subgraph == nil {

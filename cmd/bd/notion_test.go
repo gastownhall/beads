@@ -1,23 +1,133 @@
-//go:build cgo
-
 package main
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/notion"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+type notionConfigOperation struct {
+	key   string
+	value string
+	err   error
+}
+
+type notionConfigCall struct {
+	key   string
+	value string
+}
+
+// notionConfigRecorder scripts the config operations a test expects. Writes
+// are recorded independently and never become values that later reads return.
+type notionConfigRecorder struct {
+	reads   []notionConfigOperation
+	sets    []notionConfigOperation
+	deletes []notionConfigOperation
+
+	readCalls   []notionConfigCall
+	setCalls    []notionConfigCall
+	deleteCalls []notionConfigCall
+}
+
+// notionConfigDoltStore is the production-adapter shell for these tests. Its
+// nil embedded store makes any operation outside config read/set/delete panic.
+type notionConfigDoltStore struct {
+	storage.DoltStorage
+	recorder *notionConfigRecorder
+}
+
+func (s *notionConfigDoltStore) GetConfig(ctx context.Context, key string) (string, error) {
+	return s.recorder.GetConfig(ctx, key)
+}
+
+func (s *notionConfigDoltStore) SetConfig(ctx context.Context, key, value string) error {
+	return s.recorder.SetConfig(ctx, key, value)
+}
+
+func (s *notionConfigDoltStore) DeleteConfig(ctx context.Context, key string) error {
+	return s.recorder.DeleteConfig(ctx, key)
+}
+
+func (r *notionConfigRecorder) GetConfig(_ context.Context, key string) (string, error) {
+	r.readCalls = append(r.readCalls, notionConfigCall{key: key})
+	if len(r.reads) == 0 {
+		return "", errors.New("unexpected config read")
+	}
+	op := r.reads[0]
+	r.reads = r.reads[1:]
+	if op.key != key {
+		return "", errors.New("unexpected config read key")
+	}
+	return op.value, op.err
+}
+
+func (r *notionConfigRecorder) SetConfig(_ context.Context, key, value string) error {
+	r.setCalls = append(r.setCalls, notionConfigCall{key: key, value: value})
+	if len(r.sets) == 0 {
+		return errors.New("unexpected config set")
+	}
+	op := r.sets[0]
+	r.sets = r.sets[1:]
+	if op.key != key || op.value != value {
+		return errors.New("unexpected config set values")
+	}
+	return op.err
+}
+
+func (r *notionConfigRecorder) DeleteConfig(_ context.Context, key string) error {
+	r.deleteCalls = append(r.deleteCalls, notionConfigCall{key: key})
+	if len(r.deletes) == 0 {
+		return errors.New("unexpected config delete")
+	}
+	op := r.deletes[0]
+	r.deletes = r.deletes[1:]
+	if op.key != key {
+		return errors.New("unexpected config delete key")
+	}
+	return op.err
+}
+
+func (r *notionConfigRecorder) assertConsumed(t *testing.T) {
+	t.Helper()
+	if len(r.reads) != 0 || len(r.sets) != 0 || len(r.deletes) != 0 {
+		t.Fatalf("unconsumed config script: reads=%+v sets=%+v deletes=%+v", r.reads, r.sets, r.deletes)
+	}
+}
+
+func installNotionRecorderStore(t *testing.T, recorder *notionConfigRecorder, decorated bool) *notionConfigDoltStore {
+	t.Helper()
+	saveAndRestoreGlobals(t)
+	raw := &notionConfigDoltStore{recorder: recorder}
+	if decorated {
+		store = storage.NewHookFiringStore(raw, nil)
+	} else {
+		store = raw
+	}
+	setStoreActive(true)
+	return raw
+}
+
+func assertNotionConfigCalls(t *testing.T, recorder *notionConfigRecorder, reads, sets, deletes []notionConfigCall) {
+	t.Helper()
+	if !reflect.DeepEqual(recorder.readCalls, reads) || !reflect.DeepEqual(recorder.setCalls, sets) || !reflect.DeepEqual(recorder.deleteCalls, deletes) {
+		t.Fatalf("calls = reads:%+v sets:%+v deletes:%+v, want reads:%+v sets:%+v deletes:%+v", recorder.readCalls, recorder.setCalls, recorder.deleteCalls, reads, sets, deletes)
+	}
+	recorder.assertConsumed(t)
+}
 
 func TestNotionCommandsRegistered(t *testing.T) {
 	// Not parallel: Find mutates Cobra flag state on the global command tree.
@@ -30,21 +140,11 @@ func TestNotionCommandsRegistered(t *testing.T) {
 }
 
 func TestGetNotionConfigPrefersStoreOverEnv(t *testing.T) {
-	saveAndRestoreGlobals(t)
-	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	store = testStore
-	if err := store.SetConfig(ctx, "notion.token", "store-token"); err != nil {
-		t.Fatalf("SetConfig(notion.token): %v", err)
-	}
-	if err := store.SetConfig(ctx, "notion.data_source_id", "store-ds"); err != nil {
-		t.Fatalf("SetConfig(notion.data_source_id): %v", err)
-	}
-	if err := store.SetConfig(ctx, "notion.view_url", "https://store/view"); err != nil {
-		t.Fatalf("SetConfig(notion.view_url): %v", err)
-	}
+	recorder := &notionConfigRecorder{reads: []notionConfigOperation{
+		{key: "notion.data_source_id", value: "store-ds"},
+		{key: "notion.view_url", value: "https://store/view"},
+	}}
+	installNotionRecorderStore(t, recorder, false)
 
 	t.Setenv("NOTION_TOKEN", "env-token")
 	t.Setenv("NOTION_DATA_SOURCE_ID", "env-ds")
@@ -54,6 +154,8 @@ func TestGetNotionConfigPrefersStoreOverEnv(t *testing.T) {
 	if cfg.DataSourceID != "store-ds" || cfg.ViewURL != "https://store/view" {
 		t.Fatalf("config = %+v", cfg)
 	}
+	assertNotionConfigCalls(t, recorder,
+		[]notionConfigCall{{key: "notion.data_source_id"}, {key: "notion.view_url"}}, nil, nil)
 }
 
 func TestRunNotionStatusJSONWithMissingConfig(t *testing.T) {
@@ -87,69 +189,117 @@ func TestRunNotionStatusJSONWithMissingConfig(t *testing.T) {
 }
 
 func TestRunNotionInitPersistsTargetConfig(t *testing.T) {
-	saveAndRestoreGlobals(t)
-	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
-	store = testStore
-	jsonOutput = true
-	notionInitParent = "329e5bf9-7fae-8080-bb4a-d94e1387655d"
-	notionInitTitle = "Beads Issues"
-	t.Setenv("NOTION_TOKEN", "env-token")
-	originalFactory := newNotionSetupClient
-	t.Cleanup(func() { newNotionSetupClient = originalFactory })
+	tests := []struct {
+		name       string
+		viewURL    string
+		decorated  bool
+		sets       []notionConfigOperation
+		deletes    []notionConfigOperation
+		wantSets   []notionConfigCall
+		wantDelete []notionConfigCall
+	}{
+		{
+			name:    "saves returned target",
+			viewURL: "https://www.notion.so/db123",
+			sets: []notionConfigOperation{
+				{key: "notion.data_source_id", value: "ds_123"},
+				{key: "notion.view_url", value: "https://www.notion.so/db123"},
+			},
+			wantSets: []notionConfigCall{{key: "notion.data_source_id", value: "ds_123"}, {key: "notion.view_url", value: "https://www.notion.so/db123"}},
+		},
+		{
+			name:       "clears blank view through unwrapped decorated store",
+			decorated:  true,
+			sets:       []notionConfigOperation{{key: "notion.data_source_id", value: "ds_123"}},
+			deletes:    []notionConfigOperation{{key: "notion.view_url"}},
+			wantSets:   []notionConfigCall{{key: "notion.data_source_id", value: "ds_123"}},
+			wantDelete: []notionConfigCall{{key: "notion.view_url"}},
+		},
+	}
 
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/databases" {
-			t.Fatalf("unexpected path %q", r.URL.Path)
-		}
-		body, _ := io.ReadAll(r.Body)
-		for _, want := range []string{
-			`"page_id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"`,
-			`"initial_data_source"`,
-			`"Beads ID"`,
-			`"Status"`,
-		} {
-			if !strings.Contains(string(body), want) {
-				t.Fatalf("request body missing %q\n%s", want, body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			recorder := &notionConfigRecorder{
+				reads:   []notionConfigOperation{{key: "notion.token"}},
+				sets:    tt.sets,
+				deletes: tt.deletes,
 			}
-		}
-		_, _ = io.WriteString(w, `{"id":"db_123","url":"https://www.notion.so/db123","data_sources":[{"id":"ds_123","name":"Beads Issues"}]}`)
-	}))
-	defer server.Close()
-	newNotionSetupClient = func(token string) *notion.Client {
-		return notion.NewClient(token).WithBaseURL(server.URL)
-	}
+			rawStore := installNotionRecorderStore(t, recorder, tt.decorated)
+			if tt.decorated && notionConfigDeleteTarget() != rawStore {
+				t.Fatal("notionConfigDeleteTarget did not unwrap the decorated store")
+			}
 
-	cmd := &cobra.Command{}
-	var stdout bytes.Buffer
-	cmd.SetOut(&stdout)
-	cmd.SetContext(ctx)
+			oldFactory := newNotionSetupClient
+			oldParent, oldTitle, oldJSON := notionInitParent, notionInitTitle, jsonOutput
+			t.Cleanup(func() {
+				newNotionSetupClient = oldFactory
+				notionInitParent, notionInitTitle, jsonOutput = oldParent, oldTitle, oldJSON
+			})
+			notionInitParent = "329e5bf9-7fae-8080-bb4a-d94e1387655d"
+			notionInitTitle = "Beads Issues"
+			jsonOutput = false
+			t.Setenv("NOTION_TOKEN", "env-token")
 
-	if err := runNotionInit(cmd, nil); err != nil {
-		t.Fatalf("runNotionInit returned error: %v", err)
-	}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/databases" {
+					t.Fatalf("unexpected path %q", r.URL.Path)
+				}
+				body, _ := io.ReadAll(r.Body)
+				for _, want := range []string{
+					`"page_id":"329e5bf9-7fae-8080-bb4a-d94e1387655d"`,
+					`"initial_data_source"`,
+					`"Beads ID"`,
+					`"Status"`,
+				} {
+					if !strings.Contains(string(body), want) {
+						t.Fatalf("request body missing %q\n%s", want, body)
+					}
+				}
+				_, _ = fmt.Fprintf(w, `{"id":"db_123","url":%q,"data_sources":[{"id":"ds_123","name":"Beads Issues"}]}`, tt.viewURL)
+			}))
+			defer server.Close()
+			newNotionSetupClient = func(token string) *notion.Client {
+				return notion.NewClient(token).WithBaseURL(server.URL)
+			}
 
-	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
-	if err != nil || dataSourceID != "ds_123" {
-		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
-	}
-	viewURL, err := store.GetConfig(ctx, "notion.view_url")
-	if err != nil || viewURL != "https://www.notion.so/db123" {
-		t.Fatalf("notion.view_url = %q, err=%v", viewURL, err)
+			cmd := &cobra.Command{}
+			var stdout bytes.Buffer
+			cmd.SetOut(&stdout)
+			cmd.SetContext(context.Background())
+			if err := runNotionInit(cmd, nil); err != nil {
+				t.Fatalf("runNotionInit returned error: %v", err)
+			}
+			if !strings.Contains(stdout.String(), "Saved data source: ds_123") {
+				t.Fatalf("stdout = %q", stdout.String())
+			}
+			if tt.viewURL == "" && strings.Contains(stdout.String(), "Launch URL:") {
+				t.Fatalf("stdout unexpectedly contains launch URL: %q", stdout.String())
+			}
+			assertNotionConfigCalls(t, recorder,
+				[]notionConfigCall{{key: "notion.token"}}, tt.wantSets, tt.wantDelete)
+		})
 	}
 }
 
 func TestRunNotionConnectResolvesDataSourceURL(t *testing.T) {
-	saveAndRestoreGlobals(t)
-	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
-	store = testStore
+	url := "https://www.notion.so/workspace/329e5bf97fae8080bb4ad94e1387655d"
+	recorder := &notionConfigRecorder{
+		reads: []notionConfigOperation{{key: "notion.token"}},
+		sets: []notionConfigOperation{
+			{key: "notion.data_source_id", value: "329e5bf9-7fae-8080-bb4a-d94e1387655d"},
+			{key: "notion.view_url", value: url},
+		},
+	}
+	installNotionRecorderStore(t, recorder, false)
+	oldFactory := newNotionSetupClient
+	oldURL, oldJSON := notionConnectURL, jsonOutput
+	t.Cleanup(func() {
+		newNotionSetupClient = oldFactory
+		notionConnectURL, jsonOutput = oldURL, oldJSON
+	})
+	notionConnectURL = url
+	jsonOutput = false
 	t.Setenv("NOTION_TOKEN", "env-token")
-	notionConnectURL = "https://www.notion.so/workspace/329e5bf97fae8080bb4ad94e1387655d"
-	originalFactory := newNotionSetupClient
-	t.Cleanup(func() { newNotionSetupClient = originalFactory })
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -163,29 +313,28 @@ func TestRunNotionConnectResolvesDataSourceURL(t *testing.T) {
 	newNotionSetupClient = func(token string) *notion.Client {
 		return notion.NewClient(token).WithBaseURL(server.URL)
 	}
-
 	cmd := &cobra.Command{}
-	cmd.SetContext(ctx)
+	var stdout bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetContext(context.Background())
 	if err := runNotionConnect(cmd, nil); err != nil {
 		t.Fatalf("runNotionConnect returned error: %v", err)
 	}
-
-	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
-	if err != nil || dataSourceID != "329e5bf9-7fae-8080-bb4a-d94e1387655d" {
-		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
+	if !strings.Contains(stdout.String(), "Connected Notion data source 329e5bf9-7fae-8080-bb4a-d94e1387655d") {
+		t.Fatalf("stdout = %q", stdout.String())
 	}
+	assertNotionConfigCalls(t, recorder,
+		[]notionConfigCall{{key: "notion.token"}},
+		[]notionConfigCall{{key: "notion.data_source_id", value: "329e5bf9-7fae-8080-bb4a-d94e1387655d"}, {key: "notion.view_url", value: url}}, nil)
 }
 
 func TestRunNotionConnectResolvesDatabaseURL(t *testing.T) {
-	saveAndRestoreGlobals(t)
 	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
-	store = testStore
-	t.Setenv("NOTION_TOKEN", "env-token")
-	notionConnectURL = "https://www.notion.so/workspace/429e5bf97fae8080bb4ad94e1387655d"
-	originalFactory := newNotionSetupClient
-	t.Cleanup(func() { newNotionSetupClient = originalFactory })
+	url := "https://www.notion.so/workspace/429e5bf97fae8080bb4ad94e1387655d"
+	recorder := &notionConfigRecorder{sets: []notionConfigOperation{
+		{key: "notion.data_source_id", value: "529e5bf9-7fae-8080-bb4a-d94e1387655d"},
+		{key: "notion.view_url", value: url},
+	}}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -201,20 +350,14 @@ func TestRunNotionConnectResolvesDatabaseURL(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	newNotionSetupClient = func(token string) *notion.Client {
-		return notion.NewClient(token).WithBaseURL(server.URL)
+	result, err := runNotionConnectAfterValidation(ctx, notion.NewClient("env-token").WithBaseURL(server.URL), url, recorder, recorder)
+	if err != nil {
+		t.Fatalf("runNotionConnectAfterValidation returned error: %v", err)
 	}
-
-	cmd := &cobra.Command{}
-	cmd.SetContext(ctx)
-	if err := runNotionConnect(cmd, nil); err != nil {
-		t.Fatalf("runNotionConnect returned error: %v", err)
+	if result.DataSourceID != "529e5bf9-7fae-8080-bb4a-d94e1387655d" || result.DatabaseID != "429e5bf9-7fae-8080-bb4a-d94e1387655d" {
+		t.Fatalf("result = %+v", result)
 	}
-
-	dataSourceID, err := store.GetConfig(ctx, "notion.data_source_id")
-	if err != nil || dataSourceID != "529e5bf9-7fae-8080-bb4a-d94e1387655d" {
-		t.Fatalf("notion.data_source_id = %q, err=%v", dataSourceID, err)
-	}
+	recorder.assertConsumed(t)
 }
 
 func TestRunNotionStatusUsesHTTPClient(t *testing.T) {
@@ -275,24 +418,18 @@ func TestRunNotionStatusUsesHTTPClient(t *testing.T) {
 }
 
 func TestResolveNotionAuthPrefersConfigTokenOverEnv(t *testing.T) {
-	saveAndRestoreGlobals(t)
-	ctx := context.Background()
-	testStore, cleanup := setupTestDB(t)
-	defer cleanup()
-
-	store = testStore
-	if err := store.SetConfig(ctx, "notion.token", "config-token"); err != nil {
-		t.Fatalf("SetConfig(notion.token): %v", err)
-	}
+	recorder := &notionConfigRecorder{reads: []notionConfigOperation{{key: "notion.token", value: "config-token"}}}
+	installNotionRecorderStore(t, recorder, false)
 	t.Setenv("NOTION_TOKEN", "env-token")
 
-	auth, err := resolveNotionAuth(ctx)
+	auth, err := resolveNotionAuth(context.Background())
 	if err != nil {
 		t.Fatalf("resolveNotionAuth returned error: %v", err)
 	}
 	if auth == nil || auth.Token != "config-token" || auth.Source != notion.AuthSourceConfigToken {
 		t.Fatalf("auth = %+v", auth)
 	}
+	assertNotionConfigCalls(t, recorder, []notionConfigCall{{key: "notion.token"}}, nil, nil)
 }
 
 func TestRenderNotionSyncResultUsesPhaseStats(t *testing.T) {
@@ -395,30 +532,52 @@ func TestValidateNotionConfigMessages(t *testing.T) {
 	}
 }
 
-func TestGetNotionConfigReadsDBPathWhenStoreUnset(t *testing.T) {
-	saveAndRestoreGlobals(t)
-	tempDir := t.TempDir()
-	testDBPath := filepath.Join(tempDir, "test.db")
-	testStore := newTestStore(t, testDBPath)
-	defer testStore.Close()
+func TestSaveNotionTargetConfig(t *testing.T) {
+	t.Parallel()
 
-	ctx := context.Background()
-	if err := testStore.SetConfig(ctx, "notion.token", "path-token"); err != nil {
-		t.Fatalf("SetConfig(notion.token): %v", err)
+	deleteErr := errors.New("delete failed")
+	setErr := errors.New("set failed")
+	tests := []struct {
+		name     string
+		recorder *notionConfigRecorder
+		viewURL  string
+		wantErr  error
+		wantText string
+		setCalls []notionConfigCall
+		delCalls []notionConfigCall
+	}{
+		{
+			name:     "data source set failure short circuits",
+			recorder: &notionConfigRecorder{sets: []notionConfigOperation{{key: "notion.data_source_id", value: "ds_123", err: setErr}}},
+			viewURL:  "https://www.notion.so/view",
+			wantErr:  setErr,
+			wantText: "save notion.data_source_id",
+			setCalls: []notionConfigCall{{key: "notion.data_source_id", value: "ds_123"}},
+		},
+		{
+			name:     "view delete failure preserves context",
+			recorder: &notionConfigRecorder{sets: []notionConfigOperation{{key: "notion.data_source_id", value: "ds_123"}}, deletes: []notionConfigOperation{{key: "notion.view_url", err: deleteErr}}},
+			wantErr:  deleteErr,
+			wantText: "clear notion.view_url",
+			setCalls: []notionConfigCall{{key: "notion.data_source_id", value: "ds_123"}},
+			delCalls: []notionConfigCall{{key: "notion.view_url"}},
+		},
 	}
-	if err := testStore.SetConfig(ctx, "notion.data_source_id", "path-ds"); err != nil {
-		t.Fatalf("SetConfig(notion.data_source_id): %v", err)
-	}
 
-	store = nil
-	dbPath = testDBPath
-	t.Setenv("NOTION_TOKEN", "")
-	t.Setenv("NOTION_DATA_SOURCE_ID", "")
-	t.Setenv("NOTION_VIEW_URL", "")
-
-	cfg := getNotionConfig()
-	if cfg.DataSourceID != "path-ds" {
-		t.Fatalf("config = %+v", cfg)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := saveNotionTargetConfigWithWriter(context.Background(), tt.recorder, tt.recorder, " ds_123 ", tt.viewURL)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("saveNotionTargetConfigWithWriter() error = %v, want %v", err, tt.wantErr)
+			}
+			if tt.wantText != "" && !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("saveNotionTargetConfigWithWriter() error = %q, want context %q", err, tt.wantText)
+			}
+			if !reflect.DeepEqual(tt.recorder.setCalls, tt.setCalls) || !reflect.DeepEqual(tt.recorder.deleteCalls, tt.delCalls) {
+				t.Fatalf("calls = sets:%+v deletes:%+v, want sets:%+v deletes:%+v", tt.recorder.setCalls, tt.recorder.deleteCalls, tt.setCalls, tt.delCalls)
+			}
+			tt.recorder.assertConsumed(t)
+		})
 	}
 }
 

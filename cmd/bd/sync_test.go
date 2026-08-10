@@ -1366,7 +1366,7 @@ func setupSyncCommandTest(t *testing.T, fake *fakeSyncStore) {
 		_ = syncCmd.Flags().Set("attempts", fmt.Sprintf("%d", defaultSyncAttempts))
 		_ = syncCmd.Flags().Set("remote", "")
 	})
-	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) { return false, nil }
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) { return false, nil }
 
 	store = fake
 	rootCtx = context.Background()
@@ -1645,7 +1645,7 @@ func TestRunSyncCommandAdoptsGitOriginOnDefaultRemote(t *testing.T) {
 	fake := &fakeSyncStore{pullErr: errors.New("Error 1105: no remote"), recomputed: 2}
 	setupSyncCommandTest(t, fake)
 	adoptCalls := 0
-	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) {
 		adoptCalls++
 		// What adoption does on a real first-time rig: the remote now exists,
 		// so the pull that was failing with "no remote" succeeds and
@@ -1681,7 +1681,7 @@ func TestRunSyncCommandAdoptsBeforePull(t *testing.T) {
 	fake := &fakeSyncStore{}
 	setupSyncCommandTest(t, fake)
 	pullsAtAdoption := -1
-	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) {
 		pullsAtAdoption = fake.pullCalls
 		return true, nil
 	}
@@ -1722,7 +1722,7 @@ func TestRunSyncCommandNamedRemoteNeverAdopts(t *testing.T) {
 	fake := &fakeSyncStore{}
 	setupSyncCommandTest(t, fake)
 	adoptCalls := 0
-	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) {
 		adoptCalls++
 		return true, nil
 	}
@@ -1750,7 +1750,7 @@ func TestRunSyncCommandAdoptionErrorFailsLoudly(t *testing.T) {
 	fake := &fakeSyncStore{}
 	setupSyncCommandTest(t, fake)
 	adoptErr := errors.New("dolt_remotes unavailable")
-	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage) (bool, error) {
+	syncAdoptGitOrigin = func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) {
 		return false, adoptErr
 	}
 

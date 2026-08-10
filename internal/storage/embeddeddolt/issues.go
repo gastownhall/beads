@@ -137,23 +137,13 @@ func (s *EmbeddedDoltStore) ReclaimExpiredLeases(ctx context.Context, olderThan 
 	return reclaimed, err
 }
 
-// ReopenIssue reopens a closed issue, setting status to open and clearing
-// closed_at and defer_until. If reason is non-empty, it is recorded as a comment.
-// Wraps UpdateIssue; EmbeddedDolt auto-commits the transaction.
+// ReopenIssue reopens a done-category issue atomically. EmbeddedDolt commits
+// the issue, event, comment, lease, and dependency changes together.
 func (s *EmbeddedDoltStore) ReopenIssue(ctx context.Context, id string, reason string, actor string) error {
-	updates := map[string]interface{}{
-		"status":      string(types.StatusOpen),
-		"defer_until": nil,
-	}
-	if err := s.UpdateIssue(ctx, id, updates, actor); err != nil {
+	return s.withConn(ctx, true, func(tx *sql.Tx) error {
+		_, err := issueops.ReopenIssueInTx(ctx, tx, id, reason, actor)
 		return err
-	}
-	if reason != "" {
-		if err := s.AddComment(ctx, id, actor, reason); err != nil {
-			return fmt.Errorf("reopen comment: %w", err)
-		}
-	}
-	return nil
+	})
 }
 
 // UpdateIssueType changes the issue_type field of an issue.
@@ -185,7 +175,7 @@ func (s *EmbeddedDoltStore) CloseIssueChecked(ctx context.Context, id string, ac
 		if err != nil {
 			return err
 		}
-		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed}
+		result = storage.CloseIssueResult{Unchanged: res.AlreadyClosed, OpenChildren: res.OpenChildren}
 		return nil
 	})
 	if err != nil {

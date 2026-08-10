@@ -67,6 +67,23 @@ func leaseTTL(ctx context.Context) time.Duration {
 // SAME lease row and conflict without any help. Adding a new path that sets
 // status/assignee outside updateIssueInTx without rewriting row_lock would
 // silently reintroduce the zombie-merge bug.
+//
+// The exemptions are load-bearing in the OTHER direction too (analysis
+// absorbed from gastownhall/beads#4682, Julian Knutsen): row_lock doubles as
+// the RowVersion optimistic-concurrency token (types.Issue.RowVersion), so a
+// path that reminted it WITHOUT changing the content a CAS holder cares about
+// would spuriously fail honest ExpectedVersion checks. The is_blocked
+// recompute is the canonical case: it is a denormalized aux-marker refresh
+// that already goes out of its way to preserve updated_at
+// (blocked_state.go), and bumping the token there would clobber a concurrent
+// whole-row CAS over a cell derived from OTHER rows. (The PR's second
+// exemption of this kind, the lease heartbeat, no longer arises here — since
+// bd-lrgn1 heartbeats never touch the issues row at all.) So the invariant
+// cuts both ways: status/ownership writes MUST remint, aux-marker writes MUST
+// NOT. The remint direction is enforced at build time by
+// TestAllIssueRowWritesStampRowLock (row_lock_guard_test.go), whose exemption
+// markers are the machine-readable form of this list — widen the stamping
+// policy there first, not by ad-hoc stamps.
 func freshRowLock() int64 {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
@@ -242,6 +259,16 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 	// An upsert over an existing row may have ended or transferred the claim
 	// (e.g. a newer snapshot closed the issue): drop a lease row that no
 	// longer matches a live claim by its holder.
+	//
+	// This join is a SQL equality (i.assignee = leases.holder), not
+	// actorMatches — a query predicate can't canonicalize across a join the
+	// way Go code can, so a lease granted under one spelling of an identity
+	// can be dropped here if the issue's stored assignee is later written
+	// under a different, equivalent spelling (ga-v2k49). Bounded and
+	// self-healing: HeartbeatIssueInTx's disambiguation fallback re-arms the
+	// lease under the caller's current spelling on the next beat, so the gap
+	// is one issue briefly in_progress with no lease row (visible to
+	// stale/reclaim reads), never a stuck state.
 	if !isNew {
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM leases WHERE issue_id = ?
@@ -306,18 +333,41 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 		if qerr != nil {
 			return fmt.Errorf("%w: %s", storage.ErrNotClaimable, id)
 		}
-		if assignee != "" && assignee != actor {
+		// Judged under actorMatches, not verbatim (ga-v2k49): the primary
+		// UPDATE's own `holder = ?` predicate above stays a verbatim SQL
+		// comparison deliberately — fixing it would mean pre-reading the
+		// lease row on every heartbeat (the hottest write in the fleet, see
+		// above) just to bind back its own holder value. A spelling
+		// difference across layers (ga-wzl83) already makes that predicate
+		// affect 0 rows and fall here; fixing the disambiguation instead
+		// means the caller still self-heals correctly (re-arms below, under
+		// its current spelling) at the cost of the slow path on a spelling
+		// mismatch, never on the byte-identical common case.
+		if assignee != "" && !actorMatches(assignee, actor) {
 			return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
-		if !isWisp && assignee == actor && status == string(types.StatusInProgress) {
+		if !isWisp && actorMatches(assignee, actor) && status == string(types.StatusInProgress) {
 			// The caller genuinely holds the claim but has no lease row — e.g.
 			// the claim was hand-doled through a generic update (which never
-			// arms a lease, bd-9hpgf) and the worker is now opting into lease
-			// semantics. A real worker's heartbeat re-arms recovery.
+			// arms a lease, bd-9hpgf), the worker is now opting into lease
+			// semantics, or (ga-v2k49) the existing lease row's holder is a
+			// different spelling of the same identity (ga-wzl83) and the
+			// primary UPDATE's verbatim predicate above missed it. A real
+			// worker's heartbeat re-arms recovery — under actor's current
+			// spelling, which is what the next heartbeat's fast path will see.
 			return UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx))
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)
 	}
+	// DELIBERATELY NOT JOURNALED — do not add an emit here. A heartbeat is a
+	// high-frequency lease keepalive: it writes only the clone-local `leases`
+	// table (lease-liveness state), never a durable bead field. Journaling it
+	// would put a full-snapshot write plus the shared seq-counter serialization
+	// on the hottest write in the fleet, and a replay consumer gains nothing —
+	// lease state lives on the working-set plane and expires on its own. Lease
+	// RECLAIM is the opposite case and does journal: it clears assignee and
+	// reverts status, which is durable bead state. The decision is pinned by
+	// journalExemptMutations in journal_completeness_test.go.
 	return nil
 }
 
@@ -537,6 +587,12 @@ func ReclaimExpiredLeasesInTx(ctx context.Context, tx DBTX, cutoff time.Time, fi
 		if err := RecordFullEventInTable(ctx, tx, "events", r.ID, types.EventLeaseReclaimed, actor,
 			r.PreviousOwner, ""); err != nil {
 			return nil, fmt.Errorf("record reclaim event for %s: %w", r.ID, err)
+		}
+		// Journal the lease reclaim as an update (assignee cleared, status
+		// reverted to open) so a replayer sees the claim released. Emitted past
+		// both re-checks, so only reverts that actually happened are recorded.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, r.ID); err != nil {
+			return nil, err
 		}
 		// Logged HERE, past both re-checks, so the audit trail records reverts
 		// that actually happened: a heartbeat landing after the snapshot makes

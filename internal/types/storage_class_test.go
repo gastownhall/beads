@@ -121,8 +121,8 @@ func TestIssueValidateStorageClass(t *testing.T) {
 	}
 }
 
-// C2.4: storage_class appears in JSONL for non-versioned records and is
-// omitted when versioned (unset).
+// storage_class appears in JSONL for non-versioned records and is omitted when
+// versioned (unset).
 func TestStorageClassJSONRoundTrip(t *testing.T) {
 	unversioned := validBaseIssue()
 	unversioned.StorageClass = StorageClassUnversioned
@@ -149,5 +149,153 @@ func TestStorageClassJSONRoundTrip(t *testing.T) {
 	}
 	if strings.Contains(string(data), "storage_class") {
 		t.Errorf("versioned (unset) record must omit storage_class, got: %s", data)
+	}
+}
+
+func TestPersistenceModeValuesAndValidation(t *testing.T) {
+	valid := []PersistenceMode{
+		PersistenceModePersistent,
+		PersistenceModeEphemeral,
+		PersistenceModeNoHistory,
+	}
+	for _, mode := range valid {
+		if !mode.IsValid() {
+			t.Errorf("PersistenceMode(%q).IsValid() = false, want true", mode)
+		}
+	}
+	for _, mode := range []PersistenceMode{"", "durable", "wisp"} {
+		if mode.IsValid() {
+			t.Errorf("PersistenceMode(%q).IsValid() = true, want false", mode)
+		}
+	}
+}
+
+func TestNormalizePersistenceMode(t *testing.T) {
+	cases := []struct {
+		current                      Issue
+		mode                         PersistenceMode
+		wantEphemeral, wantNoHistory bool
+		wantStorageClass             StorageClass
+	}{
+		{Issue{}, PersistenceModePersistent, false, false, ""},
+		{Issue{StorageClass: StorageClassVersioned}, PersistenceModePersistent, false, false, StorageClassVersioned},
+		{Issue{}, PersistenceModeEphemeral, true, false, ""},
+		{Issue{}, PersistenceModeNoHistory, false, true, ""},
+		{Issue{StorageClass: StorageClassVersioned}, PersistenceModeEphemeral, true, false, ""},
+		{Issue{StorageClass: StorageClassVersioned}, PersistenceModeNoHistory, false, true, ""},
+		{Issue{Ephemeral: true, StorageClass: StorageClassEphemeral}, PersistenceModeEphemeral, true, false, StorageClassEphemeral},
+		{Issue{NoHistory: true, StorageClass: StorageClassEphemeral}, PersistenceModeNoHistory, false, true, StorageClassEphemeral},
+		{Issue{Ephemeral: true, StorageClass: StorageClassEphemeral}, PersistenceModeNoHistory, false, true, StorageClassEphemeral},
+		{Issue{NoHistory: true, StorageClass: StorageClassEphemeral}, PersistenceModeEphemeral, true, false, StorageClassEphemeral},
+		{Issue{Ephemeral: true, StorageClass: StorageClassEphemeral}, PersistenceModePersistent, false, false, ""},
+		{Issue{NoHistory: true, StorageClass: StorageClassEphemeral}, PersistenceModePersistent, false, false, ""},
+		{Issue{StorageClass: StorageClassUnversioned}, PersistenceModePersistent, false, false, StorageClassUnversioned},
+		{Issue{Ephemeral: true}, PersistenceModeEphemeral, true, false, ""},
+		{Issue{NoHistory: true}, PersistenceModeNoHistory, false, true, ""},
+		{Issue{Ephemeral: true}, PersistenceModeNoHistory, false, true, ""},
+		{Issue{NoHistory: true}, PersistenceModeEphemeral, true, false, ""},
+	}
+	for _, tc := range cases {
+		ephemeral, noHistory, storageClass, err := NormalizePersistenceMode(tc.current, tc.mode)
+		if err != nil {
+			t.Errorf("NormalizePersistenceMode(%q): %v", tc.mode, err)
+			continue
+		}
+		if ephemeral != tc.wantEphemeral || noHistory != tc.wantNoHistory || storageClass != tc.wantStorageClass {
+			t.Errorf("NormalizePersistenceMode(%q) = (%t, %t, %q), want (%t, %t, %q)", tc.mode, ephemeral, noHistory, storageClass, tc.wantEphemeral, tc.wantNoHistory, tc.wantStorageClass)
+		}
+	}
+}
+
+func TestNormalizePersistenceModeReturnsValidIssueStates(t *testing.T) {
+	for _, target := range []PersistenceMode{PersistenceModeEphemeral, PersistenceModeNoHistory} {
+		current := validBaseIssue()
+		current.StorageClass = StorageClassVersioned
+
+		ephemeral, noHistory, storageClass, err := NormalizePersistenceMode(current, target)
+		if err != nil {
+			t.Fatalf("NormalizePersistenceMode(versioned, %q): %v", target, err)
+		}
+		current.Ephemeral = ephemeral
+		current.NoHistory = noHistory
+		current.StorageClass = storageClass
+		if err := current.Validate(); err != nil {
+			t.Errorf("normalized versioned -> %q state is invalid: %v", target, err)
+		}
+	}
+
+	for _, current := range []Issue{
+		func() Issue {
+			issue := validBaseIssue()
+			issue.Ephemeral = true
+			issue.StorageClass = StorageClassEphemeral
+			return issue
+		}(),
+		func() Issue {
+			issue := validBaseIssue()
+			issue.NoHistory = true
+			issue.StorageClass = StorageClassEphemeral
+			return issue
+		}(),
+	} {
+		ephemeral, noHistory, storageClass, err := NormalizePersistenceMode(current, PersistenceModePersistent)
+		if err != nil {
+			t.Fatalf("NormalizePersistenceMode(wisp, persistent): %v", err)
+		}
+		current.Ephemeral = ephemeral
+		current.NoHistory = noHistory
+		current.StorageClass = storageClass
+		if err := current.Validate(); err != nil {
+			t.Errorf("normalized wisp promotion is invalid: %v", err)
+		}
+	}
+}
+
+func TestNormalizePersistenceModeRejectsIncoherentWispFlags(t *testing.T) {
+	current := Issue{Ephemeral: true, NoHistory: true}
+	for _, target := range []PersistenceMode{
+		PersistenceModePersistent,
+		PersistenceModeEphemeral,
+		PersistenceModeNoHistory,
+	} {
+		if _, _, _, err := NormalizePersistenceMode(current, target); err == nil {
+			t.Errorf("NormalizePersistenceMode(incoherent, %q) succeeded, want error", target)
+		}
+	}
+}
+
+func TestNormalizePersistenceModeRejectsPlaneClassIncoherence(t *testing.T) {
+	cases := []struct {
+		name    string
+		current Issue
+		target  PersistenceMode
+	}{
+		{"ephemeral with explicit versioned", Issue{Ephemeral: true, StorageClass: StorageClassVersioned}, PersistenceModeEphemeral},
+		{"no history with explicit versioned", Issue{NoHistory: true, StorageClass: StorageClassVersioned}, PersistenceModeNoHistory},
+		{"ephemeral with unversioned", Issue{Ephemeral: true, StorageClass: StorageClassUnversioned}, PersistenceModeEphemeral},
+		{"no history with unversioned", Issue{NoHistory: true, StorageClass: StorageClassUnversioned}, PersistenceModeNoHistory},
+		{"durable with explicit ephemeral", Issue{StorageClass: StorageClassEphemeral}, PersistenceModePersistent},
+	}
+	for _, tc := range cases {
+		if _, _, _, err := NormalizePersistenceMode(tc.current, tc.target); err == nil {
+			t.Errorf("%s: NormalizePersistenceMode succeeded, want error", tc.name)
+		}
+	}
+}
+
+func TestNormalizePersistenceModeRejectsUnsetAndUnknown(t *testing.T) {
+	for _, mode := range []PersistenceMode{"", "durable"} {
+		if _, _, _, err := NormalizePersistenceMode(Issue{}, mode); err == nil {
+			t.Errorf("NormalizePersistenceMode(%q) succeeded, want error", mode)
+		}
+	}
+}
+
+func TestNormalizePersistenceModeRejectsUnversionedDemotion(t *testing.T) {
+	current := Issue{StorageClass: StorageClassUnversioned}
+	for _, target := range []PersistenceMode{PersistenceModeEphemeral, PersistenceModeNoHistory} {
+		if _, _, _, err := NormalizePersistenceMode(current, target); err == nil {
+			t.Errorf("NormalizePersistenceMode(unversioned, %q) succeeded, want error", target)
+		}
 	}
 }

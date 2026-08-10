@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 // GraphApplyPlan describes a symbolic bead graph to create atomically.
@@ -654,7 +655,7 @@ func validateGraphApplyNodeFields(node GraphApplyNode, customTypes, customStatus
 	}
 	// Friendlier status message than the issue-model validator's below.
 	if node.Status != "" && !types.Status(node.Status).IsValidWithCustom(customStatuses) {
-		return fmt.Errorf("node %q: invalid status %q (valid: %s; configure custom statuses via 'bd config set status.custom')", node.Key, node.Status, validStatusList(customStatuses))
+		return fmt.Errorf("node %q: invalid status %q (valid: %s; configure custom statuses via 'bd config set status.custom')", node.Key, node.Status, workapi.ValidStatusList(customStatuses))
 	}
 	if node.WispType != "" && !types.WispType(node.WispType).IsValid() {
 		return fmt.Errorf("node %q: invalid wisp_type %q (must be %s)", node.Key, node.WispType, types.ValidWispTypeNames())

@@ -17,6 +17,7 @@ type CommentSQLRepository interface {
 	ListByIssueIDs(ctx context.Context, issueIDs []string, opts CommentOpts) (map[string][]*types.Comment, error)
 	IterByIssueID(ctx context.Context, issueID string, opts CommentOpts) (storage.Iter[types.Comment], error)
 	Insert(ctx context.Context, issueID, author, text string, opts CommentOpts) (*types.Comment, error)
+	InsertRecord(ctx context.Context, comment *types.Comment, opts CommentOpts) (*types.Comment, error)
 }
 
 type CommentUseCase interface {

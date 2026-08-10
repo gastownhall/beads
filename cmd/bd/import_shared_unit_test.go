@@ -2,6 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -542,4 +545,88 @@ func TestImportIssuesCoreArmsTransactionalStaleGuard(t *testing.T) {
 	if len(store.createOpts) != 1 || store.createOpts[0].RejectStaleUpserts {
 		t.Fatalf("createOpts = %#v, want RejectStaleUpserts disarmed under --allow-stale", store.createOpts)
 	}
+}
+
+// bd-axluy: redirected stdin without "-" (or a file argument) must be an
+// error, not a silent import of the default JSONL. The guard fires before any
+// store access, so these cases need no database; the pass-through cases are
+// asserted by seeing a later error than the guard's.
+func TestRunImportInnerRejectsRedirectedStdinWithoutSource(t *testing.T) {
+	t.Chdir(t.TempDir())
+	origStdin, origStore := os.Stdin, store
+	store = nil
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		store = origStore
+		importInput = ""
+	})
+
+	pipeStdin := func(t *testing.T) {
+		t.Helper()
+		r, w, err := os.Pipe()
+		if err != nil {
+			t.Fatalf("os.Pipe: %v", err)
+		}
+		w.Close() // immediate EOF: nothing should ever read this pipe anyway
+		t.Cleanup(func() { r.Close() })
+		os.Stdin = r
+	}
+
+	t.Run("piped stdin, no args", func(t *testing.T) {
+		pipeStdin(t)
+		err := runImportInner(nil)
+		if err == nil || !strings.Contains(err.Error(), "stdin is redirected") {
+			t.Fatalf("err = %v, want redirected-stdin guard error", err)
+		}
+	})
+
+	t.Run("regular-file stdin, no args", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "in.jsonl")
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		t.Cleanup(func() { f.Close() })
+		os.Stdin = f
+		err = runImportInner(nil)
+		if err == nil || !strings.Contains(err.Error(), "stdin is redirected") {
+			t.Fatalf("err = %v, want redirected-stdin guard error", err)
+		}
+	})
+
+	t.Run("piped stdin with explicit dash passes the guard", func(t *testing.T) {
+		pipeStdin(t)
+		err := runImportInner([]string{"-"})
+		if err == nil || strings.Contains(err.Error(), "stdin is redirected") {
+			t.Fatalf("err = %v, want a non-guard error (nil store)", err)
+		}
+	})
+
+	t.Run("piped stdin with explicit file passes the guard", func(t *testing.T) {
+		pipeStdin(t)
+		path := filepath.Join(t.TempDir(), "explicit.jsonl")
+		if err := os.WriteFile(path, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+		err := runImportInner([]string{path})
+		if err == nil || strings.Contains(err.Error(), "stdin is redirected") {
+			t.Fatalf("err = %v, want a non-guard error (nil store)", err)
+		}
+	})
+
+	t.Run("character-device stdin, no args passes the guard", func(t *testing.T) {
+		devNull, err := os.Open(os.DevNull)
+		if err != nil {
+			t.Skipf("open %s: %v", os.DevNull, err)
+		}
+		t.Cleanup(func() { devNull.Close() })
+		os.Stdin = devNull
+		err = runImportInner(nil)
+		if err == nil || strings.Contains(err.Error(), "stdin is redirected") {
+			t.Fatalf("err = %v, want a non-guard error (no workspace here)", err)
+		}
+	})
 }

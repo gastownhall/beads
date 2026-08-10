@@ -38,7 +38,7 @@ func depEdgeDisplay(t types.DependencyType) (label string, scheduling, ok bool) 
 	case types.DepBlocks:
 		return "depends-on", true, true
 	case types.DepConditionalBlocks:
-		return "conditional-blocks", true, true
+		return "conditionally-depends-on", true, true
 	case types.DepWaitsFor:
 		return "waits-for", true, true
 	case types.DepRelated, types.DepRelatesTo:
@@ -48,7 +48,9 @@ func depEdgeDisplay(t types.DependencyType) (label string, scheduling, ok bool) 
 	case types.DepDuplicates:
 		return "duplicates", false, true
 	case types.DepSupersedes:
-		return "supersedes", false, true
+		// `bd supersede old --with new` stores (old, new), so the source end of
+		// the edge is the issue being replaced.
+		return "superseded-by", false, true
 	case types.DepRepliesTo:
 		return "replies-to", false, true
 	default:

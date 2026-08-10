@@ -20,6 +20,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 		setupFunc     func(t *testing.T, tmpDir string) // setup before fix
 		expectedPerms os.FileMode
 		expectError   bool
+		hadOldContent bool // pre-existing local content must survive (bd-kaaz3)
 	}{
 		{
 			name: "creates new file with 0600 permissions",
@@ -34,7 +35,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 			expectError:   false,
 		},
 		{
-			name: "replaces existing file with insecure permissions",
+			name: "tightens existing file with insecure permissions",
 			setupFunc: func(t *testing.T, tmpDir string) {
 				beadsDir := filepath.Join(tmpDir, ".beads")
 				if err := os.Mkdir(beadsDir, 0750); err != nil {
@@ -48,9 +49,10 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 			},
 			expectedPerms: 0600,
 			expectError:   false,
+			hadOldContent: true,
 		},
 		{
-			name: "replaces existing file with secure permissions",
+			name: "updates existing file with secure permissions",
 			setupFunc: func(t *testing.T, tmpDir string) {
 				beadsDir := filepath.Join(tmpDir, ".beads")
 				if err := os.Mkdir(beadsDir, 0750); err != nil {
@@ -64,6 +66,7 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 			},
 			expectedPerms: 0600,
 			expectError:   false,
+			hadOldContent: true,
 		},
 		{
 			name: "fails gracefully when .beads directory doesn't exist",
@@ -128,12 +131,21 @@ func TestFixGitignore_FilePermissions(t *testing.T) {
 				t.Errorf("File has too-permissive permissions: %o (group/other should be 0)", actualPerms)
 			}
 
-			// Verify content was written correctly
+			// Verify content: a fresh file gets the full template; a
+			// pre-existing file keeps its local content and gains the
+			// required patterns append-only (bd-kaaz3 — never clobber).
 			content, err := os.ReadFile(gitignorePath)
 			if err != nil {
 				t.Fatalf("Failed to read .gitignore: %v", err)
 			}
-			if string(content) != GitignoreTemplate {
+			if tt.hadOldContent {
+				if !strings.Contains(string(content), "old content") {
+					t.Error("Pre-existing local content was not preserved")
+				}
+				if missing := missingGitignorePatterns(string(content)); len(missing) != 0 {
+					t.Errorf("Required patterns still missing after fix: %v", missing)
+				}
+			} else if string(content) != GitignoreTemplate {
 				t.Error("File content doesn't match GitignoreTemplate")
 			}
 		})
@@ -483,7 +495,7 @@ beads.left.meta.json
 beads.right.meta.json
 `,
 			expectAllPatterns: true,
-			description:       "FixGitignore replaces with canonical template",
+			description:       "should append the missing required patterns",
 		},
 		{
 			name: "partial patterns with user comments",
@@ -495,7 +507,7 @@ daemon.log
 custom-pattern.txt
 `,
 			expectAllPatterns: true,
-			description:       "FixGitignore replaces entire file, user comments will be lost",
+			description:       "user comments and local patterns must survive the fix (bd-kaaz3)",
 		},
 	}
 
@@ -547,17 +559,20 @@ custom-pattern.txt
 				}
 			}
 
-			// Verify content matches template exactly (FixGitignore always writes the template)
-			if contentStr != GitignoreTemplate {
-				t.Errorf("Content does not match GitignoreTemplate.\nExpected:\n%s\n\nGot:\n%s", GitignoreTemplate, contentStr)
+			// The fix is append-only (bd-kaaz3): the pre-existing content —
+			// including user comments and local patterns — must survive as a
+			// prefix of the fixed file, never be replaced by the template.
+			if !strings.HasPrefix(contentStr, tt.initialContent) {
+				t.Errorf("Pre-existing content was not preserved.\nInitial:\n%s\n\nGot:\n%s", tt.initialContent, contentStr)
 			}
 		})
 	}
 }
 
-func TestFixGitignore_PreservesNothing(t *testing.T) {
-	// This test documents that FixGitignore does NOT preserve custom patterns
-	// It always replaces with the canonical template
+func TestFixGitignore_PreservesLocalContent(t *testing.T) {
+	// bd-kaaz3: FixGitignore MUST preserve custom patterns. The old
+	// full-template rewrite destroyed local rules (the wy-81fnur incident:
+	// keep-exports-off-master negations clobbered across 36 clones).
 	tmpDir := t.TempDir()
 
 	oldDir, err := os.Getwd()
@@ -611,17 +626,17 @@ beads.right.meta.json
 
 	contentStr := string(content)
 
-	// Verify custom patterns are NOT preserved
-	if strings.Contains(contentStr, "custom-file.txt") {
-		t.Error("Custom pattern 'custom-file.txt' should not be preserved")
+	// Custom patterns MUST be preserved (bd-kaaz3)
+	if !strings.Contains(contentStr, "custom-file.txt") {
+		t.Error("Custom pattern 'custom-file.txt' must be preserved")
 	}
-	if strings.Contains(contentStr, "*.backup") {
-		t.Error("Custom pattern '*.backup' should not be preserved")
+	if !strings.Contains(contentStr, "*.backup") {
+		t.Error("Custom pattern '*.backup' must be preserved")
 	}
 
-	// Verify it matches template exactly
-	if contentStr != GitignoreTemplate {
-		t.Error("Content should match GitignoreTemplate exactly after fix")
+	// And the required patterns must all be present afterwards
+	if missing := missingGitignorePatterns(contentStr); len(missing) != 0 {
+		t.Errorf("Required patterns still missing after fix: %v", missing)
 	}
 }
 
@@ -679,22 +694,26 @@ func TestFixGitignore_Symlink(t *testing.T) {
 		t.Error("Expected symlink to be preserved (os.WriteFile follows symlinks)")
 	}
 
-	// Verify content is correct (reading through symlink)
+	// Verify content is correct (reading through symlink): the original
+	// content preserved with the required patterns appended (bd-kaaz3)
 	content, err := os.ReadFile(gitignorePath)
 	if err != nil {
 		t.Fatalf("Failed to read .gitignore: %v", err)
 	}
-	if string(content) != GitignoreTemplate {
-		t.Error("Content doesn't match GitignoreTemplate")
+	if !strings.Contains(string(content), "old content") {
+		t.Error("Pre-existing content was not preserved through the symlink")
+	}
+	if missing := missingGitignorePatterns(string(content)); len(missing) != 0 {
+		t.Errorf("Required patterns still missing after fix: %v", missing)
 	}
 
-	// Verify target file was updated with correct content
+	// Verify target file was updated with the same appended content
 	targetContent, err := os.ReadFile(targetPath)
 	if err != nil {
 		t.Fatalf("Failed to read target file: %v", err)
 	}
-	if string(targetContent) != GitignoreTemplate {
-		t.Error("Target file content doesn't match GitignoreTemplate")
+	if string(targetContent) != string(content) {
+		t.Error("Target file content differs from content read through the symlink")
 	}
 
 	// Note: permissions are set on the target file, not the symlink itself
@@ -753,7 +772,7 @@ beads.base.meta.json
 beads.left.meta.json
 beads.right.meta.json
 `,
-			description: "replaces file even when required patterns present with unicode",
+			description: "preserves unicode content while appending missing patterns",
 		},
 	}
 
@@ -789,14 +808,19 @@ beads.right.meta.json
 				t.Fatalf("FixGitignore failed: %v", err)
 			}
 
-			// Verify content is replaced with template (ASCII only)
+			// Unicode content is ordinary local content: it must survive
+			// the append-only fix, with the required patterns added after
+			// it (bd-kaaz3).
 			content, err := os.ReadFile(gitignorePath)
 			if err != nil {
 				t.Fatalf("Failed to read .gitignore: %v", err)
 			}
 
-			if string(content) != GitignoreTemplate {
-				t.Errorf("Content doesn't match GitignoreTemplate\nExpected:\n%s\n\nGot:\n%s", GitignoreTemplate, string(content))
+			if !strings.HasPrefix(string(content), tt.initialContent) {
+				t.Errorf("Pre-existing unicode content was not preserved.\nInitial:\n%s\n\nGot:\n%s", tt.initialContent, string(content))
+			}
+			if missing := missingGitignorePatterns(string(content)); len(missing) != 0 {
+				t.Errorf("Required patterns still missing after fix: %v", missing)
 			}
 		})
 	}
@@ -891,14 +915,18 @@ func TestFixGitignore_VeryLongLines(t *testing.T) {
 					t.Fatalf("FixGitignore failed: %v", err)
 				}
 
-				// Verify content is replaced with template
+				// Long lines are ordinary local content: preserved, with
+				// the required patterns appended (bd-kaaz3).
 				content, err := os.ReadFile(gitignorePath)
 				if err != nil {
 					t.Fatalf("Failed to read .gitignore: %v", err)
 				}
 
-				if string(content) != GitignoreTemplate {
-					t.Error("Content doesn't match GitignoreTemplate")
+				if !strings.HasPrefix(string(content), initialContent) {
+					t.Error("Pre-existing long-line content was not preserved")
+				}
+				if missing := missingGitignorePatterns(string(content)); len(missing) != 0 {
+					t.Errorf("Required patterns still missing after fix: %v", missing)
 				}
 			} else {
 				if err == nil {
@@ -1146,13 +1174,17 @@ func TestFixGitignore_SubdirectoryGitignore(t *testing.T) {
 		t.Fatalf("FixGitignore failed: %v", err)
 	}
 
-	// Verify .beads/.gitignore was updated
+	// Verify .beads/.gitignore was updated append-only: old content kept,
+	// required patterns added (bd-kaaz3)
 	beadsContent, err := os.ReadFile(beadsGitignorePath)
 	if err != nil {
 		t.Fatalf("Failed to read .beads/.gitignore: %v", err)
 	}
-	if string(beadsContent) != GitignoreTemplate {
-		t.Error(".beads/.gitignore should be updated to template")
+	if !strings.HasPrefix(string(beadsContent), oldBeadsContent) {
+		t.Error(".beads/.gitignore pre-existing content should be preserved")
+	}
+	if missing := missingGitignorePatterns(string(beadsContent)); len(missing) != 0 {
+		t.Errorf(".beads/.gitignore still missing required patterns: %v", missing)
 	}
 
 	// Verify subdirectory .gitignore was NOT touched

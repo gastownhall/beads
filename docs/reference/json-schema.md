@@ -3,7 +3,7 @@ title: JSON Output Schema Contract
 description: The stable JSON output contract for bd --json commands, covering the schema_version envelope, per-command fields, and consumer guidelines.
 ---
 
-Last reviewed: 2026-05-08
+Last reviewed: 2026-08-07
 
 Freshness source: `cmd/bd/output.go`, `cmd/bd/errors.go`, and
 `cmd/bd/protocol/json_contract_test.go`.
@@ -31,25 +31,37 @@ Every `--json` command wraps output as:
 The original payload is untouched inside `.data` — no type corruption,
 no field injection. Works identically for objects, arrays, and maps.
 
+When a `--limit`-truncated listing runs in envelope mode (currently wired
+for `bd ready`), the envelope also carries a `pagination` key:
+
+```json
+{"schema_version": 1, "data": [...], "pagination": {"returned": 10, "total": 42, "truncated": true}}
+```
+
+`total` is omitted when unknown; the whole `pagination` key is absent when
+the result was not truncated. Legacy mode keeps the stderr text hint instead.
+
 ### Updating consumers
 
 ```bash
 # Before (legacy):
 bd list --json | jq '.[0].id'
-bd show beads-abc --json | jq '.title'
+bd show beads-abc --json | jq '.[0].title'
 
 # After (envelope):
 bd list --json | jq '.data[0].id'
-bd show beads-abc --json | jq '.data.title'
+bd show beads-abc --json | jq '.data[0].title'
 
-# Version check:
-bd show beads-abc --json | jq '.schema_version'
+# Version check (object commands, e.g. create):
+bd create "Example" --json | jq '.schema_version'
 ```
 
 ### Timeline
 
 - **Current release**: Legacy format is default. Set `BD_JSON_ENVELOPE=1` to opt in.
-  A deprecation notice is printed to stderr when `--json` is used without the env var.
+  A deprecation notice is printed to stderr when `--json` is used without the env
+  var — but only when stderr is a terminal, and at most once per invocation, so
+  scripts capturing stderr will not see it.
 - **v2.0**: Envelope becomes the default. `BD_JSON_ENVELOPE=0` available as
   temporary escape hatch for one release cycle.
 
@@ -95,9 +107,9 @@ Arrays are wrapped the same way:
 
 ### Legacy mode (default, until v2.0)
 
-### Object commands (show, create, close, update, etc.)
+### Object commands (create, ping, etc.)
 
-Commands that return a single issue or result emit a JSON object with
+Commands that return a single result emit a JSON object with
 `schema_version` as a top-level field alongside the data:
 
 ```json
@@ -112,9 +124,11 @@ Commands that return a single issue or result emit a JSON object with
 }
 ```
 
-### List commands (list, ready, search, stale, etc.)
+### List commands (list, ready, search, stale, show, close, update, etc.)
 
-Commands that return multiple items emit a raw JSON array:
+Commands that return one or more issues emit a raw JSON array — including
+`show`, `close`, and `update`, which return one element per requested ID.
+Array output carries no top-level `schema_version` field:
 
 ```json
 [
@@ -123,9 +137,10 @@ Commands that return multiple items emit a raw JSON array:
 ]
 ```
 
-### Error output (stderr)
+### Error output
 
-Errors with `--json` active emit JSON to stderr:
+Errors with `--json` active emit JSON — most error paths write it to stderr,
+though some command-result error paths emit the same shape to stdout:
 
 ```json
 {
@@ -134,6 +149,12 @@ Errors with `--json` active emit JSON to stderr:
   "code": "not_found"
 }
 ```
+
+`code` and `hint` (a remediation suggestion) are both optional — only
+`error` and `schema_version` are always present. In envelope mode
+(`BD_JSON_ENVELOPE=1`) the error payload moves inside the envelope:
+`{"schema_version": 1, "data": {"error": ..., "code": ..., "hint": ...}}`.
+JSON-mode errors exit with code 1.
 
 ## Field Contracts by Command
 
@@ -158,7 +179,8 @@ Optional fields:
 
 Same schema as `bd list --json`. Items are filtered to unblocked issues only.
 Each item includes `dependency_count`, `dependent_count`, `comment_count`,
-and optional `parent` fields.
+and optional `parent` fields. In envelope mode a `--limit`-truncated result
+adds the envelope-level `pagination` key (see the envelope section above).
 
 ### bd blocked --json
 
@@ -169,10 +191,14 @@ Each item includes all standard issue fields plus:
 
 ### bd show --json
 
-Returns a single object (not wrapped in `items`). Same required fields as list
+Returns a top-level JSON array with one element per requested ID; items do
+not carry `schema_version` (this shape is pinned by a contract test — a
+change here is a breaking wire change). Same required fields as list
 items, plus:
 - `description` (string)
 - `acceptance_criteria` (string)
+- `revision` (number): guarded-write optimistic-concurrency token; always
+  present, including a legacy `0`
 - `dependencies` (object[]): Full dependency records
 - `comments` (object[]): Comment thread — present only with `--include-comments`;
   the default response returns `comment_count` only (count-only, be-ijck6q)
@@ -186,6 +212,7 @@ Returns a summary object when `--json` is active:
 - `source` (string): File path or "stdin"
 - `created` (number): Issues created
 - `updated` (number): Existing issues updated
+- `unchanged` (number, optional): Rows identical to local state, untouched
 - `skipped` (number): Issues skipped (stale rows + dedup)
 - `dedup_skipped` (number): Issues skipped by `--dedup` title match
 - `memories` (number): Memory records imported
@@ -205,6 +232,18 @@ Each line is a self-contained issue or memory record, discriminated by
 not to the interchange stream. The interchange's own version marker is the
 optional `_schema` header record (`{"_schema":"beads-jsonl/1"}`), which
 readers skip.
+
+Issue records carry an optional `wisp_plane` boolean: the explicit
+wisps-plane marker. Export stamps it on rows that live in the wisps table
+when the row flags alone cannot prove the plane (a `no_history: true` record
+is otherwise ambiguous — an unpromoted no-history wisp and a promoted one
+look identical). Import routes the storage plane by this marker, never by
+`no_history`: marker absent means the durable issues table. The marker is a
+fresh key rather than a reuse of the legacy `wisp` boolean so that older
+readers, which do not know it, degrade to flag routing instead of importing
+marked rows as ephemeral (purge-eligible and export-excluded). The v0.35–
+v0.37 `wisp` key — those streams' spelling of `ephemeral` — is still honored
+as a read-side legacy alias.
 
 ## Consumer Guidelines
 

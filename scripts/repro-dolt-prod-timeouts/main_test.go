@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,47 +22,6 @@ import (
 	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
-
-const (
-	fakeBDModeEnv      = "BEADS_REPRO_TIMEOUTS_TEST_BD_MODE"
-	fakeBDParentPIDEnv = "BEADS_REPRO_TIMEOUTS_TEST_BD_PARENT_PID"
-	fakeBDSuccess      = "BEADS_REPRO_TIMEOUTS_TEST_BD_OK"
-)
-
-// init handles the self-reexec fixture before the generated test runner parses
-// the production-style bd arguments appended by runBD. Both executable name
-// and live parent identity keep an ambient environment value from turning the
-// ordinary test runner into a successful helper process.
-func init() {
-	mode := os.Getenv(fakeBDModeEnv)
-	if mode == "" || filepath.Base(os.Args[0]) != nativeBDExecutableName() {
-		return
-	}
-	if os.Getenv(fakeBDParentPIDEnv) != strconv.Itoa(os.Getppid()) {
-		fmt.Fprintln(os.Stderr, "fake bd parent identity mismatch")
-		os.Exit(95)
-	}
-	os.Exit(runFakeBDTestProcess(mode))
-}
-
-func runFakeBDTestProcess(mode string) int {
-	if mode != "assert-no-dolt-overrides" {
-		fmt.Fprintf(os.Stderr, "unknown fake bd mode %q\n", mode)
-		return 97
-	}
-	if !slices.Equal(os.Args[1:], []string{"status"}) {
-		fmt.Fprintf(os.Stderr, "fake bd args = %q, want [status]\n", os.Args[1:])
-		return 96
-	}
-	for _, key := range subprocessEnvDenylist {
-		if value := os.Getenv(key); value != "" {
-			fmt.Fprintf(os.Stderr, "%s inherited: %s\n", key, value)
-			return 42
-		}
-	}
-	fmt.Fprintln(os.Stderr, fakeBDSuccess)
-	return 0
-}
 
 func TestIsDriverReadTimeout(t *testing.T) {
 	result := opResult{
@@ -150,56 +108,83 @@ func TestParseFlagsPreservesExplicitExistingWorkspaceSeedMode(t *testing.T) {
 	}
 }
 
-func TestBenchmarkSubprocessesStripDoltEnvOverrides(t *testing.T) {
+func TestBenchmarkCommandBuildersStripDoltEnvOverrides(t *testing.T) {
 	for _, key := range subprocessEnvDenylist {
-		t.Setenv(key, "caller-"+strings.ToLower(key))
+		t.Setenv(key, "ambient-"+strings.ToLower(key))
 	}
+	const allowedAmbient = "BEADS_REPRO_TIMEOUTS_ALLOWED_AMBIENT=present"
+	allowedKey, allowedValue, _ := strings.Cut(allowedAmbient, "=")
+	t.Setenv(allowedKey, allowedValue)
 
-	tmp := t.TempDir()
-	bd := writeNativeBDTestExecutable(t, tmp)
-
-	cfg := config{BDPath: bd, Timeout: 5 * time.Second}
-	ws := &workspace{Dir: tmp}
-	fakeEnv := []string{
-		fakeBDModeEnv + "=assert-no-dolt-overrides",
-		fakeBDParentPIDEnv + "=" + strconv.Itoa(os.Getpid()),
-	}
-	got := runBD(context.Background(), cfg, ws, job{
+	cfg := config{BDPath: filepath.Join(t.TempDir(), "bd")}
+	ws := &workspace{Dir: t.TempDir()}
+	j := job{
 		Kind: "env",
 		Argv: []string{"status"},
-		Env:  fakeEnv,
-	})
-	if got.Err != "" {
-		t.Fatalf("runBD inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
+		Env: []string{
+			"BEADS_REPRO_TIMEOUTS_CONTROLLED=one",
+			"BEADS_REPRO_TIMEOUTS_CONTROLLED_SECOND=two",
+		},
+		Sh: "printf test",
 	}
-	if got.StderrTail != fakeBDSuccess {
-		t.Fatalf("runBD fake receipt = %q, want %q", got.StderrTail, fakeBDSuccess)
+	shellPath, err := exec.LookPath("sh")
+	if err != nil {
+		t.Fatalf("find shell: %v", err)
 	}
-	if got := runShell(context.Background(), cfg, ws, job{Kind: "env", Sh: noDoltOverrideEnvScript()}); got.Err != "" {
-		t.Fatalf("runShell inherited denied env: err=%q stderr=%q", got.Err, got.StderrTail)
-	}
-}
 
-func TestNativeBDHelperRejectsWrongParent(t *testing.T) {
-	bd := writeNativeBDTestExecutable(t, t.TempDir())
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bd, "-test.run=^$")
-	cmd.WaitDelay = time.Second
-	cmd.Env = subprocessEnv(
-		fakeBDModeEnv+"=assert-no-dolt-overrides",
-		fakeBDParentPIDEnv+"=0",
-	)
+	tests := []struct {
+		name       string
+		build      func(context.Context, config, *workspace, job) *exec.Cmd
+		wantPath   string
+		wantArgs   []string
+		wantSuffix []string
+	}{
+		{
+			name:       "bd",
+			build:      newBDCommand,
+			wantPath:   cfg.BDPath,
+			wantArgs:   []string{cfg.BDPath, "status"},
+			wantSuffix: append([]string{"BD_NON_INTERACTIVE=1"}, j.Env...),
+		},
+		{
+			name:     "shell",
+			build:    newShellCommand,
+			wantPath: shellPath,
+			wantArgs: []string{"sh", "-c", j.Sh},
+			wantSuffix: append([]string{
+				"BD_NON_INTERACTIVE=1",
+				"BD_BIN=" + cfg.BDPath,
+			}, j.Env...),
+		},
+	}
 
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("wrong-parent fake bd did not terminate promptly: %v", ctx.Err())
-	}
-	if err == nil {
-		t.Fatalf("wrong-parent fake bd succeeded: %s", output)
-	}
-	if !strings.Contains(string(output), "fake bd parent identity mismatch") {
-		t.Fatalf("wrong-parent output = %q", output)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := tt.build(context.Background(), cfg, ws, j)
+			if cmd.Path != tt.wantPath {
+				t.Fatalf("Path = %q, want %q", cmd.Path, tt.wantPath)
+			}
+			if !slices.Equal(cmd.Args, tt.wantArgs) {
+				t.Fatalf("Args = %q, want %q", cmd.Args, tt.wantArgs)
+			}
+			if cmd.Dir != ws.Dir {
+				t.Fatalf("Dir = %q, want %q", cmd.Dir, ws.Dir)
+			}
+			if len(cmd.Env) < len(tt.wantSuffix) || !slices.Equal(cmd.Env[len(cmd.Env)-len(tt.wantSuffix):], tt.wantSuffix) {
+				t.Fatalf("Env suffix = %q, want %q", cmd.Env, tt.wantSuffix)
+			}
+			if !slices.Contains(cmd.Env, allowedAmbient) {
+				t.Fatalf("Env dropped allowed ambient variable %q", allowedAmbient)
+			}
+			for _, key := range subprocessEnvDenylist {
+				for _, entry := range cmd.Env {
+					gotKey, _, _ := strings.Cut(entry, "=")
+					if gotKey == key {
+						t.Fatalf("Env retained ambient denied override %q", entry)
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -255,25 +240,6 @@ func nativeBDExecutableName() string {
 		return "bd.exe"
 	}
 	return "bd"
-}
-
-func noDoltOverrideEnvScript() string {
-	var b strings.Builder
-	b.WriteString("for key in")
-	for _, key := range subprocessEnvDenylist {
-		b.WriteByte(' ')
-		b.WriteString(key)
-	}
-	b.WriteString(`; do
-	eval "value=\${$key:-}"
-	if [ -n "$value" ]; then
-		echo "$key inherited: $value" >&2
-		exit 42
-	fi
-done
-exit 0
-`)
-	return b.String()
 }
 
 func TestScenarioNamesAllIncludesEveryAdvertisedScenario(t *testing.T) {

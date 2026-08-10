@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 type molReader interface {
@@ -36,13 +37,6 @@ type molReader interface {
 }
 
 var _ molReader = storage.DoltStorage(nil)
-
-type molConfigWriter interface {
-	molReader
-	SetConfig(ctx context.Context, key, value string) error
-}
-
-var _ molConfigWriter = storage.DoltStorage(nil)
 
 type molWriter interface {
 	molReader
@@ -89,6 +83,19 @@ func (w storeMolWriter) SetConfig(ctx context.Context, key, value string) error 
 	return w.tx.SetConfig(ctx, key, value)
 }
 
+// GetConfig reads through the transaction when one is bound. Without this,
+// config readers (flattenUnregisteredIssueTypes) would go to the embedded
+// store, which opens a second pool connection — a deadlock when
+// MaxOpenConns=1 and the transaction already holds the only one. It also
+// keeps the read consistent with any config written earlier in the same
+// transaction rather than seeing the last committed value.
+func (w storeMolWriter) GetConfig(ctx context.Context, key string) (string, error) {
+	if w.tx != nil {
+		return w.tx.GetConfig(ctx, key)
+	}
+	return w.DoltStorage.GetConfig(ctx, key)
+}
+
 func (w storeMolWriter) ClaimStepIfOpen(ctx context.Context, id, actor string) error {
 	return w.DoltStorage.RunInTransaction(ctx, fmt.Sprintf("bd: advance to step %s", id), func(tx storage.Transaction) error {
 		current, err := tx.GetIssue(ctx, id)
@@ -114,9 +121,12 @@ type uowMolReader struct {
 }
 
 func (r uowMolReader) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
-	issue, isWisp := proxiedResolveIssueOrWisp(ctx, r.uw, id)
-	if issue == nil {
+	issue, isWisp, rerr := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(r.uw), id)
+	if errors.Is(rerr, storage.ErrNotFound) {
 		return nil, fmt.Errorf("issue %s not found", id)
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("resolving %s: %w", id, rerr)
 	}
 	var labels []string
 	var err error

@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/query"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var queryCmd = &cobra.Command{
@@ -88,134 +91,136 @@ Examples:
 			return runQueryProxiedServer(cmd, rootCtx, args)
 		}
 
-		if len(args) == 0 {
-			fmt.Fprintf(os.Stderr, "Error: query expression is required\n\n")
-			if err := cmd.Help(); err != nil {
-				fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
-			}
-			return SilentExit()
+		in, err := gatherQueryInput(cmd, args)
+		if err != nil {
+			return err
 		}
-
-		queryStr := strings.Join(args, " ")
-
-		limit, _ := cmd.Flags().GetInt("limit")
-		allFlag, _ := cmd.Flags().GetBool("all")
-		longFormat, _ := cmd.Flags().GetBool("long")
-		sortBy, _ := cmd.Flags().GetString("sort")
-		reverse, _ := cmd.Flags().GetBool("reverse")
-		parseOnly, _ := cmd.Flags().GetBool("parse-only")
-		offset, _ := cmd.Flags().GetInt("offset")
-		if offset < 0 {
-			return HandleErrorRespectJSON("--offset must be non-negative")
+		if in.parseOnly {
+			return printParsedQuery(in.expression)
 		}
-		if offset > 0 {
+		if in.offset > 0 {
 			return HandleErrorRespectJSON("--offset is only supported under --proxied-server")
 		}
 
-		node, err := query.Parse(queryStr)
-		if err != nil {
-			return HandleErrorRespectJSON("parsing query: %v", err)
-		}
-
-		if parseOnly {
-			fmt.Printf("Parsed query: %s\n", node.String())
-			return nil
-		}
-
-		eval := query.NewEvaluator(time.Now())
-		result, err := eval.Evaluate(node)
-		if err != nil {
-			return HandleErrorRespectJSON("evaluating query: %v", err)
-		}
-
-		if limit > 0 && !result.RequiresPredicate {
-			result.Filter.Limit = limit
-		}
-
-		if !allFlag && result.Filter.Status == nil && !hasExplicitStatusFilter(node) {
-			result.Filter.ExcludeStatus = append(result.Filter.ExcludeStatus, types.StatusClosed)
-		}
-
-		ctx := rootCtx
-
-		if store == nil {
-			return HandleErrorRespectJSON("no storage available")
-		}
-
-		searchFilter := result.Filter
-		if result.RequiresPredicate && limit > 0 {
-			searchFilter.Limit = limit * 3
-			if searchFilter.Limit < 100 {
-				searchFilter.Limit = 100
-			}
-		}
-
-		if jsonOutput {
-			iwc, err := store.SearchIssuesWithCounts(ctx, "", searchFilter)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-			if result.RequiresPredicate && result.Predicate != nil {
-				filtered := make([]*types.IssueWithCounts, 0, len(iwc))
-				for _, item := range iwc {
-					if item == nil || item.Issue == nil {
-						continue
-					}
-					if result.Predicate(item.Issue) {
-						filtered = append(filtered, item)
-					}
-				}
-				iwc = filtered
-				if limit > 0 && len(iwc) > limit {
-					iwc = iwc[:limit]
-				}
-			}
-			sortIssuesWithCounts(iwc, sortBy, reverse)
-			if iwc == nil {
-				iwc = []*types.IssueWithCounts{}
-			}
-			return outputJSON(iwc)
-		}
-
-		issues, err := store.SearchIssues(ctx, "", searchFilter)
+		querier, err := openQuerier()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-
-		if result.RequiresPredicate && result.Predicate != nil {
-			filtered := make([]*types.Issue, 0, len(issues))
-			for _, issue := range issues {
-				if result.Predicate(issue) {
-					filtered = append(filtered, issue)
-				}
-			}
-			issues = filtered
-			if limit > 0 && len(issues) > limit {
-				issues = issues[:limit]
-			}
-		}
-
-		sortIssues(issues, sortBy, reverse)
-
-		outputQueryResults(issues, queryStr, longFormat)
-		return nil
+		return runQuery(rootCtx, querier, in)
 	},
 }
 
-// hasExplicitStatusFilter checks if the query contains an explicit status comparison
-func hasExplicitStatusFilter(node query.Node) bool {
-	switch n := node.(type) {
-	case *query.ComparisonNode:
-		return n.Field == "status"
-	case *query.AndNode:
-		return hasExplicitStatusFilter(n.Left) || hasExplicitStatusFilter(n.Right)
-	case *query.OrNode:
-		return hasExplicitStatusFilter(n.Left) || hasExplicitStatusFilter(n.Right)
-	case *query.NotNode:
-		return hasExplicitStatusFilter(n.Operand)
-	default:
-		return false
+// openQuerier hands back the boolean-query role for whichever route this
+// invocation is on. Neither branch parses the expression, builds a filter or
+// opens a unit of work: that is what moved behind the role.
+func openQuerier() (issueops.Querier, error) {
+	if usesProxiedServer() {
+		return proxiedQuerier()
 	}
+	if store == nil {
+		return nil, errors.New("no storage available")
+	}
+	return store.Querier()
+}
+
+// queryInput is the flag set both routes read, gathered once.
+type queryInput struct {
+	expression string
+	request    issueops.QueryRequest
+	limit      int
+	offset     int
+	longFormat bool
+	parseOnly  bool
+}
+
+// gatherQueryInput turns the flags into the role's request. It is flag parsing
+// and nothing else: the expression is handed over verbatim.
+//
+// ONE REFUSAL IS LEFT HERE, and it is flag hygiene rather than semantics: a
+// negative --offset is not a page request at all. The two that WERE here are
+// gone — the role refuses an offset under a display order for every caller, and
+// answers an offset over a predicate query correctly rather than refusing it.
+func gatherQueryInput(cmd *cobra.Command, args []string) (queryInput, error) {
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: query expression is required\n\n")
+		if err := cmd.Help(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error displaying help: %v\n", err)
+		}
+		return queryInput{}, SilentExit()
+	}
+
+	in := queryInput{expression: strings.Join(args, " ")}
+	in.limit, _ = cmd.Flags().GetInt("limit")
+	in.longFormat, _ = cmd.Flags().GetBool("long")
+	in.parseOnly, _ = cmd.Flags().GetBool("parse-only")
+	in.offset, _ = cmd.Flags().GetInt("offset")
+	sortBy, _ := cmd.Flags().GetString("sort")
+	allFlag, _ := cmd.Flags().GetBool("all")
+	reverse, _ := cmd.Flags().GetBool("reverse")
+
+	if in.offset < 0 {
+		return queryInput{}, HandleErrorRespectJSON("--offset must be non-negative")
+	}
+
+	limit := in.limit
+	in.request = issueops.QueryRequest{
+		Expression:    in.expression,
+		IncludeClosed: allFlag,
+		SortBy:        sortBy,
+		Reverse:       reverse,
+		Limit:         &limit,
+		Offset:        in.offset,
+	}
+	return in, nil
+}
+
+// printParsedQuery serves --parse-only, which opens no store: it is a debugging
+// view of the AST, not a query, and asking for the role to print it would make
+// a syntax check need a database. Its refusal is worded as the ROLE words the
+// same fault, so a syntax error reads the same either way.
+func printParsedQuery(expression string) error {
+	node, err := query.Parse(expression)
+	if err != nil {
+		return HandleErrorRespectJSON("invalid query expression: %v", err)
+	}
+	fmt.Printf("Parsed query: %s\n", node.String())
+	return nil
+}
+
+// runQuery asks the role and renders the page. Both routes call it, so the two
+// surfaces differ by which accessor produced the role and by nothing else.
+func runQuery(ctx context.Context, querier issueops.Querier, in queryInput) error {
+	page, err := querier.Query(ctx, in.request)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	if jsonOutput {
+		if err := outputJSON(page.Items); err != nil {
+			return err
+		}
+	} else {
+		outputQueryResults(queryPageIssues(page.Items), in.expression, in.longFormat)
+	}
+	// The hint is on stderr and on BOTH routes now: the direct one had no
+	// has-more verdict to print before, because the query it ran was the
+	// truncating one.
+	printTruncationHint(page.HasMore, in.limit)
+	return nil
+}
+
+// queryPageIssues projects the counted page onto the rows the text renderings
+// take. Both output modes now read ONE query — the counted one `--json` always
+// used — because two calls that differed only in their projection are two
+// chances for a predicate to be applied to different rows.
+func queryPageIssues(items []*types.IssueWithCounts) []*types.Issue {
+	out := make([]*types.Issue, 0, len(items))
+	for _, item := range items {
+		if item == nil || item.Issue == nil {
+			continue
+		}
+		out = append(out, item.Issue)
+	}
+	return out
 }
 
 // outputQueryResults formats and displays query results
@@ -280,7 +285,7 @@ func formatQueryIssue(buf *strings.Builder, issue *types.Issue) {
 }
 
 func init() {
-	queryCmd.Flags().IntP("limit", "n", 50, "Limit results (default: 50, 0 = unlimited)")
+	queryCmd.Flags().IntP("limit", "n", workapi.DefaultQueryLimit, "Limit results (default: 50, 0 = unlimited)")
 	queryCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	queryCmd.Flags().BoolP("all", "a", false, "Include closed issues (default: exclude closed)")
 	queryCmd.Flags().Bool("long", false, "Show detailed multi-line output for each issue")

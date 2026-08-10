@@ -7,10 +7,19 @@
 # Regenerate with scripts/ci/gen_proxied_shard_manifest.py after adding,
 # splitting, or reweighting TestProxiedServer* functions. Newly-added
 # tests not listed here hash-distribute via proxied-test-shard.sh.
+#
+# `bd serve`'s two suites are listed at the shard the hash fallback was
+# already giving them, so this records the assignment without reshuffling
+# the other 100. TestProxiedServerServeReadParity is the CLI/HTTP read parity
+# oracle — the behavioural half of the anti-drift claim — so it being IN this
+# lane, and this lane being required by PR Risk's CI gate, is the thing that
+# makes that claim enforced on PRs rather than asserted in a doc comment.
 
 15 1 TestProxiedServerCount
 15 1 TestProxiedServerDelete
 15 1 TestProxiedServerDoltRemoteRemove
+15 1 TestProxiedServerExport
+15 1 TestProxiedServerGateLifecycle
 15 1 TestProxiedServerMolCurrent
 15 1 TestProxiedServerPathHelpers
 15 1 TestProxiedServerTodo
@@ -33,11 +42,13 @@
 15 3 TestProxiedServerUpdate2
 15 3 TestProxiedServerUpdateConcurrentMetadata
 
+15 4 TestProxiedServerCascadeParity
 15 4 TestProxiedServerClose2
 15 4 TestProxiedServerDeleteConcurrent
 15 4 TestProxiedServerDuplicates
 15 4 TestProxiedServerMolBond
 15 4 TestProxiedServerQuery
+15 4 TestProxiedServerUnclaimIfAssigneeParity
 15 4 TestProxiedServerWispCreate
 
 15 5 TestProxiedServerCreate2
@@ -51,6 +62,7 @@
 15 6 TestProxiedServerCleanDatabases
 15 6 TestProxiedServerEdit
 15 6 TestProxiedServerLink
+15 6 TestProxiedServerPrime
 15 6 TestProxiedServerReady2
 15 6 TestProxiedServerReadyConcurrent
 15 6 TestProxiedServerState
@@ -58,17 +70,23 @@
 15 7 TestProxiedServerClose
 15 7 TestProxiedServerCloseConcurrent
 15 7 TestProxiedServerExternalCreate
+15 7 TestProxiedServerHeartbeat
 15 7 TestProxiedServerMolStale
 15 7 TestProxiedServerReadyWisp
 15 7 TestProxiedServerReclaim
+15 7 TestProxiedServerRelate
 
 15 8 TestProxiedServerCreate
 15 8 TestProxiedServerGC
 15 8 TestProxiedServerGateCheck
 15 8 TestProxiedServerMolLastActivity
+15 8 TestProxiedServerPromote
 15 8 TestProxiedServerQuick
 15 8 TestProxiedServerReopenConcurrent
+15 8 TestProxiedServerServeClaim
+15 8 TestProxiedServerServeReadParity
 
+15 9 TestProxiedServerBatchParity
 15 9 TestProxiedServerDep2
 15 9 TestProxiedServerGraph
 15 9 TestProxiedServerMolProgress
@@ -82,11 +100,13 @@
 15 10 TestProxiedServerLabel
 15 10 TestProxiedServerList
 15 10 TestProxiedServerSQLDatabaseFlag
+15 10 TestProxiedServerSwarm
 15 10 TestProxiedServerUpdateWisp
 
 15 11 TestProxiedServerCompactHistory
 15 11 TestProxiedServerDeleteWisp
 15 11 TestProxiedServerEpic
+15 11 TestProxiedServerHuman
 15 11 TestProxiedServerInfo
 15 11 TestProxiedServerMolDistill
 15 11 TestProxiedServerReady
@@ -94,6 +114,8 @@
 
 15 12 TestProxiedServerDep
 15 12 TestProxiedServerLint
+15 12 TestProxiedServerServeLifecycle
+15 12 TestProxiedServerServeModeGate
 15 12 TestProxiedServerShow3
 15 12 TestProxiedServerStale
 15 12 TestProxiedServerTag
@@ -101,12 +123,14 @@
 15 13 TestProxiedServerConfig
 15 13 TestProxiedServerConfigConcurrent
 15 13 TestProxiedServerGateList
+15 13 TestProxiedServerMemory
 15 13 TestProxiedServerMultiStatementSQL
 15 13 TestProxiedServerReopen
 15 13 TestProxiedServerStatuses
 
 15 14 TestProxiedServerComment
 15 14 TestProxiedServerContext
+15 14 TestProxiedServerKV
 15 14 TestProxiedServerNote
 15 14 TestProxiedServerSearch
 15 14 TestProxiedServerShow
@@ -114,6 +138,7 @@
 
 15 15 TestProxiedServerMolShow
 15 15 TestProxiedServerOrphans
+15 15 TestProxiedServerRecomputeBlocked
 15 15 TestProxiedServerShow2
 15 15 TestProxiedServerUnclaim
 15 15 TestProxiedServerUpdate3

@@ -59,48 +59,25 @@ func showIssueRefs(ctx context.Context, args []string, jsonOut bool) error {
 
 		fmt.Printf("\n%s References to %s:\n", ui.RenderAccent("📎"), issueID)
 
-		// Group refs by type
-		refsByType := make(map[types.DependencyType][]*types.IssueWithDependencyMetadata)
-		for _, ref := range refs {
-			refsByType[ref.DependencyType] = append(refsByType[ref.DependencyType], ref)
-		}
-
-		// Display each type
-		typeOrder := []types.DependencyType{
-			types.DepUntil, types.DepCausedBy, types.DepValidates,
-			types.DepBlocks, types.DepParentChild, types.DepRelatesTo,
-			types.DepTracks, types.DepDiscoveredFrom, types.DepRelated,
-			types.DepSupersedes, types.DepDuplicates, types.DepRepliesTo,
-			types.DepApprovedBy, types.DepAuthoredBy, types.DepAssignedTo,
-		}
-
-		// First show types in order, then any others
-		shown := make(map[types.DependencyType]bool)
-		for _, depType := range typeOrder {
-			if refs, ok := refsByType[depType]; ok {
-				displayRefGroup(depType, refs)
-				shown[depType] = true
-			}
-		}
-		// Show any remaining types
-		for depType, refs := range refsByType {
-			if !shown[depType] {
-				displayRefGroup(depType, refs)
-			}
+		// Every ref is an edge pointing AT this issue, so each group is named
+		// from this issue's end. The bare type name would read from the other
+		// end for the types whose name runs source-first: a (dup, canonical)
+		// edge under a "duplicates" heading says the canonical is the copy.
+		for _, sec := range groupDepSections(refs, false, nil) {
+			displayRefGroup(sec)
 		}
 		fmt.Println()
 	}
 	return nil
 }
 
-// displayRefGroup displays a group of references with a given type
+// displayRefGroup displays one group of references under its relationship name
 // Closed items get entire row muted - the work is done, no need for attention
-func displayRefGroup(depType types.DependencyType, refs []*types.IssueWithDependencyMetadata) {
-	// Get emoji for type
-	emoji := getRefTypeEmoji(depType)
-	fmt.Printf("\n  %s %s (%d):\n", emoji, depType, len(refs))
+func displayRefGroup(sec depSection) {
+	emoji := getRefTypeEmoji(sec.Type)
+	fmt.Printf("\n  %s %s (%d):\n", emoji, sec.Heading, len(sec.Deps))
 
-	for _, ref := range refs {
+	for _, ref := range sec.Deps {
 		// Closed items: mute entire row since the work is complete
 		if ref.Status == types.StatusClosed {
 			fmt.Printf("    %s: %s %s\n",

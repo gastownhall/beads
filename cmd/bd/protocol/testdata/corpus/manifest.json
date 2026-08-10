@@ -61,7 +61,7 @@
     },
     "envelope/show": {
       "cmd": "bd show corpus-root --json",
-      "sha256": "ed15174a85cf33ef810cce77906d15756e80c324f8d7c6cc98330efb7dc35a70"
+      "sha256": "52c3ac87e5cb992c15a9705d77bb07ac0ffd3892359bd78579b4214f7bfb9460"
     },
     "envelope/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",
@@ -129,7 +129,7 @@
     },
     "flat/show": {
       "cmd": "bd show corpus-root --json",
-      "sha256": "586fa1f5a1aef647185b857e182df6a35f1887e22c483c8ccb1b715b69abe506"
+      "sha256": "57977d893d55da712c4ab25b718bb48d2764cb40c2a15d1bbf312b7c58e6010b"
     },
     "flat/update": {
       "cmd": "bd update corpus-root --json --priority 0 --add-label corpus-label --set-metadata phase=2 --description \"updated corpus root\"",

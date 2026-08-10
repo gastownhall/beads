@@ -15,7 +15,7 @@ import (
 // transaction. Automatically routes to wisp_comments if the ID is an active wisp.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func GetIssueCommentsInTx(ctx context.Context, tx *sql.Tx, issueID string) ([]*types.Comment, error) {
+func GetIssueCommentsInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.Comment, error) {
 	table := "comments"
 	if IsActiveWispInTx(ctx, tx, issueID) {
 		table = "wisp_comments"
@@ -223,15 +223,23 @@ func GetCommentCountsInTx(ctx context.Context, tx *sql.Tx, issueIDs []string) (m
 // GetIssueCommentsPage cursor: an un-truncated sub-second CreatedAt would sort
 // after same-second rows stored at the truncated second and skip them on resume.
 //
+// It is also advanced past the issue's newest existing comment when that
+// truncation would otherwise collide — see nextLiveCommentTime.
+//
 //nolint:gosec // G201: table names come from hardcoded constants
 func AddIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string) (*types.Comment, error) {
-	return ImportIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second))
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, time.Now().UTC().Truncate(time.Second), true)
 }
 
 // ImportIssueCommentInTx adds a comment preserving the original timestamp.
 //
 //nolint:gosec // G201: table names come from hardcoded constants
 func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
+	return addIssueCommentInTx(ctx, tx, issueID, author, text, createdAt, false)
+}
+
+//nolint:gosec // G201: table names come from hardcoded constants
+func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text string, createdAt time.Time, live bool) (*types.Comment, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	commentTable := "comments"
@@ -249,6 +257,14 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		return nil, fmt.Errorf("issue %s not found", issueID)
 	}
 
+	if live {
+		advanced, err := NextLiveCommentTime(ctx, tx, commentTable, issueID, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		createdAt = advanced
+	}
+
 	createdAtText := FormatAuxTime(createdAt)
 	id, _, err := InsertDerivedComment(ctx, tx, commentTable, issueID, author, text, createdAtText)
 	if err != nil {
@@ -259,13 +275,19 @@ func ImportIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, te
 		return nil, fmt.Errorf("add comment to %s: %w", commentTable, err)
 	}
 
-	return &types.Comment{
+	comment := &types.Comment{
 		ID:        id,
 		IssueID:   issueID,
 		Author:    author,
 		Text:      text,
 		CreatedAt: stored,
-	}, nil
+	}
+	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: author, Text: text, CreatedAt: stored, Source: CommentSourceStructured,
+	}); err != nil {
+		return nil, err
+	}
+	return comment, nil
 }
 
 // AddCommentEventInTx adds a comment as an event to an issue within a transaction.
@@ -276,13 +298,25 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, _ := WispTableRouting(isWisp)
 
-	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
+	createdAt := NowAuxTime()
+	id, err := InsertDerivedEventReturningID(ctx, tx, eventTable, AuxEvent{
 		IssueID:   issueID,
 		EventType: types.EventCommented,
 		Actor:     actor,
 		Comment:   str(comment),
-	}); err != nil {
+		CreatedAt: createdAt,
+	})
+	if err != nil {
 		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
 	}
-	return nil
+	stored, err := ParseAuxTime(createdAt)
+	if err != nil {
+		return fmt.Errorf("add comment event to %s: %w", eventTable, err)
+	}
+	// An audit-trail comment is replayable text a consumer must be able to
+	// reproduce, so it carries the same payload as a structured comment,
+	// distinguished by Source.
+	return RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+		ID: id, Author: actor, Text: comment, CreatedAt: stored, Source: CommentSourceAudit,
+	})
 }
