@@ -150,6 +150,11 @@ func TestReaderGetOptionalRowListsAreOffByDefault(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
 	conformance.RunReaderGetOptionalRowListsAreOffByDefault(t, ctx, fixture)
+}
+
+func TestReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
 	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
 }
 

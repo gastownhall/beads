@@ -1346,6 +1346,8 @@ func RunReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T, ctx context.Co
 	seedReaderIssue(t, ctx, fixture, readerIssue(subject, types.TypeTask, ""))
 	blockerIssue := readerIssue(blocker, types.TypeTask, "")
 	blockerIssue.Description = heavy
+	blockerIssue.Design = heavy
+	blockerIssue.AcceptanceCriteria = heavy
 	blockerIssue.Notes = heavy
 	seedReaderIssue(t, ctx, fixture, blockerIssue)
 	if err := fixture.AddDependency(ctx, &types.Dependency{
@@ -1361,9 +1363,10 @@ func RunReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T, ctx context.Co
 	if len(details.Dependencies) != 1 {
 		t.Fatalf("Get returned %d dependency rows, want 1", len(details.Dependencies))
 	}
-	if got := details.Dependencies[0]; got.Description != heavy || got.Notes != heavy {
-		t.Errorf("BriefDeps off must return the full body, got description=%d notes=%d",
-			len(got.Description), len(got.Notes))
+	if got := details.Dependencies[0]; got.Description != heavy || got.Design != heavy ||
+		got.AcceptanceCriteria != heavy || got.Notes != heavy {
+		t.Errorf("BriefDeps off must return the full body, got description=%d design=%d acceptance=%d notes=%d",
+			len(got.Description), len(got.Design), len(got.AcceptanceCriteria), len(got.Notes))
 	}
 
 	details, err = fixture.Reader.Get(ctx, publicops.GetRequest{ID: subject, BriefDeps: true})
@@ -1374,8 +1377,8 @@ func RunReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T, ctx context.Co
 		t.Fatalf("BriefDeps returned %d dependency rows, want 1", len(details.Dependencies))
 	}
 	got := details.Dependencies[0]
-	if got.ID != blocker || got.Status != types.StatusOpen || got.IssueType != types.TypeTask ||
-		got.Priority != 2 || got.DependencyType != types.DepBlocks {
+	if got.ID != blocker || got.Title != blocker || got.Status != types.StatusOpen ||
+		got.IssueType != types.TypeTask || got.Priority != 2 || got.DependencyType != types.DepBlocks {
 		t.Errorf("BriefDeps dropped an identity field: %+v", got)
 	}
 	if got.Description != "" || got.Design != "" || got.Notes != "" || got.AcceptanceCriteria != "" {

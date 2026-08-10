@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--brief-deps` on `bd show`, and `brief_deps` on the HTTP detail read**
+  (#5546, #5547, #5549). `bd show --json` inlines every dependency at full
+  body, so reading one issue costs the free-form text of everything it depends
+  on. On one real 16,051-issue store a single `bd show --json` returned 214,456
+  bytes, of which 193,039 was the `dependencies` array and one dependency
+  carried a 180,975-byte `notes` field. The dependents side of the same detail
+  view already had a shallow shape for this reason (be-4d36f2, where hub beads
+  cost 5-13 GB); dependencies never got it. The new flag projects each
+  dependency down to `id`, `title`, `status`, `issue_type`, `priority` and
+  `dependency_type`, which measured 89.3% smaller on that call. It is opt-in
+  and the default payload is unchanged.
+
 - **`bd serve` gets optional bearer authentication, and requires it beyond
   loopback** ([#5516](https://github.com/gastownhall/beads/pull/5516)). The
   help used to say "no authentication and no TLS", and the first half of that

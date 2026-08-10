@@ -161,12 +161,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 					return HandleErrorRespectJSON("%v", rerr)
 				}
-				details, derr := rd.Get(ctx, issueops.GetRequest{
-					ID:                issue.ID,
-					IncludeDependents: includeDepends,
-					IncludeComments:   includeComments,
-					BriefDeps:         briefDeps,
-				})
+				details, derr := rd.Get(ctx, showGetRequest(issue.ID, includeDepends, includeComments, briefDeps))
 				if derr != nil {
 					result.Close()
 					return HandleErrorRespectJSON("%v", derr)
@@ -311,4 +306,16 @@ func init() {
 	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
+}
+
+// showGetRequest carries the show flags onto the read contract. Extracted so
+// the hop is reachable from a test: both show routes build this request
+// independently, and a dropped field here is invisible to every other test.
+func showGetRequest(id string, includeDependents, includeComments, briefDeps bool) issueops.GetRequest {
+	return issueops.GetRequest{
+		ID:                id,
+		IncludeDependents: includeDependents,
+		IncludeComments:   includeComments,
+		BriefDeps:         briefDeps,
+	}
 }

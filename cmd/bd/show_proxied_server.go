@@ -427,12 +427,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 	foundCount := 0
 	for idx, id := range in.ids {
 		if rd != nil {
-			details, derr := rd.Get(ctx, issueops.GetRequest{
-				ID:                id,
-				IncludeDependents: in.includeDepends,
-				BriefDeps:         in.briefDeps,
-				IncludeComments:   in.includeComments,
-			})
+			details, derr := rd.Get(ctx, in.getRequest(id))
 			if derr != nil {
 				if errors.Is(derr, storage.ErrNotFound) {
 					// The corpus pins this pair for a missing id: the human
@@ -563,4 +558,10 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 
 	fmt.Println()
+}
+
+// getRequest carries the proxied show flags onto the read contract. See
+// showGetRequest: the two routes build this independently.
+func (in *showProxiedInput) getRequest(id string) issueops.GetRequest {
+	return showGetRequest(id, in.includeDepends, in.includeComments, in.briefDeps)
 }
