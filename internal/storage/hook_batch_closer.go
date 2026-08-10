@@ -36,6 +36,12 @@ type hookBatchCloser struct {
 // persisted nothing, so announcing it would run the workspace's on_close script
 // again on every replayed teardown, for a close that already happened.
 //
+// BOTH WRITE PLUMBINGS ANSWER THIS WAY. The proxied-server path composes the
+// same close through a unit of work, and its batch compositions
+// (uow.closeBatchItem, uowApplyRun.applyClose) rewind the recorded notification
+// for an item that persisted nothing — so `bd serve` and the direct store agree
+// about what a replayed teardown announces.
+//
 // THE SINGLE-CLOSE PATHS DELIBERATELY DIFFER: HookFiringStore.CloseIssueChecked
 // and hookIssueOperations.Close both fire on any success, re-close included,
 // for the legacy parity their own comments claim. The batch verbs are where a

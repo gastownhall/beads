@@ -103,7 +103,7 @@ func TestHookBatchCloserFiresOncePerLandedItem(t *testing.T) {
 			// (issueops.CloseOutcome.Changed), so a teardown replayed against
 			// an already-closed convoy would otherwise run the workspace's
 			// on_close script on every pass. The batch also earns no claim,
-			// for the reason BatchCloseRequest.ClaimNext gives.
+			// for the reason issueops.CloseBatchRequest.ClaimNext gives.
 			name: "an idempotent re-close fires nothing",
 			inner: &fakeBatchCloser{result: issueops.CloseBatchResult{
 				Outcomes: []issueops.CloseOutcome{

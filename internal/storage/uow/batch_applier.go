@@ -322,6 +322,11 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 	}
 	params := domain.CloseIssueParams{Reason: item.Reason, Session: item.Session}
 	var closed domain.CloseIssueResult
+	// Marked after the ExpectedVersion update above, so a rewind drops this
+	// item's close and not that update's notification. See closeBatchItem: the
+	// shared close verbs announce every success, and a batch item must announce
+	// only what it actually persisted (ga-2yaqp.1).
+	mark := markBatchNotifications(r.uw)
 	if useWisp {
 		closed, err = r.uw.IssueUseCase().CloseWispChecked(ctx, id, params, r.plan.Actor, item.Force)
 	} else {
@@ -338,6 +343,9 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 		return err
 	}
 	closeChanged := !semanticIssueEqual(before, hydrated)
+	if !closeChanged {
+		rewindBatchNotifications(r.uw, mark)
+	}
 	r.write.Changed = r.write.Changed || closeChanged
 	r.result.Items[index] = publicops.ItemResult{
 		Kind:       publicops.ItemClose,
