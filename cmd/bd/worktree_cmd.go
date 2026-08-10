@@ -36,9 +36,10 @@ type WorktreeInfo struct {
 }
 
 var worktreeCmd = &cobra.Command{
-	Use:     "worktree",
-	Short:   "Manage git worktrees for parallel development",
-	GroupID: "maint",
+	Use:         "worktree",
+	Short:       "Manage git worktrees for parallel development",
+	GroupID:     "maint",
+	Annotations: map[string]string{skipStoreAnnotation: "1"},
 	Long: `Manage git worktrees with proper beads configuration.
 
 Worktrees allow multiple working directories sharing the same git repository,

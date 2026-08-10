@@ -9,10 +9,117 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/configfile"
 	internalgit "github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/utils"
 )
+
+// TestWorktreeCommandNoStoreContract locks the complete command subtree that
+// inherit worktreeCmd's store exemption. A new child must be reviewed and added
+// here deliberately; a store-backed child cannot silently inherit the parent
+// annotation.
+func TestWorktreeCommandNoStoreContract(t *testing.T) {
+	want := map[string]*cobra.Command{
+		"create": worktreeCreateCmd,
+		"info":   worktreeInfoCmd,
+		"list":   worktreeListCmd,
+		"remove": worktreeRemoveCmd,
+	}
+
+	var descendants []*cobra.Command
+	var walk func(*cobra.Command)
+	walk = func(parent *cobra.Command) {
+		for _, child := range parent.Commands() {
+			descendants = append(descendants, child)
+			walk(child)
+		}
+	}
+	walk(worktreeCmd)
+
+	if len(descendants) != len(want) {
+		paths := make([]string, 0, len(descendants))
+		for _, descendant := range descendants {
+			paths = append(paths, descendant.CommandPath())
+		}
+		t.Fatalf("worktree command inventory = %v; update the no-store contract deliberately for any added or removed descendant", paths)
+	}
+
+	for _, descendant := range descendants {
+		wantCommand, ok := want[descendant.Name()]
+		if !ok {
+			t.Errorf("worktree descendant %q is not reviewed for the no-store contract", descendant.CommandPath())
+			continue
+		}
+		if descendant != wantCommand {
+			t.Errorf("worktree descendant %q = %p, want registered command %p", descendant.CommandPath(), descendant, wantCommand)
+		}
+		if !commandOptsOutOfStore(descendant) {
+			t.Errorf("worktree descendant %q does not inherit the store exemption", descendant.CommandPath())
+		}
+	}
+}
+
+// TestWorktreeCreateRejectsInvalidPathBeforeStoreOpen drives the real root
+// pre-run and create handler against a configured but absent server store. The
+// existing target is rejected by the worktree command itself; if the parent
+// annotation is removed, PersistentPreRunE attempts the absent store first and
+// this test fails before reaching that command-specific refusal.
+func TestWorktreeCreateRejectsInvalidPathBeforeStoreOpen(t *testing.T) {
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	writeTestConfigYAML(t, beadsDir, "")
+	writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "worktree_skip_store_test")
+
+	existingPath := filepath.Join(repoDir, "already-exists")
+	if err := os.Mkdir(existingPath, 0o755); err != nil {
+		t.Fatalf("create existing worktree target: %v", err)
+	}
+
+	t.Chdir(repoDir)
+	t.Setenv("BEADS_DIR", beadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("BD_DISABLE_METRICS", "1")
+	t.Setenv("BD_DISABLE_EVENT_FLUSH", "1")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+
+	oldStore := store
+	store = nil
+	t.Cleanup(func() { store = oldStore })
+
+	args := []string{existingPath}
+	if err := rootCmd.PersistentPreRunE(worktreeCreateCmd, args); err != nil {
+		t.Fatalf("worktree create PersistentPreRunE opened the configured absent store: %v", err)
+	}
+	if store != nil {
+		t.Fatal("worktree create must not open the store")
+	}
+	if cmdCtx == nil {
+		t.Fatal("worktree create must initialize the command context")
+	}
+	if cmdCtx.Store != nil {
+		t.Fatal("worktree create must not attach a store to the command context")
+	}
+	if !serverMode {
+		t.Fatal("test precondition broken: configured server-mode target was not loaded")
+	}
+	if err := worktreeCreateCmd.Args(worktreeCreateCmd, args); err != nil {
+		t.Fatalf("worktree create args: %v", err)
+	}
+	err := worktreeCreateCmd.RunE(worktreeCreateCmd, args)
+	wantErr := "path already exists: " + existingPath
+	if err == nil || err.Error() != wantErr {
+		t.Fatalf("worktree create error = %v, want %q", err, wantErr)
+	}
+}
 
 // TestGetRedirectTarget tests that getRedirectTarget resolves redirect paths correctly.
 // This is the fix for GH#1266: relative paths must be resolved from the worktree root
