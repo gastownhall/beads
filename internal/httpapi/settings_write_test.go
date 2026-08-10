@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -197,16 +198,23 @@ func TestSetSettingWithholdsACredentialItJustAccepted(t *testing.T) {
 	if reqs := settings.setRequests(); len(reqs) != 1 || reqs[0].Value != "shhh-real-secret" {
 		t.Fatalf("the role received %+v, want the value the caller sent", reqs)
 	}
-	body := decodeBody(t, resp)
+	raw := readAll(t, resp)
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		t.Fatalf("decode %q: %v", raw, err)
+	}
 	if body["redacted"] != true {
 		t.Errorf("redacted = %v, want true", body["redacted"])
 	}
 	if _, present := body["value"]; present {
 		t.Errorf("the write handed the credential back: %v", body)
 	}
-	// And the whole response, not just the member: nothing else may carry it.
-	if raw := fmt.Sprint(body); strings.Contains(raw, "shhh-real-secret") {
-		t.Errorf("the response body carries the stored credential: %s", raw)
+	// THE RAW RESPONSE BYTES, not the decoded map. A decoded-map grep only sees
+	// members this test thought to look at — an extension member, a duplicated
+	// key, an echo inside a `detail` string would all pass it — and what a
+	// client, a proxy log and an access log actually receive is the bytes.
+	if strings.Contains(raw, "shhh-real-secret") {
+		t.Errorf("the response bytes carry the stored credential: %s", raw)
 	}
 }
 
@@ -250,6 +258,16 @@ func TestSetSettingRefusesTheRequest(t *testing.T) {
 			body:  `{"value":"v"}`,
 			param: "key",
 		},
+		{
+			// The SAME hazard on the other half of the row: config.value is a
+			// TEXT column, so one byte past it is an error from the column — a
+			// generic 500 for a request the caller could have fixed, which is
+			// precisely what the key's bound above exists to prevent.
+			name:  "a value past the storage column",
+			path:  "notes",
+			body:  `{"value":"` + strings.Repeat("v", types.MaxTextBytes+1) + `"}`,
+			param: "value",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			settings := &roleSettings{}
@@ -270,6 +288,102 @@ func TestSetSettingRefusesTheRequest(t *testing.T) {
 				t.Errorf("%d writes ran on a refused request", len(got))
 			}
 		})
+	}
+}
+
+// TestSetSettingAcceptsAValueAtTheColumnsCeiling is the other direction of the
+// bound, and it is the half that stops a refusal from quietly becoming stricter
+// than the column it is keyed on: exactly MaxTextBytes must be ACCEPTED and
+// reach the role, because that value fits.
+//
+// The multi-byte case is what pins BYTES rather than characters. 40000 two-byte
+// characters are 80000 bytes — well inside any rune count and well past the
+// column — so a bound that counted runes would accept it and hand the 500 back
+// to the caller, which is the failure this whole check exists to prevent.
+func TestSetSettingAcceptsAValueAtTheColumnsCeiling(t *testing.T) {
+	t.Run("exactly the ceiling is accepted", func(t *testing.T) {
+		settings := &roleSettings{}
+		ts := newSettingsServer(t, settings)
+
+		value := strings.Repeat("v", types.MaxTextBytes)
+		raw, err := json.Marshal(map[string]string{"value": value})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		resp := ts.setSetting(t, "/v0/beads/config/notes", string(raw))
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("status = %d, want 200 — this value fits the column: %s", resp.StatusCode, readAll(t, resp))
+		}
+		if reqs := settings.setRequests(); len(reqs) != 1 || len(reqs[0].Value) != types.MaxTextBytes {
+			t.Errorf("the role received %d bytes, want the %d sent", len(reqs[0].Value), types.MaxTextBytes)
+		}
+	})
+
+	t.Run("multi-byte is counted in bytes", func(t *testing.T) {
+		settings := &roleSettings{}
+		ts := newSettingsServer(t, settings)
+
+		// Two bytes per character, so this is inside any rune-based bound and
+		// past the column.
+		value := strings.Repeat("é", types.MaxTextBytes/2+1)
+		if len(value) <= types.MaxTextBytes {
+			t.Fatalf("the fixture is %d bytes, which the column accepts; this test proves nothing", len(value))
+		}
+		raw, err := json.Marshal(map[string]string{"value": value})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		resp := ts.setSetting(t, "/v0/beads/config/notes", string(raw))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 — the column counts bytes: %s", resp.StatusCode, readAll(t, resp))
+		}
+		if body := decodeBody(t, resp); body["param"] != "value" {
+			t.Errorf("param = %v, want value", body["param"])
+		}
+		if got := settings.setRequests(); len(got) != 0 {
+			t.Errorf("%d writes ran on a refused request", len(got))
+		}
+	})
+}
+
+// TestSetSettingTwiceIsTheSameAnswerAndTheSameState is PUT's defining property,
+// pinned rather than assumed: the method is idempotent, so the second request
+// must answer byte-for-byte what the first did and leave the plane where the
+// first left it.
+//
+// It is worth a case of its own because nothing else here would catch a handler
+// that grew a "first write wins" or an "already set" member — both of which are
+// shapes this surface has elsewhere (claimIssue's `already_claimed`,
+// closeIssue's `already_closed`) and neither of which belongs on a PUT.
+func TestSetSettingTwiceIsTheSameAnswerAndTheSameState(t *testing.T) {
+	settings := &roleSettings{}
+	ts := newSettingsServer(t, settings)
+
+	first := ts.setSetting(t, settingPath, `{"value":"awaiting_review:active"}`)
+	if first.StatusCode != http.StatusOK {
+		t.Fatalf("first PUT status = %d, want 200: %s", first.StatusCode, readAll(t, first))
+	}
+	firstBody := decodeBody(t, first)
+
+	second := ts.setSetting(t, settingPath, `{"value":"awaiting_review:active"}`)
+	if second.StatusCode != http.StatusOK {
+		t.Fatalf("second PUT status = %d, want 200: %s", second.StatusCode, readAll(t, second))
+	}
+	if secondBody := decodeBody(t, second); !reflect.DeepEqual(firstBody, secondBody) {
+		t.Errorf("the second PUT answered %v, the first answered %v; this method is idempotent", secondBody, firstBody)
+	}
+
+	// BOTH reached the role, which is the state half: the role performs the
+	// write and its projection unconditionally — a no-op detection would make
+	// repairing a drifted table depend on the row having changed, which is
+	// exactly the state that needs repairing — so this surface must not
+	// short-circuit the second call either.
+	reqs := settings.setRequests()
+	if len(reqs) != 2 {
+		t.Fatalf("%d writes reached the role, want 2", len(reqs))
+	}
+	if !reflect.DeepEqual(reqs[0], reqs[1]) {
+		t.Errorf("the two writes reached the role as %+v and %+v; want the same request twice", reqs[0], reqs[1])
 	}
 }
 

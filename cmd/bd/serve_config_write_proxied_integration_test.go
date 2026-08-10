@@ -225,6 +225,55 @@ func TestProxiedServerServeSettingsWrites(t *testing.T) {
 		}
 	})
 
+	// THE VALUE BOUND, against the real column, in both directions. This is the
+	// hazard settingWriteKey already guards on the key half: config.value is a
+	// TEXT column, and before the bound a 100 KiB PUT was a generic 500 from the
+	// column — a request the caller could have fixed, answered with the one code
+	// that says nothing about how to fix it.
+	//
+	// The accepted case is the half that keeps the refusal honest: a value at
+	// the ceiling must reach the column and land, or the bound is stricter than
+	// the storage it claims to describe.
+	t.Run("an oversized value is refused and a ceiling value lands", func(t *testing.T) {
+		oversized, err := json.Marshal(map[string]string{"value": strings.Repeat("v", 100*1024)})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		status, body := sp.putJSON(t, "/v0/beads/config/notes.big", string(oversized))
+		if status != http.StatusBadRequest {
+			t.Fatalf("a 100 KiB value: status = %d, want 400 — refused at the edge, not by the column: %v", status, body)
+		}
+		if body["code"] != "invalid_argument" || body["param"] != "value" {
+			t.Errorf("problem = %v, want invalid_argument on param value", body)
+		}
+
+		// Nothing landed, which a 400 asserts and a read-back proves.
+		readStatus, read, _ := sp.get(t, "/v0/beads/config/notes.big")
+		if readStatus != http.StatusOK {
+			t.Fatalf("read back: status = %d", readStatus)
+		}
+		if _, present := read["value"]; present {
+			t.Errorf("the refused write landed: %v", read)
+		}
+
+		// And exactly the column's ceiling goes all the way through to Dolt.
+		ceiling, err := json.Marshal(map[string]string{"value": strings.Repeat("c", 65535)})
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+		status, body = sp.putJSON(t, "/v0/beads/config/notes.ceiling", string(ceiling))
+		if status != http.StatusOK {
+			t.Fatalf("a 65535-byte value: status = %d, want 200 — this value fits the column: %v", status, body)
+		}
+		readStatus, read, _ = sp.get(t, "/v0/beads/config/notes.ceiling")
+		if readStatus != http.StatusOK {
+			t.Fatalf("read back: status = %d", readStatus)
+		}
+		if got, _ := read["value"].(string); len(got) != 65535 {
+			t.Errorf("stored %d bytes of a 65535-byte value; the column truncated it", len(got))
+		}
+	})
+
 	// THE REMOVAL, against the table: it removes, and removing again succeeds
 	// rather than reporting a miss this role cannot see.
 	t.Run("the removal is idempotent and reports no miss", func(t *testing.T) {

@@ -4461,8 +4461,9 @@ paths:
         '400':
           description: >-
             Invalid request: an unknown query parameter, an unparseable or
-            oversized body, an unknown body member, a `value` that is missing or
-            is not a string, a `key` that is empty after trimming, carries a
+            oversized body, an unknown body member, a `value` that is missing,
+            is not a string or is longer than the 65535-byte column, a `key`
+            that is empty after trimming, carries a
             control character or is longer than the 255-character column — or a
             value this workspace's own validation refuses, which is `issue_prefix`
             in either spelling and a `status.custom` that does not parse. NOTHING
@@ -8052,10 +8053,26 @@ components:
         value:
           type: string
           description: >-
-            The value to store, VERBATIM. It is not trimmed, not bounded beyond
-            the 1 MiB every body on this surface shares, and not
-            character-filtered: the column is `TEXT`, and two of the keys this
-            plane holds carry structured configuration a filter would corrupt.
+            The value to store, VERBATIM. It is not trimmed and not
+            character-filtered: two of the keys this plane holds carry
+            structured configuration a filter would corrupt.
+
+
+            IT IS BOUNDED AT 65535 BYTES, which is the storage column, and the
+            refusal is a `400` naming this member rather than the `500` the
+            column would otherwise produce for a request the caller could have
+            fixed. BYTES rather than characters, because that is how the column
+            counts: 40000 multi-byte characters overflow it and 65000 ASCII ones
+            do not. The 1 MiB body cap every operation shares still applies above
+            this and is never the binding limit here.
+
+
+            The bound is NOT the one `addComment`'s `text` carries, and the
+            difference is what the two members are for. A comment is a document —
+            a stack trace, a diff, a captured transcript — so its column is
+            `LONGTEXT`. A setting is a value: nothing this plane holds is a
+            megabyte of configuration, so the narrow bound is the honest
+            description rather than a limitation to widen later.
 
 
             The empty string is a legal value and is stored. Read back it is

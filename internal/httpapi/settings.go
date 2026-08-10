@@ -231,10 +231,23 @@ func (s *Server) settingWriteKey(w http.ResponseWriter, r *http.Request) (string
 
 // settingValue decodes the body's one member.
 //
-// NOTHING IS TRIMMED, BOUNDED OR FILTERED. The column is TEXT, two of the keys
-// this plane holds carry structured configuration a filter would corrupt, and
-// the role's promise is that a successful write stored the value that was sent.
-// The only cap is decodeJSONObjectBody's 1 MiB, which every body here shares.
+// NOTHING IS TRIMMED OR FILTERED. Two of the keys this plane holds carry
+// structured configuration a filter would corrupt, and the role's promise is
+// that a successful write stored the value that was sent.
+//
+// IT IS BOUNDED, THOUGH, and that is settingWriteKey's rule applied to the other
+// half of the row rather than a second opinion about it. `config.value` is a
+// TEXT column, so a value past 65535 BYTES is an error from the column — a
+// generic 500 for a request the caller could have fixed, which is the exact
+// failure the key's bound exists to prevent. Keyed on storage's own constant,
+// and counted in BYTES because that is how the column counts.
+//
+// It is NOT widened the way the ephemeral comment column was. A comment is a
+// document — a stack trace, a diff, a transcript — and the planes disagreeing
+// about one was a bug. A setting is a VALUE: nothing this plane holds is a
+// megabyte of configuration, and the narrow bound is the honest description of
+// what a settings row is for. decodeJSONObjectBody's 1 MiB still applies above
+// it and is now never the binding limit here.
 //
 // THE EMPTY STRING IS ACCEPTED and is stored. It reads back indistinguishably
 // from a key nothing ever set, which is this plane's shipped conflation rather
@@ -264,6 +277,12 @@ func (s *Server) settingValue(w http.ResponseWriter, r *http.Request) (string, b
 	if err := json.Unmarshal(raw, &value); err != nil || value == nil {
 		s.fail(w, r, InvalidArgument(setSettingValueMember, ReasonInvalidValue,
 			"`"+setSettingValueMember+"` must be a string"))
+		return "", false
+	}
+	if types.CheckTextLen(setSettingValueMember, *value) != nil {
+		s.fail(w, r, InvalidArgument(setSettingValueMember, ReasonInvalidValue,
+			fmt.Sprintf("`%s` is %d bytes; storage holds at most %d",
+				setSettingValueMember, len(*value), types.MaxTextBytes)))
 		return "", false
 	}
 	return *value, true

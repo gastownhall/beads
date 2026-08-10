@@ -1728,7 +1728,11 @@ type ReopenIssueResponse struct {
 //
 // THERE IS NO `actor`, unlike every issue mutation on this surface, and no guard member either. This plane records no history entry to attribute a write on and holds no row version to compare, so both would be members with nothing behind them.
 type SetSettingRequest struct {
-	// Value The value to store, VERBATIM. It is not trimmed, not bounded beyond the 1 MiB every body on this surface shares, and not character-filtered: the column is `TEXT`, and two of the keys this plane holds carry structured configuration a filter would corrupt.
+	// Value The value to store, VERBATIM. It is not trimmed and not character-filtered: two of the keys this plane holds carry structured configuration a filter would corrupt.
+	//
+	// IT IS BOUNDED AT 65535 BYTES, which is the storage column, and the refusal is a `400` naming this member rather than the `500` the column would otherwise produce for a request the caller could have fixed. BYTES rather than characters, because that is how the column counts: 40000 multi-byte characters overflow it and 65000 ASCII ones do not. The 1 MiB body cap every operation shares still applies above this and is never the binding limit here.
+	//
+	// The bound is NOT the one `addComment`'s `text` carries, and the difference is what the two members are for. A comment is a document — a stack trace, a diff, a captured transcript — so its column is `LONGTEXT`. A setting is a value: nothing this plane holds is a megabyte of configuration, so the narrow bound is the honest description rather than a limitation to widen later.
 	//
 	// The empty string is a legal value and is stored. Read back it is INDISTINGUISHABLE from a key nothing ever set — `Setting.value` is absent for both — which is this plane's shipped conflation rather than something this operation introduces. A caller that means "remove it" sends `DELETE`.
 	//
