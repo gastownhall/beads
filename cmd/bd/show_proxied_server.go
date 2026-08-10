@@ -34,6 +34,7 @@ type showProxiedInput struct {
 	watchMode       bool
 	currentMode     bool
 	includeDepends  bool
+	briefDeps       bool
 	includeComments bool
 }
 
@@ -49,6 +50,7 @@ func gatherShowProxiedInput(cmd *cobra.Command, args []string) *showProxiedInput
 	in.watchMode, _ = cmd.Flags().GetBool("watch")
 	in.currentMode, _ = cmd.Flags().GetBool("current")
 	in.includeDepends, _ = cmd.Flags().GetBool("include-dependents")
+	in.briefDeps, _ = cmd.Flags().GetBool("brief-deps")
 	in.includeComments, _ = cmd.Flags().GetBool("include-comments")
 
 	idFlags, _ := cmd.Flags().GetStringArray("id")
@@ -428,6 +430,7 @@ func runShowProxiedDefault(ctx context.Context, uw uow.UnitOfWork, in *showProxi
 			details, derr := rd.Get(ctx, issueops.GetRequest{
 				ID:                id,
 				IncludeDependents: in.includeDepends,
+				BriefDeps:         in.briefDeps,
 				IncludeComments:   in.includeComments,
 			})
 			if derr != nil {
