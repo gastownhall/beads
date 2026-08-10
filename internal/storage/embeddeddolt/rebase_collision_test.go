@@ -262,6 +262,10 @@ func TestEmbeddedRebaseRemoteDominates(t *testing.T) {
 	if report.BackupTag == "" {
 		t.Error("expected a backup tag to be recorded")
 	}
+	// A successful rebase never rolled back, so a caller must not be told it did.
+	if report.Restored {
+		t.Error("report.Restored is true after a successful rebase")
+	}
 	// The parent->child dependency followed the renumber: local's .71 edge rekeyed
 	// to .74, remote's .71 (Tom) edge intact — neither left under a stale PK.
 	assertDepRekeyed(t, ctx, conn, p+".74", p)
@@ -632,4 +636,318 @@ func TestEmbeddedRebaseRemoteDominatesDurableSubtreeCounter(t *testing.T) {
 		t.Errorf("child_counters for renumbered root %s.74 = %d, want 1 (migrated from .71)", p, got)
 	}
 	assertRebaseSettled(t, ctx, conn)
+}
+
+// insertRebaseIssueWithHash inserts a child with an explicit content_hash and
+// pinned timestamps, so two clones can be made to add byte-identical rows. The
+// real create path computes content_hash from the substantive fields
+// (issueops/create.go), so equal content yields an equal hash across clones;
+// pinning it here states that relationship directly instead of depending on the
+// hash function's current field set.
+func insertRebaseIssueWithHash(t *testing.T, ctx context.Context, db versioncontrolops.DBConn, id, title, hash string) {
+	t.Helper()
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO issues (id, content_hash, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at) "+
+			"VALUES (?, ?, ?, '', '', '', '', 'open', 2, 'task', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+		id, hash, title); err != nil {
+		t.Fatalf("insert issue %s: %v", id, err)
+	}
+}
+
+func issueCount(t *testing.T, ctx context.Context, db versioncontrolops.DBConn, id string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", id).Scan(&n); err != nil {
+		t.Fatalf("count issues at %s: %v", id, err)
+	}
+	return n
+}
+
+// seedIdenticalAddAdd builds a divergence where both clones added the SAME id
+// twice over: .71 with identical content on both sides (one issue that reached
+// two clones out of band — a JSONL import, a restored backup), and .72 with
+// genuinely different content (a real collision). Returns the peer branch with
+// main checked out.
+func seedIdenticalAddAdd(t *testing.T, ctx context.Context, db versioncontrolops.DBConn, p string) (peerBranch string) {
+	t.Helper()
+
+	insertRebaseIssue(t, ctx, db, p, "Parent")
+	if _, err := db.ExecContext(ctx,
+		"INSERT INTO child_counters (parent_id, last_child) VALUES (?, 70)", p); err != nil {
+		t.Fatalf("seed counter: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed base')"); err != nil {
+		t.Fatalf("commit base: %v", err)
+	}
+
+	peerBranch = "identpeer_" + p
+	if _, err := db.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peerBranch); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+
+	insertRebaseIssueWithHash(t, ctx, db, p+".71", "SharedIssue", "hash-shared")
+	insertRebaseIssueWithHash(t, ctx, db, p+".72", "Local72", "hash-local-72")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone A adds .71 (shared) and .72')"); err != nil {
+		t.Fatalf("commit clone A: %v", err)
+	}
+
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peerBranch); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	insertRebaseIssueWithHash(t, ctx, db, p+".71", "SharedIssue", "hash-shared")
+	insertRebaseIssueWithHash(t, ctx, db, p+".72", "Eugene", "hash-remote-72")
+	if _, err := db.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone B adds .71 (shared) and .72')"); err != nil {
+		t.Fatalf("commit clone B: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	return peerBranch
+}
+
+// TestEmbeddedRebaseIdenticalAddAddIsNotRenumbered pins the content-equality
+// guard maphew asked for on #4844: an id both clones added with the SAME content
+// is ONE issue that reached both of them out of band, not two issues contesting a
+// slot. Renumbering it forks it in two, irreversibly — no later pass can tell the
+// halves were ever the same row. Only the genuinely-different .72 may move.
+//
+// Without the guard this renumbers BOTH ids and .71 ends up duplicated across
+// .71 and .73.
+func TestEmbeddedRebaseIdenticalAddAddIsNotRenumbered(t *testing.T) {
+	te := newTestEnv(t, "rbident")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-ident"
+
+	peer := seedIdenticalAddAdd(t, ctx, conn, p)
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err != nil {
+		t.Fatalf("rebase (identical add/add): %v", err)
+	}
+
+	if len(report.Renumbered) != 1 {
+		t.Fatalf("report.Renumbered has %d entries, want 1 (only the genuinely-different .72)", len(report.Renumbered))
+	}
+	if got := report.Renumbered[0].OldID; got != p+".72" {
+		t.Errorf("renumbered %q, want %s.72 — the identical .71 must be left to the merge", got, p)
+	}
+	// The shared issue stayed put and stayed single.
+	if got := titleOf(t, ctx, conn, p+".71"); got != "SharedIssue" {
+		t.Errorf("%s.71 = %q, want the shared issue left in place", p, got)
+	}
+	if n := issueCount(t, ctx, conn, p+".71"); n != 1 {
+		t.Errorf("%s.71 has %d rows, want 1", p, n)
+	}
+	// The real collision resolved the ordinary way: remote keeps .72, local moves.
+	if got := titleOf(t, ctx, conn, p+".72"); got != "Eugene" {
+		t.Errorf("%s.72 = %q, want remote's \"Eugene\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".73"); got != "Local72" {
+		t.Errorf("%s.73 = %q, want renumbered \"Local72\"", p, got)
+	}
+	// Nothing forked the shared issue into a second slot alongside the renumber.
+	if n := issueCount(t, ctx, conn, p+".74"); n != 0 {
+		t.Errorf("%s.74 exists — the identical .71 was forked into a second row", p)
+	}
+	assertRebaseSettled(t, ctx, conn)
+}
+
+// TestEmbeddedRebaseCollidingChildUnderIdenticalParent pins the ORDERING of the
+// content-equality guard against the collision-root filter. detectCollisions
+// suppresses a colliding id whose ancestor also collides, because the ancestor's
+// subtree rewrite will carry it. If the identical add/adds are filtered out AFTER
+// that root pass, a genuine collision sitting under an identical parent is
+// suppressed by an ancestor that is then never renumbered — and the collision is
+// dropped on the floor, exactly the failure `bd dolt rebase` exists to prevent.
+//
+// Here .71 is identical on both sides and its child .71.1 is not. .71 must stay,
+// and .71.1 must be renumbered in its own right.
+func TestEmbeddedRebaseCollidingChildUnderIdenticalParent(t *testing.T) {
+	te := newTestEnv(t, "rbidentkid")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-identkid"
+
+	insertRebaseIssue(t, ctx, conn, p, "Parent")
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'seed base')"); err != nil {
+		t.Fatalf("commit base: %v", err)
+	}
+	peer := "identkidpeer_" + p
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_BRANCH(?, 'HEAD')", peer); err != nil {
+		t.Fatalf("create peer branch: %v", err)
+	}
+
+	insertRebaseIssueWithHash(t, ctx, conn, p+".71", "SharedParent", "hash-shared-parent")
+	insertRebaseIssueWithHash(t, ctx, conn, p+".71.1", "LocalChild", "hash-local-child")
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone A')"); err != nil {
+		t.Fatalf("commit clone A: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peer); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	insertRebaseIssueWithHash(t, ctx, conn, p+".71", "SharedParent", "hash-shared-parent")
+	insertRebaseIssueWithHash(t, ctx, conn, p+".71.1", "RemoteChild", "hash-remote-child")
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'clone B')"); err != nil {
+		t.Fatalf("commit clone B: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err != nil {
+		t.Fatalf("rebase (colliding child under identical parent): %v", err)
+	}
+
+	if len(report.Renumbered) != 1 {
+		t.Fatalf("report.Renumbered has %d entries, want 1 (the child, not its identical parent)", len(report.Renumbered))
+	}
+	if got := report.Renumbered[0].OldID; got != p+".71.1" {
+		t.Errorf("renumbered %q, want %s.71.1", got, p)
+	}
+	if got := titleOf(t, ctx, conn, p+".71"); got != "SharedParent" {
+		t.Errorf("%s.71 = %q, want the identical parent left in place", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".71.1"); got != "RemoteChild" {
+		t.Errorf("%s.71.1 = %q, want remote's child to keep the contested id", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".71.2"); got != "LocalChild" {
+		t.Errorf("%s.71.2 = %q, want the local child renumbered clear", p, got)
+	}
+	assertRebaseSettled(t, ctx, conn)
+}
+
+// TestEmbeddedRebaseLocalDominatesSwapTempVacancy pins the swap's scratch-id
+// allocation. The local-dominates swap parks the remote's subtree on a temporary
+// id, and the old fixed "parent.1000000+i" was only checked for being improbable,
+// never for being FREE. A pre-existing subtree under that prefix is then captured
+// by the final rename — because renameSubtreeInTx moves "root" AND everything
+// under "root." — silently re-parenting unrelated issues.
+//
+// The bystander here occupies parent.1000000.1 without parent.1000000 itself
+// existing, which is the case a bare row-existence probe misses: the scratch id
+// looks free while its subtree is not. With the vacancy check the swap steps past
+// the occupied prefix; without it the bystander is dragged to the remote's new id.
+func TestEmbeddedRebaseLocalDominatesSwapTempVacancy(t *testing.T) {
+	te := newTestEnv(t, "rbswap")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-swap"
+
+	peer := seedRebaseCollision(t, ctx, conn, p)
+
+	// An unrelated issue sitting inside the naive scratch prefix's subtree. It is a
+	// deep id (parent.1000000.1), so it does NOT raise the parent's direct-child
+	// high-water and cannot influence which slots the renumber picks.
+	bystander := p + ".1000000.1"
+	insertRebaseIssue(t, ctx, conn, bystander, "Bystander")
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'unrelated issue inside the scratch prefix')"); err != nil {
+		t.Fatalf("commit bystander: %v", err)
+	}
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, true)
+	if err != nil {
+		t.Fatalf("rebase (local-dominates, occupied scratch prefix): %v", err)
+	}
+
+	// The bystander is exactly where it was, under its own id.
+	if got := titleOf(t, ctx, conn, bystander); got != "Bystander" {
+		t.Errorf("%s = %q, want \"Bystander\" untouched by the swap", bystander, got)
+	}
+	if n := issueCount(t, ctx, conn, p+".74.1"); n != 0 {
+		t.Errorf("%s.74.1 exists — the swap captured the bystander subtree via its scratch id", p)
+	}
+	// And the swap itself still did its job.
+	if got := titleOf(t, ctx, conn, p+".71"); got != "Local71" {
+		t.Errorf("%s.71 = %q, want kept \"Local71\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".74"); got != "Tom" {
+		t.Errorf("%s.74 = %q, want renumbered \"Tom\"", p, got)
+	}
+	if got := titleOf(t, ctx, conn, p+".75"); got != "Eugene" {
+		t.Errorf("%s.75 = %q, want renumbered \"Eugene\"", p, got)
+	}
+	if len(report.Renumbered) != 2 {
+		t.Errorf("report.Renumbered has %d entries, want 2", len(report.Renumbered))
+	}
+	// No scratch id survived the swap as a live issue.
+	var leftovers int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues WHERE id LIKE CONCAT(?, '.1000000') OR id LIKE CONCAT(?, '.1000001')",
+		p, p).Scan(&leftovers); err != nil {
+		t.Fatalf("count leftover scratch ids: %v", err)
+	}
+	if leftovers != 0 {
+		t.Errorf("%d scratch id(s) left behind as live issues", leftovers)
+	}
+	assertRebaseSettled(t, ctx, conn)
+}
+
+// TestEmbeddedRebaseRestoredFlagOnFailure pins the signal that tells a caller
+// whether a failed rebase rolled back. The reconcile is atomic — on its own
+// failure it hard-resets to the backup tag — but a failure AFTER it returns (the
+// store wrapper's is_blocked recompute) leaves the merge committed and standing.
+// The CLI printed "the database was restored... no changes were kept" for both,
+// so the second case sent the operator hunting for changes that were in fact
+// live. RebaseReport.Restored separates them.
+//
+// The failure here is a genuinely unresolvable conflict on a non-kv.memory config
+// key, which the settle auto-resolver declines by design, so the merge aborts and
+// the restore runs for real.
+func TestEmbeddedRebaseRestoredFlagOnFailure(t *testing.T) {
+	te := newTestEnv(t, "rbrestore")
+	ctx := t.Context()
+	conn := openSettleConn(t, ctx, te)
+	p := "rbp-restore"
+
+	peer := seedRebaseCollision(t, ctx, conn, p)
+
+	// Diverge a config key the auto-resolver will not touch (only kv.memory.* is
+	// convergent), so the settle aborts after the renumber has already committed.
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", peer); err != nil {
+		t.Fatalf("checkout peer: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO config (`key`, value) VALUES ('kv.custom.wedge', 'theirs')"); err != nil {
+		t.Fatalf("insert peer config: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'peer sets a non-memory config key')"); err != nil {
+		t.Fatalf("commit peer config: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT('main')"); err != nil {
+		t.Fatalf("checkout main: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx,
+		"INSERT INTO config (`key`, value) VALUES ('kv.custom.wedge', 'ours')"); err != nil {
+		t.Fatalf("insert local config: %v", err)
+	}
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_COMMIT('-Am', 'local sets the same config key differently')"); err != nil {
+		t.Fatalf("commit local config: %v", err)
+	}
+
+	report, err := versioncontrolops.RebaseChildCollisions(ctx, conn, peer, false)
+	if err == nil {
+		t.Fatal("expected the rebase to fail on an unresolvable config conflict")
+	}
+	if report == nil {
+		t.Fatal("expected a report alongside the error so the caller can read BackupTag/Restored")
+	}
+	if !report.Restored {
+		t.Error("report.Restored is false after a rolled-back rebase — the caller cannot tell a rollback from a committed rebase whose follow-up failed")
+	}
+	if report.BackupTag == "" {
+		t.Error("expected the backup tag to be recorded on the restored report")
+	}
+
+	// Restored means restored: the pre-rebase state is back, byte for byte.
+	if got := titleOf(t, ctx, conn, p+".71"); got != "Local71" {
+		t.Errorf("%s.71 = %q, want local's pre-rebase \"Local71\"", p, got)
+	}
+	if n := issueCount(t, ctx, conn, p+".74"); n != 0 {
+		t.Errorf("%s.74 exists — the renumber survived a supposedly-restored rebase", p)
+	}
+	if got := lastChildOf(t, ctx, conn, p); got != 73 {
+		t.Errorf("child_counters last_child = %d, want the pre-rebase 73", got)
+	}
 }

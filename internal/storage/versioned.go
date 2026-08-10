@@ -55,11 +55,19 @@ type RebaseRenumber struct {
 // pre-mutation backup tag, every renumbered child, and the final child-counter
 // high-water set per affected parent. Renumbered is empty when there were no
 // collisions to resolve (the caller should fall back to a plain pull).
+//
+// Restored distinguishes the two ways a rebase can return an error. When true,
+// the reconcile itself failed and the branch was hard-reset back to BackupTag —
+// nothing was kept, and Renumbered records what was rolled back. When false, the
+// reconcile committed successfully and a LATER step failed (e.g. the post-merge
+// is_blocked recompute): the merge stands and Renumbered is live. Callers must
+// not report a rollback that did not happen.
 type RebaseReport struct {
 	Direction   string           `json:"direction"` // "remote-dominates" | "local-dominates"
 	BackupTag   string           `json:"backup_tag"`
 	Renumbered  []RebaseRenumber `json:"renumbered"`
 	CountersSet map[string]int   `json:"counters_set"`
+	Restored    bool             `json:"restored"`
 }
 
 // SyncStatus describes the synchronization state with a peer.

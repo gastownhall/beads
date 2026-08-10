@@ -699,11 +699,26 @@ A backup tag is created before anything is mutated; the command reports it.`,
 			if isRemoteNotFoundErr(err) {
 				fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
 				fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
-			} else if report != nil && report.BackupTag != "" {
-				// The rebase is atomic: on failure it has already hard-reset the
-				// branch back to this pre-rebase tag, so nothing was left half-done.
+			} else if report != nil && report.Restored {
+				// The reconcile itself failed: it is atomic, so it has already
+				// hard-reset the branch back to this pre-rebase tag and nothing was
+				// left half-done.
 				fmt.Fprintf(os.Stderr, "\nThe database was restored to its pre-rebase state (backup tag: %s).\n", report.BackupTag)
 				fmt.Fprintln(os.Stderr, "No changes were kept; resolve the cause above and retry.")
+			} else if report != nil && len(report.Renumbered) > 0 {
+				// The reconcile committed and a LATER step failed (the post-merge
+				// is_blocked recompute). Nothing was rolled back — saying otherwise
+				// would send the operator hunting for changes that are in fact live.
+				fmt.Fprintf(os.Stderr, "\nThe rebase itself completed and was committed; nothing was rolled back.\n")
+				fmt.Fprintf(os.Stderr, "Renumbered %d colliding child id(s):\n", len(report.Renumbered))
+				for _, r := range report.Renumbered {
+					fmt.Fprintf(os.Stderr, "  %s → %s\n", r.OldID, r.NewID)
+				}
+				fmt.Fprintln(os.Stderr, "Only the follow-up step above failed. Blocked state may be stale until you")
+				fmt.Fprintln(os.Stderr, "run 'bd doctor --fix', which recomputes it from the dependency graph.")
+				if report.BackupTag != "" {
+					fmt.Fprintf(os.Stderr, "Pre-rebase backup tag (to undo the rebase deliberately): %s\n", report.BackupTag)
+				}
 			}
 			return SilentExit()
 		}

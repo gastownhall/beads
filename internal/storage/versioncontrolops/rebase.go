@@ -48,8 +48,12 @@ type txBeginner interface {
 // content_hash is left untouched on a renumbered row, and that is correct: the
 // canonical rename primitive rewrites id/title/description/design/acceptance/
 // notes but not content_hash, and Issue.ComputeContentHash excludes the id, so
-// changing only the id does not invalidate the stored hash. content_hash is used
-// only for compaction/dedup, never for merge, so nothing here depends on it.
+// changing only the id does not invalidate the stored hash.
+//
+// That id-independence is what lets detectCollisions use content_hash as its
+// content-equality guard: an id both sides added with the same hash is one
+// issue, not two, and must be left for the merge to converge rather than
+// renumbered into a fork.
 
 // rebaseCollision is one colliding child id and the parent it hangs under.
 type rebaseCollision struct {
@@ -119,6 +123,12 @@ func RebaseChildCollisions(ctx context.Context, db DBConn, remoteRef string, loc
 	// unmerged, with no bd command to undo it. Make the whole operation atomic by
 	// hard-resetting the branch back to the pre-mutation backup tag on any error,
 	// so it either fully reconciles or leaves the DB exactly as it was found.
+	//
+	// report.Restored records whether that restore actually ran, so a caller can
+	// tell "the reconcile failed and was rolled back" from "the reconcile
+	// committed and something after it failed". Only a failure of THIS function
+	// rolls back; a later failure in the store wrapper (the is_blocked recompute)
+	// leaves the merge standing, and reporting a rollback there would be a lie.
 	defer func() {
 		if retErr == nil {
 			return
@@ -126,6 +136,10 @@ func RebaseChildCollisions(ctx context.Context, db DBConn, remoteRef string, loc
 		if _, err := db.ExecContext(ctx, "CALL DOLT_RESET('--hard', ?)", backupTag); err != nil {
 			retErr = fmt.Errorf("%w; the automatic restore to backup tag %s also failed (%v) — "+
 				"recover by re-cloning from the remote (bd bootstrap) or restoring the tag with Dolt directly", retErr, backupTag, err)
+			return
+		}
+		if report != nil {
+			report.Restored = true
 		}
 	}()
 
@@ -186,10 +200,17 @@ func RebaseChildCollisions(ctx context.Context, db DBConn, remoteRef string, loc
 // but not at the merge base (base) — independent add/add assignments of the
 // same parent.N id. Only collision "roots" are returned: a colliding id whose
 // ancestor also collides is left to the subtree rewrite of that ancestor.
+//
+// An id that both sides added with IDENTICAL content is deliberately NOT a
+// collision. Two clones can land on the same id carrying the same issue — an
+// out-of-band JSONL import on both sides, a restored backup, a re-run bootstrap.
+// Renumbering there does real damage: it forks one issue into two, and no later
+// pass can tell they were ever the same. Dolt converges identical add/add rows on
+// its own, so the right move is to leave them to the merge.
 func detectCollisions(ctx context.Context, db DBConn, remoteRef, base string) ([]rebaseCollision, error) {
 	//nolint:gosec // G201: remoteRef and base are validated by ValidateRef; AS OF requires literals.
 	q := fmt.Sprintf(`
-		SELECT h.id FROM issues h
+		SELECT h.id, COALESCE(h.content_hash, '') FROM issues h
 		WHERE h.id LIKE '%%.%%'
 		  AND h.id IN (SELECT id FROM issues AS OF '%s')
 		  AND h.id NOT IN (SELECT id FROM issues AS OF '%s')`, remoteRef, base)
@@ -198,18 +219,30 @@ func detectCollisions(ctx context.Context, db DBConn, remoteRef, base string) ([
 		return nil, fmt.Errorf("detect child-id collisions: %w", err)
 	}
 	var ids []string
+	localHash := map[string]string{}
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan collision id: %w", err)
 		}
 		ids = append(ids, id)
+		localHash[id] = hash
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
 	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Drop the identical add/adds BEFORE the root filter below, not after: the
+	// filter suppresses a colliding id whose ancestor also collides, on the
+	// grounds that the ancestor's subtree rewrite will carry it. If that ancestor
+	// has just been excluded as identical, no rewrite is coming, and suppressing
+	// the descendant would drop a genuine collision on the floor.
+	ids, err = dropIdenticalAddAdds(ctx, db, remoteRef, ids, localHash)
+	if err != nil {
 		return nil, err
 	}
 
@@ -232,6 +265,74 @@ func detectCollisions(ctx context.Context, db DBConn, remoteRef, base string) ([
 	// Deterministic order so multi-collision renumbering is reproducible.
 	sort.Slice(out, func(i, j int) bool { return out[i].id < out[j].id })
 	return out, nil
+}
+
+// contentHashChunk bounds how many ids go into one AS OF lookup, keeping the
+// bind-parameter count well inside any engine limit however many collisions a
+// long-diverged clone brings.
+const contentHashChunk = 500
+
+// dropIdenticalAddAdds removes from ids every candidate whose row is the SAME
+// ISSUE on both sides, judged by content_hash: Issue.ComputeContentHash covers
+// the substantive fields and excludes the id, timestamps and compaction
+// metadata, so two independent creations of the same content hash identically.
+// That is precisely the "both sides added it, and it is one issue, not two"
+// case, and renumbering it would fork it.
+//
+// The test is deliberately one-sided: a candidate is kept (treated as a real
+// collision) unless BOTH sides carry a non-empty hash and the two agree. An
+// absent or empty content_hash — a row written by a path that never computed
+// one, or an older schema — proves nothing about content, so it falls through to
+// the existing renumber behavior. Renumbering a genuinely-identical pair costs
+// a spurious fork; failing to renumber a genuinely-different pair costs a lost
+// issue. Only the first is recoverable by hand, so the guard errs toward
+// renumbering.
+func dropIdenticalAddAdds(ctx context.Context, db DBConn, remoteRef string, ids []string, localHash map[string]string) ([]string, error) {
+	if len(ids) == 0 {
+		return ids, nil
+	}
+	remoteHash := make(map[string]string, len(ids))
+	for start := 0; start < len(ids); start += contentHashChunk {
+		end := start + contentHashChunk
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunk := ids[start:end]
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		//nolint:gosec // G201: remoteRef is validated by ValidateRef and AS OF requires a literal; the ids are bind params.
+		q := fmt.Sprintf("SELECT id, COALESCE(content_hash, '') FROM issues AS OF '%s' WHERE id IN (%s)",
+			remoteRef, strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ","))
+		rows, err := db.QueryContext(ctx, q, args...)
+		if err != nil {
+			return nil, fmt.Errorf("read remote content hashes for collision candidates: %w", err)
+		}
+		for rows.Next() {
+			var id, hash string
+			if err := rows.Scan(&id, &hash); err != nil {
+				_ = rows.Close()
+				return nil, fmt.Errorf("scan remote content hash: %w", err)
+			}
+			remoteHash[id] = hash
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	kept := ids[:0:0] // fresh backing array: ids is still read above via localHash keys
+	for _, id := range ids {
+		if h := localHash[id]; h != "" && h == remoteHash[id] {
+			continue // same issue on both sides — let the merge converge it
+		}
+		kept = append(kept, id)
+	}
+	return kept, nil
 }
 
 // hasCollidingAncestor reports whether any strict ancestor of id is itself in
@@ -411,10 +512,15 @@ func swapRenumberedSubtrees(ctx context.Context, db DBConn, records []storage.Re
 	}
 	defer func() { _ = tx.Rollback() }() // no-op once committed
 
-	for i, r := range records {
-		// A temp id far above any real child number, unique per pair, so no rename
-		// in the three-step swap collides with a live id.
-		temp := fmt.Sprintf("%s.%d", r.Parent, 1_000_000+i)
+	taken := map[string]bool{}
+	for _, r := range records {
+		// A temp id well above any real child number, verified vacant and unique per
+		// pair, so no rename in the three-step swap can collide with — or capture —
+		// live data.
+		temp, err := allocateSwapTemp(ctx, tx, r.Parent, taken)
+		if err != nil {
+			return err
+		}
 		if err := renameSubtreeInTx(ctx, tx, r.OldID, temp); err != nil { // remote -> temp
 			return err
 		}
@@ -426,6 +532,55 @@ func swapRenumberedSubtrees(ctx context.Context, db DBConn, records []storage.Re
 		}
 	}
 	return tx.Commit()
+}
+
+// swapTempBase is the first child number tried for a swap's scratch id: far
+// above any child number a real "parent.N" sequence reaches, so the search
+// almost always succeeds on its first probe.
+//
+// swapTempProbeLimit bounds that search. It exists only so a pathological
+// database cannot spin the swap forever; exhausting it is a hard error, never a
+// silent fall-back onto an occupied id.
+const (
+	swapTempBase       = 1_000_000
+	swapTempProbeLimit = 1_000
+)
+
+// allocateSwapTemp returns a scratch child id under parent that is free to use
+// as a SUBTREE PREFIX for one pair of the local-dominates swap, and marks it
+// taken so a later pair cannot pick the same one.
+//
+// "Free as a prefix" is the strict test, and the reason a fixed
+// "parent.1000000+i" was not safe: renameSubtreeInTx moves a root AND everything
+// under "root.", so a scratch id that merely has no row of its own can still
+// have descendants. If "parent.1000000.4" exists — a legitimate id under a
+// legitimately-numbered parent, or the residue of an earlier interrupted swap —
+// then renaming the remote's subtree onto "parent.1000000" and back again sweeps
+// that unrelated subtree along with it, silently re-parenting someone else's
+// issues. So a candidate qualifies only when neither it nor any descendant
+// exists, in issues or in wisps: exactly what subtreeIDs enumerates (and it
+// already degrades cleanly when the wisps table is absent).
+//
+// The scan is per parent, and the probe is cheap: it runs inside the swap
+// transaction, so a candidate cleared here cannot be occupied by a concurrent
+// writer before the rename lands.
+func allocateSwapTemp(ctx context.Context, tx *sql.Tx, parent string, taken map[string]bool) (string, error) {
+	for n := swapTempBase; n < swapTempBase+swapTempProbeLimit; n++ {
+		candidate := fmt.Sprintf("%s.%d", parent, n)
+		if taken[candidate] {
+			continue
+		}
+		occupants, err := subtreeIDs(ctx, tx, candidate)
+		if err != nil {
+			return "", fmt.Errorf("probe swap scratch id %s: %w", candidate, err)
+		}
+		if len(occupants) == 0 {
+			taken[candidate] = true
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("no vacant scratch id under %s in [%s.%d, %s.%d): every candidate is occupied by a live issue or subtree, so the local-dominates swap cannot proceed without overwriting data",
+		parent, parent, swapTempBase, parent, swapTempBase+swapTempProbeLimit)
 }
 
 // maxChildNumber returns the high-water DIRECT child number under parent as seen
