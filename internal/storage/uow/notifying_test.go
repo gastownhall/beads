@@ -491,10 +491,15 @@ func TestNotifyingUOWOpToHookEventMapping(t *testing.T) {
 			// The one predicate that reads backwards at first glance, and the
 			// reason it is spelled out: HookFiringStore.CloseIssueChecked fires
 			// on_close for the idempotent no-op too ("this includes the
-			// idempotent no-op when the issue was already closed"), and
-			// hookBatchCloser fires for every outcome that did not refuse. A
-			// re-close answers "it is closed", and a script reconciling on that
-			// answer must not be told only sometimes.
+			// idempotent no-op when the issue was already closed"). A re-close
+			// answers "it is closed", and a script reconciling on that answer
+			// must not be told only sometimes.
+			//
+			// THE BATCH PATHS DISAGREE WITH THIS ONE, deliberately and as of
+			// ga-2yaqp.1: hookBatchCloser and hookBatchApplier both fire on
+			// Changed, so a replayed teardown does not re-run on_close per
+			// item. This single-close path keeps legacy parity, which is why
+			// the divergence is pinned here rather than left to be discovered.
 			name:   "a re-close still reports the close",
 			parity: "HookFiringStore.CloseIssueChecked fires on_close on success, unchanged rows included",
 			run: func(ctx context.Context, t *testing.T, uw UnitOfWork) {
