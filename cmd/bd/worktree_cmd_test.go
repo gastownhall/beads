@@ -91,6 +91,38 @@ func TestGetRedirectTarget(t *testing.T) {
 }
 
 func TestAddToGitignore(t *testing.T) {
+	t.Run("recognizes existing CRLF entries", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			initial string
+			entry   string
+		}{
+			{name: "exact entry", initial: "worktree-feature/\r\n", entry: "worktree-feature"},
+			{name: "parent pattern", initial: ".worktrees/\r\n", entry: ".worktrees/worktree-one"},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				repoRoot := t.TempDir()
+				gitignorePath := filepath.Join(repoRoot, ".gitignore")
+				if err := os.WriteFile(gitignorePath, []byte(test.initial), 0644); err != nil {
+					t.Fatalf("failed to write .gitignore: %v", err)
+				}
+
+				if err := addToGitignore(context.Background(), repoRoot, test.entry); err != nil {
+					t.Fatalf("addToGitignore failed: %v", err)
+				}
+
+				updated, err := os.ReadFile(gitignorePath)
+				if err != nil {
+					t.Fatalf("failed to read .gitignore: %v", err)
+				}
+				if string(updated) != test.initial {
+					t.Fatalf(".gitignore changed despite existing CRLF entry:\nwant: %q\ngot:  %q", test.initial, string(updated))
+				}
+			})
+		}
+	})
+
 	t.Run("skips append when path already ignored by broader pattern", func(t *testing.T) {
 		repoRoot := initGitRepoForGitignoreTest(t)
 		gitignorePath := filepath.Join(repoRoot, ".gitignore")

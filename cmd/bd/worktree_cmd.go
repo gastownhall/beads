@@ -2067,6 +2067,7 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	// e.g. if ".worktrees" is in .gitignore, ".worktrees/my-branch" is already covered.
 	lines := strings.Split(string(content), "\n")
 	for _, line := range lines {
+		line = strings.TrimSuffix(line, "\r")
 		trimmed := strings.TrimSuffix(filepath.ToSlash(line), "/")
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
