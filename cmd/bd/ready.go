@@ -49,6 +49,15 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		claimReady, _ := cmd.Flags().GetBool("claim")
 
+		// ABOVE THE MODE DISPATCH, and above the proxied branch, so it is the
+		// one place a --brief conflict is decided for this command on either
+		// route. The branches below return before gatherReadyInput runs, so a
+		// check written into each of them would be three untested copies; this
+		// is one call into the body the gatherer also uses.
+		if err := briefModeConflictFromFlags(cmd); err != nil {
+			return err
+		}
+
 		if usesProxiedServer() {
 			// --claim consumes exactly one row, same reasoning as the
 			// direct-path fix in issueops/claim.go: a rig-wide cap sized
@@ -82,12 +91,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --gated")
 			}
-			// Duplicated from gatherReadyInput because this route dispatches
-			// the specialized modes BEFORE gathering, so the gatherer's copy
-			// reaches the proxied route only.
-			if brief, _ := cmd.Flags().GetBool("brief"); brief {
-				return HandleErrorRespectJSON("--gated cannot be combined with --brief")
-			}
 			// Delegate to the non-emitting core so `bd ready --gated` records
 			// exactly one cli_command event ("ready"), not also "mol-ready-gated".
 			return runMolReadyGatedCore(cmd, args)
@@ -98,9 +101,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --mol")
 			}
-			if brief, _ := cmd.Flags().GetBool("brief"); brief {
-				return HandleErrorRespectJSON("--mol cannot be combined with --brief")
-			}
 			return runMoleculeReady(cmd, molID)
 		}
 
@@ -108,9 +108,6 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if explain {
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --explain")
-			}
-			if brief, _ := cmd.Flags().GetBool("brief"); brief {
-				return HandleErrorRespectJSON("--explain cannot be combined with --brief")
 			}
 			return runReadyExplain(cmd)
 		}

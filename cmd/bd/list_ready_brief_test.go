@@ -277,6 +277,87 @@ func TestReadyBriefIsRefusedWhereItCannotBeHonored(t *testing.T) {
 	}
 }
 
+// TestReadyCmdRefusesBriefBeforeItDispatches drives readyCmd's RunE, which the
+// table above does not reach, and it is the half that was missing.
+//
+// --gated, --mol and --explain are dispatched by RunE BEFORE gatherReadyInput
+// runs, so the gatherer's refusals guard the proxied route only. When those
+// three checks were copies written into each dispatch branch, deleting one left
+// `bd ready --gated --brief` silently ignoring the flag on the direct route
+// with the whole package still green. They are now one hoisted call to
+// briefModeConflict, and this is what fails if that call is removed.
+//
+// RunE is reachable in a test because the check sits above every store access:
+// it returns before the proxied branch, the offset check and the mode dispatch.
+func TestReadyCmdRefusesBriefBeforeItDispatches(t *testing.T) {
+	setFlag := func(t *testing.T, name, value string) {
+		t.Helper()
+		if err := readyCmd.Flags().Set(name, value); err != nil {
+			t.Fatalf("set %s=%s: %v", name, value, err)
+		}
+		// pflag.Set leaves Changed true, which outlives the value reset and
+		// would contaminate later tests in the package.
+		t.Cleanup(func() {
+			def := readyCmd.Flags().Lookup(name).DefValue
+			_ = readyCmd.Flags().Set(name, def)
+			readyCmd.Flags().Lookup(name).Changed = false
+		})
+	}
+
+	for _, tc := range []struct {
+		name string
+		flag string
+		val  string
+		want string
+	}{
+		{"gated", "gated", "true", "--gated cannot be combined with --brief"},
+		{"mol", "mol", "bd-1", "--mol cannot be combined with --brief"},
+		{"explain", "explain", "true", "--explain cannot be combined with --brief"},
+		{"claim", "claim", "true", "--claim cannot be combined with --brief"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pinJSONOutput(t, true)
+			setFlag(t, "brief", "true")
+			setFlag(t, tc.flag, tc.val)
+
+			stdioMutex.Lock()
+			defer stdioMutex.Unlock()
+
+			oldStdout, oldStderr := os.Stdout, os.Stderr
+			rOut, wOut, _ := os.Pipe()
+			rErr, wErr, _ := os.Pipe()
+			os.Stdout, os.Stderr = wOut, wErr
+
+			drain := func(r *os.File) <-chan string {
+				done := make(chan string, 1)
+				go func() {
+					var buf bytes.Buffer
+					_, _ = buf.ReadFrom(r)
+					done <- buf.String()
+				}()
+				return done
+			}
+			outDone, errDone := drain(rOut), drain(rErr)
+
+			err := readyCmd.RunE(readyCmd, nil)
+
+			wOut.Close()
+			wErr.Close()
+			os.Stdout, os.Stderr = oldStdout, oldStderr
+			shown := <-outDone + <-errDone
+			_ = rOut.Close()
+			_ = rErr.Close()
+
+			if err == nil {
+				t.Fatalf("readyCmd.RunE(--brief --%s) = nil, want a usage error naming %q", tc.flag, tc.want)
+			}
+			if !strings.Contains(shown, tc.want) {
+				t.Errorf("output = %q, want it to name %q", shown, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadyBriefWithJSONIsAccepted is the negative control for the table above:
 // with none of those modes set, the flag must get through. Without this, a
 // refusal that fired unconditionally would leave every case there green.
