@@ -431,6 +431,9 @@ type GetRequest struct {
 	// that wants the rows asks for them.
 	IncludeDependents bool
 	IncludeComments   bool
+
+	// BriefDeps reduces each dependency to its identity-and-shape fields.
+	BriefDeps bool
 }
 
 // IssuePage is one page of work. Ready and List share it deliberately: both

@@ -139,5 +139,6 @@ func (r *storeReader) Get(ctx context.Context, req issueops.GetRequest) (*issueo
 	return workapi.BuildIssueDetails(ctx, src, issue, isWisp, workapi.DetailOptions{
 		IncludeDependents: req.IncludeDependents,
 		IncludeComments:   req.IncludeComments,
+		BriefDeps:         req.BriefDeps,
 	})
 }
