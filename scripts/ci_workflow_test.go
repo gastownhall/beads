@@ -60,6 +60,54 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+
+	if job.RunsOn != "${{ matrix.os }}" {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want matrix.os", job.RunsOn)
+	}
+	if got := job.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+		t.Errorf("pr-preflight-platforms matrix os = %v, want required three-host matrix", got)
+	}
+	if job.If != "" {
+		t.Errorf("pr-preflight-platforms job is conditional: %q", job.If)
+	}
+	if job.ContinueOnError {
+		t.Error("pr-preflight-platforms job may not continue on error")
+	}
+
+	step := job.step(t, "Check benchmark environment scrubbing")
+	if step.If != "matrix.os == 'windows-latest'" {
+		t.Errorf("benchmark environment scrubbing selector = %q, want native Windows only", step.If)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("benchmark environment scrubbing step may not continue on error")
+	}
+	const command = "go test -tags gms_pure_go -count=1 -run '^(TestCleanEnvUsesHostKeySemantics|TestBenchmarkCommandBuildersStripDoltEnvOverrides)$' ./scripts/repro-dolt-prod-timeouts"
+	if got := strings.TrimSpace(step.Run); got != command {
+		t.Errorf("benchmark environment scrubbing command = %q, want %q", got, command)
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if gate.If != "${{ always() }}" {
+		t.Errorf("ci-gate condition = %q, want always() aggregation", gate.If)
+	}
+	if gate.ContinueOnError {
+		t.Error("ci-gate may not continue on error")
+	}
+	if !contains(gate.Needs, "pr-preflight-platforms") {
+		t.Errorf("ci-gate does not require pr-preflight-platforms: %v", gate.Needs)
+	}
+	if got := gateEnv["PR_PREFLIGHT_PLATFORMS"]; got != "${{ needs.pr-preflight-platforms.result }}" {
+		t.Errorf("ci-gate pr-preflight-platforms result = %q", got)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Error("ci-gate required set omits pr-preflight-platforms")
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
@@ -865,12 +913,13 @@ type ciWorkflow struct {
 }
 
 type ciWorkflowJob struct {
-	Needs          ciWorkflowStringList `yaml:"needs"`
-	Steps          []ciWorkflowStep     `yaml:"steps"`
-	RunsOn         string               `yaml:"runs-on"`
-	If             string               `yaml:"if"`
-	TimeoutMinutes int                  `yaml:"timeout-minutes"`
-	Strategy       ciWorkflowStrategy   `yaml:"strategy"`
+	Needs           ciWorkflowStringList `yaml:"needs"`
+	Steps           []ciWorkflowStep     `yaml:"steps"`
+	RunsOn          string               `yaml:"runs-on"`
+	If              string               `yaml:"if"`
+	ContinueOnError bool                 `yaml:"continue-on-error"`
+	TimeoutMinutes  int                  `yaml:"timeout-minutes"`
+	Strategy        ciWorkflowStrategy   `yaml:"strategy"`
 }
 
 type ciWorkflowStrategy struct {
