@@ -98,6 +98,10 @@ jobs:
     name: Build example modules
     runs-on: ubuntu-latest
     continue-on-error: true
+    # Advisory posture must also bound hang time: a job stuck at the 6-hour
+    # default would hold the check pending — stalling merge-lane consumers in
+    # exactly the way continue-on-error exists to prevent.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
