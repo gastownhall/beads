@@ -71,15 +71,21 @@ func runLabelListAllProxiedServer(ctx context.Context) error {
 			}
 		}
 	}
+	// THE QUESTION HAS NO ROLE, which is the reason ga-26w10 left `list-all`
+	// behind and the reason it is still here: no issueops surface answers
+	// "every distinct label in this workspace, with a count". Reader.Get is one
+	// detail view per call, so asking it would be one round trip per bead to
+	// build a histogram. A label-vocabulary role is the follow-up
+	// (ga-2ltro.12).
 	if len(permIDs) > 0 {
-		byIssue, err := uw.LabelUseCase().GetLabelsForIssues(ctx, permIDs)
+		byIssue, err := uw.LabelUseCase().GetLabelsForIssues(ctx, permIDs) //nolint:forbidigo // label histogram; no role answers the workspace's label vocabulary
 		if err != nil {
 			return HandleErrorRespectJSON("getting labels: %v", err)
 		}
 		accumulate(byIssue)
 	}
 	if len(wispIDs) > 0 {
-		byWisp, err := uw.LabelUseCase().GetLabelsForWisps(ctx, wispIDs)
+		byWisp, err := uw.LabelUseCase().GetLabelsForWisps(ctx, wispIDs) //nolint:forbidigo // label histogram; see GetLabelsForIssues above
 		if err != nil {
 			return HandleErrorRespectJSON("getting labels: %v", err)
 		}
@@ -160,12 +166,24 @@ func runLabelPropagateProxiedServer(ctx context.Context, args []string) error {
 		if len(children) == 0 {
 			return "", nil
 		}
+		// THE ONE SURVIVING WISP SWITCH, and it is named rather than hidden.
+		// This is the same four-way shape ga-26w10 deleted from `bd label` and
+		// ga-2ltro.12 deleted from `bd tag`, `bd set-state` and the molecule
+		// port — the branch a front door can get backwards and put a wisp's
+		// label in the durable table. It survives because propagate is a search
+		// plus a fan-out that must land as ONE transaction over N children, and
+		// a per-child Lifecycle.Update is N transactions: the atomicity this
+		// command has today would be the price of the migration. The shape that
+		// keeps both is issueops.BatchApplier.ApplyBatch with one ItemUpdate per
+		// child carrying this same label patch, and it is blocked on a cmd/bd
+		// accessor for that role. That is the follow-up this waiver names
+		// (ga-2ltro.12); it is the last one on this list that WRITES.
 		for _, child := range children {
 			var e error
 			if child.Ephemeral {
-				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, actor)
+				e = uw.LabelUseCase().AddWispLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			} else {
-				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, actor)
+				e = uw.LabelUseCase().AddLabel(ctx, child.ID, label, actor) //nolint:forbidigo // atomic N-child fan-out; awaits a BatchApplier accessor
 			}
 			if e != nil {
 				return "", fmt.Errorf("add label '%s' on %s: %w", label, child.ID, e)

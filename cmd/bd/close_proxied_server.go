@@ -425,7 +425,12 @@ func autoCloseProxiedCompletedMolecule(ctx context.Context, uw uow.UnitOfWork, c
 	if err != nil || root == nil || root.Status == types.StatusClosed {
 		return nil
 	}
-	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil {
+	// A READ, and one that has to see this transaction. The auto-close decision
+	// is made from labels written earlier in the same unit of work, and
+	// issueops.Reader opens a transaction of its own, so it would answer from
+	// the last committed state instead. The follow-up is a reader role bound to
+	// a caller's transaction; until one exists this stays (ga-2ltro.12).
+	if labels, err := uw.LabelUseCase().GetLabels(ctx, moleculeID); err == nil { //nolint:forbidigo // in-transaction read; issueops.Reader would open its own
 		root.Labels = labels
 	}
 	if !shouldAutoCloseCompletedRoot(root) {

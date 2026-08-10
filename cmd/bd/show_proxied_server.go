@@ -510,11 +510,19 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("ACCEPTANCE CRITERIA"), uimd.RenderMarkdown(issue.AcceptanceCriteria))
 	}
 
+	// A READ on an ALTERNATE view. `bd show`'s detail view is on
+	// issueops.Reader on both routes and gets its labels hydrated there; this
+	// renderer serves --refs, --children, --thread and --as-of, which answer
+	// with shapes the Reader contract does not describe, from a unit of work
+	// the caller already holds and has already read the issue from. Asking the
+	// role here would open a second transaction to re-fetch a row this function
+	// was handed. Alternate views reaching roles of their own is the follow-up
+	// (ga-2ltro.12).
 	var labels []string
 	if isWisp {
-		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetWispLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	} else {
-		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID)
+		labels, _ = uw.LabelUseCase().GetLabels(ctx, issue.ID) //nolint:forbidigo // alternate view, caller-owned UOW; the detail view is on the role
 	}
 	if len(labels) > 0 {
 		fmt.Printf("\n%s %s\n", ui.RenderBold("LABELS:"), strings.Join(labels, ", "))
