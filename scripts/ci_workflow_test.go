@@ -167,16 +167,32 @@ func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 
 func TestStorageDomainUOWJobsUseNestedTimeoutBudgets(t *testing.T) {
 	const (
-		storageCommand = "go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/..."
-		doctorCommand  = "go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/"
-		jobTimeout     = 30
+		storageTimeoutMinutes     = 15
+		doctorTimeoutMinutes      = 10
+		setupTeardownSlackMinutes = 5
+		jobTimeoutMinutes         = storageTimeoutMinutes + doctorTimeoutMinutes + setupTeardownSlackMinutes
 	)
+	storageCommand := fmt.Sprintf(
+		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...",
+		storageTimeoutMinutes)
+	doctorCommand := fmt.Sprintf(
+		"go test -tags gms_pure_go -race -count=1 -timeout %dm -v ./cmd/bd/doctor/fix/",
+		doctorTimeoutMinutes)
 
 	for _, workflowName := range []string{"pr.yml", "main.yml"} {
 		t.Run(workflowName, func(t *testing.T) {
 			job := readCIWorkflow(t, workflowName).job(t, "test-domain-uow")
-			if job.TimeoutMinutes != jobTimeout {
-				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeout)
+			if job.TimeoutMinutes != jobTimeoutMinutes {
+				t.Errorf("test-domain-uow timeout = %d minutes, want %d", job.TimeoutMinutes, jobTimeoutMinutes)
+			}
+			// Go's timeout applies per package test binary, so this is a
+			// maintenance tripwire for the declared sequential tier budgets,
+			// not a mathematical upper bound for the multi-package first step.
+			if job.TimeoutMinutes <= storageTimeoutMinutes+doctorTimeoutMinutes {
+				t.Errorf(
+					"test-domain-uow timeout = %d minutes, want more than %d minutes of declared tier budgets",
+					job.TimeoutMinutes,
+					storageTimeoutMinutes+doctorTimeoutMinutes)
 			}
 			assertStepRunsExactly(t, job, "Test domain + uow + tracker", storageCommand)
 			assertStepRunsExactly(t, job, "Test doctor/fix (Dolt-backed, hard-require container)", doctorCommand)
@@ -248,6 +264,42 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	if job.RunsOn != "${{ matrix.os }}" {
+		t.Errorf("pr-preflight-platforms runs-on = %q, want matrix.os", job.RunsOn)
+	}
+	if job.If != "" || job.TimeoutMinutes != 10 {
+		t.Errorf("pr-preflight-platforms condition/timeout = %q/%d, want unconditional/10",
+			job.If, job.TimeoutMinutes)
+	}
+	if got := job.Strategy.Matrix.OS; !equalStrings(got, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+		t.Errorf("pr-preflight-platforms matrix os = %v, want all three hosted platforms", got)
+	}
+
+	const stepName = "Exercise test.sh prebuilt binary path"
+	assertStepRunsExactly(t, job, stepName,
+		"go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts")
+	step := job.step(t, stepName)
+	if step.Shell != "bash" || step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Errorf("%s shell/condition/continue-on-error = %q/%q/%v, want unconditional required bash",
+			stepName, step.Shell, step.If, step.ContinueOnError)
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") {
+		t.Errorf("ci-gate does not need pr-preflight-platforms: %v", gate.Needs)
+	}
+	if got, want := gateEnv["PR_PREFLIGHT_PLATFORMS"], "${{ needs.pr-preflight-platforms.result }}"; got != want {
+		t.Errorf("ci-gate PR_PREFLIGHT_PLATFORMS = %q, want %q", got, want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Errorf("ci-gate required set omits PR_PREFLIGHT_PLATFORMS")
 	}
 }
 
@@ -350,7 +402,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "check-doc-freshness-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
-		[]string{"Restore Go module cache"}, []string{"Exercise the real Bash process boundary"})
+		[]string{"Restore Go module cache"}, []string{"Exercise the real Bash process boundary", "Exercise test.sh prebuilt binary path"})
 
 	prRiskEmbedded := workflows["pr-risk.yml"].job(t, "build-embedded")
 	prRiskNonRaceBuilds := []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"}
@@ -756,14 +808,15 @@ type ciWorkflowMatrixInclude struct {
 }
 
 type ciWorkflowStep struct {
-	Name  string            `yaml:"name"`
-	ID    string            `yaml:"id"`
-	If    string            `yaml:"if"`
-	Uses  string            `yaml:"uses"`
-	Run   string            `yaml:"run"`
-	Shell string            `yaml:"shell"`
-	Env   map[string]string `yaml:"env"`
-	With  map[string]string `yaml:"with"`
+	Name            string            `yaml:"name"`
+	ID              string            `yaml:"id"`
+	If              string            `yaml:"if"`
+	Uses            string            `yaml:"uses"`
+	Run             string            `yaml:"run"`
+	Shell           string            `yaml:"shell"`
+	ContinueOnError any               `yaml:"continue-on-error"`
+	Env             map[string]string `yaml:"env"`
+	With            map[string]string `yaml:"with"`
 }
 
 type ciWorkflowStringList []string

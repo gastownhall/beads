@@ -568,8 +568,15 @@ refuse a hook-firing one — missing it is a `bd serve` that runs a user
 subprocess per call); `uow`'s notifying wrapper, in BOTH halves — the recording
 use case, which silently records nothing for an inherited method, and the
 notifying provider, whose missing accessor makes a caller's type assertion stop
-matching; and two `cmd/bd` stub stores that embed `storage.DoltStorage`. Grep
-for the embed, not for the interface. And note that `internal/storage/uow`'s own
+matching; and two `cmd/bd` stub stores that embedded `storage.DoltStorage`. Grep
+for the embed, not for the interface.
+
+Those two `cmd/bd` stubs are the one place this step is now taken FOR you.
+`serveIssueRoles` asks for `serveRoleSource` — the accessor subset it actually
+reaches — and both stubs declare that subset and assert it, so a role added to
+the loop is a compile error naming the missing method instead of a segfault
+inside role extraction. Every other surface above is still yours to grep for.
+And note that `internal/storage/uow`'s own
 package run is nine minutes — the parity guards live there, so a role slice that
 runs only its contract on the three legs has not run them.
 

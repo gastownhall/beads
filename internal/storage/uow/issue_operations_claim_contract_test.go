@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage/domain"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
 )
@@ -100,9 +101,21 @@ func (s *claimContractIssues) ReopenIssue(ctx context.Context, id string, _ doma
 	return domain.ReopenIssueResult{Issue: issue, Reopened: reopened}, err
 }
 
+// ApplyUpdate mirrors the real CAS's idempotent-preserves-spelling contract
+// (domain/db's Claim, itself required to stay in lockstep with
+// issueops.ClaimIssueInTx, ga-v2k49): a holder re-claiming under a respelled
+// identity wins the CAS without writing, so the stored spelling survives
+// unchanged. Only a genuine transition (not already in_progress under a
+// matching identity) rewrites assignee/status — a fake that overwrote
+// unconditionally would make every cross-spelling reclaim look like a real
+// mutation via semanticIssueEqual, for a reason that has nothing to do with
+// claimChanged itself.
 func (s *claimContractIssues) ApplyUpdate(ctx context.Context, id string, spec domain.UpdateSpec, actor string) (*types.Issue, error) {
 	if spec.Claim && s.issue != nil {
-		s.issue.Assignee, s.issue.Status = actor, types.StatusInProgress
+		alreadyHeld := s.issue.Status == types.StatusInProgress && storageissueops.ActorMatches(s.issue.Assignee, actor)
+		if !alreadyHeld {
+			s.issue.Assignee, s.issue.Status = actor, types.StatusInProgress
+		}
 	}
 	if s.isWisp {
 		return s.GetWisp(ctx, id)
@@ -208,6 +221,98 @@ func TestIdempotentClaimRecordsNoHistoryEntry(t *testing.T) {
 	}
 	if len(uw.commits) != 0 {
 		t.Errorf("history entries = %q, want none for a claim that wrote nothing", uw.commits)
+	}
+}
+
+// TestIdempotentClaimAcrossSpellingRecordsNoHistoryEntry pins ga-v2k49
+// (steveyegge's #5479 re-review, blocking fix-class): the idempotent-reclaim
+// contract above must also hold when the caller's actor and the stored
+// assignee are the same identity spelled under two different layers'
+// separator conventions (ga-wzl83's repro shape: dotted vs. sanitized
+// double-underscore), not just byte-identical. This backend builds its own
+// claimChanged decision rather than routing through ClaimIssueInTx, so it
+// needs its own regression pin independent of public_claim_test.go's.
+func TestIdempotentClaimAcrossSpellingRecordsNoHistoryEntry(t *testing.T) {
+	held := &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown__mayor"}
+	operations, uw := newClaimContract(t, held, false)
+
+	result, err := operations.Update(context.Background(), publicops.UpdateRequest{
+		Actor: "gastown.mayor", IssueID: "bd-1", Claim: true, Provenance: "bd serve: claim bd-1 by gastown.mayor",
+	})
+	if err != nil {
+		t.Fatalf("Update: %v, want success (same identity, different separator spelling)", err)
+	}
+	if result.Changed {
+		t.Error("a cross-spelling re-claim by the holder reports a change")
+	}
+	if len(uw.commits) != 0 {
+		t.Errorf("history entries = %q, want none for a claim that wrote nothing", uw.commits)
+	}
+}
+
+// TestClaimByGenuinelyDifferentIdentityRecordsAHistoryEntry is the
+// not-a-no-op control for the cross-spelling fix above: canonicalActor's own
+// documented pair that must stay distinct despite sharing a separator style.
+// Without this, a canonicalization broad enough to match everyone would pass
+// the idempotent test above for the wrong reason.
+func TestClaimByGenuinelyDifferentIdentityRecordsAHistoryEntry(t *testing.T) {
+	held := &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown.mayor"}
+	operations, uw := newClaimContract(t, held, false)
+
+	result, err := operations.Update(context.Background(), publicops.UpdateRequest{
+		Actor: "gastown.dog-3", IssueID: "bd-1", Claim: true, Provenance: "bd serve: claim bd-1 by gastown.dog-3",
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !result.Changed {
+		t.Error("a claim transferring to a genuinely different identity reports no change")
+	}
+	if len(uw.commits) != 1 {
+		t.Errorf("history entries = %q, want exactly one for a real transfer", uw.commits)
+	}
+}
+
+// TestBatchRunUpdateIdempotentClaimAcrossSpellingReportsNoChange pins the
+// SAME ga-v2k49 contract as TestIdempotentClaimAcrossSpellingRecordsNoHistoryEntry,
+// against uowApplyRun.runUpdate (batch_applier.go) — the batch/plan path's own
+// independent claimChanged expression, reached through ApplyPlan rather than
+// Update. runUpdate's own doc comment says it is reached from
+// issueOperations.Update "so the two cannot drift on ... the Changed rule";
+// that describes an intent, not a mechanism — nothing stops two independent
+// expressions disagreeing, which is exactly what this bug did until both
+// were fixed. runUpdate only touches r.uw, so the same fake UOW plugs in
+// directly without the full BatchApplier/ApplyPlan machinery.
+func TestBatchRunUpdateIdempotentClaimAcrossSpellingReportsNoChange(t *testing.T) {
+	held := &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown__mayor"}
+	run := &uowApplyRun{uw: &claimContractUOW{issues: &claimContractIssues{issue: held}}}
+
+	result, err := run.runUpdate(context.Background(), publicops.UpdateRequest{
+		Actor: "gastown.mayor", IssueID: "bd-1", Claim: true,
+	})
+	if err != nil {
+		t.Fatalf("runUpdate: %v, want success (same identity, different separator spelling)", err)
+	}
+	if result.Changed {
+		t.Error("a cross-spelling re-claim by the holder reports a change")
+	}
+}
+
+// TestBatchRunUpdateClaimByGenuinelyDifferentIdentityReportsAChange is the
+// batch-path twin of TestClaimByGenuinelyDifferentIdentityRecordsAHistoryEntry
+// — the not-a-no-op control for the fix above.
+func TestBatchRunUpdateClaimByGenuinelyDifferentIdentityReportsAChange(t *testing.T) {
+	held := &types.Issue{ID: "bd-1", Status: types.StatusInProgress, Assignee: "gastown.mayor"}
+	run := &uowApplyRun{uw: &claimContractUOW{issues: &claimContractIssues{issue: held}}}
+
+	result, err := run.runUpdate(context.Background(), publicops.UpdateRequest{
+		Actor: "gastown.dog-3", IssueID: "bd-1", Claim: true,
+	})
+	if err != nil {
+		t.Fatalf("runUpdate: %v", err)
+	}
+	if !result.Changed {
+		t.Error("a claim transferring to a genuinely different identity reports no change")
 	}
 }
 

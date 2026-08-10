@@ -386,6 +386,36 @@ func TestSpecDefaultsMatchSharedConstants(t *testing.T) {
 			t.Errorf("%s: limit description does not document the non-loopback refusal of limit=0", tc.opID)
 		}
 	}
+
+	// The anchor bound on ALL THREE dependency-collection reads. Each bounds
+	// the same thing — how many issues one call may ask about — from the same
+	// maxDependencyAnchors, and each says so in prose. Nothing kept the
+	// document's number and the constant together until this: the bound is
+	// enforced in the handler, so a spec that drifted to a different maxItems
+	// would be refused by the server it documents, at a number no reader could
+	// have predicted.
+	//
+	// THE THIRD ROW IS THE POINT. listBlockingAnnotations enforces the same
+	// constant (blocking.go) and declares the same maxItems, and it predates
+	// this gate — so a two-operation loop would have pinned the copies that
+	// happened to be in the slice that wrote it and left the oldest one free
+	// to drift. Every operation reading maxDependencyAnchors belongs here, and
+	// the next one to do so must be added.
+	for _, opID := range []string{OpListDependencies, OpCountDependencyEdges, OpListBlockingAnnotations} {
+		so, ok := ops[opID]
+		if !ok {
+			t.Fatalf("operation %q missing from the spec", opID)
+		}
+		schema := mapAt(t, specParam(t, so, "issue_id"), "schema")
+		if got, ok := schema["maxItems"].(int); !ok || got != maxDependencyAnchors {
+			t.Errorf("%s: issue_id maxItems = %v, want the shared bound %d", opID, schema["maxItems"], maxDependencyAnchors)
+		}
+		// At least one is required on both, and the schema is where a
+		// generated client learns it.
+		if got, ok := schema["minItems"].(int); !ok || got != 1 {
+			t.Errorf("%s: issue_id minItems = %v, want 1", opID, schema["minItems"])
+		}
+	}
 }
 
 // capabilityToken matches one backticked capability token in the
@@ -756,6 +786,197 @@ func TestCloseRequestMembersMatchTheHandler(t *testing.T) {
 	}
 }
 
+// TestBatchCloseRequestMembersMatchTheHandler is the batch create's gate for
+// the batch close body, at BOTH of its levels. Same reason as there: the
+// handler decodes raw members so it can name the offending one by index, which
+// costs a hand-rolled copy of two member lists with nothing tying them to the
+// document.
+func TestBatchCloseRequestMembersMatchTheHandler(t *testing.T) {
+	doc := loadSpec(t)
+	schemas := mapAt(t, mapAt(t, doc, "components"), "schemas")
+
+	for _, tc := range []struct {
+		schema   string
+		accepted []string
+		goType   any
+	}{
+		{schema: "BatchCloseRequest", accepted: batchCloseRequestMembers, goType: apigen.BatchCloseRequest{}},
+		{schema: "BatchCloseItem", accepted: batchCloseItemMembers, goType: apigen.BatchCloseItem{}},
+	} {
+		t.Run(tc.schema, func(t *testing.T) {
+			accepted := map[string]bool{}
+			for _, name := range tc.accepted {
+				accepted[name] = true
+			}
+			goFields := jsonTagNames(t, reflect.TypeOf(tc.goType))
+			if extra := diff(goFields, accepted); len(extra) > 0 {
+				t.Errorf("generated %s declares members the batchClose handler refuses as unknown: %v", tc.schema, extra)
+			}
+			if missing := diff(accepted, goFields); len(missing) > 0 {
+				t.Errorf("the batchClose handler accepts members %s does not declare: %v", tc.schema, missing)
+			}
+			specProps := schemaProperties(t, doc, mapAt(t, schemas, tc.schema))
+			if extra := diff(specProps, accepted); len(extra) > 0 {
+				t.Errorf("the %s schema documents members the batchClose handler refuses: %v", tc.schema, extra)
+			}
+			if missing := diff(accepted, specProps); len(missing) > 0 {
+				t.Errorf("the batchClose handler accepts members the %s schema does not document: %v", tc.schema, missing)
+			}
+		})
+	}
+}
+
+// TestCloseOutcomeCodesAreExactlyWhatTheProjectionEmits holds the per-item
+// vocabulary to the document, which no other gate covers: `code` on an outcome
+// lives inside a 200 BODY, so TestSpecStatusCodesMatchHandlerTable — which
+// compares problem documents — cannot see it at all.
+//
+// An item code the projection emits and the document does not name is
+// undisclosed wire surface on the one operation whose refusals do not travel as
+// problems.
+func TestCloseOutcomeCodesAreExactlyWhatTheProjectionEmits(t *testing.T) {
+	// The codes closeOutcome can produce, read off the function's own arms.
+	emitted := map[string]bool{
+		string(CodeNotFound):    true,
+		string(CodeNotClosable): true,
+		string(CodeInternal):    true,
+	}
+	for code := range emitted {
+		if Code(code).Status() == 0 {
+			t.Errorf("outcome code %q is not in the frozen vocabulary", code)
+		}
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "CloseOutcome")
+	described := mapAt(t, mapAt(t, schema, "properties"), "code")["description"]
+	prose, _ := described.(string)
+	if prose == "" {
+		t.Fatal("CloseOutcome.code carries no description; the item vocabulary is documented nowhere else")
+	}
+	for code := range emitted {
+		// `internal` is the fail-closed arm for a refusal no vocabulary here
+		// names, and the document does not enumerate it for the same reason no
+		// operation enumerates the generic 500: it means the server is broken,
+		// not that the client sent something.
+		if code == string(CodeInternal) {
+			continue
+		}
+		if !strings.Contains(prose, "`"+code+"`") {
+			t.Errorf("closeOutcome emits %q and CloseOutcome.code does not name it", code)
+		}
+	}
+}
+
+// TestClaimNextRequestMembersMatchTheHandler is the claim's gate for the
+// claimNext body. The body is one member, and the point of the test is the
+// NEGATIVE half: this operation's filter lives in the query string, so a
+// documented body member the handler refuses — or, worse, a filter member added
+// to the schema that would have to be a second spelling of the ready
+// vocabulary — fails here rather than shipping.
+func TestClaimNextRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range claimNextRequestMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.ClaimNextRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated ClaimNextRequest declares members the claimNext handler refuses as unknown: %v", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the claimNext handler accepts members ClaimNextRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ClaimNextRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the ClaimNextRequest schema documents members the claimNext handler refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the claimNext handler accepts members the ClaimNextRequest schema does not document: %v", missing)
+	}
+}
+
+// TestClaimNextAdmitsExactlyTheListingsFilters is the guarantee readyFilters
+// exists for, asserted at the DOCUMENT level rather than trusted to the shared
+// function.
+//
+// The handler cannot drift — it calls readyFilters itself — but the SPEC can,
+// and a document that published a filter the handler never decodes would tell a
+// client its request was narrowed when it was not. The two operations must
+// admit one set: a claim answering a different question than the listing shows
+// would hand an agent work the listing never offered it.
+//
+// `limit` is the one deliberate difference, and it is asserted as an absence
+// rather than merely not listed, because it is the parameter this operation
+// refuses BY VALUE.
+func TestClaimNextAdmitsExactlyTheListingsFilters(t *testing.T) {
+	doc := loadSpec(t)
+	names := func(path, method string) map[string]bool {
+		op := mapAt(t, mapAt(t, mapAt(t, doc, "paths"), path), method)
+		params, _ := op["parameters"].([]any)
+		out := map[string]bool{}
+		for _, raw := range params {
+			p, _ := raw.(map[string]any)
+			name, _ := p["name"].(string)
+			out[name] = true
+		}
+		return out
+	}
+	listing := names("/v0/beads/ready", "get")
+	claimNext := names("/v0/beads/issues:claimNext", "post")
+
+	if !listing["limit"] {
+		t.Fatal("the listing no longer publishes `limit`; this test's one exception is stale")
+	}
+	delete(listing, "limit")
+
+	if extra := diff(claimNext, listing); len(extra) > 0 {
+		t.Errorf("claimNext publishes parameters the ready listing does not: %v\n"+
+			"the two must admit one filter vocabulary, or a claim answers a different question than the listing shows", extra)
+	}
+	if missing := diff(listing, claimNext); len(missing) > 0 {
+		t.Errorf("the ready listing publishes parameters claimNext does not: %v\n"+
+			"the handler decodes them through readyFilters either way, so the document is understating what it accepts", missing)
+	}
+	if claimNext["limit"] {
+		t.Error("claimNext publishes `limit`; it refuses one, and a documented parameter that is always a 400 is a trap")
+	}
+}
+
+// TestReleaseRequestMembersMatchTheHandler is the close's gate for the release
+// body, and it exists for the same reason. It matters a little more here than
+// there because two of the three members are GUARDS: a documented guard the
+// server refuses as unknown, or an undocumented one it honors, both change who
+// is allowed to release whose claim.
+func TestReleaseRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range releaseRequestMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.ReleaseIssueRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated ReleaseIssueRequest declares members the release handler refuses as unknown: %v\n"+
+			"teach releaseRequest to honor them, or the document promises a member the server turns down", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the release handler accepts members ReleaseIssueRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "ReleaseIssueRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the ReleaseIssueRequest schema documents members the release handler refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the release handler accepts members the ReleaseIssueRequest schema does not document: %v", missing)
+	}
+}
+
 // TestUpdateRequestMembersMatchTheHandler is the claim's and the close's gate
 // for the update body, at BOTH of its levels.
 //
@@ -911,6 +1132,43 @@ func TestReopenRequestMembersMatchTheHandler(t *testing.T) {
 	}
 	if missing := diff(accepted, specProps); len(missing) > 0 {
 		t.Errorf("the reopen handler accepts members the ReopenIssueRequest schema does not document: %v", missing)
+	}
+}
+
+// TestDeleteRequestMembersMatchTheHandler is the reopen's gate for the delete
+// body, and it is new in the slice that gave that body a sixth member.
+//
+// The gap it closes is the same one every gate in this file closes, on the
+// operation where it costs the most. `deleteMembers` is a hand-rolled copy of
+// the schema — the handler reads raw members so a refusal can name the
+// offending one, which on THIS operation is the difference between orphaning a
+// dependent and deleting it — and nothing tied that copy to the document.
+// A member documented and not honored is refused as `unknown_parameter` with
+// every other gate green; a member honored and not documented is undisclosed
+// input on an irreversible write.
+func TestDeleteRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range deleteMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.DeleteIssuesRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated DeleteIssuesRequest declares members the delete handler refuses as unknown: %v\n"+
+			"teach deleteRequest to honor them, or the document promises a member the server turns down", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the delete handler accepts members DeleteIssuesRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "DeleteIssuesRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the DeleteIssuesRequest schema documents members the delete handler refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the delete handler accepts members the DeleteIssuesRequest schema does not document: %v", missing)
 	}
 }
 
@@ -1248,4 +1506,77 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestSpecSecurityMatchesRouteTable is the auth half of route/spec parity: an
+// operation declares the bearer scheme in the document exactly when its route
+// row is not auth-exempt. Without this the exemption column and the document's
+// `security` blocks are two independent statements about the same thing, and
+// the one clients read could quietly become the wrong one.
+//
+// Authentication is a DEPLOYMENT posture — a server started with no token file
+// never emits a 401 — so the spec's job here is to say which operations are
+// guarded when it is enabled, not to claim it always is. The scheme is declared
+// per operation rather than at the document level for the same reason the
+// exemption is a route-table column: healthz is exempt, and a top-level
+// `security` block with a per-operation override would state that twice.
+func TestSpecSecurityMatchesRouteTable(t *testing.T) {
+	doc := loadSpec(t)
+	ops := specOps(t, doc)
+
+	schemes := mapAt(t, mapAt(t, doc, "components"), "securitySchemes")
+	bearer := mapAt(t, schemes, specBearerScheme)
+	if got, _ := bearer["type"].(string); got != "http" {
+		t.Errorf("securityScheme %s type = %q, want http", specBearerScheme, got)
+	}
+	if got, _ := bearer["scheme"].(string); got != "bearer" {
+		t.Errorf("securityScheme %s scheme = %q, want bearer", specBearerScheme, got)
+	}
+	if _, ok := doc["security"]; ok {
+		t.Error("the document declares a top-level `security` block; the exemption is per operation, so declaring it globally states the policy twice")
+	}
+
+	for _, rt := range routeTable {
+		so, ok := ops[rt.op]
+		if !ok {
+			t.Errorf("route %q is not in the spec", rt.op)
+			continue
+		}
+		declared := specDeclaresBearer(t, so)
+		if rt.authExempt && declared {
+			t.Errorf("%s is auth-exempt in the route table but declares %s in the spec", rt.op, specBearerScheme)
+		}
+		if !rt.authExempt && !declared {
+			t.Errorf("%s is guarded by the route table but declares no security in the spec", rt.op)
+		}
+
+		// And the 401 travels with the declaration, so a generated client of a
+		// guarded operation always has the status in its response set.
+		_, has401 := mapAt(t, so.op, "responses")["401"]
+		if declared != has401 {
+			t.Errorf("%s declares security = %v but documents a 401 = %v; the two must move together", rt.op, declared, has401)
+		}
+	}
+}
+
+func specDeclaresBearer(t *testing.T, so specOp) bool {
+	t.Helper()
+	raw, ok := so.op["security"]
+	if !ok {
+		return false
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		t.Fatalf("%s: security is %T, want a sequence", so.path, raw)
+	}
+	for _, item := range list {
+		req, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("%s: security item is %T, want a mapping", so.path, item)
+		}
+		if _, ok := req[specBearerScheme]; ok {
+			return true
+		}
+	}
+	return false
 }

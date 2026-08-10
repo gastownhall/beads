@@ -495,6 +495,10 @@ func TestPersistDependenciesSkipsHierarchyValidationAcrossPrefixes(t *testing.T)
 	}
 }
 
+// The mock half of the missing-parent skip: it pins the STATEMENTS (no counter
+// read, no upsert). Its real-backend twin is the conformance case
+// ReconcileSkipsMissingParentCounter (backend/conformance/portable.go), which
+// pins what a live engine does with the same skip on both Dolt legs.
 func TestReconcileChildCountersSkipsMissingParent(t *testing.T) {
 	ctx := context.Background()
 	db, mock, tx := beginMockTx(t)

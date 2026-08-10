@@ -198,6 +198,52 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// printDepSection prints one dependency section: bold heading, then a line per
+// edge marked with the section's direction glyph.
+func printDepSection(sec depSection) {
+	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
+	for _, dep := range sec.Deps {
+		fmt.Println(formatDependencyLine(sec.Glyph, dep))
+	}
+}
+
+// printRelatedSection prints the deduplicated RELATED section that both
+// directions of the symmetric related/relates-to edges collapse into.
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
+	if len(relatedSeen) == 0 {
+		return
+	}
+	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+	ids := make([]string, 0, len(relatedSeen))
+	for id := range relatedSeen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
+	}
+}
+
+// printEpicChildProgress summarizes how much of an epic its children have
+// finished, printed under the CHILDREN section.
+func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
+	if len(children) == 0 {
+		return
+	}
+	closed := 0
+	for _, dep := range children {
+		if dep.Status == types.StatusClosed {
+			closed++
+		}
+	}
+	pct := closed * 100 / len(children)
+	if closed == len(children) {
+		fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closed, len(children), pct)
+	} else {
+		fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closed, len(children), pct)
+	}
+}
+
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
 // Closed items get entire row muted - the work is done, no need for attention
 func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {

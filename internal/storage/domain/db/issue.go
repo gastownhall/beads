@@ -424,12 +424,15 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	if err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: resolve claim pools: %w", id, err)
 	}
-	assigneePredicate := "assignee = '' OR assignee IS NULL OR assignee = ?"
-	assigneeArgs := []any{actor}
-	for _, pool := range pools {
-		assigneePredicate += " OR assignee = ?"
-		assigneeArgs = append(assigneeArgs, pool)
-	}
+
+	// Claimability of the assignee slot, judged in Go against oldIssue rather
+	// than as a spelling-sensitive SQL predicate (ga-v2k49, mirroring the
+	// same-day fix to issueops.ClaimIssueInTx — this dual must stay in
+	// lockstep, per the comment above): empty/unassigned, already this actor
+	// — including a spelling difference across layers (ga-wzl83) — or a
+	// claim-pool alias. issueops.ActorMatches is the exported form of the
+	// primary path's package-local actorMatches, kept for exactly this dual.
+	assigneeOK := oldIssue.Assignee == "" || issueops.ActorMatches(oldIssue.Assignee, actor) || slices.Contains(pools, oldIssue.Assignee)
 
 	// Same lockstep for the source statuses (bd-pq7m2): claimable from "open"
 	// plus custom active-category statuses, like the primary path — not a
@@ -445,36 +448,46 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		statusArgs = append(statusArgs, st)
 	}
 
-	var res sql.Result
-	if startedWasZero {
-		args := append([]any{actor, now, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
-			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
-	} else {
-		args := append([]any{actor, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
-			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
-	}
-	if err != nil {
-		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: rows affected: %w", id, err)
+	// Conditional UPDATE, attempted only while assigneeOK — otherwise there
+	// is nothing this actor could win, so skip straight to the rows==0
+	// disambiguation below (matches the primary path's ga-v2k49 fix). CASed
+	// on row_lock rather than re-checking assignee in SQL: row_lock is
+	// rewritten by every path that mutates status/assignee/started_at (see
+	// the freshRowLock invariant in issueops/lease.go), so requiring it to
+	// still equal oldIssue.RowVersion detects a race exactly as precisely as
+	// the old assignee predicate did, without embedding a spelling-sensitive
+	// string comparison in SQL.
+	var rows int64
+	if assigneeOK {
+		var res sql.Result
+		if startedWasZero {
+			args := append([]any{actor, now, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			//nolint:gosec // G201: table is one of two hardcoded constants
+			res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND (%s)
+			`, table, rowLockClause, statusPredicate), args...)
+		} else {
+			args := append([]any{actor, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			//nolint:gosec // G201: table is one of two hardcoded constants
+			res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND (%s)
+			`, table, rowLockClause, statusPredicate), args...)
+		}
+		if err != nil {
+			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
+		}
+		rows, err = res.RowsAffected()
+		if err != nil {
+			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: rows affected: %w", id, err)
+		}
 	}
 
 	if rows == 0 {

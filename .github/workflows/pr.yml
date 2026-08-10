@@ -425,6 +425,10 @@ jobs:
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
 
+      - name: Exercise test.sh prebuilt binary path
+        shell: bash
+        run: go test '-tags=gms_pure_go' -count=1 -run '^TestTestScriptPrebuiltBinaryContract$' ./scripts
+
   # Fast check to catch accidental .beads/issues.jsonl changes from contributors
   check-no-beads-changes:
     name: Check for .beads changes
@@ -642,6 +646,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # --new-from-merge-base below walks real history.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -652,7 +659,13 @@ jobs:
       - name: Install golangci-lint
         run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
 
+      # Scope the wrapper's lint to what this PR introduces, matching the
+      # `lint` job's only-new-issues below. main.yml runs the same wrapper with
+      # this unset, so the whole tree is still swept on every push to main.
+      # Both PR triggers (pull_request, merge_group) target main.
       - name: Run PR lint wrapper
+        env:
+          BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
 
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
@@ -872,11 +885,30 @@ jobs:
       - name: Check gofmt
         run: make fmt-check
 
+  # Lint lanes are split deliberately: the PR lane reports only the issues a PR
+  # introduces, and main.yml's identical job sweeps the whole tree on every
+  # push. The tradeoff is that a pre-existing issue in untouched code no longer
+  # blocks a PR — but a lint word that lands on main now reds main's own run,
+  # where it belongs, instead of reddening every open PR for a change it did
+  # not make.
+  #
+  # "New" is measured off the diff, so MOVED CODE READS AS NEW: a pre-existing
+  # violation carried into a PR by a move or a rename is reported against that
+  # PR and blocks it. Fix it or //nolint it there — that is the accepted cost of
+  # the trade above.
   lint:
     name: Lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # only-new-issues reads the PR patch from the API.
+      pull-requests: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # On merge_group there is no PR patch, so the action falls back to
+          # --new-from-rev and needs real history.
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
@@ -890,6 +922,7 @@ jobs:
           GOWORK: "off"
         with:
           version: v2.10.1
+          only-new-issues: true
           args: --config=.golangci.yml --modules-download-mode=readonly --timeout=5m --build-tags=gms_pure_go
 
   windows-make-shell:

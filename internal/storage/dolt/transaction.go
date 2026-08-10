@@ -1114,16 +1114,17 @@ func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID
 	return &p, nil
 }
 
-// checkCrossTierSchedulingCycle rejects a scheduling edge (blocks,
-// conditional-blocks, parent-child — the same set issueops.CheckDependencyCycleInTx
-// gates) that would close a cycle, using the merged view of both sessions'
-// dependency tables. The in-tx cycle check scans both tables on the write tx
-// and so misses edges added on the other session earlier in this logical
-// transaction.
+// checkCrossTierSchedulingCycle rejects a scheduling edge that would close a
+// cycle, using the merged view of both sessions' dependency tables. The in-tx
+// cycle check scans both tables on the write tx and so misses edges added on
+// the other session earlier in this logical transaction.
+//
+// The set is types.IsSchedulingEdge's, by call and not by restatement: an
+// inline copy that missed a fifth scheduling type would fall through to
+// "not a scheduling edge" and skip this gate entirely, which is silence rather
+// than a failure — the whole reason that predicate was consolidated (ga-2ltro.10).
 func (t *doltTransaction) checkCrossTierSchedulingCycle(ctx context.Context, dep *types.Dependency) error {
-	switch dep.Type {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-	default:
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	cycle, err := t.CycleThroughEdges(ctx, [][2]string{{dep.IssueID, dep.DependsOnID}})

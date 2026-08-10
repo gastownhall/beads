@@ -3,6 +3,7 @@ package httpapi
 import (
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1050,5 +1051,118 @@ func TestUpdateGuardsDistinguishAbsentFromEmpty(t *testing.T) {
 	}
 	if got[0].ExpectedStatus == nil || *got[0].ExpectedStatus != "" {
 		t.Errorf("expected_status = %v, want a pointer to the empty status", got[0].ExpectedStatus)
+	}
+}
+
+// TestUpdateAssemblesTheThreeLabelMembersAsOnePatch is the whole of the
+// incremental-label slice, and the assertion is that they are ONE edit rather
+// than three members racing to write the same field.
+//
+// The role applies Replace, then Add, then Remove, so removal wins. A handler
+// that built a LabelPatch per member would have the last one decoded overwrite
+// the others in silence, which is the failure this shape exists to prevent —
+// and the reason the three are assembled in one loop rather than three `if`s.
+func TestUpdateAssemblesTheThreeLabelMembersAsOnePatch(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		patch   string
+		replace *[]string
+		add     []string
+		remove  []string
+	}{
+		{
+			name:    "replacement alone still sets Replace",
+			patch:   `{"labels":["a","b"]}`,
+			replace: &[]string{"a", "b"},
+		},
+		{
+			// The case the pair exists for: an addition that does NOT have to
+			// name the labels already on the row, so a concurrent writer's
+			// label is not silently dropped.
+			name:  "an addition alone leaves Replace unset",
+			patch: `{"add_labels":["c"]}`,
+			add:   []string{"c"},
+		},
+		{
+			name:   "a removal alone leaves Replace unset",
+			patch:  `{"remove_labels":["c"]}`,
+			remove: []string{"c"},
+		},
+		{
+			// NOT mutually exclusive, unlike `notes`/`append_notes`: the role
+			// defines an order over all three, so this request has a defined
+			// result and must reach the role whole.
+			name:    "all three together reach the role together",
+			patch:   `{"labels":["a"],"add_labels":["b"],"remove_labels":["a"]}`,
+			replace: &[]string{"a"},
+			add:     []string{"b"},
+			remove:  []string{"a"},
+		},
+		{
+			name:    "an empty replacement clears, and is not read as absent",
+			patch:   `{"labels":[]}`,
+			replace: &[]string{},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lifecycle := &roleLifecycle{updateResult: issueops.UpdateResult{Issue: updatedIssue("bd-1"), Changed: true}}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath, `{"actor":"alice","patch":`+tc.patch+`}`)
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status = %d, want 200: %s", resp.StatusCode, readAll(t, resp))
+			}
+			got := lifecycle.updateRequests()
+			if len(got) != 1 {
+				t.Fatalf("the role received %+v, want exactly one request", got)
+			}
+			labels := got[0].Patch.Labels
+			if (tc.replace != nil) != labels.Replace.Set {
+				t.Fatalf("Replace.Set = %v, want %v: presence of `labels` is what selects a replacement",
+					labels.Replace.Set, tc.replace != nil)
+			}
+			if tc.replace != nil && !slices.Equal(labels.Replace.Value, *tc.replace) {
+				t.Errorf("Replace.Value = %v, want %v", labels.Replace.Value, *tc.replace)
+			}
+			if !slices.Equal(labels.Add, tc.add) {
+				t.Errorf("Add = %v, want %v", labels.Add, tc.add)
+			}
+			if !slices.Equal(labels.Remove, tc.remove) {
+				t.Errorf("Remove = %v, want %v", labels.Remove, tc.remove)
+			}
+		})
+	}
+}
+
+// TestUpdateBoundsEveryLabelMember: the length rule is about what a label may
+// BE, so it holds on all three members — including `remove_labels`, where a
+// value the column could not hold could never have been stored. The role
+// refuses it there too and writes nothing, so the edge refuses it where the
+// 400 can name the member and the index.
+func TestUpdateBoundsEveryLabelMember(t *testing.T) {
+	long := strings.Repeat("x", types.MaxFieldLen+1)
+	for _, member := range []string{"labels", "add_labels", "remove_labels"} {
+		t.Run(member, func(t *testing.T) {
+			lifecycle := &roleLifecycle{}
+			ts := newUpdateServer(t, lifecycle)
+
+			resp := ts.updateIssue(t, updatePath,
+				fmt.Sprintf(`{"actor":"alice","patch":{%q:["ok",%q]}}`, member, long))
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
+			}
+			body := decodeBody(t, resp)
+			if body["param"] != patchParam(member) {
+				t.Errorf("param = %v, want %q", body["param"], patchParam(member))
+			}
+			// The index is in the detail, so a caller fixing a long list knows
+			// which entry to fix without a binary search.
+			if detail, _ := body["detail"].(string); !strings.Contains(detail, member+"[1]") {
+				t.Errorf("detail does not name the offending entry: %q", detail)
+			}
+			if got := lifecycle.updateRequests(); len(got) != 0 {
+				t.Errorf("a refused label reached the role: %+v", got)
+			}
+		})
 	}
 }

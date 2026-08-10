@@ -79,7 +79,9 @@ type Issue struct {
 	// signals the row was mutated since you read it. It is json:"-" on purpose:
 	// row_lock is random per write, so generic Issue serialization would break
 	// stable list/export round-trips. The detail-view DTO projects it explicitly
-	// as `revision` for guarded clients; Go consumers read RowVersion directly.
+	// as `revision` for guarded clients (IssueDetails.Revision, set by
+	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
+	// consumers read RowVersion directly.
 	//
 	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
 	// generic update path, but NOT on direct-UPDATE paths that rewrite text
@@ -1138,6 +1140,39 @@ type IssueDetails struct {
 	EpicTotalChildren  *int  `json:"epic_total_children,omitempty"`
 	EpicClosedChildren *int  `json:"epic_closed_children,omitempty"`
 	EpicCloseable      *bool `json:"epic_closeable,omitempty"`
+
+	// Revision is the detail view's projection of the embedded Issue's
+	// RowVersion under a storage-neutral wire name, and it is the ONE place
+	// the token is published to a client. Read RowVersion's doc for what the
+	// token means: it is EQUALITY-ONLY, its coverage is deliberately PARTIAL,
+	// and 0 is a real value rather than an absence.
+	//
+	// It exists as a projected field rather than a re-tagged RowVersion
+	// because RowVersion is json:"-" for a reason that still holds — row_lock
+	// is random per write, so serializing it generically would break stable
+	// list and export round-trips — and the detail view is the one shape that
+	// neither lists nor interchanges. NewIssueDetails is the only door: a
+	// literal with an unset Revision serializes a 0 that is indistinguishable
+	// from a legacy migration-0054 row, so the projection lives beside the
+	// field and not at each caller.
+	//
+	// NO omitempty. A guarded write that expects 0 matches an un-mutated
+	// legacy row and misses any current one, which is correct CAS; omitting
+	// the member would leave that client unable to read the value it must
+	// send, and would make an absent field mean either "legacy-zero" or "this
+	// producer has no token".
+	Revision int64 `json:"revision"`
+}
+
+// NewIssueDetails starts a detail view of issue with the wire-visible revision
+// token projected off the row.
+//
+// It is the only constructor: the token is a projection, not an independent
+// field, and 0 is a legal token value, so a detail view assembled by struct
+// literal would publish a silently wrong token that nothing can distinguish
+// from a right one. The caller fills in labels, edges and counts afterwards.
+func NewIssueDetails(issue Issue) *IssueDetails {
+	return &IssueDetails{Issue: issue, Revision: issue.RowVersion}
 }
 
 // DependencyType categorizes the relationship

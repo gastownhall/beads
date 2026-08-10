@@ -189,6 +189,88 @@ func TestProxiedServerServeUpdate(t *testing.T) {
 		}
 	})
 
+	// THE CASE THE INCREMENTAL MEMBERS EXIST FOR, and the one a fake cannot
+	// state: two writers each adding a label to one row, neither of which knows
+	// what the other added. Composed out of replacements — which is all this
+	// operation published before — the second write silently drops the first
+	// writer's label, because a replacement can only be composed safely by a
+	// writer that knows it is alone.
+	t.Run("concurrent additions do not drop each other's labels", func(t *testing.T) {
+		issue := bdProxiedCreate(t, bd, p.dir, "incrementally labelled", "-p", "2", "--label", "original")
+
+		// Each writer read the row BEFORE the other wrote, so each knows only
+		// {original} plus its own label. Under a replacement that is a lost
+		// update; under an addition it is not.
+		for _, label := range []string{"from-a", "from-b"} {
+			status, body := sp.updateIssue(t, issue.ID,
+				`{"actor":"http-agent","patch":{"add_labels":["`+label+`"]}}`)
+			if status != http.StatusOK {
+				t.Fatalf("add %s: status = %d, want 200: %v", label, status, body)
+			}
+		}
+
+		after := bdProxiedShow(t, bd, p.dir, issue.ID)
+		got := map[string]bool{}
+		for _, l := range after.Labels {
+			got[l] = true
+		}
+		for _, want := range []string{"original", "from-a", "from-b"} {
+			if !got[want] {
+				t.Errorf("labels = %v, want %q kept; an addition must not rewrite the set", after.Labels, want)
+			}
+		}
+
+		// And the removal half, applied to a row neither writer fully knows.
+		status, body := sp.updateIssue(t, issue.ID,
+			`{"actor":"http-agent","patch":{"remove_labels":["from-a"]}}`)
+		if status != http.StatusOK {
+			t.Fatalf("remove: status = %d, want 200: %v", status, body)
+		}
+		after = bdProxiedShow(t, bd, p.dir, issue.ID)
+		got = map[string]bool{}
+		for _, l := range after.Labels {
+			got[l] = true
+		}
+		if got["from-a"] {
+			t.Errorf("labels = %v; the removal did not land", after.Labels)
+		}
+		if !got["original"] || !got["from-b"] {
+			t.Errorf("labels = %v; a removal must touch only the labels it names", after.Labels)
+		}
+
+		// Removing a label the row does not carry is a no-op, not a refusal.
+		status, body = sp.updateIssue(t, issue.ID,
+			`{"actor":"http-agent","patch":{"remove_labels":["never-there"]}}`)
+		if status != http.StatusOK {
+			t.Fatalf("removing an absent label: status = %d, want 200: %v", status, body)
+		}
+		if body["changed"] != false {
+			t.Errorf("changed = %v, want false; removing a label the row does not carry writes nothing", body["changed"])
+		}
+
+		// All three in one request, in the role's order: replace, then add,
+		// then REMOVE WINS.
+		status, body = sp.updateIssue(t, issue.ID,
+			`{"actor":"http-agent","patch":{"labels":["base"],"add_labels":["extra","doomed"],"remove_labels":["doomed"]}}`)
+		if status != http.StatusOK {
+			t.Fatalf("ordered edit: status = %d, want 200: %v", status, body)
+		}
+		after = bdProxiedShow(t, bd, p.dir, issue.ID)
+		got = map[string]bool{}
+		for _, l := range after.Labels {
+			got[l] = true
+		}
+		if !got["base"] || !got["extra"] {
+			t.Errorf("labels = %v, want the replacement plus the addition", after.Labels)
+		}
+		if got["doomed"] {
+			t.Errorf("labels = %v; removal must win over an addition of the same label", after.Labels)
+		}
+		if got["original"] || got["from-b"] {
+			t.Errorf("labels = %v; the replacement must still clear what it omitted", after.Labels)
+		}
+	})
+
 	// The rule-8 oracle against `bd update --json`[0], the claim's device: both
 	// surfaces marshal the same canonical struct, so the allowlist is empty.
 	t.Run("the updated issue matches bd update --json element 0", func(t *testing.T) {

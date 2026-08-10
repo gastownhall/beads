@@ -228,7 +228,11 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 				return publicops.UpdateResult{}, "", err
 			}
 		}
-		claimChanged := attempt.Claim && (before.Status != types.StatusInProgress || before.Assignee != attempt.Actor)
+		// ActorMatches (not a verbatim compare, ga-v2k49): a holder re-claiming
+		// under a respelled identity is a real CAS win one layer down (domain/db's
+		// Claim already canonicalizes), so this bookkeeping must recognize it as
+		// the same no-op rather than staging a phantom history entry.
+		claimChanged := attempt.Claim && (before.Status != types.StatusInProgress || !storageissueops.ActorMatches(before.Assignee, attempt.Actor))
 		updated, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, spec, attempt.Actor)
 		if err != nil {
 			return publicops.UpdateResult{}, "", err

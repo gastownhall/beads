@@ -311,14 +311,20 @@ type timedProvider struct {
 var (
 	_ uow.IssueReaderSource         = timedProvider{}
 	_ uow.IssueClaimerSource        = timedProvider{}
+	_ uow.BatchCloserSource         = timedProvider{}
+	_ uow.ReadyClaimerSource        = timedProvider{}
+	_ uow.ReleaserSource            = timedProvider{}
 	_ uow.IssueLifecycleSource      = timedProvider{}
 	_ uow.WorkspaceConfigSource     = timedProvider{}
 	_ uow.StatsReporterSource       = timedProvider{}
 	_ uow.CycleDetectorSource       = timedProvider{}
 	_ uow.EdgeReaderSource          = timedProvider{}
+	_ uow.GraphCounterSource        = timedProvider{}
+	_ uow.RelationsSource           = timedProvider{}
 	_ uow.BlockingAnnotatorSource   = timedProvider{}
 	_ uow.TreeWalkerSource          = timedProvider{}
 	_ uow.ReadyCounterSource        = timedProvider{}
+	_ uow.CounterSource             = timedProvider{}
 	_ uow.QuerierSource             = timedProvider{}
 	_ uow.SweeperSource             = timedProvider{}
 	_ uow.DeleterSource             = timedProvider{}
@@ -367,6 +373,32 @@ func (p timedProvider) IssueClaimer() (issueops.Claimer, error) {
 	return uow.NewIssueClaimer(p)
 }
 
+// BatchCloser builds the many-issue close role OVER THIS WRAPPER, for the same
+// reason as the roles above. Like BatchApplier it opens one of the longest
+// write units of work on this surface — up to a hundred closes plus their
+// blocked-state maintenance in one transaction — so a recursion here would
+// report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) BatchCloser() (issueops.BatchCloser, error) {
+	return uow.NewBatchCloser(p)
+}
+
+// ReadyClaimer builds the take-ready-work role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueClaimer: it opens a write unit of
+// work per call, and its scan is the longest read on this surface — it walks
+// the whole ready order past rows other agents took — so a recursion here would
+// report uow_ms=0.000 for exactly the requests whose timing matters most.
+func (p timedProvider) ReadyClaimer() (issueops.ReadyClaimer, error) {
+	return uow.NewReadyClaimer(p)
+}
+
+// Releaser builds the claim-release role OVER THIS WRAPPER, for the same reason
+// and with the same hazard as IssueClaimer: a release opens a write transaction
+// per call, so a recursion here would report uow_ms=0.000 for every one of
+// them.
+func (p timedProvider) Releaser() (issueops.Releaser, error) {
+	return uow.NewReleaser(p)
+}
+
 // IssueLifecycle builds the guarded-mutation role OVER THIS WRAPPER, for the
 // same reason and with the same hazard as IssueClaimer: this role opens the
 // longest write transactions on the surface, so a claimer-style recursion here
@@ -399,6 +431,20 @@ func (p timedProvider) EdgeReader() (issueops.EdgeReader, error) {
 	return uow.NewEdgeReader(p)
 }
 
+// GraphCounter builds the edge-count role OVER THIS WRAPPER, for the same
+// reason and with the same hazard as IssueReader.
+func (p timedProvider) GraphCounter() (issueops.GraphCounter, error) {
+	return uow.NewGraphCounter(p)
+}
+
+// IssueRelations builds the single-anchor neighbor role OVER THIS WRAPPER, for
+// the same reason and with the same hazard as IssueReader. It is the one
+// accessor here whose name is not the role's: the seam spells it IssueRelations
+// on both the store and the provider, and this type implements the seam.
+func (p timedProvider) IssueRelations() (issueops.Relations, error) {
+	return uow.NewIssueRelations(p)
+}
+
 // BlockingAnnotator builds the blocking-decoration role OVER THIS WRAPPER, for
 // the same reason and with the same hazard as IssueReader.
 func (p timedProvider) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
@@ -415,6 +461,11 @@ func (p timedProvider) TreeWalker() (issueops.TreeWalker, error) {
 // and with the same hazard as IssueReader.
 func (p timedProvider) ReadyCounter() (issueops.ReadyCounter, error) {
 	return uow.NewReadyCounter(p)
+}
+
+// Counter builds the issue counter OVER THIS WRAPPER, for ReadyCounter's reason.
+func (p timedProvider) Counter() (issueops.Counter, error) {
+	return uow.NewCounter(p)
 }
 
 // Querier builds the boolean-query role OVER THIS WRAPPER, for the same reason

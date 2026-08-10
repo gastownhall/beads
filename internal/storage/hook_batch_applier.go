@@ -30,13 +30,13 @@ type hookBatchApplier struct {
 // all when the batch refused — the request is all or nothing, so a refusal left
 // no row for a script to be told about.
 //
-// IT FIRES ON LANDED, NOT ON "no error". That is the one place this wrapper
-// deliberately differs from its closest sibling: hookBatchCloser fires for
-// every outcome whose Err is nil, including an idempotent re-close that wrote
-// nothing, so a replayed teardown runs the workspace's on_close script on every
-// pass. There are no per-item errors here to make that mistake with, and
-// ItemResult.Changed is the fact a script cares about, so a no-op update, an
-// idempotent re-close and an edge that was already there fire nothing.
+// IT FIRES ON LANDED, NOT ON "no error". There are no per-item errors here to
+// make that mistake with, and ItemResult.Changed is the fact a script cares
+// about, so a no-op update, an idempotent re-close and an edge that was already
+// there fire nothing. hookBatchCloser once tested a nil per-item Err instead
+// and announced every idempotent re-close, running the workspace's on_close
+// script on every replayed teardown (ga-2yaqp.1); it now fires on Changed too,
+// so the two siblings state one rule rather than two.
 //
 // A CREATE ALWAYS FIRES because a create always landed; the role has no
 // idempotent create.

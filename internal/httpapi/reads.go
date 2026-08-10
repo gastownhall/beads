@@ -167,6 +167,163 @@ func (s *Server) handleCountReady(w http.ResponseWriter, r *http.Request) {
 // value it could take.
 const readySortDefault = "priority"
 
+// countFilters decodes the count's predicate: every filter the role publishes
+// and nothing about a page, an order or a bucket.
+//
+// It is a function of its own for readyFilters' reason turned inside out. That
+// one is shared because two operations must admit the same parameters; this one
+// has a single caller, and it is split off so a test can drive it over an empty
+// query and read back the EXACT set of names this handler asks for
+// (query.read). That is what makes the parameter-parity check mechanical rather
+// than a second hand-rolled list beside the document's.
+func countFilters(q *query) issueops.CountRequest {
+	return issueops.CountRequest{
+		// ONE status, not the listing's comma-separated OR set. The role says so
+		// and the document says so; reading it with q.csv here would publish a
+		// set the role would answer 0 for.
+		Status:    q.str("status"),
+		IssueType: q.str("type"),
+		Assignee:  q.str("assignee"),
+
+		Priority:    q.integer("priority"),
+		PriorityMin: q.integer("priority_min"),
+		PriorityMax: q.integer("priority_max"),
+
+		Labels:    q.list("label"),
+		LabelsAny: q.list("label_any"),
+
+		TitleSearch: q.str("title"),
+		// A COMMA-SEPARATED string, handed over as written: the role splits,
+		// trims and de-duplicates it, and a handler that pre-split it would be
+		// deciding what an id set means.
+		IDFilter: q.str("id"),
+
+		TitleContains: q.str("title_contains"),
+		DescContains:  q.str("desc_contains"),
+		NotesContains: q.str("notes_contains"),
+
+		CreatedAfter:  q.timestamp("created_after"),
+		CreatedBefore: q.timestamp("created_before"),
+		UpdatedAfter:  q.timestamp("updated_after"),
+		UpdatedBefore: q.timestamp("updated_before"),
+		ClosedAfter:   q.timestamp("closed_after"),
+		ClosedBefore:  q.timestamp("closed_before"),
+
+		EmptyDesc:  q.boolean("empty_description"),
+		NoAssignee: q.boolean("no_assignee"),
+		NoLabels:   q.boolean("no_labels"),
+
+		// The plane switch, forwarded as the boolean the caller sent. What it
+		// MEANS — merge the wisps tier, drop templates, drop gates, and route an
+		// infra type to the ephemeral tier — is four decisions the role makes
+		// from the WORKSPACE's own infra vocabulary, which is a config load this
+		// handler must never perform.
+		IncludeInfra: q.boolean("include_infra"),
+	}
+}
+
+// countGroupOf reads the bucketing dimension and reports whether one was asked
+// for.
+//
+// PRESENCE is the signal, which is why this returns a boolean beside the value:
+// an absent `group_by` selects the scalar method, and q.oneOf's fallback alone
+// would collapse "no bucketing asked for" into a dimension. An unknown value is
+// refused HERE rather than at the role, so the 400 names the parameter — the
+// role's own rule (an unknown dimension is ErrValidation, never an empty
+// answer) with the member name a client dispatches on added.
+func countGroupOf(q *query) (issueops.CountGroup, bool) {
+	grouped := q.has("group_by")
+	return issueops.CountGroup(q.oneOf("group_by", "", countGroupNames()...)), grouped
+}
+
+// countGroups is the closed dimension vocabulary, in the document's order, so
+// the schema's enum and the values this server accepts are one list read twice
+// rather than two lists kept in step by hand.
+//
+// It is spelled with the ROLE's constants rather than as bare strings: the wire
+// names and issueops.CountGroup's values are the same strings today, and
+// deriving one from the other is what keeps them the same tomorrow.
+var countGroups = []issueops.CountGroup{
+	issueops.CountGroupStatus,
+	issueops.CountGroupPriority,
+	issueops.CountGroupType,
+	issueops.CountGroupAssignee,
+	issueops.CountGroupLabel,
+}
+
+// countGroupNames is countGroups as the strings q.oneOf compares against.
+func countGroupNames() []string {
+	names := make([]string, len(countGroups))
+	for i, g := range countGroups {
+		names[i] = string(g)
+	}
+	return names
+}
+
+// handleCountIssues answers GET /v0/beads/issues:count.
+//
+// ONE HANDLER FOR BOTH OF THE ROLE'S METHODS, because `group_by` chooses
+// between two shapes of one answer rather than between two questions: the same
+// predicate over the same set, differing only in whether the reply is one
+// number or a number per bucket. The grouped result carries the scalar total
+// itself, which is why splitting them would have put one role's promise inside
+// the other's result.
+//
+// WHAT IS NOT HERE is this file's whole point, and on a count it is more than
+// usual. No filter is built, no ConfigSource is wired, and the workspace's
+// INFRA VOCABULARY is never read — that config load is precisely what
+// issueops.Counter exists to keep off a front door.
+//
+// The default answer is the ROLE's too, and it is NOT the listing's: an empty
+// request counts every durable row including closed, pinned, template and gate
+// ones. A handler that "helpfully" applied the listing's exclusions would be
+// answering a different question with the same parameters.
+func (s *Server) handleCountIssues(w http.ResponseWriter, r *http.Request) {
+	q := newQuery(r.URL.Query())
+
+	req := countFilters(q)
+	group, grouped := countGroupOf(q)
+
+	if !s.acceptQuery(w, r, q) {
+		return
+	}
+
+	counter, err := s.counter(r)
+	if err != nil {
+		s.failErr(w, r, err)
+		return
+	}
+	if grouped {
+		// THE SAME PREDICATE reaches both methods, which is the identity the
+		// role promises: a grouped count is a scalar count plus a dimension, so
+		// the two cannot be asked of different sets.
+		result, err := counter.CountByGroup(r.Context(), issueops.CountByGroupRequest{Filter: req, GroupBy: group})
+		if err != nil {
+			s.failReadErr(w, r, err)
+			return
+		}
+		// `groups` is PRESENT because the request asked for buckets, even when
+		// the answer has none: an empty object means "nothing matched" and an
+		// absent member means "you did not ask", and a client must be able to
+		// tell those apart without re-reading its own request. The role promises
+		// a non-nil map; this does not lean on that promise, because a nil map
+		// would marshal as `{}` anyway and leaning on it would make the
+		// difference invisible if it ever broke.
+		groups := result.Groups
+		if groups == nil {
+			groups = map[string]int{}
+		}
+		writeJSON(w, apigen.IssueCount{Total: result.Total, Groups: &groups})
+		return
+	}
+	result, err := counter.Count(r.Context(), req)
+	if err != nil {
+		s.failReadErr(w, r, err)
+		return
+	}
+	writeJSON(w, apigen.IssueCount{Total: result.Total})
+}
+
 // handleListIssues answers GET /v0/beads/issues.
 func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 	q := newQuery(r.URL.Query())

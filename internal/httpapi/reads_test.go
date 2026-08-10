@@ -248,7 +248,10 @@ func TestUnlimitedReadsAreLoopbackOnly(t *testing.T) {
 	})
 
 	t.Run("a non-loopback bind refuses it", func(t *testing.T) {
-		ts, rec := newReadServer(t, Config{Addr: "127.0.0.1:0", AllowNonLoopback: true})
+		// InsecureNoAuth is what --allow-non-loopback now requires when no
+		// token file is configured. It is the posture under test here — the
+		// refusal being pinned is about the BIND, not about the credential.
+		ts, rec := newReadServer(t, Config{Addr: "127.0.0.1:0", AllowNonLoopback: true, InsecureNoAuth: true})
 		resp := ts.get(t, "/v0/beads/ready?limit=0")
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)

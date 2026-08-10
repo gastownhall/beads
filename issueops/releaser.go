@@ -21,7 +21,9 @@ type ReleaseRequest struct {
 	// is the current holder. That is not authentication — Actor is
 	// caller-asserted provenance here as it is everywhere else in this package
 	// — it is the same anti-yank guard ClaimRequest gets from refusing a
-	// foreign holder, pointed the other way.
+	// foreign holder, pointed the other way. "Is the current holder" is the
+	// same separator-insensitive comparison ExpectedAssignee documents below,
+	// not exact equality.
 	Actor string
 	// IssueID is the exact canonical id and must not be empty.
 	//
@@ -49,12 +51,17 @@ type ReleaseRequest struct {
 	// wants, and it is safer than Force for the purpose because it cannot
 	// release a claim that has since moved.
 	//
-	// HOLDERS COMPARE BYTE FOR BYTE, not trimmed and not folded: " agent-a" is
-	// not agent-a and will refuse. The validation below trims only far enough to
-	// tell a blank expectation from a real one, and never writes the trimmed
-	// form back — the no-mutation promise above makes that permanent, so a
-	// caller that pads its expectation loses every time rather than
-	// intermittently. Compose it from a holder a read gave you.
+	// THE COMPARISON IS SEPARATOR-INSENSITIVE AND NOTHING ELSE. A run of ".",
+	// "_" or "-" matches any other such run, so "agent-a", "agent_a" and
+	// "agent.a" are one holder — that is deliberate, so a caller naming the
+	// holder under a different layer's spelling is a match rather than a
+	// mismatch (ga-5ksp5). NOTHING ELSE IS FORGIVEN: the value is not trimmed
+	// and not case-folded, so " agent-a" and "Agent-a" are both refusals. The
+	// validation below trims only far enough to tell a blank expectation from a
+	// real one, and never writes the trimmed form back — the no-mutation
+	// promise above makes that permanent, so a caller that pads its expectation
+	// loses every time rather than intermittently. Compose it from a holder a
+	// read gave you.
 	//
 	// nil DISABLES THE CHECK and selects the unconditional path. It is a
 	// pointer so that "do not check" is distinct from a value — but unlike

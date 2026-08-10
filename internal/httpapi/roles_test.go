@@ -106,6 +106,63 @@ func (e *roleEdgeReader) edgeRequests() []issueops.EdgeReadRequest {
 	return append([]issueops.EdgeReadRequest(nil), e.reads...)
 }
 
+// roleGraphCounter is the edge-COUNT role of the store-shaped source, its own
+// fake beside roleEdgeReader rather than a method on it: the two are separate
+// roles with separate accessors, and one fake answering both would let a test
+// pass on a server that had wired the count handler to the reader.
+type roleGraphCounter struct {
+	result issueops.EdgeCountResult
+	err    error
+
+	mu     sync.Mutex
+	counts []issueops.EdgeCountRequest
+}
+
+func (c *roleGraphCounter) CountEdges(_ context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
+	c.mu.Lock()
+	c.counts = append(c.counts, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.EdgeCountResult{}, c.err
+	}
+	return c.result, nil
+}
+
+func (c *roleGraphCounter) countRequests() []issueops.EdgeCountRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.EdgeCountRequest(nil), c.counts...)
+}
+
+// roleRelations is the single-anchor NEIGHBOR role of the store-shaped source,
+// its own fake beside roleEdgeReader for roleGraphCounter's reason: the two sit
+// on adjacent accessors and answer about the same edges, so one fake serving
+// both would let a test pass on a server that had wired the neighbor handler to
+// the stored-edge reader.
+type roleRelations struct {
+	items []*issueops.RelatedIssue
+	err   error
+
+	mu   sync.Mutex
+	reqs []issueops.RelatedRequest
+}
+
+func (r *roleRelations) Related(_ context.Context, req issueops.RelatedRequest) ([]*issueops.RelatedIssue, error) {
+	r.mu.Lock()
+	r.reqs = append(r.reqs, req)
+	r.mu.Unlock()
+	if r.err != nil {
+		return nil, r.err
+	}
+	return r.items, nil
+}
+
+func (r *roleRelations) relatedRequests() []issueops.RelatedRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]issueops.RelatedRequest(nil), r.reqs...)
+}
+
 // roleBlockingAnnotator is the derived-decoration role of the store-shaped
 // source. It is its own fake beside roleEdgeReader because the two are separate
 // interfaces for separate questions, and a double answering both would be the
@@ -186,6 +243,61 @@ func (c *roleReadyCounter) countRequests() []issueops.ReadyRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]issueops.ReadyRequest(nil), c.counts...)
+}
+
+// roleCounter is the issue-count role's double, and it records BOTH requests
+// separately: the operation chooses between the role's two methods on one
+// parameter, so a case has to be able to say which one was called and not only
+// what it was handed.
+type roleCounter struct {
+	total   int64
+	groups  map[string]int
+	err     error
+	groupTo int64
+
+	mu       sync.Mutex
+	counts   []issueops.CountRequest
+	buckets  []issueops.CountByGroupRequest
+	nilGroup bool
+}
+
+func (c *roleCounter) Count(_ context.Context, req issueops.CountRequest) (issueops.CountResult, error) {
+	c.mu.Lock()
+	c.counts = append(c.counts, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.CountResult{}, c.err
+	}
+	return issueops.CountResult{Total: c.total}, nil
+}
+
+func (c *roleCounter) CountByGroup(_ context.Context, req issueops.CountByGroupRequest) (issueops.CountByGroupResult, error) {
+	c.mu.Lock()
+	c.buckets = append(c.buckets, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.CountByGroupResult{}, c.err
+	}
+	// nilGroup lets a case drive the one thing the role promises and an
+	// implementation could still get wrong: a grouped answer with no buckets is
+	// an EMPTY object on the wire, never null.
+	groups := c.groups
+	if groups == nil && !c.nilGroup {
+		groups = map[string]int{}
+	}
+	return issueops.CountByGroupResult{Groups: groups, Total: c.groupTo}, nil
+}
+
+func (c *roleCounter) countRequests() []issueops.CountRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.CountRequest(nil), c.counts...)
+}
+
+func (c *roleCounter) groupRequests() []issueops.CountByGroupRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.CountByGroupRequest(nil), c.buckets...)
 }
 
 // roleQuerier is the boolean-query role's double. It records the whole request
@@ -449,6 +561,91 @@ func (c *roleClaimer) claimRequests() []issueops.ClaimRequest {
 	return append([]issueops.ClaimRequest(nil), c.claims...)
 }
 
+// roleBatchCloser is the store-shaped source's many-issue close role. The
+// batchClose tests drive it directly, and it is the fake that matters most on
+// this surface: the per-item outcome projection is the one place where a role
+// result and a 200 body can disagree without any status saying so.
+type roleBatchCloser struct {
+	result issueops.CloseBatchResult
+	err    error
+
+	mu       sync.Mutex
+	requests []issueops.CloseBatchRequest
+}
+
+func (c *roleBatchCloser) CloseBatch(_ context.Context, req issueops.CloseBatchRequest) (issueops.CloseBatchResult, error) {
+	c.mu.Lock()
+	c.requests = append(c.requests, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.CloseBatchResult{}, c.err
+	}
+	return c.result, nil
+}
+
+func (c *roleBatchCloser) closeBatchRequests() []issueops.CloseBatchRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.CloseBatchRequest(nil), c.requests...)
+}
+
+// roleReadyClaimer is the store-shaped source's take-ready-work role. The
+// claimNext tests drive it directly: the wire edge — the filter decode, the
+// `limit` refusal, the body vocabulary and the absent-row answer — is provable
+// against a fake, and the atomicity that makes the operation worth having
+// belongs to the role's own contract.
+type roleReadyClaimer struct {
+	result issueops.ClaimNextResult
+	err    error
+
+	mu     sync.Mutex
+	claims []issueops.ClaimNextRequest
+}
+
+func (c *roleReadyClaimer) ClaimNext(_ context.Context, req issueops.ClaimNextRequest) (issueops.ClaimNextResult, error) {
+	c.mu.Lock()
+	c.claims = append(c.claims, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.ClaimNextResult{}, c.err
+	}
+	return c.result, nil
+}
+
+func (c *roleReadyClaimer) claimNextRequests() []issueops.ClaimNextRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.ClaimNextRequest(nil), c.claims...)
+}
+
+// roleReleaser is the store-shaped source's claim-release role. The release
+// tests drive it directly, for the reason roleLifecycle exists: the wire edge —
+// the body vocabulary, the guard pair, the refusal mapping — is provable
+// against a fake, and the transition itself belongs to the role's own contract.
+type roleReleaser struct {
+	result issueops.ReleaseResult
+	err    error
+
+	mu       sync.Mutex
+	releases []issueops.ReleaseRequest
+}
+
+func (c *roleReleaser) Release(_ context.Context, req issueops.ReleaseRequest) (issueops.ReleaseResult, error) {
+	c.mu.Lock()
+	c.releases = append(c.releases, req)
+	c.mu.Unlock()
+	if c.err != nil {
+		return issueops.ReleaseResult{}, c.err
+	}
+	return c.result, nil
+}
+
+func (c *roleReleaser) releaseRequests() []issueops.ReleaseRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.ReleaseRequest(nil), c.releases...)
+}
+
 // roleLifecycle is the store-shaped source's guarded-mutation role. Every case
 // hands Listen a COMPLETE source, so this exists partly to be a placeholder —
 // but the close tests drive it directly, which is what the claim precedent
@@ -638,6 +835,15 @@ func rolesConfig(cfg Config) Config {
 	if cfg.Claimer == nil {
 		cfg.Claimer = &roleClaimer{}
 	}
+	if cfg.BatchCloser == nil {
+		cfg.BatchCloser = &roleBatchCloser{}
+	}
+	if cfg.ReadyClaimer == nil {
+		cfg.ReadyClaimer = &roleReadyClaimer{}
+	}
+	if cfg.Releaser == nil {
+		cfg.Releaser = &roleReleaser{}
+	}
 	if cfg.Lifecycle == nil {
 		cfg.Lifecycle = &roleLifecycle{}
 	}
@@ -653,6 +859,12 @@ func rolesConfig(cfg Config) Config {
 	if cfg.EdgeReader == nil {
 		cfg.EdgeReader = &roleEdgeReader{}
 	}
+	if cfg.GraphCounter == nil {
+		cfg.GraphCounter = &roleGraphCounter{}
+	}
+	if cfg.Relations == nil {
+		cfg.Relations = &roleRelations{}
+	}
 	if cfg.BlockingAnnotator == nil {
 		cfg.BlockingAnnotator = &roleBlockingAnnotator{}
 	}
@@ -661,6 +873,9 @@ func rolesConfig(cfg Config) Config {
 	}
 	if cfg.ReadyCounter == nil {
 		cfg.ReadyCounter = &roleReadyCounter{}
+	}
+	if cfg.Counter == nil {
+		cfg.Counter = &roleCounter{}
 	}
 	if cfg.Querier == nil {
 		cfg.Querier = &roleQuerier{}
@@ -921,6 +1136,14 @@ func TestListenRequiresExactlyOneDatabaseSource(t *testing.T) {
 		{
 			name:    "no ready counter",
 			cfg:     rolesConfigWithout(func(c *Config) { c.ReadyCounter = nil }),
+			wantErr: "no database source",
+		},
+		{
+			// The issue count is a SEPARATE role from the ready count beside
+			// it: missing it, the server binds, advertises issues.count, and
+			// nil-dereferences on the first request that sizes a filter.
+			name:    "no counter",
+			cfg:     rolesConfigWithout(func(c *Config) { c.Counter = nil }),
 			wantErr: "no database source",
 		},
 		{

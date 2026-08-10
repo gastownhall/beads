@@ -150,6 +150,7 @@ var roleContractCases = []roleContract{
 		RunClaimerClaimsAnUnassignedOpenIssueAndAnswersTheBareRow,
 		RunClaimerTakesAnOpenIssueTheActorAlreadyHolds,
 		RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting,
+		RunClaimerReclaimsAcrossSpellingWithoutWriting,
 		RunClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne,
 		RunClaimerTakesAPoolAssignedIssueButRefusesAForeignHolder,
 		RunClaimerRefusesABuiltInIneligibleStatusWithTheStateThatRefusedIt,

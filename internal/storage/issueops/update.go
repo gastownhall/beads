@@ -237,6 +237,13 @@ func ManageLeaseOnUpdate(oldIssue *types.Issue, updates map[string]interface{}) 
 		}
 	}
 
+	// newAssignee == oldIssue.Assignee is deliberately verbatim, not
+	// actorMatches (ga-v2k49): a generic update that hand-doles the same
+	// identity back under a different layer's spelling genuinely rewrites the
+	// assignee column's bytes, so clearing the lease here (as any other
+	// transfer would) is defensible rather than a false positive — it costs
+	// the holder's live lease, but HeartbeatIssueInTx's fallback re-arms one
+	// under the caller's current spelling on the next beat, so it self-heals.
 	sameClaim := newStatus == string(types.StatusInProgress) && newAssignee != "" &&
 		oldIssue.Status == types.StatusInProgress && newAssignee == oldIssue.Assignee
 	return !sameClaim

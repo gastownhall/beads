@@ -518,6 +518,56 @@ func (r *recorder) record(op string, issue *types.Issue) {
 
 func (r *recorder) drain() []mutationEntry { e := r.entries; r.entries = nil; return e }
 
+// batchNotificationBuffer is this decorator seen from the BATCH COMPOSITIONS in
+// this package. They need it because the close verbs are shared: a single close
+// and a batch item reach the same recordingIssueUC method, and the two have
+// different firing rules — the single close announces an idempotent re-close,
+// the batch verbs do not (ga-2yaqp.1). Gating inside the verb would change both.
+//
+// So the composition marks the buffer before the item's close and rewinds to
+// that mark when the close turned out to have persisted nothing. Rewinding
+// rather than not-recording is what keeps the rule where it belongs: the verb
+// stays honest about what it did, and the composition decides what is worth
+// telling a script about.
+//
+// It is an interface rather than a concrete field because a UnitOfWork is only
+// sometimes this decorator — with hooks disabled NewNotifyingProvider hands back
+// the inner provider unwrapped, and then there is no buffer and nothing to do.
+type batchNotificationBuffer interface {
+	markNotifications() int
+	rewindNotifications(mark int)
+}
+
+func (u *notifyingUOW) markNotifications() int { return len(u.rec.entries) }
+
+func (u *notifyingUOW) rewindNotifications(mark int) {
+	if mark >= 0 && mark <= len(u.rec.entries) {
+		u.rec.entries = u.rec.entries[:mark]
+	}
+}
+
+// markBatchNotifications returns a rewind token for a batch item's close, or -1
+// when this unit of work buffers nothing.
+func markBatchNotifications(uw UnitOfWork) int {
+	if buf, ok := uw.(batchNotificationBuffer); ok {
+		return buf.markNotifications()
+	}
+	return -1
+}
+
+// rewindBatchNotifications drops whatever a batch item's close buffered. The
+// caller has established the item changed nothing, which is the only thing that
+// makes discarding a recorded mutation safe: nothing observes the buffer before
+// Commit drains it.
+func rewindBatchNotifications(uw UnitOfWork, mark int) {
+	if mark < 0 {
+		return
+	}
+	if buf, ok := uw.(batchNotificationBuffer); ok {
+		buf.rewindNotifications(mark)
+	}
+}
+
 // The recorder's op vocabulary. These name what happened; hookEventForOp maps
 // them to the three events internal/hooks publishes.
 const (
@@ -1038,10 +1088,17 @@ func (u *recordingIssueUC) ClaimReadyWisp(ctx context.Context, filter types.Work
 
 // CloseIssue and its three siblings record on SUCCESS, not on "something
 // changed": the DoltStorage plumbing fires on_close for an idempotent re-close
-// too — HookFiringStore.CloseIssueChecked says so in as many words, and
-// hookBatchCloser fires for every outcome that did not refuse. A close that
-// found the issue already closed still answers "it is closed", and a script
-// that reconciles on that answer must not be told only sometimes.
+// too — HookFiringStore.CloseIssueChecked says so in as many words. A close
+// that found the issue already closed still answers "it is closed", and a
+// script that reconciles on that answer must not be told only sometimes.
+//
+// THE BATCH COMPOSITIONS OVERRIDE THAT, and they do it above these verbs rather
+// than inside them, because these are the SAME methods a single close reaches.
+// closeBatchItem and uowApplyRun.applyClose rewind the recorded notification
+// when the item persisted nothing, matching hookBatchCloser and hookBatchApplier
+// on the other plumbing (ga-2yaqp.1) — otherwise a teardown replayed against an
+// already-closed convoy runs on_close once per item on every pass. Gate here
+// and the single close would lose its re-close firing with it.
 //
 // The snapshot read is PLANE-PINNED to the verb that was called, while the verb
 // itself tolerates an id from either plane. That gap is unreachable as shipped:

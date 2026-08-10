@@ -40,7 +40,7 @@ var (
 	issuePatchMembers = []string{
 		"title", "description", "design", "acceptance_criteria",
 		"notes", "append_notes", "priority", "issue_type", "status",
-		"assignee", "parent_id", "labels", "metadata",
+		"assignee", "parent_id", "labels", "add_labels", "remove_labels", "metadata",
 		"estimated_minutes", "external_ref", "due_at", "defer_until",
 	}
 	// nullablePatchMembers is the closed set on which explicit `null` CLEARS
@@ -146,7 +146,7 @@ func (s *Server) updateRequest(w http.ResponseWriter, r *http.Request, id string
 		return issueops.UpdateRequest{}, false
 	}
 
-	expectedVersion, res := applyInt64Member(members, "", "expected_version")
+	expectedVersion, res := applyVersionGuardMember(members, "")
 	if res != nil {
 		s.fail(w, r, *res)
 		return issueops.UpdateRequest{}, false
@@ -377,18 +377,48 @@ func (s *Server) issuePatch(w http.ResponseWriter, r *http.Request, id string, m
 		}
 		patch.Metadata = metadata
 	}
-	if set("labels") {
-		labels := *wire.Labels
-		for i, label := range labels {
-			if types.CheckFieldLen("label", label) != nil {
-				return refuse("labels", fmt.Sprintf("`labels[%d]` is %d characters; storage holds at most %d",
-					i, utf8.RuneCountInString(label), types.MaxFieldLen))
-			}
-		}
+	// THE THREE LABEL MEMBERS ARE ONE PATCH, assembled together because the role
+	// models them as one: LabelPatch applies Replace, then Add, then Remove, so
+	// removal wins where a label appears in more than one of them. They are NOT
+	// mutually exclusive, which is the difference from `notes`/`append_notes`
+	// above — that pair is a contradiction the role refuses, and this trio has a
+	// defined order.
+	//
+	// Building the value in one place is what keeps the wire from inventing a
+	// fourth combination rule: a member decoded into its own LabelPatch would
+	// overwrite the others' fields, and the last one written would silently win.
+	labelEdit := issueops.LabelPatch{}
+	for _, member := range []struct {
+		name   string
+		values *[]string
+		apply  func([]string)
+	}{
 		// COMPLETE REPLACEMENT, and an empty array clears every label — which is
 		// why this sets Replace rather than Add.
-		patch.Labels = issueops.LabelPatch{Replace: issueops.Field[[]string]{Set: true, Value: labels}}
+		{"labels", wire.Labels, func(v []string) {
+			labelEdit.Replace = issueops.Field[[]string]{Set: true, Value: v}
+		}},
+		{"add_labels", wire.AddLabels, func(v []string) { labelEdit.Add = v }},
+		{"remove_labels", wire.RemoveLabels, func(v []string) { labelEdit.Remove = v }},
+	} {
+		if !set(member.name) {
+			continue
+		}
+		values := *member.values
+		// The role refuses an over-long label on ANY of the three and writes
+		// nothing, so the edge refuses it on all three too. It is a rule about
+		// what a label may BE rather than about whether this row carries one,
+		// which is why `remove_labels` is bounded like the other two even though
+		// a value the column could not hold could never have been stored.
+		for i, label := range values {
+			if types.CheckFieldLen("label", label) != nil {
+				return refuse(member.name, fmt.Sprintf("`%s[%d]` is %d characters; storage holds at most %d",
+					member.name, i, utf8.RuneCountInString(label), types.MaxFieldLen))
+			}
+		}
+		member.apply(values)
 	}
+	patch.Labels = labelEdit
 
 	// The four nullable members. Set is true whenever the member is present;
 	// the VALUE is a nil pointer for an explicit null, which is how a clear

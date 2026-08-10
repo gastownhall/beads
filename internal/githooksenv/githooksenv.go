@@ -55,6 +55,22 @@ func Extract(env []string) string {
 	return val
 }
 
+// DisabledEnv returns env with git client-side hooks disabled, for callers
+// that hand a subprocess its environment explicitly. Existing
+// GIT_CONFIG_PARAMETERS entries are collapsed (exec last-wins) into one entry
+// with the no-hooks override appended. The input slice is not modified.
+func DisabledEnv(env []string) []string {
+	merged := AppendParameter(Extract(env), NoHooksParam)
+	prefix := ParametersEnv + "="
+	out := make([]string, 0, len(env)+1)
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			out = append(out, e)
+		}
+	}
+	return append(out, prefix+merged)
+}
+
 // Process-environment state for WithDisabled. A refcount rather than a plain
 // mutex held across fn: remote operations are network-bound and can take
 // minutes, and serializing every one of them behind a single lock would be a

@@ -259,6 +259,16 @@ func RestoreLeaseOnImportInTx(ctx context.Context, tx DBTX, issue *types.Issue, 
 	// An upsert over an existing row may have ended or transferred the claim
 	// (e.g. a newer snapshot closed the issue): drop a lease row that no
 	// longer matches a live claim by its holder.
+	//
+	// This join is a SQL equality (i.assignee = leases.holder), not
+	// actorMatches — a query predicate can't canonicalize across a join the
+	// way Go code can, so a lease granted under one spelling of an identity
+	// can be dropped here if the issue's stored assignee is later written
+	// under a different, equivalent spelling (ga-v2k49). Bounded and
+	// self-healing: HeartbeatIssueInTx's disambiguation fallback re-arms the
+	// lease under the caller's current spelling on the next beat, so the gap
+	// is one issue briefly in_progress with no lease row (visible to
+	// stale/reclaim reads), never a stuck state.
 	if !isNew {
 		_, err := tx.ExecContext(ctx, `
 			DELETE FROM leases WHERE issue_id = ?
@@ -323,14 +333,28 @@ func HeartbeatIssueInTx(ctx context.Context, tx DBTX, id, actor string) error {
 		if qerr != nil {
 			return fmt.Errorf("%w: %s", storage.ErrNotClaimable, id)
 		}
-		if assignee != "" && assignee != actor {
+		// Judged under actorMatches, not verbatim (ga-v2k49): the primary
+		// UPDATE's own `holder = ?` predicate above stays a verbatim SQL
+		// comparison deliberately — fixing it would mean pre-reading the
+		// lease row on every heartbeat (the hottest write in the fleet, see
+		// above) just to bind back its own holder value. A spelling
+		// difference across layers (ga-wzl83) already makes that predicate
+		// affect 0 rows and fall here; fixing the disambiguation instead
+		// means the caller still self-heals correctly (re-arms below, under
+		// its current spelling) at the cost of the slow path on a spelling
+		// mismatch, never on the byte-identical common case.
+		if assignee != "" && !actorMatches(assignee, actor) {
 			return fmt.Errorf("%w by %s", storage.ErrAlreadyClaimed, assignee)
 		}
-		if !isWisp && assignee == actor && status == string(types.StatusInProgress) {
+		if !isWisp && actorMatches(assignee, actor) && status == string(types.StatusInProgress) {
 			// The caller genuinely holds the claim but has no lease row — e.g.
 			// the claim was hand-doled through a generic update (which never
-			// arms a lease, bd-9hpgf) and the worker is now opting into lease
-			// semantics. A real worker's heartbeat re-arms recovery.
+			// arms a lease, bd-9hpgf), the worker is now opting into lease
+			// semantics, or (ga-v2k49) the existing lease row's holder is a
+			// different spelling of the same identity (ga-wzl83) and the
+			// primary UPDATE's verbatim predicate above missed it. A real
+			// worker's heartbeat re-arms recovery — under actor's current
+			// spelling, which is what the next heartbeat's fast path will see.
 			return UpsertLeaseInTx(ctx, tx, id, actor, now, leaseTTL(ctx))
 		}
 		return fmt.Errorf("%w: %s status %s", storage.ErrNotClaimable, id, status)

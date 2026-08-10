@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -22,56 +23,70 @@ import (
 // internal/storage/uow/lifecycle_close_reopen_contract_test.go. This test owns
 // the wire-to-role seam and cites that one rather than duplicating it.
 
-// closeIssue posts a close for id and returns the status and decoded body.
-func (sp *serveProcess) closeIssue(t *testing.T, id, body string) (int, map[string]any) {
+// lifecycleVerbRaw posts a custom method for id and returns the status and the
+// UNDECODED body, so a caller can choose how to read a member rather than
+// inheriting encoding/json's default for `any`.
+//
+// It exists for `revision`, and the update slice paid for the lesson: live
+// row_lock tokens run past 5e17, where a float64's ulp is already 64, so a
+// token read through `map[string]any` is a value NEAR the token and is not it.
+// The decoded helpers below stay as they were — a case comparing prose members
+// wants the ordinary decode — and the guarded cases read the raw bytes.
+func (sp *serveProcess) lifecycleVerbRaw(t *testing.T, verb, id, body string) (int, []byte) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, sp.url("/v0/beads/issues/"+id+":close"), strings.NewReader(body))
+	req, err := http.NewRequest(http.MethodPost, sp.url("/v0/beads/issues/"+id+":"+verb), strings.NewReader(body))
 	if err != nil {
-		t.Fatalf("new close request: %v", err)
+		t.Fatalf("new %s request: %v", verb, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := sp.client.Do(req)
 	if err != nil {
-		t.Fatalf("POST close %s: %v\nstderr:\n%s", id, err, sp.stderr.String())
+		t.Fatalf("POST %s %s: %v\nstderr:\n%s", verb, id, err, sp.stderr.String())
 	}
 	defer func() { _ = resp.Body.Close() }()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read close body: %v", err)
+		t.Fatalf("read %s body: %v", verb, err)
 	}
+	return resp.StatusCode, raw
+}
+
+// decodeVerbBody is the ordinary decode the unguarded cases use.
+func decodeVerbBody(t *testing.T, verb string, raw []byte) map[string]any {
+	t.Helper()
 	var m map[string]any
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("decode close body %q: %v", raw, err)
+			t.Fatalf("decode %s body %q: %v", verb, raw, err)
 		}
 	}
-	return resp.StatusCode, m
+	return m
+}
+
+// closeIssueRaw posts a close and returns the status and the undecoded body.
+func (sp *serveProcess) closeIssueRaw(t *testing.T, id, body string) (int, []byte) {
+	t.Helper()
+	return sp.lifecycleVerbRaw(t, "close", id, body)
+}
+
+// closeIssue posts a close for id and returns the status and decoded body.
+func (sp *serveProcess) closeIssue(t *testing.T, id, body string) (int, map[string]any) {
+	t.Helper()
+	status, raw := sp.closeIssueRaw(t, id, body)
+	return status, decodeVerbBody(t, "close", raw)
+}
+
+// reopenIssueRaw posts a reopen and returns the status and the undecoded body.
+func (sp *serveProcess) reopenIssueRaw(t *testing.T, id, body string) (int, []byte) {
+	t.Helper()
+	return sp.lifecycleVerbRaw(t, "reopen", id, body)
 }
 
 // reopenIssue posts a reopen for id and returns the status and decoded body.
 func (sp *serveProcess) reopenIssue(t *testing.T, id, body string) (int, map[string]any) {
 	t.Helper()
-	req, err := http.NewRequest(http.MethodPost, sp.url("/v0/beads/issues/"+id+":reopen"), strings.NewReader(body))
-	if err != nil {
-		t.Fatalf("new reopen request: %v", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := sp.client.Do(req)
-	if err != nil {
-		t.Fatalf("POST reopen %s: %v\nstderr:\n%s", id, err, sp.stderr.String())
-	}
-	defer func() { _ = resp.Body.Close() }()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("read reopen body: %v", err)
-	}
-	var m map[string]any
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &m); err != nil {
-			t.Fatalf("decode reopen body %q: %v", raw, err)
-		}
-	}
-	return resp.StatusCode, m
+	status, raw := sp.reopenIssueRaw(t, id, body)
+	return status, decodeVerbBody(t, "reopen", raw)
 }
 
 func TestProxiedServerServeClose(t *testing.T) {
@@ -329,6 +344,131 @@ func TestProxiedServerServeClose(t *testing.T) {
 		// The refusals are wire-edge refusals: nothing reached the database.
 		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" {
 			t.Errorf("a refused close wrote to the row: status %q", shown.Status)
+		}
+	})
+
+	// THE GUARD, AS A REAL READ-MODIFY-WRITE LOOP. The pure tests assert the
+	// projection onto issueops.CloseRequest and the shape of the 409; what only
+	// this level can show is that the token a write ANSWERS with is the one the
+	// next request must send, that a stale one really refuses against a store,
+	// and — the claim a fake has no way to hold — that the guard is evaluated
+	// BEFORE the idempotent re-close.
+	//
+	// The stale token is made by a real concurrent writer rather than by
+	// arithmetic. The token is opaque and compared for equality alone, so
+	// `revision - 1` is not "the previous revision"; there is no way to
+	// construct a stale one except to let something move the row.
+	t.Run("a guarded close and reopen compose from the revision the write answered", func(t *testing.T) {
+		issue := bdProxiedCreate(t, bd, p.dir, "guarded lifecycle", "-p", "2")
+
+		// The first guarded write has to seed itself from an unguarded one:
+		// no READ on this surface publishes a revision yet, which is the gap
+		// the document names on every one of these members.
+		status, raw := sp.updateIssueRaw(t, issue.ID, `{"actor":"http-agent","patch":{"notes":"seeded"}}`)
+		if status != http.StatusOK {
+			t.Fatalf("the seeding write: status = %d, want 200: %s", status, raw)
+		}
+		first := revisionOf(t, raw)
+
+		status, raw = sp.updateIssueRaw(t, issue.ID, `{"actor":"other-agent","patch":{"notes":"moved"}}`)
+		if status != http.StatusOK {
+			t.Fatalf("the concurrent write: status = %d, want 200: %s", status, raw)
+		}
+		second := revisionOf(t, raw)
+		if second == first {
+			t.Fatalf("revision = %d after a second write; a write that does not move the token makes every guard vacuous", second)
+		}
+
+		// The stale close. Nothing is written, and the 409 names the member.
+		status, problem := sp.closeIssue(t, issue.ID,
+			`{"actor":"http-agent","reason":"never","expected_version":`+strconv.FormatInt(first, 10)+`}`)
+		if status != http.StatusConflict {
+			t.Fatalf("stale close: status = %d, want 409: %v", status, problem)
+		}
+		if problem["code"] != "precondition_failed" || problem["param"] != "expected_version" {
+			t.Errorf("stale close: code = %v param = %v, want precondition_failed / expected_version", problem["code"], problem["param"])
+		}
+		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" || shown.CloseReason != "" {
+			t.Errorf("a refused guard closed the row anyway: status %q reason %q", shown.Status, shown.CloseReason)
+		}
+
+		// FORCE DOES NOT BYPASS IT. `force` bypasses close POLICY; the guard is
+		// about whether this is still the row the caller read, which force says
+		// nothing about.
+		status, problem = sp.closeIssue(t, issue.ID,
+			`{"actor":"http-agent","force":true,"expected_version":`+strconv.FormatInt(first, 10)+`}`)
+		if status != http.StatusConflict {
+			t.Fatalf("forced stale close: status = %d, want 409 — force bypasses policy, never a precondition: %v", status, problem)
+		}
+		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" {
+			t.Errorf("a forced stale close closed the row: status %q", shown.Status)
+		}
+
+		// The fresh guard lands, and answers with the token the close minted.
+		status, raw = sp.closeIssueRaw(t, issue.ID,
+			`{"actor":"http-agent","reason":"shipped","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+		if status != http.StatusOK {
+			t.Fatalf("guarded close: status = %d, want 200: %s", status, raw)
+		}
+		closed := revisionOf(t, raw)
+		if closed == second {
+			t.Errorf("revision = %d after a close that wrote; the token did not move", closed)
+		}
+		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "closed" {
+			t.Fatalf("the guarded close did not land: status %q", shown.Status)
+		}
+
+		// THE CLAIM ONLY A REAL STORE CAN SHOW: the guard is checked BEFORE the
+		// idempotent re-close. The same body that earns a 200 with
+		// `already_closed` unguarded is a 409 when it carries a token the close
+		// itself has already invalidated — which is what lets a client read
+		// `already_closed` as "and nothing has happened here since".
+		status, problem = sp.closeIssue(t, issue.ID,
+			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+		if status != http.StatusConflict {
+			t.Fatalf("guarded re-close with a pre-close token: status = %d, want 409: %v", status, problem)
+		}
+
+		// Unguarded, that same replay is the ordinary idempotent answer.
+		status, raw = sp.closeIssueRaw(t, issue.ID, `{"actor":"http-agent","reason":"REWRITTEN"}`)
+		if status != http.StatusOK {
+			t.Fatalf("unguarded re-close: status = %d, want 200: %s", status, raw)
+		}
+		replay := decodeVerbBody(t, "close", raw)
+		if replay["already_closed"] != true {
+			t.Errorf("already_closed = %v, want true", replay["already_closed"])
+		}
+		afterReplay := revisionOf(t, raw)
+		if afterReplay != closed {
+			t.Errorf("revision = %d after an idempotent re-close, want the unchanged %d: a replay that writes nothing must not move the token",
+				afterReplay, closed)
+		}
+
+		// The reopen's own guard, on the mirror. Stale first.
+		status, problem = sp.reopenIssue(t, issue.ID,
+			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(second, 10)+`}`)
+		if status != http.StatusConflict {
+			t.Fatalf("stale reopen: status = %d, want 409: %v", status, problem)
+		}
+		if problem["code"] != "precondition_failed" || problem["param"] != "expected_version" {
+			t.Errorf("stale reopen: code = %v param = %v", problem["code"], problem["param"])
+		}
+		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "closed" {
+			t.Errorf("a refused guard reopened the row: status %q", shown.Status)
+		}
+
+		// And the loop closes: the token the last successful write answered
+		// with is the one that lands.
+		status, raw = sp.reopenIssueRaw(t, issue.ID,
+			`{"actor":"http-agent","expected_version":`+strconv.FormatInt(afterReplay, 10)+`}`)
+		if status != http.StatusOK {
+			t.Fatalf("guarded reopen: status = %d, want 200: %s", status, raw)
+		}
+		if reopened := revisionOf(t, raw); reopened == afterReplay {
+			t.Errorf("revision = %d after a reopen that wrote; the token did not move", reopened)
+		}
+		if shown := bdProxiedShow(t, bd, p.dir, issue.ID); string(shown.Status) != "open" || shown.CloseReason != "" {
+			t.Errorf("the guarded reopen did not land: status %q reason %q", shown.Status, shown.CloseReason)
 		}
 	})
 

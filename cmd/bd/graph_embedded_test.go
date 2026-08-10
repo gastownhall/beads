@@ -3,9 +3,11 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +25,31 @@ func bdGraph(t *testing.T, bd, dir string, args ...string) string {
 		t.Fatalf("bd graph %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
 	}
 	return stdout.String()
+}
+
+// runGraphWithReadOnlyStdout gives the child a real stdout handle that cannot
+// be written. Unlike a closed pipe, this produces a normal write error on both
+// Unix and Windows instead of depending on SIGPIPE behavior.
+func runGraphWithReadOnlyStdout(t *testing.T, bd, dir string, env []string, args ...string) (string, error) {
+	t.Helper()
+	stdoutPath := filepath.Join(t.TempDir(), "stdout.txt")
+	if err := os.WriteFile(stdoutPath, nil, 0o600); err != nil {
+		t.Fatalf("create read-only stdout target: %v", err)
+	}
+	stdout, err := os.Open(stdoutPath)
+	if err != nil {
+		t.Fatalf("open read-only stdout target: %v", err)
+	}
+	defer func() { _ = stdout.Close() }()
+
+	cmd := exec.Command(bd, append([]string{"graph"}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = env
+	cmd.Stdout = stdout
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	err = cmd.Run()
+	return stderr.String(), err
 }
 
 func TestEmbeddedGraph(t *testing.T) {
@@ -96,6 +123,16 @@ func TestEmbeddedGraph(t *testing.T) {
 		out := bdGraph(t, bd, dir, "--html", epic.ID)
 		if !strings.Contains(out, "<html") && !strings.Contains(out, "<!DOCTYPE") {
 			t.Errorf("expected HTML output: %s", out[:min(200, len(out))])
+		}
+	})
+
+	t.Run("dot_output_error", func(t *testing.T) {
+		stderr, err := runGraphWithReadOnlyStdout(t, bd, dir, bdEnv(dir), "--dot", epic.ID)
+		if err == nil {
+			t.Fatalf("graph --dot succeeded with read-only stdout; stderr:\n%s", stderr)
+		}
+		if !strings.Contains(stderr, "writing DOT output") {
+			t.Fatalf("graph --dot stderr = %q, want writer diagnostic", stderr)
 		}
 	})
 

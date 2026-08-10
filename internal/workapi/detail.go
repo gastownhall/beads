@@ -110,7 +110,7 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 		return nil, errors.New("build issue details: issue must not be nil")
 	}
 	id := issue.ID
-	details := &types.IssueDetails{Issue: *issue}
+	details := types.NewIssueDetails(*issue)
 
 	details.Labels, _ = src.Labels(ctx, id, isWisp)
 	details.Dependencies, _ = src.Dependencies(ctx, id, isWisp)

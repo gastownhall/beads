@@ -130,10 +130,10 @@ func TestHookBatchApplierFiresPerLandedItem(t *testing.T) {
 			want: []string{"create:bd-1", "update:bd-2", "close:bd-3"},
 		},
 		{
-			// The sibling bug NOT to copy: hookBatchCloser fires for every
-			// outcome whose Err is nil, so an idempotent re-close runs the
-			// workspace's on_close script on every replayed pass. Changed is
-			// the fact a script cares about.
+			// Changed is the fact a script cares about, not "no error".
+			// hookBatchCloser tested a nil per-item Err here and ran the
+			// workspace's on_close script on every replayed pass (ga-2yaqp.1);
+			// its own table pins the same rule now.
 			name: "an item that changed nothing fires nothing",
 			applier: &fakeBatchApplier{result: issueops.ApplyBatchResult{Items: []issueops.ItemResult{
 				batchApplyItemResult(issueops.ItemUpdate, "bd-1", false),

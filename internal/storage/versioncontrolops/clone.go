@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-
-	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
 // DoltClone clones a Dolt database from a remote URL.
@@ -23,7 +21,7 @@ func DoltClone(ctx context.Context, conn DBConn, remoteURL, database, user strin
 
 	// GH#4272: the initial fetch runs git hooks just like push/pull; disable
 	// them for the clone window too (see remotes.go for the full rationale).
-	return githooksenv.WithDisabled(func() error {
+	return withRemoteEnvGuards(func() error {
 		if _, err := conn.ExecContext(ctx, query, args...); err != nil {
 			return fmt.Errorf("dolt clone %s: %w", sanitizeURL(remoteURL), err)
 		}

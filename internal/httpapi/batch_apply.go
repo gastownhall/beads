@@ -713,7 +713,7 @@ func applyCloseItem(prefix string, raw map[string]json.RawMessage) (*issueops.Cl
 	if res != nil {
 		return nil, res
 	}
-	expectedVersion, res := applyInt64Member(raw, prefix, "expected_version")
+	expectedVersion, res := applyVersionGuardMember(raw, prefix)
 	if res != nil {
 		return nil, res
 	}
@@ -1180,7 +1180,7 @@ func applyRequiredText(raw map[string]json.RawMessage, prefix, member string) (s
 	return value, nil
 }
 
-// applyTextMember, applyBoolMember and applyInt64Member are the pure twins of
+// applyTextMember, applyBoolMember and applyVersionGuardMember are the pure twins of
 // Server.storedTextMember and Server.booleanMember, with their rules unchanged:
 // an absent member is the zero value the role reads as "not supplied", an
 // explicit `null` is a 400 naming the member rather than a third state, and a
@@ -1219,14 +1219,27 @@ func applyBoolMember(raw map[string]json.RawMessage, prefix, member string) (boo
 	return *value, nil
 }
 
-func applyInt64Member(raw map[string]json.RawMessage, prefix, member string) (*int64, *Result) {
-	encoded, ok := raw[member]
+// applyVersionGuardMember is the family's int64 reader, and it names the member
+// itself rather than taking one.
+//
+// Its siblings above are generic because they read many members; this one has
+// read exactly one on every operation that has ever published a 64-bit member —
+// the row-version guard — so the member name lives in the function instead of
+// at five call sites that could disagree about how to spell it. A second int64
+// member would re-generalize it, which is a two-line change and not a reason to
+// carry a parameter nothing varies.
+//
+// prefix stays, because a batch item's guard is reported qualified by the item
+// that carried it where a single operation's is spelled bare.
+func applyVersionGuardMember(raw map[string]json.RawMessage, prefix string) (*int64, *Result) {
+	encoded, ok := raw[expectedVersionMember]
 	if !ok {
 		return nil, nil
 	}
 	var value *int64
 	if err := json.Unmarshal(encoded, &value); err != nil || value == nil {
-		res := InvalidArgument(prefix+member, ReasonInvalidValue, "`"+member+"` must be an integer")
+		res := InvalidArgument(prefix+expectedVersionMember, ReasonInvalidValue,
+			"`"+expectedVersionMember+"` must be an integer")
 		return nil, &res
 	}
 	return value, nil

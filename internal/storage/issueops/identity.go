@@ -55,3 +55,15 @@ func canonicalActor(s string) string {
 func actorMatches(a, b string) bool {
 	return a == b || canonicalActor(a) == canonicalActor(b)
 }
+
+// ActorMatches is the exported form of actorMatches. Exported for the
+// proxied-server (uow) claim path in internal/storage/domain/db (ga-v2k49),
+// which builds its own claim UPDATE rather than calling ClaimIssueInTx —
+// same reason lease.go's RowLockClause and FreshRowLock are exported, and
+// same package-local-duplicate-over-cross-layer-import tradeoff documented on
+// canonicalActor above: domain/db already depends on issueops for the
+// row_lock and pool/status helpers, so reusing this one too adds no new
+// layering edge, unlike importing validation would.
+func ActorMatches(a, b string) bool {
+	return actorMatches(a, b)
+}

@@ -115,14 +115,21 @@ func TestExecuteClaimReportsTheStateThatLostTheCAS(t *testing.T) {
 		// still carries the holder it read; only the wire decides whether to
 		// publish it.
 		wantAssignee string
+		// attemptsUpdate: ClaimIssueInTx only issues the UPDATE when the
+		// pre-image says the actor could possibly win the CAS (ga-v2k49 —
+		// same early-skip shape as unclaim.go's ownership precheck). "held by
+		// another actor" never could, so no UPDATE is attempted at all; "not
+		// in a claimable state" has an empty (claimable-by-anyone) assignee,
+		// so the UPDATE is attempted and loses on the status predicate.
+		attemptsUpdate bool
 	}{
 		{
 			name: "held by another actor", assignee: "bob", status: types.StatusOpen,
-			sentinel: storage.ErrAlreadyClaimed, wantAssignee: "bob",
+			sentinel: storage.ErrAlreadyClaimed, wantAssignee: "bob", attemptsUpdate: false,
 		},
 		{
 			name: "not in a claimable state", assignee: "", status: types.StatusClosed,
-			sentinel: storage.ErrNotClaimable,
+			sentinel: storage.ErrNotClaimable, attemptsUpdate: true,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -130,7 +137,9 @@ func TestExecuteClaimReportsTheStateThatLostTheCAS(t *testing.T) {
 
 			const id = "bd-1"
 			expectClaimableRead(mock, id, tc.assignee, tc.status)
-			mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
+			if tc.attemptsUpdate {
+				mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
+			}
 			expectClaimStateRead(mock, id, tc.assignee, tc.status)
 			// The role's own re-read, which is what carries the state out.
 			expectClaimStateRead(mock, id, tc.assignee, tc.status)
@@ -190,6 +199,80 @@ func TestExecuteClaimIdempotentReclaimStagesNothing(t *testing.T) {
 	}
 	if result.Issue == nil || result.Issue.Assignee != claimActor || result.Issue.Status != types.StatusInProgress {
 		t.Errorf("result issue = %+v, want the post-state row", result.Issue)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestExecuteClaimIdempotentReclaimAcrossSpellingStagesNothing pins ga-v2k49
+// (the ga-wzl83/ga-5ksp5 follow-up steveyegge's #5438 review enumerated): the
+// idempotent re-claim above must also hold when the caller's actor and the
+// stored assignee are the same identity spelled under two different layers'
+// separator conventions (dot vs sanitized double-underscore — the ga-wzl83
+// repro shape), not just byte-identical.
+func TestExecuteClaimIdempotentReclaimAcrossSpellingStagesNothing(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+
+	const id = "bd-1"
+	const storedAssignee = "gastown__mayor" // sanitized form, as persisted
+	const actor = "gastown.mayor"           // dotted form, as this caller spells itself
+	expectClaimableRead(mock, id, storedAssignee, types.StatusInProgress)
+	mock.ExpectExec(`(?s)UPDATE issues\s+SET assignee`).WillReturnResult(sqlmock.NewResult(0, 0))
+	expectClaimStateRead(mock, id, storedAssignee, types.StatusInProgress)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(claimIssueRow(id, storedAssignee, types.StatusInProgress))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM labels WHERE issue_id = ? ORDER BY label")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"label"}))
+
+	result, tables, err := ExecuteClaim(context.Background(), tx, publicops.ClaimRequest{Actor: actor, IssueID: id})
+	if err != nil {
+		t.Fatalf("ExecuteClaim: %v, want success (same identity, different separator spelling)", err)
+	}
+	if result.Changed {
+		t.Error("a cross-spelling re-claim by the holder reported a persisted mutation")
+	}
+	if len(tables) != 0 {
+		t.Errorf("a cross-spelling re-claim by the holder staged %v; nothing changed, so nothing may be committed", tables)
+	}
+	if result.Issue == nil || result.Issue.Assignee != storedAssignee || result.Issue.Status != types.StatusInProgress {
+		t.Errorf("result issue = %+v, want the post-state row (assignee stays in its stored spelling %q)", result.Issue, storedAssignee)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestExecuteClaimRefusesGenuinelyDifferentIdentityDespiteSimilarSpelling is
+// the not-a-no-op control for the cross-spelling fix above (steveyegge's
+// #5438 review flagged exactly this shape as the right guard): the pair named
+// in canonicalActor's own doc comment as one that must stay distinct despite
+// sharing a separator style. Without this, a canonicalization broad enough to
+// match everyone would pass the idempotent test above for the wrong reason.
+func TestExecuteClaimRefusesGenuinelyDifferentIdentityDespiteSimilarSpelling(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+
+	const id = "bd-1"
+	const storedAssignee = "gastown.mayor"
+	const actor = "gastown.dog-3"
+	expectClaimableRead(mock, id, storedAssignee, types.StatusInProgress)
+	// No ExpectExec: a genuinely different identity never had a chance to win
+	// the CAS, so ClaimIssueInTx skips the UPDATE attempt entirely (ga-v2k49
+	// — see attemptsUpdate above).
+	expectClaimStateRead(mock, id, storedAssignee, types.StatusInProgress)
+
+	_, tables, err := ExecuteClaim(context.Background(), tx, publicops.ClaimRequest{Actor: actor, IssueID: id})
+	if !errors.Is(err, storage.ErrAlreadyClaimed) {
+		t.Fatalf("err = %v, want ErrAlreadyClaimed for a genuinely different identity", err)
+	}
+	var conflict *publicops.ClaimConflictError
+	if !errors.As(err, &conflict) || conflict.Assignee != storedAssignee {
+		t.Fatalf("conflict = %+v, want it to name the real holder %q", conflict, storedAssignee)
+	}
+	if len(tables) != 0 {
+		t.Errorf("a refused claim staged %v", tables)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)

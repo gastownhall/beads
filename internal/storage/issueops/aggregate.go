@@ -161,6 +161,10 @@ func AuthorizeAssigneeTransferWithPools(before *types.Issue, request publicops.U
 	if !request.Patch.Assignee.Set || actorMatches(request.Patch.Assignee.Value, before.Assignee) || request.ExpectedAssignee != nil || request.ForceAssigneeTransfer || before.Status != types.StatusInProgress || before.Assignee == "" || actorMatches(before.Assignee, request.Actor) {
 		return nil
 	}
+	// Exact-string membership, deliberately not actorMatches (ga-v2k49, same
+	// reason as claim.go's identical pool checks): a pool alias is a literal
+	// claim.pools config value, not a Gas Town identity that gets respelled
+	// per layer, so there is no cross-spelling variant to reconcile.
 	for _, pool := range pools {
 		if pool == before.Assignee {
 			return nil

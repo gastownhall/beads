@@ -25,6 +25,12 @@ func TestClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t *testing.T) {
 	conformance.RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t, ctx, fixture)
 }
 
+func TestClaimerReclaimsAcrossSpellingWithoutWriting(t *testing.T) {
+	fixture, ctx, cleanup := newDoltClaimerFixture(t, "clspell")
+	defer cleanup()
+	conformance.RunClaimerReclaimsAcrossSpellingWithoutWriting(t, ctx, fixture)
+}
+
 func TestClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne(t *testing.T) {
 	fixture, ctx, cleanup := newDoltClaimerFixture(t, "clcustom")
 	defer cleanup()

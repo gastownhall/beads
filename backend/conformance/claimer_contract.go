@@ -297,6 +297,65 @@ func RunClaimerReclaimsItsOwnInProgressIssueWithoutWriting(t *testing.T, ctx con
 	assertClaimerCommittedNothing(t, ctx, fixture, before, "an idempotent re-claim")
 }
 
+// RunClaimerReclaimsAcrossSpellingWithoutWriting pins ga-v2k49 (steveyegge's
+// #5479 re-review): the idempotent-reclaim contract above must also hold when
+// the caller's actor and the row's stored assignee are the same Gas Town
+// identity spelled under two different layers' separator conventions
+// (ga-wzl83's repro shape — a dotted alias vs. its sanitized form), not just
+// byte-identical.
+//
+// THE VOTE COUNT'S OWN WARNING (top of this file) is what this case answers:
+// the unit-of-work leg's domain/db dual of ClaimIssueInTx is a
+// hand-maintained restructuring, and without a case here it was pinned only
+// at the mock layer (uow/issue_operations_claim_contract_test.go's fakes) —
+// a real divergence between the two bodies on cross-spelling idempotency
+// would have passed every other case in this file and still shipped.
+//
+// The row is seeded directly in the already-claimed state (not reached via a
+// first live Claim, unlike the sibling above) because the STORED spelling has
+// to differ from the actor before this reclaim runs, and a real first Claim
+// would store the actor's own spelling.
+func RunClaimerReclaimsAcrossSpellingWithoutWriting(t *testing.T, ctx context.Context, fixture ClaimerFixture) {
+	t.Helper()
+	id := fixture.IssuePrefix + "-clspell"
+	const storedAssignee = "gastown__mayor" // sanitized form, as persisted
+	const actor = "gastown.mayor"           // dotted form, as this caller spells itself
+
+	seeded := claimerIssue(id, types.StatusInProgress)
+	seeded.Assignee = storedAssignee
+	seedClaimerIssue(t, ctx, fixture, seeded)
+
+	before := claimerHistoryCount(t, ctx, fixture)
+	updatedBefore := claimerUpdatedAt(t, ctx, fixture, id)
+	claimEventsBefore := claimerClaimEventCount(t, ctx, fixture, id)
+
+	result, err := fixture.Claimer.Claim(ctx, publicops.ClaimRequest{Actor: actor, IssueID: id})
+	if err != nil {
+		t.Fatalf("Claim under a respelled identity of the current holder: error = %v, want nil", err)
+	}
+	if result.Changed {
+		t.Error("Changed = true for a cross-spelling re-claim that had nothing to change")
+	}
+	if result.Issue == nil {
+		t.Fatal("the cross-spelling re-claim returned a nil Issue")
+	}
+	// The row keeps its STORED spelling: a claim that changed nothing must not
+	// rewrite the assignee column to the caller's own spelling either.
+	if result.Issue.Status != types.StatusInProgress || result.Issue.Assignee != storedAssignee {
+		t.Errorf("returned row = (status %q, assignee %q), want the claim already held, in its stored spelling (%q, %q)",
+			result.Issue.Status, result.Issue.Assignee, types.StatusInProgress, storedAssignee)
+	}
+
+	if got := claimerUpdatedAt(t, ctx, fixture, id); got != updatedBefore {
+		t.Errorf("updated_at moved %q -> %q across a cross-spelling re-claim that reported Changed false", updatedBefore, got)
+	}
+	if got := claimerClaimEventCount(t, ctx, fixture, id); got != claimEventsBefore {
+		t.Errorf("claim events went %d -> %d across a cross-spelling re-claim that reported Changed false", claimEventsBefore, got)
+	}
+	assertClaimerRowState(t, ctx, fixture, id, string(types.StatusInProgress), storedAssignee)
+	assertClaimerCommittedNothing(t, ctx, fixture, before, "a cross-spelling idempotent re-claim")
+}
+
 // RunClaimerAcceptsAConfiguredActiveStatusAndRefusesAConfiguredWipOne pins the
 // CONFIGURED half of the status arm in issueops/claimer.go's Claim doc: an
 // issue is claimable "while the issue's status is built-in StatusOpen or a

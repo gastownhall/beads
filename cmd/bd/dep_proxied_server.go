@@ -254,9 +254,10 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 		return nil
 	}
 
-	fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
+	fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, res.fromTitle),
+		depRelationFor(dt).phrase,
 		formatFeedbackIDParen(toID, res.toTitle),
 		dt)
 	return nil
@@ -353,7 +354,7 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 		return nil
 	}
 
-	fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
+	fmt.Printf("%s Removed dependency: %s → %s\n",
 		ui.RenderPass("✓"),
 		formatFeedbackIDParen(fromID, res.fromTitle),
 		formatFeedbackIDParen(toID, res.toTitle))

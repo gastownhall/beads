@@ -615,7 +615,7 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	if row.Updated {
 		return ClaimResult{}, nil
 	}
-	if row.CurrentAssignee == actor && row.CurrentStatus == types.StatusInProgress {
+	if validation.ActorMatches(row.CurrentAssignee, actor) && row.CurrentStatus == types.StatusInProgress {
 		return ClaimResult{AlreadyClaimed: true, PriorAssignee: actor}, nil
 	}
 	// The refusal carries the assignee and status the repository read back in
@@ -635,7 +635,7 @@ func (u *issueUseCaseImpl) claim(ctx context.Context, id, actor string, useWisp 
 	// domain-stack twin of that producer and must answer the same three ways
 	// (bd-at6rc).
 	refusal := fmt.Errorf("%w%s%s", storage.ErrNotClaimable, storage.NotClaimableStatusFragment, row.CurrentStatus)
-	if row.CurrentAssignee != "" && row.CurrentAssignee != actor {
+	if row.CurrentAssignee != "" && !validation.ActorMatches(row.CurrentAssignee, actor) {
 		switch {
 		// Pool aliases refuse on the STATUS, checked first so a pool never
 		// reaches the holder-steering copy below.

@@ -3,11 +3,13 @@ package uow
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 // ── Fakes ───────────────────────────────────────────────────────────
@@ -59,10 +61,14 @@ func newNotifyIssueUC(issues ...*types.Issue) *notifyIssueUC {
 	return uc
 }
 
+// GetIssue and GetWisp answer a miss with ErrNotFound rather than a bare
+// error, because operationIssue tells "this id is not on that plane" from "that
+// plane is broken" by that sentinel alone: a bare error there aborts the
+// two-plane resolve instead of falling through to the other plane.
 func (u *notifyIssueUC) GetIssue(_ context.Context, id string) (*types.Issue, error) {
 	issue, ok := u.issues[id]
 	if !ok {
-		return nil, errors.New("no such issue")
+		return nil, fmt.Errorf("%w: issue %s", publicops.ErrNotFound, id)
 	}
 	return issue, nil
 }
@@ -70,7 +76,7 @@ func (u *notifyIssueUC) GetIssue(_ context.Context, id string) (*types.Issue, er
 func (u *notifyIssueUC) GetWisp(_ context.Context, id string) (*types.Issue, error) {
 	wisp, ok := u.wisps[id]
 	if !ok {
-		return nil, errors.New("no such wisp")
+		return nil, fmt.Errorf("%w: wisp %s", publicops.ErrNotFound, id)
 	}
 	return wisp, nil
 }
@@ -265,6 +271,23 @@ func (f *notifyFixture) newUOW(t *testing.T) UnitOfWork {
 
 func seedIssue(id string) *types.Issue {
 	return &types.Issue{ID: id, Title: id, Status: types.StatusOpen}
+}
+
+// closeThroughBatch closes ids through the REAL batch composition rather than
+// through the use case directly. That is the whole point of the rows that call
+// it: closeBatchItem and the single close reach the same recording verb, so
+// only a test that goes through the composition can tell the two firing rules
+// apart.
+func closeThroughBatch(ctx context.Context, t *testing.T, uw UnitOfWork, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		outcome := closeBatchItem(ctx, uw,
+			publicops.CloseBatchRequest{Actor: "tester"},
+			publicops.BatchCloseItem{IssueID: id})
+		if outcome.Err != nil {
+			t.Fatalf("closeBatchItem(%s): %v", id, outcome.Err)
+		}
+	}
 }
 
 // ── The contract ────────────────────────────────────────────────────
@@ -491,10 +514,15 @@ func TestNotifyingUOWOpToHookEventMapping(t *testing.T) {
 			// The one predicate that reads backwards at first glance, and the
 			// reason it is spelled out: HookFiringStore.CloseIssueChecked fires
 			// on_close for the idempotent no-op too ("this includes the
-			// idempotent no-op when the issue was already closed"), and
-			// hookBatchCloser fires for every outcome that did not refuse. A
-			// re-close answers "it is closed", and a script reconciling on that
-			// answer must not be told only sometimes.
+			// idempotent no-op when the issue was already closed"). A re-close
+			// answers "it is closed", and a script reconciling on that answer
+			// must not be told only sometimes.
+			//
+			// THE BATCH COMPOSITIONS DISAGREE WITH THIS ONE, deliberately and
+			// as of ga-2yaqp.1 — see the two rows below, which are the same
+			// verb reached through closeBatchItem. This SINGLE close keeps the
+			// legacy parity; the batch verbs gate on Changed. The divergence is
+			// pinned on both sides here rather than left to be discovered.
 			name:   "a re-close still reports the close",
 			parity: "HookFiringStore.CloseIssueChecked fires on_close on success, unchanged rows included",
 			run: func(ctx context.Context, t *testing.T, uw UnitOfWork) {
@@ -505,6 +533,43 @@ func TestNotifyingUOWOpToHookEventMapping(t *testing.T) {
 				}
 			},
 			want: []firedHook{{hooks.EventClose, "bd-1"}, {hooks.EventClose, "bd-1"}},
+		},
+		{
+			// The batch half of the row above, and the reason this plumbing
+			// needed its own fix: closeBatchItem reaches the SAME recording
+			// verb, so before ga-2yaqp.1 a teardown replayed against an
+			// already-closed convoy ran the workspace's on_close script once
+			// per item on every pass. Proxied mode — which is what `bd serve`
+			// runs — is this plumbing, so that was the user-visible symptom.
+			name:   "a batch re-close reports the close once",
+			parity: "hookBatchCloser fires per outcome whose Changed is set, so the second pass announces nothing",
+			run: func(ctx context.Context, t *testing.T, uw UnitOfWork) {
+				for i := 0; i < 2; i++ {
+					closeThroughBatch(ctx, t, uw, "bd-1")
+				}
+			},
+			want: []firedHook{{hooks.EventClose, "bd-1"}},
+		},
+		{
+			// The discriminating row: a replay where one item was still open.
+			// Only that item is a script's business, and a wrapper that
+			// announced the whole pass would be indistinguishable from one that
+			// announced the right item on the rows above.
+			name:   "a batch pass announces only the close that landed",
+			parity: "hookBatchCloser's mixed re-close row: the landed item fires, the idempotent one does not",
+			run: func(ctx context.Context, t *testing.T, uw UnitOfWork) {
+				if _, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: seedIssue("bd-2")}, "tester"); err != nil {
+					t.Fatalf("CreateIssue: %v", err)
+				}
+				closeThroughBatch(ctx, t, uw, "bd-1")
+				// The replayed pass: bd-1 is already closed, bd-2 is not.
+				closeThroughBatch(ctx, t, uw, "bd-1", "bd-2")
+			},
+			want: []firedHook{
+				{hooks.EventCreate, "bd-2"},
+				{hooks.EventClose, "bd-1"},
+				{hooks.EventClose, "bd-2"},
+			},
 		},
 		{
 			// The far end of a REVERSE edge: the create wrote an edge leaving
@@ -816,4 +881,35 @@ func assertFired(t *testing.T, got, want []firedHook) {
 			t.Fatalf("fired %v, want %v", got, want)
 		}
 	}
+}
+
+// TestNotifyingUOWBatchApplierAnnouncesOnlyLandedCloses is the BatchApplier's
+// half of the batch firing rule the parity table pins for closeBatchItem. Both
+// compositions reach the same recording close verb, so both had the same defect
+// and both need their own case: a fix applied to one of them passes the other's
+// tests untouched (ga-2yaqp.1).
+//
+// The batch mixes a row that is already closed with one that is not, which is
+// the shape a replayed teardown produces. Only the row that actually closed is
+// a script's business.
+func TestNotifyingUOWBatchApplierAnnouncesOnlyLandedCloses(t *testing.T) {
+	closedAlready := seedIssue("bd-closed")
+	closedAlready.Status = types.StatusClosed
+	f := newNotifyFixture(t, closedAlready, seedIssue("bd-open"))
+
+	applier, err := NewBatchApplier(f.provider)
+	if err != nil {
+		t.Fatalf("NewBatchApplier: %v", err)
+	}
+	if _, err := applier.ApplyBatch(context.Background(), publicops.ApplyBatchRequest{
+		Actor: "tester",
+		Items: []publicops.ApplyItem{
+			{Kind: publicops.ItemClose, Close: &publicops.CloseItem{Target: publicops.Ref{ID: "bd-closed"}}},
+			{Kind: publicops.ItemClose, Close: &publicops.CloseItem{Target: publicops.Ref{ID: "bd-open"}}},
+		},
+	}); err != nil {
+		t.Fatalf("ApplyBatch: %v", err)
+	}
+
+	assertFired(t, f.runner.events(), []firedHook{{hooks.EventClose, "bd-open"}})
 }

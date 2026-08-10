@@ -637,6 +637,44 @@ func TestBuildIssueDetailsRowStreamErrors(t *testing.T) {
 	})
 }
 
+// TestBuildIssueDetailsProjectsTheRevisionToken pins the SEAM, which is the
+// half types.NewIssueDetails cannot pin for itself.
+//
+// Both front doors read their detail view from here, so this is where the
+// published token is either projected off the row or silently 0. It is
+// asserted on BOTH seams because the store and the use case assemble the same
+// view through different readers, and a leg that reached the constructor and a
+// leg that went back to a struct literal look identical from the outside: 0 is
+// a legal token, so a caller cannot tell an unset one from a legacy row.
+func TestBuildIssueDetailsProjectsTheRevisionToken(t *testing.T) {
+	ctx := context.Background()
+	fx := newDetailFixture()
+	fx.issues["bd-1"].RowVersion = 987654321
+	store, useCase := fixtureSources(fx)
+
+	for _, tc := range []struct {
+		name string
+		src  DetailSource
+	}{
+		{"store seam", store},
+		{"use case seam", useCase},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details, err := BuildIssueDetails(ctx, tc.src, fx.issues["bd-1"], false, DetailOptions{})
+			if err != nil {
+				t.Fatalf("BuildIssueDetails: %v", err)
+			}
+			if details.Revision != 987654321 {
+				t.Errorf("Revision = %d, want the row's token 987654321", details.Revision)
+			}
+			if details.Revision != details.RowVersion {
+				t.Errorf("Revision = %d but RowVersion = %d; the published token must be the row's",
+					details.Revision, details.RowVersion)
+			}
+		})
+	}
+}
+
 func TestBuildIssueDetailsRejectsNilIssue(t *testing.T) {
 	fx := newDetailFixture()
 	store, _ := fixtureSources(fx)

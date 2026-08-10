@@ -115,10 +115,23 @@ type Config struct {
 	// Addr is the host:port to bind. The host must be a numeric IP literal;
 	// see ValidateBindAddr.
 	Addr string
-	// AllowNonLoopback permits a bind beyond loopback. v0 has no
-	// authentication and no TLS, so this is an operator decision that is never
-	// taken by default.
+	// AllowNonLoopback permits a bind beyond loopback. There is no TLS, so
+	// this is an operator decision that is never taken by default, and it
+	// requires either Auth or InsecureNoAuth — see ValidateAuthPosture.
 	AllowNonLoopback bool
+	// Auth verifies bearer credentials. NIL MEANS NO AUTHENTICATION, which is
+	// the pre-existing behavior and stays the default on loopback: a zero
+	// Config serves exactly what it served before this field existed.
+	Auth *TokenFileAuth
+	// InsecureNoAuth is the operator's explicit waiver for serving a
+	// non-loopback bind with no credential. It only ever permits; it never
+	// disables a configured Auth (that combination is refused).
+	InsecureNoAuth bool
+	// AllowedHosts are extra Host header values to answer to, beyond the
+	// loopback spellings and the bind address. In a cluster the client dials a
+	// service DNS name, which the rebinding defense would otherwise refuse;
+	// see newHostPolicy. Empty leaves today's policy exactly as it was.
+	AllowedHosts []string
 	// Provider is where every database-touching handler opens its one unit of
 	// work per request.
 	Provider uow.UnitOfWorkProvider
@@ -173,20 +186,59 @@ type Config struct {
 	// server, so a rebuild would buy nothing.
 	Reader  issueops.Reader
 	Claimer issueops.Claimer
+	// BatchCloser closes many issues as one transaction, behind
+	// POST /v0/beads/issues:batchClose. It is its own field rather than a mode
+	// of Lifecycle for the role's reason: the request is the transaction
+	// boundary, and a loop over Lifecycle.Close is N transactions.
+	BatchCloser issueops.BatchCloser
+	// ReadyClaimer is the atomic take of ready work, behind
+	// POST /v0/beads/issues:claimNext. It is its own field rather than a second
+	// verb on Claimer for the reason the role is its own interface: the caller
+	// names a QUESTION and the implementation picks the answer, so selection is
+	// part of the operation and not a patch.
+	ReadyClaimer issueops.ReadyClaimer
+	// Releaser is the claim's inverse, behind
+	// POST /v0/beads/issues/{id}:release. It is its own field rather than a
+	// method on Claimer for the reason the role is its own interface: a caller
+	// entitled to give its own work back is very often not entitled to take
+	// new work, so a surface carrying both hands out a capability it should not
+	// be able to reach.
+	Releaser issueops.Releaser
 	// Lifecycle is the guarded-mutation role behind the issue lifecycle
 	// operations. Required on the same terms as every field here, and the
 	// hook-firing refusal below bites hardest on it: a store's own
 	// IssueLifecycle() returns a role that fires on_create, on_update and the
 	// close hooks for every mutation it lands.
-	Lifecycle         issueops.Lifecycle
-	Settings          issueops.WorkspaceConfig
-	Stats             issueops.StatsReporter
-	CycleDetector     issueops.CycleDetector
-	EdgeReader        issueops.EdgeReader
+	Lifecycle     issueops.Lifecycle
+	Settings      issueops.WorkspaceConfig
+	Stats         issueops.StatsReporter
+	CycleDetector issueops.CycleDetector
+	EdgeReader    issueops.EdgeReader
+	// GraphCounter is the edge-count role behind
+	// GET /v0/beads/dependencies:count. It is a SEPARATE field from EdgeReader
+	// for the reason Counter is separate from ReadyCounter: that role answers
+	// with the edge ROWS in one direction, this one with a number in either,
+	// and neither can answer the other's question. Required on the same terms
+	// as every field here.
+	GraphCounter issueops.GraphCounter
+	// Relations is the single-anchor neighbor read behind
+	// GET /v0/beads/issues/{id}/related. It is a SEPARATE field from EdgeReader
+	// for the reason issueops.EdgeReader's own doc gives at length: that role
+	// answers with the edge ROWS for many anchors and reports a miss per anchor,
+	// this one answers with the hydrated ISSUES on the far end for ONE anchor and
+	// answers ErrNotFound. Different answer shape, different miss policy,
+	// different arity. Required on the same terms as every field here.
+	Relations         issueops.Relations
 	BlockingAnnotator issueops.BlockingAnnotator
 	TreeWalker        issueops.TreeWalker
 	ReadyCounter      issueops.ReadyCounter
-	Querier           issueops.Querier
+	// Counter is the issue-count role behind GET /v0/beads/issues:count. It is
+	// a SEPARATE field from ReadyCounter because it is a separate role: that
+	// one sizes the ready predicate, this one sizes a filter, and neither can
+	// answer the other's question. Required on the same terms as every field
+	// here.
+	Counter issueops.Counter
+	Querier issueops.Querier
 	// Sweeper is the DESTRUCTIVE one, required on the same terms as every other
 	// role rather than opt-in: whether this build erases beads is a decision
 	// for the operator who chose to run bd serve, not a consequence of whether
@@ -284,14 +336,20 @@ type Server struct {
 	// names because a struct cannot carry both.
 	issueReader       issueops.Reader
 	issueClaimer      issueops.Claimer
+	issueBatchCloser  issueops.BatchCloser
+	issueReadyClaimer issueops.ReadyClaimer
+	issueReleaser     issueops.Releaser
 	issueLifecycle    issueops.Lifecycle
 	settings          issueops.WorkspaceConfig
 	issueStats        issueops.StatsReporter
 	issueCycles       issueops.CycleDetector
 	issueEdges        issueops.EdgeReader
+	issueEdgeCounter  issueops.GraphCounter
+	issueRelations    issueops.Relations
 	issueBlocking     issueops.BlockingAnnotator
 	issueTree         issueops.TreeWalker
 	issueReadyCounter issueops.ReadyCounter
+	issueCounter      issueops.Counter
 	issueQuerier      issueops.Querier
 	issueSweeper      issueops.Sweeper
 	issueDeleter      issueops.Deleter
@@ -308,6 +366,8 @@ type Server struct {
 	// sem bounds handlers that touch the database. Buffered channel rather
 	// than sync.Semaphore so the acquisition can select on a timer.
 	sem chan struct{}
+	// auth is nil on an unauthenticated server, which is the loopback default.
+	auth *TokenFileAuth
 	// semTimeout, semWarn, writeStall, watchPoll and watchBeat default to the
 	// constants above. They are fields rather than constants at the point of use
 	// so the queueing, stalled-write and streaming behavior can be exercised in
@@ -376,7 +436,7 @@ func ValidateBindAddr(addr string, allowNonLoopback bool) (net.IP, error) {
 		return nil, fmt.Errorf("--addr %q: host must be a numeric IP literal, not a name — use 127.0.0.1 rather than localhost", addr)
 	}
 	if !ip.IsLoopback() && !allowNonLoopback {
-		return nil, fmt.Errorf("--addr %q binds beyond loopback; bd serve has no authentication, so this requires --allow-non-loopback", addr)
+		return nil, fmt.Errorf("--addr %q binds beyond loopback, which requires --allow-non-loopback (and, with it, --auth-token-file)", addr)
 	}
 	return ip, nil
 }
@@ -399,6 +459,17 @@ func Listen(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The same posture and allowlist rules the CLI applies, applied again here
+	// so a second caller of this package cannot assemble a Config that serves
+	// the whole surface to a network with no credential.
+	if err := ValidateAuthPosture(cfg.AllowNonLoopback, cfg.Auth != nil, cfg.InsecureNoAuth); err != nil {
+		return nil, err
+	}
+	for _, host := range cfg.AllowedHosts {
+		if err := ValidateAllowedHost(host); err != nil {
+			return nil, err
+		}
+	}
 	if cfg.Stdout == nil {
 		cfg.Stdout = os.Stdout
 	}
@@ -416,14 +487,20 @@ func Listen(cfg Config) (*Server, error) {
 		provider:          cfg.Provider,
 		issueReader:       cfg.Reader,
 		issueClaimer:      cfg.Claimer,
+		issueBatchCloser:  cfg.BatchCloser,
+		issueReadyClaimer: cfg.ReadyClaimer,
+		issueReleaser:     cfg.Releaser,
 		issueLifecycle:    cfg.Lifecycle,
 		settings:          cfg.Settings,
 		issueStats:        cfg.Stats,
 		issueCycles:       cfg.CycleDetector,
 		issueEdges:        cfg.EdgeReader,
+		issueEdgeCounter:  cfg.GraphCounter,
+		issueRelations:    cfg.Relations,
 		issueBlocking:     cfg.BlockingAnnotator,
 		issueTree:         cfg.TreeWalker,
 		issueReadyCounter: cfg.ReadyCounter,
+		issueCounter:      cfg.Counter,
 		issueQuerier:      cfg.Querier,
 		issueSweeper:      cfg.Sweeper,
 		issueDeleter:      cfg.Deleter,
@@ -444,7 +521,8 @@ func Listen(cfg Config) (*Server, error) {
 		log:      log.New(cfg.Stderr, "bd serve: ", log.LstdFlags|log.LUTC),
 		stdout:   cfg.Stdout,
 		ctxBody:  contextResponse(cfg.Workspace, cfg.SchemaVersion, Capabilities()),
-		hosts:    newHostPolicy(ip),
+		hosts:    newHostPolicy(ip, cfg.AllowedHosts),
+		auth:     cfg.Auth,
 		idPrefix: prefix,
 		maxConns: maxConns,
 	}
@@ -536,12 +614,12 @@ func Listen(cfg Config) (*Server, error) {
 // "all or nothing" would turn an honest condition into a special case inside
 // three functions. It is checked once, on its own, below.
 func sourceRoles(cfg Config) []any {
-	return []any{cfg.Reader, cfg.Claimer, cfg.Lifecycle, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
+	return []any{cfg.Reader, cfg.Claimer, cfg.ReadyClaimer, cfg.Releaser, cfg.Lifecycle, cfg.BatchCloser, cfg.Settings, cfg.Stats, cfg.CycleDetector, cfg.EdgeReader, cfg.GraphCounter, cfg.Relations, cfg.BlockingAnnotator, cfg.TreeWalker, cfg.ReadyCounter, cfg.Counter, cfg.Querier, cfg.Sweeper, cfg.Deleter, cfg.BatchCreator, cfg.DependencyEditor, cfg.BatchApplier, cfg.Memories, cfg.MetadataCAS}
 }
 
 // roleSourceNames spells sourceRoles for the refusal message, in the same
 // order, so a caller reading the error learns the whole set it must pass.
-const roleSourceNames = "Reader, Claimer, Lifecycle, Settings, Stats, CycleDetector, EdgeReader, BlockingAnnotator, TreeWalker, ReadyCounter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
+const roleSourceNames = "Reader, Claimer, ReadyClaimer, Releaser, Lifecycle, BatchCloser, Settings, Stats, CycleDetector, EdgeReader, GraphCounter, Relations, BlockingAnnotator, TreeWalker, ReadyCounter, Counter, Querier, Sweeper, Deleter, BatchCreator, DependencyEditor, BatchApplier, Memories and MetadataCAS"
 
 func anyRoleSet(cfg Config) bool {
 	return slices.ContainsFunc(sourceRoles(cfg), func(r any) bool { return r != nil })
@@ -733,6 +811,66 @@ func (s *Server) claimer(r *http.Request) (issueops.Claimer, error) {
 	return checkedClaimer{inner: cl}, nil
 }
 
+// batchCloser returns the many-issue close surface for one request, on the same
+// terms as every role above and held by INTERFACE so uow.BatchCloserSource is
+// load-bearing rather than decorative.
+//
+// Wrapped in checkedBatchCloser from either source, and the hazard it folds is
+// not the one the other wrappers exist for. Nothing here dereferences the issue
+// pointer an outcome carries; what this role owns instead is a POSITIONAL array
+// the client reads against its own argument list, and checkedBatchCloser says
+// what a miscounted or contentless entry in it costs.
+func (s *Server) batchCloser(r *http.Request) (issueops.BatchCloser, error) {
+	if s.provider == nil {
+		return checkedBatchCloser{inner: s.issueBatchCloser}, nil
+	}
+	var src uow.BatchCloserSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	closer, err := src.BatchCloser()
+	if err != nil {
+		return nil, err
+	}
+	return checkedBatchCloser{inner: closer}, nil
+}
+
+// readyClaimer returns the take-ready-work surface for one request.
+//
+// Built the same two ways as claimer above and for the same reasons, and held
+// by INTERFACE so uow.ReadyClaimerSource is load-bearing rather than
+// decorative.
+//
+// IT GOES OUT UNWRAPPED, and the difference from checkedClaimer is the whole
+// reason that wrapper exists. That one folds a nil issue because handleClaim
+// DEREFERENCES the pointer the role returned; this handler forwards it, and a
+// nil is not even a fault here — it is the documented answer for an empty ready
+// front. A wrapper would be ceremony that reads like a guarantee.
+func (s *Server) readyClaimer(r *http.Request) (issueops.ReadyClaimer, error) {
+	if s.provider == nil {
+		return s.issueReadyClaimer, nil
+	}
+	var src uow.ReadyClaimerSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.ReadyClaimer()
+}
+
+// releaser returns the claim-release surface for one request.
+//
+// Built the same two ways as claimer above and for the same reasons: the
+// configured role on the roles source, and on the provider source one built per
+// request so its units of work are timed into THIS request's log line, held by
+// INTERFACE so uow.ReleaserSource is load-bearing rather than decorative — and,
+// from either source, wrapped in checkedReleaser, because the handler
+// dereferences the pointer the result carries.
+func (s *Server) releaser(r *http.Request) (issueops.Releaser, error) {
+	if s.provider == nil {
+		return checkedReleaser{inner: s.issueReleaser}, nil
+	}
+	var src uow.ReleaserSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	rel, err := src.Releaser()
+	if err != nil {
+		return nil, err
+	}
+	return checkedReleaser{inner: rel}, nil
+}
+
 // lifecycle returns the guarded issue-mutation surface for one request.
 //
 // Built the same two ways as claimer above and for the same reasons: the
@@ -782,6 +920,38 @@ func (s *Server) edgeReader(r *http.Request) (issueops.EdgeReader, error) {
 	return src.EdgeReader()
 }
 
+// graphCounter returns the edge-count surface for one request, built the same
+// two ways as edgeReader above and held by INTERFACE so
+// uow.GraphCounterSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED, for counter's reason: the role answers with a VALUE
+// whose slice a nil-safe range walks, so no handler dereferences a pointer it
+// returned and a checked wrapper would be ceremony that reads like a guarantee.
+func (s *Server) graphCounter(r *http.Request) (issueops.GraphCounter, error) {
+	if s.provider == nil {
+		return s.issueEdgeCounter, nil
+	}
+	var src uow.GraphCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.GraphCounter()
+}
+
+// relations returns the single-anchor neighbor surface for one request, built
+// the same two ways as edgeReader above and held by INTERFACE so
+// uow.RelationsSource is load-bearing rather than decorative.
+//
+// It goes out UNWRAPPED even though the role answers with a slice of POINTERS,
+// which is the one place this differs from checkedReader's argument. That
+// wrapper exists because handleGetIssue DEREFERENCES the pointer a role handed
+// back; here wireRelated drops a nil element the way wireItems and wireEdges
+// already do, so there is nothing for a checked wrapper to make safe.
+func (s *Server) relations(r *http.Request) (issueops.Relations, error) {
+	if s.provider == nil {
+		return s.issueRelations, nil
+	}
+	var src uow.RelationsSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.IssueRelations()
+}
+
 // blockingAnnotator returns the derived blocking-decoration surface for one
 // request, on the same terms as every role above and held by INTERFACE so
 // uow.BlockingAnnotatorSource is load-bearing rather than decorative. It goes
@@ -822,6 +992,24 @@ func (s *Server) readyCounter(r *http.Request) (issueops.ReadyCounter, error) {
 	}
 	var src uow.ReadyCounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
 	return src.ReadyCounter()
+}
+
+// counter returns the issue-count surface for one request, on the same terms as
+// readyCounter above and held by INTERFACE so uow.CounterSource is load-bearing
+// rather than decorative.
+//
+// It goes out UNWRAPPED, for readyCounter's reason: both of this role's methods
+// answer with a VALUE, so a checked wrapper would be ceremony that reads like a
+// guarantee. The one pointer-shaped thing in its result is CountByGroupResult's
+// map, and the role promises an empty map rather than nil — a promise the
+// handler does not have to trust, because a nil map ranges and marshals as an
+// empty object either way.
+func (s *Server) counter(r *http.Request) (issueops.Counter, error) {
+	if s.provider == nil {
+		return s.issueCounter, nil
+	}
+	var src uow.CounterSource = timedProvider{inner: s.provider, rec: requestInfo(r.Context())}
+	return src.Counter()
 }
 
 // querier returns the boolean-query surface for one request, on the same terms
@@ -1311,7 +1499,21 @@ func (s *Server) closeStreams() {
 }
 
 // route wraps one operation with the limits that apply to it: the per-request
-// deadline, and — unless the operation is exempt — a database slot.
+// deadline, the bearer credential unless the operation is exempt, the
+// Bd-Project-Id stamp check unless the operation is exempt, and — unless the
+// operation is exempt — a database slot.
+//
+// The credential check runs BEFORE the semaphore, which is the load-bearing
+// ordering: a storm of refused requests then costs one SHA-256 each and can
+// never occupy the slots, or the SQL connections pinned to them, that
+// authenticated clients are waiting for. It runs inside withRequestContext, so
+// a 401 gets a request id and a request log line like every other refusal.
+//
+// The stamp check runs AFTER the credential and before the semaphore: the
+// project-mismatch refusal is the one that discloses this server's own project
+// id (server_project_id), so it must sit behind the authentication gate — an
+// unauthenticated caller is turned away by the 401 before the stamp is ever
+// compared, and so learns nothing about the workspace's identity.
 func (s *Server) route(rt route) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		rec := requestInfo(r.Context())
@@ -1328,6 +1530,23 @@ func (s *Server) route(rt route) http.Handler {
 			r = r.WithContext(ctx)
 		}
 
+		if !rt.authExempt && s.auth != nil && !s.authorize(w, r, rec) {
+			return
+		}
+
+		// Identity before resources: a stamp for the wrong workspace is turned
+		// away before it can buy a database slot or open a unit of work, so a
+		// misdirected read or write costs nothing and mutates nothing. The two
+		// exempt routes (liveness, identity handshake) skip it. It runs after
+		// the credential check so the server_project_id it discloses stays
+		// behind the authentication gate.
+		if !rt.projectExempt {
+			if res := s.checkProjectStamp(r); res != nil {
+				s.fail(w, r, *res)
+				return
+			}
+		}
+
 		if !rt.bypassSemaphore {
 			release, err := s.acquire(r.Context(), rec)
 			if err != nil {
@@ -1339,6 +1558,103 @@ func (s *Server) route(rt route) http.Handler {
 
 		rt.handler(s, w, r)
 	})
+}
+
+// authorize verifies the request's bearer credential, writing the 401 itself
+// and reporting whether the handler may run.
+//
+// The presented credential appears in NO log field and NO response byte. It is
+// deliberately not recorded through rec.refuse, which is defined as an echoed
+// CALLER VALUE and goes on the request line: a Host header or a parameter name
+// is attacker-controlled text worth attributing, and a token is a secret. What
+// the log gets instead is the reason — which of the three client mistakes it
+// was — and the request id that ties it to the response.
+func (s *Server) authorize(w http.ResponseWriter, r *http.Request, rec *reqInfo) bool {
+	token, reason := bearerCredential(r.Header.Get("Authorization"))
+	if reason == "" {
+		ok, reloadErr := s.auth.Verify(token)
+		if reloadErr != nil {
+			// A reload that failed leaves the last-good token set in force, so
+			// this is not a refusal on its own — but it means the file the
+			// operator is rotating is unreadable, and nothing else would say so.
+			s.event("auth_reload_error", "request_id", rec.id, "error", reloadErr.Error())
+		}
+		if ok {
+			return true
+		}
+		reason = "unknown_token"
+	}
+
+	s.event("auth_refused", "request_id", rec.id, "op", rec.op,
+		"reason", reason, "remote_addr", r.RemoteAddr)
+	s.fail(w, r, newResult(CodeUnauthenticated, ""))
+	return false
+}
+
+// bearerCredential extracts the token from an Authorization header value. It
+// returns a non-empty reason instead when there is nothing to verify, so the
+// log can separate a misconfigured client from a wrong or stale token.
+//
+// The scheme is matched case-insensitively, which RFC 9110 requires.
+func bearerCredential(header string) (token, reason string) {
+	if strings.TrimSpace(header) == "" {
+		return "", "missing"
+	}
+	rest, ok := strings.CutPrefix(header, "Bearer ")
+	if !ok {
+		scheme, tail, split := strings.Cut(header, " ")
+		if !split || !strings.EqualFold(scheme, "Bearer") {
+			return "", "malformed"
+		}
+		rest = tail
+	}
+	if token = strings.TrimSpace(rest); token == "" {
+		return "", "malformed"
+	}
+	return token, ""
+}
+
+// authLabel describes the credential posture for the startup line. It names the
+// token FILE, never a token: the path is configuration an operator already
+// knows, and the contents are the secret.
+func (s *Server) authLabel() string {
+	if s.auth == nil {
+		return "none"
+	}
+	return "bearer (" + s.auth.path + ")"
+}
+
+// checkProjectStamp enforces per-request workspace identity. A client that
+// stamps a request with its intended workspace's project id in the
+// Bd-Project-Id header is asserting "I mean to be talking to THIS workspace"; if
+// the id it names is not the one this server serves, the request is refused
+// before it can read or write the wrong workspace. It returns nil when the
+// request may proceed, or the 400 to write.
+//
+// The comparison is LITERAL, and a server whose own project id is empty refuses
+// any non-empty stamp: it cannot prove it is the workspace the client named, so
+// it does not answer as if it were. That mirrors the identity handshake — a
+// server advertises the id it can assert, and asserts nothing when it has none.
+//
+// Two paths return nil. An ABSENT header is the backward-compatible one: an
+// older client never sends it, and enforcement triggers only when the header
+// arrives, so this adds no precondition to any request already in the field. A
+// stamp equal to the server's own project id is a match.
+//
+// The refusal is recorded on the request line like every other middleware
+// refusal, so a client persistently addressing the wrong server is attributable
+// on loopback down to the local process.
+func (s *Server) checkProjectStamp(r *http.Request) *Result {
+	stamp := r.Header.Get(ProjectIDHeader)
+	if stamp == "" {
+		return nil
+	}
+	if stamp == s.ctxBody.ProjectId {
+		return nil
+	}
+	requestInfo(r.Context()).refuse(stamp)
+	res := ProjectMismatch(stamp, s.ctxBody.ProjectId)
+	return &res
 }
 
 // fail writes a problem response and records what it was for the log line.
@@ -1444,9 +1760,10 @@ type hostPolicy struct {
 	// are the same hosts as ::1 and 127.0.0.1, and a client that spells one of
 	// them the long way is not an attacker.
 	ips []net.IP
-	// names are the allowed non-numeric Host values, lowercased. There is
-	// exactly one, "localhost", and no mechanism to add another: a DNS name in
-	// a Host header is precisely what the rebinding attack carries.
+	// names are the allowed non-numeric Host values, lowercased. "localhost"
+	// is always there; an operator may enumerate more with --allowed-host, and
+	// nothing else can add one. Matching is EXACT — no wildcard and no suffix
+	// syntax — so the allowlist is precisely what was enumerated.
 	names map[string]bool
 	// anyIP additionally allows ANY numeric Host literal. Only a wildcard bind
 	// sets it; see newHostPolicy for why that is still a rebinding defense.
@@ -1469,7 +1786,14 @@ type hostPolicy struct {
 // would instead surrender the defense on the serving host's own loopback
 // interface, which is rebinding's canonical target, and on every LAN browser
 // behind a firewall the attacker cannot otherwise reach.
-func newHostPolicy(bind net.IP) hostPolicy {
+// EXTRA is the operator's enumerated additions (--allowed-host). A deployment
+// where clients dial a service DNS name is refused by the policy above on every
+// single request, so without this the server is unreachable rather than
+// protected. Admitting a name the operator named does not weaken the defense
+// the check exists for: a rebound page still cannot make a browser send that
+// Host to 127.0.0.1, and the in-cluster clients that do send it are not
+// browsers. Numeric values land in ips, so a pod IP can be enumerated too.
+func newHostPolicy(bind net.IP, extra []string) hostPolicy {
 	p := hostPolicy{
 		ips:   []net.IP{net.IPv4(127, 0, 0, 1), net.IPv6loopback},
 		names: map[string]bool{"localhost": true},
@@ -1478,7 +1802,46 @@ func newHostPolicy(bind net.IP) hostPolicy {
 	if !p.anyIP && !containsIP(p.ips, bind) {
 		p.ips = append(p.ips, bind)
 	}
+	for _, host := range extra {
+		h := hostOnly(host)
+		if ip := net.ParseIP(h); ip != nil {
+			if !containsIP(p.ips, ip) {
+				p.ips = append(p.ips, ip)
+			}
+			continue
+		}
+		p.names[h] = true
+	}
 	return p
+}
+
+// ValidateAllowedHost refuses an allowlist entry that is not a bare host.
+//
+// The Host header's port is stripped before matching (hostOnly), so an entry
+// carrying one would silently never match — and an operator who wrote it would
+// reasonably read the startup line as proof that it does. A URL, a path or
+// embedded whitespace is the same mistake in a louder form.
+func ValidateAllowedHost(v string) error {
+	if strings.TrimSpace(v) == "" {
+		return errors.New("--allowed-host is empty; pass the Host header value clients send, such as bd-myproject.beads.svc.cluster.local")
+	}
+	if strings.ContainsAny(v, " \t\r\n") {
+		return fmt.Errorf("--allowed-host %q contains whitespace; it must be a bare host name or IP", v)
+	}
+	if strings.ContainsAny(v, "/@") {
+		return fmt.Errorf("--allowed-host %q looks like a URL; pass just the host, with no scheme and no path", v)
+	}
+	// An IPv6 address is spelled in brackets in a Host header, so an operator
+	// copying one off the wire types it that way. hostOnly strips them before
+	// matching, so the entry works; refusing it here — with a message about a
+	// port it does not have — would be the validation lying about the policy.
+	if net.ParseIP(strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")) != nil {
+		return nil
+	}
+	if strings.Contains(v, ":") {
+		return fmt.Errorf("--allowed-host %q carries a port; the port is stripped from a request's Host before matching, so an entry with one could never match", v)
+	}
+	return nil
 }
 
 // allows reports whether a Host header value is one this server answers to.
@@ -1546,6 +1909,10 @@ func (s *Server) logStartup() {
 		"database", s.cfg.Workspace.Database,
 		"host_allowlist", s.hosts.label(),
 		"capabilities", strings.Join(s.ctxBody.Capabilities, ","),
+		// Whether this server requires a credential is the first thing an
+		// operator checks after a deploy, and the last thing they should have
+		// to infer from the absence of a flag in a process listing.
+		"auth", s.authLabel(),
 	)
 
 	limits := []any{

@@ -46,6 +46,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("DeleteIssuesBySourceRepo", func(t *testing.T) { testDeleteIssuesBySourceRepo(t, factory) })
 	t.Run("CreateIssuesWithFullOptions", func(t *testing.T) { testCreateIssuesWithFullOptions(t, factory) })
 	t.Run("ReconcileHierarchicalChildIDs", func(t *testing.T) { testReconcileHierarchicalChildIDs(t, factory) })
+	t.Run("ReconcileSkipsMissingParentCounter", func(t *testing.T) { testReconcileSkipsMissingParentCounter(t, factory) })
 	t.Run("Slots", func(t *testing.T) { testSlots(t, factory) })
 }
 
@@ -718,6 +719,61 @@ func testReconcileHierarchicalChildIDs(t *testing.T, f Factory) {
 	}
 	if next, err := s.GetNextChildID(c, "x-1.2"); err != nil || next != "x-1.2.2" {
 		t.Errorf("GetNextChildID(x-1.2) = (%q,%v), want (x-1.2.2,nil) — grandchild counter reconciled", next, err)
+	}
+}
+
+// The other half of the same upsert: a dotted id whose PARENT ROW DOES NOT EXIST is
+// accepted, and no counter is minted for the absent parent. ReconcileChildCounters
+// probes the parent table first and `continue`s on sql.ErrNoRows (issueops/create.go),
+// because orphaned dotted ids are ordinary import input — the parent was deleted
+// before the export — and both counter tables carry a parent foreign key, so minting
+// the row anyway fails the whole create rather than merely leaving a stray counter.
+//
+// The skip's only real-backend exerciser was testAuditCreateOrphanHandling, deleted
+// with the orphan-handling modes in #5497. What survived is an sqlmock unit test
+// (issueops.TestReconcileChildCountersSkipsMissingParent), which asserts against a
+// mock and so cannot see how a real engine answers the parent lookup.
+//
+// HOW THE ABSENCE IS OBSERVED. No storage method reads child_counters, and
+// GetNextChildID — the one method whose answer depends on it — SELF-HEALS from the
+// issue rows, taking max(counter, highest existing direct child). So while the orphan
+// y-1.1 is still stored, a skipped counter and a wrongly minted one BOTH answer y-1.2
+// and the bug hides; and with the parent still absent the method cannot be called at
+// all, because its own counter upsert trips the same foreign key. Each arm therefore
+// deletes the orphan (removing the self-heal signal) and then creates the parent
+// (making the upsert legal), leaving the counter row as the only thing that could
+// still advance the answer: parent.1 means nothing was minted, parent.2 means it was.
+//
+// That self-heal is also why the skip costs nothing: a later child of a
+// resurrected parent steps past the surviving orphan instead of colliding with it.
+//
+// Both create paths are covered because they reach the shared body from different
+// call sites — the batch path once over the whole slice, the singular path per issue.
+func testReconcileSkipsMissingParentCounter(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// Neither y-1 nor z-1 exists at this point: these ARE the orphan creates.
+	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
+		withDefaults(&types.Issue{ID: "y-1.1", Title: "batch orphan"}),
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("batch create of orphan y-1.1 = %v, want nil — the missing-parent skip is what keeps the counter foreign key from failing the create", err)
+	}
+	if err := s.CreateIssue(c, withDefaults(&types.Issue{ID: "z-1.1", Title: "singular orphan"}), "a"); err != nil {
+		t.Fatalf("singular create of orphan z-1.1 = %v, want nil — same skip, per-issue call site", err)
+	}
+
+	for _, parent := range []string{"y-1", "z-1"} {
+		child := parent + ".1"
+		if _, err := s.GetIssue(c, child); err != nil {
+			t.Fatalf("orphan hierarchical child %s not created: %v", child, err)
+		}
+		must(t, s.DeleteIssue(c, child))
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: parent, Title: "late parent"}), "a"))
+		if next, err := s.GetNextChildID(c, parent); err != nil || next != child {
+			t.Errorf("GetNextChildID(%s) = (%q,%v), want (%s,nil) — a counter row was minted for %s while it did not exist",
+				parent, next, err, child, parent)
+		}
 	}
 }
 

@@ -167,7 +167,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		if claimed.OldIssue.Status != types.StatusInProgress || claimed.OldIssue.Assignee != attempt.Actor {
+		if claimAdvancedTheRow(claimed, attempt.Actor) {
 			changedAny = true
 			issueTable, _, eventTable, _ := WispTableRouting(claimed.IsWisp)
 			tables.Add(issueTable, eventTable)
@@ -254,6 +254,19 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		return publicops.UpdateResult{}, nil, err
 	}
 	return publicops.UpdateResult{Issue: hydrated, Changed: changedAny}, tables, nil
+}
+
+// claimAdvancedTheRow reports whether ClaimIssueInTx's CAS represents a real
+// mutation from the pre-image it read, as opposed to an idempotent re-claim
+// that matched the CAS but changed nothing worth staging. Comparing the
+// pre-image assignee to actor verbatim (ga-v2k49, steveyegge's #5479
+// re-review) mistook a holder re-claiming under a respelled identity — a
+// dotted alias vs. its sanitized form, ga-wzl83's repro shape — for a fresh
+// mutation: ClaimIssueInTx's own CAS already treats the two spellings as the
+// same holder and writes nothing, but this check disagreed and staged a
+// phantom issues+events mutation for a request that changed no bytes.
+func claimAdvancedTheRow(claimed *ClaimResult, actor string) bool {
+	return claimed.OldIssue.Status != types.StatusInProgress || !actorMatches(claimed.OldIssue.Assignee, actor)
 }
 
 // ExecuteClose applies a guarded close in tx and reports durable tables changed.

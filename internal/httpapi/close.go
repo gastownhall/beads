@@ -17,7 +17,7 @@ import (
 // schema is additionalProperties: false, so anything else is refused BY NAME —
 // which is why the body is decoded as raw members first, the posture claim and
 // batchCreate already take.
-var closeRequestMembers = []string{"actor", "reason", "session", "force"}
+var closeRequestMembers = []string{"actor", "reason", "session", "force", expectedVersionMember}
 
 // handleClose closes one issue: the second half of the loop this surface exists
 // to serve, and the half that still forked a subprocess.
@@ -55,21 +55,28 @@ func (s *Server) handleClose(w http.ResponseWriter, r *http.Request) {
 
 	lifecycle, err := s.lifecycle(r)
 	if err != nil {
-		s.failClose(w, r, err)
+		s.failClose(w, r, request, err)
 		return
 	}
 	result, err := lifecycle.Close(r.Context(), request)
 	if err != nil {
-		s.failClose(w, r, err)
+		s.failClose(w, r, request, err)
 		return
 	}
 	// `already_closed` is the wire's name for the idempotent re-close, which is
 	// exactly the case the role reports as an unchanged result — and the case
 	// whose `reason` and `session` were NOT rewritten.
+	//
+	// `revision` is the row's post-close concurrency token, read off the same
+	// snapshot rather than computed. It is on the wire because `expected_version`
+	// is: a guard whose token no response carries is a guard a caller cannot
+	// fill. types.Issue.RowVersion is `json:"-"`, so the Issue body cannot carry
+	// it and this member is where it lives — updateIssue's arrangement exactly.
 	writeJSON(w, apigen.CloseIssueResponse{
 		Issue:         *result.Issue,
 		AlreadyClosed: !result.Changed,
 		OpenChildren:  result.OpenChildren,
+		Revision:      result.Issue.RowVersion,
 	})
 }
 
@@ -103,16 +110,22 @@ func (s *Server) closeRequest(w http.ResponseWriter, r *http.Request, id string)
 	if !ok {
 		return issueops.CloseRequest{}, false
 	}
+	// The guard the response's `revision` exists to feed. Read through the
+	// shared int64 decoder rather than a local one so a malformed token is
+	// refused with the same sentence on every operation that takes one.
+	expectedVersion, res := applyVersionGuardMember(members, "")
+	if res != nil {
+		s.fail(w, r, *res)
+		return issueops.CloseRequest{}, false
+	}
 
-	// ExpectedVersion stays unpublished on this surface: a precondition would
-	// need a frozen conflict code for ErrVersionMismatch and a `row_version` on
-	// the issue body for clients to echo. Both are additive later.
 	return issueops.CloseRequest{
-		Actor:   actor,
-		IssueID: id,
-		Reason:  reason,
-		Session: session,
-		Force:   force,
+		Actor:           actor,
+		IssueID:         id,
+		Reason:          reason,
+		Session:         session,
+		Force:           force,
+		ExpectedVersion: expectedVersion,
 	}, true
 }
 
@@ -201,18 +214,35 @@ func (s *Server) booleanMember(w http.ResponseWriter, r *http.Request, members m
 	return *value, true
 }
 
-// failClose answers a failed close, adding the extension member the
-// open-children 409 carries.
+// failClose answers a failed close: the precondition's 409, then the shared
+// classification with the extension member the open-children 409 carries.
 //
-// The count comes from *issueops.CloseOpenChildrenError's own field, which the
-// role fills inside the transaction that refused — never from parsing the
-// sentinel's message ("%d open child issue(s)"). That substring classification
-// is what a client adopting this endpoint gets to delete, and it can only
-// delete it if the server never does it either.
+// THE PRECONDITION ARM IS MATCHED TYPED AND FIRST, obeying the rule
+// ClassifyError states rather than restating it: that function cannot build
+// this 409, because the refusal echoes the value the REQUEST guarded on and it
+// is handed an error alone.
+//
+// The cost of forgetting the arm is not a worse 4xx. Neither leg wraps
+// ErrVersionMismatch in ErrValidation — the store legs return CheckVersionInTx's
+// error through runIssueOperationTx unchanged and the unit of work returns its
+// own — so it arrives as a bare sentinel, falls through failErr's default, and
+// every guard miss on this operation becomes a GENERIC 500. Verified by
+// mutation rather than asserted: removing the arm turns
+// TestCloseRefusesAStaleGuard into a 500.
+//
+// The open-children count comes from *issueops.CloseOpenChildrenError's own
+// field, which the role fills inside the transaction that refused — never from
+// parsing the sentinel's message ("%d open child issue(s)"). That substring
+// classification is what a client adopting this endpoint gets to delete, and it
+// can only delete it if the server never does it either.
 //
 // The live-blocker refusal shares the code and carries NO member, which is what
 // makes member presence the discriminator the document promises.
-func (s *Server) failClose(w http.ResponseWriter, r *http.Request, err error) {
+func (s *Server) failClose(w http.ResponseWriter, r *http.Request, request issueops.CloseRequest, err error) {
+	if errors.Is(err, issueops.ErrVersionMismatch) {
+		s.fail(w, r, versionPreconditionResult(request.ExpectedVersion))
+		return
+	}
 	var openChildren *issueops.CloseOpenChildrenError
 	if !errors.As(err, &openChildren) {
 		s.failErr(w, r, err)
@@ -224,3 +254,32 @@ func (s *Server) failClose(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	s.fail(w, r, res)
 }
+
+// versionPreconditionResult builds the 409 for the row-version guard that
+// missed, naming the member and echoing what the request asked for.
+//
+// It is shared by the close, the reopen and the delete because all three
+// publish ONE guard, where updatePreconditionResult has to choose between
+// three. The rule is updatePreconditionResult's unchanged: the expected value
+// comes from the REQUEST rather than from a read, and the observed value is
+// absent, because the refusal rolled its transaction back and a read afterwards
+// would describe a row the refusal never saw. See PreconditionFailed.
+//
+// A nil expectation cannot reach here from any of the three handlers — the
+// role raises this sentinel only when a guard was sent — but it is handled
+// rather than dereferenced, so a role that returns it unprompted is a 409
+// without the echoed member instead of a panic on a live server.
+func versionPreconditionResult(expected *int64) Result {
+	res := PreconditionFailed()
+	member := expectedVersionMember
+	res.Problem.Param = &member
+	if expected != nil {
+		res = res.WithExpectedVersion(*expected)
+	}
+	return res
+}
+
+// expectedVersionMember is the one spelling of the row-version guard, shared by
+// the three operations that publish it so the member name a client reads off
+// `param` cannot drift from the member name it sent.
+const expectedVersionMember = "expected_version"

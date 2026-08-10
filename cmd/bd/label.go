@@ -296,6 +296,29 @@ var labelListCmd = &cobra.Command{
 		return runLabelList(rootCtx, args)
 	},
 }
+
+// labelListAllSearcher is the whole storage surface `bd label list-all`
+// needs. SearchIssues already hydrates Issue.Labels in bulk; omitting
+// GetLabels here keeps the per-issue lookup — one extra connection and
+// transaction per issue in embedded mode — unreachable (GH#5325).
+type labelListAllSearcher interface {
+	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error)
+}
+
+func countLabelsAcrossIssues(ctx context.Context, s labelListAllSearcher) (map[string]int, error) {
+	issues, err := s.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return nil, err
+	}
+	labelCounts := make(map[string]int)
+	for _, issue := range issues {
+		for _, label := range issue.Labels {
+			labelCounts[label]++
+		}
+	}
+	return labelCounts, nil
+}
+
 var labelListAllCmd = &cobra.Command{
 	Use:           "list-all",
 	Short:         "List all unique labels in the database",
@@ -313,22 +336,9 @@ var labelListAllCmd = &cobra.Command{
 			return runLabelListAllProxiedServer(rootCtx)
 		}
 
-		ctx := rootCtx
-		var issues []*types.Issue
-		var err error
-		issues, err = store.SearchIssues(ctx, "", types.IssueFilter{})
+		labelCounts, err := countLabelsAcrossIssues(rootCtx, store)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
-		}
-		labelCounts := make(map[string]int)
-		for _, issue := range issues {
-			labels, err := store.GetLabels(ctx, issue.ID)
-			if err != nil {
-				return HandleErrorRespectJSON("getting labels for %s: %v", issue.ID, err)
-			}
-			for _, label := range labels {
-				labelCounts[label]++
-			}
 		}
 		type labelInfo struct {
 			Label string `json:"label"`
