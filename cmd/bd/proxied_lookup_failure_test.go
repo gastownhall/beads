@@ -331,6 +331,22 @@ var proxiedLookupCommands = []struct {
 		wantNotFound: "Error: issue bd-missing not found",
 		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
 	},
+	{
+		name: "human respond",
+		run: func(ctx context.Context) error {
+			return runHumanRespondProxiedServer(ctx, stubMissingID, "Response: resp")
+		},
+		wantNotFound: "Error: issue not found: bd-missing",
+		wantHardErr:  "Error: resolving issue ID bd-missing: connection reset by peer",
+	},
+	{
+		name: "human dismiss",
+		run: func(ctx context.Context) error {
+			return runHumanDismissProxiedServer(ctx, stubMissingID, "Dismissed")
+		},
+		wantNotFound: "Error: issue not found: bd-missing",
+		wantHardErr:  "Error: resolving issue ID bd-missing: connection reset by peer",
+	},
 }
 
 // TestProxiedLookupReportsMissingIssue covers the errors.Is(storage.ErrNotFound)

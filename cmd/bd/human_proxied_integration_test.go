@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os/exec"
 	"slices"
@@ -204,6 +205,38 @@ func TestProxiedServerHuman(t *testing.T) {
 		}
 		if strings.Contains(listOut, responded.ID) || strings.Contains(listOut, dismissed.ID) {
 			t.Errorf("closed beads leaked into open human list:\n%s", listOut)
+		}
+	})
+
+	// A human-labeled bead can be a WISP: `bd human list` shows the whole
+	// ephemeral plane, so a bead a person can SEE here must be one they can
+	// also ANSWER. Before the wisp branch, respond resolved the wisp fine and
+	// then wrote its comment and close against the durable tables, where the
+	// row does not exist.
+	t.Run("respond_on_wisp", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "hm7")
+		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp question", "--ephemeral", "--labels", "human")
+
+		// No label warning: the label load has to reach the WISP plane too,
+		// and a failed load must stay silent rather than claim the label is
+		// missing.
+		_, stderr := bdProxiedHuman(t, bd, p.dir, "respond", wisp.ID, "wisp answer")
+		if strings.Contains(stderr, "does not have 'human' label") {
+			t.Errorf("unexpected label warning for a human-labeled wisp:\n%s", stderr)
+		}
+
+		db := openProxiedDB(t, p)
+		if got := readStatus(t, db, wisp.ID); got != types.StatusClosed {
+			t.Errorf("expected closed wisp, got status %q", got)
+		}
+		var wispComments int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM wisp_comments WHERE issue_id = ?", wisp.ID).Scan(&wispComments); err != nil {
+			t.Fatalf("count wisp_comments: %v", err)
+		}
+		if wispComments != 1 {
+			t.Errorf("wisp_comments count = %d, want 1: the comment must land on the wisp plane", wispComments)
 		}
 	})
 
