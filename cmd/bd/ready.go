@@ -82,6 +82,12 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --gated")
 			}
+			// Duplicated from gatherReadyInput because this route dispatches
+			// the specialized modes BEFORE gathering, so the gatherer's copy
+			// reaches the proxied route only.
+			if brief, _ := cmd.Flags().GetBool("brief"); brief {
+				return HandleErrorRespectJSON("--gated cannot be combined with --brief")
+			}
 			// Delegate to the non-emitting core so `bd ready --gated` records
 			// exactly one cli_command event ("ready"), not also "mol-ready-gated".
 			return runMolReadyGatedCore(cmd, args)
@@ -92,6 +98,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --mol")
 			}
+			if brief, _ := cmd.Flags().GetBool("brief"); brief {
+				return HandleErrorRespectJSON("--mol cannot be combined with --brief")
+			}
 			return runMoleculeReady(cmd, molID)
 		}
 
@@ -99,6 +108,9 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		if explain {
 			if claimReady {
 				return HandleErrorRespectJSON("--claim cannot be combined with --explain")
+			}
+			if brief, _ := cmd.Flags().GetBool("brief"); brief {
+				return HandleErrorRespectJSON("--explain cannot be combined with --brief")
 			}
 			return runReadyExplain(cmd)
 		}
@@ -707,6 +719,14 @@ func init() {
 	readyCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 	readyCmd.Flags().Bool("explain", false, "Show dependency-aware reasoning for why issues are ready or blocked")
 	readyCmd.Flags().Bool("claim", false, "Atomically claim the first ready issue matching the filters")
+	// Projection toggle, the same one `bd list --brief` sets. Refused with
+	// --claim, which returns one whole row by contract; see gatherReadyInput.
+	readyCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields still "+
+			"select on them. An omitted field is indistinguishable from an empty "+
+			"one; fetch a whole issue with bd show. Requires --json, and cannot be "+
+			"combined with --claim, --gated, --mol or --explain.")
 	// Metadata filtering (GH#1406)
 	readyCmd.Flags().StringArray("metadata-field", nil, "Filter by metadata field (key=value, repeatable)")
 	readyCmd.Flags().String("has-metadata-key", "", "Filter issues that have this metadata key set")

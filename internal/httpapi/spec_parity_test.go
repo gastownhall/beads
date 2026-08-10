@@ -909,9 +909,17 @@ func TestClaimNextRequestMembersMatchTheHandler(t *testing.T) {
 // admit one set: a claim answering a different question than the listing shows
 // would hand an agent work the listing never offered it.
 //
-// `limit` is the one deliberate difference, and it is asserted as an absence
-// rather than merely not listed, because it is the parameter this operation
-// refuses BY VALUE.
+// The deliberate differences are the listing's own PAGE knobs, which are not
+// filters: they bound or shape what one request returns rather than selecting
+// which rows are eligible, so a claim has no use for them.
+// issueops.ValidateClaimNextRequest refuses each one by VALUE, and because
+// readyFilters does not decode them, the HTTP door refuses them earlier still
+// as an unknown parameter. Each is asserted as an absence from claimNext rather
+// than merely left off the comparison, because a documented parameter that is
+// always a 400 is a trap either way.
+//
+// `sort` is deliberately NOT on that list. It picks WHICH row comes first, so
+// it changes which one a claim takes, and both operations must admit it.
 func TestClaimNextAdmitsExactlyTheListingsFilters(t *testing.T) {
 	doc := loadSpec(t)
 	names := func(path, method string) map[string]bool {
@@ -928,10 +936,19 @@ func TestClaimNextAdmitsExactlyTheListingsFilters(t *testing.T) {
 	listing := names("/v0/beads/ready", "get")
 	claimNext := names("/v0/beads/issues:claimNext", "post")
 
-	if !listing["limit"] {
-		t.Fatal("the listing no longer publishes `limit`; this test's one exception is stale")
+	pageKnobs := map[string]string{
+		"limit": "bounds the page; a claim takes one row however large the pool it scanned",
+		"brief": "projects the rows a page returns; a claim refetches its winning row whole, so there is nothing to project",
 	}
-	delete(listing, "limit")
+	for name, why := range pageKnobs {
+		if !listing[name] {
+			t.Fatalf("the listing no longer publishes `%s`; this test's exception for it is stale (%s)", name, why)
+		}
+		delete(listing, name)
+		if claimNext[name] {
+			t.Errorf("claimNext publishes `%s`; it refuses one by value (%s), and a documented parameter that is always a 400 is a trap", name, why)
+		}
+	}
 
 	if extra := diff(claimNext, listing); len(extra) > 0 {
 		t.Errorf("claimNext publishes parameters the ready listing does not: %v\n"+
@@ -939,10 +956,8 @@ func TestClaimNextAdmitsExactlyTheListingsFilters(t *testing.T) {
 	}
 	if missing := diff(listing, claimNext); len(missing) > 0 {
 		t.Errorf("the ready listing publishes parameters claimNext does not: %v\n"+
-			"the handler decodes them through readyFilters either way, so the document is understating what it accepts", missing)
-	}
-	if claimNext["limit"] {
-		t.Error("claimNext publishes `limit`; it refuses one, and a documented parameter that is always a 400 is a trap")
+			"the handler decodes them through readyFilters either way, so the document is understating what it accepts.\n"+
+			"If one of these is a page knob rather than a filter, add it to pageKnobs above with its reason", missing)
 	}
 }
 

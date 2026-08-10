@@ -65,6 +65,10 @@ func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
 	// and never sends empty.
 	req.Sort = q.oneOf("sort", readySortDefault, "hybrid", "priority", "oldest")
 	req.Limit = q.limit()
+	// Decoded here and not in readyFilters, which is the vocabulary the count
+	// shares: this is a projection of the rows a page returns, in the same
+	// class as the two lines above it, and the count returns no rows to project.
+	req.Brief = q.boolean("brief")
 
 	if !s.acceptQuery(w, r, q) {
 		return
@@ -339,6 +343,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 
 		ParentID: q.str("parent"),
 
+		Brief:            q.boolean("brief"),
 		AllFlag:          q.boolean("all"),
 		IncludeTemplates: q.boolean("include_templates"),
 		IncludeGates:     q.boolean("include_gates"),

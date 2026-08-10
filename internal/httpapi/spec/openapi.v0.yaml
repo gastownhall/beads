@@ -532,6 +532,23 @@ paths:
             type: integer
             minimum: 0
             default: 100
+        - name: brief
+          in: query
+          description: >-
+            Omit the free-form text from every item: `description`, `design`,
+            `acceptance_criteria`, `notes`, `payload` and `waiters` are not
+            selected. Filtering is unaffected, because it selects rows and this
+            selects fields. Default false, so the payload is unchanged for a
+            client that does not ask.
+
+
+            The response carries no marker for the omission, so an omitted
+            field is indistinguishable from a genuinely empty one: only the
+            client that sent this parameter knows the rows are partial. Fetch a
+            whole issue with `GET /v0/beads/issues/{id}`.
+          schema:
+            type: boolean
+            default: false
       security:
         - bearerToken: []
       responses:
@@ -1245,6 +1262,23 @@ paths:
             type: integer
             minimum: 0
             default: 50
+        - name: brief
+          in: query
+          description: >-
+            Omit the free-form text from every item: `description`, `design`,
+            `acceptance_criteria`, `notes`, `payload` and `waiters` are not
+            selected. Filtering is unaffected, because it selects rows and this
+            selects fields. Default false, so the payload is unchanged for a
+            client that does not ask.
+
+
+            The response carries no marker for the omission, so an omitted
+            field is indistinguishable from a genuinely empty one: only the
+            client that sent this parameter knows the rows are partial. Fetch a
+            whole issue with `GET /v0/beads/issues/{id}`.
+          schema:
+            type: boolean
+            default: false
       security:
         - bearerToken: []
       responses:

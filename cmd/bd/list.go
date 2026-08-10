@@ -443,6 +443,15 @@ func init() {
 			"Cannot combine with --label, --label-any, --label-pattern, --label-regex, "+
 			"--exclude-label, or --no-labels.")
 
+	// Projection toggle. Like --skip-labels it trades data for bytes, and
+	// unlike it the dropped fields leave a mark on the row (IsLitePartial).
+	listCmd.Flags().Bool("brief", false,
+		"Omit the free-form text (description, design, acceptance criteria, notes, "+
+			"payload, waiters) from each row. Filters that read those fields, such as "+
+			"--desc-contains, still select on them. An omitted field is"+
+			" indistinguishable from an empty one in --json; fetch a whole issue"+
+			" with bd show.")
+
 	// Priority ranges
 	listCmd.Flags().String("priority-min", "", "Filter by minimum priority (inclusive, 0-4 or P0-P4)")
 	listCmd.Flags().String("priority-max", "", "Filter by maximum priority (inclusive, 0-4 or P0-P4)")

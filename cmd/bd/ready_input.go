@@ -60,6 +60,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.gated, _ = cmd.Flags().GetBool("gated")
 	in.molID, _ = cmd.Flags().GetString("mol")
 	in.explain, _ = cmd.Flags().GetBool("explain")
+	in.Brief, _ = cmd.Flags().GetBool("brief")
 	in.prettyFormat, _ = cmd.Flags().GetBool("pretty")
 	in.plainFormat, _ = cmd.Flags().GetBool("plain")
 	in.jsonOut = jsonOutput
@@ -106,6 +107,35 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	}
 	if in.claim && in.explain {
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
+	}
+	// THE PROJECTION IS REFUSED WHEREVER IT CANNOT BE HONORED, rather than
+	// accepted and dropped. types.WorkFilter.Lite reaches the driver through
+	// one query, the counts mega-query behind GetReadyWorkWithCounts, and
+	// `bd ready` only runs that query for --json. Everything below reaches a
+	// different one: the text routes call the bare GetReadyWork, and --gated,
+	// --mol and --explain answer with shapes of their own. A flag those routes
+	// take and ignore is exactly the silent no-op this feature exists to close,
+	// so each combination says so instead.
+	//
+	// --claim is refused for a stronger reason than the rest: it cannot be
+	// served on ANY route. ClaimNext refetches its winning row whole and
+	// returns ErrValidation for a projected request
+	// (issueops.ValidateClaimNextRequest). Catching it here keeps the message
+	// about the two flags the user typed, and leaves readyRoleRequest free to
+	// carry Brief for the COUNT, which does need it.
+	if in.Brief {
+		switch {
+		case in.claim:
+			return in, HandleErrorRespectJSON("--claim cannot be combined with --brief")
+		case in.gated:
+			return in, HandleErrorRespectJSON("--gated cannot be combined with --brief")
+		case in.molID != "":
+			return in, HandleErrorRespectJSON("--mol cannot be combined with --brief")
+		case in.explain:
+			return in, HandleErrorRespectJSON("--explain cannot be combined with --brief")
+		case !in.jsonOut:
+			return in, HandleErrorRespectJSON("--brief requires --json; the text renderings print none of the fields it omits")
+		}
 	}
 	if in.Offset > 0 && in.claim {
 		return in, HandleErrorRespectJSON("--offset cannot be combined with --claim")
