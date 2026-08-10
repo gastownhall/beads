@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -207,6 +208,19 @@ func RunReleaserRefusesAForeignClaimUntilForced(t *testing.T, ctx context.Contex
 // most likely to get backwards: a match REPLACES the ownership fence, so the
 // caller need not be the holder. An implementation that ran the fence anyway
 // would answer ErrNotOwner here and pass every other case in this file.
+//
+// THE LAST TWO LIMBS PIN WHAT "MATCH" MEANS, which nothing at this tier pinned
+// before (ga-2ltro.14) — and it is not string equality. The comparison is
+// SEPARATOR-INSENSITIVE AND NOTHING ELSE (canonicalActor, ga-5ksp5): a run of
+// ".", "_" or "-" matches any other such run, so an expectation spelled under
+// one layer's separator convention releases a claim stored under another's.
+// NOTHING ELSE IS FORGIVEN, and the padded limb is the half that says so: an
+// implementation that reached for strings.TrimSpace to make the respelled limb
+// pass would release on an expectation the caller never actually held.
+//
+// The two limbs are ONE case rather than two because they are one predicate,
+// and a reader who sees only the forgiving half draws exactly the wrong
+// conclusion about the other.
 func RunReleaserReleasesOnlyTheExpectedHolder(t *testing.T, ctx context.Context, fixture ReleaserFixture) {
 	t.Helper()
 	stale := "releaser-previous-holder"
@@ -236,6 +250,38 @@ func RunReleaserReleasesOnlyTheExpectedHolder(t *testing.T, ctx context.Context,
 		t.Errorf("Changed = false, want true for a conditional release that wrote the row")
 	}
 	releaserAssertRow(t, ctx, fixture, "issues", matched, "", types.StatusOpen)
+
+	// releaserHolder spelled with the other separator: "releaser_holder"
+	// against a row holding "releaser-holder". Both canonicalize to one
+	// identity, so the release lands.
+	respelled := strings.ReplaceAll(releaserHolder, "-", "_")
+	if respelled == releaserHolder {
+		t.Fatalf("releaserHolder %q carries no separator to respell — this limb would assert nothing", releaserHolder)
+	}
+	separatorSpelled := releaserSeedClaimed(t, ctx, fixture, "expect", "respelled", false)
+	if _, err := fixture.Releaser.Release(ctx, publicops.ReleaseRequest{
+		Actor: "releaser-supervisor", IssueID: separatorSpelled, ExpectedAssignee: &respelled,
+	}); err != nil {
+		t.Fatalf("Release() expecting %q against a claim held by %q error = %v, want the release to land — the comparison is separator-insensitive",
+			respelled, releaserHolder, err)
+	}
+	releaserAssertRow(t, ctx, fixture, "issues", separatorSpelled, "", types.StatusOpen)
+
+	// The other half of the same predicate: separators are all that is
+	// forgiven. A padded expectation is a different string and refuses, and the
+	// claim it named is still there afterwards.
+	padded := " " + releaserHolder
+	untouched := releaserSeedClaimed(t, ctx, fixture, "expect", "padded", false)
+	paddedVersion := releaserRowVersion(t, ctx, fixture, untouched)
+	if _, err := fixture.Releaser.Release(ctx, publicops.ReleaseRequest{
+		Actor: "releaser-supervisor", IssueID: untouched, ExpectedAssignee: &padded,
+	}); !errors.Is(err, publicops.ErrAssigneeMismatch) {
+		t.Fatalf("Release() expecting %q error = %v, want ErrAssigneeMismatch — the value is not trimmed", padded, err)
+	}
+	releaserAssertRow(t, ctx, fixture, "issues", untouched, releaserHolder, types.StatusInProgress)
+	if got := releaserRowVersion(t, ctx, fixture, untouched); got != paddedVersion {
+		t.Errorf("a refused padded expectation moved the row version")
+	}
 }
 
 // RunReleaserRefusesAnUnheldIssue pins the three answers an unheld row gets
