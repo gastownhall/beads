@@ -28,12 +28,12 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 	expectedStatus := issueops.StatusOpen
 	tests := []struct {
 		name     string
-		mutation directUpdateMutation
+		mutation commandUpdateMutation
 		want     issueops.UpdateRequest
 	}{
 		{
 			name: "force without assignee only overrides close policy",
-			mutation: directUpdateMutation{
+			mutation: commandUpdateMutation{
 				actor:            "writer",
 				issueID:          "bd-1",
 				patch:            issueops.IssuePatch{Status: issueops.Field[issueops.Status]{Set: true, Value: issueops.StatusClosed}},
@@ -54,7 +54,7 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 		},
 		{
 			name: "force with assignee overrides both policies",
-			mutation: directUpdateMutation{
+			mutation: commandUpdateMutation{
 				actor:   "writer",
 				issueID: "bd-2",
 				patch: issueops.IssuePatch{
@@ -73,7 +73,7 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 		},
 		{
 			name: "unforced update preserves guards without overrides",
-			mutation: directUpdateMutation{
+			mutation: commandUpdateMutation{
 				actor:            "writer",
 				issueID:          "bd-3",
 				patch:            issueops.IssuePatch{Assignee: issueops.Field[string]{Set: true, Value: "next-owner"}},
@@ -93,8 +93,8 @@ func TestRunDirectUpdateMutationBuildsLifecycleRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			updater := &recordingDirectIssueUpdater{}
-			if _, err := runDirectUpdateMutation(context.Background(), updater, tt.mutation); err != nil {
-				t.Fatalf("runDirectUpdateMutation: %v", err)
+			if _, err := runCommandUpdateMutation(context.Background(), updater, tt.mutation); err != nil {
+				t.Fatalf("runCommandUpdateMutation: %v", err)
 			}
 			if len(updater.requests) != 1 {
 				t.Fatalf("Update calls = %d, want 1", len(updater.requests))
@@ -114,7 +114,7 @@ func TestRunDirectUpdateMutationPropagatesErrorUnchanged(t *testing.T) {
 		err:    wantErr,
 	}
 
-	result, err := runDirectUpdateMutation(context.Background(), updater, directUpdateMutation{})
+	result, err := runCommandUpdateMutation(context.Background(), updater, commandUpdateMutation{})
 	if result.Issue != wantIssue || !result.Changed {
 		t.Errorf("result = %#v, want issue %p and Changed true", result, wantIssue)
 	}

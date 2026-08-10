@@ -95,6 +95,12 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	return newSQLServerUOWProvider(ctx, beadsDir, topology, opts...)
 }
 
+// newSQLServerUOWProvider is the single funnel every unit-of-work provider bd
+// builds passes through — the proxied CLI path AND `bd serve`'s own provider
+// for server-mode workspaces. Activation is applied by the two constructors it
+// dispatches to, each alongside its own open; doing it at the CALL SITES
+// instead is what left `bd serve` writing mutations into an empty journal while
+// reporting success. See the note at the top of events_journal.go.
 func newSQLServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	if topology.external != nil {
 		return newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, opts...)
@@ -103,18 +109,21 @@ func newSQLServerUOWProvider(ctx context.Context, beadsDir string, topology sqlS
 }
 
 // resolveProxiedServerUOWTopology reads a proxied-server workspace's topology
-// out of metadata.json and the proxied-server sidecar. Neither read is fatal:
-// an absent or unreadable one leaves the defaults, which is the behavior every
-// proxied command has had, and the provider construction below is where a
-// workspace that cannot be reached actually fails. The one refusal it can
-// return is the team-server workspace with no identity to assert.
+// out of metadata.json and the proxied-server sidecar. An ABSENT file is not
+// fatal — both loads return (nil, nil) then, the defaults apply, and the
+// provider construction below is where a workspace that cannot be reached
+// actually fails. A file that EXISTS but cannot be read or parsed IS fatal
+// (restores f880a985b, reverted in #4418; bd-aj3g5): swallowing it silently
+// falls back to a fresh managed local database — reads return zero issues and
+// writes land in the wrong database (split-brain) — and the identity assertion
+// below silently degrades to no assertion at all.
 func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture identityPosture) (sqlServerUOWTopology, error) {
-	// NOTE: a load error is swallowed here (pre-existing behavior), which
-	// leaves persisted == nil and therefore silently falls back to the default
-	// database with teamServer=false. The identity assertion below inherits
-	// that: an unreadable metadata.json degrades to no assertion rather than a
-	// refusal. Tracked separately with the wider silent-fallback smell.
-	persisted, _ := configfile.Load(beadsDir)
+	persisted, err := configfile.Load(beadsDir)
+	if err != nil {
+		return sqlServerUOWTopology{}, fmt.Errorf(
+			"corrupt workspace config %s: %w — refusing to fall back to a fresh database; repair or remove the file to proceed",
+			configfile.ConfigPath(beadsDir), err)
+	}
 	topology := sqlServerUOWTopology{database: configfile.DefaultDoltDatabase}
 	if persisted != nil {
 		topology.database = persisted.GetDoltDatabase()
@@ -137,7 +146,12 @@ func resolveProxiedServerUOWTopology(beadsDir, databaseOverride string, posture 
 		topology.database = databaseOverride
 	}
 
-	info, _ := configfile.LoadProxiedServerClientInfo(beadsDir)
+	info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+	if err != nil {
+		return sqlServerUOWTopology{}, fmt.Errorf(
+			"corrupt proxied-server sidecar %s: %w — refusing to fall back to a fresh database; repair or remove the file to proceed",
+			configfile.ProxiedServerClientInfoPath(beadsDir), err)
+	}
 	if info != nil {
 		topology.proxyPort = info.Port
 		topology.proxyIdle = info.IdleTimeout
@@ -315,7 +329,8 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the workspace mode: since bd-emv a server-mode workspace lands here too, and
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
-func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: resolve root path: %w", err)
@@ -354,7 +369,8 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 	)
 }
 
-func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: dolt is not installed (not found in PATH); install from https://docs.dolthub.com/introduction/installation: %w", err)
@@ -368,13 +384,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 		return nil, fmt.Errorf("newProxiedServerUOWProvider: proxied server root (from env or %s): %w", configfile.ProxiedServerClientInfoFileName, err)
 	}
 
-	// Gate auto_gc_behavior.archive_level: 0 on the resolved external dolt's
-	// version — Dolt's YAML config loader uses yaml.UnmarshalStrict, so an
-	// older dolt whose own YAMLConfig struct lacks this field would refuse
-	// to start rather than ignore the unknown key (gastownhall/beads#4986).
-	archiveLevelSupported := doltserver.SupportsArchiveLevelConfig(doltBin)
-
-	configPath, err := ensureProxiedServerConfig(beadsDir, archiveLevelSupported)
+	configPath, err := ensureProxiedServerConfig(beadsDir)
 	if err != nil {
 		return nil, err
 	}

@@ -37,16 +37,26 @@ bd gate resolve <gate-id>    # close a gate manually
 | `timer` | a duration after gate creation | `bd gate check` once the timeout elapses |
 | `gh:run` | a GitHub Actions workflow to complete successfully | `bd gate check` (uses `gh run view`) |
 | `gh:pr` | a pull request to merge | `bd gate check` (uses `gh pr view`) |
-| `bead` | a bead in another rig to close | currently unresolvable — multi-rig routing was removed, so `bd gate check` reports these gates as uncheckable |
+| `bead` | a bead in another rig to close | cannot be checked because multi-rig routing was removed; resolve these gates manually |
 
 Timeouts use Go duration syntax: `30m`, `1h`, `24h` (there is no `d` unit —
 write `24h`, not `1d`).
+
+GitHub gates use the current Git repository by default. To evaluate a PR or
+workflow run in another repository, set the gate's string `metadata.repo` value
+to `OWNER/REPO` or `HOST/OWNER/REPO`. An ad-hoc `gh:run`/`gh:pr` gate created
+with `bd gate create` inherits a valid `metadata.repo` value from the issue it
+blocks; `human`/`timer`/`bead` gates do not, since `metadata.repo` is
+unrelated, ordinary metadata for those types. `bd gate check` rejects
+malformed repository values instead of falling back to the current
+repository.
 
 ## Gates in formulas
 
 A formula step declares a gate with a `[steps.gate]` block. When the formula
 is instantiated, bd creates the gate issue and wires it as a blocker of that
-step. The schema has four fields: `type`, `id`, `await_id`, and `timeout`.
+step. The schema has five fields: `type`, `id`, `await_id`, `timeout`, and
+`repo`.
 
 This is the release gate from beads' own release formula — the step that
 waits for the GitHub release workflow:
@@ -61,6 +71,35 @@ type = "gh:run"
 id = "release.yml"       # which workflow to watch
 timeout = "30m"          # escalate if it takes longer
 ```
+
+For a `gh:run` or `gh:pr` gate that watches another repository, set `repo`
+the same way a `metadata.repo` value works for an ad-hoc gate — `OWNER/REPO`
+or `HOST/OWNER/REPO`. Malformed values are rejected when the gate is checked:
+
+```toml
+[[steps]]
+id = "wait-for-downstream"
+title = "Wait for downstream release"
+
+[steps.gate]
+type = "gh:run"
+id = "release.yml"
+repo = "org/downstream-repo"   # check gh:run against this repo, not the current one
+```
+
+`repo` accepts a `{{var}}` placeholder (e.g. `repo = "{{gate_repo}}"`); for a
+formula persisted with `bd cook --persist`, the placeholder is substituted
+when the proto is later poured with `bd mol pour --var gate_repo=...`, the
+same as `title`, `description`, and `await_id`.
+
+`bd gate discover` (auto-discovery of a `gh:run` gate's run ID) requires a
+workflow name hint (`await_id`/`id`, not left blank) for a gate targeting
+another repository — without one, the local commit/branch heuristics that
+narrow a same-repo match don't apply across repos, so nothing but the
+workflow name can identify the right run. A cross-repo gate discovery also
+ignores the local checkout's branch unless `--branch` is passed explicitly;
+an auto-detected local branch has no relationship to the target repo's
+branches.
 
 A human sign-off gate:
 

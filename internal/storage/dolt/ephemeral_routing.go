@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-var permanentIssueAuxTables = []string{"issues", "labels", "dependencies", "events", "comments"}
+var permanentIssueAuxTables = []string{"issues", "labels", "dependencies", "events", "comments", "provenance_events"}
 
 // IsEphemeralID returns true if the ID belongs to an ephemeral issue.
 func IsEphemeralID(id string) bool {
@@ -174,6 +174,27 @@ func (s *DoltStore) batchWispExists(ctx context.Context, ids []string) map[strin
 	return result
 }
 
+// PartitionWispIDs reports which of ids currently live in the wisps table
+// (single batched membership query; IDs absent from the wisps table are
+// returned as permanent). Export's plane-marker stamping uses this to tell an
+// unpromoted no-history wisp apart from a promoted one, which row flags
+// cannot do (bd-r9uce). batchWispExists tolerates a missing wisps table by
+// reporting no members, matching PartitionWispIDsInTx.
+func (s *DoltStore) PartitionWispIDs(ctx context.Context, ids []string) (wispIDs, permIDs []string, err error) {
+	if len(ids) == 0 {
+		return nil, nil, nil
+	}
+	set := s.batchWispExists(ctx, ids)
+	for _, id := range ids {
+		if set[id] {
+			wispIDs = append(wispIDs, id)
+		} else {
+			permIDs = append(permIDs, id)
+		}
+	}
+	return wispIDs, permIDs, nil
+}
+
 // PromoteFromEphemeral copies an issue from the wisps table to the issues table,
 // clearing the Ephemeral flag. Used by bd promote and mol squash to crystallize wisps.
 //
@@ -295,18 +316,54 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 		return fmt.Errorf("recompute is_blocked after demote for %s: %w", id, err)
 	}
 
+	// The bead keeps its id across demotion; only its plane changes. Journal one
+	// update carrying the demoted snapshot, after the derived blocked-state
+	// maintenance has settled. UpdateIssueWithoutEventInTx above suppressed only
+	// the human audit event — its own journal row already recorded the field
+	// change, and this one records the plane move.
+	if err := issueops.RecordEventInTx(ctx, tx, issueops.EventUpdate, id); err != nil {
+		return err
+	}
+
 	return s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables, fmt.Sprintf("bd: demote %s to wisp", id))
 }
 
 func (s *DoltStore) doltAddAndCommitInTx(ctx context.Context, tx *sql.Tx, tables []string, commitMsg string) error {
+	// Batch/off auto-commit (bd-4wamg): leave the writes in the working set
+	// for a later explicit commit point (bd dolt commit / CommitPending)
+	// instead of minting one Dolt version commit per write.
+	if issueops.VersionCommitDeferred(ctx) {
+		return nil
+	}
 	for _, table := range tables {
 		if err := schema.DrainCall(ctx, tx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
+
+	// Skip the commit when nothing was actually staged. A caller can reach here
+	// after an idempotent no-op write (e.g. re-adding an existing dependency via
+	// INSERT IGNORE, or removing a non-existent one), in which case the DOLT_ADDs
+	// above stage nothing and DOLT_COMMIT('-m') fails with a server-side "nothing
+	// to commit" warning that floods the Dolt log at reconcile cadence.
+	//
+	// Unlike StageAndCommit's fast-path (a global HasPendingChanges check), this
+	// helper stages only a FIXED table list. Other tables may be dirty
+	// concurrently, so the guard must test the STAGED set, not the whole working
+	// set — otherwise we would still fire an empty `-m` commit whenever an
+	// unrelated table is dirty. issueops.HasStagedChanges checks exactly what
+	// '-m' will commit; *sql.Tx satisfies issueops.SQLQuerier.
+	staged, err := issueops.HasStagedChanges(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("check staged changes before commit: %w", err)
+	}
+	if !staged {
+		return nil
+	}
+
 	if err := schema.DrainCall(ctx, tx, "CALL DOLT_COMMIT('-m', ?, '--author', ?)",
 		commitMsg, s.commitAuthorString()); err != nil && !isDoltNothingToCommit(err) {
-		return fmt.Errorf("dolt commit: %w", err)
+		return wrapSQLCommitError("dolt commit", err)
 	}
 	return nil
 }

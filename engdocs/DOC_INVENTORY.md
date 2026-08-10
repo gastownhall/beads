@@ -34,9 +34,9 @@ freshness source.
 | `reference/json-schema.md` | `Last reviewed:` marker tied to `cmd/bd/output.go`, `cmd/bd/errors.go`, and protocol tests. (Mintlify port: was `JSON_SCHEMA.md`.) |
 | `recovery/init-safety.md` | `Last reviewed:` marker tied to `cmd/bd/init*.go` safety code and tests. (Mintlify port: was `RECOVERY.md`.) |
 | `ERROR_HANDLING.md` | `Last reviewed:` marker tied to current command error exits and JSON error helpers. |
-| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml` and current lint output. |
+| `LINTING.md` | `Last reviewed:` marker tied to `.golangci.yml`, `scripts/ci/pr-lint.sh`, the `Makefile` wrapper, and CI workflow wiring. |
 | `SERVE_RUNBOOK.md` | `Last reviewed:` marker tied to the operating-envelope constants in `internal/httpapi/server.go` and the log fields in its `event`/`request` emitters. |
-| `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to CI audit, workflow files, package manifests, and maintainer decision review. |
+| `CI_CLEANUP_PLAN.md` | `Last reviewed:` marker tied to the CI audit, workflow files, wrapper scripts, `Makefile`, package manifests, and maintainer decision review. |
 | `design/otel/otel-data-model.md` | `Last reviewed:` marker tied to telemetry, Dolt storage, hooks, and AI call sites. |
 
 Follow-up automation should replace marker-only checks with generated or
@@ -51,6 +51,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `AGENT_SIGNING.md` | Keep | Maintainer/operator convention for agent comment and commit signatures. |
 | `adr/0001-multi-remote-approach.md` | Keep | ADR; historical decision record, not a live reference table. |
 | `adr/0002-init-safety-invariants.md` | Keep | ADR backing `RECOVERY.md` and init safety code. |
+| `adr/0003-provenance-event-log.md` | Keep | ADR; historical decision record for the `provenance_events` table and `bd provenance` command group. Status: Proposed pending a maintainer post on issue 4460. |
 | `ADVANCED.md` | Keep/revise as needed | User-facing advanced workflows; mixed command examples should defer to generated CLI reference when expanded. |
 | `AIDER_INTEGRATION.md` | Keep | User-facing integration guide; evidence is setup/integration behaviour. |
 | `ANTIVIRUS.md` | Keep | User-facing operational note; review vendor/version claims when touched. |
@@ -60,7 +61,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `CLAUDE.md` | Revise | Kept as architecture orientation only; command/workflow duplication was reduced in favour of root `AGENTS.md` and `AGENT_INSTRUCTIONS.md`. |
 | `CLI_REFERENCE.md` | Keep/generated | Generated command reference from live help output. |
 | `CI_CLEANUP_PLAN.md` | Keep as maintainer context | Dated CI policy, measurements, and implementation roadmap; current commands live in workflows and the `Makefile`. |
-| `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep | Design note for the required-check aggregate gate topology; explicitly flags pre-rollout status and gates branch-protection changes on the new checks passing first. |
+| `CI_REQUIRED_CHECK_TOPOLOGY.md` | Keep as maintainer context | Implemented workflow design record for aggregate-gate policy; branch-protection and ruleset adoption remain pending. Live job membership and display names come from `.github/workflows/*.yml` and their structural tests; copied wiring and rollout steps are historical snapshots. |
 | `CI_TEST_SURFACE_AUDIT.md` | Keep as historical snapshot | Dated test-surface inventory; current commands live in workflows and the `Makefile`. |
 | `plugins/beads/skills/beads/resources/CLI_REFERENCE.md` | Keep pointer | Plugin skill resource intentionally points at live CLI sources to avoid duplicate generated command snapshots. |
 | `CODEX_INTEGRATION.md` | Keep | User-facing Codex integration guide. |
@@ -91,7 +92,7 @@ Follow-up automation should replace marker-only checks with generated or
 | `INTERNALS.md` | Keep | Internal architecture/runtime deep dive. |
 | `JSON_SCHEMA.md` | Keep with freshness | JSON contract; marker tied to schema constant and tests. |
 | `LABELS.md` | Keep | User-facing label philosophy plus examples; generated CLI handles command reference. |
-| `LINTING.md` | Revise with freshness | Stale fixed-count wording removed; marker tied to current lint output. |
+| `LINTING.md` | Revise with freshness | Zero-issue wrapper contract and CI pin reviewed; marker tied to lint configuration, wrapper, and workflow wiring. |
 | `messaging.md` | Keep | Design doc for messaging issue types. |
 | `METADATA.md` | Keep | Behaviour doc for metadata field semantics. |
 | `MOLECULES.md` | Keep | User-facing workflow concept doc. |

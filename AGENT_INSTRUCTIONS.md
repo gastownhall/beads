@@ -9,7 +9,8 @@ This document contains detailed operational instructions for AI agents working o
 ### Code Standards
 
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
-- **Linting**: `golangci-lint run ./...` (baseline warnings documented in [engdocs/LINTING.md](engdocs/LINTING.md))
+- **Linting**: `make ci-pr-lint` must pass with zero issues; see
+  [engdocs/LINTING.md](engdocs/LINTING.md)
 - **Testing**: All new features need tests; use [engdocs/TESTING.md](engdocs/TESTING.md) for command selection, test design, and PR readiness.
 - **Documentation**: Update relevant .md files
 
@@ -83,8 +84,8 @@ test runs if `du -sh /tmp/beads-* /tmp/bd-*` shows accumulation. See bd-3q2u.
 ### Before Committing
 
 1. **Run tests**: follow [engdocs/TESTING.md](engdocs/TESTING.md).
-2. **Run linter when its code surface changed**: `golangci-lint run ./...`
-   (ignore baseline warnings)
+2. **Run the required lint contract when its code surface changed**:
+   `make ci-pr-lint`
 3. **Update docs**: If you changed behavior, update README.md or other docs
 4. **Commit**: With git hooks installed (`bd hooks install`), Dolt changes are auto-committed
 
@@ -268,7 +269,7 @@ consistency.
 Use small Unicode symbols with semantic colors applied via lipgloss:
 
 - Status: `○ ◐ ● ✓ ❄`
-- Priority: `●` (filled circle with color)
+- Priority: `P0`–`P4` label with color (no status glyph)
 
 #### Status Icons
 
@@ -282,13 +283,14 @@ Use these symbols consistently across all commands:
 ❄ deferred    - Scheduled for later (blue/muted)
 ```
 
-#### Priority Icons and Colors
+#### Priority Labels and Colors
 
-Format priority as `● P0` (filled circle icon plus label, colored by priority):
+Format priority as the P-label with color only (no status glyph — `●` is blocked status):
 
-- `● P0`: Red + bold (critical)
-- `● P1`: Orange (high)
-- `● P2-P4`: Default text (normal)
+- `P0`: Red + bold (critical)
+- `P1`: Orange (high)
+- `P2`: Amber (elevated)
+- `P3`–`P4`: Default text
 
 #### Issue Type Colors
 

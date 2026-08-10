@@ -221,6 +221,60 @@ func TestEmbeddedClose(t *testing.T) {
 		}
 	})
 
+	// The direct route's mirror of the proxied route's
+	// single_transaction_dolt_commit oracle. N ids are ONE request, and the
+	// request is the transaction boundary, so they land as one transaction with
+	// one Dolt commit whose message names every id that landed. Before `bd close`
+	// moved onto the BatchCloser role this route wrote one commit per id, each
+	// titled "bd: close issue".
+	t.Run("close_multiple_ids_single_dolt_commit", func(t *testing.T) {
+		// Isolated store so the commit count is deterministic, mirroring
+		// close_already_closed_claim_next.
+		sdir, sbeads, _ := bdInit(t, bd, "--prefix", "sb")
+		readLog := func() (int, string) {
+			dataDir := filepath.Join(sbeads, "embeddeddolt")
+			cfg, _ := configfile.Load(sbeads)
+			database := ""
+			if cfg != nil {
+				database = cfg.GetDoltDatabase()
+			}
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, database, "main")
+			if err != nil {
+				t.Fatalf("OpenSQL: %v", err)
+			}
+			defer cleanup()
+			var count int
+			if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM dolt_log").Scan(&count); err != nil {
+				t.Fatalf("query dolt_log: %v", err)
+			}
+			var message string
+			if err := db.QueryRowContext(t.Context(), "SELECT message FROM dolt_log ORDER BY date DESC LIMIT 1").Scan(&message); err != nil {
+				t.Fatalf("query latest dolt_log message: %v", err)
+			}
+			return count, message
+		}
+
+		a := bdCreate(t, bd, sdir, "Batch commit A", "--type", "task")
+		b := bdCreate(t, bd, sdir, "Batch commit B", "--type", "task")
+		c := bdCreate(t, bd, sdir, "Batch commit C", "--type", "task")
+
+		before, _ := readLog()
+		bdClose(t, bd, sdir, a.ID, b.ID, c.ID)
+		after, message := readLog()
+
+		if got := after - before; got != 1 {
+			t.Errorf("dolt commits for a 3-id close = %d, want 1: the request is the transaction boundary", got)
+		}
+		if !strings.HasPrefix(message, "bd: close ") {
+			t.Errorf("commit message = %q, want it to start with %q", message, "bd: close ")
+		}
+		for _, id := range []string{a.ID, b.ID, c.ID} {
+			if !strings.Contains(message, id) {
+				t.Errorf("commit message %q should name %s: the entry names what landed", message, id)
+			}
+		}
+	})
+
 	t.Run("close_already_closed_continue_advances", func(t *testing.T) {
 		// Isolated store so molecule progress and the Dolt commit count are
 		// deterministic, mirroring close_already_closed_claim_next.
@@ -319,21 +373,25 @@ func TestEmbeddedClose(t *testing.T) {
 		next := bdCreate(t, bd, cdir, "Reclose claim next", "--type", "task")
 		bdClose(t, bd, cdir, target.ID) // real close; `next` is now the only ready issue
 
-		// Re-close the already-closed target with --claim-next: the retry-safe claim
-		// must still fire and claim the next ready issue.
+		// Re-close the already-closed target with --claim-next. The claim does NOT
+		// fire: bd-yby99.19 adjudicated that a batch whose items were all already
+		// closed mutated nothing, so it earns no claim and mints no commit
+		// (issueops/batchcloser.go, "CHANGED IS THE TEST"). This subtest used to
+		// assert the opposite as a retry-safety property — a crashed agent
+		// re-running `bd close X --claim-next` got its next work item — and that
+		// property is what the adjudication traded away; bd-yby99.30 carries it.
 		beforeCommits := countCommits()
 		_ = bdClose(t, bd, cdir, target.ID, "--claim-next")
 
 		got := bdShow(t, bd, cdir, next.ID)
-		if got.Status != types.StatusInProgress || got.Assignee == "" {
-			t.Errorf("expected next issue %s claimed (in_progress, assigned) after already-closed --claim-next, got status=%s assignee=%q",
+		if got.Status != types.StatusOpen || got.Assignee != "" {
+			t.Errorf("next issue %s = (status=%s assignee=%q) after an already-closed --claim-next, want it untouched: the re-close closed nothing, so the claim was never earned",
 				next.ID, got.Status, got.Assignee)
 		}
-		// The claim is a real mutation, so the already-closed re-close must still
-		// persist it with a Dolt commit — not leave it dangling in the working set
-		// (the close itself is a no-op, so only the claim drives the commit).
-		if afterCommits := countCommits(); afterCommits <= beforeCommits {
-			t.Errorf("expected a Dolt commit for the --claim-next claim on an already-closed re-close: before=%d after=%d",
+		// Nothing landed, so nothing is committed either — the shape the
+		// adjudication names, a commit that changed nothing.
+		if afterCommits := countCommits(); afterCommits != beforeCommits {
+			t.Errorf("dolt_log went %d -> %d across an already-closed re-close that claimed nothing, want no commit",
 				beforeCommits, afterCommits)
 		}
 	})

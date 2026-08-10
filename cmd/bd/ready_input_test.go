@@ -209,6 +209,9 @@ func TestGatherReadyInputResolvesCapWhereTheDirectBuilderDid(t *testing.T) {
 		}{
 			{"mol_type", []string{"--max-rows", "-1", "--mol-type", "bogus"}, "invalid mol-type"},
 			{"claim_assignee", []string{"--max-rows", "-1", "--claim", "--assignee", "alice"}, "--claim cannot be combined with --assignee"},
+			{"claim_gated", []string{"--max-rows", "-1", "--claim", "--gated"}, "--claim cannot be combined with --gated"},
+			{"claim_mol", []string{"--max-rows", "-1", "--claim", "--mol", "bd-mol"}, "--claim cannot be combined with --mol"},
+			{"claim_explain", []string{"--max-rows", "-1", "--claim", "--explain"}, "--claim cannot be combined with --explain"},
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
@@ -252,6 +255,141 @@ func TestGatherReadyInputResolvesCapWhereTheDirectBuilderDid(t *testing.T) {
 			t.Errorf("no resolver should mean no cap output, got:\n%s", got.stderr)
 		}
 	})
+}
+
+// TestGatherReadyInputMapsReadyPassThroughFlags keeps the CLI parsing boundary
+// covered for filters whose result semantics live at the domain seam. The
+// workapi golden starts from ReadyRequest, so it cannot prove that these flags
+// reached that request and its resulting WorkFilter.
+func TestGatherReadyInputMapsReadyPassThroughFlags(t *testing.T) {
+	tests := []struct {
+		name  string
+		args  []string
+		check func(*testing.T, types.WorkFilter)
+	}{
+		{
+			name: "priority_zero_preserves_explicit_pointer",
+			args: []string{"--priority", "0"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if filter.Priority == nil || *filter.Priority != 0 {
+					t.Errorf("filter.Priority = %v, want non-nil pointer to 0", filter.Priority)
+				}
+			},
+		},
+		{
+			name: "assignee",
+			args: []string{"--assignee", "alice"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if filter.Assignee == nil || *filter.Assignee != "alice" {
+					t.Errorf("filter.Assignee = %v, want non-nil pointer to alice", filter.Assignee)
+				}
+			},
+		},
+		{
+			name: "unassigned",
+			args: []string{"--unassigned"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if !filter.Unassigned {
+					t.Error("filter.Unassigned = false, want true")
+				}
+			},
+		},
+		{
+			name: "type",
+			args: []string{"--type", "bug"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if filter.Type != "bug" {
+					t.Errorf("filter.Type = %q, want bug", filter.Type)
+				}
+			},
+		},
+		{
+			name: "parent",
+			args: []string{"--parent", "bd-parent"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if filter.ParentID == nil || *filter.ParentID != "bd-parent" {
+					t.Errorf("filter.ParentID = %v, want non-nil pointer to bd-parent", filter.ParentID)
+				}
+			},
+		},
+		{
+			name: "metadata_equality",
+			args: []string{"--metadata-field", "team=platform"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if !reflect.DeepEqual(filter.MetadataFields, map[string]string{"team": "platform"}) {
+					t.Errorf("filter.MetadataFields = %#v, want map[team:platform]", filter.MetadataFields)
+				}
+			},
+		},
+		{
+			name: "metadata_key_presence",
+			args: []string{"--has-metadata-key", "team"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if filter.HasMetadataKey != "team" {
+					t.Errorf("filter.HasMetadataKey = %q, want team", filter.HasMetadataKey)
+				}
+			},
+		},
+		{
+			name: "include_deferred",
+			args: []string{"--include-deferred"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if !filter.IncludeDeferred {
+					t.Error("filter.IncludeDeferred = false, want true")
+				}
+			},
+		},
+		{
+			name: "include_ephemeral",
+			args: []string{"--include-ephemeral"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				if !filter.IncludeEphemeral {
+					t.Error("filter.IncludeEphemeral = false, want true")
+				}
+			},
+		},
+		{
+			name: "exclude_type_csv",
+			args: []string{"--exclude-type", "bug,epic"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				want := []types.IssueType{types.TypeBug, types.TypeEpic}
+				if !slices.Equal(filter.ExcludeTypes, want) {
+					t.Errorf("filter.ExcludeTypes = %q, want %q", filter.ExcludeTypes, want)
+				}
+			},
+		},
+		{
+			name: "exclude_type_repeated",
+			args: []string{"--exclude-type", "bug", "--exclude-type", "epic"},
+			check: func(t *testing.T, filter types.WorkFilter) {
+				t.Helper()
+				want := []types.IssueType{types.TypeBug, types.TypeEpic}
+				if !slices.Equal(filter.ExcludeTypes, want) {
+					t.Errorf("filter.ExcludeTypes = %q, want %q", filter.ExcludeTypes, want)
+				}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := runGatherReadyInput(t, newReadyFlagsCommand(t, tc.args...), nil)
+			if got.err != nil {
+				t.Fatalf("gatherReadyInput(%v): %v", tc.args, got.err)
+			}
+			tc.check(t, got.in.filter)
+		})
+	}
 }
 
 // TestGatherReadyInputUsageErrorsRespectJSON pins the one behavior change in

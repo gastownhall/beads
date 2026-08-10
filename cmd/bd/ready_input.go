@@ -21,6 +21,12 @@ type readyInput struct {
 
 	filter types.WorkFilter
 
+	// dirLabels is the directory-label default (GH#541) this listing applied,
+	// or nil when it did not apply one. It is the gatherer's DECISION rather
+	// than the configured value: the question is answerable only BEFORE the
+	// default has been written onto the filter. See readyRoleRequest.
+	dirLabels []string
+
 	claim        bool
 	gated        bool
 	molID        string
@@ -194,9 +200,58 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	if len(filter.Labels) == 0 && len(filter.LabelsAny) == 0 {
 		if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
 			filter.LabelsAny = dirLabels
+			// Recorded rather than recomputed downstream: the line above has
+			// just made the filter's label sets non-empty, so re-running the
+			// emptiness test would read its own output.
+			in.dirLabels = dirLabels
 		}
 	}
 	in.filter = filter
 
 	return in, nil
+}
+
+// readyRoleRequest is the request `bd ready` hands the two roles that take a
+// whole ready question rather than a filter: ReadyClaimer, which claims one
+// row out of it, and ReadyCounter, which sizes it. Both routes of both
+// operations build it here, so a claim, a count and the listing beside them
+// ask ONE question no matter which door they came through.
+//
+// The two things the filter carries that the request does not:
+//
+//   - The --max-rows cap. It never applied to either role. A claim consumes
+//     one row however large the pool it scanned (ClaimReadyIssueInTx clears
+//     MaxRows, MaxRowsSource and Limit before it scans, because a cap sized
+//     for bulk reads must not make a single-row claim report an empty front),
+//     and a count materializes no rows at all.
+//
+//   - The directory-label default (GH#541). The listing puts it on the built
+//     filter verbatim; here it goes on the request, where it is normalized
+//     along with every other label. That differs only for a directory.labels
+//     value carrying stray whitespace.
+//
+//     IT IS READ OFF readyInput.dirLabels, NEVER RECOMPUTED FROM in.filter.
+//     The gatherer has already written the default INTO that filter, so
+//     re-running its emptiness test here sees a non-empty label set and skips.
+//     That is what made `bd ready --claim` in a scoped directory claim from
+//     the WHOLE ready front while `bd ready` beside it listed only the
+//     configured scope — the one thing ReadyClaimer's contract says a claim
+//     must never do (issueops/readyclaimer.go:9-14).
+//
+// Limit and Offset are ErrValidation on BOTH roles, so they are cleared here
+// once. Neither was ever live for the claim; for the count they are exactly
+// what has to go — the page is the thing being sized.
+func readyRoleRequest(in readyInput) issueops.ReadyRequest {
+	req := in.ReadyRequest
+	req.Limit, req.Offset = nil, 0
+	if len(in.dirLabels) > 0 {
+		req.LabelsAny = in.dirLabels
+	}
+	return req
+}
+
+// claimNextRequest is `bd ready --claim`'s request to the ReadyClaimer role:
+// the shared ready question above, plus the claimant.
+func claimNextRequest(in readyInput) issueops.ClaimNextRequest {
+	return issueops.ClaimNextRequest{Actor: actor, Filter: readyRoleRequest(in)}
 }

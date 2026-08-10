@@ -195,6 +195,92 @@ func TestStoreReaderListOverFetchesForAPushdownSort(t *testing.T) {
 	}
 }
 
+// TestStoreReaderReachesPastTheOffset pins the mechanism this body pages with,
+// which the page alone cannot show. The seam renders LIMIT without OFFSET, so
+// the reader has to ask for the skipped rows TOO — limit + offset + the probe
+// row — and drop them itself. A body that skipped without widening would hand
+// back a short page and call it complete.
+//
+// The filter's own Offset must come back to ZERO. The builders write the
+// request's offset onto it for the callers that consume the filter and run
+// their own query, so a body that widened the bound and left the offset on
+// would skip the same rows twice the day this seam learns to render OFFSET.
+func TestStoreReaderReachesPastTheOffset(t *testing.T) {
+	limit := 2
+	for _, tc := range []struct {
+		name        string
+		run         func(issueops.Reader) (issueops.IssuePage, error)
+		queryWindow func(*fakeReaderStore) (int, int)
+	}{
+		{"Ready", func(rd issueops.Reader) (issueops.IssuePage, error) {
+			return rd.Ready(context.Background(), issueops.ReadyRequest{Sort: "priority", Limit: &limit, Offset: 1})
+		}, func(s *fakeReaderStore) (int, int) { return s.readyFilters[0].Limit, s.readyFilters[0].Offset }},
+		{"List", func(rd issueops.Reader) (issueops.IssuePage, error) {
+			return rd.List(context.Background(), issueops.ListRequest{SortBy: "created", Limit: &limit, Offset: 1})
+		}, func(s *fakeReaderStore) (int, int) { return s.searchFilters[0].Limit, s.searchFilters[0].Offset }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rd, store := storeReaderFor(t, readerFixture(5))
+			page, err := tc.run(rd)
+			if err != nil {
+				t.Fatalf("%s at Offset 1: %v", tc.name, err)
+			}
+			gotLimit, gotOffset := tc.queryWindow(store)
+			if want := limit + 1 + 1; gotLimit != want {
+				t.Errorf("query ran with Limit %d, want %d — the page, the row it skips, and the probe row", gotLimit, want)
+			}
+			if gotOffset != 0 {
+				t.Errorf("query ran with Offset %d, want 0: the epilogue does the skipping", gotOffset)
+			}
+			if got := ids(page); !slices.Equal(got, []string{"bd-2", "bd-3"}) {
+				t.Errorf("page = %v, want the two rows after the first", got)
+			}
+			if !page.HasMore {
+				t.Error("HasMore = false with five rows, an offset of one and a limit of two")
+			}
+		})
+	}
+}
+
+// TestStoreReaderOffsetPastTheEndIsAnEmptyPage: a pager that walks off the end
+// gets an answer, not an error, and not the last page over again.
+func TestStoreReaderOffsetPastTheEndIsAnEmptyPage(t *testing.T) {
+	rd, _ := storeReaderFor(t, readerFixture(2))
+
+	page, err := rd.List(context.Background(), issueops.ListRequest{SortBy: "created", Offset: 5})
+	if err != nil {
+		t.Fatalf("List at Offset 5 over two rows: %v", err)
+	}
+	if len(page.Items) != 0 || page.Items == nil || page.HasMore {
+		t.Errorf("page = %v (nil=%v) has_more = %v, want an empty non-nil page and no more",
+			ids(page), page.Items == nil, page.HasMore)
+	}
+}
+
+// TestStoreReaderServesOffsetZero: zero is the absence of a page request, so it
+// must not widen the query the way a real offset does. Every other test in this
+// file would fail if it did, but none of them says why.
+func TestStoreReaderServesOffsetZero(t *testing.T) {
+	limit := 2
+	rd, store := storeReaderFor(t, readerFixture(4))
+
+	if _, err := rd.Ready(context.Background(), issueops.ReadyRequest{Sort: "priority", Limit: &limit, Offset: 0}); err != nil {
+		t.Fatalf("Ready at Offset 0: %v", err)
+	}
+	if _, err := rd.List(context.Background(), issueops.ListRequest{SortBy: "created", Limit: &limit, Offset: 0}); err != nil {
+		t.Fatalf("List at Offset 0: %v", err)
+	}
+	if len(store.readyFilters) != 1 || len(store.searchFilters) != 1 {
+		t.Errorf("ran %d ready and %d search queries, want one each", len(store.readyFilters), len(store.searchFilters))
+	}
+	if got := store.readyFilters[0].Limit; got != limit+1 {
+		t.Errorf("Ready at Offset 0 ran with Limit %d, want %d — the probe row and nothing else", got, limit+1)
+	}
+	if got := store.searchFilters[0].Limit; got != limit+1 {
+		t.Errorf("List at Offset 0 ran with Limit %d, want %d — the probe row and nothing else", got, limit+1)
+	}
+}
+
 // TestStoreReaderRefusesANilStore: the accessor is the only door, and a door
 // that hands back a reader over nothing would fail on the first query with a
 // nil dereference instead of at the seam that knows what is missing.

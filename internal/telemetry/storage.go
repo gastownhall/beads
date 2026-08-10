@@ -490,6 +490,30 @@ func (s *InstrumentedStorage) GetAllEventsSince(ctx context.Context, since time.
 	return v, err
 }
 
+func (s *InstrumentedStorage) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (string, bool, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", ev.IssueID), attribute.String("bd.prov.kind", string(ev.Kind))}
+	ctx, span, t := s.op(ctx, "RecordProvenanceEvent", attrs...)
+	id, inserted, err := s.inner.RecordProvenanceEvent(ctx, ev)
+	s.done(ctx, span, t, err, attrs...)
+	return id, inserted, err
+}
+
+func (s *InstrumentedStorage) GetProvenanceEvents(ctx context.Context, issueID, kindFilter string) ([]types.ProvenanceEvent, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.issue.id", issueID)}
+	ctx, span, t := s.op(ctx, "GetProvenanceEvents", attrs...)
+	v, err := s.inner.GetProvenanceEvents(ctx, issueID, kindFilter)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
+func (s *InstrumentedStorage) GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error) {
+	attrs := []attribute.KeyValue{attribute.String("bd.prov.ref", ref)}
+	ctx, span, t := s.op(ctx, "GetProvenanceByRef", attrs...)
+	v, err := s.inner.GetProvenanceByRef(ctx, ref)
+	s.done(ctx, span, t, err, attrs...)
+	return v, err
+}
+
 // ── Statistics ───────────────────────────────────────────────────────────────
 
 func (s *InstrumentedStorage) GetStatistics(ctx context.Context) (*types.Statistics, error) {

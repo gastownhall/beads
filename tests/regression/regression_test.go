@@ -513,6 +513,11 @@ var volatileFields = []string{
 	"last_activity", "closed_by_session",
 	"compaction_level", "original_size",
 	"content_hash",
+	// revision (row_lock) is the guarded-write optimistic-concurrency token that
+	// bd show --json began exposing (bd-bwa7n): a random value the engine
+	// rewrites on every write, and absent from the v0.49.6 baseline's show
+	// output entirely, so it is pure cross-version noise for this oracle.
+	"revision",
 }
 
 // showOnlyFields are present in bd show --json but were not in bd export.

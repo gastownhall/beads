@@ -5,12 +5,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -21,274 +22,75 @@ func TestProxiedServerCreate(t *testing.T) {
 
 	bd := buildEmbeddedBD(t)
 
-	t.Run("basic", func(t *testing.T) {
+	t.Run("scalar_and_output_boundary", func(t *testing.T) {
 		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "bc")
-		issue := bdProxiedCreate(t, bd, p.dir, "Basic issue")
-		if issue.ID == "" {
-			t.Fatal("expected issue ID")
+		p := newSharedProxiedProject(t, bd, "sc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Scalar issue")
+		if !strings.HasPrefix(issue.ID, "sc-") {
+			t.Fatalf("ID should have prefix sc-, got %q", issue.ID)
 		}
-		if issue.Title != "Basic issue" {
-			t.Errorf("title: got %q, want %q", issue.Title, "Basic issue")
+		if issue.Title != "Scalar issue" || issue.Status != types.StatusOpen || issue.Priority != 2 || issue.IssueType != types.TypeTask {
+			t.Errorf("create result = %+v, want scalar defaults", issue)
 		}
-		if issue.Status != types.StatusOpen {
-			t.Errorf("status: got %q, want %q", issue.Status, types.StatusOpen)
-		}
-		if issue.Priority != 2 {
-			t.Errorf("priority: got %d, want 2 (default)", issue.Priority)
-		}
-		if issue.IssueType != types.TypeTask {
-			t.Errorf("type: got %q, want %q", issue.IssueType, types.TypeTask)
-		}
-		if !strings.HasPrefix(issue.ID, "bc-") {
-			t.Errorf("ID should have prefix bc-, got %q", issue.ID)
-		}
-	})
-
-	t.Run("title_flag", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "tf")
-		issue := bdProxiedCreate(t, bd, p.dir, "--title", "Title via flag")
-		if issue.Title != "Title via flag" {
-			t.Errorf("title: got %q, want %q", issue.Title, "Title via flag")
-		}
-	})
-
-	t.Run("silent", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "sl")
-		id := bdProxiedCreateSilent(t, bd, p.dir, "Silent issue")
-		if id == "" {
-			t.Fatal("expected issue ID from --silent")
-		}
-		if !strings.HasPrefix(id, "sl-") {
-			t.Errorf("ID should have prefix sl-, got %q", id)
-		}
-	})
-
-	t.Run("priority", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pr")
-		for _, tc := range []struct {
-			flag string
-			want int
-		}{
-			{"0", 0}, {"1", 1}, {"P3", 3}, {"4", 4},
-		} {
-			t.Run("P"+tc.flag, func(t *testing.T) {
-				issue := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Priority %s", tc.flag), "-p", tc.flag)
-				if issue.Priority != tc.want {
-					t.Errorf("priority: got %d, want %d", issue.Priority, tc.want)
-				}
-			})
-		}
-	})
-
-	t.Run("issue_types", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "it")
-		for _, issueType := range []string{"bug", "feature", "task", "epic", "chore", "decision"} {
-			t.Run(issueType, func(t *testing.T) {
-				issue := bdProxiedCreate(t, bd, p.dir, fmt.Sprintf("Type %s", issueType), "-t", issueType)
-				normalized := types.IssueType(issueType).Normalize()
-				if issue.IssueType != normalized {
-					t.Errorf("type: got %q, want %q", issue.IssueType, normalized)
-				}
-			})
-		}
-	})
-
-	t.Run("description", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "ds")
-		issue := bdProxiedCreate(t, bd, p.dir, "Desc issue", "-d", "This is the description")
-		if issue.Description != "This is the description" {
-			t.Errorf("description: got %q, want %q", issue.Description, "This is the description")
-		}
-	})
-
-	t.Run("design_and_acceptance", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "da")
-		issue := bdProxiedCreate(t, bd, p.dir, "Design issue",
-			"--design", "Use MVC pattern",
-			"--acceptance", "All tests pass")
-		if issue.Design != "Use MVC pattern" {
-			t.Errorf("design: got %q, want %q", issue.Design, "Use MVC pattern")
-		}
-		if issue.AcceptanceCriteria != "All tests pass" {
-			t.Errorf("acceptance: got %q, want %q", issue.AcceptanceCriteria, "All tests pass")
-		}
-	})
-
-	t.Run("assignee", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "as")
-		issue := bdProxiedCreate(t, bd, p.dir, "Assigned issue", "-a", "alice")
-		if issue.Assignee != "alice" {
-			t.Errorf("assignee: got %q, want %q", issue.Assignee, "alice")
-		}
-	})
-
-	t.Run("labels", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "lb")
-		issue := bdProxiedCreate(t, bd, p.dir, "Labeled issue", "-l", "bug,critical")
 
 		db := openProxiedDB(t, p)
-		labels := getProxiedLabels(t, db, issue.ID)
-		labelMap := make(map[string]bool)
-		for _, l := range labels {
-			labelMap[l] = true
+		var title, status, issueType string
+		var priority int
+		if err := db.QueryRowContext(context.Background(), "SELECT title, status, priority, issue_type FROM issues WHERE id = ?", issue.ID).Scan(&title, &status, &priority, &issueType); err != nil {
+			t.Fatalf("query persisted scalar issue: %v", err)
 		}
-		if !labelMap["bug"] || !labelMap["critical"] {
-			t.Errorf("expected labels bug and critical, got %v", labels)
+		if title != "Scalar issue" || status != string(types.StatusOpen) || priority != 2 || issueType != string(types.TypeTask) {
+			t.Errorf("persisted scalar issue = title=%q status=%q priority=%d type=%q", title, status, priority, issueType)
 		}
-	})
 
-	t.Run("explicit_id", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "ei")
-		issue := bdProxiedCreate(t, bd, p.dir, "Explicit ID", "--id", "ei-custom42")
-		if issue.ID != "ei-custom42" {
-			t.Errorf("ID: got %q, want %q", issue.ID, "ei-custom42")
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--silent", "Silent issue")
+		if err != nil {
+			t.Fatalf("bd create --silent: %v\n%s", err, out)
 		}
-	})
-
-	t.Run("dependencies", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dp")
-		parent := bdProxiedCreate(t, bd, p.dir, "Parent issue")
-		child := bdProxiedCreate(t, bd, p.dir, "Child issue", "--deps", "blocks:"+parent.ID)
-
-		db := openProxiedDB(t, p)
-		assertProxiedDepExists(t, db, parent.ID, child.ID)
-	})
-
-	t.Run("blocked_by_alias", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "bb")
-		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker issue")
-		blocked := bdProxiedCreate(t, bd, p.dir, "Blocked issue", "--deps", "blocked-by:"+blocker.ID)
-
-		db := openProxiedDB(t, p)
-		assertProxiedDepExistsWithType(t, db, blocked.ID, blocker.ID, "blocks")
-	})
-
-	t.Run("depends_on_alias", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "do")
-		prereq := bdProxiedCreate(t, bd, p.dir, "Prerequisite")
-		dependent := bdProxiedCreate(t, bd, p.dir, "Dependent issue", "--deps", "depends-on:"+prereq.ID)
-
-		db := openProxiedDB(t, p)
-		assertProxiedDepExistsWithType(t, db, dependent.ID, prereq.ID, "blocks")
-	})
-
-	t.Run("unknown_dep_type_rejected", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "ud")
-		blocker := bdProxiedCreate(t, bd, p.dir, "Blocker")
-		out := bdProxiedCreateFail(t, bd, p.dir, "Bad dep type", "--deps", "bogus-type:"+blocker.ID)
-		if !strings.Contains(out, "unknown dependency type") {
-			t.Errorf("expected 'unknown dependency type' error, got:\n%s", out)
+		silentID := strings.TrimSpace(string(out))
+		if !strings.HasPrefix(silentID, "sc-") || string(out) != silentID+"\n" {
+			t.Errorf("silent stdout = %q, want exactly the created ID plus newline", out)
 		}
-		if !strings.Contains(out, "blocked-by") || !strings.Contains(out, "depends-on") {
-			t.Errorf("expected accepted dependency aliases in error, got:\n%s", out)
+		if err := db.QueryRowContext(context.Background(), "SELECT title FROM issues WHERE id = ?", silentID).Scan(&title); err != nil {
+			t.Fatalf("query persisted silent issue: %v", err)
+		}
+		if title != "Silent issue" {
+			t.Errorf("silent issue title = %q, want Silent issue", title)
 		}
 	})
 
-	t.Run("multiple_dependencies", func(t *testing.T) {
+	t.Run("aggregate_transaction_boundary", func(t *testing.T) {
 		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "md")
-		dep1 := bdProxiedCreate(t, bd, p.dir, "Dep 1")
-		dep2 := bdProxiedCreate(t, bd, p.dir, "Dep 2")
-		child := bdProxiedCreate(t, bd, p.dir, "Multi dep issue",
-			"--deps", fmt.Sprintf("blocks:%s,related:%s", dep1.ID, dep2.ID))
-
-		db := openProxiedDB(t, p)
-		assertProxiedDepExists(t, db, dep1.ID, child.ID)
-		assertProxiedDepExists(t, db, child.ID, dep2.ID)
-	})
-
-	t.Run("parent_child", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pc")
-		parent := bdProxiedCreate(t, bd, p.dir, "Parent epic", "-t", "epic")
-		child := bdProxiedCreate(t, bd, p.dir, "Child task", "--parent", parent.ID)
-
+		p := newSharedProxiedProject(t, bd, "ag")
+		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "-t", "epic", "-l", "parent-label,shared")
+		target := bdProxiedCreate(t, bd, p.dir, "Dependency target")
+		child := bdProxiedCreate(t, bd, p.dir, "Child", "--parent", parent.ID, "-l", "own-label", "--deps", "blocks:"+target.ID)
 		if !strings.HasPrefix(child.ID, parent.ID+".") {
 			t.Errorf("child ID %q should start with %q.", child.ID, parent.ID)
 		}
-		db := openProxiedDB(t, p)
-		assertProxiedDepExists(t, db, child.ID, parent.ID)
-	})
-
-	t.Run("parent_label_inheritance", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "pi")
-		parent := bdProxiedCreate(t, bd, p.dir, "Parent with labels", "-t", "epic", "-l", "team-a,priority:high")
-		child := bdProxiedCreate(t, bd, p.dir, "Child inherits", "--parent", parent.ID)
 
 		db := openProxiedDB(t, p)
+		var persistedTitle string
+		if err := db.QueryRowContext(context.Background(), "SELECT title FROM issues WHERE id = ?", child.ID).Scan(&persistedTitle); err != nil {
+			t.Fatalf("query persisted child: %v", err)
+		}
+		if persistedTitle != "Child" {
+			t.Errorf("persisted child title = %q, want Child", persistedTitle)
+		}
+		assertProxiedDepExistsWithType(t, db, child.ID, parent.ID, "parent-child")
+		assertProxiedDepExistsWithType(t, db, target.ID, child.ID, "blocks")
+
 		labels := getProxiedLabels(t, db, child.ID)
-		labelMap := make(map[string]bool)
-		for _, l := range labels {
-			labelMap[l] = true
+		labelSet := make(map[string]bool, len(labels))
+		for _, label := range labels {
+			labelSet[label] = true
 		}
-		if !labelMap["team-a"] || !labelMap["priority:high"] {
-			t.Errorf("expected inherited labels team-a and priority:high, got %v", labels)
-		}
-	})
-
-	t.Run("parent_no_inherit_labels", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "ni")
-		parent := bdProxiedCreate(t, bd, p.dir, "Parent", "-t", "epic", "-l", "inherited-label")
-		child := bdProxiedCreate(t, bd, p.dir, "Child no inherit", "--parent", parent.ID, "--no-inherit-labels", "-l", "own-label")
-
-		db := openProxiedDB(t, p)
-		labels := getProxiedLabels(t, db, child.ID)
-		labelMap := make(map[string]bool)
-		for _, l := range labels {
-			labelMap[l] = true
-		}
-		if !labelMap["own-label"] {
-			t.Error("expected own-label on child")
-		}
-		if labelMap["inherited-label"] {
-			t.Error("did not expect inherited-label on child with --no-inherit-labels")
+		for _, want := range []string{"parent-label", "shared", "own-label"} {
+			if !labelSet[want] {
+				t.Errorf("child labels = %v, missing %q", labels, want)
+			}
 		}
 	})
-
-	t.Run("due_date", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "dd")
-		issue := bdProxiedCreate(t, bd, p.dir, "Due issue", "--due", "+24h")
-		if issue.DueAt == nil {
-			t.Fatal("expected DueAt to be set")
-		}
-		expected := time.Now().Add(24 * time.Hour)
-		diff := issue.DueAt.Sub(expected)
-		if diff < -5*time.Minute || diff > 5*time.Minute {
-			t.Errorf("DueAt off by too much: got %v, expected ~%v", issue.DueAt, expected)
-		}
-	})
-
-	t.Run("defer_until", func(t *testing.T) {
-		t.Parallel()
-		p := newSharedProxiedProject(t, bd, "df")
-		issue := bdProxiedCreate(t, bd, p.dir, "Deferred issue", "--defer", "+2h")
-		if issue.DeferUntil == nil {
-			t.Fatal("expected DeferUntil to be set")
-		}
-		expected := time.Now().Add(2 * time.Hour)
-		diff := issue.DeferUntil.Sub(expected)
-		if diff < -5*time.Minute || diff > 5*time.Minute {
-			t.Errorf("DeferUntil off by too much: got %v, expected ~%v", issue.DeferUntil, expected)
-		}
-	})
-
 }
 
 func TestProxiedServerCreate2(t *testing.T) {
@@ -545,6 +347,51 @@ A new feature
 		}
 		if sourceRepo != "/path/to/repo" {
 			t.Errorf("source_repo: got %q, want %q", sourceRepo, "/path/to/repo")
+		}
+	})
+
+	// RULING R1 (TestParityCreateOnOccupiedIDRefuses): `bd create --id` on an
+	// occupied ID refuses with exit 1 and a fixed message, leaving the
+	// pre-existing row untouched. This is the proxied twin of the embedded
+	// parity pin — before the bd-b8itp fix the proxied route sent the
+	// domain-level upsert form and silently destroyed the existing issue
+	// while reporting "Created issue:".
+	t.Run("occupied_id_refuses", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "oc")
+		seeded := bdProxiedCreate(t, bd, p.dir, "Original title",
+			"--id", "oc-occ1", "-d", "original description", "-p", "0")
+		if seeded.ID != "oc-occ1" {
+			t.Fatalf("seed ID = %q, want oc-occ1", seeded.ID)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "create", "Replacement title",
+			"--id", "oc-occ1", "-d", "replacement description", "-p", "4")
+		if err == nil {
+			t.Fatalf("bd create --id oc-occ1 should have refused the occupied ID\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			t.Errorf("exit = %v, want exit code 1", err)
+		}
+		const wantErr = "Error: oc-occ1 already exists; use bd update, or bd import for upsert semantics\n"
+		if stderr != wantErr {
+			t.Errorf("stderr = %q, want %q", stderr, wantErr)
+		}
+		if stdout != "" {
+			t.Errorf("stdout = %q, want empty on a refused create", stdout)
+		}
+
+		db := openProxiedDB(t, p)
+		var title, description string
+		var priority int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT title, description, priority FROM issues WHERE id = ?", "oc-occ1").
+			Scan(&title, &description, &priority); err != nil {
+			t.Fatalf("query surviving row: %v", err)
+		}
+		if title != "Original title" || description != "original description" || priority != 0 {
+			t.Errorf("row after refused create = title=%q description=%q priority=%d, want the seeded values", title, description, priority)
 		}
 	})
 

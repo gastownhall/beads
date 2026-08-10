@@ -32,7 +32,7 @@ func formatShortIssue(issue *types.Issue) string {
 		return fmt.Sprintf("%s %s %s %s%s",
 			statusIcon,
 			ui.RenderMuted(issue.ID),
-			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(fmt.Sprintf("P%d", issue.Priority)),
 			ui.RenderMuted(string(issue.IssueType)),
 			ui.RenderMuted(" "+issue.Title))
 	}
@@ -49,7 +49,7 @@ func formatIssueHeader(issue *types.Issue) string {
 	statusStyle := ui.GetStatusStyle(string(issue.Status))
 	statusStr := statusStyle.Render(strings.ToUpper(string(issue.Status)))
 
-	// Priority with semantic color (includes ● icon)
+	// Priority with semantic color (P-label only)
 	priorityTag := ui.RenderPriority(issue.Priority)
 
 	// Type badge for notable types
@@ -115,10 +115,10 @@ func formatIssueMetadata(issue *types.Issue) string {
 	timeParts = append(timeParts, fmt.Sprintf("Updated: %s", issue.UpdatedAt.Format("2006-01-02")))
 
 	if issue.DueAt != nil {
-		timeParts = append(timeParts, fmt.Sprintf("Due: %s", issue.DueAt.Format("2006-01-02")))
+		timeParts = append(timeParts, fmt.Sprintf("Due: %s", issue.DueAt.Local().Format("2006-01-02")))
 	}
 	if issue.DeferUntil != nil {
-		timeParts = append(timeParts, fmt.Sprintf("Deferred: %s", issue.DeferUntil.Format("2006-01-02")))
+		timeParts = append(timeParts, fmt.Sprintf("Deferred: %s", issue.DeferUntil.Local().Format("2006-01-02")))
 	}
 	if len(timeParts) > 0 {
 		lines = append(lines, strings.Join(timeParts, " · "))
@@ -179,7 +179,7 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: ID with status color, priority with semantic color
@@ -198,6 +198,52 @@ func formatDependencyLine(prefix string, dep *types.IssueWithDependencyMetadata)
 	return fmt.Sprintf("  %s %s %s: %s%s %s", prefix, statusIcon, idStr, typeStr, dep.Title, priorityTag)
 }
 
+// printDepSection prints one dependency section: bold heading, then a line per
+// edge marked with the section's direction glyph.
+func printDepSection(sec depSection) {
+	fmt.Printf("\n%s\n", ui.RenderBold(sec.Heading))
+	for _, dep := range sec.Deps {
+		fmt.Println(formatDependencyLine(sec.Glyph, dep))
+	}
+}
+
+// printRelatedSection prints the deduplicated RELATED section that both
+// directions of the symmetric related/relates-to edges collapse into.
+func printRelatedSection(relatedSeen map[string]*types.IssueWithDependencyMetadata) {
+	if len(relatedSeen) == 0 {
+		return
+	}
+	fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
+	ids := make([]string, 0, len(relatedSeen))
+	for id := range relatedSeen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		fmt.Println(formatDependencyLine("↔", relatedSeen[id]))
+	}
+}
+
+// printEpicChildProgress summarizes how much of an epic its children have
+// finished, printed under the CHILDREN section.
+func printEpicChildProgress(children []*types.IssueWithDependencyMetadata) {
+	if len(children) == 0 {
+		return
+	}
+	closed := 0
+	for _, dep := range children {
+		if dep.Status == types.StatusClosed {
+			closed++
+		}
+	}
+	pct := closed * 100 / len(children)
+	if closed == len(children) {
+		fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closed, len(children), pct)
+	} else {
+		fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closed, len(children), pct)
+	}
+}
+
 // formatSimpleDependencyLine formats a dependency without metadata (fallback)
 // Closed items get entire row muted - the work is done, no need for attention
 func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
@@ -209,7 +255,7 @@ func formatSimpleDependencyLine(prefix string, dep *types.Issue) string {
 			prefix, statusIcon,
 			ui.RenderMuted(dep.ID),
 			ui.RenderMuted(dep.Title),
-			ui.RenderMuted(fmt.Sprintf("● P%d", dep.Priority)))
+			ui.RenderMuted(fmt.Sprintf("P%d", dep.Priority)))
 	}
 
 	// Active items: use semantic colors

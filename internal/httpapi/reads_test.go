@@ -40,6 +40,12 @@ func (f *recordingIssues) SearchIssuesWithCounts(_ context.Context, _ string, fi
 	return domain.SearchCountsPage{Items: f.items}, nil
 }
 
+// The ready surface's defer-wake sweep reaches this before the read; nothing
+// is deferred in the fixture, so it reports a no-op sweep.
+func (f *recordingIssues) WakeExpiredDefers(context.Context) (issues, wisps int, err error) {
+	return 0, 0, nil
+}
+
 func (f *recordingIssues) readyFilters() []types.WorkFilter {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -242,7 +248,10 @@ func TestUnlimitedReadsAreLoopbackOnly(t *testing.T) {
 	})
 
 	t.Run("a non-loopback bind refuses it", func(t *testing.T) {
-		ts, rec := newReadServer(t, Config{Addr: "127.0.0.1:0", AllowNonLoopback: true})
+		// InsecureNoAuth is what --allow-non-loopback now requires when no
+		// token file is configured. It is the posture under test here — the
+		// refusal being pinned is about the BIND, not about the credential.
+		ts, rec := newReadServer(t, Config{Addr: "127.0.0.1:0", AllowNonLoopback: true, InsecureNoAuth: true})
 		resp := ts.get(t, "/v0/beads/ready?limit=0")
 		if resp.StatusCode != http.StatusBadRequest {
 			t.Fatalf("status = %d, want 400", resp.StatusCode)
@@ -345,8 +354,11 @@ func TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens(t *testing.T) {
 	if resp := ts.get(t, "/v0/beads/ready"); resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-	if n := len(provider.openedUOWs()); n != 1 {
-		t.Fatalf("opened %d units of work, want 1", n)
+	// Two units of work, both through the wrapper: the ready surface's
+	// defer-wake sweep, then the read span. A reader bound to the untimed
+	// provider would report zero.
+	if n := len(provider.openedUOWs()); n != 2 {
+		t.Fatalf("opened %d units of work, want 2 (defer-wake sweep + read span)", n)
 	}
 
 	line := findLogLine(t, ts.stderr.String(), "op="+OpListReadyWork)
@@ -355,5 +367,82 @@ func TestAReadRouteTimesTheUnitsOfWorkItsReaderOpens(t *testing.T) {
 	}
 	if strings.Contains(line, "uow_ms=0.000") {
 		t.Errorf("read request line reports no unit-of-work time though the provider took 5ms; the reader is bound to the untimed provider:\n%s", line)
+	}
+}
+
+// TestListForwardsTheEphemeralPlaneParameter is the handler half of
+// ListRequest.IncludeEphemeral. The parameter decides which TABLES the query
+// reads, and nothing in the response distinguishes a merged page from a durable
+// one when the fixture holds no wisps — so the recorded filter is the only place
+// a dropped plumb-through is visible, which is exactly why the filter is
+// recorded at all.
+//
+// The third case is the one that stops the parameter from being wired to the
+// wrong knob: `include_infra` also admits the plane, so a handler that mapped
+// `include_ephemeral` onto IncludeInfra would pass the first two and silently
+// widen the answer by four issue types.
+func TestListForwardsTheEphemeralPlaneParameter(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		path          string
+		wantSkipWisps bool
+		wantInfraType bool
+	}{
+		{"absent leaves the durable listing alone", "/v0/beads/issues", true, false},
+		{"include_ephemeral admits the plane and takes no type exclusion off", "/v0/beads/issues?include_ephemeral=true", false, false},
+		{"include_infra is the wider one", "/v0/beads/issues?include_infra=true", false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts, rec := newReadServer(t, Config{})
+			if resp := ts.get(t, tc.path); resp.StatusCode != http.StatusOK {
+				t.Fatalf("GET %s: status = %d, want 200", tc.path, resp.StatusCode)
+			}
+			filters := rec.searchFilters()
+			if len(filters) != 1 {
+				t.Fatalf("%d list queries, want 1", len(filters))
+			}
+			if got := filters[0].SkipWisps; got != tc.wantSkipWisps {
+				t.Errorf("SkipWisps = %v, want %v", got, tc.wantSkipWisps)
+			}
+			infraExcluded := false
+			for _, excluded := range filters[0].ExcludeTypes {
+				if excluded == types.IssueType("message") {
+					infraExcluded = true
+				}
+			}
+			if infraExcluded == tc.wantInfraType {
+				t.Errorf("ExcludeTypes = %v; the infra types are a TYPE exclusion and only include_infra takes it off", filters[0].ExcludeTypes)
+			}
+		})
+	}
+}
+
+// TestTheEphemeralPlaneParameterIsTheSkewSignal pins the version-skew half.
+//
+// A client that sends `include_ephemeral` to a server built before this
+// parameter existed gets 400 `unknown_parameter` — the designed signal that the
+// server is older than the client thinks, whose recovery is to degrade rather
+// than retry. That behavior is the shared decoder's, so what has to hold HERE
+// is the other side of it: this build must CONSUME the parameter, because a
+// handler that stopped reading it would answer the durable set and report the
+// request as unknown-parameter-free, which is indistinguishable from success.
+func TestTheEphemeralPlaneParameterIsTheSkewSignal(t *testing.T) {
+	ts, _ := newReadServer(t, Config{})
+
+	resp := ts.get(t, "/v0/beads/issues?include_ephemeral=true")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200: a parameter this build serves must not read as skew", resp.StatusCode)
+	}
+
+	// The neighbouring spelling a client might guess is NOT quietly accepted:
+	// an unknown parameter is refused by name, which is what makes the 200
+	// above mean something.
+	resp = ts.get(t, "/v0/beads/issues?include_ephemerals=true")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	}
+	body := decodeBody(t, resp)
+	if body["param"] != "include_ephemerals" || body["reason"] != string(ReasonUnknownParameter) {
+		t.Errorf("body = %v, want param=include_ephemerals reason=unknown_parameter", body)
 	}
 }

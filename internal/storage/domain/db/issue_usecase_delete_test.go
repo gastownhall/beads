@@ -22,6 +22,12 @@ func (s *testSuite) TestIssueUseCase_Delete() {
 		s.Run("MixedIssueAndWispMutatesCorrectTables", s.iucDeleteIssuesMixedIssueAndWispMutatesCorrectTables)
 		s.Run("UpdateTextReferencesFalseLeavesRefs", s.iucDeleteSkipsRefsWhenFlagOff)
 	})
+	s.Run("CascadePolicy", func() {
+		s.Run("LegacyDefaultIgnoresForceAndFollowsCascadeAlone", s.iucCascadePolicyLegacy)
+		s.Run("EnforcedCascadeDeletesTransitiveDependents", s.iucCascadePolicyCascade)
+		s.Run("EnforcedRefusesOnExternalDependents", s.iucCascadePolicyRefuses)
+		s.Run("EnforcedForceOrphansExternalDependents", s.iucCascadePolicyForceOrphans)
+	})
 	s.Run("DeleteWisp", func() {
 		s.Run("DispatchesToWispsTable", s.iucDeleteWispDispatches)
 		s.Run("CleansAuxiliaryTablesAndCascadesAcrossDependencyTypes", s.iucDeleteWispCleansAuxiliaryTablesAndCascadesAcrossDependencyTypes)
@@ -249,6 +255,117 @@ func (s *testSuite) iucDeleteSkipsRefsWhenFlagOff() {
 	survived, err := s.issueRepo().Get(s.Ctx(), "bd-iuc-noref-neighbor", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.Equal(original, survived.Description, "description must be untouched when flag is off")
+}
+
+// seedDependentChain seeds root <- mid <- leaf (mid depends on root, leaf on
+// mid) for the cascade-policy combos.
+func (s *testSuite) seedDependentChain(root, mid, leaf string) {
+	for _, id := range []string{root, mid, leaf} {
+		s.seedOpenIssue(id)
+	}
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(mid, root, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(s.depRepo().Insert(s.Ctx(),
+		newDep(leaf, mid, types.DepBlocks), "tester", domain.DepInsertOpts{}))
+}
+
+func (s *testSuite) issueRowCount(id string) int {
+	var rows int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM issues WHERE id = ?", id).Scan(&rows))
+	return rows
+}
+
+// iucCascadePolicyLegacy pins the EnforceCascadePolicy=false path EXACTLY as
+// it behaved before bd-paurh: Cascade alone decides expansion and Force is
+// ignored — no refusal, no orphan reporting. Other proxied callers (wisp/mol/
+// gc/purge) rely on this.
+func (s *testSuite) iucCascadePolicyLegacy() {
+	s.seedDependentChain("bd-iuc-cpl-root", "bd-iuc-cpl-mid", "bd-iuc-cpl-leaf")
+
+	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
+		IDs: []string{"bd-iuc-cpl-root"},
+		// Cascade=false, Force=false, EnforceCascadePolicy=false
+	}, "tester")
+	s.Require().NoError(err, "legacy path must not refuse on external dependents")
+	s.Equal(1, res.DeletedCount, "legacy non-cascade deletes only the named ID")
+	s.Empty(res.OrphanedIssues, "legacy path reports no orphans")
+	s.Equal(0, s.issueRowCount("bd-iuc-cpl-root"))
+	s.Equal(1, s.issueRowCount("bd-iuc-cpl-mid"), "dependent silently kept (legacy)")
+	s.Equal(1, s.issueRowCount("bd-iuc-cpl-leaf"))
+}
+
+func (s *testSuite) iucCascadePolicyCascade() {
+	s.seedDependentChain("bd-iuc-cpc-root", "bd-iuc-cpc-mid", "bd-iuc-cpc-leaf")
+
+	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
+		IDs:                  []string{"bd-iuc-cpc-root"},
+		Cascade:              true,
+		EnforceCascadePolicy: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(3, res.DeletedCount, "cascade sweeps all transitive dependents")
+	s.Empty(res.OrphanedIssues, "cascade path reports no orphans")
+	for _, id := range []string{"bd-iuc-cpc-root", "bd-iuc-cpc-mid", "bd-iuc-cpc-leaf"} {
+		s.Equal(0, s.issueRowCount(id), "%s should be deleted", id)
+	}
+}
+
+func (s *testSuite) iucCascadePolicyRefuses() {
+	s.seedDependentChain("bd-iuc-cpr-root", "bd-iuc-cpr-mid", "bd-iuc-cpr-leaf")
+
+	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
+		IDs:                  []string{"bd-iuc-cpr-root"},
+		EnforceCascadePolicy: true,
+	}, "tester")
+	s.Require().Error(err)
+
+	var blocked *domain.DeleteBlockedError
+	s.Require().ErrorAs(err, &blocked, "refusal must be a typed DeleteBlockedError")
+	s.Equal("bd-iuc-cpr-root", blocked.IssueID)
+	s.Equal([]string{"bd-iuc-cpr-mid"}, blocked.Dependents, "only the DIRECT external dependent blocks")
+	s.Contains(err.Error(), "use --cascade to delete them or --force to orphan them",
+		"refusal must say how to proceed (classic parity)")
+	s.Equal([]string{"bd-iuc-cpr-mid"}, res.OrphanedIssues,
+		"blocking dependents are reported on the result alongside the error")
+	s.Equal(0, res.DeletedCount)
+
+	for _, id := range []string{"bd-iuc-cpr-root", "bd-iuc-cpr-mid", "bd-iuc-cpr-leaf"} {
+		s.Equal(1, s.issueRowCount(id), "%s must survive a refused delete", id)
+	}
+	var depRows int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE depends_on_issue_id = ?",
+		"bd-iuc-cpr-root").Scan(&depRows))
+	s.Equal(1, depRows, "dependency links must survive a refused delete")
+}
+
+func (s *testSuite) iucCascadePolicyForceOrphans() {
+	s.seedDependentChain("bd-iuc-cpf-root", "bd-iuc-cpf-mid", "bd-iuc-cpf-leaf")
+
+	res, err := s.issueUseCase().DeleteIssues(s.Ctx(), domain.DeleteIssuesParams{
+		IDs:                  []string{"bd-iuc-cpf-root"},
+		Force:                true,
+		EnforceCascadePolicy: true,
+	}, "tester")
+	s.Require().NoError(err)
+	s.Equal(1, res.DeletedCount, "force without cascade deletes only the named IDs")
+	s.Equal([]string{"bd-iuc-cpf-mid"}, res.OrphanedIssues,
+		"the direct external dependent is reported as orphaned")
+
+	s.Equal(0, s.issueRowCount("bd-iuc-cpf-root"))
+	s.Equal(1, s.issueRowCount("bd-iuc-cpf-mid"), "orphaned dependent survives")
+	s.Equal(1, s.issueRowCount("bd-iuc-cpf-leaf"), "transitive dependent survives")
+
+	var depRows int
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? OR depends_on_issue_id = ?",
+		"bd-iuc-cpf-root", "bd-iuc-cpf-root").Scan(&depRows))
+	s.Equal(0, depRows, "dependency links to/from the deleted ID are cleaned up")
+	s.Require().NoError(s.Runner().QueryRowContext(s.Ctx(),
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ?",
+		"bd-iuc-cpf-leaf", "bd-iuc-cpf-mid").Scan(&depRows))
+	s.Equal(1, depRows, "links between survivors are untouched")
 }
 
 func (s *testSuite) iucDeleteWispDispatches() {

@@ -60,6 +60,66 @@ type Unwrapper interface {
 // Unwrap returns the underlying store, satisfying Unwrapper.
 func (h *HookFiringStore) Unwrap() DoltStorage { return h.inner }
 
+// RoleFiresHooks reports whether an issue role taken off a store carries this
+// decorator's hook layer — that is, whether a landed write through it runs the
+// workspace's user hook scripts.
+//
+// It is the question a caller cannot answer from the role's own type, and the
+// one a NETWORK server has to answer before it serves anything: `bd serve`
+// documents that hooks do not fire (a user-controlled subprocess per mutation
+// is an unbounded latency multiplier and an orphaned child at shutdown), and
+// the accessors on a decorated store return decorated roles by design —
+// IssueClaimer recurses precisely so a CLI claim keeps its on_update. So the
+// exact value the obvious `store.IssueClaimer()` produces on bd's own storage
+// chain is the one value that server must refuse, and this is what lets it.
+//
+// A decorator built with a nil runner still answers true. Whether hooks fire
+// on this instant's configuration is not the property: the type's contract is
+// to fire them, and a server that admitted it would be one config change away
+// from breaking its own.
+//
+// NOT ENFORCED, because the assertion is on the type: a role this decorator
+// produced and something else then wrapped is invisible here, and so is a
+// future decorator elsewhere that fires hooks of its own. Every case that
+// exists today is in the switch, and a new one belongs there too.
+func RoleFiresHooks(role any) bool {
+	switch role.(type) {
+	case *hookIssueClaimer:
+		return true
+	// The lifecycle role fires on_create, on_update and the close hooks for
+	// every mutation it lands (hook_issue_operations.go), so it is the same
+	// value the network server must refuse — and a wider one than the claimer,
+	// because it carries four verbs rather than one.
+	case *hookIssueOperations:
+		return true
+	// The dependency editor fires the update hook once per DISTINCT SOURCE
+	// ISSUE it edits (hook_dependency_editor.go), so one batch runs the
+	// workspace's script several times — the same value to refuse, for the same
+	// reason, and the one that multiplies fastest.
+	case *hookDependencyEditor:
+		return true
+	// The releaser fires the update hook for every release it lands
+	// (hook_releaser.go), so it is the same value the network server must
+	// refuse — a reaper draining abandoned claims would otherwise run the
+	// workspace's script once per row it freed.
+	case *hookReleaser:
+		return true
+	// The compare-and-set fires the update hook for every swap that MOVED a
+	// key, which is a coordination write a loop makes repeatedly — so a server
+	// handed an unpeeled one runs the workspace's script once per contended
+	// retry round.
+	case *hookMetadataCAS:
+		return true
+	// The batch applier is the widest of them all: one call fires on_create,
+	// on_update AND the close hooks, once per landed item plus once per
+	// distinct edge source (hook_batch_applier.go). A hundred-item plan served
+	// unpeeled is a hundred user subprocesses inside one request.
+	case *hookBatchApplier:
+		return true
+	}
+	return false
+}
+
 // UnwrapStore peels back any chain of Unwrapper decorators and returns
 // the innermost store. Use this before type-asserting to optional
 // interfaces (StoreLocator, BackupStore, Flattener, RawDBAccessor, etc.)
@@ -158,6 +218,11 @@ func (h *HookFiringStore) CloseIssue(ctx context.Context, id string, reason stri
 // on_close on success — mirroring CloseIssue, this includes the idempotent
 // no-op when the issue was already closed (res.Unchanged). A guard rejection
 // (ErrCloseBlocked) or any other error returns without firing.
+//
+// THE BATCH VERBS DO NOT FOLLOW THIS RULE: hookBatchCloser and hookBatchApplier
+// fire per item on Changed, so a replayed teardown does not re-run on_close N
+// times (ga-2yaqp.1). This single close keeps the firing because one re-close
+// is one answer to one question a script asked.
 func (h *HookFiringStore) CloseIssueChecked(ctx context.Context, id string, actor string, opts CloseIssueOptions) (CloseIssueResult, error) {
 	res, err := h.inner.CloseIssueChecked(ctx, id, actor, opts)
 	if err != nil {
@@ -305,15 +370,50 @@ func (h *HookFiringStore) CompleteIssueOperationCreate(ctx context.Context, issu
 }
 
 // CompleteIssueOperationUpdate fires the update hook for a committed guarded
-// operation.
+// operation. The issue is cloned because the hook runner marshals it on its
+// own goroutine while callers (cmd/bd close/update/reopen) go on to mutate
+// the result they handed in.
 func (h *HookFiringStore) CompleteIssueOperationUpdate(issue *types.Issue) {
-	h.fireHook(hooks.EventUpdate, issue)
+	h.fireHook(hooks.EventUpdate, cloneIssueForHook(issue))
 }
 
 // CompleteIssueOperationClose fires the close hook for a committed guarded
-// close.
+// close. Cloned for the same reason as CompleteIssueOperationUpdate.
 func (h *HookFiringStore) CompleteIssueOperationClose(issue *types.Issue) {
-	h.fireHook(hooks.EventClose, issue)
+	h.fireHook(hooks.EventClose, cloneIssueForHook(issue))
+}
+
+// CompleteIssueOperationDependency fires the update hook for an issue whose
+// edges a committed guarded edit changed. It re-reads the issue with its
+// dependency records, exactly as AddDependency and RemoveDependency do, so a
+// hook script sees the graph the edit produced rather than the row alone.
+func (h *HookFiringStore) CompleteIssueOperationDependency(ctx context.Context, issueID string) {
+	h.fireDependencyHookByID(ctx, issueID)
+}
+
+// CompleteIssueOperationComment fires the update hook for a committed guarded
+// comment, which is the event AddIssueComment fires: there is no on_comment
+// event, and a comment is a change to the issue as far as a script is
+// concerned.
+func (h *HookFiringStore) CompleteIssueOperationComment(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
+// CompleteIssueOperationMetadata fires the update hook for a committed
+// compare-and-set that moved a metadata key, which is the event the generic
+// update path fires for the same write. It re-reads the row rather than taking
+// the caller's, so a script sees the metadata the swap produced.
+func (h *HookFiringStore) CompleteIssueOperationMetadata(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
+}
+
+// CompleteIssueOperationRelease fires the update hook for a committed release,
+// which is the event the generic update path fires for the same write —
+// assignee and status are exactly the fields a release moves. It re-reads the
+// row rather than taking the caller's, so a script sees the unheld issue the
+// release produced rather than the claim it had.
+func (h *HookFiringStore) CompleteIssueOperationRelease(ctx context.Context, issueID string) {
+	h.fireHookByID(ctx, hooks.EventUpdate, issueID)
 }
 
 func (h *HookFiringStore) fireHookByID(ctx context.Context, event, id string) {
@@ -481,6 +581,7 @@ func cloneIssueForHook(issue *types.Issue) *types.Issue {
 	clone.LeaseExpiresAt = clonePtr(issue.LeaseExpiresAt)
 	clone.HeartbeatAt = clonePtr(issue.HeartbeatAt)
 	clone.ExternalRef = clonePtr(issue.ExternalRef)
+	clone.WispPlaneOverride = clonePtr(issue.WispPlaneOverride)
 	clone.Labels = append([]string(nil), issue.Labels...)
 	clone.Metadata = append([]byte(nil), issue.Metadata...)
 	clone.CompactedAt = clonePtr(issue.CompactedAt)

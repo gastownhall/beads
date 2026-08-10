@@ -96,6 +96,97 @@ linters:
           deny:
             - pkg: github.com/steveyegge/beads/internal/workapi
               desc: "internal/httpapi is transport only: a read handler asks the provider for issueops.Reader and passes the whole request - it never builds a filter - see internal/httpapi/reads.go"
+        # The OTHER way past the roles, and the one the rule above does not
+        # close. Denying internal/workapi stops a handler BUILDING a filter; it
+        # does nothing about a handler taking uw.IssueUseCase() and calling the
+        # use case straight, which needs no filter and no builder. That is not a
+        # hypothetical shortcut - it is exactly what the proxied CLI did for
+        # years, and unpicking it is what the role accessors exist for. A second
+        # front door that reached the domain directly would be the same two
+        # implementations again, arriving one handler at a time.
+        #
+        # Deny-by-default over the whole package, so a file added here tomorrow
+        # is covered the moment it exists. The two holes below are named, and
+        # each one is a VALUE the caller assembled, never a use case:
+        #
+        #   server.go     Config.Workspace is domain.ContextInfo, the startup
+        #                 snapshot the embedder hands in. The package resolves
+        #                 no workspace state of its own; this is the type of the
+        #                 thing it is given.
+        #   handlers.go   contextResponse projects that snapshot with
+        #                 domain.PublishedContext - the SAME projection `bd
+        #                 context` publishes, which is where the credential and
+        #                 host-path exclusions live. Reimplementing it here to
+        #                 satisfy a lint rule would be the field-by-field copy
+        #                 that projection exists to prevent.
+        #
+        # Neither file touches a use case, and both are small: the read handlers
+        # (reads.go), the one write (claim.go) and everything added later stay
+        # guarded. Tests are exempt for the reason the rule above exempts them -
+        # they stand up domain fakes to drive the handlers.
+        httpapi-domain-boundary:
+          list-mode: lax
+          files:
+            - "**/internal/httpapi/**"
+            - "!$test"
+            - "!**/internal/httpapi/server.go"
+            - "!**/internal/httpapi/handlers.go"
+          deny:
+            - pkg: github.com/steveyegge/beads/internal/storage/domain
+              desc: "internal/httpapi is transport only: a handler reaches storage through an issueops role accessor on the provider, never through the domain use cases - see internal/httpapi/claim.go"
+        # The same boundary, transposed onto the front door that was last past
+        # it. cmd/bd cannot be closed to the domain wholesale — thirty of its
+        # non-test files import internal/storage/domain today and unpicking
+        # them is a program, not a rule — so this closes it ONE COMMAND AT A
+        # TIME, and `bd label` is the first entry.
+        #
+        # It denies internal/storage/uow as well as internal/storage/domain,
+        # and the second package is the one that does the work here. depguard
+        # matches IMPORTS, and a file can call uw.LabelUseCase().AddLabel(...)
+        # without importing domain at all — the method call needs no import for
+        # the inferred type. That is exactly what cmd/bd/label_proxied_server.go
+        # did, so a domain-only deny would have been a rule that could not see
+        # the bypass it was written for. Reaching a use case requires a unit of
+        # work, opening one requires uow.RunTx, and THAT is an import.
+        #
+        # THIS RULE COVERS THE IMPORT SPELLING AND ONLY THE IMPORT SPELLING, and
+        # by itself it is NOT sufficient. cmd/bd is one package, so
+        # proxiedOpenReadUOW (cmd/bd/show_proxied_server.go) hands any file in
+        # it a uow.UnitOfWork with no import of its own — measured: a label.go
+        # calling proxiedOpenReadUOW(ctx) and then uw.LabelUseCase().AddLabel()
+        # compiles and passes this rule. An import-scoped guard cannot see a
+        # bypass routed through an in-package helper, and pretending otherwise
+        # would be worse than no rule, because the next reader greps for the
+        # guard, finds one, and stops looking.
+        #
+        # What closes that route is the forbidigo `LabelUseCase` rule below,
+        # scoped to this same file. The two are a PAIR and neither is
+        # decorative: forbidigo names the call and depguard names the package,
+        # so a caller that reached the domain through some third spelling —
+        # a helper returning a use case directly, say — still trips the import.
+        # Both were verified by mutation, one bypass each.
+        #
+        # cmd/bd/label.go holds every label decision now — the arg split, the
+        # reserved-prefix refusal, the patch, the report — and reaches storage
+        # only through issueops.Lifecycle and issueops.Reader.
+        # cmd/bd/label_proxied_server.go is NOT on this list and legitimately
+        # imports uow: it is where the route's capability accessors live, and
+        # it still holds `list-all` and `propagate`, whose questions no role
+        # answers yet. It joins the list when they move.
+        #
+        # The list grows by one file per command whose front doors reach the
+        # roles, the way cmd-bd-role-constructors grows by one package per
+        # shared body.
+        cmd-bd-domain-boundary:
+          list-mode: lax
+          files:
+            - "**/cmd/bd/label.go"
+            - "!$test"
+          deny:
+            - pkg: github.com/steveyegge/beads/internal/storage/domain
+              desc: "bd label reaches storage through an issueops role accessor, never through the domain use cases - see openIssueLifecycle in cmd/bd/label.go"
+            - pkg: github.com/steveyegge/beads/internal/storage/uow
+              desc: "bd label does not open a unit of work: the route fork is the accessor (openIssueLifecycle/openIssueReader), and a unit of work here is how a use-case call gets back in - see cmd/bd/label.go"
         # store.IssueReader() is the door to the reader role, and a store wears
         # decorators (telemetry spans, hook firing) that each add their layer in
         # their OWN accessor. A command holding the storage.DoltStorage
@@ -109,13 +200,46 @@ linters:
         # No matching entry for internal/httpapi: depguard matches pkg by
         # prefix, so httpapi-transport-boundary above already denies the
         # subpackage along with its parent.
-        cmd-bd-reader-constructor:
+        #
+        # The list grows by one entry per store-backed role that gets a shared
+        # body of its own. It is a LIST rather than a rule per role so the next
+        # one is a one-line edit here - see
+        # engdocs/ADDING_AN_ISSUEOPS_ROLE.md.
+        cmd-bd-role-constructors:
           list-mode: lax
           files:
             - "**/cmd/bd/**"
           deny:
             - pkg: github.com/steveyegge/beads/internal/workapi/storereader
               desc: "a command reaches the reader role through store.IssueReader(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereader/reader.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storecounter
+              desc: "a command reaches the count role through store.Counter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storecounter/counter.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storeworkspaceconfig
+              desc: "a command reaches the workspace-settings role through store.WorkspaceConfig(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storeworkspaceconfig/workspaceconfig.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storeversionreconciler
+              desc: "a command reaches the version-marker role through store.VersionReconciler(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storeversionreconciler/versionreconciler.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storestats
+              desc: "a command reaches the summary role through store.StatsReporter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storestats/reporter.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storereadycounter
+              desc: "a command reaches the ready-count role through store.ReadyCounter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadycounter/counter.go"
+            - pkg: github.com/steveyegge/beads/internal/workapi/storequerier
+              desc: "a command reaches the boolean-query role through store.Querier(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storequerier/querier.go"
+        # beadserrors sits BENEATH every role leaf, so whatever it imports is
+        # imported by all of them - which is the reason it exists. The second
+        # leaf reached into issueops for one sentinel and pulled internal/types
+        # along behind it, and that import claimed the memory plane sits
+        # downstream of the issue plane. Stdlib only, and enforced rather than
+        # requested, because the next tempting import is always one shared
+        # constant that "obviously belongs with the errors".
+        #
+        # strict, not lax: this is an allowlist of the whole world, so a rule
+        # that named packages to deny would have to predict them.
+        beadserrors-leaf:
+          list-mode: strict
+          files:
+            - "**/beadserrors/**"
+          allow:
+            - "$gostd"
     # The CONSTRUCTION half of that same boundary, and the half that actually
     # matches the failure. The depguard rule above denies a handler IMPORTING
     # the builders; it does not deny a handler naming the filter types, which
@@ -160,6 +284,8 @@ linters:
     forbidigo:
       analyze-types: true
       forbid:
+        - pattern: 'LabelUseCase$'
+          msg: "reach the label plane through issueops.Lifecycle (Patch.Labels) and issueops.Reader, never the domain use case - see openIssueLifecycle in cmd/bd/label.go"
         - pattern: '^types\.(IssueFilter|WorkFilter)$'
           pkg: '^github\.com/steveyegge/beads/internal/types$'
           msg: "do not write a filter here: take one back from a builder in internal/workapi, or pass the whole request to issueops.Reader. internal/httpapi may never name these types; cmd/bd denies them by default and lists the files that legitimately build their own, with the reason for each, in .golangci.yml - see issueops/reader.go"
@@ -189,17 +315,38 @@ linters:
 
   exclusions:
     rules:
-      # forbidigo holds exactly one rule - the filter-construction guard - and
-      # the entries from here to the test exemption are its entire scope. This
-      # one keeps it off the rest of the tree; the settings block above says
-      # why. A second forbidigo rule would need this widened or replaced, and
-      # nothing else about the config would tell you that, so it is written
-      # here rather than left implicit.
+      # forbidigo holds TWO rules - the filter-construction guard and the
+      # label-plane guard - and the entries from here to the test exemption are
+      # their entire scope. This one keeps both off the rest of the tree; the
+      # settings block above says why.
+      #
+      # The previous version of this comment said there was exactly one rule and
+      # that a second "would need this widened or replaced". That came true, and
+      # what it cost is the two entries below plus a `text:` on ONE of the
+      # per-path holes. Every hole from here down is written for the FILTER rule
+      # and predates the label one, so a hole that names only a path silently
+      # opens both. That is fine wherever the file never reaches a label use
+      # case, and it is not fine for cmd/bd/label.go, which is the one file the
+      # label rule exists for - see the `text:`-scoped entry at the label family
+      # below.
       - path-except: '^(internal/httpapi/|cmd/bd/)'
         linters:
           - forbidigo
+      # The label-plane rule is deny-by-default across cmd/bd like its sibling,
+      # and this narrows it to the ONE file whose front door has been migrated.
+      # Every other caller of a label use case in cmd/bd is a command this slice
+      # did not move - `bd create --labels`' dry-run preview, the mutate and
+      # show proxied routes, and label.go's own list-all and propagate twins in
+      # label_proxied_server.go - and holding them to a rule written for a
+      # migration they have not had would be a lint that has to be waived on
+      # sight. Each one drops off this exemption as its command reaches the
+      # role, which is the same shrink-by-migration the filter holes above do.
+      - path-except: '^cmd/bd/label\.go$'
+        text: 'reach the label plane through issueops'
+        linters:
+          - forbidigo
       # Inside cmd/bd the rule is deny-by-default, so each entry below is a
-      # HOLE in it and carries the reason that hole exists. 64 of the 382
+      # HOLE in it and carries the reason that hole exists. 59 of the 389
       # non-test files under cmd/bd are on this list; widening it is an edit
       # here and a diff a reviewer sees. internal/httpapi has no entry and is
       # meant not to.
@@ -210,6 +357,12 @@ linters:
       # to name the type to hand the filter back), and --current (which
       # resolves an id from a deliberately BARE filter that must not pick up
       # the default listing's exclusions).
+      #
+      # `bd list`'s PAGE left this hole when issueops.Reader took it on both
+      # routes: cmd/bd/list.go and cmd/bd/list_proxied_server.go were never on
+      # this list and still are not, and the modes above are all that keeps this
+      # file on it. The entry therefore stays and the count is unchanged — a
+      # role commit that could not remove one says so rather than implying it.
       - path: '^cmd/bd/list_show_filter_modes\.go$'
         linters:
           - forbidigo
@@ -224,9 +377,12 @@ linters:
       # than inlining a third copy of the default - bd-3fs.3. The blocked-issue
       # views in these files name the type directly for an empty filter or one
       # carrying only a --parent id, which is the absence of a filter rather
-      # than one this command built. `bd ready` is on the shared BUILDER and,
-      # on the proxied route, the shared EPILOGUE; it is not on the role, and
-      # this rule does not pretend otherwise.
+      # than one this command built. `bd ready`'s LISTING is on the shared
+      # BUILDER and, on the proxied route, the shared EPILOGUE; it is not on a
+      # role, and this rule does not pretend otherwise. Its other two questions
+      # are: --claim goes to ReadyClaimer and the published total to
+      # ReadyCounter, both over the request rather than the filter, on both
+      # routes - which is why this hole keeps shrinking rather than growing.
       - path: '^cmd/bd/ready(_input|_proxied_server)?\.go$'
         linters:
           - forbidigo
@@ -237,8 +393,32 @@ linters:
       # still named, and a new file in a family is still an edit here.
       #
       # Commands with a direct route and a proxied twin that build the same
-      # filter on both:
-      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|search|status|todo|wisp)(_proxied_server)?\.go$'
+      # filter on both.
+      #
+      # `status` LEFT this list when the StatsReporter role took the assignee
+      # filter, the ready-work filter and the status fold off both its routes:
+      # cmd/bd/status.go and cmd/bd/status_proxied_server.go now build an
+      # issueops request and name no filter type, so the hole they needed is
+      # closed rather than merely unused. Removing an entry here is how a role
+      # commit proves its front doors reached the role.
+      #
+      # `purge` left it the same way when the Sweeper role took the candidate
+      # filter off both `bd purge` and `bd prune`: cmd/bd/purge.go now builds an
+      # issueops.SweepRequest, and cmd/bd/purge_proxied_server.go is down to the
+      # provider's capability accessor. `gc` stays — it is a different command
+      # that still selects its own closed beads, and it now shares only the pure
+      # recheck (workapi.FilterSweepCandidates) with the role.
+      # `text:` HERE AND NOWHERE ELSE, and the asymmetry is deliberate rather
+      # than an oversight to tidy up later. This is the only hole in the list
+      # whose files include one the LABEL rule must bite in - cmd/bd/label.go,
+      # which still names types.IssueFilter for list-all and propagate and
+      # therefore still needs its filter exemption. Without the text scope this
+      # entry would exempt that file from every forbidigo rule there will ever
+      # be, including the one written to guard it. The other holes name no such
+      # file, so widening them now would be churn asserting nothing; the next
+      # rule that overlaps one of them adds its own text scope the same way.
+      - path: '^cmd/bd/(close|duplicates|find_duplicates|gate|gc|graph|info|label|orphans|purge|search|todo|wisp|human)(_proxied_server)?\.go$'
+        text: 'do not write a filter here'
         linters:
           - forbidigo
       # Molecule reporting: each selects the members of one molecule.
@@ -249,8 +429,11 @@ linters:
       - path: '^cmd/bd/(ado|gitlab|jira|linear)\.go$'
         linters:
           - forbidigo
-      # Bulk movement of issues in, out and across prefixes.
-      - path: '^cmd/bd/(export|export_auto|import|migrate|migrate_issues|migrate_personal|rename|rename_prefix)\.go$'
+      # Bulk movement of issues in, out and across prefixes. export_source is
+      # export's storage seam (classic store vs proxied unit of work): it does
+      # not build a filter, it carries the one export.go builds through to
+      # whichever stack is live.
+      - path: '^cmd/bd/(export|export_auto|export_source|import|migrate|migrate_issues|migrate_personal|rename|rename_prefix)\.go$'
         linters:
           - forbidigo
       # doctor's diagnostics and the fixes that follow them.
@@ -258,7 +441,14 @@ linters:
         linters:
           - forbidigo
       # One command each, no family to join.
-      - path: '^cmd/bd/(cleanup|completions|count|gate_discover|human|lint|ping|repo|swarm|template)\.go$'
+      #
+      # `count` LEFT this list when the Counter role took the filter off both
+      # its routes: cmd/bd/count.go now builds an issueops.CountRequest and
+      # names no filter type, so the hole it needed is closed rather than
+      # merely unused. Removing an entry here is how a role commit proves its
+      # front door reached the role.
+      
+      - path: '^cmd/bd/(cleanup|completions|gate_discover|lint|ping|repo|swarm|template)\.go$'
         linters:
           - forbidigo
       # Tests are exempt for the same reason the depguard twin exempts them:

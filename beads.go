@@ -5,6 +5,11 @@
 // Go-based extensions that want to use bd's storage layer programmatically.
 //
 // For a working extension example, see examples/bd-example-extension-go.
+//
+// This is the CONSUMER surface: it opens and uses bd's own storage. To
+// IMPLEMENT a storage backend out of tree — and prove it with the
+// conformance suite — use github.com/steveyegge/beads/backend and
+// github.com/steveyegge/beads/backend/conformance instead.
 package beads
 
 import (
@@ -25,7 +30,10 @@ import (
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
-// Storage is the interface for beads storage operations
+// Storage is the interface for beads storage operations. Its
+// RunInTransaction callback is invoked at most once per public call; callers
+// retry it explicitly after a callback has started when their operation is
+// safe to repeat.
 type Storage = beads.Storage
 
 func configuredBackendUnavailable(backend string) error {
@@ -188,7 +196,8 @@ func AsDependentQuerier(s Storage) (DependentQuerier, bool) {
 // and ErrNotClaimable — the ones ParseClaimConflict recovers assignee/status
 // detail from — are re-exported with the other error sentinels below.
 var (
-	ErrCircuitOpen = dolt.ErrCircuitOpen
+	ErrCircuitOpen         = dolt.ErrCircuitOpen
+	ErrCommitIndeterminate = storage.ErrCommitIndeterminate
 )
 
 // IssueClaimer is the atomic-claim surface of a Storage. ClaimIssue and
@@ -504,7 +513,12 @@ var (
 	ErrVersionMismatch = storage.ErrVersionMismatch
 	ErrSelfDependency  = domain.ErrSelfDependency
 	ErrDependencyCycle = domain.ErrDependencyCycle
-	ErrFieldTooLong    = types.ErrFieldTooLong
+	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
+	// endpoint-existence refusals AddDependency and AddDependencies raise; the
+	// typed value carrying the missing id is DependencyEndpointNotFoundError.
+	ErrDependencySourceNotFound = domain.ErrDependencySourceNotFound
+	ErrDependencyTargetNotFound = domain.ErrDependencyTargetNotFound
+	ErrFieldTooLong             = types.ErrFieldTooLong
 	// ErrGateBusy is returned by OpenGated when a maintenance operation
 	// holds the workspace or physical-root gate exclusively and the wait
 	// budget ran out. Alias of the internal sentinel so errors.Is works
@@ -521,3 +535,8 @@ type DependencyTypeConflictError = domain.DependencyTypeConflictError
 // edge would gate an issue on its own ancestor/descendant (a gate that can
 // never clear).
 type DependencyHierarchyConflictError = domain.DependencyHierarchyConflictError
+
+// DependencyEndpointNotFoundError is returned by AddDependency when an edge
+// names an endpoint this database can see the absence of; callers errors.As it
+// to read the missing id instead of parsing the message.
+type DependencyEndpointNotFoundError = domain.DependencyEndpointNotFoundError

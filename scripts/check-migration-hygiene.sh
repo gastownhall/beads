@@ -225,7 +225,7 @@ fi
 if [ -z "$base" ] || [ -z "${merge_base:-}" ]; then
   echo "WARN (ignored twins) no usable base ref; skipping check D." >&2
 else
-  ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|ignored_schema_migrations'
+  ignored_tables='wisps|wisp_[a-z_]+|repo_mtimes|local_metadata|leases|events|bd_events_journal|bd_events_seq|ignored_schema_migrations'
   ddl_re="(alter|create|rename|drop)[[:space:]]+table([[:space:]]+if[[:space:]]+(not[[:space:]]+)?exists)?[[:space:]]+[\`']?(${ignored_tables})\b"
   # Untracked files count as added too (mirrors check C's working-tree scope:
   # in CI the tree is clean so this equals the PR diff).

@@ -768,6 +768,70 @@ var hooksListCmd = &cobra.Command{
 	},
 }
 
+// guardHookWritePath refuses hook writes that would silently modify files
+// bd does not own (bd-5vdt8):
+//   - a symlinked hook path: os.WriteFile follows the link (O_TRUNC) and
+//     rewrites the target inode — e.g. a repo-tracked script the hook
+//     points at, dirtying every clone that shares it
+//   - a hook file tracked by git: writing it dirties the working tree.
+//     allowTracked exempts shared installs (.beads-hooks/ is deliberately
+//     committed).
+func guardHookWritePath(hookPath string, allowTracked bool) error {
+	fi, err := os.Lstat(hookPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // creating a new file — nothing to clobber
+		}
+		return fmt.Errorf("failed to stat %s: %w", hookPath, err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		target := "unresolvable target"
+		if resolved, rerr := filepath.EvalSymlinks(hookPath); rerr == nil {
+			target = resolved
+		} else if link, lerr := os.Readlink(hookPath); lerr == nil {
+			target = link
+		}
+		return fmt.Errorf("%s is a symlink to %s; writing would rewrite the link target, not the hook\nRemove the symlink (or leave that hook to its owner) and re-run", hookPath, target)
+	}
+	if allowTracked {
+		return nil
+	}
+	// A tracked file is refused only when bd does NOT own it: writing into a
+	// foreign tracked file dirties every clone that shares it (the wy-81fnur
+	// incident). A bd-owned hook the user chose to commit (e.g. a team-shared
+	// .beads/hooks/) is bd's to maintain — same policy as shared installs.
+	if isGitTrackedFile(hookPath) && !isBdOwnedHookFile(hookPath) {
+		return fmt.Errorf("%s is tracked by git and not a bd-managed hook; bd will not modify committed files it does not own\nUntrack it (git rm --cached) or move hooks to an untracked directory and re-run", hookPath)
+	}
+	return nil
+}
+
+// isBdOwnedHookFile reports whether the hook file at path is bd-managed:
+// either section-marker format or a legacy bd hook (shim or inline).
+func isBdOwnedHookFile(path string) bool {
+	content, err := os.ReadFile(path) // #nosec G304 -- path is a hook location bd resolved
+	if err != nil {
+		return false
+	}
+	if strings.Contains(string(content), hookSectionBeginPrefix) {
+		return true
+	}
+	versionInfo, err := getHookVersion(path)
+	return err == nil && versionInfo.IsBdHook
+}
+
+// isGitTrackedFile reports whether path is tracked by git in the repository
+// containing it. Errors (not a repo, path inside .git/, no work tree) count
+// as untracked — the guard only blocks writes it can prove are unsafe.
+func isGitTrackedFile(path string) bool {
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	// #nosec G204 G702 - fixed "git" command; dir/base come from the hooks
+	// directory bd itself resolved, not user input
+	cmd := exec.Command("git", "-C", dir, "ls-files", "--error-unmatch", "--", base)
+	return cmd.Run() == nil
+}
+
 //nolint:unparam // force and chain kept for CLI flag compatibility; section markers make them no-ops
 func installHooksWithOptions(hookNames []string, force bool, shared bool, chain bool, beadsHooks bool) error {
 	var hooksDir string
@@ -813,6 +877,14 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 		preservePreexistingHooks(hooksDir)
 	}
 
+	// Refuse the whole install up front if any target is unsafe to write —
+	// stopping midway through the loop would leave hooks half-installed.
+	for _, hookName := range hookNames {
+		if err := guardHookWritePath(filepath.Join(hooksDir, hookName), shared); err != nil {
+			return fmt.Errorf("refusing to install %s hook: %w", hookName, err)
+		}
+	}
+
 	// Install each hook using section markers (GH#1380).
 	// Only the content between markers is managed by beads; user content
 	// outside the markers is preserved across reinstalls and upgrades.
@@ -845,7 +917,17 @@ func installHooksWithOptions(hookNames []string, force bool, shared bool, chain 
 					// Legacy bd hook — replace entire file with section format
 					newContent = "#!/usr/bin/env sh\n" + section
 				} else {
-					// Non-bd hook — inject section (preserving existing content)
+					// Non-bd hook — this is the one write that modifies a file
+					// bd does not own. Preserve the original as a one-time
+					// .backup sidecar before injecting (bd-5vdt8).
+					backupPath := hookPath + ".backup"
+					if _, statErr := os.Lstat(backupPath); os.IsNotExist(statErr) {
+						// #nosec G306 -- keep executable so a rename restores a working hook
+						if backupErr := os.WriteFile(backupPath, existing, 0755); backupErr != nil {
+							return fmt.Errorf("failed to back up %s before injecting bd section: %w", hookName, backupErr)
+						}
+					}
+					// Inject section, preserving existing content
 					newContent = injectHookSection(existingStr, section)
 				}
 			}
@@ -1778,9 +1860,9 @@ installed bd version - upgrading bd automatically updates hook behavior.`,
 }
 
 func init() {
-	hooksInstallCmd.Flags().Bool("force", false, "Overwrite existing hooks without backup")
+	hooksInstallCmd.Flags().Bool("force", false, "No-op, kept for compatibility (section markers always preserve non-bd content)")
 	hooksInstallCmd.Flags().Bool("shared", false, "Install hooks to .beads-hooks/ (versioned) instead of .git/hooks/")
-	hooksInstallCmd.Flags().Bool("chain", false, "Chain with existing hooks (run them before bd hooks)")
+	hooksInstallCmd.Flags().Bool("chain", false, "No-op, kept for compatibility (existing hook content always runs alongside the bd section)")
 	hooksInstallCmd.Flags().Bool("beads", false, "Install hooks to .beads/hooks/ (recommended for Dolt backend)")
 
 	hooksCmd.AddCommand(hooksInstallCmd)

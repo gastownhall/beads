@@ -31,6 +31,10 @@ type issueOperationHooks interface {
 	CompleteIssueOperationCreate(ctx context.Context, issue *types.Issue, dependencies []*types.Dependency)
 	CompleteIssueOperationUpdate(issue *types.Issue)
 	CompleteIssueOperationClose(issue *types.Issue)
+	CompleteIssueOperationDependency(ctx context.Context, issueID string)
+	CompleteIssueOperationComment(ctx context.Context, issueID string)
+	CompleteIssueOperationMetadata(ctx context.Context, issueID string)
+	CompleteIssueOperationRelease(ctx context.Context, issueID string)
 }
 
 var _ issueOperationHooks = (*HookFiringStore)(nil)
@@ -71,7 +75,9 @@ func (o *hookIssueOperations) Close(ctx context.Context, request issueops.CloseR
 
 // Reopen suppresses the update hook on a no-op, matching the legacy reopen
 // path (hookTrackingLifecycleTransaction.ReopenIssueWithResult). Close and
-// Update stay unconditional on success, also matching their legacy paths.
+// Update stay unconditional on success, also matching their legacy paths —
+// unlike the BATCH close verbs, which fire on Changed so that a replayed
+// teardown does not re-run on_close per item (hookBatchCloser, ga-2yaqp.1).
 func (o *hookIssueOperations) Reopen(ctx context.Context, request issueops.ReopenRequest) (issueops.ReopenResult, error) {
 	result, err := o.inner.Reopen(ctx, request)
 	if err == nil && result.Changed {
