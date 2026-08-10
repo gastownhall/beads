@@ -774,9 +774,19 @@ type roleSettings struct {
 	value    string
 	settings map[string]string
 	err      error
+	// writeErr is what the two writes refuse with, so a case can drive a role
+	// refusal without making the reads fail too.
+	writeErr error
+	// stored is what SetSetting reports back. Empty means "the value that was
+	// sent", which is the role's own promise for every key this plane accepts;
+	// a case that wants to prove the response carries the STORED value rather
+	// than the request sets it.
+	stored string
 
-	mu   sync.Mutex
-	gets []issueops.GetSettingRequest
+	mu     sync.Mutex
+	gets   []issueops.GetSettingRequest
+	sets   []issueops.SetSettingRequest
+	unsets []issueops.UnsetSettingRequest
 }
 
 func (c *roleSettings) GetSetting(_ context.Context, req issueops.GetSettingRequest) (issueops.SettingResult, error) {
@@ -796,18 +806,46 @@ func (c *roleSettings) ListSettings(context.Context, issueops.ListSettingsReques
 	return issueops.ListSettingsResult{Settings: c.settings}, nil
 }
 
-func (c *roleSettings) SetSetting(context.Context, issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
-	return issueops.SetSettingResult{}, errors.New("this surface publishes no settings write")
+func (c *roleSettings) SetSetting(_ context.Context, req issueops.SetSettingRequest) (issueops.SetSettingResult, error) {
+	c.mu.Lock()
+	c.sets = append(c.sets, req)
+	c.mu.Unlock()
+	if c.writeErr != nil {
+		return issueops.SetSettingResult{}, c.writeErr
+	}
+	value := req.Value
+	if c.stored != "" {
+		value = c.stored
+	}
+	return issueops.SetSettingResult{Key: req.Key, Value: value}, nil
 }
 
-func (c *roleSettings) UnsetSetting(context.Context, issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
-	return issueops.UnsetSettingResult{}, errors.New("this surface publishes no settings write")
+func (c *roleSettings) UnsetSetting(_ context.Context, req issueops.UnsetSettingRequest) (issueops.UnsetSettingResult, error) {
+	c.mu.Lock()
+	c.unsets = append(c.unsets, req)
+	c.mu.Unlock()
+	if c.writeErr != nil {
+		return issueops.UnsetSettingResult{}, c.writeErr
+	}
+	return issueops.UnsetSettingResult{Key: req.Key}, nil
 }
 
 func (c *roleSettings) getRequests() []issueops.GetSettingRequest {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]issueops.GetSettingRequest(nil), c.gets...)
+}
+
+func (c *roleSettings) setRequests() []issueops.SetSettingRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.SetSettingRequest(nil), c.sets...)
+}
+
+func (c *roleSettings) unsetRequests() []issueops.UnsetSettingRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]issueops.UnsetSettingRequest(nil), c.unsets...)
 }
 
 type roleStats struct {

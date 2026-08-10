@@ -358,6 +358,33 @@ var routeTable = []route{
 		handler:     (*Server).handleGetSetting,
 	},
 	{
+		op:     OpSetSetting,
+		method: http.MethodPut,
+		// THE SURFACE'S FIRST PUT, and the method is what the operation means
+		// rather than a preference: the caller names the resource by path and
+		// sends the value that becomes its whole state, which is what PUT
+		// already means, and the write is idempotent in the strict sense.
+		//
+		// It shares its pattern with the read above and the delete below and
+		// differs only in method, which ServeMux registers together — the same
+		// arrangement the memory key already has, so the three rows cannot
+		// collide.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.set",
+		implemented: true,
+		handler:     (*Server).handleSetSetting,
+	},
+	{
+		op:     OpUnsetSetting,
+		method: http.MethodDelete,
+		// The surface's second DELETE, and forgetMemory's argument unchanged:
+		// one named resource, no body, no flags.
+		pattern:     "/v0/beads/config/{key}",
+		capability:  "config.unset",
+		implemented: true,
+		handler:     (*Server).handleUnsetSetting,
+	},
+	{
 		op:          OpListDependencies,
 		method:      http.MethodGet,
 		pattern:     "/v0/beads/dependencies",

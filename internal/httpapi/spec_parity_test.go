@@ -992,6 +992,62 @@ func TestReleaseRequestMembersMatchTheHandler(t *testing.T) {
 	}
 }
 
+// TestSetSettingRequestMembersMatchTheHandler is the release's gate for the
+// settings write body.
+//
+// The member this is really guarding is the one that is NOT there. The key is
+// the path's, and a `key` member arriving in the body — documented or honored —
+// would give one request two anchors, so both halves of the check matter: the
+// handler refuses it as unknown, and the schema must not promise it.
+func TestSetSettingRequestMembersMatchTheHandler(t *testing.T) {
+	accepted := map[string]bool{}
+	for _, name := range setSettingRequestMembers {
+		accepted[name] = true
+	}
+
+	goFields := jsonTagNames(t, reflect.TypeOf(apigen.SetSettingRequest{}))
+	if extra := diff(goFields, accepted); len(extra) > 0 {
+		t.Errorf("generated SetSettingRequest declares members the settings write refuses as unknown: %v", extra)
+	}
+	if missing := diff(accepted, goFields); len(missing) > 0 {
+		t.Errorf("the settings write accepts members SetSettingRequest does not declare: %v", missing)
+	}
+
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "SetSettingRequest")
+	specProps := schemaProperties(t, doc, schema)
+	if extra := diff(specProps, accepted); len(extra) > 0 {
+		t.Errorf("the SetSettingRequest schema documents members the settings write refuses: %v", extra)
+	}
+	if missing := diff(accepted, specProps); len(missing) > 0 {
+		t.Errorf("the settings write accepts members the SetSettingRequest schema does not document: %v", missing)
+	}
+
+	if accepted["key"] || specProps["key"] {
+		t.Error("SetSettingRequest publishes `key`; the anchor is the path parameter and must have one spelling")
+	}
+}
+
+// TestRemovedSettingPublishesNothingButTheKey pins the removal's response shape
+// against the document from the SERVER's side, which the schema alone cannot do:
+// `RemovedSetting` is unpinned, so nothing else fails when a member is added to
+// the Go type and to the schema together.
+//
+// Both absences are the contract. `removed` cannot be honest — the storage seam
+// discards the affected-row count on every implementation — and `value` would
+// publish, on the one settings operation that withholds nothing, exactly the
+// credential `GET /v0/beads/config/{key}` redacts.
+func TestRemovedSettingPublishesNothingButTheKey(t *testing.T) {
+	if got := jsonTagNames(t, reflect.TypeOf(apigen.RemovedSetting{})); len(got) != 1 || !got["key"] {
+		t.Errorf("RemovedSetting declares %v, want `key` alone", got)
+	}
+	doc := loadSpec(t)
+	schema := mapAt(t, mapAt(t, mapAt(t, doc, "components"), "schemas"), "RemovedSetting")
+	if got := schemaProperties(t, doc, schema); len(got) != 1 || !got["key"] {
+		t.Errorf("the RemovedSetting schema documents %v, want `key` alone", got)
+	}
+}
+
 // TestAddCommentRequestMembersMatchTheHandler is the release's gate for the
 // comment body.
 //

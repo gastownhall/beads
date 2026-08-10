@@ -412,6 +412,17 @@ const (
 	OpListSettings         = "listSettings"
 	OpGetSetting           = "getSetting"
 	OpListDependencyCycles = "listDependencyCycles"
+	// OpSetSetting stores one setting, replacing whatever was there. It is the
+	// surface's first PUT, and the method IS the argument: the caller names the
+	// resource by path and sends the value that becomes its whole state.
+	// rememberMemory posts to a COLLECTION because its key may be derived from
+	// the content; here the caller can always name what it is writing.
+	OpSetSetting = "setSetting"
+	// OpUnsetSetting removes one setting. It is the second DELETE on this
+	// surface and the one that does NOT 404 on a key nothing stored: this role
+	// reports no affected-row count, so the operation states an intended end
+	// state rather than an act performed. See its operationCodes row.
+	OpUnsetSetting = "unsetSetting"
 	// OpListDependencies reads STORED EDGE ROWS for several issues at once.
 	// It is a separate operation from getIssue's embedded `dependencies`
 	// member because it answers per named issue, reports the ids that named
@@ -622,6 +633,29 @@ var operationCodes = map[string][]Code{
 	// answer on this surface, so the only refusal a key can earn is the 400
 	// that says it was not a key.
 	OpGetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// getSetting's row PLUS the ROLE's refusals, which is the whole difference
+	// between the read half and the write half. Two of the role's three are
+	// reachable — `issue_prefix` in either spelling, and a `status.custom` that
+	// does not parse — and both arrive as the 400 they are, on the sentinel,
+	// through the shared ErrValidation line every role-backed handler here draws.
+	//
+	// NO 404 and no conflict code, both inherited from the read beside it. A key
+	// nothing stored and a key stored empty are one answer on this plane, so
+	// there is no resource this write can fail to address; and the write is an
+	// unconditional replace, so there is no state for it to lose a race against.
+	// A `revision` guard would need a row version this plane does not hold.
+	OpSetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// getSetting's row EXACTLY, and that is this operation's whole error story:
+	// it takes the same parameter, judges it the same way, and reaches a role
+	// whose only refusal — an empty key — the path bound has already made
+	// unreachable. Its 400 is therefore entirely the transport's.
+	//
+	// THE ABSENT 404 IS THE DIVERGENCE FROM forgetMemory, which addresses the
+	// same shape of resource with the same method and answers 404 for a key it
+	// held nothing under. That role reports Found; this one cannot — the storage
+	// seam discards the affected-row count on all three legs — so a 404 here
+	// would publish a distinction this server would have to invent.
+	OpUnsetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 here is this operation's own, not the document-level
 	// unknown-parameter rule: a malformed `skip_blocked`, and the EMPTY
 	// `assignee` the document refuses rather than answering with the rows that

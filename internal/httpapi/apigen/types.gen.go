@@ -970,7 +970,7 @@ type ContextResponse struct {
 	// BeadsDir Absolute path of the served workspace's `.beads` directory. A host path, kept because it is the single-workspace server's only workspace-identity handshake; disclosing it to network peers is part of what an operator accepts when binding beyond loopback.
 	BeadsDir string `json:"beads_dir"`
 
-	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
+	// Capabilities The tokens this server advertises: the OPERATIONS it implements, derived from its route table, and the server-wide BEHAVIORS it enforces. v0's operation vocabulary is `ready.list`, `ready.count`, `issues.list`, `issues.query`, `issues.count`, `issues.get`, `issues.related`, `issues.create`, `issues.addComment`, `issues.batchClose`, `issues.claim`, `issues.claimNext`, `issues.release`, `issues.close`, `issues.reopen`, `issues.update`, `issues.sweep`, `issues.delete`, `issues.batchCreate`, `issues.batchApply`, `stats.get`, `config.list`, `config.get`, `config.set`, `config.unset`, `dependencies.cycles`, `dependencies.list`, `dependencies.count`, `dependencies.blocking`, `dependencies.tree`, `dependencies.add`, `dependencies.remove`, `memories.list`, `memories.get`, `memories.remember`, `memories.forget`, `events.list`, `events.watch`, `issues.casMetadata`; the one behavior token is `project.enforce`, which announces that a `Bd-Project-Id` stamp for the wrong workspace is refused here rather than silently ignored. The list grows additively, and an operation never appears here unless it is fully implemented. This is how a client checks for an operation or a behavior — never the version string.
 	//
 	// THIS LIST IS BUILD-LEVEL, NOT WORKSPACE-LEVEL. It says which operations this binary serves, and for every entry but two that is the whole answer. `events.list` and `events.watch` are the exceptions: the durable events journal is a per-workspace setting that is OFF by default, so a server that advertises them may still refuse every request to both with 409 `events_journal_disabled` — correctly, because the operations exist and the workspace has no journal. A consumer of either MUST treat the capability as "this server speaks it" and the 409 as "not on this workspace", and must not read the capability as a promise that records will arrive.
 	Capabilities []string `json:"capabilities"`
@@ -1688,6 +1688,14 @@ type RemoveDependencyResponse struct {
 	Removed bool `json:"removed"`
 }
 
+// RemovedSetting The outcome of removing one setting.
+//
+// IT CARRIES THE KEY AND NOTHING ELSE, and the absence is the contract rather than an unfinished shape. There is no `removed` flag because the storage seam discards the affected-row count on every implementation, so the member would be a value one of them had to invent — and no `value`, because reporting what was there would publish, on the one operation that withholds nothing, exactly the credential `GET /v0/beads/config/{key}` redacts.
+type RemovedSetting struct {
+	// Key The key that now holds nothing, echoed verbatim.
+	Key string `json:"key"`
+}
+
 // ReopenIssueRequest defines model for ReopenIssueRequest.
 type ReopenIssueRequest struct {
 	// Actor Who is reopening the issue. `ClaimRequest.actor`'s rules exactly: the server trims it, then refuses an empty result, anything longer than 256 BYTES (the `maxLength` above counts characters — the byte limit is the binding one), and any control character including newline. The value reaches the `reopened` event's attribution and the storage commit message, so an unvalidated newline would forge audit-trail lines.
@@ -1714,6 +1722,18 @@ type ReopenIssueResponse struct {
 
 	// Revision The row's optimistic-concurrency token AFTER this reopen, spelled the way `CloseIssueResponse.revision` spells it and here for the same reason: a recovery flow that reopens and then re-closes composes its next `expected_version` from this value. DECODE IT AS A 64-BIT INTEGER.
 	Revision int64 `json:"revision"`
+}
+
+// SetSettingRequest What to store under the key the path names. The key is not a member here: it has one spelling, and a body carrying it too would give one request two anchors and a question about what to do when they disagree.
+//
+// THERE IS NO `actor`, unlike every issue mutation on this surface, and no guard member either. This plane records no history entry to attribute a write on and holds no row version to compare, so both would be members with nothing behind them.
+type SetSettingRequest struct {
+	// Value The value to store, VERBATIM. It is not trimmed, not bounded beyond the 1 MiB every body on this surface shares, and not character-filtered: the column is `TEXT`, and two of the keys this plane holds carry structured configuration a filter would corrupt.
+	//
+	// The empty string is a legal value and is stored. Read back it is INDISTINGUISHABLE from a key nothing ever set — `Setting.value` is absent for both — which is this plane's shipped conflation rather than something this operation introduces. A caller that means "remove it" sends `DELETE`.
+	//
+	// What comes back is this value, for every key this plane accepts: the one stored key with a normalization step is `issue_prefix`, which is also the one key this plane refuses, so no write through this door is transformed on its way in. The one thing the response may not repeat is a value the KEY marks credential-bearing; see the operation.
+	Value string `json:"value"`
 }
 
 // Setting One entry of the workspace's stored settings plane.
@@ -2478,6 +2498,9 @@ type GetStatsParams struct {
 	// IGNORED when `assignee` is set: that answer computes both numbers by a route with no fast path, and it is not an error to ask.
 	SkipBlocked *bool `form:"skip_blocked,omitempty" json:"skip_blocked,omitempty"`
 }
+
+// SetSettingJSONRequestBody defines body for SetSetting for application/json ContentType.
+type SetSettingJSONRequestBody = SetSettingRequest
 
 // AddDependenciesJSONRequestBody defines body for AddDependencies for application/json ContentType.
 type AddDependenciesJSONRequestBody = AddDependenciesRequest

@@ -63,7 +63,7 @@ info:
       outside its own parameter table with `400` / `code: invalid_argument` /
       `reason: "unknown_parameter"` and `param` naming the offending key.
       Operations that declare no QUERY parameter at all reject every query key
-      the same way. Today that is twenty-three of the thirty-nine operations
+      the same way. Today that is twenty-five of the forty-one operations
       here — `GET /healthz`, `GET /v0/beads/context`,
       `GET /v0/beads/dependencies/cycles`, `POST /v0/beads/issues`,
       `PATCH /v0/beads/issues/{id}`,
@@ -77,7 +77,8 @@ info:
       `POST /v0/beads/issues:batchCreate`,
       `POST /v0/beads/issues:batchApply`,
       `POST /v0/beads/issues:batchClose`, `GET /v0/beads/config`,
-      `GET /v0/beads/config/{key}`, `POST /v0/beads/dependencies:add`,
+      `GET /v0/beads/config/{key}`, `PUT /v0/beads/config/{key}`,
+      `DELETE /v0/beads/config/{key}`, `POST /v0/beads/dependencies:add`,
       `POST /v0/beads/dependencies:remove`, `POST /v0/beads/memories`,
       `GET /v0/beads/memories/{key}` and `DELETE /v0/beads/memories/{key}`.
       A path parameter is not a query parameter: several of those carry
@@ -4277,8 +4278,14 @@ paths:
         SETTINGS WHOSE KEY MARKS THEM AS CREDENTIAL-BEARING ARE WITHHELD. Their
         entry is present with `redacted: true` and no `value`, so a client can
         see that the key is configured without the surface handing a secret to
-        every process that can reach the port — this API has no
-        authentication. See `Setting`.
+        every process that can reach the port. A CONFIGURED BEARER DOES NOT
+        NARROW IT: authentication on this surface is a deployment posture and the
+        credential, where there is one, is a single shared token that names
+        nobody — it decides WHO may call, never what a caller who is let in may
+        read — and there is no TLS either. The rule is the KEY's and is the same
+        for every caller. See `Setting`, and `PUT` on this key's own path for the
+        write half, which withholds the value in its response for the same
+        reason and permits the write.
 
 
         The envelope is the paginated one and `has_more` is always false today:
@@ -4332,6 +4339,222 @@ paths:
           description: >-
             Invalid request: an unknown query parameter, or a `key` that is
             empty after trimming or carries a control character.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+    put:
+      operationId: setSetting
+      summary: Store one setting
+      description: >-
+        Stores one setting, REPLACING any value already there — the write
+        `bd config set` spells, on the durable settings plane this document's
+        reads already publish.
+
+
+        `PUT` RATHER THAN A COLLECTION `POST`, and the method is the whole
+        argument: the resource has a canonical URI, the caller names it, and the
+        request carries the value that becomes its whole state. That is what
+        `PUT` already means, and it is idempotent in the strict sense — the same
+        request sent twice leaves the same row.
+        `POST /v0/beads/memories` is the operation this is NOT: that one posts to
+        the COLLECTION because its key may be derived from the content, so the
+        caller cannot always name the resource it is creating. Here the caller
+        always can.
+
+
+        THE KEY IS THE PATH'S and appears nowhere in the body: one anchor, one
+        spelling, and no question about what to do when two disagree. It is used
+        verbatim — no namespace completion, no case folding, no dash/underscore
+        equivalence — and stored UNTRIMMED, because a key differing from another
+        only by surrounding space is a key a reader will never match and
+        trimming it would produce a write the caller cannot find again.
+
+
+        ## What this plane refuses, and what it does not
+
+
+        `issue_prefix` — in either spelling — is a `400` and NOTHING is written.
+        The prefix is owned by `bd init --prefix`, `bd bootstrap` and
+        `bd rename-prefix`, each of which does work this plane cannot: rewriting
+        existing ids, or seeding a workspace that has none. Storing a new one
+        here would leave the beads created before the write and the beads created
+        after it disagreeing about their own namespace with nothing to reconcile
+        them.
+
+
+        A `status.custom` value that does not PARSE is a `400` and nothing is
+        written. That key is not merely stored — it is projected into the
+        `custom_statuses` table, which reads consult first, IN THE SAME
+        TRANSACTION as the row. `types.custom` is projected into `custom_types`
+        the same way. A row without its table is a value that has been stored and
+        has no effect for as long as the table holds something else, so the write
+        and the projection are one durable act or neither happens.
+
+
+        A KEY WHOSE NAME MARKS IT CREDENTIAL-BEARING IS WRITABLE, and that is
+        deliberate rather than an oversight in the redaction posture. Redaction
+        is a rule about DISCLOSURE: it withholds a value from a reader because a
+        bearer on this surface is shared and surface-wide and cannot decide that
+        one caller may read a credential and another may not. A writer supplies
+        the value, so refusing the write protects nothing that is not already in
+        the caller's hand — and it would leave a workspace whose credentials can
+        be seen to EXIST and never configured. The role refuses no such key
+        either; `bd config set`'s own secret guard is about writing a credential
+        into a git-tracked `config.yaml`, which is a different plane with a
+        different hazard, and it returns clean for every key this operation
+        reaches.
+
+
+        THE RESPONSE THEREFORE WITHHOLDS IT ANYWAY. The body is a `Setting`
+        projected by the same rule `GET /v0/beads/config/{key}` projects with, so
+        a `redacted: true` key comes back with no `value` — the response to a
+        write is byte-identical to the read that follows it. It costs the caller
+        nothing: the role promises the stored value equals the value sent for
+        every key this plane accepts, so the echo carries no information the
+        caller does not already hold, and publishing it would make one schema say
+        two different things about `redacted`.
+
+
+        A key belonging to another SOURCE is not refused here and is worth
+        knowing about: `export.*`, `dolt.*`, `federation.*`, `storage-class.*`
+        and the rest of the yaml-only list live in `config.yaml`, and
+        `beads.role` lives in git config. Written through this operation they
+        land a row no reader consults. The role does not police that routing and
+        neither can this server — three of the five sources `bd config show`
+        reads are files on the CLIENT's machine, which is the same reason that
+        command has no operation here.
+
+
+        Hooks do not fire, as for every write on this surface — and on this plane
+        there are none to fire in any case: the workspace hook vocabulary is
+        `on_create`/`on_update`/`on_close`, each of which hands a script an
+        ISSUE, and a settings write has none to name.
+      parameters:
+        - $ref: '#/components/parameters/SettingKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SetSettingRequest'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: >-
+            The setting as it now stands, projected exactly as the `GET` beside
+            it projects it — including the redaction, which is decided on the KEY
+            and never on the caller.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Setting'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, an unparseable or
+            oversized body, an unknown body member, a `value` that is missing or
+            is not a string, a `key` that is empty after trimming, carries a
+            control character or is longer than the 255-character column — or a
+            value this workspace's own validation refuses, which is `issue_prefix`
+            in either spelling and a `status.custom` that does not parse. NOTHING
+            IS WRITTEN in any of these cases.
+
+
+            The role's two refusals carry no `param`, unlike the transport's
+            above: telling them apart would take a second copy of the protected-key
+            vocabulary on this side of the seam, and `detail` carries the role's
+            own sentence, which names what to send instead.
+          x-bd-codes: [invalid_argument]
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/Unavailable'
+
+    delete:
+      operationId: unsetSetting
+      summary: Remove one stored setting
+      description: >-
+        Removes the setting stored under one key — the write `bd config unset`
+        spells. `DELETE` for `DELETE /v0/beads/memories/{key}`'s reason: it names
+        ONE resource by path, carries no body and takes no flags, which is what
+        the method already means.
+
+
+        REMOVING A KEY NOTHING SET SUCCEEDS, and this is where the operation
+        parts company with the memory delete beside it. That one answers `404`
+        for a key it held nothing under, because its role reports whether a row
+        was found and `bd recall` already has an exit-code contract for the
+        miss. THIS role reports no such thing: the storage seam discards the
+        affected-row count on all three implementations, and an absent key and a
+        key stored as the empty string are one answer on this plane — the same
+        conflation `GET /v0/beads/config/{key}` has no `404` for. So this
+        operation states an INTENDED END STATE rather than an act performed, and
+        a caller clearing configuration it is not sure was ever written does not
+        have to classify an error to learn it was already absent.
+
+
+        THERE IS CONSEQUENTLY NO `removed` MEMBER, and there must not be one: it
+        would be a value one implementation had to invent. Sending the same
+        request twice is `200` and then `200`.
+
+
+        UNSET DOES NOT UNDO `PUT`'s PROJECTION. Removing `status.custom` or
+        `types.custom` deletes the row and LEAVES the normalized table exactly as
+        the last write left it, so the custom statuses and types keep applying
+        after the key that configured them is gone. All three implementations
+        agree, so it is the plane's behavior rather than a divergence, and it is
+        stated here so no reader infers a symmetry with `PUT` that the code does
+        not have.
+
+
+        THE PROTECTED KEY IS NOT REFUSED HERE. `issue_prefix` cannot be WRITTEN
+        through this plane and can be removed through it — an asymmetry that is
+        shipped behavior on all three implementations rather than a decision this
+        document makes, recorded as bd-yby99.34. Removing it does not rename
+        anything; it leaves the workspace resolving its prefix from `config.yaml`
+        or from nothing.
+
+
+        A CREDENTIAL-BEARING KEY IS REMOVABLE, on `PUT`'s reasoning: redaction
+        withholds a value from a READER, and a removal discloses nothing at all.
+
+
+        Hooks do not fire, and this plane has none to fire; see `PUT`.
+      parameters:
+        - $ref: '#/components/parameters/SettingKey'
+      security:
+        - bearerToken: []
+      responses:
+        '200':
+          description: >-
+            The key holds nothing now. Whether it held anything before is not
+            reported — see the description.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RemovedSetting'
+        '400':
+          description: >-
+            Invalid request: an unknown query parameter, or a `key` that is empty
+            after trimming or carries a control character. It is the `GET`
+            beside it's refusal exactly, unchanged, because the two take the same
+            parameter and judge it the same way. Nothing is removed in either
+            case.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:
@@ -6922,7 +7145,8 @@ components:
             `issues.close`, `issues.reopen`, `issues.update`,
             `issues.sweep`, `issues.delete`, `issues.batchCreate`,
             `issues.batchApply`,
-            `stats.get`, `config.list`, `config.get`, `dependencies.cycles`,
+            `stats.get`, `config.list`, `config.get`, `config.set`,
+            `config.unset`, `dependencies.cycles`,
             `dependencies.list`, `dependencies.count`,
             `dependencies.blocking`, `dependencies.tree`,
             `dependencies.add`, `dependencies.remove`,
@@ -7809,6 +8033,63 @@ components:
             conflation showing through, and it is stated rather than smoothed
             over, because smoothing it would mean this member reporting
             "nothing was there" about a write that overwrote something.
+
+    SetSettingRequest:
+      type: object
+      additionalProperties: false
+      required: [value]
+      description: >-
+        What to store under the key the path names. The key is not a member
+        here: it has one spelling, and a body carrying it too would give one
+        request two anchors and a question about what to do when they disagree.
+
+
+        THERE IS NO `actor`, unlike every issue mutation on this surface, and no
+        guard member either. This plane records no history entry to attribute a
+        write on and holds no row version to compare, so both would be members
+        with nothing behind them.
+      properties:
+        value:
+          type: string
+          description: >-
+            The value to store, VERBATIM. It is not trimmed, not bounded beyond
+            the 1 MiB every body on this surface shares, and not
+            character-filtered: the column is `TEXT`, and two of the keys this
+            plane holds carry structured configuration a filter would corrupt.
+
+
+            The empty string is a legal value and is stored. Read back it is
+            INDISTINGUISHABLE from a key nothing ever set — `Setting.value` is
+            absent for both — which is this plane's shipped conflation rather
+            than something this operation introduces. A caller that means
+            "remove it" sends `DELETE`.
+
+
+            What comes back is this value, for every key this plane accepts:
+            the one stored key with a normalization step is `issue_prefix`,
+            which is also the one key this plane refuses, so no write through
+            this door is transformed on its way in. The one thing the response
+            may not repeat is a value the KEY marks credential-bearing; see the
+            operation.
+
+    RemovedSetting:
+      type: object
+      required: [key]
+      description: >-
+        The outcome of removing one setting.
+
+
+        IT CARRIES THE KEY AND NOTHING ELSE, and the absence is the contract
+        rather than an unfinished shape. There is no `removed` flag because the
+        storage seam discards the affected-row count on every implementation, so
+        the member would be a value one of them had to invent — and no `value`,
+        because reporting what was there would publish, on the one operation that
+        withholds nothing, exactly the credential `GET /v0/beads/config/{key}`
+        redacts.
+      properties:
+        key:
+          type: string
+          description: The key that now holds nothing, echoed verbatim.
 
     SettingsPage:
       type: object
