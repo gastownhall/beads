@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -17,6 +16,17 @@ var latestGitHubReleaseFetcher = fetchLatestGitHubRelease
 // CheckCLIVersion checks if the CLI version is up to date.
 // Takes cliVersion parameter since it can't access the Version variable from main package.
 func CheckCLIVersion(cliVersion string) DoctorCheck {
+	// A Homebrew --HEAD build carries no orderable version — CompareVersions
+	// would read it as 0.0.0 and warn "update available" forever, and the
+	// suggested upgrade would actually move the user off HEAD.
+	if IsBrewHeadVersion(cliVersion) {
+		return DoctorCheck{
+			Name:    "CLI Version",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s (Homebrew --HEAD build; release comparison skipped)", cliVersion),
+		}
+	}
+
 	latestVersion, err := latestGitHubReleaseFetcher()
 	if err != nil {
 		// Network error or API issue - don't fail, just warn
@@ -309,9 +319,12 @@ func IsBrewHeadVersion(version string) bool {
 		return false
 	}
 	// Homebrew's pkg_version appends _<revision> once the formula carries a
-	// revision, so a revision bump must not read as malformed.
+	// revision, so a revision bump must not read as malformed. The revision is
+	// an unsigned decimal; a digits-only check keeps Atoi's tolerance of
+	// signed forms ("+1", "-0") from admitting shapes brew never emits.
 	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
-		if revision, err := strconv.Atoi(rest[cut+1:]); err != nil || revision < 0 {
+		revision := rest[cut+1:]
+		if revision == "" || strings.Trim(revision, "0123456789") != "" {
 			return false
 		}
 		rest = rest[:cut]

@@ -46,6 +46,18 @@ func TestGetVersionsSince(t *testing.T) {
 			expectedCount: 0,
 			description:   "Should return empty slice when already on latest in changelog",
 		},
+		{
+			name:          "brew HEAD stamp returns empty",
+			sinceVersion:  "HEAD-f925f3f",
+			expectedCount: 0,
+			description:   "A --HEAD stamp names no changelog entry and must not dump the full history",
+		},
+		{
+			name:          "bare brew HEAD stamp returns empty",
+			sinceVersion:  "HEAD",
+			expectedCount: 0,
+			description:   "A bare HEAD stamp names no changelog entry and must not dump the full history",
+		},
 	}
 
 	for _, tt := range tests {

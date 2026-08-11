@@ -64,9 +64,11 @@ func trackBdVersionFile(persist bool) {
 	// Homebrew --HEAD stamps (HEAD-<sha>) carry no ordering, so CompareVersions
 	// reads them as 0.0.0 and a changed stamp would never register. A changed
 	// stamp with a HEAD build on either side is treated as an upgrade: brew
-	// reinstalls only move forward, and the workspace-side reconciler and
-	// schema forward-drift guard still arbitrate direction if that assumption
-	// is ever wrong.
+	// reinstalls only move forward. If that assumption is ever wrong, the
+	// misfire is bounded — the destructive pre-0.56 recovery below only fires
+	// on a semver predecessor, and the numeric schema forward-drift guard
+	// still protects the schema. (The workspace version-marker reconciler
+	// cannot arbitrate direction here: it too reads HEAD stamps as 0.0.0.)
 	if lastVersion != "" && lastVersion != Version {
 		if doctor.CompareVersions(Version, lastVersion) > 0 ||
 			isBrewHeadVersion(Version) || isBrewHeadVersion(lastVersion) {
@@ -112,6 +114,13 @@ func getVersionsSince(sinceVersion string) []VersionChange {
 		return versionChanges
 	}
 
+	// A brew --HEAD stamp names no changelog entry; without this the
+	// unknown-version fallback below would report the entire release history
+	// as new after every --HEAD reinstall.
+	if isBrewHeadVersion(sinceVersion) {
+		return []VersionChange{}
+	}
+
 	// Find the index of sinceVersion
 	// versionChanges is ordered newest-first: [0.23.0, 0.22.1, 0.22.0, 0.21.0]
 	startIdx := -1
@@ -146,6 +155,16 @@ func getVersionsSince(sinceVersion string) []VersionChange {
 	return result
 }
 
+// displayVersion formats a version stamp for user-facing messages: semver
+// stamps get the conventional "v" prefix, while a brew --HEAD stamp is shown
+// verbatim ("vHEAD-f925f3f" reads as a typo).
+func displayVersion(version string) string {
+	if isBrewHeadVersion(version) {
+		return version
+	}
+	return "v" + version
+}
+
 // maybeShowUpgradeNotification displays a one-time upgrade notification if version changed.
 // This is called by commands like 'bd ready' and 'bd list' to inform users of upgrades.
 func maybeShowUpgradeNotification() {
@@ -158,7 +177,7 @@ func maybeShowUpgradeNotification() {
 	upgradeAcknowledged = true
 
 	// Display notification
-	fmt.Printf("🔄 bd upgraded from v%s to v%s since last use\n", previousVersion, Version)
+	fmt.Printf("🔄 bd upgraded from %s to %s since last use\n", displayVersion(previousVersion), displayVersion(Version))
 	fmt.Println("💡 Run 'bd upgrade review' to see what changed")
 	if usesSQLServer() {
 		fmt.Println("💊 Run 'bd doctor' to verify upgrade completed cleanly")
@@ -218,8 +237,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 	// CompareVersions scans each dot-part with %d and leaves unparsable parts
 	// at 0, so a non-semver stamp such as a Homebrew "HEAD-<sha>" would read as
 	// pre-0.56 and hand a current workspace to a recovery path that deletes
-	// .dolt. Only an actual semver predecessor may reach it.
-	if doctor.IsValidSemver(previousVersion) && doctor.CompareVersions(previousVersion, "0.56.0") < 0 {
+	// .dolt. Only an actual semver predecessor may reach it — normalized via
+	// versionCore so a v-prefixed or suffixed pre-0.56 stamp, which the
+	// legacy guard's classifiers tolerate, keeps its recovery.
+	prevCore := versionCore(previousVersion)
+	if doctor.IsValidSemver(prevCore) && doctor.CompareVersions(prevCore, "0.56.0") < 0 {
 		recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
 		if recErr != nil {
 			debug.Logf("auto-migrate: pre-v56 recovery failed: %v", recErr)
