@@ -251,11 +251,20 @@ func legacyServerVersion(version string) bool {
 	return ok && minor >= 55 && minor <= 62
 }
 
-// currentVersionWitness identifies a syntactically valid post-1.0 version
-// marker. A local Dolt root in server mode is ambiguous without it, so that
-// shape must be refused rather than opened as a historical schema.
+// currentVersionWitness identifies a version marker only a post-1.0 binary
+// could have written: an x.y.z with major >= 1 (pre-release and build-metadata
+// suffixes tolerated), or a Homebrew --HEAD stamp. A local Dolt root in server
+// mode is ambiguous without it, so that shape must be refused rather than
+// opened as a historical schema.
 func currentVersionWitness(version string) bool {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+	if isBrewHeadVersion(version) {
+		return true
+	}
+	core := strings.TrimPrefix(version, "v")
+	if cut := strings.IndexAny(core, "-+"); cut >= 0 {
+		core = core[:cut]
+	}
+	parts := strings.Split(core, ".")
 	if len(parts) != 3 {
 		return false
 	}
@@ -268,6 +277,24 @@ func currentVersionWitness(version string) bool {
 		values[i] = value
 	}
 	return values[0] >= 1
+}
+
+// isBrewHeadVersion recognizes the HEAD-<shortsha> version Homebrew stamps
+// into --HEAD installs of the core beads formula. That formula is the only
+// distribution channel that ever produced this shape — every legacy-era
+// channel shipped prebuilt binaries with a baked-in x.y.z — so the witness is
+// attributable to a current-era binary despite not parsing as semver.
+func isBrewHeadVersion(version string) bool {
+	sha, ok := strings.CutPrefix(version, "HEAD-")
+	if !ok || sha == "" {
+		return false
+	}
+	for _, r := range sha {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func legacyVersionMinor(version string) (int, bool) {

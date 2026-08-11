@@ -235,6 +235,38 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		}
 	})
 
+	t.Run("explicit server metadata with brew HEAD witness and local Dolt root is admitted", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("HEAD-f925f3f\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("current server workspace with brew HEAD witness was refused: %v", err)
+		}
+	})
+
+	t.Run("explicit server metadata with pre-release current witness and local Dolt root is admitted", func(t *testing.T) {
+		beadsDir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.1.0-rc.1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			t.Fatalf("current server workspace with pre-release witness was refused: %v", err)
+		}
+	})
+
 	t.Run("empty selection is ignored", func(t *testing.T) {
 		if err := guardLegacyUpgradeWorkspace(""); err != nil {
 			t.Fatalf("guardLegacyUpgradeWorkspace(\"\") = %v, want nil", err)
