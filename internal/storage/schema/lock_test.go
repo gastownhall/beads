@@ -178,7 +178,8 @@ func expectColumnExists(mock sqlmock.Sqlmock, present bool) {
 // expectContentHashColumnExists mocks the idempotent ensureContentHashColumn
 // probe, reporting that the content_hash column already exists (so no ALTER runs).
 func expectContentHashColumnExists(mock sqlmock.Sqlmock) {
-	expectColumnExists(mock, true)
+	mock.ExpectQuery(`^SELECT \* FROM (?:ignored_)?schema_migrations LIMIT 0$`).
+		WillReturnRows(sqlmock.NewRows([]string{"version", "applied_at", "content_hash"}))
 }
 
 func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {

@@ -829,16 +829,34 @@ func (m migrationSource) bootstrapSQL() string {
 }
 
 // hasContentHashColumn reports whether the cursor table already carries the
-// content_hash column. It probes INFORMATION_SCHEMA, so a not-yet-created table
-// simply reports false.
+// content_hash column. It probes only the cursor table's zero-row result-set
+// metadata, which keeps the query table-scoped and avoids INFORMATION_SCHEMA
+// or SHOW COLUMNS scans that can fan out across every registered database. A
+// not-yet-created table simply reports false (the table-not-exist error is
+// swallowed so the absent cursor case matches the legacy behavior).
 func (m migrationSource) hasContentHashColumn(ctx context.Context, db DBConn) (bool, error) {
-	var count int
-	if err := db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = 'content_hash'`,
-		m.cursorTable).Scan(&count); err != nil {
+	//nolint:gosec // G201: m.cursorTable is a hardcoded constant.
+	rows, err := db.QueryContext(ctx, "SELECT * FROM "+m.cursorTable+" LIMIT 0")
+	if err != nil {
+		if dberrors.IsTableNotExist(err) {
+			return false, nil
+		}
 		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
 	}
-	return count > 0, nil
+	defer rows.Close()
+	cols, err := rows.Columns()
+	if err != nil {
+		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+	}
+	for _, column := range cols {
+		if column == "content_hash" {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("checking %s.content_hash: %w", m.cursorTable, err)
+	}
+	return false, nil
 }
 
 // ensureContentHashColumn adds the content_hash column to an existing cursor
