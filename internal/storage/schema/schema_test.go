@@ -1016,3 +1016,66 @@ func TestUnstageIgnoredTablesResetsExistingIgnoredTables(t *testing.T) {
 		t.Fatalf("unmet sql expectations: %v", err)
 	}
 }
+
+func TestHasContentHashColumnUsesCursorTableMetadata(t *testing.T) {
+	const probeQuery = `^SELECT \* FROM schema_migrations LIMIT 0$`
+
+	tests := []struct {
+		name     string
+		columns  []string
+		queryErr error
+		want     bool
+		wantErr  bool
+	}{
+		{
+			name:    "column present",
+			columns: []string{"version", "applied_at", "content_hash"},
+			want:    true,
+		},
+		{
+			name:    "column absent",
+			columns: []string{"version", "applied_at"},
+		},
+		{
+			name:     "missing table reports false without error",
+			queryErr: errors.New("Error 1146: Table 'beads.schema_migrations' doesn't exist"),
+		},
+		{
+			name:    "non-matching column is rejected",
+			columns: []string{"version", "contentXhash"},
+		},
+		{
+			name:     "propagates unexpected errors",
+			queryErr: errors.New("connection refused"),
+			wantErr:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			expectation := mock.ExpectQuery(probeQuery)
+			if tt.queryErr != nil {
+				expectation.WillReturnError(tt.queryErr)
+			} else {
+				expectation.WillReturnRows(sqlmock.NewRows(tt.columns))
+			}
+
+			got, err := mainSource.hasContentHashColumn(context.Background(), db)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("hasContentHashColumn error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Fatalf("hasContentHashColumn = %v, want %v", got, tt.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatalf("unmet sql expectations: %v", err)
+			}
+		})
+	}
+}
