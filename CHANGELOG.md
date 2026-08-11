@@ -446,6 +446,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A long or multi-paragraph close reason renders as body text in `bd show`**
+  ([#5595](https://github.com/gastownhall/beads/pull/5595)). Every other
+  free-text field — description, design, notes, acceptance criteria, comments —
+  reaches the terminal through the markdown renderer, which word wraps and
+  indents. The close reason did not: it was formatted into the metadata block
+  beside `Owner:` and `Created:`, so it never wrapped and its second and later
+  lines read as separate metadata entries, a blank line and a bare `- bullet`
+  sitting directly under `Created:`. `bd close --reason-file` exists so agents
+  can write structured close reports, and those were exactly the reasons that
+  came out corrupted. A reason that still fits one metadata line — nearly all
+  of them, including one-liners that arrive from a file with a trailing
+  newline — is unchanged; anything larger now gets a `CLOSE REASON` section
+  rendered by the same call the other body fields make. The JSON payload is
+  untouched. The compaction savings line moved into the metadata block at the
+  same time, so it can no longer be stranded below that section, and all five
+  `bd show` render paths now report it alike.
+
 - **Script hooks now fire on both write plumbings** (bd-opisf). bd has two write
   plumbings and only one of them ran the workspace's hook scripts. The
   DoltStorage decorator chain fires `on_create`/`on_update`/`on_close` after

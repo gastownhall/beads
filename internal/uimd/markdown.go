@@ -16,12 +16,13 @@ import (
 	"golang.org/x/term"
 )
 
-// RenderMarkdown renders markdown text using glamour's terminal style.
-// Returns the rendered markdown or the original text if rendering fails.
-// Word wraps at terminal width (or 80 columns if width can't be detected).
-func RenderMarkdown(markdown string) string {
+// WrapWidth reports the column width RenderMarkdown wraps body text to, or 0
+// in agent mode, where the text is emitted verbatim and nothing wraps. Callers
+// deciding whether a value is short enough to sit inline instead of becoming a
+// rendered section use this so their idea of "one line" matches the renderer's.
+func WrapWidth() int {
 	if ui.IsAgentMode() {
-		return markdown
+		return 0
 	}
 
 	// Cap at 100 chars for readability; wider lines are harder to scan.
@@ -32,6 +33,17 @@ func RenderMarkdown(markdown string) string {
 	}
 	if wrapWidth > maxReadableWidth {
 		wrapWidth = maxReadableWidth
+	}
+	return wrapWidth
+}
+
+// RenderMarkdown renders markdown text using glamour's terminal style.
+// Returns the rendered markdown or the original text if rendering fails.
+// Word wraps at terminal width (or 80 columns if width can't be detected).
+func RenderMarkdown(markdown string) string {
+	wrapWidth := WrapWidth()
+	if wrapWidth == 0 {
+		return markdown
 	}
 
 	// Markdown rendering and terminal escape emission are separate concerns.

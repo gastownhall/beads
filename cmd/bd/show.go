@@ -180,20 +180,6 @@ var showCmd = &cobra.Command{
 			// Metadata: Owner · Type | Created · Updated
 			fmt.Println(formatIssueMetadata(issue))
 
-			// Compaction info (if applicable)
-			if issue.CompactionLevel > 0 {
-				fmt.Println()
-				if issue.OriginalSize > 0 {
-					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-					saved := issue.OriginalSize - currentSize
-					if saved > 0 {
-						reduction := float64(saved) / float64(issue.OriginalSize) * 100
-						fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n",
-							issue.OriginalSize, currentSize, reduction)
-					}
-				}
-			}
-
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
 			if issue.Description != "" {

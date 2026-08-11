@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,7 +20,7 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
-func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput) error {
+func runListProxiedServer(cmd *cobra.Command, ctx context.Context, out io.Writer, in listInput) error {
 	if in.repoOverrideSet {
 		return errors.New("--repo is not supported with --proxied-server")
 	}
@@ -32,7 +33,7 @@ func runListProxiedServer(cmd *cobra.Command, ctx context.Context, in listInput)
 		// The --ready arm is not a case of its own any more: it is
 		// ListRequest.ReadyFlag, and choosing the ready query from it is the
 		// ROLE's job on both routes.
-		return runListProxiedPage(ctx, in)
+		return runListProxiedPage(ctx, out, in)
 	}
 }
 
@@ -72,7 +73,7 @@ func runListProxiedTree(ctx context.Context, in listInput) error {
 // one more than this route used to for a listing that also loads dependency
 // records. Nothing here was atomic across those reads before either: the
 // renderings ran after the query returned.
-func runListProxiedPage(ctx context.Context, in listInput) error {
+func runListProxiedPage(ctx context.Context, out io.Writer, in listInput) error {
 	rd, err := proxiedIssueReader()
 	if err != nil {
 		return err
@@ -96,7 +97,7 @@ func runListProxiedPage(ctx context.Context, in listInput) error {
 		return err
 	}
 	issues, hasMore := listPageIssues(page)
-	return renderProxiedListText(ctx, issues, in, hasMore)
+	return renderProxiedListText(ctx, out, issues, in, hasMore)
 }
 
 func runListProxiedWatch(_ *cobra.Command, ctx context.Context, in listInput) error {
@@ -216,7 +217,7 @@ func loadDepsForIssues(ctx context.Context, uw uow.UnitOfWork, issues []*types.I
 	return uw.DependencyUseCase().GetForIssueIDs(ctx, ids)
 }
 
-func renderProxiedListText(ctx context.Context, issues []*types.Issue, in listInput, truncated bool) error {
+func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.Issue, in listInput, truncated bool) error {
 	// --format and the pretty tree want the WHOLE dependency record set for the
 	// page — every edge type, no status rule — which is neither role's
 	// question. They open their own unit of work for it, which is what lets
@@ -232,7 +233,7 @@ func renderProxiedListText(ctx context.Context, issues []*types.Issue, in listIn
 			return err
 		}
 		if in.formatStr != "" {
-			if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+			if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 				return err
 			}
 			printTruncationHint(truncated, in.effectiveLimit)

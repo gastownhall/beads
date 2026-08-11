@@ -302,6 +302,36 @@ func CheckFieldLen(name, val string) error {
 	return nil
 }
 
+// MaxTextBytes is the maximum size, in BYTES, of a `TEXT` column — the storage
+// ceiling for the values this schema keeps in one rather than in a LONGTEXT.
+//
+// BYTES, NOT CHARACTERS, which is the one place this differs from MaxFieldLen
+// beside it and the reason CheckTextLen does not simply call CheckFieldLen with
+// a bigger number: MySQL and Dolt bound a TEXT column by its encoded length, so
+// a value of 40000 multi-byte characters overflows it while a value of 65000
+// ASCII characters does not.
+//
+// The large-content columns are deliberately NOT bounded by this — issue
+// descriptions and comment bodies are LONGTEXT precisely so an embedded image or
+// a captured transcript fits (migrations 0049 and 0065). This is for the columns
+// that hold a VALUE rather than a document, `config.value` being the one a front
+// door can reach with an arbitrary payload.
+const MaxTextBytes = 65535
+
+// CheckTextLen returns ErrFieldTooLong (wrapped with context) when val exceeds
+// MaxTextBytes bytes. name is the field label used in the message.
+//
+// It exists so a front door can refuse an oversized value with a 400 that names
+// the member, instead of letting the column refuse it — which arrives as a
+// driver error, is classified as a generic 500, and tells the caller nothing it
+// could act on.
+func CheckTextLen(name, val string) error {
+	if n := len(val); n > MaxTextBytes {
+		return fmt.Errorf("%w: %s is %d bytes (max %d)", ErrFieldTooLong, name, n, MaxTextBytes)
+	}
+	return nil
+}
+
 // ValidateIssueTitle checks the canonical issue-title requirements. The title
 // must be nonempty and at most 500 bytes.
 func ValidateIssueTitle(title string) error {

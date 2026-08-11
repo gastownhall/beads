@@ -412,6 +412,17 @@ const (
 	OpListSettings         = "listSettings"
 	OpGetSetting           = "getSetting"
 	OpListDependencyCycles = "listDependencyCycles"
+	// OpSetSetting stores one setting, replacing whatever was there. It is the
+	// surface's first PUT, and the method IS the argument: the caller names the
+	// resource by path and sends the value that becomes its whole state.
+	// rememberMemory posts to a COLLECTION because its key may be derived from
+	// the content; here the caller can always name what it is writing.
+	OpSetSetting = "setSetting"
+	// OpUnsetSetting removes one setting. It is the second DELETE on this
+	// surface and the one that does NOT 404 on a key nothing stored: this role
+	// reports no affected-row count, so the operation states an intended end
+	// state rather than an act performed. See its operationCodes row.
+	OpUnsetSetting = "unsetSetting"
 	// OpListDependencies reads STORED EDGE ROWS for several issues at once.
 	// It is a separate operation from getIssue's embedded `dependencies`
 	// member because it answers per named issue, reports the ids that named
@@ -498,6 +509,17 @@ const (
 	// codes come from: an occupied id, and the graph refusing the edges the
 	// request asked for.
 	OpCreateIssue = "createIssue"
+	// OpAddComment appends one comment to the thread an issue owns, behind
+	// issueops.Commenter. It is the surface's first write on a SUB-RESOURCE
+	// COLLECTION, and a plain collection POST for OpCreateIssue's reason:
+	// creating one member of the collection a path names is what POST means.
+	//
+	// The row it creates is the same pinned Comment getIssue already carries
+	// under `comments`, which is what puts the operation on the issue rather
+	// than on a collection of its own. The collection publishes no GET,
+	// deliberately: no role answers a comment PAGE, and inventing one here
+	// would be this surface deciding a paging contract the role declined.
+	OpAddComment = "addComment"
 	// OpBatchCreateIssues creates many issues as one transaction, or none.
 	OpBatchCreateIssues = "batchCreateIssues"
 	// OpApplyBatch applies an ORDERED, heterogeneous plan — creates, updates,
@@ -611,6 +633,29 @@ var operationCodes = map[string][]Code{
 	// answer on this surface, so the only refusal a key can earn is the 400
 	// that says it was not a key.
 	OpGetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// getSetting's row PLUS the ROLE's refusals, which is the whole difference
+	// between the read half and the write half. Two of the role's three are
+	// reachable — `issue_prefix` in either spelling, and a `status.custom` that
+	// does not parse — and both arrive as the 400 they are, on the sentinel,
+	// through the shared ErrValidation line every role-backed handler here draws.
+	//
+	// NO 404 and no conflict code, both inherited from the read beside it. A key
+	// nothing stored and a key stored empty are one answer on this plane, so
+	// there is no resource this write can fail to address; and the write is an
+	// unconditional replace, so there is no state for it to lose a race against.
+	// A `revision` guard would need a row version this plane does not hold.
+	OpSetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
+	// getSetting's row EXACTLY, and that is this operation's whole error story:
+	// it takes the same parameter, judges it the same way, and reaches a role
+	// whose only refusal — an empty key — the path bound has already made
+	// unreachable. Its 400 is therefore entirely the transport's.
+	//
+	// THE ABSENT 404 IS THE DIVERGENCE FROM forgetMemory, which addresses the
+	// same shape of resource with the same method and answers 404 for a key it
+	// held nothing under. That role reports Found; this one cannot — the storage
+	// seam discards the affected-row count on all three legs — so a 404 here
+	// would publish a distinction this server would have to invent.
+	OpUnsetSetting: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The 400 here is this operation's own, not the document-level
 	// unknown-parameter rule: a malformed `skip_blocked`, and the EMPTY
 	// `assignee` the document refuses rather than answering with the rows that
@@ -871,6 +916,25 @@ var operationCodes = map[string][]Code{
 		CodeDependencyCycle, CodeDependencyExists,
 		CodeBusy, CodeDBUnavailable, CodeInternal,
 	},
+	// getDependencyTree's row, and it is the same shape for the same two
+	// reasons: ONE anchor, so an id that names nothing is the 404 it is rather
+	// than a per-item flag, and a 400 that is BOTH the transport's and the
+	// ROLE's.
+	//
+	// NO CONFLICT CODE, and the absence is the operation's contract. A thread is
+	// append-only and this write touches no field of the issue, so there is no
+	// row state a guard could be stale about and no concurrent comment for this
+	// one to collide with — which is also why there is no `expected_version`
+	// member to earn a precondition_failed with.
+	//
+	// Of the role's three ErrValidation refusals exactly ONE is reachable here.
+	// An empty author is refused at the edge under `actor`'s rules, which are
+	// strictly stronger, and an empty issue id cannot arrive at all — a ServeMux
+	// wildcard does not match an empty segment, and an id that fails the path
+	// bound is the 404 a real miss gets. So the blank body is the whole of what
+	// the role can refuse over this wire, which is why failAddComment names one
+	// parameter rather than re-asking the validator's questions.
+	OpAddComment: {CodeInvalidArgument, CodeUnauthenticated, CodeNotFound, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// No 404 and no conflict code: this is an UPSERT with a server-derivable
 	// key, so there is no resource it can fail to address and no row it can
 	// collide with. Its 400 is the body vocabulary plus the ROLE's two

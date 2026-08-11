@@ -485,16 +485,6 @@ func proxiedRenderIssue(ctx context.Context, uw uow.UnitOfWork, issue *types.Iss
 	}
 	fmt.Println(formatIssueMetadata(issue))
 
-	if issue.CompactionLevel > 0 && issue.OriginalSize > 0 {
-		currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-		saved := issue.OriginalSize - currentSize
-		if saved > 0 {
-			reduction := float64(saved) / float64(issue.OriginalSize) * 100
-			fmt.Println()
-			fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n", issue.OriginalSize, currentSize, reduction)
-		}
-	}
-
 	if issue.Description != "" {
 		fmt.Printf("\n%s\n%s\n", ui.RenderBold("DESCRIPTION"), uimd.RenderMarkdown(issue.Description))
 	} else {

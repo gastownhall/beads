@@ -45,9 +45,10 @@ func hookSectionEndLine() string {
 	return fmt.Sprintf("%s v%s ---", hookSectionEndPrefix, Version)
 }
 
-// hookTimeoutSeconds is the maximum time a beads hook is allowed to run before
-// being killed and allowing the git operation to proceed.  A bounded timeout
-// prevents `bd hooks run` from hanging `git push` indefinitely (GH#2453).
+// hookTimeoutSeconds is the soft deadline for a beads hook. GNU timeout sends
+// SIGTERM at the deadline, while Perl's alarm terminates the direct bd process.
+// Neither backend promises containment of TERM-resistant descendant work. When
+// neither helper is available, the generated hook warns that it is unbounded.
 // The default is 300 seconds (5 minutes) to accommodate chained hooks — e.g.
 // pre-commit framework pipelines that run linters, type-checkers, and builds
 // inside `bd hooks run` via the `.old` hook chain (GH#2732).
@@ -60,7 +61,13 @@ const hookTimeoutSeconds = 300
 // content after the section from executing on success.
 //
 // Resilience (GH#2453, GH#2449):
-//   - A configurable timeout prevents hooks from hanging git operations.
+//   - A compatible timeout helper applies a best-effort soft deadline.
+//   - BEADS_HOOK_TIMEOUT accepts positive whole seconds only.
+//   - Helper argv is separated with -- so user input cannot become an option.
+//   - If no compatible helper exists, the direct fallback is explicitly
+//     unbounded rather than silently pretending to enforce a deadline.
+//   - Only GNU coreutils timeout implementations are selected; Windows
+//     timeout.exe has the same name but an incompatible command line (GH#5503).
 //   - If the beads database is not initialized (exit code 3), the hook exits
 //     successfully with a warning so that git operations are not blocked.
 func generateHookSection(hookName string) string {
@@ -69,31 +76,57 @@ func generateHookSection(hookName string) string {
 		"if command -v bd >/dev/null 2>&1; then\n" +
 		"  export BD_GIT_HOOK=1\n" +
 		"  _bd_timeout=${BEADS_HOOK_TIMEOUT:-" + fmt.Sprintf("%d", hookTimeoutSeconds) + "}\n" +
-		"  _bd_used_perl=0\n" +
-		"  if command -v timeout >/dev/null 2>&1; then\n" +
-		"    timeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
-		"  elif command -v gtimeout >/dev/null 2>&1; then\n" +
-		"    gtimeout \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"  case \"$_bd_timeout\" in\n" +
+		"    *[!0-9]*|'') _bd_timeout_invalid=1 ;;\n" +
+		"    *[1-9]*) _bd_timeout_invalid=0 ;;\n" +
+		"    *) _bd_timeout_invalid=1 ;;\n" +
+		"  esac\n" +
+		"  if [ \"$_bd_timeout_invalid\" -eq 1 ]; then\n" +
+		"    echo >&2 \"beads: invalid BEADS_HOOK_TIMEOUT; using " + fmt.Sprintf("%d", hookTimeoutSeconds) + " seconds\"\n" +
+		"    _bd_timeout=" + fmt.Sprintf("%d", hookTimeoutSeconds) + "\n" +
+		"  fi\n" +
+		"  _bd_timeout_backend=none\n" +
+		"  _bd_timeout_command=\n" +
+		"  for _bd_timeout_candidate in timeout gtimeout; do\n" +
+		"    if command -v \"$_bd_timeout_candidate\" >/dev/null 2>&1; then\n" +
+		"      if _bd_timeout_version=\"$(\"$_bd_timeout_candidate\" --version 2>/dev/null)\"; then\n" +
+		"        case \"$_bd_timeout_version\" in\n" +
+		"          \"timeout (GNU coreutils) \"*) _bd_timeout_command=$_bd_timeout_candidate; break ;;\n" +
+		"        esac\n" +
+		"      fi\n" +
+		"    fi\n" +
+		"  done\n" +
+		"  if [ -n \"$_bd_timeout_command\" ]; then\n" +
+		"    _bd_timeout_backend=coreutils\n" +
+		"    if \"$_bd_timeout_command\" -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  elif command -v perl >/dev/null 2>&1; then\n" +
-		"    _bd_used_perl=1\n" +
-		"    perl -e 'alarm shift; exec @ARGV' \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"    _bd_timeout_backend=perl\n" +
+		"    if perl -e 'alarm shift; exec @ARGV' -- \"$_bd_timeout\" bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  else\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' running without timeout; install coreutils or perl to enable BEADS_HOOK_TIMEOUT\"\n" +
-		"    bd hooks run " + hookName + " \"$@\"\n" +
-		"    _bd_exit=$?\n" +
+		"    if bd hooks run " + hookName + " \"$@\"; then\n" +
+		"      _bd_exit=0\n" +
+		"    else\n" +
+		"      _bd_exit=$?\n" +
+		"    fi\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -eq 124 ] || { [ $_bd_used_perl -eq 1 ] && [ $_bd_exit -eq 142 ]; }; then\n" +
+		"  if { [ \"$_bd_timeout_backend\" = coreutils ] && [ \"$_bd_exit\" -eq 124 ]; } || { [ \"$_bd_timeout_backend\" = perl ] && [ \"$_bd_exit\" -eq 142 ]; }; then\n" +
 		"    echo >&2 \"beads: hook '" + hookName + "' timed out after ${_bd_timeout}s — continuing without beads\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -eq 3 ]; then\n" +
+		"  if [ \"$_bd_exit\" -eq 3 ]; then\n" +
 		"    echo >&2 \"beads: database not initialized — skipping hook '" + hookName + "'\"\n" +
 		"    _bd_exit=0\n" +
 		"  fi\n" +
-		"  if [ $_bd_exit -ne 0 ]; then exit $_bd_exit; fi\n" +
+		"  if [ \"$_bd_exit\" -ne 0 ]; then exit \"$_bd_exit\"; fi\n" +
 		"fi\n" +
 		hookSectionEndLine() + "\n"
 }
@@ -1817,8 +1850,9 @@ Supported hooks:
   - post-checkout: Run chained hooks after branch checkout
   - prepare-commit-msg: Add agent identity trailers for forensics
 
-The thin shim pattern ensures hook logic is always in sync with the
-installed bd version - upgrading bd automatically updates hook behavior.`,
+The thin shim keeps delegated hook logic in sync with the installed bd
+version. Upgrading bd updates that delegated behavior. To adopt changes to the
+shim's generated shell policy, refresh it with 'bd hooks install'.`,
 	Args:          cobra.MinimumNArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,

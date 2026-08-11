@@ -244,6 +244,12 @@ func (*serveIdentityStore) GraphCounter() (issueops.GraphCounter, error) {
 func (*serveIdentityStore) IssueRelations() (issueops.Relations, error) {
 	return serveIdentityRole{}, nil
 }
+
+// Commenter is declared at depth 1 for IssueRelations' reason, and it is the
+// second role to arrive as a build error here rather than as a runtime one.
+func (*serveIdentityStore) Commenter() (issueops.Commenter, error) {
+	return serveIdentityRole{}, nil
+}
 func (*serveIdentityStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
 	return serveIdentityRole{}, nil
 }
@@ -287,6 +293,7 @@ type serveIdentityRole struct {
 	issueops.EdgeReader
 	issueops.GraphCounter
 	issueops.Relations
+	issueops.Commenter
 	issueops.BlockingAnnotator
 	issueops.TreeWalker
 	issueops.ReadyCounter

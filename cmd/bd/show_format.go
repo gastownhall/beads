@@ -7,9 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/uimd"
 )
 
 // formatShortIssue returns a compact one-line representation of an issue
@@ -146,9 +148,25 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, ui.RenderMuted(leaseLine))
 	}
 
-	// Line 3: Close reason (if closed)
-	if issue.Status == types.StatusClosed && issue.CloseReason != "" {
-		lines = append(lines, ui.RenderMuted(fmt.Sprintf("Close reason: %s", issue.CloseReason)))
+	// Line 3: Close reason (if closed). A reason too long or too structured to
+	// sit on a metadata line is body text, not metadata, so it gets the same
+	// markdown section treatment as DESCRIPTION — `bd close --reason-file`
+	// exists to write exactly that. Emitted after the remaining metadata lines
+	// so a multi-line reason cannot split the block it is part of.
+	//
+	// Trimmed first: --reason-file and heredoc content virtually always ends
+	// in a newline, and without this a genuine one-liner would be promoted to
+	// a section on that byte alone.
+	closeReasonSection := ""
+	if issue.Status == types.StatusClosed {
+		if reason := strings.TrimSpace(issue.CloseReason); reason != "" {
+			if line := "Close reason: " + reason; fitsMetadataLine(line) {
+				lines = append(lines, ui.RenderMuted(line))
+			} else {
+				closeReasonSection = fmt.Sprintf("\n\n%s\n%s", ui.RenderBold("CLOSE REASON"),
+					strings.TrimRight(uimd.RenderMarkdown(reason), "\n"))
+			}
+		}
 	}
 
 	// Line 4: External ref (if exists)
@@ -164,7 +182,41 @@ func formatIssueMetadata(issue *types.Issue) string {
 		lines = append(lines, fmt.Sprintf("Wisp type: %s", ui.RenderMuted(string(issue.WispType))))
 	}
 
-	return strings.Join(lines, "\n")
+	// Line 6: Compaction savings. A metadata line rather than a callout the
+	// callers print after the block, so a promoted close reason cannot strand
+	// it below the body text, and so all five show paths report it alike.
+	if line := compactionSavingsLine(issue); line != "" {
+		lines = append(lines, line)
+	}
+
+	return strings.Join(lines, "\n") + closeReasonSection
+}
+
+// compactionSavingsLine reports how much a compacted issue's stored body shrank.
+// Returns "" when the issue was never compacted, or when compaction recorded no
+// saving worth reporting.
+func compactionSavingsLine(issue *types.Issue) string {
+	if issue.CompactionLevel == 0 || issue.OriginalSize <= 0 {
+		return ""
+	}
+	currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
+	saved := issue.OriginalSize - currentSize
+	if saved <= 0 {
+		return ""
+	}
+	reduction := float64(saved) / float64(issue.OriginalSize) * 100
+	return fmt.Sprintf("📊 %d → %d bytes (%.0f%% reduction)", issue.OriginalSize, currentSize, reduction)
+}
+
+// fitsMetadataLine reports whether a value can occupy one metadata line without
+// the terminal breaking it for us. Anything that cannot belongs in a rendered
+// section, where it gets the wrapping and indentation body text gets.
+func fitsMetadataLine(s string) bool {
+	if strings.ContainsAny(s, "\n\r") {
+		return false
+	}
+	width := uimd.WrapWidth()
+	return width == 0 || ansi.StringWidth(s) <= width
 }
 
 // formatDependencyLine formats a single dependency with semantic colors

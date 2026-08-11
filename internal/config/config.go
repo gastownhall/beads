@@ -64,7 +64,9 @@ func Initialize() error {
 	// subsequent file so higher-priority values overwrite lower-priority ones.
 	//
 	// Precedence (highest to lowest):
-	//   BEADS_DIR/config.yaml > project .beads/config.yaml > ~/.config/bd/config.yaml > ~/.beads/config.yaml
+	//   BEADS_DIR/config.yaml > project .beads/config.yaml > documented
+	//   <home>/.config/bd/config.yaml > native os.UserConfigDir()/bd/config.yaml
+	//   > legacy <home>/.beads/config.yaml
 	//
 	// Previously, only ONE config file was loaded (the highest-priority match),
 	// which meant user-level config was silently ignored when project-level
@@ -72,40 +74,27 @@ func Initialize() error {
 	var configPaths []string     // ordered lowest priority first
 	var primaryConfigPath string // project-level config (for config.local.yaml and SaveConfigValue)
 
-	// 3. Legacy: ~/.beads/config.yaml (lowest priority)
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		p := filepath.Join(homeDir, ".beads", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
+	// User-level paths are built once through the same absolute-native-path
+	// gate used by direct reads and writes. Invalid roots are silently skipped
+	// here because Initialize is an implicit read path: absent user config is a
+	// supported state, while a relative root must never reach os.Stat.
+	userConfigPaths := currentUserConfigYamlCandidates()
+	appendExistingUserConfig := func(path string) {
+		if !userConfigPathExists(path) {
+			return
 		}
-	}
-
-	// 2. User: ~/.config/bd/config.yaml
-	if configDir, err := os.UserConfigDir(); err == nil {
-		p := filepath.Join(configDir, "bd", "config.yaml")
-		if _, err := os.Stat(p); err == nil {
-			configPaths = append(configPaths, p)
-		}
-	}
-
-	// Also check ~/.config/bd/config.yaml explicitly. On macOS,
-	// os.UserConfigDir() returns ~/Library/Application Support, not ~/.config.
-	// This ensures the documented path works on all platforms.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
-		alreadyAdded := false
 		for _, existing := range configPaths {
-			if filepath.Clean(existing) == filepath.Clean(xdgPath) {
-				alreadyAdded = true
-				break
+			if filepath.Clean(existing) == path {
+				return
 			}
 		}
-		if !alreadyAdded {
-			if _, err := os.Stat(xdgPath); err == nil {
-				configPaths = append(configPaths, xdgPath)
-			}
-		}
+		configPaths = append(configPaths, path)
 	}
+
+	// Lowest to highest user-level precedence: legacy, native, documented.
+	appendExistingUserConfig(userConfigPaths.legacy)
+	appendExistingUserConfig(userConfigPaths.native)
+	appendExistingUserConfig(userConfigPaths.documented)
 
 	// 1. Project: walk up from CWD to find .beads/config.yaml
 	beadsDirEnv := strings.TrimSpace(os.Getenv("BEADS_DIR"))
