@@ -80,7 +80,7 @@ func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, update
 		return err
 	}
 	if promoted {
-		for _, table := range []string{"labels", "dependencies", "comments"} {
+		for _, table := range []string{"labels", "dependencies", "comments", "child_counters"} {
 			t.dirty.MarkDirty(table)
 		}
 	}

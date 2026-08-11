@@ -109,6 +109,18 @@ func InsertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *typ
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func insertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *types.Issue, rejectStaleUpdate bool) error {
+	return executeIssueInsert(ctx, tx, table, issue,
+		"ON DUPLICATE KEY UPDATE\n\t\t\t"+issueUpsertAssignments(table, rejectStaleUpdate))
+}
+
+// InsertIssueStrictInTx inserts an issue without an upsert fallback. Plane
+// moves use this so a destination collision aborts the whole transaction.
+func InsertIssueStrictInTx(ctx context.Context, tx DBTX, table string, issue *types.Issue) error {
+	return executeIssueInsert(ctx, tx, table, issue, "")
+}
+
+//nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
+func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -133,9 +145,8 @@ func insertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *typ
 			?, ?, ?,
 			?
 		)
-		ON DUPLICATE KEY UPDATE
-			%s
-	`, table, issueUpsertAssignments(table, rejectStaleUpdate)),
+		%s
+	`, table, suffix),
 		issue.ID, issue.ContentHash, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes,
 		issue.Status, issue.Priority, issue.IssueType, NullString(issue.Assignee), NullInt(issue.EstimatedMinutes),
 		issue.CreatedAt, issue.CreatedBy, issue.Owner, issue.UpdatedAt, issue.StartedAt, issue.ClosedAt, NullStringPtr(issue.ExternalRef), issue.SpecID,

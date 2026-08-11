@@ -60,6 +60,7 @@ var HeavyDropList = []string{
 	"design",
 	"acceptance_criteria",
 	"notes",
+	"closed_by_session",
 	"waiters",
 	"payload",
 }

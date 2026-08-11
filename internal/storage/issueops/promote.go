@@ -4,17 +4,20 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
 
 //nolint:gosec // G201: table names are hardcoded constants
 func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
-	if !IsActiveWispInTx(ctx, tx, id) {
-		return fmt.Errorf("wisp %s not found", id)
+	var destinationRows int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, id).Scan(&destinationRows); err != nil {
+		return fmt.Errorf("check promotion destination for %s: %w", id, err)
+	}
+	if destinationRows != 0 {
+		return fmt.Errorf("cannot promote wisp %s: destination already exists in issues", id)
 	}
 
-	issue, err := GetIssueInTx(ctx, tx, id)
+	issue, err := getIssueFromTableInTx(ctx, tx, "wisps", "wisp_labels", id)
 	if err != nil {
 		return fmt.Errorf("get wisp for promote: %w", err)
 	}
@@ -38,56 +41,21 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	if err := PrepareIssueForInsert(issue, types.CustomStatusNames(customStatuses), customTypes); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
-	if _, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{}); err != nil {
+	if err := InsertIssueStrictInTx(ctx, tx, "issues", issue); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO labels (issue_id, label)
-		SELECT issue_id, label FROM wisp_labels WHERE issue_id = ?
-	`, id); err != nil {
-		return fmt.Errorf("copy labels for promoted wisp %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_labels WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied wisp labels for promoted wisp %s: %w", id, err)
-	}
-
-	// Carry id across promotion. Both tables derive id deterministically from the
-	// same (issue_id, target) key, so the wisp edge's id is exactly the id a
-	// direct dependency on that edge would get; copying it (rather than letting a
-	// DEFAULT mint a fresh random one) keeps the promoted edge merge-safe and is
-	// required now that dependencies.id has no DEFAULT (#4259).
-	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO dependencies (id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id)
-		SELECT id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id
-		FROM wisp_dependencies WHERE issue_id = ?
-	`, id); err != nil {
-		return fmt.Errorf("copy dependencies for promoted wisp %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_dependencies WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied wisp dependencies for promoted wisp %s: %w", id, err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO events (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
-		SELECT id, issue_id, event_type, actor, old_value, new_value, comment, created_at
-		FROM wisp_events WHERE issue_id = ?
-	`, id); err != nil {
-		return fmt.Errorf("copy events for promoted wisp %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_events WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied wisp events for promoted wisp %s: %w", id, err)
-	}
-
-	if _, err := tx.ExecContext(ctx, `
-		INSERT IGNORE INTO comments (id, issue_id, author, text, created_at)
-		SELECT id, issue_id, author, text, created_at
-		FROM wisp_comments WHERE issue_id = ?
-	`, id); err != nil {
-		return fmt.Errorf("copy comments for promoted wisp %s: %w", id, err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_comments WHERE issue_id = ?`, id); err != nil {
-		return fmt.Errorf("delete copied wisp comments for promoted wisp %s: %w", id, err)
+	for _, aux := range promotionAuxiliaryTables {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
+			INSERT INTO %s (%s)
+			SELECT %s FROM %s WHERE %s = ?
+		`, aux.destination, aux.columns, aux.columns, aux.source, aux.key), id); err != nil {
+			return fmt.Errorf("copy %s for promoted wisp %s: %w", aux.name, id, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			fmt.Sprintf(`DELETE FROM %s WHERE %s = ?`, aux.source, aux.key), id); err != nil {
+			return fmt.Errorf("delete copied wisp %s for promoted wisp %s: %w", aux.name, id, err)
+		}
 	}
 
 	if err := RetargetInboundDependenciesToIssueInTx(ctx, tx, id); err != nil {
@@ -116,6 +84,20 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	return nil
 }
 
+var promotionAuxiliaryTables = []struct {
+	name        string
+	source      string
+	destination string
+	columns     string
+	key         string
+}{
+	{"labels", "wisp_labels", "labels", "issue_id, label", "issue_id"},
+	{"dependencies", "wisp_dependencies", "dependencies", "id, issue_id, depends_on_issue_id, depends_on_wisp_id, depends_on_external, type, created_at, created_by, metadata, thread_id", "issue_id"},
+	{"events", "wisp_events", "events", "id, issue_id, event_type, actor, old_value, new_value, comment, created_at", "issue_id"},
+	{"comments", "wisp_comments", "comments", "id, issue_id, author, text, created_at", "issue_id"},
+	{"child counters", "wisp_child_counters", "child_counters", "parent_id, last_child", "parent_id"},
+}
+
 // PromoteWispIfDurableInTx repairs the physical plane after an update.  A row
 // remains a runtime wisp while either marker is set; once both are clear it is
 // fully durable and must move to issues before the transaction commits.
@@ -123,7 +105,7 @@ func PromoteWispIfDurableInTx(ctx context.Context, tx DBTX, id, actor string) (b
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return false, nil
 	}
-	issue, err := GetIssueInTx(ctx, tx, id)
+	issue, err := getIssueFromTableInTx(ctx, tx, "wisps", "wisp_labels", id)
 	if err != nil {
 		return false, fmt.Errorf("read wisp persistence after update: %w", err)
 	}
