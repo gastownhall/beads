@@ -1034,20 +1034,136 @@ jobs:
             throw 'Native Make installed bd.exe with unexpected contents'
           }
 
-          $expectedInstall = @(
+          $expectedFirstInstall = @(
             'D profile with spaces'
             'D profile with spaces/.local'
             'D profile with spaces/.local/bin'
             "F profile with spaces/.local/bin/bd.exe $sentinelHash"
           ) | Sort-Object
-          $actualInstall = @(Get-TreeManifest -Root $installRoot)
-          if (Compare-Object -ReferenceObject $expectedInstall -DifferenceObject $actualInstall) {
-            throw "Native Make changed paths outside the exact install destination:`n$($actualInstall -join "`n")"
+          $actualFirstInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedFirstInstall -DifferenceObject $actualFirstInstall) {
+            throw "Native Make changed paths outside the exact first install destination:`n$($actualFirstInstall -join "`n")"
           }
 
-          $fixtureAfter = @(Get-TreeManifest -Root $fixtureRepo)
-          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfter) {
-            throw 'Native Make split the spaced install path or otherwise mutated the fixture repository'
+          $fixtureAfterFirstInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBefore -DifferenceObject $fixtureAfterFirstInstall) {
+            throw 'Native Make split the spaced first-install path or otherwise mutated the fixture repository'
+          }
+
+          $legacyAlias = Join-Path $installProfile '.local\bin\BD'
+          Set-Content -LiteralPath $legacyAlias -Encoding ascii -NoNewline -Value 'legacy-extensionless-alias'
+          $installBeforeFailedReplacement = @(Get-TreeManifest -Root $installRoot)
+          $fixtureBeforeFailedReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          $missingBuildDir = Join-Path $fixtureRepo 'missing build output'
+          if (Test-Path -LiteralPath $missingBuildDir) {
+            throw "Failure-injection source unexpectedly exists: '$missingBuildDir'"
+          }
+
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$missingBuildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -eq 0) {
+              throw 'Native Make replacement unexpectedly succeeded without a source bd.exe'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $installAfterFailedReplacement = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $installBeforeFailedReplacement -DifferenceObject $installAfterFailedReplacement) {
+            throw "Failed native Make replacement changed the live install tree:`n$($installAfterFailedReplacement -join "`n")"
+          }
+          $fixtureAfterFailedReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeFailedReplacement -DifferenceObject $fixtureAfterFailedReplacement) {
+            throw 'Failed native Make replacement mutated the fixture repository'
+          }
+
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v2'
+          $replacementHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make replacement install-force failed with a case-variant legacy alias'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          if (Test-Path -LiteralPath $legacyAlias) {
+            throw "Native Make left the case-variant legacy alias '$legacyAlias'"
+          }
+          if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) {
+            throw "Native Make replacement left no bd.exe at '$installed'"
+          }
+          if ((Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash -ne $replacementHash) {
+            throw 'Native Make replacement installed bd.exe with unexpected contents'
+          }
+
+          $expectedReplacement = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            "F profile with spaces/.local/bin/bd.exe $replacementHash"
+          ) | Sort-Object
+          $actualReplacement = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedReplacement -DifferenceObject $actualReplacement) {
+            throw "Native Make replacement changed paths outside the exact install destination:`n$($actualReplacement -join "`n")"
+          }
+
+          $fixtureAfterReplacement = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeReplacement -DifferenceObject $fixtureAfterReplacement) {
+            throw 'Native Make split the spaced replacement path or otherwise mutated the fixture repository'
+          }
+
+          $junctionRoot = Join-Path $proofRoot 'junction install sandbox'
+          $junctionProfile = Join-Path $junctionRoot 'profile with spaces'
+          $junctionParent = Join-Path $junctionProfile '.local'
+          $junctionTarget = Join-Path $junctionRoot 'bin target with spaces'
+          New-Item -ItemType Directory -Force -Path $junctionParent, $junctionTarget | Out-Null
+          $junctionBin = Join-Path $junctionParent 'bin'
+          New-Item -ItemType Junction -Path $junctionBin -Target $junctionTarget | Out-Null
+          $junctionLegacyAlias = Join-Path $junctionTarget 'bd'
+          Set-Content -LiteralPath $junctionLegacyAlias -Encoding ascii -NoNewline -Value 'junction-legacy-alias'
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v3'
+          $junctionHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeJunctionInstall = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $junctionProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed through a junction install directory'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          if (Test-Path -LiteralPath $junctionLegacyAlias) {
+            throw "Native Make left the legacy alias behind the install junction '$junctionLegacyAlias'"
+          }
+          $junctionInstalled = Join-Path $junctionTarget 'bd.exe'
+          $junctionVisibleInstalled = Join-Path $junctionBin 'bd.exe'
+          foreach ($path in @($junctionInstalled, $junctionVisibleInstalled)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+              throw "Native Make junction install left no bd.exe at '$path'"
+            }
+            if ((Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash -ne $junctionHash) {
+              throw "Native Make junction install wrote unexpected contents at '$path'"
+            }
+          }
+          $expectedJunctionTarget = @("F bd.exe $junctionHash")
+          $actualJunctionTarget = @(Get-TreeManifest -Root $junctionTarget)
+          if (Compare-Object -ReferenceObject $expectedJunctionTarget -DifferenceObject $actualJunctionTarget) {
+            throw "Native Make junction install left unexpected target entries:`n$($actualJunctionTarget -join "`n")"
+          }
+
+          $fixtureAfterJunctionInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeJunctionInstall -DifferenceObject $fixtureAfterJunctionInstall) {
+            throw 'Native Make junction install mutated the fixture repository'
           }
 
       - name: Exercise MSYS2-hosted Make
