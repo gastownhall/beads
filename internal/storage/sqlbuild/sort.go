@@ -105,6 +105,13 @@ func OrderBy(sortBy string, sortDesc bool, table string) string {
 // selected.
 func Less(a, b *types.Issue, sortBy string, sortDesc bool) bool {
 	if sortBy == "id" {
+		// Byte order, the order SQL would apply — and sortDesc flips it,
+		// exactly as it flips every SQL-rendered key below. This key used to
+		// ignore sortDesc, so a reversed id merge kept the byte-FIRST rows
+		// (the sibling bug idSrcPage.sortGoSide's doc named).
+		if sortDesc {
+			return a.ID > b.ID
+		}
 		return a.ID < b.ID
 	}
 	def, ok := SortDefs[sortBy]

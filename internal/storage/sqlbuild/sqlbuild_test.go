@@ -73,6 +73,21 @@ func TestLessMirrorsOrderBy(t *testing.T) {
 	}
 }
 
+// TestLessIDHonorsSortDesc pins the bd-jao3t half of the reversed-id bug:
+// Less ignored sortDesc for "id" (the one Go-side sort key), so every merge
+// sort that fed a reversed id page kept the byte-FIRST rows.
+func TestLessIDHonorsSortDesc(t *testing.T) {
+	a := &types.Issue{ID: "bd-001"}
+	b := &types.Issue{ID: "bd-002"}
+
+	if !Less(a, b, "id", false) || Less(b, a, "id", false) {
+		t.Error("id ascending must be byte order")
+	}
+	if !Less(b, a, "id", true) || Less(a, b, "id", true) {
+		t.Error("id descending must be reversed byte order, not the ascending order sortDesc used to be ignored into")
+	}
+}
+
 func TestBuildReadyWorkOrderPriorityFIFO(t *testing.T) {
 	t.Parallel()
 
