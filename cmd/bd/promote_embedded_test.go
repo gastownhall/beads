@@ -7,9 +7,13 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // bdPromote runs "bd promote" with the given args and returns stdout.
@@ -68,6 +72,64 @@ func TestEmbeddedPromoteCLI(t *testing.T) {
 		got = bdShow(t, bd, dir, issue.ID)
 		if got.Ephemeral {
 			t.Error("expected non-ephemeral after promote")
+		}
+	})
+
+	t.Run("promote_no_history_wisp_by_physical_plane", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "CLI promote no-history", "--no-history")
+		dataDir := filepath.Join(beadsDir, "embeddeddolt")
+		assertPlane := func(label string, wantIssues, wantWisps int) {
+			t.Helper()
+			db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "pr", "main")
+			if err != nil {
+				t.Fatalf("%s: open embedded database: %v", label, err)
+			}
+			defer cleanup()
+			var issueRows, wispRows int
+			if err := db.QueryRowContext(t.Context(),
+				"SELECT COUNT(*) FROM issues WHERE id = ?", issue.ID).Scan(&issueRows); err != nil {
+				t.Fatalf("%s: count issues: %v", label, err)
+			}
+			if err := db.QueryRowContext(t.Context(),
+				"SELECT COUNT(*) FROM wisps WHERE id = ?", issue.ID).Scan(&wispRows); err != nil {
+				t.Fatalf("%s: count wisps: %v", label, err)
+			}
+			if issueRows != wantIssues || wispRows != wantWisps {
+				t.Fatalf("%s: issues=%d wisps=%d, want issues=%d wisps=%d",
+					label, issueRows, wispRows, wantIssues, wantWisps)
+			}
+		}
+		assertPlane("before explicit promote", 0, 1)
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Ephemeral || !got.NoHistory {
+			t.Fatalf("precondition flags: ephemeral=%v no_history=%v, want false/true",
+				got.Ephemeral, got.NoHistory)
+		}
+
+		out := bdPromote(t, bd, dir, issue.ID)
+		if !strings.Contains(out, "Promoted") {
+			t.Errorf("expected 'Promoted' in output: %s", out)
+		}
+		assertPlane("after explicit promote", 1, 0)
+
+		bdUpdate(t, bd, dir, issue.ID,
+			"--claim", "--set-metadata", "circuit=closed", "--actor", "worker")
+		assertPlane("after later claim and metadata update", 1, 0)
+		got = bdShow(t, bd, dir, issue.ID)
+		if got.Ephemeral || got.NoHistory {
+			t.Errorf("promoted flags: ephemeral=%v no_history=%v, want false/false",
+				got.Ephemeral, got.NoHistory)
+		}
+		if got.Status != types.StatusInProgress || got.Assignee != "worker" {
+			t.Errorf("promoted claim: status=%q assignee=%q, want in_progress/worker",
+				got.Status, got.Assignee)
+		}
+		var metadata map[string]any
+		if err := json.Unmarshal(got.Metadata, &metadata); err != nil {
+			t.Fatalf("decode promoted metadata %q: %v", got.Metadata, err)
+		}
+		if metadata["circuit"] != "closed" {
+			t.Errorf("promoted metadata = %s, want closed circuit", got.Metadata)
 		}
 	})
 

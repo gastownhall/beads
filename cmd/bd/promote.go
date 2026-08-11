@@ -57,17 +57,15 @@ Examples:
 			return HandleErrorRespectJSON("resolving %s: %v", id, err)
 		}
 
-		issue, err := store.GetIssue(ctx, fullID)
+		_, err = store.GetIssue(ctx, fullID)
 		if err != nil {
 			if errors.Is(err, storage.ErrNotFound) {
 				return HandleErrorRespectJSON("issue %s not found", fullID)
 			}
 			return HandleErrorRespectJSON("getting issue %s: %v", fullID, err)
 		}
-		if !issue.Ephemeral {
-			return HandleErrorRespectJSON("%s is not a wisp (already persistent)", fullID)
-		}
-
+		// Table membership is authoritative.  A no-history wisp is logically
+		// non-ephemeral but still lives in the wisp plane and is promotable.
 		if err := store.PromoteFromEphemeral(ctx, fullID, actor); err != nil {
 			return HandleErrorRespectJSON("promoting %s: %v", fullID, err)
 		}
