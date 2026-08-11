@@ -27,6 +27,15 @@ func RunSendMetrics() int {
 		return 1
 	}
 
+	// Bound the queue before flushing: TTL out stale batches and orphaned
+	// emitter temps, cap the rest drop-oldest (bd-ulfod: an unbounded queue
+	// reached 149k files / 1.1GB when emission outran the throttled drain).
+	// Out-of-band by construction — this child is already detached.
+	if dropped, freed := PruneQueue(dir, time.Now()); dropped > 0 {
+		fmt.Fprintf(os.Stderr, "send-metrics: pruned %d queued event file(s), freed %.1f MB\n",
+			dropped, float64(freed)/(1<<20))
+	}
+
 	ga, err := ga4tx.New(ga4tx.Config{Endpoint: Endpoint()})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "send-metrics: ga4: %v\n", err)
