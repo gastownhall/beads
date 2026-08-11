@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -151,6 +152,16 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 	}
 
+	// A Homebrew --HEAD stamp carries no ordering, so the staleness heuristic
+	// below cannot apply — but it is a healthy marker, not a malformed one.
+	if IsBrewHeadVersion(lastVersion) {
+		return DoctorCheck{
+			Name:    "Version Tracking",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
+		}
+	}
+
 	// Validate that version is a valid semver-like string
 	if !IsValidSemver(lastVersion) {
 		return DoctorCheck{
@@ -287,6 +298,53 @@ func CompareVersions(v1, v2 string) int {
 	}
 
 	return 0
+}
+
+// IsBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
+// installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
+// head spec resolves no commit, and either shape carrying Homebrew's
+// _<revision> suffix. Such a stamp is a healthy current-era version marker,
+// not a malformed one — the binary rewrites it identically on every run, so
+// nothing the user does can "fix" it into semver.
+//
+// This is the canonical definition; cmd/bd's legacy upgrade guard delegates
+// here so the two ends cannot drift.
+func IsBrewHeadVersion(version string) bool {
+	rest, ok := strings.CutPrefix(version, "HEAD")
+	if !ok {
+		return false
+	}
+	// Homebrew's pkg_version appends _<revision> once the formula carries a
+	// revision, so a revision bump must not read as malformed.
+	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
+		if revision, err := strconv.Atoi(rest[cut+1:]); err != nil || revision < 0 {
+			return false
+		}
+		rest = rest[:cut]
+	}
+	// Homebrew leaves the version as a bare "HEAD" whenever the head spec
+	// cannot resolve a commit.
+	if rest == "" {
+		return true
+	}
+	sha, ok := strings.CutPrefix(rest, "-")
+	if !ok {
+		return false
+	}
+	// Bound the tail to a plausible git abbreviation so that arbitrary hex
+	// cannot stand in for a commit; git never abbreviates below 7 characters.
+	if len(sha) < 7 || len(sha) > 40 {
+		return false
+	}
+	for _, character := range sha {
+		if character >= '0' && character <= '9' ||
+			character >= 'a' && character <= 'f' ||
+			character >= 'A' && character <= 'F' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)

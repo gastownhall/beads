@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -286,42 +287,15 @@ func versionCore(version string) string {
 	return core
 }
 
-// isBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
-// installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
-// head spec resolves no commit, and either shape carrying Homebrew's
-// _<revision> suffix.
-//
-// No legacy-era channel could produce this shape, so the witness is
-// attributable to a current-era binary despite not parsing as semver: the
-// archived legacy tap formula was GoReleaser-generated with no head spec at
-// all (it only unpacked a prebuilt tarball), the Makefile stamps main.Build
-// and never main.Version, and the release workflow passes an x.y.z to
-// -X main.Version.
+// isBrewHeadVersion reports whether a stamp is the version Homebrew writes
+// into --HEAD installs of the core beads formula; doctor.IsBrewHeadVersion is
+// the canonical definition. The guard may treat such a witness as current-era
+// because no legacy-era channel could produce the shape: the archived legacy
+// tap formula was GoReleaser-generated with no head spec at all (it only
+// unpacked a prebuilt tarball), the Makefile stamps main.Build and never
+// main.Version, and the release workflow passes an x.y.z to -X main.Version.
 func isBrewHeadVersion(version string) bool {
-	rest, ok := strings.CutPrefix(version, "HEAD")
-	if !ok {
-		return false
-	}
-	// Homebrew's pkg_version appends _<revision> once the formula carries a
-	// revision, so a revision bump must not read as a legacy stamp.
-	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
-		if revision, err := strconv.Atoi(rest[cut+1:]); err != nil || revision < 0 {
-			return false
-		}
-		rest = rest[:cut]
-	}
-	// Homebrew leaves the version as a bare "HEAD" whenever the head spec
-	// cannot resolve a commit.
-	if rest == "" {
-		return true
-	}
-	sha, ok := strings.CutPrefix(rest, "-")
-	if !ok {
-		return false
-	}
-	// Bound the tail to a plausible git abbreviation so that arbitrary hex
-	// cannot stand in for a commit; git never abbreviates below 7 characters.
-	return len(sha) >= 7 && len(sha) <= 40 && isHexObjectID(sha, len(sha))
+	return doctor.IsBrewHeadVersion(version)
 }
 
 func legacyVersionMinor(version string) (int, bool) {
