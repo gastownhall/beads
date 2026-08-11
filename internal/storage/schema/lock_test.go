@@ -663,6 +663,30 @@ func TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires(t
 	}
 }
 
+// TestDetachedMigrationContextSurvivesCallerCancelButStaysBounded pins both
+// halves of the post-lock context contract. WithoutCancel alone would make the
+// pass uncancelable forever, and the uow provider's DSN carries no driver
+// ReadTimeout to fall back on, so the detachment is paired with an explicit
+// cap that only has to be far above any real migration.
+func TestDetachedMigrationContextSurvivesCallerCancelButStaysBounded(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	migrateCtx, cancelMigrate := detachedMigrationContext(parent)
+	defer cancelMigrate()
+
+	cancelParent()
+
+	if err := migrateCtx.Err(); err != nil {
+		t.Fatalf("detached context Err() = %v, want nil after the caller cancels", err)
+	}
+	deadline, ok := migrateCtx.Deadline()
+	if !ok {
+		t.Fatal("detached context has no deadline: a wedged server would hang the pass forever")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > migrationPassTimeout {
+		t.Fatalf("detached context remaining = %v, want within (0, %v]", remaining, migrationPassTimeout)
+	}
+}
+
 // expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
 // currentVersion issues to confirm a non-zero ignored cursor against the
 // schema it claims (gh 5033). They fire only for a non-zero cursor, in

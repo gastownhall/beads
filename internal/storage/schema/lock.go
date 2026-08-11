@@ -19,6 +19,14 @@ const (
 	// lock wait can time out and still leave room for a real retry.
 	migrationLockAcquireTimeoutSeconds = 5
 	migrationLockCleanupTimeout        = 5 * time.Second
+	// migrationPassTimeout bounds the post-lock unit that runs detached from
+	// the caller's context. Detaching alone would make that unit uncancelable
+	// forever, so a Dolt server wedging mid-migration could hang the process
+	// with no escape: the store path has a driver ReadTimeout backstop, but
+	// the uow provider's DSN sets none. The cap is deliberately far above any
+	// real migration, so it never truncates honest work -- it only restores
+	// liveness in the wedged case.
+	migrationPassTimeout = 30 * time.Minute
 )
 
 var (
@@ -212,7 +220,8 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// before it resets, so a context that expires between the two would burn
 	// the capability with no reset performed and leave the logical open
 	// permanently unhealable by any outer retry.
-	migrateCtx := context.WithoutCancel(ctx)
+	migrateCtx, cancelMigrate := detachedMigrationContext(ctx)
+	defer cancelMigrate()
 	applied, err = MigrateUp(migrateCtx, conn)
 	var dirtyErr *DirtyTablesError
 	if err != nil && o.freshBootstrapHeal != nil && errors.As(err, &dirtyErr) {
@@ -240,6 +249,14 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		applied, err = MigrateUp(migrateCtx, conn)
 	}
 	return applied, err
+}
+
+// detachedMigrationContext derives the context the post-lock unit runs on: cut
+// off from the caller's cancellation so the pass cannot be abandoned mid-flight
+// under a held lock, but still bounded by migrationPassTimeout so a wedged
+// server cannot hang the process forever.
+func detachedMigrationContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), migrationPassTimeout)
 }
 
 // consumeIfCurrentIncarnation validates and atomically consumes c. All probes
