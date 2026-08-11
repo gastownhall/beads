@@ -19,6 +19,12 @@ const (
 	EnvDoNotTrack        = "DO_NOT_TRACK"
 
 	DefaultEndpoint = "https://gastownhall-eventsapi.com/mp/collect"
+
+	// queuedEventExt is the extension the eventkit FileEmitter gives queued
+	// event batches in DataDir. Re-exported here (this file holds the fenced
+	// eventkit import — see computeMachineID) so spawn.go's pending-events
+	// check can recognize them.
+	queuedEventExt = eventkit.DefaultFileExt
 )
 
 var (

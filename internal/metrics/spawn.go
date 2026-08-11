@@ -3,7 +3,9 @@ package metrics
 import (
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
+	"time"
 )
 
 const SendMetricsSubcommand = "send-metrics"
@@ -28,16 +30,85 @@ func inTestMode() bool {
 	return os.Getenv(EnvTestMode) == "1"
 }
 
-// shouldSpawnFlusher is the whole spawn gate, extracted so tests can assert
-// the decision without forking a real detached child.
+// shouldSpawnFlusher is the env/config half of the spawn gate, extracted so
+// tests can assert the decision without forking a real detached child. The
+// stateful half (pending events + throttle) is flusherDue.
 func shouldSpawnFlusher() bool {
 	return os.Getenv(EnvIsFlusher) != "1" && Enabled() && !flushDisabledByEnv() && !inTestMode()
+}
+
+// flushInterval is the minimum spacing between detached send-metrics spawns.
+// Every bd invocation used to spawn one unconditionally — a full re-exec of
+// the ~200MB binary plus an HTTPS POST, measured at 8.5-14.1ms in-band before
+// the child even starts, ~10k spawns/day on a busy machine. Events tolerate
+// batching: nothing downstream needs sub-5-minute telemetry latency, and any
+// backlog uploads in one flush.
+const flushInterval = 5 * time.Minute
+
+// flushMarkerName is the throttle marker inside the eventsData dir. Its mtime
+// records the last spawn ATTEMPT (not success: the parent detaches before the
+// child's outcome is knowable, and attempt-based throttling is what bounds the
+// spawn rate even when uploads keep failing). The eventkit FileFlusher only
+// touches `*.evtq` entries, so the marker is inert to it.
+const flushMarkerName = ".last-flush"
+
+// flusherDue reports whether a detached flush is worth spawning: at least one
+// queued event batch exists, and the last spawn attempt is at least
+// flushInterval old. A marker mtime more than one interval in the future
+// (clock stepped back) reads as due rather than suppressing uploads until the
+// wall clock catches up; smaller negative ages are ordinary timestamp skew
+// (e.g. the caller sampled now just before the marker was written) and stay
+// throttled.
+func flusherDue(dir string, now time.Time) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		// Unreadable/missing queue dir: the emitter never wrote, so there is
+		// nothing a flusher child could upload.
+		return false
+	}
+	pending := false
+	for _, e := range entries {
+		if !e.IsDir() && filepath.Ext(e.Name()) == queuedEventExt {
+			pending = true
+			break
+		}
+	}
+	if !pending {
+		return false
+	}
+	fi, err := os.Stat(filepath.Join(dir, flushMarkerName))
+	if err != nil {
+		return true
+	}
+	age := now.Sub(fi.ModTime())
+	return age >= flushInterval || age <= -flushInterval
+}
+
+// touchFlushMarker stamps the throttle marker with the current time. Failures
+// are ignored: the marker is a rate limiter, and on a filesystem where it
+// cannot be written the worst case is the old always-spawn behavior.
+func touchFlushMarker(dir string) {
+	path := filepath.Join(dir, flushMarkerName)
+	now := time.Now()
+	if err := os.Chtimes(path, now, now); err == nil {
+		return
+	}
+	// Marker doesn't exist yet (or Chtimes failed): (re)create it.
+	_ = os.WriteFile(path, nil, 0o600)
 }
 
 func MaybeSpawnFlusher() {
 	if !shouldSpawnFlusher() {
 		return
 	}
+	dir, err := DataDir()
+	if err != nil {
+		return
+	}
+	if !flusherDue(dir, time.Now()) {
+		return
+	}
+	touchFlushMarker(dir)
 	self, err := os.Executable()
 	if err != nil {
 		return

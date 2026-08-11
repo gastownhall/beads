@@ -446,6 +446,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Telemetry no longer taxes every bd invocation.** Two startup costs paid on
+  every command, measured during the post-wave startup audit, are gone. First,
+  the machine-scoped distinct ID was recomputed on every invocation — a fork
+  of the platform machine-id probe (`ioreg` on macOS, 20.2±1.2ms) — even with
+  `BD_DISABLE_METRICS=1` and even for `bd --version`. The ID is now resolved
+  only when metrics are enabled and cached at `~/.beads/machine-id` (0600), so
+  the probe runs at most once per machine; a probe failure is retried next run
+  rather than cached. Second, every invocation unconditionally spawned a
+  detached `bd send-metrics` child — a full re-exec of the binary plus an
+  HTTPS upload attempt, with no check that anything was queued. The spawn now
+  requires at least one queued event batch and is throttled to one attempt per
+  5 minutes (marker: `eventsData/.last-flush`); queued events still upload,
+  just batched. Telemetry content, opt-out semantics, and the sanctioned
+  endpoint pinning are all unchanged.
+
 - **A long or multi-paragraph close reason renders as body text in `bd show`**
   ([#5595](https://github.com/gastownhall/beads/pull/5595)). Every other
   free-text field — description, design, notes, acceptance criteria, comments —
