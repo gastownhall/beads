@@ -1837,6 +1837,9 @@ func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (str
 	if remote != "" {
 		for _, r := range remotes {
 			if r.Name == remote {
+				if !syncauth.IsGitRemoteURL(r.URL) {
+					return "", nil
+				}
 				host, _ := syncauth.HostFromRemoteURL(r.URL)
 				return host, nil
 			}
@@ -1845,6 +1848,9 @@ func remoteHost(ctx context.Context, st storage.DoltStorage, remote string) (str
 	}
 
 	if len(remotes) == 0 {
+		return "", nil
+	}
+	if !syncauth.IsGitRemoteURL(remotes[0].URL) {
 		return "", nil
 	}
 	host, _ := syncauth.HostFromRemoteURL(remotes[0].URL)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -110,12 +111,21 @@ func runGitHubSyncStatus(cmd *cobra.Command, args []string) error {
 
 	a, err := resolveSyncAuth(ctx, cfg)
 	if err != nil {
-		return HandleError("%v", err)
+		if errors.Is(err, syncauth.ErrNoAuth) {
+			// No provider is available; status should report unauthenticated
+			// rather than exit with an error.
+			a = nil
+		} else {
+			return HandleError("%v", err)
+		}
 	}
 
-	ok, err := a.Detect(ctx)
-	if err != nil {
-		return HandleError("%v", err)
+	ok := false
+	if a != nil {
+		ok, err = a.Detect(ctx)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 	}
 
 	if jsonOutput {
@@ -383,6 +393,9 @@ func inferRemoteHost(ctx context.Context) string {
 	if err != nil || len(remotes) == 0 {
 		return ""
 	}
+	if !syncauth.IsGitRemoteURL(remotes[0].URL) {
+		return ""
+	}
 	host, err := syncauth.HostFromRemoteURL(remotes[0].URL)
 	if err != nil {
 		return ""
@@ -407,9 +420,15 @@ func clientIDForHost(host string) string {
 func clientSecretForHost(host string) string {
 	host = syncauth.NormalizeHost(host)
 	if syncauth.IsGitHubHost(host) {
-		return os.Getenv("BD_GITHUB_CLIENT_SECRET")
+		if v := os.Getenv("BD_GITHUB_CLIENT_SECRET"); v != "" {
+			return v
+		}
+		return config.GetString("github.client_secret")
 	}
-	return os.Getenv("BD_GITLAB_CLIENT_SECRET")
+	if v := os.Getenv("BD_GITLAB_CLIENT_SECRET"); v != "" {
+		return v
+	}
+	return config.GetString("gitlab.client_secret")
 }
 
 func oauthScopesForHost(host string) []string {
