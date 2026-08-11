@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,7 +18,12 @@ import (
 
 func writeQueuedEvent(t *testing.T, dir string) {
 	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "batch1"+queuedEventExt), []byte("x"), 0o600); err != nil {
+	writeQueuedEventNamed(t, dir, "batch1")
+}
+
+func writeQueuedEventNamed(t *testing.T, dir, stem string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, stem+queuedEventExt), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write event file: %v", err)
 	}
 }
@@ -103,6 +109,52 @@ func TestFlusherDueThrottlesByMarkerAge(t *testing.T) {
 	}
 	if !flusherDue(dir, now) {
 		t.Errorf("flusherDue(marker far in future) = false, want true")
+	}
+}
+
+// TestHasQueuedEventsAcrossChunks pins the chunked directory scan: a queued
+// batch sitting past the first ReadDir(64) chunk must still be found, and a
+// large all-litter directory must come back empty rather than false-positive.
+func TestHasQueuedEventsAcrossChunks(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 200; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("litter-%03d.tmp", i)), nil, 0o600); err != nil {
+			t.Fatalf("write litter: %v", err)
+		}
+	}
+	if hasQueuedEvents(dir) {
+		t.Errorf("hasQueuedEvents(200 litter files) = true, want false")
+	}
+	// The all-litter pass above is the deterministic pin on the loop: 200
+	// entries force at least four 64-entry chunks plus the io.EOF exit. The
+	// found-a-match pass is chunk-position-deterministic only where directory
+	// enumeration is sorted (e.g. NTFS, which CI exercises); elsewhere the
+	// batch may surface in any chunk, and the assertion is just "found".
+	writeQueuedEventNamed(t, dir, "zz-last")
+	if !hasQueuedEvents(dir) {
+		t.Errorf("hasQueuedEvents(batch among 200 litter files) = false, want true")
+	}
+}
+
+// TestFlusherDueFreshMarkerSkipsQueueScan pins the evaluation order: inside
+// the throttle interval the queue must not be scanned at all — the property
+// that keeps a backed-up queue (148k entries observed) from taxing every bd
+// invocation. The scanQueue seam is stubbed so any scan attempt fails the
+// test outright.
+func TestFlusherDueFreshMarkerSkipsQueueScan(t *testing.T) {
+	dir := t.TempDir()
+	writeQueuedEvent(t, dir)
+	touchFlushMarker(dir)
+
+	orig := scanQueue
+	scanQueue = func(string) bool {
+		t.Error("flusherDue scanned the queue despite a fresh marker")
+		return true
+	}
+	defer func() { scanQueue = orig }()
+
+	if flusherDue(dir, time.Now()) {
+		t.Errorf("flusherDue(fresh marker, queued events) = true, want false")
 	}
 }
 
