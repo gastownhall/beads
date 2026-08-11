@@ -265,13 +265,16 @@ func currentVersionWitness(version string) bool {
 	if len(parts) != 3 {
 		return false
 	}
-	for _, part := range parts {
-		if value, err := strconv.Atoi(part); err != nil || value < 0 {
+	major, err := strconv.Atoi(parts[0])
+	if err != nil || major < 1 {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if _, err := strconv.Atoi(part); err != nil {
 			return false
 		}
 	}
-	major, _ := strconv.Atoi(parts[0])
-	return major >= 1
+	return true
 }
 
 // versionCore reduces a version stamp to its bare x.y.z core: it drops the

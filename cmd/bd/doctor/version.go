@@ -152,14 +152,16 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 	}
 
+	trackingActive := DoctorCheck{
+		Name:    "Version Tracking",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
+	}
+
 	// A Homebrew --HEAD stamp carries no ordering, so the staleness heuristic
 	// below cannot apply — but it is a healthy marker, not a malformed one.
 	if IsBrewHeadVersion(lastVersion) {
-		return DoctorCheck{
-			Name:    "Version Tracking",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-		}
+		return trackingActive
 	}
 
 	// Validate that version is a valid semver-like string
@@ -182,11 +184,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 
 		// Guard against short version strings (e.g., "5" → [5] has no [1])
 		if len(currentParts) < 2 || len(lastParts) < 2 {
-			return DoctorCheck{
-				Name:    "Version Tracking",
-				Status:  StatusOK,
-				Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-			}
+			return trackingActive
 		}
 
 		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
@@ -204,11 +202,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 
 		// Version is behind but not too old - this is normal after upgrade
-		return DoctorCheck{
-			Name:    "Version Tracking",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-		}
+		return trackingActive
 	}
 
 	// Version is current or ahead
@@ -336,15 +330,7 @@ func IsBrewHeadVersion(version string) bool {
 	if len(sha) < 7 || len(sha) > 40 {
 		return false
 	}
-	for _, character := range sha {
-		if character >= '0' && character <= '9' ||
-			character >= 'a' && character <= 'f' ||
-			character >= 'A' && character <= 'F' {
-			continue
-		}
-		return false
-	}
-	return true
+	return strings.Trim(sha, "0123456789abcdefABCDEF") == ""
 }
 
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)
