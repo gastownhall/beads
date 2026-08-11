@@ -636,6 +636,12 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 }
 
 func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
+	for _, field := range []string{"wisp", "no_history"} {
+		if _, ok := updates[field]; ok {
+			return fmt.Errorf("update issue in split transaction: persistence field %q is not supported", field)
+		}
+	}
+
 	table := "issues"
 	if t.isActiveWisp(ctx, id) {
 		table = "wisps"

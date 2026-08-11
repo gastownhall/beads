@@ -344,6 +344,7 @@ func TestPromoteFromEphemeralRollsBackWhenAuxiliaryCopyFails(t *testing.T) {
 		{"dependencies", "dependencies", "copy dependencies for promoted wisp", "mixed-promote-dependencies-fail"},
 		{"events", "events", "copy events for promoted wisp", "mixed-promote-events-fail"},
 		{"comments", "comments", "copy comments for promoted wisp", "mixed-promote-comments-fail"},
+		{"child counters", "child_counters", "copy child counters for promoted wisp", "mixed-promote-counters-fail"},
 	}
 
 	for _, tc := range cases {

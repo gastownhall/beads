@@ -182,9 +182,9 @@ func (s *DoltStore) getWispLabels(ctx context.Context, issueID string) ([]string
 	return labels, rows.Err()
 }
 
-// updateWisp updates fields on a wisp in the wisps table.
-// Delegates SQL work to issueops.UpdateIssueInTx; no Dolt versioning needed
-// since wisps live in dolt_ignored tables.
+// updateWisp updates fields on a wisp in the wisps table. Runtime-only modes
+// remain dolt_ignored; an update that selects durable history promotes the
+// aggregate and commits its permanent tables in the same transaction.
 func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -194,6 +194,16 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
 		return err
+	}
+	promoted, err := issueops.PromoteWispIfDurableInTx(ctx, tx, id, actor)
+	if err != nil {
+		return err
+	}
+	if promoted {
+		if err := s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables,
+			fmt.Sprintf("bd: promote %s via update", id)); err != nil {
+			return err
+		}
 	}
 
 	return wrapTransactionError("commit update wisp", tx.Commit())
@@ -207,8 +217,8 @@ func (s *DoltStore) updateWisp(ctx context.Context, id string, updates map[strin
 // ErrStatusMismatch), so a stale precondition refuses before any write and the
 // deferred Rollback discards the transaction (a true compare-and-swap). Like
 // updateWisp it uses a bare BeginTx/Commit with no withRetryTx (consistent with
-// the rest of the wisp write path — do not add one here); wisps live in
-// dolt_ignored tables, so there is no DOLT_COMMIT.
+// the rest of the wisp write path — do not add one here). Runtime wisps require
+// no DOLT_COMMIT; a durable transition is staged and committed before tx ends.
 func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates map[string]interface{}, actor string, opts storage.UpdateIssueOptions) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -226,6 +236,16 @@ func (s *DoltStore) updateWispChecked(ctx context.Context, id string, updates ma
 	}
 	if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
 		return err
+	}
+	promoted, err := issueops.PromoteWispIfDurableInTx(ctx, tx, id, actor)
+	if err != nil {
+		return err
+	}
+	if promoted {
+		if err := s.doltAddAndCommitInTx(ctx, tx, permanentIssueAuxTables,
+			fmt.Sprintf("bd: promote %s via checked update", id)); err != nil {
+			return err
+		}
 	}
 
 	return wrapTransactionError("commit update wisp", tx.Commit())
