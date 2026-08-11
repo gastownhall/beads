@@ -55,3 +55,14 @@ Independently verified, not taken on the reviewer's characterization:
 - Push target: `fork` (`quad341/beads`) — `origin` (`gastownhall/beads`) push is deliberately disabled (fetch-only sentinel), upstream is fork-and-PR workflow. Matches proven precedent (be-pt3sv / PR #5194, since merged upstream). `fork` and `prhead` remotes point at the same underlying repo (`quad341/beads`, renamed to `quad341/beads-sec003-contrib`, GitHub redirects the old URL) — using `fork` for consistency with precedent.
 - PR: cross-repo `quad341:deploy/be-ulyj3-gate` → `gastownhall:main`.
 - **gastownhall/beads is upstream-only for this rig** (contributor relationship, not maintainer). Per role instructions, job ends at opening the PR — no merge-request routed to mayor for this repo; merge belongs to the upstream maintainers.
+
+## Addendum — post-gate review round (2026-08-11)
+
+Everything above is the record as verified at the reviewed commit `c8e0afb66` and is left unchanged. Upstream review on PR #5329 (steveyegge, 2026-08-07, "MERGE-AFTER-FIXES") found one blocking gap that this gate did not catch, and the branch has since moved. Re-verification is against the new tip, not the SHAs above.
+
+- **Blocking, now fixed:** detaching only the two `MigrateUp` calls left the recovery unit between them — `consumeIfCurrentIncarnation` and the `DOLT_RESET` `DrainCall` — on the caller's context. A deadline expiring there could burn the one-shot `FreshBootstrapHealCapability` with no reset performed, making the logical open permanently unhealable by any outer retry. The whole post-lock unit now runs on the detached context.
+- **Liveness:** the detached pass is now bounded by `migrationPassTimeout` (30m) rather than being uncancelable forever; the uow provider's DSN carries no driver `ReadTimeout` to fall back on.
+- **Signal UX:** the caller's first interrupt no longer looks like a hang — it is disclosed on stderr.
+- **Criterion 7 note:** the diff is now 3 files rather than 2 (the gate doc itself included). The feature theme is unchanged.
+- **Test evidence at the new tip:** `go build ./...`, `go vet ./internal/storage/schema/` clean; `go test ./internal/storage/schema/ -race` **ok** (21.7s, full package). The heal-path regression was confirmed genuinely RED before the fix (heal skipped, `DOLT_RESET` never reached) and GREEN after.
+- **Test-mechanism correction:** the test cited at Criterion 2 above timed its expiry with `context.WithTimeout` from the top of the test, documented as counting down "after GET_LOCK resolves". It does not — `WithTimeout` starts at creation — so that margin covered lock acquisition too and could flake on a saturated runner. The expiry is now anchored inside the call via `WithLockedPreparation`. The assertion it makes is unchanged.
