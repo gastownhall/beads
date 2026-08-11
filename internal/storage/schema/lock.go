@@ -211,24 +211,16 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
-	// Detaching the pass below swallows the caller's first interrupt, which
-	// would otherwise look like a hang. Say so once instead. The watcher is
-	// bounded by the pass in both directions: it cannot outlive
-	// MigrateUpWithLock, and MigrateUpWithLock does not return until the
-	// watcher has finished writing, so stderr is never touched concurrently.
-	passDone := make(chan struct{})
-	noticeDone := make(chan struct{})
-	go func() {
-		defer close(noticeDone)
-		select {
-		case <-ctx.Done():
-			fmt.Fprint(stderr, "Schema migration in progress; completing before exit…\n")
-		case <-passDone:
-		}
-	}()
+	// Detaching the pass swallows the caller's interrupt, which would
+	// otherwise leave no trace of why the process kept working after a Ctrl-C.
+	// Disclose it once, from this goroutine and after the pass: MigrateUp
+	// writes its own per-migration progress to stderr, so a watcher goroutine
+	// reporting the interrupt live would be a second concurrent writer to a
+	// writer that is not safe for that (the race detector agrees).
 	defer func() {
-		close(passDone)
-		<-noticeDone
+		if ctx.Err() != nil {
+			fmt.Fprint(stderr, "Schema migration ran to completion before exiting (interrupt received mid-migration).\n")
+		}
 	}()
 
 	// A migration pass must run to completion once the lock is held: the

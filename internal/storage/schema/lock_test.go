@@ -687,9 +687,13 @@ func TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires(t
 
 // TestMigrateUpWithLockNoticesCallerInterruptDuringPass pins the signal-UX
 // side of detaching the pass: the caller's first Ctrl-C no longer stops the
-// migration, so the delta is disclosed on stderr rather than looking like a
-// hang. The notice is emitted once, and only when the caller's context ends
-// while the pass is still running under the held lock.
+// migration, so the delta is disclosed on stderr instead of the process just
+// appearing to work on past the interrupt with no explanation. The notice is
+// emitted once, and only when the caller's context ended during the pass.
+//
+// It is written after the pass, from the calling goroutine, because MigrateUp
+// writes its own progress to the same stderr while the pass runs -- reporting
+// the interrupt live would mean two goroutines writing one writer.
 func TestMigrateUpWithLockNoticesCallerInterruptDuringPass(t *testing.T) {
 	db, mock, err := sqlmock.New()
 	if err != nil {
@@ -731,8 +735,8 @@ func TestMigrateUpWithLockNoticesCallerInterruptDuringPass(t *testing.T) {
 	if applied != 1 {
 		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
 	}
-	if got, want := buf.String(), "migration in progress"; !strings.Contains(got, want) {
-		t.Fatalf("stderr = %q, want it to disclose that the pass continues past the interrupt (%q)", got, want)
+	if got, want := buf.String(), "interrupt received mid-migration"; !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want it to disclose that the pass ran on past the interrupt (%q)", got, want)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
@@ -774,7 +778,7 @@ func TestMigrateUpWithLockOmitsInterruptNoticeWithoutCallerInterrupt(t *testing.
 	if _, err := MigrateUpWithLock(ctx, conn, "testdb"); err != nil {
 		t.Fatalf("MigrateUpWithLock() error = %v", err)
 	}
-	if got := buf.String(); strings.Contains(got, "migration in progress") {
+	if got := buf.String(); strings.Contains(got, "interrupt received mid-migration") {
 		t.Fatalf("stderr = %q, want no interrupt notice on an uninterrupted pass", got)
 	}
 }
