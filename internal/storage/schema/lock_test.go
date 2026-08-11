@@ -113,15 +113,26 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 // path. Once MigrateUpWithLock holds the lock, the migration pass must run
 // to completion regardless of the caller's context.
 //
-// The first query MigrateUp issues is delayed well past a short caller
-// deadline that only starts counting down after GET_LOCK (undelayed)
-// resolves, so the deadline reliably fires while migration work is in
-// flight, never during lock acquisition. Today, an abandoned pass leaves the
-// full expectation sequence unfulfilled, so the deferred RELEASE_LOCK call
-// also mismatches its (ordered, not-yet-reached) expectation -- the
-// resulting error is a join of the context-cancellation failure and that
-// mismatch, not just the latter alone.
+// The expiry is anchored to a synchronization point inside the call rather
+// than to a wall-clock deadline. WithLockedPreparation runs after GET_LOCK
+// resolves and immediately before the first pass, so the cancel is scheduled
+// from there: the only margin that has to hold is inFlightCancelDelay against
+// the first query's much longer delay, both measured from the same anchor. An
+// earlier version timed this with context.WithTimeout from the top of the
+// test, which was documented as counting down "after GET_LOCK resolves" -- it
+// does not, WithTimeout starts at creation, so on a saturated runner the
+// deadline could fire during lock acquisition and flake.
+//
+// Today, an abandoned pass leaves the full expectation sequence unfulfilled,
+// so the deferred RELEASE_LOCK call also mismatches its (ordered,
+// not-yet-reached) expectation -- the resulting error is a join of the
+// context-cancellation failure and that mismatch, not just the latter alone.
 func TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcquire(t *testing.T) {
+	const (
+		firstQueryDelay     = 250 * time.Millisecond
+		inFlightCancelDelay = 25 * time.Millisecond
+	)
+
 	db, mock, err := sqlmock.New()
 	if err != nil {
 		t.Fatalf("create sql mock: %v", err)
@@ -138,15 +149,25 @@ func TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcq
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
-	expectOnePendingMigration(t, mock, 250*time.Millisecond)
+	expectOnePendingMigration(t, mock, firstQueryDelay)
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			// The lock is held and the first (delayed) query is next: expire
+			// the caller's context while that query is in flight. Returning a
+			// nil capability arms no heal, so this stays a plain pass.
+			go func() {
+				time.Sleep(inFlightCancelDelay)
+				cancel()
+			}()
+			return nil, nil
+		}))
 	if err != nil {
 		t.Fatalf("MigrateUpWithLock() error = %v, want the migration to run to completion despite caller context expiry after lock acquisition", err)
 	}
