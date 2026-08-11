@@ -207,7 +207,11 @@ func autoMigrateOnVersionBump(beadsDir string) {
 
 	// GH#2137: If upgrading from pre-0.56, the dolt database may have been
 	// created by the old embedded Dolt mode. Recover by reinitializing.
-	if previousVersion != "" && doctor.CompareVersions(previousVersion, "0.56.0") < 0 {
+	// CompareVersions scans each dot-part with %d and leaves unparsable parts
+	// at 0, so a non-semver stamp such as a Homebrew "HEAD-<sha>" would read as
+	// pre-0.56 and hand a current workspace to a recovery path that deletes
+	// .dolt. Only an actual semver predecessor may reach it.
+	if doctor.IsValidSemver(previousVersion) && doctor.CompareVersions(previousVersion, "0.56.0") < 0 {
 		recovered, recErr := doltserver.RecoverPreV56DoltDir(dbPath)
 		if recErr != nil {
 			debug.Logf("auto-migrate: pre-v56 recovery failed: %v", recErr)

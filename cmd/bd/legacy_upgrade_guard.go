@@ -253,52 +253,79 @@ func legacyServerVersion(version string) bool {
 
 // currentVersionWitness identifies a version marker only a post-1.0 binary
 // could have written: an x.y.z with major >= 1 (pre-release and build-metadata
-// suffixes tolerated), or a Homebrew --HEAD stamp. A local Dolt root in server
-// mode is ambiguous without it, so that shape must be refused rather than
-// opened as a historical schema.
+// suffixes tolerated, see versionCore), or a Homebrew --HEAD stamp. A local
+// Dolt root in server mode is ambiguous without it, so that shape must be
+// refused rather than opened as a historical schema.
 func currentVersionWitness(version string) bool {
 	if isBrewHeadVersion(version) {
 		return true
 	}
+	parts := strings.Split(versionCore(version), ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if value, err := strconv.Atoi(part); err != nil || value < 0 {
+			return false
+		}
+	}
+	major, _ := strconv.Atoi(parts[0])
+	return major >= 1
+}
+
+// versionCore reduces a version stamp to its bare x.y.z core: it drops the
+// optional leading "v" and any pre-release or build-metadata suffix. Every
+// classifier in this file shares it so that a suffixed stamp cannot land
+// outside both the current-era and legacy-era buckets, which on the
+// shared-server path would admit a legacy workspace.
+func versionCore(version string) string {
 	core := strings.TrimPrefix(version, "v")
 	if cut := strings.IndexAny(core, "-+"); cut >= 0 {
 		core = core[:cut]
 	}
-	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
-		return false
-	}
-	values := make([]int, len(parts))
-	for i, part := range parts {
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 {
-			return false
-		}
-		values[i] = value
-	}
-	return values[0] >= 1
+	return core
 }
 
-// isBrewHeadVersion recognizes the HEAD-<shortsha> version Homebrew stamps
-// into --HEAD installs of the core beads formula. That formula is the only
-// distribution channel that ever produced this shape — every legacy-era
-// channel shipped prebuilt binaries with a baked-in x.y.z — so the witness is
-// attributable to a current-era binary despite not parsing as semver.
+// isBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
+// installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
+// head spec resolves no commit, and either shape carrying Homebrew's
+// _<revision> suffix.
+//
+// No legacy-era channel could produce this shape, so the witness is
+// attributable to a current-era binary despite not parsing as semver: the
+// archived legacy tap formula was GoReleaser-generated with no head spec at
+// all (it only unpacked a prebuilt tarball), the Makefile stamps main.Build
+// and never main.Version, and the release workflow passes an x.y.z to
+// -X main.Version.
 func isBrewHeadVersion(version string) bool {
-	sha, ok := strings.CutPrefix(version, "HEAD-")
-	if !ok || sha == "" {
+	rest, ok := strings.CutPrefix(version, "HEAD")
+	if !ok {
 		return false
 	}
-	for _, r := range sha {
-		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+	// Homebrew's pkg_version appends _<revision> once the formula carries a
+	// revision, so a revision bump must not read as a legacy stamp.
+	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
+		if revision, err := strconv.Atoi(rest[cut+1:]); err != nil || revision < 0 {
 			return false
 		}
+		rest = rest[:cut]
 	}
-	return true
+	// Homebrew leaves the version as a bare "HEAD" whenever the head spec
+	// cannot resolve a commit.
+	if rest == "" {
+		return true
+	}
+	sha, ok := strings.CutPrefix(rest, "-")
+	if !ok {
+		return false
+	}
+	// Bound the tail to a plausible git abbreviation so that arbitrary hex
+	// cannot stand in for a commit; git never abbreviates below 7 characters.
+	return len(sha) >= 7 && len(sha) <= 40 && isHexObjectID(sha, len(sha))
 }
 
 func legacyVersionMinor(version string) (int, bool) {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+	parts := strings.Split(versionCore(version), ".")
 	if len(parts) != 3 || parts[0] != "0" {
 		return 0, false
 	}

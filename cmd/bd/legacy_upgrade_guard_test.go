@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/config"
@@ -190,80 +191,51 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 		}
 	})
 
-	t.Run("explicit server metadata with missing version witness and local Dolt root is refused", func(t *testing.T) {
-		beadsDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
-			t.Fatal(err)
+	t.Run("explicit server metadata with local Dolt root admits only current-era witnesses", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			version     string
+			wantRefusal bool
+		}{
+			{name: "missing witness", wantRefusal: true},
+			{name: "malformed witness", version: "not-a-version", wantRefusal: true},
+			{name: "legacy witness", version: "0.62.0", wantRefusal: true},
+			{name: "legacy pre-release witness", version: "0.62.0-rc.1", wantRefusal: true},
+			{name: "legacy snapshot witness", version: "0.62.1-next", wantRefusal: true},
+			{name: "current witness", version: "1.1.2"},
+			{name: "current pre-release witness", version: "1.1.0-rc.1"},
+			{name: "current build-metadata witness", version: "1.1.0+ci.7"},
+			{name: "brew HEAD witness", version: "HEAD-f925f3f"},
+			{name: "brew HEAD witness with revision", version: "HEAD-f925f3f_1"},
+			{name: "bare brew HEAD witness", version: "HEAD"},
 		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
-			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
-		}
-	})
 
-	t.Run("explicit server metadata with malformed version witness and local Dolt root is refused", func(t *testing.T) {
-		beadsDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("not-a-version\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
-			t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
-		}
-	})
-
-	t.Run("explicit server metadata with current version witness and local Dolt root is admitted", func(t *testing.T) {
-		beadsDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.1.2\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-			t.Fatalf("current server workspace with current witness was refused: %v", err)
-		}
-	})
-
-	t.Run("explicit server metadata with brew HEAD witness and local Dolt root is admitted", func(t *testing.T) {
-		beadsDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("HEAD-f925f3f\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-			t.Fatalf("current server workspace with brew HEAD witness was refused: %v", err)
-		}
-	})
-
-	t.Run("explicit server metadata with pre-release current witness and local Dolt root is admitted", func(t *testing.T) {
-		beadsDir := t.TempDir()
-		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_mode":"server"}`), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte("1.1.0-rc.1\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-			t.Fatalf("current server workspace with pre-release witness was refused: %v", err)
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				beadsDir := t.TempDir()
+				metadata := []byte(`{"backend":"dolt","dolt_mode":"server"}`)
+				if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), metadata, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if tt.version != "" {
+					if err := os.WriteFile(filepath.Join(beadsDir, localVersionFile), []byte(tt.version+"\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				err := guardLegacyUpgradeWorkspace(beadsDir)
+				if tt.wantRefusal {
+					if !isLegacyUpgradeRefusal(err) {
+						t.Fatalf("guardLegacyUpgradeWorkspace() = %v, want migration refusal", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("current server workspace was refused: %v", err)
+				}
+			})
 		}
 	})
 
@@ -440,6 +412,91 @@ func TestLegacyUpgradeGuardRejectsBackendTombstonesWithoutMigratingConfig(t *tes
 			}
 			if _, err := os.Stat(filepath.Join(beadsDir, "metadata.json")); !os.IsNotExist(err) {
 				t.Fatalf("guard created metadata.json: %v", err)
+			}
+		})
+	}
+}
+
+func TestCurrentVersionWitness(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "release", version: "1.1.2", want: true},
+		{name: "v prefixed release", version: "v1.1.2", want: true},
+		{name: "pre-release", version: "1.1.0-rc.1", want: true},
+		{name: "build metadata", version: "1.1.0+ci.7", want: true},
+		{name: "brew HEAD stamp", version: "HEAD-f925f3f", want: true},
+		{name: "pre-v1 release", version: "0.62.0"},
+		{name: "pre-v1 pre-release", version: "0.62.0-rc.1"},
+		{name: "empty", version: ""},
+		{name: "not a version", version: "not-a-version"},
+		{name: "two part core", version: "1.1"},
+		{name: "non-numeric core", version: "1.x.0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := currentVersionWitness(tt.version); got != tt.want {
+				t.Fatalf("currentVersionWitness(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestIsBrewHeadVersion(t *testing.T) {
+	tests := []struct {
+		name    string
+		version string
+		want    bool
+	}{
+		{name: "short sha", version: "HEAD-f925f3f", want: true},
+		{name: "full sha", version: "HEAD-" + strings.Repeat("a", 40), want: true},
+		{name: "uppercase sha", version: "HEAD-F925F3F", want: true},
+		{name: "bare HEAD", version: "HEAD", want: true},
+		{name: "revision suffix", version: "HEAD-f925f3f_1", want: true},
+		{name: "bare HEAD with revision suffix", version: "HEAD_2", want: true},
+		{name: "empty sha", version: "HEAD-"},
+		{name: "non-hex sha", version: "HEAD-zzzzzzz"},
+		{name: "sha below git abbreviation floor", version: "HEAD-abc"},
+		{name: "sha beyond object id length", version: "HEAD-" + strings.Repeat("a", 41)},
+		{name: "dirty suffix", version: "HEAD-f925f3f-dirty"},
+		{name: "non-numeric revision", version: "HEAD-f925f3f_x"},
+		{name: "unrelated prefix", version: "HEADLESS-f925f3f"},
+		{name: "semver", version: "1.1.2"},
+		{name: "empty", version: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBrewHeadVersion(tt.version); got != tt.want {
+				t.Fatalf("isBrewHeadVersion(%q) = %v, want %v", tt.version, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLegacyVersionMinorToleratesSuffixes(t *testing.T) {
+	tests := []struct {
+		name      string
+		version   string
+		wantMinor int
+		wantOK    bool
+	}{
+		{name: "release", version: "0.62.0", wantMinor: 62, wantOK: true},
+		{name: "pre-release", version: "0.62.0-rc.1", wantMinor: 62, wantOK: true},
+		{name: "snapshot", version: "0.62.1-next", wantMinor: 62, wantOK: true},
+		{name: "build metadata", version: "0.55.4+ci", wantMinor: 55, wantOK: true},
+		{name: "post-v1", version: "1.1.0-rc.1"},
+		{name: "not a version", version: "not-a-version"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			minor, ok := legacyVersionMinor(tt.version)
+			if ok != tt.wantOK || minor != tt.wantMinor {
+				t.Fatalf("legacyVersionMinor(%q) = (%d, %v), want (%d, %v)", tt.version, minor, ok, tt.wantMinor, tt.wantOK)
 			}
 		})
 	}
