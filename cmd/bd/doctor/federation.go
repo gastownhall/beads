@@ -38,6 +38,8 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 		cfg.ServerHost = bcfg.GetDoltServerHost()
 		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 		cfg.ServerUser = bcfg.GetDoltServerUser()
+		cfg.ServerTLS = bcfg.GetDoltServerTLS()
+		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
 	}
 	dolt.ApplyCLIAutoStart(beadsDir, cfg)
 	return cfg
