@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/git"
+	"github.com/steveyegge/beads/internal/gitenv"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/worktreeremove"
@@ -469,7 +471,7 @@ func gitCmdInDir(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", gitArgs...)
 	cmd.Dir = dir
 	// Security: Disable git hooks and templates (SEC-001, SEC-002)
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(scrubWorktreeGitRoutingEnv(os.Environ()),
 		"GIT_TEMPLATE_DIR=",
 	)
 	return cmd
@@ -664,47 +666,71 @@ func newWorktreeRemovalGit() (*worktreeRemovalGit, error) {
 	}, nil
 }
 
-func scrubWorktreeRemovalGitEnv(env []string) []string {
-	exactKeys := map[string]struct{}{
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES": {},
-		"GIT_CEILING_DIRECTORIES":          {},
-		"GIT_COMMON_DIR":                   {},
-		"GIT_DIR":                          {},
-		"GIT_DISCOVERY_ACROSS_FILESYSTEM":  {},
-		"GIT_EXEC_PATH":                    {},
-		"GIT_GRAFT_FILE":                   {},
-		"GIT_IMPLICIT_WORK_TREE":           {},
-		"GIT_INDEX_FILE":                   {},
-		"GIT_INTERNAL_SUPER_PREFIX":        {},
-		"GIT_NAMESPACE":                    {},
-		"GIT_NO_REPLACE_OBJECTS":           {},
-		"GIT_OBJECT_DIRECTORY":             {},
-		"GIT_OPTIONAL_LOCKS":               {},
-		"GIT_PREFIX":                       {},
-		"GIT_QUARANTINE_PATH":              {},
-		"GIT_REPLACE_REF_BASE":             {},
-		"GIT_SHALLOW_FILE":                 {},
-		"GIT_SUPER_PREFIX":                 {},
-		"GIT_TEMPLATE_DIR":                 {},
-		"GIT_WORK_TREE":                    {},
-	}
+func scrubWorktreeGitRoutingEnv(env []string) []string {
+	return scrubWorktreeGitRoutingEnvForOS(env, runtime.GOOS)
+}
 
-	cleaned := make([]string, 0, len(env))
-	for _, entry := range env {
-		key := entry
-		if separator := strings.IndexByte(entry, '='); separator >= 0 {
-			key = entry[:separator]
-		}
-		upperKey := strings.ToUpper(key)
-		if strings.HasPrefix(upperKey, "GIT_CONFIG") {
+// scrubWorktreeGitRoutingEnvForOS removes inherited Git repository, index,
+// object, namespace, executable, template, and config routing. It deliberately
+// preserves non-routing controls such as GIT_OPTIONAL_LOCKS; the removal runner
+// applies its stricter policy separately.
+func scrubWorktreeGitRoutingEnvForOS(env []string, goos string) []string {
+	return gitenv.ScrubRoutingForOS(env, goos)
+}
+
+func scrubWorktreeRemovalGitEnv(env []string) []string {
+	return scrubWorktreeRemovalGitEnvForOS(env, runtime.GOOS)
+}
+
+func scrubWorktreeRemovalGitEnvForOS(env []string, goos string) []string {
+	cleaned := scrubWorktreeGitRoutingEnvForOS(env, goos)
+	result := cleaned[:0]
+	for _, entry := range cleaned {
+		key := normalizeWorktreeGitEnvKey(worktreeGitEnvKey(entry), goos)
+		if key == "GIT_NO_REPLACE_OBJECTS" || key == "GIT_OPTIONAL_LOCKS" {
 			continue
 		}
-		if _, blocked := exactKeys[upperKey]; blocked {
-			continue
-		}
-		cleaned = append(cleaned, entry)
+		result = append(result, entry)
 	}
-	return cleaned
+	return result
+}
+
+func worktreeGitEnvKey(entry string) string {
+	return gitenv.EntryKey(entry)
+}
+
+func normalizeWorktreeGitEnvKey(key, goos string) string {
+	if goos == "windows" {
+		return strings.ToUpper(key)
+	}
+	return key
+}
+
+func isWorktreeGitRoutingEnvKeyForOS(key, goos string) bool {
+	return gitenv.IsRoutingKeyForOS(key, goos)
+}
+
+// clearWorktreeGitRoutingEnv establishes the command working directory as the
+// repository-selection boundary without changing process identity or signal
+// semantics. Startup config discovery applies the same boundary to its one
+// pre-hook Git probe.
+func clearWorktreeGitRoutingEnv(cmd *cobra.Command) error {
+	if !hasWorktreeCommandAncestor(cmd) {
+		return nil
+	}
+	if _, err := gitenv.ClearRouting(); err != nil {
+		return fmt.Errorf("clear inherited Git routing for worktree command: %w", err)
+	}
+	return nil
+}
+
+func hasWorktreeCommandAncestor(cmd *cobra.Command) bool {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current == worktreeCmd {
+			return true
+		}
+	}
+	return false
 }
 
 func (git *worktreeRemovalGit) command(ctx context.Context, dir string, args ...string) *exec.Cmd {
