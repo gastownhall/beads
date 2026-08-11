@@ -773,7 +773,7 @@ func (s *DoltStore) withCircuitWrite(ctx context.Context, op func(context.Contex
 		return op(ctx)
 	}
 	if s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitRejected.Add(ctx, 1)
 		return ErrCircuitOpen
 	}
 	err := op(context.WithValue(ctx, circuitWriteContextKey{}, struct{}{}))
@@ -786,7 +786,7 @@ func (s *DoltStore) withCircuitWrite(ctx context.Context, op func(context.Contex
 func (s *DoltStore) withRetryClassified(ctx context.Context, op func() error, retryable func(error) bool) error {
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitRejected.Add(ctx, 1)
 		return ErrCircuitOpen
 	}
 
@@ -797,7 +797,7 @@ func (s *DoltStore) withRetryClassified(ctx context.Context, op func() error, re
 		return s.classifyManagedRetry(ctx, op(), retryable)
 	}, backoff.WithContext(bo, ctx))
 	if attempts > 1 {
-		doltMetrics.retryCount.Add(ctx, int64(attempts-1), telemetry.WithMergedAttrs())
+		doltMetrics.retryCount.Add(ctx, int64(attempts-1))
 	}
 	return err
 }
@@ -846,7 +846,7 @@ func (s *DoltStore) recordRetryFailure(ctx context.Context, err error) error {
 	}
 	s.breaker.RecordFailure()
 	if s.breaker.State() == circuitOpen {
-		doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitTrips.Add(ctx, 1)
 		return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 	}
 	return nil
@@ -860,67 +860,67 @@ var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
 // Instruments are registered against the global delegating provider at init time,
 // so they automatically forward to the real provider once telemetry.Init() runs.
 var doltMetrics struct {
-	retryCount           metric.Int64Counter
-	lockWaitMs           metric.Float64Histogram
-	circuitTrips         metric.Int64Counter
-	circuitRejected      metric.Int64Counter
-	serializationErrors  metric.Int64Counter
-	writeRetries         metric.Int64Counter
-	connAcquireMs        metric.Float64Histogram
-	poolWaitCount        metric.Int64Counter
-	poolWaitMs           metric.Float64Histogram
-	claimVerifyLost      metric.Int64Counter
-	claimVerifyRecovered metric.Int64Counter
-	ignoredTxFreshPool   metric.Int64Counter
+	retryCount           telemetry.Counter
+	lockWaitMs           telemetry.Histogram
+	circuitTrips         telemetry.Counter
+	circuitRejected      telemetry.Counter
+	serializationErrors  telemetry.Counter
+	writeRetries         telemetry.Counter
+	connAcquireMs        telemetry.Histogram
+	poolWaitCount        telemetry.Counter
+	poolWaitMs           telemetry.Histogram
+	claimVerifyLost      telemetry.Counter
+	claimVerifyRecovered telemetry.Counter
+	ignoredTxFreshPool   telemetry.Counter
 }
 
 func init() {
 	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
-	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
+	doltMetrics.retryCount = telemetry.NewCounter(m, "bd.db.retry_count",
 		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
 		metric.WithUnit("{retry}"),
 	)
-	doltMetrics.lockWaitMs, _ = m.Float64Histogram("bd.db.lock_wait_ms",
+	doltMetrics.lockWaitMs = telemetry.NewHistogram(m, "bd.db.lock_wait_ms",
 		metric.WithDescription("Time spent waiting to acquire database locks"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.circuitTrips, _ = m.Int64Counter("bd.db.circuit_trips",
+	doltMetrics.circuitTrips = telemetry.NewCounter(m, "bd.db.circuit_trips",
 		metric.WithDescription("Number of times the Dolt circuit breaker tripped open"),
 		metric.WithUnit("{trip}"),
 	)
-	doltMetrics.circuitRejected, _ = m.Int64Counter("bd.db.circuit_rejected",
+	doltMetrics.circuitRejected = telemetry.NewCounter(m, "bd.db.circuit_rejected",
 		metric.WithDescription("Requests rejected by open circuit breaker (fail-fast)"),
 		metric.WithUnit("{request}"),
 	)
-	doltMetrics.serializationErrors, _ = m.Int64Counter("bd.db.serialization_errors",
+	doltMetrics.serializationErrors = telemetry.NewCounter(m, "bd.db.serialization_errors",
 		metric.WithDescription("Serialization failures (MySQL 1213/1205) before retry"),
 		metric.WithUnit("{error}"),
 	)
-	doltMetrics.writeRetries, _ = m.Int64Counter("bd.write_retries_total",
+	doltMetrics.writeRetries = telemetry.NewCounter(m, "bd.write_retries_total",
 		metric.WithDescription("Write-tx retries in withRetryTx (label: type=serialization|connection)"),
 		metric.WithUnit("{retry}"),
 	)
-	doltMetrics.connAcquireMs, _ = m.Float64Histogram("bd.db.conn_acquire_ms",
+	doltMetrics.connAcquireMs = telemetry.NewHistogram(m, "bd.db.conn_acquire_ms",
 		metric.WithDescription("Time to acquire a pooled connection for a Dolt transaction"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.poolWaitCount, _ = m.Int64Counter("bd.db.pool_wait_count",
+	doltMetrics.poolWaitCount = telemetry.NewCounter(m, "bd.db.pool_wait_count",
 		metric.WithDescription("Number of times a connection acquisition had to wait for the pool"),
 		metric.WithUnit("{wait}"),
 	)
-	doltMetrics.poolWaitMs, _ = m.Float64Histogram("bd.db.pool_wait_ms",
+	doltMetrics.poolWaitMs = telemetry.NewHistogram(m, "bd.db.pool_wait_ms",
 		metric.WithDescription("Total time connections spent waiting due to pool exhaustion"),
 		metric.WithUnit("ms"),
 	)
-	doltMetrics.claimVerifyLost, _ = m.Int64Counter("bd.claim_verify_lost_total",
+	doltMetrics.claimVerifyLost = telemetry.NewCounter(m, "bd.claim_verify_lost_total",
 		metric.WithDescription("Claim-family writes that reported success but failed verify-by-re-read (label: op=claim|unclaim)"),
 		metric.WithUnit("{write}"),
 	)
-	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
+	doltMetrics.claimVerifyRecovered = telemetry.NewCounter(m, "bd.claim_verify_recovered_total",
 		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
 		metric.WithUnit("{write}"),
 	)
-	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
+	doltMetrics.ignoredTxFreshPool = telemetry.NewCounter(m, "bd.db.ignored_tx_fresh_pool",
 		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
 		metric.WithUnit("{tx}"),
 	)
@@ -1089,7 +1089,7 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 	// withRetry from here would multiply retries and could replay a write after
 	// an indeterminate commit.
 	if !circuitWriteManaged(ctx) && s.breaker != nil && !s.breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitRejected.Add(ctx, 1)
 		return ErrCircuitOpen
 	}
 
@@ -1111,8 +1111,8 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// land. This is the only 1105 replayed, and withRetryTx is the boundary
 		// that recreates the complete SQL transaction on every attempt.
 		if isDoltAutocommitRollbackError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1, telemetry.WithMergedAttrs())
-			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "serialization")))
+			doltMetrics.serializationErrors.Add(ctx, 1)
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "serialization"))
 			return err
 		}
 		// A commit result marked indeterminate may have landed before its
@@ -1124,19 +1124,19 @@ func (s *DoltStore) withRetryTx(ctx context.Context, fn func(tx *sql.Tx) error) 
 		// Serialization failures (1213/1205) guarantee a server-side rollback,
 		// so the write never landed — safe to replay at any phase.
 		if isSerializationError(err) {
-			doltMetrics.serializationErrors.Add(ctx, 1, telemetry.WithMergedAttrs())
-			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "serialization")))
+			doltMetrics.serializationErrors.Add(ctx, 1)
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "serialization"))
 			return err // retryable
 		}
 		// Connection failures reaching this branch happened before commit;
 		// withWriteTx marks ambiguous commit response loss with the public
 		// ErrCommitIndeterminate sentinel above.
 		if isRetryableError(err) {
-			doltMetrics.writeRetries.Add(ctx, 1, telemetry.WithMergedAttrs(attribute.String("type", "connection")))
+			doltMetrics.writeRetries.Add(ctx, 1, attribute.String("type", "connection"))
 			if s.breaker != nil && isConnectionError(err) {
 				s.breaker.RecordFailure()
 				if s.breaker.State() == circuitOpen {
-					doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
+					doltMetrics.circuitTrips.Add(ctx, 1)
 					return backoff.Permanent(fmt.Errorf("%w (circuit breaker tripped)", err))
 				}
 			}
@@ -1672,7 +1672,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Circuit breaker: fail-fast if the server is known to be down.
 	if breaker != nil && !breaker.Allow() {
-		doltMetrics.circuitRejected.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitRejected.Add(ctx, 1)
 		return nil, ErrCircuitOpen
 	}
 
@@ -3187,7 +3187,7 @@ func (s *DoltStore) recordDoltPublicationFailure(ctx context.Context, err error)
 	}
 	s.breaker.RecordFailure()
 	if s.breaker.State() == circuitOpen {
-		doltMetrics.circuitTrips.Add(ctx, 1, telemetry.WithMergedAttrs())
+		doltMetrics.circuitTrips.Add(ctx, 1)
 		return fmt.Errorf("%w (circuit breaker tripped)", err)
 	}
 	return err

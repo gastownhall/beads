@@ -105,24 +105,24 @@ func (h *haikuClient) SummarizeTier1(ctx context.Context, issue *types.Issue) (s
 
 // aiMetrics holds lazily-initialized OTel instruments for Anthropic API calls.
 var aiMetrics struct {
-	inputTokens  metric.Int64Counter
-	outputTokens metric.Int64Counter
-	duration     metric.Float64Histogram
+	inputTokens  telemetry.Counter
+	outputTokens telemetry.Counter
+	duration     telemetry.Histogram
 }
 
 var aiMetricsOnce sync.Once
 
 func initAIMetrics() {
 	m := telemetry.Meter("github.com/steveyegge/beads/ai")
-	aiMetrics.inputTokens, _ = m.Int64Counter("bd.ai.input_tokens",
+	aiMetrics.inputTokens = telemetry.NewCounter(m, "bd.ai.input_tokens",
 		metric.WithDescription("Anthropic API input tokens consumed"),
 		metric.WithUnit("{token}"),
 	)
-	aiMetrics.outputTokens, _ = m.Int64Counter("bd.ai.output_tokens",
+	aiMetrics.outputTokens = telemetry.NewCounter(m, "bd.ai.output_tokens",
 		metric.WithDescription("Anthropic API output tokens generated"),
 		metric.WithUnit("{token}"),
 	)
-	aiMetrics.duration, _ = m.Float64Histogram("bd.ai.request.duration",
+	aiMetrics.duration = telemetry.NewHistogram(m, "bd.ai.request.duration",
 		metric.WithDescription("Anthropic API request duration in milliseconds"),
 		metric.WithUnit("ms"),
 	)
@@ -163,11 +163,9 @@ func (h *haikuClient) callWithRetry(ctx context.Context, prompt string) (string,
 		if err == nil {
 			// Record token usage and latency.
 			modelAttr := attribute.String("bd.ai.model", h.model)
-			if aiMetrics.inputTokens != nil {
-				aiMetrics.inputTokens.Add(ctx, message.Usage.InputTokens, telemetry.WithMergedAttrs(modelAttr))
-				aiMetrics.outputTokens.Add(ctx, message.Usage.OutputTokens, telemetry.WithMergedAttrs(modelAttr))
-				aiMetrics.duration.Record(ctx, ms, telemetry.WithMergedAttrs(modelAttr))
-			}
+			aiMetrics.inputTokens.Add(ctx, message.Usage.InputTokens, modelAttr)
+			aiMetrics.outputTokens.Add(ctx, message.Usage.OutputTokens, modelAttr)
+			aiMetrics.duration.Record(ctx, ms, modelAttr)
 			span.SetAttributes(
 				attribute.Int64("bd.ai.input_tokens", message.Usage.InputTokens),
 				attribute.Int64("bd.ai.output_tokens", message.Usage.OutputTokens),
