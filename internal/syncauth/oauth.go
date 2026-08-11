@@ -32,10 +32,12 @@ type oauthAuth struct {
 	scopes   []string
 }
 
+const defaultGitHubHost = "github.com"
+
 func newOAuthAuth(cfg Config, kr Keyring) *oauthAuth {
 	host := cfg.Host
 	if host == "" {
-		host = "github.com"
+		host = defaultGitHubHost
 	}
 	host = normalizeHost(host)
 
@@ -202,7 +204,7 @@ func (o *oauthAuth) tokenToToken(tok *oauth2.Token) Token {
 
 func oauth2Endpoint(host string) oauth2.Endpoint {
 	switch host {
-	case "github.com":
+	case defaultGitHubHost:
 		return github.Endpoint
 	case "gitlab.com":
 		return gitlab.Endpoint
@@ -223,7 +225,7 @@ func DefaultScopes(host string) []string {
 }
 
 func defaultOAuthScopes(host string) []string {
-	if strings.EqualFold(host, "github.com") {
+	if strings.EqualFold(host, defaultGitHubHost) {
 		return []string{"repo"}
 	}
 	return []string{"read_repository", "write_repository"}
