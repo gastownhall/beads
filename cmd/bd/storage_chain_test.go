@@ -89,6 +89,17 @@ func TestDoltBackupSizeUnwrapsStorageDecorators(t *testing.T) {
 	}
 }
 
+func TestGCStoreSizeUnwrapsStorageDecorators(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	raw := &stubChainStore{databaseSize: 99}
+	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+
+	if got := storeSizeBytesForStore(t.Context(), wrapped); got != 99 {
+		t.Fatalf("storeSizeBytesForStore = %d, want 99", got)
+	}
+}
+
 func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	t.Setenv("BD_OTEL_STDOUT", "true")

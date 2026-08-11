@@ -198,13 +198,13 @@ Examples:
 				// refs are left alone here (they cache the remote tip for the
 				// migrate gate); flatten/compact prune them before their GC
 				// (bd-agctw). Sizes are reported so a no-op reclaim is visible.
-				sizeBefore := storeSizeBytes()
+				sizeBefore := storeSizeBytes(ctx)
 				remoteRefs, tags := listRemoteRefsAndTags(ctx)
 				if err := gc.DoltGC(ctx); err != nil {
 					WarnError("dolt gc failed: %v", err)
 					results = append(results, phaseResult{name: "Dolt GC", detail: "failed"})
 				} else {
-					sizeAfter := storeSizeBytes()
+					sizeAfter := storeSizeBytes(ctx)
 					detail := "complete"
 					if line := gcSizeLine(sizeBefore, sizeAfter); line != "" {
 						detail = "complete: " + line
