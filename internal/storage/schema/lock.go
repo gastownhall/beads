@@ -329,6 +329,12 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// A migration pass must run to completion once the lock is held: the
 	// caller's context can no longer abandon it mid-flight, which would
 	// leave schema_migrations short of latest under a released lock.
+	//
+	// The detached context covers the whole post-lock unit, not just the
+	// MigrateUp calls: the heal between them consumes a one-shot capability
+	// before it resets, so a context that expires between the two would burn
+	// the capability with no reset performed and leave the logical open
+	// permanently unhealable by any outer retry.
 	migrateCtx := context.WithoutCancel(ctx)
 	applied, err = MigrateUp(migrateCtx, conn)
 	var dirtyErr *DirtyTablesError
@@ -338,7 +344,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// ancestor, probe error, or previously consumed capability returns the
 		// original DirtyTablesError without attempting a destructive reset.
 		if !o.freshBootstrapHeal.capability.consumeIfCurrentIncarnation(
-			ctx, conn, databaseName, o.freshBootstrapHeal.endpoint,
+			migrateCtx, conn, databaseName, o.freshBootstrapHeal.endpoint,
 		) {
 			return applied, err
 		}
@@ -348,7 +354,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// second reset in the caller's outer retry loop.
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
+		if resetErr := drainFreshBootstrapReset(migrateCtx, conn); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(migrateCtx, conn)
