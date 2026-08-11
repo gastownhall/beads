@@ -39,6 +39,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("AddComment", func(t *testing.T) { testAddComment(t, factory) })
 	t.Run("ImportIssueComment", func(t *testing.T) { testImportIssueComment(t, factory) })
 	t.Run("PromoteFromEphemeral", func(t *testing.T) { testPromoteFromEphemeral(t, factory) })
+	t.Run("PromoteClosedWispPreservesSession", func(t *testing.T) { testPromoteClosedWispPreservesSession(t, factory) })
 	t.Run("UpdateIssueID", func(t *testing.T) { testUpdateIssueID(t, factory) })
 	t.Run("DeleteIssuesBySourceRepo", func(t *testing.T) { testDeleteIssuesBySourceRepo(t, factory) })
 	t.Run("CreateIssuesWithFullOptions", func(t *testing.T) { testCreateIssuesWithFullOptions(t, factory) })
@@ -518,6 +519,33 @@ func testPromoteFromEphemeral(t *testing.T, f Factory) {
 	// Second promote fails (no longer a wisp).
 	if err := s.PromoteFromEphemeral(c, "test-w", "a"); err == nil {
 		t.Error("double promote: want error, got nil")
+	}
+}
+
+// testPromoteClosedWispPreservesSession verifies that promoting a *closed*
+// ephemeral wisp preserves its closed_by_session provenance. Before the fix
+// (GH#4662), closed_by_session was absent from the shared issue select/scan
+// and insert column set, so promotion (read wisp -> insert issue) hydrated a
+// zero value and dropped the original closing session.
+func testPromoteClosedWispPreservesSession(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-cw", Title: "Closed wisp", Ephemeral: true}), "a"))
+	must(t, s.CloseIssue(c, "test-cw", "done", "a", "sess-xyz"))
+
+	must(t, s.PromoteFromEphemeral(c, "test-cw", "a"))
+
+	got, err := s.GetIssue(c, "test-cw")
+	must(t, err)
+	if got.Ephemeral {
+		t.Error("promoted issue still Ephemeral")
+	}
+	if got.Status != types.StatusClosed {
+		t.Errorf("promoted issue status = %q, want %q", got.Status, types.StatusClosed)
+	}
+	if got.ClosedBySession != "sess-xyz" {
+		t.Errorf("closed_by_session after promote = %q, want %q (GH#4662)", got.ClosedBySession, "sess-xyz")
 	}
 }
 

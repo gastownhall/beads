@@ -566,6 +566,57 @@ func TestProxiedServerUpdate2(t *testing.T) {
 		}
 	})
 
+	t.Run("physical_wisp_promotes_and_future_updates_stay_durable", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "upw")
+		issue := bdProxiedCreate(t, bd, p.dir, "Runtime wisp to promote", "--ephemeral")
+		db := openProxiedDB(t, p)
+
+		assertPlane := func(label string, wantIssues, wantWisps int) {
+			t.Helper()
+			var issueRows, wispRows int
+			if err := db.QueryRowContext(context.Background(),
+				"SELECT COUNT(*) FROM issues WHERE id = ?", issue.ID).Scan(&issueRows); err != nil {
+				t.Fatalf("%s: count issues: %v", label, err)
+			}
+			if err := db.QueryRowContext(context.Background(),
+				"SELECT COUNT(*) FROM wisps WHERE id = ?", issue.ID).Scan(&wispRows); err != nil {
+				t.Fatalf("%s: count wisps: %v", label, err)
+			}
+			if issueRows != wantIssues || wispRows != wantWisps {
+				t.Errorf("%s: issues=%d wisps=%d, want issues=%d wisps=%d",
+					label, issueRows, wispRows, wantIssues, wantWisps)
+			}
+		}
+
+		assertPlane("after ephemeral create", 0, 1)
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
+			"--persistent", "--no-history", "--metadata", `{"phase":"runtime"}`)
+		assertPlane("after no-history selection", 0, 1)
+
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
+			"--history", "--metadata", `{"phase":"durable"}`)
+		assertPlane("after history selection", 1, 0)
+
+		bdProxiedUpdateOne(t, bd, p.dir, issue.ID,
+			"--claim", "--set-metadata", "circuit=closed", "--actor", "worker")
+		assertPlane("after durable claim", 1, 0)
+
+		var status, assignee, metadata string
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT status, assignee, metadata FROM issues WHERE id = ?", issue.ID).
+			Scan(&status, &assignee, &metadata); err != nil {
+			t.Fatalf("read durable row: %v", err)
+		}
+		if status != string(types.StatusInProgress) || assignee != "worker" {
+			t.Errorf("durable claim: status=%q assignee=%q, want in_progress/worker", status, assignee)
+		}
+		if !strings.Contains(metadata, `"phase":"durable"`) ||
+			!strings.Contains(metadata, `"circuit":"closed"`) {
+			t.Errorf("durable metadata = %s, want phase and circuit keys", metadata)
+		}
+	})
+
 	t.Run("update_ephemeral", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uep")

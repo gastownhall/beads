@@ -97,6 +97,40 @@ func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	}
 }
 
+func TestRunInTransactionRejectsPersistenceMarkerUpdates(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "test-tx-persistence-issue")
+	createWisp(t, ctx, store, "test-tx-persistence-wisp")
+
+	for _, tc := range []struct {
+		name    string
+		id      string
+		updates map[string]interface{}
+	}{
+		{"regular_to_no_history", "test-tx-persistence-issue", map[string]interface{}{"no_history": true}},
+		{"wisp_to_durable", "test-tx-persistence-wisp", map[string]interface{}{"wisp": false, "no_history": false}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := store.RunInTransaction(ctx, "test: reject split persistence move", func(tx storage.Transaction) error {
+				return tx.UpdateIssue(ctx, tc.id, tc.updates, "tester")
+			})
+			if err == nil || !strings.Contains(err.Error(), "persistence field") ||
+				!strings.Contains(err.Error(), "is not supported") {
+				t.Fatalf("RunInTransaction persistence error = %v, want explicit refusal", err)
+			}
+		})
+	}
+
+	assertRowCountForIssue(t, store, "issues", "test-tx-persistence-issue", 1)
+	assertRowCountForIssue(t, store, "wisps", "test-tx-persistence-issue", 0)
+	assertRowCountForIssue(t, store, "issues", "test-tx-persistence-wisp", 0)
+	assertRowCountForIssue(t, store, "wisps", "test-tx-persistence-wisp", 1)
+}
+
 func TestRunInTransactionCloseIssueEmitsEvent(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

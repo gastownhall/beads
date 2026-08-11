@@ -107,6 +107,7 @@ func (s *testSuite) issueInsertRoundTrip() {
 	in := newTestIssue("bd-test-1", "round trip")
 	in.Description = "desc body"
 	in.Assignee = "alice"
+	in.ClosedBySession = "session-domain-round-trip"
 	in.Labels = []string{"ignored-in-this-impl"}
 	mins := 45
 	in.EstimatedMinutes = &mins
@@ -118,6 +119,7 @@ func (s *testSuite) issueInsertRoundTrip() {
 	s.Equal("bd-test-1", out.ID)
 	s.Equal("round trip", out.Title)
 	s.Equal("desc body", out.Description)
+	s.Equal("session-domain-round-trip", out.ClosedBySession)
 	s.Equal("alice", out.Assignee)
 	s.Equal(types.StatusOpen, out.Status)
 	s.Equal(2, out.Priority)

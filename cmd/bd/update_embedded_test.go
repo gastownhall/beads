@@ -218,6 +218,91 @@ func TestEmbeddedUpdateRoutedStoreCommitsTargetHead(t *testing.T) {
 	}
 }
 
+func TestEmbeddedUpdatePersistenceMovesThePhysicalRow(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt update tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, beadsDir, _ := bdInit(t, bd, "--prefix", "upm")
+	issue := bdCreate(t, bd, dir, "Runtime wisp to promote", "--ephemeral")
+
+	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+
+	assertPlane := func(label string, wantIssues, wantWisps int) {
+		t.Helper()
+		db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "upm", "main")
+		if err != nil {
+			t.Fatalf("%s: OpenSQL: %v", label, err)
+		}
+		defer cleanup()
+		var issueRows, wispRows int
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM issues WHERE id = ?", issue.ID).Scan(&issueRows); err != nil {
+			t.Fatalf("%s: count issues: %v", label, err)
+		}
+		if err := db.QueryRowContext(t.Context(),
+			"SELECT COUNT(*) FROM wisps WHERE id = ?", issue.ID).Scan(&wispRows); err != nil {
+			t.Fatalf("%s: count wisps: %v", label, err)
+		}
+		if issueRows != wantIssues || wispRows != wantWisps {
+			t.Errorf("%s: issues=%d wisps=%d, want issues=%d wisps=%d",
+				label, issueRows, wispRows, wantIssues, wantWisps)
+		}
+	}
+
+	assertPlane("after ephemeral create", 0, 1)
+	bdUpdate(t, bd, dir, issue.ID,
+		"--persistent", "--no-history", "--metadata", `{"phase":"runtime"}`)
+	assertPlane("after selecting no-history runtime mode", 0, 1)
+
+	var ephemeral, noHistory int
+	db, cleanup, err := embeddeddolt.OpenSQL(t.Context(), dataDir, "upm", "main")
+	if err != nil {
+		t.Fatalf("open runtime flags: %v", err)
+	}
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT ephemeral, no_history FROM wisps WHERE id = ?", issue.ID).
+		Scan(&ephemeral, &noHistory); err != nil {
+		t.Fatalf("read runtime wisp flags: %v", err)
+	}
+	cleanup()
+	if ephemeral != 0 || noHistory != 1 {
+		t.Fatalf("runtime flags: ephemeral=%d no_history=%d, want 0/1", ephemeral, noHistory)
+	}
+
+	bdUpdate(t, bd, dir, issue.ID,
+		"--history", "--metadata", `{"phase":"durable"}`)
+	assertPlane("after selecting durable history", 1, 0)
+
+	bdUpdate(t, bd, dir, issue.ID,
+		"--claim", "--set-metadata", "circuit=closed", "--actor", "worker")
+	assertPlane("after claim-like durable update", 1, 0)
+
+	var status, assignee, metadata string
+	db, cleanup, err = embeddeddolt.OpenSQL(t.Context(), dataDir, "upm", "main")
+	if err != nil {
+		t.Fatalf("open promoted issue: %v", err)
+	}
+	defer cleanup()
+	if err := db.QueryRowContext(t.Context(),
+		"SELECT status, assignee, metadata FROM issues WHERE id = ?", issue.ID).
+		Scan(&status, &assignee, &metadata); err != nil {
+		t.Fatalf("read promoted issue: %v", err)
+	}
+	if status != string(types.StatusInProgress) || assignee != "worker" {
+		t.Errorf("promoted claim: status=%q assignee=%q, want in_progress/worker", status, assignee)
+	}
+	var metadataFields map[string]any
+	if err := json.Unmarshal([]byte(metadata), &metadataFields); err != nil {
+		t.Fatalf("decode promoted metadata %q: %v", metadata, err)
+	}
+	if metadataFields["phase"] != "durable" || metadataFields["circuit"] != "closed" {
+		t.Errorf("promoted metadata = %s, want durable phase and closed circuit", metadata)
+	}
+}
+
 func TestEmbeddedUpdate(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
