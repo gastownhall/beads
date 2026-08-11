@@ -589,6 +589,80 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 	}
 }
 
+// TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires
+// covers the recovery unit between the two detached migration passes.
+// Detaching only the MigrateUp calls leaves the capability probes and
+// DOLT_RESET on the caller's context, so this PR's own scenario -- a deadline
+// that expires while the pass runs under a held lock -- still breaks the heal.
+//
+// Pass 1 is detached, so it reaches the #4566 dirty guard and returns
+// *DirtyTablesError as usual. The heal that follows must run to completion
+// too. On the caller's context it cannot: either the probes fail on the
+// expired context and the heal is silently skipped, or -- worse -- the probes
+// pass, the one-shot capability is consumed (consume precedes reset by
+// design), and DOLT_RESET then fails on the expired context. That burns the
+// capability with no reset performed, so no outer retry can heal this logical
+// open again: a retryable failure converted into a permanent one, inside the
+// very function whose invariant is that a pass runs to completion once the
+// lock is held.
+//
+// WithLockedPreparation is the deterministic seam for the expiry: it runs
+// after GET_LOCK resolves and before any migration work starts, so canceling
+// there reproduces the scenario exactly -- no timers, no dependence on how
+// loaded the runner is.
+func TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// First pass: detached, so it still reaches the dirty guard and refuses.
+	expectDirtyGuardRefusal(t, mock)
+	// The heal must still revalidate, consume, reset and re-migrate.
+	expectFreshBootstrapIdentityMatch(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	capability := testFreshBootstrapHealCapability()
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			// The lock is held and no migration work has started yet: expire
+			// the caller's context exactly where the reported scenario does.
+			cancel()
+			return capability, nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the heal to run to completion despite caller context expiry after lock acquisition", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1 (the heal must reset and re-migrate)", applied)
+	}
+	if !capability.consumed.Load() {
+		t.Fatal("heal completed without consuming the one-shot capability")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
 // currentVersion issues to confirm a non-zero ignored cursor against the
 // schema it claims (gh 5033). They fire only for a non-zero cursor, in
