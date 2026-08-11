@@ -304,6 +304,71 @@ func TestTrackBdVersion_DowngradeIgnored(t *testing.T) {
 	}
 }
 
+func TestTrackBdVersion_HeadStampChangeDetectedAsUpgrade(t *testing.T) {
+	tests := []struct {
+		name         string
+		lastVersion  string
+		binVersion   string
+		wantDetected bool
+	}{
+		{name: "HEAD stamp to different HEAD stamp", lastVersion: "HEAD-423afdc", binVersion: "HEAD-f925f3f", wantDetected: true},
+		{name: "release to HEAD stamp", lastVersion: "1.1.2", binVersion: "HEAD-f925f3f", wantDetected: true},
+		{name: "HEAD stamp to release", lastVersion: "HEAD-423afdc", binVersion: "1.1.3", wantDetected: true},
+		{name: "same HEAD stamp", lastVersion: "HEAD-f925f3f", binVersion: "HEAD-f925f3f", wantDetected: false},
+		{name: "non-HEAD garbage change stays undetected", lastVersion: "not-a-version", binVersion: "also-not-one", wantDetected: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ensureCleanGlobalState(t)
+
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatalf("Failed to create .beads: %v", err)
+			}
+			t.Setenv("BEADS_DIR", beadsDir)
+			t.Chdir(tmpDir)
+			metadataPath := filepath.Join(beadsDir, "metadata.json")
+			if err := os.WriteFile(metadataPath, []byte(`{"database":"beads.db"}`), 0600); err != nil {
+				t.Fatalf("Failed to create metadata.json: %v", err)
+			}
+			localVersionPath := filepath.Join(beadsDir, localVersionFile)
+			if err := writeLocalVersion(localVersionPath, tt.lastVersion); err != nil {
+				t.Fatalf("Failed to write local version: %v", err)
+			}
+
+			origVersion := Version
+			origUpgradeDetected := versionUpgradeDetected
+			origPreviousVersion := previousVersion
+			defer func() {
+				Version = origVersion
+				versionUpgradeDetected = origUpgradeDetected
+				previousVersion = origPreviousVersion
+			}()
+			Version = tt.binVersion
+			versionUpgradeDetected = false
+			previousVersion = ""
+
+			trackBdVersion()
+
+			if versionUpgradeDetected != tt.wantDetected {
+				t.Errorf("versionUpgradeDetected = %v, want %v", versionUpgradeDetected, tt.wantDetected)
+			}
+			wantPrevious := ""
+			if tt.wantDetected {
+				wantPrevious = tt.lastVersion
+			}
+			if previousVersion != wantPrevious {
+				t.Errorf("previousVersion = %q, want %q", previousVersion, wantPrevious)
+			}
+			if got := readLocalVersion(localVersionPath); got != tt.binVersion {
+				t.Errorf(".local_version = %q, want %q", got, tt.binVersion)
+			}
+		})
+	}
+}
+
 func TestTrackBdVersion_SameVersion(t *testing.T) {
 	// Create temp .beads directory
 	tmpDir := t.TempDir()

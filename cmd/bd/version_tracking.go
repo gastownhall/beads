@@ -59,9 +59,17 @@ func trackBdVersionFile(persist bool) {
 	localVersionPath := filepath.Join(beadsDir, localVersionFile)
 	lastVersion := readLocalVersion(localVersionPath)
 
-	// Check if version changed (only flag actual upgrades, not downgrades)
+	// Check if version changed (only flag actual upgrades, not downgrades).
+	//
+	// Homebrew --HEAD stamps (HEAD-<sha>) carry no ordering, so CompareVersions
+	// reads them as 0.0.0 and a changed stamp would never register. A changed
+	// stamp with a HEAD build on either side is treated as an upgrade: brew
+	// reinstalls only move forward, and the workspace-side reconciler and
+	// schema forward-drift guard still arbitrate direction if that assumption
+	// is ever wrong.
 	if lastVersion != "" && lastVersion != Version {
-		if doctor.CompareVersions(Version, lastVersion) > 0 {
+		if doctor.CompareVersions(Version, lastVersion) > 0 ||
+			isBrewHeadVersion(Version) || isBrewHeadVersion(lastVersion) {
 			// Version upgrade detected!
 			versionUpgradeDetected = true
 			previousVersion = lastVersion
