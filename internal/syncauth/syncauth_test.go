@@ -52,9 +52,12 @@ func TestIsGitRemoteURL(t *testing.T) {
 		want bool
 	}{
 		{"https://github.com/steveyegge/beads.git", true},
+		{"git+https://github.com/steveyegge/beads.git", true},
+		{"git+http://gitlab.example.com/group/project.git", true},
 		{"ssh://git@github.com/steveyegge/beads.git", true},
 		{"git@github.com:steveyegge/beads.git", true},
 		{"https://gitlab.com/group/project.git", true},
+		{"git://github.com/steveyegge/beads.git", true},
 		{"dolthub://org/repo", false},
 		{"s3://bucket/repo", false},
 		{"az://account/repo", false},
