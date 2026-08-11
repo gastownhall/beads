@@ -236,6 +236,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			}
 		}
 	}
+	if opts.UseWispsTable {
+		if _, err := issueops.PromoteWispIfDurableInTx(ctx, r.runner, id, actor); err != nil {
+			return fmt.Errorf("db: Update %s: promote durable wisp: %w", id, err)
+		}
+	}
 	return nil
 }
 

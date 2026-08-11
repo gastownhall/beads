@@ -72,8 +72,19 @@ func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.
 func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	t.dirty.MarkDirty("issues")
 	t.dirty.MarkDirty("events")
-	_, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor)
-	return err
+	if _, err := issueops.UpdateIssueInTx(ctx, t.tx, id, updates, actor); err != nil {
+		return err
+	}
+	promoted, err := issueops.PromoteWispIfDurableInTx(ctx, t.tx, id, actor)
+	if err != nil {
+		return err
+	}
+	if promoted {
+		for _, table := range []string{"labels", "dependencies", "comments"} {
+			t.dirty.MarkDirty(table)
+		}
+	}
+	return nil
 }
 
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {

@@ -547,6 +547,14 @@ func (u *issueUseCaseImpl) ApplyUpdate(ctx context.Context, id string, spec Upda
 			if err := u.UpdateWisp(ctx, id, spec.Fields, actor); err != nil {
 				return nil, err
 			}
+			// A field update can select durable history and atomically promote
+			// the row. Re-probe the physical plane so labels, reparenting, and
+			// the result read follow the moved aggregate rather than the stale
+			// pre-update route.
+			useWisp, err = u.isWispID(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("ApplyUpdate: re-probe %s after update: %w", id, err)
+			}
 		} else {
 			if err := u.UpdateIssue(ctx, id, spec.Fields, actor); err != nil {
 				return nil, err

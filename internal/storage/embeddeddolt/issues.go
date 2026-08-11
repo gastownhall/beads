@@ -69,7 +69,10 @@ func (s *EmbeddedDoltStore) UpdateIssue(ctx context.Context, id string, updates 
 	}
 
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			return err
+		}
+		_, err := issueops.PromoteWispIfDurableInTx(ctx, tx, id, actor)
 		return err
 	})
 }
@@ -107,7 +110,10 @@ func (s *EmbeddedDoltStore) UpdateIssueChecked(ctx context.Context, id string, u
 		if err := issueops.CheckExpectedFieldsInTx(ctx, tx, id, opts.ExpectedAssignee, opts.ExpectedStatus); err != nil {
 			return err
 		}
-		_, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor)
+		if _, err := issueops.UpdateIssueInTx(ctx, tx, id, updates, actor); err != nil {
+			return err
+		}
+		_, err := issueops.PromoteWispIfDurableInTx(ctx, tx, id, actor)
 		return err
 	})
 }

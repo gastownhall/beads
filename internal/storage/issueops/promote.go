@@ -2,14 +2,14 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 //nolint:gosec // G201: table names are hardcoded constants
-func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor string) error {
+func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor string) error {
 	if !IsActiveWispInTx(ctx, tx, id) {
 		return fmt.Errorf("wisp %s not found", id)
 	}
@@ -22,15 +22,20 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("wisp %s not found", id)
 	}
 
+	// Promotion selects durable history, so clear both wisp-plane markers.
+	// NoHistory rows are real wisps even though Ephemeral is already false.
 	issue.Ephemeral = false
+	issue.NoHistory = false
 
-	bc, err := NewBatchContext(ctx, tx, storage.BatchCreateOptions{
-		SkipPrefixValidation: true,
-	})
+	customStatuses, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
-		return fmt.Errorf("new batch context: %w", err)
+		return fmt.Errorf("failed to get custom statuses: %w", err)
 	}
-	if err := PrepareIssueForInsert(issue, bc.CustomStatuses, bc.CustomTypes); err != nil {
+	customTypes, err := ResolveCustomTypesInTx(ctx, tx)
+	if err != nil {
+		return fmt.Errorf("failed to get custom types: %w", err)
+	}
+	if err := PrepareIssueForInsert(issue, types.CustomStatusNames(customStatuses), customTypes); err != nil {
 		return fmt.Errorf("promote wisp to issues: %w", err)
 	}
 	if _, _, err := InsertIssueIfNew(ctx, tx, "issues", issue, storage.BatchCreateOptions{}); err != nil {
@@ -109,4 +114,27 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx *sql.Tx, id string, actor 
 		return fmt.Errorf("recompute is_blocked after promote for %s: %w", id, err)
 	}
 	return nil
+}
+
+// PromoteWispIfDurableInTx repairs the physical plane after an update.  A row
+// remains a runtime wisp while either marker is set; once both are clear it is
+// fully durable and must move to issues before the transaction commits.
+func PromoteWispIfDurableInTx(ctx context.Context, tx DBTX, id, actor string) (bool, error) {
+	if !IsActiveWispInTx(ctx, tx, id) {
+		return false, nil
+	}
+	issue, err := GetIssueInTx(ctx, tx, id)
+	if err != nil {
+		return false, fmt.Errorf("read wisp persistence after update: %w", err)
+	}
+	if issue == nil {
+		return false, fmt.Errorf("read wisp persistence after update: wisp %s not found", id)
+	}
+	if issue.Ephemeral || issue.NoHistory {
+		return false, nil
+	}
+	if err := PromoteFromEphemeralInTx(ctx, tx, id, actor); err != nil {
+		return false, err
+	}
+	return true, nil
 }

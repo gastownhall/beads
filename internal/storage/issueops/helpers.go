@@ -103,12 +103,12 @@ func issueUpsertAssignments(table string, rejectStaleUpdate bool) string {
 
 // InsertIssueIntoTable inserts an issue into the specified table ("issues" or "wisps"),
 // using ON DUPLICATE KEY UPDATE to handle pre-existing records gracefully.
-func InsertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue) error {
+func InsertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *types.Issue) error {
 	return insertIssueIntoTable(ctx, tx, table, issue, false)
 }
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
-func insertIssueIntoTable(ctx context.Context, tx *sql.Tx, table string, issue *types.Issue, rejectStaleUpdate bool) error {
+func insertIssueIntoTable(ctx context.Context, tx DBTX, table string, issue *types.Issue, rejectStaleUpdate bool) error {
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
