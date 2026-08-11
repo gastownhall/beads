@@ -189,6 +189,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
+	out := cmd.OutOrStdout()
 
 	if usesProxiedServer() {
 		// The cap USED to be rejected here: the proxied query path threaded no
@@ -197,7 +198,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		// through the same two functions the store seam uses), so this route
 		// answers *ErrTooManyRows the same way the direct route below does —
 		// same message, same exit code.
-		if err := runListProxiedServer(cmd, rootCtx, in); err != nil {
+		if err := runListProxiedServer(cmd, rootCtx, out, in); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -331,7 +332,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 
 	if in.formatStr != "" {
 		depsByIssueID, _ := activeStore.GetAllDependencyRecords(ctx)
-		if err := outputFormattedList(issues, depsByIssueID, in.formatStr); err != nil {
+		if err := outputFormattedList(out, issues, depsByIssueID, in.formatStr); err != nil {
 			return HandleError("%v", err)
 		}
 		printTruncationHint(truncated, in.effectiveLimit)
