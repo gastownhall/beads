@@ -1,6 +1,7 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -660,6 +661,100 @@ func TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires(t
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockNoticesCallerInterruptDuringPass pins the signal-UX
+// side of detaching the pass: the caller's first Ctrl-C no longer stops the
+// migration, so the delta is disclosed on stderr rather than looking like a
+// hang. The notice is emitted once, and only when the caller's context ends
+// while the pass is still running under the held lock.
+func TestMigrateUpWithLockNoticesCallerInterruptDuringPass(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	var buf bytes.Buffer
+	origStderr := stderr
+	stderr = &buf
+	defer func() { stderr = origStderr }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			cancel()
+			return nil, nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if got, want := buf.String(), "migration in progress"; !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want it to disclose that the pass continues past the interrupt (%q)", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockOmitsInterruptNoticeWithoutCallerInterrupt keeps the
+// notice from becoming unconditional noise on the ordinary path. MigrateUp
+// still reports its own per-migration progress on stderr, so this asserts the
+// absence of the notice rather than silence.
+func TestMigrateUpWithLockOmitsInterruptNoticeWithoutCallerInterrupt(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	var buf bytes.Buffer
+	origStderr := stderr
+	stderr = &buf
+	defer func() { stderr = origStderr }()
+
+	if _, err := MigrateUpWithLock(ctx, conn, "testdb"); err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "migration in progress") {
+		t.Fatalf("stderr = %q, want no interrupt notice on an uninterrupted pass", got)
 	}
 }
 

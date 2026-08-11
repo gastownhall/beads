@@ -220,6 +220,26 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	// before it resets, so a context that expires between the two would burn
 	// the capability with no reset performed and leave the logical open
 	// permanently unhealable by any outer retry.
+	// Detaching the pass also swallows the caller's first interrupt, which
+	// would otherwise look like a hang. Say so once instead. The watcher is
+	// bounded by the pass in both directions: it cannot outlive
+	// MigrateUpWithLock, and MigrateUpWithLock does not return until the
+	// watcher has finished writing, so stderr is never touched concurrently.
+	passDone := make(chan struct{})
+	noticeDone := make(chan struct{})
+	go func() {
+		defer close(noticeDone)
+		select {
+		case <-ctx.Done():
+			fmt.Fprint(stderr, "Schema migration in progress; completing before exit…\n")
+		case <-passDone:
+		}
+	}()
+	defer func() {
+		close(passDone)
+		<-noticeDone
+	}()
+
 	migrateCtx, cancelMigrate := detachedMigrationContext(ctx)
 	defer cancelMigrate()
 	applied, err = MigrateUp(migrateCtx, conn)
