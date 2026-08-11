@@ -36,6 +36,10 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3"},
 		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor"},
 		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor."},
+		{name: "slash separator canonicalizes (gas-oqhi)", in: "gascity/bob"},
+		{name: "session-name dash spelling of a qualified name", in: "gascity--bob"},
+		{name: "rig-qualified role folds both separator kinds", in: "gascity/gastown.refinery"},
+		{name: "run of mixed separators including slash", in: "gascity/-_bob"},
 	}
 	for _, tc := range canonicalCases {
 		t.Run("CanonicalActor/"+tc.name, func(t *testing.T) {
@@ -57,6 +61,9 @@ func TestIdentityCanonicalizationParityWithValidation(t *testing.T) {
 		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3"},
 		{name: "both empty match", assignee: "", actor: ""},
 		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor"},
+		{name: "qualified slash vs session-name dash match (gas-oqhi)", assignee: "gascity/bob", actor: "gascity--bob"},
+		{name: "different agents in one rig still do not match", assignee: "gascity/bob", actor: "gascity/alice"},
+		{name: "same agent name in a different rig still does not match", assignee: "gascity/bob", actor: "python419--bob"},
 	}
 	for _, tc := range matchCases {
 		t.Run("ActorMatches/"+tc.name, func(t *testing.T) {

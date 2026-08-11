@@ -74,12 +74,14 @@ func NotPinned(force bool) IssueValidator {
 // CanonicalActor normalizes an identity string so two spellings of the same
 // Gas Town identity compare equal. The same identity arrives at bd in more
 // than one spelling depending on which layer produced the string it was
-// handed: a dotted alias like "gastown.mayor" gets its dot replaced wherever
-// a dot is unsafe for that context — "__" in a session name, "_" in a Dolt
+// handed: a qualified name like "gascity/bob" or a dotted alias like
+// "gastown.mayor" gets its separator replaced wherever that character is
+// unsafe for the context — "--" or "__" in a session name, "_" in a Dolt
 // table/database name, "-" elsewhere — and bd only ever sees the resulting
-// string, never the substitution itself (ga-wzl83). None of ".", "_", "-"
-// carries meaning in an identity string: each is always a positional
-// separator between a rig and a role/agent name, never part of either name.
+// string, never the substitution itself (ga-wzl83, gas-oqhi). None of "/",
+// ".", "_", "-" carries meaning in an identity string: each is always a
+// positional separator between a rig and a role/agent name, never part of
+// either name.
 // Collapsing any run of them to one canonical separator lets two spellings
 // of the same identity compare equal without weakening comparisons between
 // genuinely different identities, whose non-separator characters still
@@ -97,7 +99,7 @@ func CanonicalActor(s string) string {
 	inSeparator := false
 	for _, r := range s {
 		switch r {
-		case '.', '_', '-':
+		case '/', '.', '_', '-':
 			if !inSeparator {
 				b.WriteByte('_')
 				inSeparator = true

@@ -159,6 +159,11 @@ func TestCanonicalActor(t *testing.T) {
 		{name: "mixed separators each collapse to one canonical separator", in: "gastown.dog-3", want: "gastown_dog_3"},
 		{name: "leading separator is preserved as a separator, not dropped", in: ".mayor", want: "_mayor"},
 		{name: "trailing separator is preserved as a separator, not dropped", in: "mayor.", want: "mayor_"},
+		{name: "slash separator canonicalizes (gas-oqhi)", in: "gascity/bob", want: "gascity_bob"},
+		{name: "session-name dash spelling of a qualified name matches it", in: "gascity--bob", want: "gascity_bob"},
+		{name: "session-name underscore spelling of a qualified name matches it", in: "gascity__bob", want: "gascity_bob"},
+		{name: "rig-qualified role folds both separator kinds", in: "gascity/gastown.refinery", want: "gascity_gastown_refinery"},
+		{name: "run of mixed separators including slash collapses to one", in: "gascity/-_bob", want: "gascity_bob"},
 	}
 
 	for _, tt := range tests {
@@ -182,6 +187,12 @@ func TestActorMatches(t *testing.T) {
 		{name: "genuinely different identities do not match", assignee: "gastown.mayor", actor: "gastown.dog-3", want: false},
 		{name: "both empty match", assignee: "", actor: "", want: true},
 		{name: "empty assignee never matches a non-empty actor", assignee: "", actor: "mayor", want: false},
+		{name: "qualified slash vs session-name dash match (gas-oqhi)", assignee: "gascity/bob", actor: "gascity--bob", want: true},
+		{name: "qualified slash vs session-name underscore match", assignee: "gascity/bob", actor: "gascity__bob", want: true},
+		{name: "rig-qualified role with both separator kinds matches", assignee: "gascity/gastown.refinery", actor: "gascity--gastown.refinery", want: true},
+		{name: "different agents in one rig still do not match", assignee: "gascity/bob", actor: "gascity/alice", want: false},
+		{name: "same agent name in a different rig still does not match", assignee: "gascity/bob", actor: "python419--bob", want: false},
+		{name: "a separator-only actor never matches a real identity", assignee: "gascity/bob", actor: "/", want: false},
 	}
 
 	for _, tt := range tests {
