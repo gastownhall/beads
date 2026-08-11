@@ -71,6 +71,22 @@ enabled one subcommand at a time, each human-vetted (GH#3794). Do not lift the
 embedded-mode gate in `cmd/bd/doctor.go` wholesale, and keep database-layer
 checks and fixes server-gated until the driver interface covers them.
 
+## GitHub/GitLab Sync Authentication
+
+`bd dolt push` and `bd dolt pull` now authenticate with GitHub/GitLab remotes via
+the `gh`/`glab` CLIs or an OAuth device flow. Do not store PATs in beads
+config; `github.token` and `gitlab.token` are treated as deprecated.
+
+Migration steps for existing PAT-based sync:
+1. Run `bd github-sync status` to see the detected provider.
+2. Log in with `bd github-sync login --provider gh --host github.com` or
+   `bd github-sync login --provider oauth --host github.com`.
+3. Remove old PAT config: `bd github-sync migrate --remove`.
+4. Use `bd dolt push --auth auto` (or `gh`/`glab`/`oauth`) for explicit control.
+
+OAuth setup needs `github.client_id`/`github.client_secret` (or GitLab
+equivalents) in config or `BD_GITHUB_CLIENT_ID`/`BD_GITLAB_CLIENT_ID` env vars.
+
 ## Agent Warning: Interactive Commands
 
 **DO NOT use `bd edit`** - it opens an interactive editor ($EDITOR) which AI agents cannot use.
