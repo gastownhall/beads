@@ -238,7 +238,7 @@ func renderProxiedListText(ctx context.Context, issues []*types.Issue, in listIn
 			printTruncationHint(truncated, in.effectiveLimit)
 			return nil
 		}
-		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated)
+		displayPrettyListWithDepsMode(issues, false, depsByIssueID, in.depsMode, truncated, in.ReadyFlag)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
