@@ -214,18 +214,8 @@ func runGitHubSyncLogout(cmd *cobra.Command, args []string) error {
 }
 
 func runGitHubSyncMigrate(cmd *cobra.Command, args []string) error {
-	ctx := cmd.Context()
-	if ctx == nil {
-		ctx = context.Background()
-	}
-
-	patKeys := []string{"github.token", "gitlab.token"}
-	found := []string{}
-	for _, key := range patKeys {
-		if v := config.GetString(key); v != "" {
-			found = append(found, key)
-		}
-	}
+	patKeys := patConfigKeys()
+	found := findPATKeys(patKeys)
 
 	if len(found) == 0 {
 		fmt.Println("No PATs found in bd config.")
@@ -238,29 +228,56 @@ func runGitHubSyncMigrate(cmd *cobra.Command, args []string) error {
 	}
 
 	if githubSyncAuthRemove {
-		if githubSyncAuthDryRun {
-			fmt.Println("Would remove PAT entries from config.")
-		} else {
-			beadsDir := beads.FindBeadsDir()
-			for _, key := range found {
-				if beadsDir != "" {
-					if err := config.SaveConfigValue(key, "", beadsDir); err != nil {
-						return HandleError("save config: %v", err)
-					}
-				} else {
-					config.Set(key, "")
-				}
-			}
-			fmt.Println("PAT entries cleared from config.")
-		}
-	} else {
-		fmt.Println("Re-run with --remove to clear them, then authenticate with one of:")
-		fmt.Println("  bd github-sync login --provider gh --host github.com")
-		fmt.Println("  bd github-sync login --provider glab --host gitlab.com")
-		fmt.Println("  bd github-sync login --provider oauth --host <host>")
+		return removePATKeys(found)
 	}
 
+	printMigrationHelp()
 	return nil
+}
+
+func patConfigKeys() []string {
+	return []string{"github.token", "gitlab.token"}
+}
+
+func findPATKeys(keys []string) []string {
+	found := []string{}
+	for _, key := range keys {
+		if config.GetString(key) != "" {
+			found = append(found, key)
+		}
+	}
+	return found
+}
+
+func removePATKeys(keys []string) error {
+	if githubSyncAuthDryRun {
+		fmt.Println("Would remove PAT entries from config.")
+		return nil
+	}
+
+	beadsDir := beads.FindBeadsDir()
+	for _, key := range keys {
+		if err := clearConfigValue(key, beadsDir); err != nil {
+			return HandleError("save config: %v", err)
+		}
+	}
+	fmt.Println("PAT entries cleared from config.")
+	return nil
+}
+
+func clearConfigValue(key, beadsDir string) error {
+	if beadsDir != "" {
+		return config.SaveConfigValue(key, "", beadsDir)
+	}
+	config.Set(key, "")
+	return nil
+}
+
+func printMigrationHelp() {
+	fmt.Println("Re-run with --remove to clear them, then authenticate with one of:")
+	fmt.Println("  bd github-sync login --provider gh --host github.com")
+	fmt.Println("  bd github-sync login --provider glab --host gitlab.com")
+	fmt.Println("  bd github-sync login --provider oauth --host <host>")
 }
 
 func runCLIAuthLogin(name, host string) error {

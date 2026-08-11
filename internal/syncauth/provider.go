@@ -47,40 +47,51 @@ func ResolveAuto(ctx context.Context, host string, cfg Config, kr Keyring) (Auth
 	}
 
 	hp := hostProvider(host)
+	hostCfg := Config{Host: host}
+
+	var candidates []func(context.Context) (Auth, error)
+
 	if hp == ProviderGH {
-		gh := newGHAuth(Config{Host: host})
-		ok, err := gh.Detect(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return gh, nil
-		}
+		candidates = append(candidates, func(ctx context.Context) (Auth, error) {
+			return tryDetect(ctx, newGHAuth(hostCfg))
+		})
 	}
 
 	if hp == ProviderGLab || hp == ProviderGH {
-		gl := newGLabAuth(Config{Host: host})
-		ok, err := gl.Detect(ctx)
-		if err != nil {
-			return nil, err
-		}
-		if ok {
-			return gl, nil
-		}
+		candidates = append(candidates, func(ctx context.Context) (Auth, error) {
+			return tryDetect(ctx, newGLabAuth(hostCfg))
+		})
 	}
 
 	if cfg.ClientID != "" {
-		oa := newOAuthAuth(Config{Host: host, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, Scopes: cfg.Scopes, Exe: cfg.Exe}, kr)
-		ok, err := oa.Detect(ctx)
+		oauthCfg := Config{Host: host, ClientID: cfg.ClientID, ClientSecret: cfg.ClientSecret, Scopes: cfg.Scopes, Exe: cfg.Exe}
+		candidates = append(candidates, func(ctx context.Context) (Auth, error) {
+			return tryDetect(ctx, newOAuthAuth(oauthCfg, kr))
+		})
+	}
+
+	for _, candidate := range candidates {
+		a, err := candidate(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if ok {
-			return oa, nil
+		if a != nil {
+			return a, nil
 		}
 	}
 
 	return nil, fmt.Errorf("%w: no gh/glab login and no OAuth client_id configured for %s", ErrNoAuth, host)
+}
+
+func tryDetect(ctx context.Context, a Auth) (Auth, error) {
+	ok, err := a.Detect(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return a, nil
+	}
+	return nil, nil
 }
 
 // GitConfigParameters builds a GIT_CONFIG_PARAMETERS value that configures git
