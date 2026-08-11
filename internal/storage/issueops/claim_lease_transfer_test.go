@@ -181,3 +181,53 @@ func TestPlainAssigneeUpdateWithoutClaimStillClearsLease(t *testing.T) {
 		t.Fatalf("unmet SQL expectations: %v", err)
 	}
 }
+
+// expectWispPreImage mocks the pre-update read for a WISP id: the routing
+// probe answers yes, then GetIssueInTx's issues-first lookup misses and its
+// wisps fallback supplies the row (get_issue.go:18-35).
+func expectWispPreImage(mock sqlmock.Sqlmock, id, assignee string, status types.Status) {
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT 1 FROM wisps WHERE id = ? LIMIT 1")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"1"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM issues " + sqlbuild.LeaseJoin("issues") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnError(sql.ErrNoRows)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT " + IssueSelectColumns + " FROM wisps " + sqlbuild.LeaseJoin("wisps") + " WHERE id = ?")).
+		WithArgs(id).
+		WillReturnRows(claimIssueRow(id, assignee, status))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT label FROM wisp_labels WHERE issue_id = ? ORDER BY label")).
+		WithArgs(id).
+		WillReturnRows(sqlmock.NewRows([]string{"label"}))
+}
+
+// TestClaimWithAssigneeOverrideNeverLeasesAWisp pins the wisp half of the
+// re-arm branch. ClaimIssueInTx arms a lease only `if !isWisp`
+// (lease.go:349), and UpsertLeaseInTx's contract says wisps never get a row,
+// so the claim-transfer re-arm must carry the same guard: a wisp takes the
+// DELETE path like every other wisp update, never the INSERT. Without the
+// `&& !isWisp` on the re-arm, `bd update <wisp-id> --claim --assignee=bob`
+// issues `INSERT INTO leases` here and this ordered expectation fails.
+func TestClaimWithAssigneeOverrideNeverLeasesAWisp(t *testing.T) {
+	_, mock, tx := beginMockTx(t)
+
+	const wispID = "bd-w1"
+	expectWispPreImage(mock, wispID, transferClaimant, types.StatusInProgress)
+	mock.ExpectExec(`(?s)UPDATE wisps SET updated_at`).WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectExec(regexp.QuoteMeta("DELETE FROM leases WHERE issue_id = ?")).
+		WithArgs(wispID).
+		WillReturnResult(sqlmock.NewResult(0, 1))
+	mock.ExpectQuery(`(?s)SELECT id FROM wisp_events`).WillReturnRows(sqlmock.NewRows([]string{"id"}))
+	mock.ExpectExec(`(?s)INSERT INTO wisp_events`).WillReturnResult(sqlmock.NewResult(0, 1))
+
+	result, err := UpdateClaimedIssueInTx(context.Background(), tx, wispID,
+		map[string]interface{}{"assignee": transferFinalHolder}, transferClaimant)
+	if err != nil {
+		t.Fatalf("UpdateClaimedIssueInTx: %v", err)
+	}
+	if !result.IsWisp {
+		t.Error("update did not route to the wisp table")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}

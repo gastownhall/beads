@@ -550,7 +550,13 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 		if isClaim {
 			holder, stillClaimed = finalAssigneeIfStillClaimed(oldIssue, updates)
 		}
-		if stillClaimed {
+		// Wisps are never leased (lease.go's UpsertLeaseInTx invariant), and
+		// ClaimIssueInTx guards its own arm with the same !isWisp condition —
+		// so the re-arm here must carry it too, or `bd update <wisp-id>
+		// --claim --assignee=X` mints the one leases row a wisp may never
+		// have. Wisps keep falling through to the delete below, which is the
+		// no-op it has always been for them.
+		if stillClaimed && !isWisp {
 			if err := UpsertLeaseInTx(ctx, tx, id, holder, time.Now().UTC(), leaseTTL(ctx)); err != nil {
 				return nil, err
 			}
