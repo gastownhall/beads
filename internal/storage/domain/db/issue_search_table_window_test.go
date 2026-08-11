@@ -58,6 +58,10 @@ func (s *testSuite) perTableGoSideSortKeepsTheRightSubset() {
 		types.IssueFilter{IDPrefix: prefix + "-", SortBy: "id", Limit: limit})
 	s.Require().NoError(err)
 
+	// NOTE: a weak witness by itself — Dolt's engine order for a PK-clustered
+	// id-prefix scan tends to be byte-ascending already, so this case likely
+	// passed pre-fix too. It pins the contract against future engine-order
+	// changes; the DESC cases below are the red-before-green fences.
 	s.Equal(ids[:limit], idsFrom(page),
 		"a limited per-table page under a Go-side sort must be the globally first rows, not an engine-ordered subset")
 	s.True(page.HasMore)

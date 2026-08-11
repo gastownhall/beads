@@ -115,10 +115,7 @@ var idProjection = searchProjection[string]{
 		if !sqlbuild.IsGoSideSort(sortBy) {
 			return false
 		}
-		if sortDesc {
-			return a > b
-		}
-		return a < b
+		return sqlbuild.LessID(a, b, sortDesc)
 	},
 }
 
@@ -300,10 +297,7 @@ func sortMergedResults[T any](results []T, less func(a, b T, sortBy string, sort
 func goSideSortAndTrim[T any](results []T, id func(T) string, sortDesc bool, bound int) []T {
 	if len(results) > 1 {
 		sort.SliceStable(results, func(i, j int) bool {
-			if sortDesc {
-				return id(results[i]) > id(results[j])
-			}
-			return id(results[i]) < id(results[j])
+			return sqlbuild.LessID(id(results[i]), id(results[j]), sortDesc)
 		})
 	}
 	if bound > 0 && len(results) > bound {

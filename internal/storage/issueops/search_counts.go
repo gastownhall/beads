@@ -112,12 +112,33 @@ func runFilterSearchQueryInTx(ctx context.Context, tx *sql.Tx, query string, fil
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + joinAnd(whereClauses)
 	}
+	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS —
+	// the same rule searchTableInTxT applies on the plain seam. sqlbuild.OrderBy
+	// renders no ORDER BY for a Go-side sort key ("id"), and a LIMIT with no
+	// ORDER BY returns n rows, not the first n; this is the seam
+	// bd query '<expr>' --sort id reaches on the store-shaped backends
+	// (storequerier → SearchIssuesWithCounts), where BuildQueryPlan always
+	// pushes a bound. So under a Go-side sort the query scans the complete
+	// matching set and the same eff bound is applied below, after the order
+	// exists — leaving every downstream count (the merge, the terminal
+	// finishSearchIssuesWithCounts trim-then-cap) exactly what the SQL LIMIT
+	// used to hand it.
+	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
+	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
 	limitSQL := ""
-	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+	if eff > 0 && !goSideSort {
 		limitSQL = fmt.Sprintf("LIMIT %d", eff)
 	}
 	orderBy := sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, "i")
-	return runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
+	out, err := runSearchQueryInTx(ctx, tx, tables, whereSQL, orderBy, limitSQL, args, includeWispReverseDeps, hydrationFor(filter))
+	if err != nil {
+		return nil, err
+	}
+	if goSideSort {
+		// scanCountsRowsInTx drops nil-Issue rows, so the accessor is safe.
+		out = goSideSortAndTrim(out, func(iwc *types.IssueWithCounts) string { return iwc.Issue.ID }, filter.SortDesc, eff)
+	}
+	return out, nil
 }
 
 //nolint:gosec // G201: SQL fragments are caller-built from hardcoded shapes

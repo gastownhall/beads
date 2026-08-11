@@ -597,10 +597,7 @@ func (p *idSrcPage) sortGoSide(sortBy string, sortDesc bool) {
 		return
 	}
 	sort.SliceStable(p.ordered, func(i, j int) bool {
-		if sortDesc {
-			return p.ordered[i].id > p.ordered[j].id
-		}
-		return p.ordered[i].id < p.ordered[j].id
+		return sqlbuild.LessID(p.ordered[i].id, p.ordered[j].id, sortDesc)
 	})
 	p.issueIDs = p.issueIDs[:0]
 	p.wispIDs = p.wispIDs[:0]
@@ -657,10 +654,7 @@ func sortRowsGoSide[T any](rows []T, id func(T) string, sortBy string, sortDesc 
 		return
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		if sortDesc {
-			return id(rows[i]) > id(rows[j])
-		}
-		return id(rows[i]) < id(rows[j])
+		return sqlbuild.LessID(id(rows[i]), id(rows[j]), sortDesc)
 	})
 }
 
