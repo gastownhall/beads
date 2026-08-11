@@ -46,6 +46,32 @@ func TestHostFromRemoteURL(t *testing.T) {
 	}
 }
 
+func TestIsGitRemoteURL(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"https://github.com/steveyegge/beads.git", true},
+		{"ssh://git@github.com/steveyegge/beads.git", true},
+		{"git@github.com:steveyegge/beads.git", true},
+		{"https://gitlab.com/group/project.git", true},
+		{"dolthub://org/repo", false},
+		{"s3://bucket/repo", false},
+		{"az://account/repo", false},
+		{"gs://bucket/repo", false},
+		{"mem://repo", false},
+		{"", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := IsGitRemoteURL(tc.in); got != tc.want {
+				t.Fatalf("IsGitRemoteURL(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestTokenStringRedacts(t *testing.T) {
 	tok := Token{
 		AccessToken:  "super-secret",
