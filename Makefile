@@ -313,16 +313,21 @@ endif
 # zero bytes of output — indistinguishable from an empty result set to callers.
 # The old rm-first shape added an ENOENT window on top. Same treatment for the
 # beads symlink.
+#
+# EXCEPTION — native Windows keeps the rm-first + cp shape: under Git for
+# Windows' bash the staged tmp+rename leaves no bd.exe at the destination even
+# though cp && mv exit 0 (caught by pr.yml's spaced-USERPROFILE install proof;
+# root cause untraced). Restore Windows atomicity only with that proof green.
 install install-force: build
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/.bd.exe.install.tmp.$$$$ && mv -f $(INSTALL_DIR)/.bd.exe.install.tmp.$$$$ $(INSTALL_DIR)/bd.exe
-	@rm -f $(INSTALL_DIR)/bd
+	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/bd.exe"
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/.bd.install.tmp.$$$$ && mv -f $(INSTALL_DIR)/.bd.install.tmp.$$$$ $(INSTALL_DIR)/bd
+	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
-	@ln -sfn bd $(INSTALL_DIR)/.beads.install.tmp.$$$$ && mv -f $(INSTALL_DIR)/.beads.install.tmp.$$$$ $(INSTALL_DIR)/beads
+	@ln -sfn bd "$(INSTALL_DIR)/.beads.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.beads.install.tmp.$$$$" "$(INSTALL_DIR)/beads"
 	@echo "Created 'beads' alias -> bd"
 endif
 	@git config core.hooksPath .githooks 2>/dev/null && echo "Configured git hooks (.githooks/)" || true
