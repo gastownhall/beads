@@ -143,12 +143,16 @@ func OrphanedChildCounters(path string, verbose bool) error {
 		return err
 	}
 
-	db, err := openDoltDB(beadsDir)
+	db, cfg, err := openDoltDB(beadsDir)
 	if err != nil {
 		fmt.Printf("  Orphaned child counters fix skipped (%v)\n", err)
 		return nil
 	}
 	defer db.Close()
+
+	if skip, err := guardFixTarget("Orphaned child counters fix", db, beadsDir, cfg); skip {
+		return err
+	}
 
 	ctx := context.Background()
 

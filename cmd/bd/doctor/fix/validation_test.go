@@ -187,7 +187,12 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	// set) so OrphanedChildCounters' own openDoltDB(beadsDir) → configfile.Load
 	// call — a separate connection from the one below — resolves the same
 	// server/database this test seeds.
-	seedCfg := &configfile.Config{Database: "dolt", DoltDatabase: dbName}
+	// project_id matched between metadata.json and the database so
+	// verifyFixTargetIdentity (mybd-2qegi) doesn't reject this fix call as an
+	// unverifiable target — OrphanedChildCounters is a destructive fix entry
+	// point and so goes through guardFixTarget like its siblings.
+	projectID := configfile.GenerateProjectID()
+	seedCfg := &configfile.Config{Database: "dolt", DoltDatabase: dbName, ProjectID: projectID}
 	if err := seedCfg.Save(beadsDir); err != nil {
 		t.Fatalf("save initial config: %v", err)
 	}
@@ -208,6 +213,9 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 
 	if err := store.SetConfig(ctx, "issue_prefix", "tst"); err != nil {
 		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+	if err := store.SetMetadata(ctx, "_project_id", projectID); err != nil {
+		t.Fatalf("SetMetadata(_project_id): %v", err)
 	}
 
 	// Live parent + live wisp: their child_counters/wisp_child_counters rows
