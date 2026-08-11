@@ -742,13 +742,20 @@ A backup tag is created before anything is mutated; the command reports it.`,
 		if st == nil {
 			return HandleError("no store available")
 		}
+		// Optional capability, reached the way cmd/bd reaches StoreLocator,
+		// Flattener and the rest: it is not on the engine interface, so it does not
+		// promote through a decorator and needs the unwrap.
+		rebaser, ok := storage.UnwrapStore(st).(storage.ChildCollisionRebaser)
+		if !ok {
+			return HandleError("this storage backend cannot rebase child-ID collisions")
+		}
 		remote, _ := cmd.Flags().GetString("remote")
 		if remote == "" {
 			remote = "origin"
 		}
 
 		fmt.Printf("Rebasing against remote %q (%s)...\n", remote, directionLabel(localDom))
-		report, err := st.RebaseRemote(ctx, remote, localDom)
+		report, err := rebaser.RebaseRemote(ctx, remote, localDom)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			if isRemoteNotFoundErr(err) {

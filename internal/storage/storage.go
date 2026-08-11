@@ -710,6 +710,26 @@ type RemoteRefPruner interface {
 	ListTags(ctx context.Context) ([]string, error)
 }
 
+// ChildCollisionRebaser reconciles cross-clone hierarchical child-ID collisions
+// that a plain pull cannot auto-merge (#4796): two clones that each created a
+// child under the same parent while offline both minted the same "parent.N" id,
+// so the pull aborts on an add/add PK collision the settle machinery will not
+// resolve. RebaseRemote fetches remote, renumbers the losing side's colliding
+// children to free ids, then completes the merge. localDominates=false
+// (remote-dominates, the default) renumbers the local children; true renumbers
+// the remote's. The report names every renumber and the backup tag taken before
+// anything was mutated.
+//
+// Callers should type-assert to this interface. It is deliberately NOT on
+// RemoteStore: that interface is aliased as the public beads.RemoteStore, and
+// adding a method there breaks every out-of-tree implementer. Reconciling
+// collisions is a capability a store may or may not have — like Flattener or
+// BackupStore — so it is an optional interface reached through
+// storage.UnwrapStore, and a store that lacks it simply cannot offer the command.
+type ChildCollisionRebaser interface {
+	RebaseRemote(ctx context.Context, remote string, localDominates bool) (*RebaseReport, error)
+}
+
 type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
 }
