@@ -211,16 +211,7 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		}
 	}
 
-	// A migration pass must run to completion once the lock is held: the
-	// caller's context can no longer abandon it mid-flight, which would
-	// leave schema_migrations short of latest under a released lock.
-	//
-	// The detached context covers the whole post-lock unit, not just the
-	// MigrateUp calls: the heal between them consumes a one-shot capability
-	// before it resets, so a context that expires between the two would burn
-	// the capability with no reset performed and leave the logical open
-	// permanently unhealable by any outer retry.
-	// Detaching the pass also swallows the caller's first interrupt, which
+	// Detaching the pass below swallows the caller's first interrupt, which
 	// would otherwise look like a hang. Say so once instead. The watcher is
 	// bounded by the pass in both directions: it cannot outlive
 	// MigrateUpWithLock, and MigrateUpWithLock does not return until the
@@ -240,6 +231,15 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		<-noticeDone
 	}()
 
+	// A migration pass must run to completion once the lock is held: the
+	// caller's context can no longer abandon it mid-flight, which would
+	// leave schema_migrations short of latest under a released lock.
+	//
+	// migrateCtx covers the whole post-lock unit, not just the MigrateUp
+	// calls: the heal between them consumes a one-shot capability before it
+	// resets, so a context expiring between the two would burn the capability
+	// with no reset performed and leave the logical open permanently
+	// unhealable by any outer retry.
 	migrateCtx, cancelMigrate := detachedMigrationContext(ctx)
 	defer cancelMigrate()
 	applied, err = MigrateUp(migrateCtx, conn)
