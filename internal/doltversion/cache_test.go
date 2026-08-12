@@ -12,11 +12,15 @@ import (
 // writeCountingVersionStub writes a stub that prints a version line AND
 // appends one byte to countFile per invocation, so tests can prove whether
 // the binary was actually forked or the result came from the cache.
+//
+// The batch variant leads with the redirection: cmd.exe includes any space
+// before a mid-line `>>` in the text being written (`set /p =x >> f`
+// appends "x ", two bytes), which silently doubled forkCount on Windows.
 func writeCountingVersionStub(t *testing.T, dir, name, line, countFile string) string {
 	t.Helper()
 	return writeExecStub(t, dir, name,
 		"#!/bin/sh\nprintf x >> '"+countFile+"'\necho '"+line+"'\n",
-		"@<nul set /p =x >> \""+countFile+"\"\r\n@echo "+line+"\r\n")
+		"@>>\""+countFile+"\" <nul set /p =x\r\n@echo "+line+"\r\n")
 }
 
 func forkCount(t *testing.T, countFile string) int {
