@@ -1282,5 +1282,5 @@ func autoExportDataLossTestEnv(home string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "HOME="+home, "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
+	return append(env, "HOME="+home, "BEADS_TEST_MODE=1", "BEADS_DOLT_AUTO_START=0", "BEADS_NO_DAEMON=1", "BD_DISABLE_METRICS=1", "BD_DISABLE_EVENT_FLUSH=1")
 }

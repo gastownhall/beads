@@ -41,6 +41,7 @@ func createDepsTestEnv(dir string) []string {
 	}
 	return append(env,
 		"BEADS_DIR="+filepath.Join(dir, ".beads"),
+		"BEADS_TEST_MODE=1",
 		"BD_NON_INTERACTIVE=1",
 	)
 }

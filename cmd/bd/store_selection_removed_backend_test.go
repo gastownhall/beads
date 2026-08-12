@@ -341,7 +341,7 @@ func removedBackendTestEnv(beadsDir string) []string {
 		}
 		env = append(env, entry)
 	}
-	return append(env, "BEADS_DIR="+beadsDir)
+	return append(env, "BEADS_DIR="+beadsDir, "BEADS_TEST_MODE=1")
 }
 
 func TestStoreFactoriesRemovedBackendsFailLoud(t *testing.T) {

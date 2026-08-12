@@ -30,7 +30,7 @@ func hermeticInitEnv(homeDir string, extra ...string) []string {
 		}
 		env = append(env, e)
 	}
-	env = append(env, "HOME="+homeDir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	env = append(env, "HOME="+homeDir, "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null", "BEADS_TEST_MODE=1")
 	return append(env, extra...)
 }
 

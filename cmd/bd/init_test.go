@@ -2363,7 +2363,7 @@ func initBackendTestEnv(beadsDir string) []string {
 		}
 		env = append(env, e)
 	}
-	return append(env, "BEADS_DIR="+beadsDir)
+	return append(env, "BEADS_DIR="+beadsDir, "BEADS_TEST_MODE=1")
 }
 
 func TestInitBackendFlag(t *testing.T) {

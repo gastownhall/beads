@@ -44,6 +44,7 @@ func bdProxiedEnv(dir string) []string {
 	}
 	return append(env,
 		"HOME="+dir,
+		"BEADS_TEST_MODE=1",
 		"BEADS_DOLT_PROXIED_SERVER=1",
 		"BEADS_NO_DAEMON=1",
 		"BD_DISABLE_METRICS=1",

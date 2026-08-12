@@ -256,6 +256,7 @@ func bootstrapBackendGuardEnv(home, beadsDir string) []string {
 	return append(env,
 		"HOME="+home,
 		"BEADS_DIR="+beadsDir,
+		"BEADS_TEST_MODE=1",
 		"BEADS_DOLT_AUTO_START=0",
 		"BEADS_NO_DAEMON=1",
 		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
