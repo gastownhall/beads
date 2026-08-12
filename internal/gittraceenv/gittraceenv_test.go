@@ -180,6 +180,16 @@ func TestScrubEnvWindowsCaseInsensitiveNames(t *testing.T) {
 	}
 }
 
+func TestScrubEnvDoesNotEqualFoldUnicodeKeys(t *testing.T) {
+	// EqualFold considers the Unicode long s equivalent to ASCII s. os/exec's
+	// Windows key identity uses strings.ToLower and keeps them distinct.
+	nearCollision := "GIT_TRACE_ſETUP=1"
+	got := ScrubEnv([]string{nearCollision})
+	if !slices.Equal(got, []string{nearCollision}) {
+		t.Fatalf("ScrubEnv() = %q, want Unicode near-collision preserved", got)
+	}
+}
+
 // Git on Windows treats a leading dir separator as absolute (is_dir_sep), so
 // a Git-Bash-style file target like /c/temp/git.trace never touches stderr
 // and must be kept, even though filepath.IsAbs rejects it.

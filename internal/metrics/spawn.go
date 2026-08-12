@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 const SendMetricsSubcommand = "send-metrics"
@@ -159,13 +161,7 @@ func MaybeSpawnFlusher() {
 // so the detached flusher cannot be redirected by project-controlled
 // environment.
 func flusherChildEnv(env []string, endpoint string) []string {
-	out := make([]string, 0, len(env)+2)
-	for _, kv := range env {
-		if strings.HasPrefix(kv, EnvEndpoint+"=") || strings.HasPrefix(kv, EnvIsFlusher+"=") {
-			continue
-		}
-		out = append(out, kv)
-	}
+	out := execenv.Without(env, EnvEndpoint, EnvIsFlusher)
 	if endpoint != "" {
 		out = append(out, EnvEndpoint+"="+endpoint)
 	}
