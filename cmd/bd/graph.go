@@ -336,22 +336,22 @@ func renderGraphCheck(cycles [][]*types.Issue) error {
 	}
 
 	if result.Clean {
-		fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓"))
+		fmt.Printf("\n%s Graph integrity check passed\n\n", ui.RenderPass("✓")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	} else {
-		fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗"))
+		fmt.Printf("\n%s Graph integrity issues found\n\n", ui.RenderFail("✗")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	}
 
 	if len(result.Cycles) > 0 {
-		fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles))
+		fmt.Printf("%s Cycles (%d):\n\n", ui.RenderFail("⚠"), len(result.Cycles)) //nolint:forbidigo // Graph check is outside the renderer contract.
 		for _, cycle := range result.Cycles {
-			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0])
+			fmt.Printf("  %s → %s\n", strings.Join(cycle, " → "), cycle[0]) //nolint:forbidigo // Graph check is outside the renderer contract.
 		}
-		fmt.Println()
+		fmt.Println() //nolint:forbidigo // Graph check is outside the renderer contract.
 	} else {
-		fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓"))
+		fmt.Printf("  %s No dependency cycles\n", ui.RenderPass("✓")) //nolint:forbidigo // Graph check is outside the renderer contract.
 	}
 
-	fmt.Println()
+	fmt.Println() //nolint:forbidigo // Graph check is outside the renderer contract.
 
 	if !result.Clean {
 		return SilentExit()

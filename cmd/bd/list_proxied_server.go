@@ -274,7 +274,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 		for _, issue := range issues {
 			formatAgentIssue(&buf, issue, blocking.blockedBy[issue.ID], blocking.blocks[issue.ID], blocking.parent[issue.ID])
 		}
-		fmt.Print(buf.String())
+		fmt.Print(buf.String()) //nolint:forbidigo // Agent output is outside the --format contract.
 		printTruncationHint(truncated, in.effectiveLimit)
 		return nil
 	case in.longFormat:
@@ -293,7 +293,7 @@ func renderProxiedListText(ctx context.Context, out io.Writer, issues []*types.I
 	}
 
 	if err := ui.ToPager(buf.String(), ui.PagerOptions{NoPager: in.noPager}); err != nil {
-		if _, werr := fmt.Fprint(os.Stdout, buf.String()); werr != nil {
+		if _, werr := fmt.Fprint(os.Stdout, buf.String()); werr != nil { //nolint:forbidigo // Pager fallback is outside the --format contract.
 			fmt.Fprintf(os.Stderr, "Error writing output: %v\n", werr)
 		}
 	}

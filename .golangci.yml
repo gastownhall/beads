@@ -301,6 +301,12 @@ linters:
         - pattern: '^types\.(IssueFilter|WorkFilter)$'
           pkg: '^github\.com/steveyegge/beads/internal/types$'
           msg: "do not write a filter here: take one back from a builder in internal/workapi, or pass the whole request to issueops.Reader. internal/httpapi may never name these types; cmd/bd denies them by default and lists the files that legitimately build their own, with the reason for each, in .golangci.yml - see issueops/reader.go"
+        - pattern: '^fmt\.Print(f|ln)?$'
+          pkg: '^fmt$'
+          msg: "do not write list/graph output through process stdout: route format output through the command writer; mark an intentional non-format path locally"
+        - pattern: '^os\.Stdout$'
+          pkg: '^os$'
+          msg: "do not write list/graph output through process stdout: route format output through the command writer; mark an intentional non-format path locally"
     errcheck:
       exclude-functions:
         - (*database/sql.DB).Close
@@ -327,10 +333,10 @@ linters:
 
   exclusions:
     rules:
-      # forbidigo holds TWO rules - the filter-construction guard and the
-      # label-plane guard - and the entries from here to the test exemption are
-      # their entire scope. This one keeps both off the rest of the tree; the
-      # settings block above says why.
+      # forbidigo holds four rules: filter construction, label-plane access,
+      # and the two process-stdout forms used by list/graph output. The entries
+      # from here to the test exemption define their scopes. This first one
+      # keeps every rule off the rest of the tree; the settings block says why.
       #
       # The previous version of this comment said there was exactly one rule and
       # that a second "would need this widened or replaced". That came true, and
@@ -341,6 +347,14 @@ linters:
       # it is not fine for the files that do - see the three `text:`-scoped
       # entries below.
       - path-except: '^(internal/httpapi/|cmd/bd/)'
+        linters:
+          - forbidigo
+      # Process stdout is forbidden only across the list/graph file families.
+      # Existing non-format paths in those families carry local, reviewed
+      # exceptions; a new file or output site is denied by default. Scoping by
+      # the diagnostic text keeps the filter and label rules unchanged.
+      - path-except: '^cmd/bd/(list|graph).*\.go$'
+        text: 'do not write list/graph output through process stdout'
         linters:
           - forbidigo
       #
