@@ -173,6 +173,12 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
+	// TestMain sets BEADS_DOLT_PORT process-wide when Docker is available,
+	// which suppresses the .beads/dolt-server.port file openFixDB needs to
+	// reach this test's auto-started server. Clear it, as the dolt package's
+	// own tests do.
+	t.Setenv("BEADS_DOLT_PORT", "")
+
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0755); err != nil {
@@ -274,9 +280,9 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	// OrphanedChildCounters (validation.go) opens its own connection via
 	// openDoltDB → configfile.Load, which is server-mode only (remotes.go's
 	// openFixDB always dials MySQL). seedCfg above already points that config
-	// at the same local server/database this test just seeded — the port is
-	// picked up from the .beads/dolt-server.port file the auto-start above
-	// wrote (doltserver.DefaultConfig's top-priority source).
+	// at the same local server/database this test just seeded — with the
+	// ambient BEADS_DOLT_PORT cleared above, the port comes from the
+	// .beads/dolt-server.port file the auto-start wrote.
 	if err := OrphanedChildCounters(dir, false); err != nil {
 		t.Fatalf("OrphanedChildCounters: %v", err)
 	}
