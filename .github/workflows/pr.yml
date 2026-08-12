@@ -126,7 +126,6 @@ jobs:
       # near-perfect hit; without it this job cold-downloads the whole
       # dolt-sized graph on every PR.
       - name: Restore Go module cache
-        id: restore-cache
         continue-on-error: true
         timeout-minutes: 5
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

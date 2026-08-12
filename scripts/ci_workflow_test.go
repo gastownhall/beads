@@ -349,7 +349,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	assertGoCacheInventory(t, workflows["pr.yml"].job(t, "worktree-remove-windows"), []goCacheStep{
 		restoreModuleCache(), restoreBuildCache("non-race"),
 	})
-	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms"} {
+	for _, jobName := range []string{"check-doc-freshness-platforms", "pr-preflight-platforms", "build-examples"} {
 		assertGoCacheInventory(t, workflows["pr.yml"].job(t, jobName), []goCacheStep{restoreModuleCache()})
 	}
 	assertGoCacheInventory(t, workflows["pr-risk.yml"].job(t, "build-embedded"), []goCacheStep{
@@ -361,7 +361,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		},
 		"pr.yml": {
 			"build-artifacts": true, "pr-core-wrapper": true, "test-macos": true, "worktree-remove-windows": true,
-			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true,
+			"check-doc-freshness-platforms": true, "pr-preflight-platforms": true, "build-examples": true,
 		},
 		"pr-risk.yml": {"build-embedded": true},
 	})
@@ -403,6 +403,8 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		[]string{"Restore Go module cache"}, []string{"Exercise native date and Bash process boundary"})
 	assertStepsBefore(t, workflows["pr.yml"].job(t, "pr-preflight-platforms"),
 		[]string{"Restore Go module cache"}, []string{"Exercise the real Bash process boundary", "Exercise test.sh prebuilt binary path"})
+	assertStepsBefore(t, workflows["pr.yml"].job(t, "build-examples"),
+		[]string{"Restore Go module cache"}, []string{"Type-check every module under examples/"})
 
 	prRiskEmbedded := workflows["pr-risk.yml"].job(t, "build-embedded")
 	prRiskNonRaceBuilds := []string{"Build proxied bd subprocess binary", "Build server Dolt conformance test binary"}
@@ -460,6 +462,7 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 		{"pr.yml", "worktree-remove-windows"},
 		{"pr.yml", "check-doc-freshness-platforms"},
 		{"pr.yml", "pr-preflight-platforms"},
+		{"pr.yml", "build-examples"},
 		{"pr-risk.yml", "build-embedded"},
 	} {
 		if got := workflows[target.workflow].job(t, target.job).step(t, "Set up Go").ID; got != "setup-go" {
