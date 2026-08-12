@@ -84,14 +84,34 @@ func (e metricsEvent) attr(key string) (string, bool) {
 
 func metricsTestEnv(home string, extra ...string) []string {
 	base := bdEnv(home)
-	out := make([]string, 0, len(base)+len(extra)+1)
+	// bdEnv overrides HOME only. Keep the platform-specific profile variables
+	// aligned too, or os.UserHomeDir still resolves USERPROFILE on Windows and
+	// writes the queue outside this test's fixture.
+	out := make([]string, 0, len(base)+len(extra)+8)
 	for _, e := range base {
-		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") || strings.HasPrefix(e, "DO_NOT_TRACK=") {
+		key, _, _ := strings.Cut(e, "=")
+		switch strings.ToUpper(key) {
+		case "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+			"XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA",
+			"BD_DISABLE_METRICS", "DO_NOT_TRACK":
 			continue
 		}
 		out = append(out, e)
 	}
-	out = append(out, "BD_DISABLE_EVENT_FLUSH=1")
+	out = append(out,
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"BD_DISABLE_EVENT_FLUSH=1",
+	)
+	if volume := filepath.VolumeName(home); volume != "" {
+		out = append(out,
+			"HOMEDRIVE="+volume,
+			"HOMEPATH="+strings.TrimPrefix(home, volume),
+		)
+	}
 	return append(out, extra...)
 }
 
