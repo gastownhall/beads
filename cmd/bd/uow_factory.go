@@ -45,6 +45,12 @@ func doltProbeCachePath() string {
 // sidecar > PATH) and hardened-probes it, printing the version-recommendation
 // advisory (if any) at most once per process via doltVersionWarnOnce.
 //
+// quiet suppresses the advisory (errors still return). It is a parameter
+// rather than a read of the global quietFlag because bd init defines its own
+// local --quiet flag that shadows the persistent one: during
+// `bd init --proxied-server -q` the global quietFlag is false while the
+// user very much asked for quiet.
+//
 // bd init --proxied-server's own preflight (init_proxied_server.go) and
 // newManagedProxiedServerUOWProvider both need exactly this
 // resolve+probe+warn sequence. A single non-quiet `bd init --proxied-server`
@@ -57,7 +63,7 @@ func doltProbeCachePath() string {
 // auto_gc_behavior.archive_level gate) was removed upstream from
 // proxied-server mode, and PR-2's revalidation consumer will re-widen the
 // signature when it lands.
-func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string, err error) {
+func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (doltBin string, err error) {
 	doltBin, doltSrc, err := doltversion.Resolve(doltversion.ResolveOptions{
 		EnvValue: doltversion.ReadEnvOverride(),
 		// SidecarValue is a hook point only in this PR — the clone-local
@@ -97,7 +103,7 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 	// (see e.g. tips.go, metrics.go). WarnDue adds the cross-process gate:
 	// the advisory repeats at most once per day (per the probe cache's
 	// stamp), not on every bd invocation.
-	if res.Warning != nil && !quietFlag && !jsonOutput && res.WarnDue {
+	if res.Warning != nil && !quiet && !jsonOutput && res.WarnDue {
 		doltVersionWarnOnce.Do(func() {
 			fmt.Fprintf(os.Stderr, "Warning: %s\n", res.Warning.Message())
 			doltversion.MarkWarned(cachePath, time.Now())
@@ -474,7 +480,7 @@ func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, to
 	// newSQLServerUOWProvider) also lands here, a hardcoded
 	// "newProxiedServerUOWProvider" would mislabel a `bd serve` failure as a
 	// proxied-server one.
-	doltBin, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider")
+	doltBin, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider", quietFlag)
 	if err != nil {
 		return nil, err
 	}

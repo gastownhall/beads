@@ -75,7 +75,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 	// version advisory prints at most once for the command, not once per
 	// call site.
 	if in.externalConfig == nil {
-		if _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server"); err != nil {
+		// in.quiet, not the global quietFlag: init's local --quiet shadows
+		// the persistent flag, so the global is false under `bd init -q`.
+		if _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server", in.quiet || quietFlag); err != nil {
 			return err
 		}
 	}

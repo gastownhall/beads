@@ -390,8 +390,10 @@ bd dolt start
 ### Proxied-server mode: "dolt is older than the recommended minimum" warning
 
 Managed proxied-server mode spawns an external `dolt` CLI it finds via
-`BEADS_DOLT_BIN`, a clone-local sidecar setting, or PATH (in that order —
-see [Environment Variables](/reference/configuration#environment-variables)). On
+`BEADS_DOLT_BIN` or PATH (in that order — see
+[Environment Variables](/reference/configuration#environment-variables); a
+clone-local sidecar setting will slot between the two when the sidecar
+reader lands in contract part 2). On
 startup it probes that binary with `dolt version` and recommends
 **dolt >= 2.0.0**: the 2026-07-25 cross-version compatibility matrix found
 that cross-reading storage written by the beads Dolt Go module (as opposed
