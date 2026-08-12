@@ -263,6 +263,30 @@ jobs:
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
 
+  # internal/doltversion carries Windows-specific branches (PATHEXT
+  # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
+  # executable-bit carve-out) and its behavioral tests run there via .cmd
+  # stubs — but the Ubuntu test jobs compile those branches without ever
+  # executing them. Same pattern as the liveness job above: run exactly
+  # this package on windows-latest so the platform it targets actually
+  # exercises it at PR time. Small on purpose (~1 min).
+  test-windows-doltversion:
+    name: Test (Windows) doltversion package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run doltversion package tests on Windows
+        run: go test -tags gms_pure_go -count=1 ./internal/doltversion/
+
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity
   # and fails (rather than skips) when the runner cannot provide it.

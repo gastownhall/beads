@@ -46,6 +46,14 @@ type Version struct {
 // dev builds) "dolt version 1.52.3-dev-abcdef", and the goal here is to
 // extract a usable, comparable version from whatever dolt prints rather than
 // to validate that dolt's own output is well-formed semver.
+//
+// A consequence worth naming: any first line whose last field parses as a
+// dotted integer sequence passes — "dolt build 2023" yields version "2023",
+// which sails over RecommendedMin. Acceptable while the consumer is
+// warn-only policy; if a later change makes this the parser behind a hard
+// enforcement floor (the part-2 revalidation contract), tighten it to
+// require at least two dotted segments or an explicit "version" marker
+// before the token, so a stray trailing integer cannot satisfy a gate.
 func ParseVersion(output string) (Version, error) {
 	firstLine := output
 	if idx := strings.IndexByte(output, '\n'); idx >= 0 {

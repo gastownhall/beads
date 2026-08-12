@@ -44,9 +44,8 @@ func TestWarningMessage(t *testing.T) {
 }
 
 func TestProbeWithPolicyDemotesUnparseableVersionToWarning(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
-	stub := writeStub(t, dir, "dolt-garbage", "#!/bin/sh\necho 'not a version'\n", true)
+	stub := writeVersionEchoStub(t, dir, "dolt-garbage", "not a version")
 
 	id, warn, err := ProbeWithPolicy(context.Background(), stub)
 	if err != nil {
@@ -68,11 +67,10 @@ func TestProbeWithPolicyDemotesUnparseableVersionToWarning(t *testing.T) {
 }
 
 func TestProbeWithPolicyStillErrorsOnBrokenBinary(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
 
 	t.Run("probe failure is still an error", func(t *testing.T) {
-		stub := writeStub(t, dir, "dolt-fails", "#!/bin/sh\nexit 1\n", true)
+		stub := writeExecStub(t, dir, "dolt-fails", "#!/bin/sh\nexit 1\n", "@exit /b 1\r\n")
 		_, _, err := ProbeWithPolicy(context.Background(), stub)
 		if err == nil {
 			t.Fatal("ProbeWithPolicy on failing binary: want error, got nil")
@@ -93,7 +91,9 @@ func TestProbeWithPolicyStillErrorsOnBrokenBinary(t *testing.T) {
 	})
 
 	t.Run("timeout is still an error", func(t *testing.T) {
-		stub := writeStub(t, dir, "dolt-sleeps", "#!/bin/sh\nsleep 30\n", true)
+		stub := writeExecStub(t, dir, "dolt-sleeps",
+			"#!/bin/sh\nsleep 30\n",
+			"@ping -n 31 127.0.0.1 > nul\r\n")
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
 
@@ -108,11 +108,10 @@ func TestProbeWithPolicyStillErrorsOnBrokenBinary(t *testing.T) {
 }
 
 func TestProbeWithPolicyRecommendedVersion(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
 
 	t.Run("recommended version produces no warning", func(t *testing.T) {
-		stub := writeStub(t, dir, "dolt-recent", "#!/bin/sh\necho 'dolt version 2.0.0'\n", true)
+		stub := writeVersionEchoStub(t, dir, "dolt-recent", "dolt version 2.0.0")
 		_, warn, err := ProbeWithPolicy(context.Background(), stub)
 		if err != nil {
 			t.Fatalf("ProbeWithPolicy: %v", err)
@@ -123,7 +122,7 @@ func TestProbeWithPolicyRecommendedVersion(t *testing.T) {
 	})
 
 	t.Run("old version produces warning not error", func(t *testing.T) {
-		stub := writeStub(t, dir, "dolt-old", "#!/bin/sh\necho 'dolt version 1.52.1'\n", true)
+		stub := writeVersionEchoStub(t, dir, "dolt-old", "dolt version 1.52.1")
 		_, warn, err := ProbeWithPolicy(context.Background(), stub)
 		if err != nil {
 			t.Fatalf("ProbeWithPolicy: %v", err)

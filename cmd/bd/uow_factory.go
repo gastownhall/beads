@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -22,8 +24,22 @@ import (
 // (retries, multiple UOW providers opened in one command, or bd init
 // --proxied-server's own preflight followed by the UOW provider it opens a
 // few lines later). Repeating the same advisory on every call would just be
-// noise once the operator has seen it.
+// noise once the operator has seen it. Cross-process dedup (each bd
+// invocation is a new process) is handled separately by the probe cache's
+// warn stamp — see doltversion.ProbeWithPolicyCached / MarkWarned.
 var doltVersionWarnOnce sync.Once
+
+// doltProbeCachePath is where the cross-process dolt probe cache lives: the
+// binary being probed is machine-scoped, so the cache is too (user cache
+// dir, not the workspace). Empty on any error, which makes the cached probe
+// fall back to uncached behavior — never a reason to fail a command.
+func doltProbeCachePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "beads", "dolt-probe.json")
+}
 
 // resolveAndProbeDolt resolves the external dolt binary (env override >
 // sidecar > PATH) and hardened-probes it, printing the version-recommendation
@@ -54,8 +70,23 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 			errPrefix, doltSrc, err,
 		)
 	}
-	_, doltWarn, err := doltversion.ProbeWithPolicy(ctx, doltBin)
+	// Cached: a fingerprint hit (same real path, size, mtime as the last
+	// successful probe) replays the result for the cost of a stat instead of
+	// forking `dolt version` on every command — this call sits on the
+	// store-open hot path of essentially every bd command in managed
+	// proxied-server mode.
+	cachePath := doltProbeCachePath()
+	res, err := doltversion.ProbeWithPolicyCached(ctx, doltBin, cachePath, time.Now())
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// The probe was killed because OUR context was canceled (user
+			// hit Ctrl-C, outer operation gave up) — dolt itself was never
+			// shown to be broken, so the install hint would mislead.
+			return doltBin, fmt.Errorf(
+				"%s: probing dolt binary %q (source: %s): %w",
+				errPrefix, doltBin, doltSrc, err,
+			)
+		}
 		return doltBin, fmt.Errorf(
 			"%s: probing dolt binary %q (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
 			errPrefix, doltBin, doltSrc, err,
@@ -63,10 +94,13 @@ func resolveAndProbeDolt(ctx context.Context, errPrefix string) (doltBin string,
 	}
 	// Gated on both quietFlag and jsonOutput, matching this package's
 	// convention of keeping JSON-mode stdout/stderr free of advisory chatter
-	// (see e.g. tips.go, metrics.go).
-	if doltWarn != nil && !quietFlag && !jsonOutput {
+	// (see e.g. tips.go, metrics.go). WarnDue adds the cross-process gate:
+	// the advisory repeats at most once per day (per the probe cache's
+	// stamp), not on every bd invocation.
+	if res.Warning != nil && !quietFlag && !jsonOutput && res.WarnDue {
 		doltVersionWarnOnce.Do(func() {
-			fmt.Fprintf(os.Stderr, "Warning: %s\n", doltWarn.Message())
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", res.Warning.Message())
+			doltversion.MarkWarned(cachePath, time.Now())
 		})
 	}
 	return doltBin, nil

@@ -118,6 +118,7 @@ func Resolve(opts ResolveOptions) (string, Source, error) {
 		if err != nil {
 			return "", SourceEnv, fmt.Errorf("%s=%q: resolving absolute path: %w", DoltBinEnvVar, opts.EnvValue, err)
 		}
+		abs = completeExecutableExt(abs)
 		if err := validateExplicitPath(abs); err != nil {
 			return "", SourceEnv, fmt.Errorf("%s=%q: %w", DoltBinEnvVar, opts.EnvValue, err)
 		}
@@ -129,6 +130,7 @@ func Resolve(opts ResolveOptions) (string, Source, error) {
 		if err != nil {
 			return "", SourceSidecar, fmt.Errorf("sidecar dolt binary %q: resolving absolute path: %w", opts.SidecarValue, err)
 		}
+		abs = completeExecutableExt(abs)
 		if err := validateExplicitPath(abs); err != nil {
 			return "", SourceSidecar, fmt.Errorf("sidecar dolt binary %q: %w", opts.SidecarValue, err)
 		}
@@ -140,6 +142,31 @@ func Resolve(opts ResolveOptions) (string, Source, error) {
 		return "", SourcePath, fmt.Errorf("%w: dolt not found on PATH: %v", ErrNotFound, err)
 	}
 	return path, SourcePath, nil
+}
+
+// completeExecutableExt completes a Windows executable extension on an
+// explicitly-named path spelled without one: BEADS_DOLT_BIN=C:\tools\dolt
+// should find C:\tools\dolt.exe the same way cmd.exe or exec.LookPath
+// would. os.Lstat has no PATHEXT concept, so without this the explicit
+// path reported "not found" while dolt.exe sat right there. The exact
+// spelled path wins when it exists (an operator who names an extensionless
+// file gets that file); only when it does not is exec.LookPath consulted —
+// on Windows, LookPath applies PATHEXT completion to paths that contain a
+// separator without searching PATH. Non-Windows returns path unchanged:
+// there, Unix has no implied-extension convention and LookPath's extra
+// checks would only duplicate validateExplicitPath with a different error
+// taxonomy.
+func completeExecutableExt(path string) string {
+	if runtime.GOOS != "windows" {
+		return path
+	}
+	if _, err := os.Lstat(path); err == nil {
+		return path
+	}
+	if completed, err := exec.LookPath(path); err == nil {
+		return completed
+	}
+	return path
 }
 
 // validateExplicitPath checks an explicitly-named binary path (from env or

@@ -11,10 +11,15 @@ import (
 	"time"
 )
 
-func skipOnWindows(t *testing.T) {
+// skipOnWindows remains only for the tests whose subject genuinely does
+// not exist on Windows: the executable-bit check (validateExplicitPath
+// deliberately skips it there) and symlink creation (a privileged
+// operation on default Windows configurations). Behavioral probe tests
+// run on Windows via writeExecStub's .cmd stubs.
+func skipOnWindows(t *testing.T, why string) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
-		t.Skipf("shell-script stubs require a POSIX shell; skipping on windows")
+		t.Skipf("%s; skipping on windows", why)
 	}
 }
 
@@ -75,9 +80,8 @@ func TestCapBufferTruncates(t *testing.T) {
 }
 
 func TestProbeNormalOutput(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
-	stub := writeStub(t, dir, "dolt", "#!/bin/sh\necho 'dolt version 1.52.3'\n", true)
+	stub := writeVersionEchoStub(t, dir, "dolt", "dolt version 1.52.3")
 
 	id, err := Probe(context.Background(), stub)
 	if err != nil {
@@ -104,9 +108,8 @@ func TestProbeNormalOutput(t *testing.T) {
 }
 
 func TestProbeGarbageOutput(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
-	stub := writeStub(t, dir, "dolt", "#!/bin/sh\necho 'this is not a version'\n", true)
+	stub := writeVersionEchoStub(t, dir, "dolt", "this is not a version")
 
 	_, err := Probe(context.Background(), stub)
 	if err == nil {
@@ -118,11 +121,14 @@ func TestProbeGarbageOutput(t *testing.T) {
 }
 
 func TestProbeTimeout(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
 	// Sleeps far longer than the test's own deadline below; if Probe's
 	// kill-on-timeout didn't work, this test would hang for the full sleep.
-	stub := writeStub(t, dir, "dolt", "#!/bin/sh\nsleep 30\necho 'dolt version 1.52.3'\n", true)
+	// (The batch variant sleeps via ping's per-attempt one-second cadence,
+	// the portable cmd.exe idiom — `timeout` refuses non-interactive use.)
+	stub := writeExecStub(t, dir, "dolt",
+		"#!/bin/sh\nsleep 30\necho 'dolt version 1.52.3'\n",
+		"@ping -n 31 127.0.0.1 > nul\r\n@echo dolt version 1.52.3\r\n")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
@@ -143,15 +149,16 @@ func TestProbeTimeout(t *testing.T) {
 }
 
 func TestProbeHugeOutputCapped(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
 	// First line is a valid version; the script then floods stdout with
 	// far more than probeOutputCap bytes to prove the cap holds and
 	// parsing of the (already-captured) first line still succeeds.
-	script := "#!/bin/sh\n" +
+	posix := "#!/bin/sh\n" +
 		"echo 'dolt version 1.52.3'\n" +
 		"yes 'garbage filler line to inflate output well past the cap' | head -c 2000000\n"
-	stub := writeStub(t, dir, "dolt", script, true)
+	batch := "@echo dolt version 1.52.3\r\n" +
+		"@for /L %%i in (1,1,3000) do @echo garbage filler line to inflate output well past the cap\r\n"
+	stub := writeExecStub(t, dir, "dolt", posix, batch)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -166,7 +173,7 @@ func TestProbeHugeOutputCapped(t *testing.T) {
 }
 
 func TestProbeNonExecutableRegularFile(t *testing.T) {
-	skipOnWindows(t)
+	skipOnWindows(t, "the executable-bit check is deliberately Unix-only")
 	dir := t.TempDir()
 	stub := writeStub(t, dir, "dolt", "#!/bin/sh\necho 'dolt version 1.52.3'\n", false)
 
@@ -185,7 +192,6 @@ func TestProbeNonExecutableRegularFile(t *testing.T) {
 // path does exist). Either taxonomy is defensible per the design doc; this
 // is the one this package implements.
 func TestProbeDirectory(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
 	sub := filepath.Join(dir, "adir")
 	if err := os.Mkdir(sub, 0o755); err != nil {
@@ -202,7 +208,7 @@ func TestProbeDirectory(t *testing.T) {
 }
 
 func TestProbeSymlink(t *testing.T) {
-	skipOnWindows(t)
+	skipOnWindows(t, "symlink creation is a privileged operation on default Windows configurations")
 	dir := t.TempDir()
 	real := writeStub(t, dir, "real-dolt", "#!/bin/sh\necho 'dolt version 1.52.3'\n", true)
 	link := filepath.Join(dir, "dolt-link")
@@ -237,9 +243,10 @@ func TestProbeMissingPath(t *testing.T) {
 }
 
 func TestProbeNonZeroExit(t *testing.T) {
-	skipOnWindows(t)
 	dir := t.TempDir()
-	stub := writeStub(t, dir, "dolt", "#!/bin/sh\necho 'boom' >&2\nexit 1\n", true)
+	stub := writeExecStub(t, dir, "dolt",
+		"#!/bin/sh\necho 'boom' >&2\nexit 1\n",
+		"@echo boom 1>&2\r\n@exit /b 1\r\n")
 
 	_, err := Probe(context.Background(), stub)
 	if err == nil {

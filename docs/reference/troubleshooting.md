@@ -404,6 +404,12 @@ version floor, so an older dolt can still be used at your own risk. To
 resolve it, install a current dolt (https://docs.dolthub.com/introduction/installation)
 and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
 
+The advisory repeats at most once per day, not on every command: the probe
+result and the warning timestamp are cached (keyed by the binary's path,
+size, and mtime, in the user cache directory), so day-to-day `bd` use stays
+quiet while the reminder still resurfaces until the binary is upgraded.
+Upgrading or replacing the dolt binary re-probes immediately.
+
 If the probe can't parse `dolt version`'s output at all (most commonly a
 dev/custom build with non-standard version output), that also only warns —
 proxied-server mode still starts, since an unparseable version means "we

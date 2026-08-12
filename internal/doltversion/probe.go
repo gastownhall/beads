@@ -96,7 +96,13 @@ func Probe(ctx context.Context, path string) (Identity, error) {
 
 	info, err := os.Stat(realPath)
 	if err != nil {
-		return Identity{}, fmt.Errorf("%w: stat %s: %v", ErrNotFound, realPath, err)
+		// Same taxonomy split as validateExplicitPath: a missing file is
+		// ErrNotFound; any other stat failure (most commonly EACCES) means
+		// the path may exist but is unusable from here — ErrNotExecutable.
+		if os.IsNotExist(err) {
+			return Identity{}, fmt.Errorf("%w: stat %s: %v", ErrNotFound, realPath, err)
+		}
+		return Identity{}, fmt.Errorf("%w: stat %s: %v", ErrNotExecutable, realPath, err)
 	}
 
 	id := Identity{

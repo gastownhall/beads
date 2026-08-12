@@ -165,6 +165,65 @@ func TestResolveAbsolutizesBareEnvValue(t *testing.T) {
 	}
 }
 
+// TestResolveCompletesWindowsExeExtension regression-tests the review
+// finding that BEADS_DOLT_BIN=C:\tools\dolt reported "not found" while
+// dolt.exe sat right there: os.Lstat has no PATHEXT concept, so an
+// explicit path spelled without its extension (the way operators type
+// paths everywhere else on Windows) must be completed via exec.LookPath
+// before validation. Windows-only by nature; the completion helper is an
+// identity function elsewhere.
+func TestResolveCompletesWindowsExeExtension(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("PATHEXT extension completion is Windows-specific")
+	}
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dolt.exe")
+	if err := os.WriteFile(target, []byte("MZ fake binary for stat-level tests"), 0o644); err != nil {
+		t.Fatalf("write fake exe: %v", err)
+	}
+
+	t.Run("extensionless env value finds the .exe", func(t *testing.T) {
+		path, src, err := Resolve(ResolveOptions{EnvValue: filepath.Join(dir, "dolt")})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if src != SourceEnv {
+			t.Errorf("source = %v, want SourceEnv", src)
+		}
+		if path != target {
+			t.Errorf("path = %q, want %q (completed extension)", path, target)
+		}
+	})
+
+	t.Run("exact extensionless file wins when it exists", func(t *testing.T) {
+		exact := filepath.Join(dir, "doltbare")
+		if err := os.WriteFile(exact, []byte("exact file, no extension"), 0o644); err != nil {
+			t.Fatalf("write exact file: %v", err)
+		}
+		// A sibling with .exe must NOT shadow the exactly-spelled file.
+		if err := os.WriteFile(exact+".exe", []byte("decoy"), 0o644); err != nil {
+			t.Fatalf("write decoy: %v", err)
+		}
+		path, _, err := Resolve(ResolveOptions{EnvValue: exact})
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if path != exact {
+			t.Errorf("path = %q, want %q (exact spelled path wins)", path, exact)
+		}
+	})
+
+	t.Run("still not-found when no completion exists", func(t *testing.T) {
+		_, _, err := Resolve(ResolveOptions{EnvValue: filepath.Join(dir, "no-such-binary")})
+		if err == nil {
+			t.Fatal("Resolve: want error, got nil")
+		}
+		if !errors.Is(err, ErrNotFound) {
+			t.Errorf("error = %v, want wrapping ErrNotFound", err)
+		}
+	})
+}
+
 func TestSourceString(t *testing.T) {
 	cases := map[Source]string{
 		SourceEnv:     DoltBinEnvVar,
