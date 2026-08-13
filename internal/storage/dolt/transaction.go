@@ -1247,13 +1247,12 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 	if err != nil {
 		return wrapExecError("add label in tx", err)
 	}
-	if !changed {
-		return nil
-	}
-	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
-	if table == "labels" {
-		t.dirty.MarkDirty("issues")
+	if changed {
+		t.dirty.MarkDirty(table)
+		if table == "labels" {
+			t.dirty.MarkDirty("issues")
+		}
 	}
 	return nil
 }
@@ -1294,13 +1293,12 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 	if err != nil {
 		return wrapExecError("remove label in tx", err)
 	}
-	if !changed {
-		return nil
-	}
-	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
-	if table == "labels" {
-		t.dirty.MarkDirty("issues")
+	if changed {
+		t.dirty.MarkDirty(table)
+		if table == "labels" {
+			t.dirty.MarkDirty("issues")
+		}
 	}
 	return nil
 }

@@ -151,11 +151,11 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err != nil {
 		return false, fmt.Errorf("add label: rows affected: %w", err)
 	}
-	if rows == 0 {
-		return false, nil
-	}
-	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
-		return false, fmt.Errorf("add label: %w", err)
+	changed := rows > 0
+	if changed {
+		if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+			return false, fmt.Errorf("add label: %w", err)
+		}
 	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -171,7 +171,7 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID); err != nil {
 		return false, err
 	}
-	return true, nil
+	return changed, nil
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
@@ -192,11 +192,11 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	if err != nil {
 		return false, fmt.Errorf("remove label: rows affected: %w", err)
 	}
-	if rows == 0 {
-		return false, nil
-	}
-	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
-		return false, fmt.Errorf("remove label: %w", err)
+	changed := rows > 0
+	if changed {
+		if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+			return false, fmt.Errorf("remove label: %w", err)
+		}
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -210,7 +210,7 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID); err != nil {
 		return false, err
 	}
-	return true, nil
+	return changed, nil
 }
 
 func resolveLabelTables(ctx context.Context, tx DBTX, labelTable, eventTable, issueID string) (string, string, string, error) {

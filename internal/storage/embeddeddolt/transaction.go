@@ -248,12 +248,11 @@ func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, acto
 	if err != nil {
 		return err
 	}
-	if !changed {
-		return nil
-	}
-	t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
-	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
+	if changed {
+		t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
+		t.dirty.MarkDirty(labelTable)
+	}
 	return nil
 }
 
@@ -263,12 +262,11 @@ func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, a
 	if err != nil {
 		return err
 	}
-	if !changed {
-		return nil
-	}
-	t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
-	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
+	if changed {
+		t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
+		t.dirty.MarkDirty(labelTable)
+	}
 	return nil
 }
 
