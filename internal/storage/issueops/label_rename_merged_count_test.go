@@ -71,7 +71,7 @@ func TestRenameLabelInPlane_ConcurrentAddLabelStillCountsMerge(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	renamed, merged, ids, err := renameLabelInPlane(ctx, tx, "labels", "events", "old", "new", "tester")
+	renamed, merged, ids, err := renameLabelInPlane(ctx, tx, "issues", "labels", "events", "old", "new", "tester")
 	if err != nil {
 		t.Fatalf("renameLabelInPlane: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestRenameLabelInPlane_CleanRenameCountsZeroMerges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
 	}
-	renamed, merged, _, err := renameLabelInPlane(ctx, tx, "labels", "events", "old", "new", "tester")
+	renamed, merged, _, err := renameLabelInPlane(ctx, tx, "issues", "labels", "events", "old", "new", "tester")
 	if err != nil {
 		t.Fatalf("renameLabelInPlane: %v", err)
 	}

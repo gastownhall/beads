@@ -210,8 +210,8 @@ func TestAggregateRevisionCreateWritesBackAndNoOpsStayStable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(eventsAfterNoOps) != len(eventsBeforeNoOps) {
-		t.Fatalf("idempotent label operations emitted events: %d -> %d", len(eventsBeforeNoOps), len(eventsAfterNoOps))
+	if len(eventsAfterNoOps) != len(eventsBeforeNoOps)+2 {
+		t.Fatalf("row-idempotent label operations emitted %d new audit events, want 2", len(eventsAfterNoOps)-len(eventsBeforeNoOps))
 	}
 
 	target := &types.Issue{ID: "revision-noop-target", Title: "target", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
@@ -258,6 +258,89 @@ func TestAggregateRevisionCreateWritesBackAndNoOpsStayStable(t *testing.T) {
 	}
 	if after.RowVersion != stored.RowVersion {
 		t.Fatalf("empty dependency metadata re-assertion changed RowVersion %d -> %d", stored.RowVersion, after.RowVersion)
+	}
+}
+
+func TestAggregateRevisionTransactionLabelEventsDoNotRemintNoOps(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	te := newTestEnv(t, "aggregate_revision_tx_labels")
+	ctx := t.Context()
+	issue := &types.Issue{ID: "revision-tx-labels", Title: "transaction labels", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := te.store.CreateIssue(ctx, issue, "writer"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := te.store.RunInTransaction(ctx, "test: add label", func(tx storage.Transaction) error {
+		return tx.AddLabel(ctx, issue.ID, "same", "writer")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	withLabel, err := te.store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var committedLabelCount int
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?", []any{issue.ID, "same"}, &committedLabelCount)
+	if committedLabelCount != 1 {
+		t.Fatalf("committed label count = %d, want 1", committedLabelCount)
+	}
+	var committedRevision int64
+	te.queryScalar(t, ctx, "SELECT row_lock FROM issues AS OF 'HEAD' WHERE id = ?", []any{issue.ID}, &committedRevision)
+	if committedRevision != withLabel.RowVersion {
+		t.Fatalf("committed revision = %d, working revision = %d", committedRevision, withLabel.RowVersion)
+	}
+
+	if err := te.store.RunInTransaction(ctx, "test: audit row-level label no-ops", func(tx storage.Transaction) error {
+		if err := tx.AddLabel(ctx, issue.ID, "same", "writer"); err != nil {
+			return err
+		}
+		return tx.RemoveLabel(ctx, issue.ID, "missing", "writer")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	afterNoOps, err := te.store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterNoOps.RowVersion != withLabel.RowVersion {
+		t.Fatalf("transactional label no-ops changed RowVersion %d -> %d", withLabel.RowVersion, afterNoOps.RowVersion)
+	}
+	events, err := te.store.GetEvents(ctx, issue.ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var added, removed int
+	for _, event := range events {
+		switch event.EventType {
+		case types.EventLabelAdded:
+			added++
+		case types.EventLabelRemoved:
+			removed++
+		}
+	}
+	if added != 2 || removed != 1 {
+		t.Fatalf("transactional label audit events: added=%d removed=%d, want added=2 removed=1", added, removed)
+	}
+
+	if err := te.store.RunInTransaction(ctx, "test: remove label", func(tx storage.Transaction) error {
+		return tx.RemoveLabel(ctx, issue.ID, "same", "writer")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	afterRemove, err := te.store.GetIssue(ctx, issue.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterRemove.RowVersion == afterNoOps.RowVersion {
+		t.Fatalf("genuine transactional label removal preserved RowVersion %d", afterRemove.RowVersion)
+	}
+	te.queryScalar(t, ctx, "SELECT COUNT(*) FROM labels AS OF 'HEAD' WHERE issue_id = ? AND label = ?", []any{issue.ID, "same"}, &committedLabelCount)
+	if committedLabelCount != 0 {
+		t.Fatalf("committed label count after removal = %d, want 0", committedLabelCount)
+	}
+	te.queryScalar(t, ctx, "SELECT row_lock FROM issues AS OF 'HEAD' WHERE id = ?", []any{issue.ID}, &committedRevision)
+	if committedRevision != afterRemove.RowVersion {
+		t.Fatalf("committed revision after removal = %d, working revision = %d", committedRevision, afterRemove.RowVersion)
 	}
 }
 
