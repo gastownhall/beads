@@ -1040,22 +1040,26 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	}
 
 	var addErr error
-	var eventWritten bool
+	var result issueops.DependencyWriteResult
 	if opts.PrecheckedTarget != nil && table == "wisp_dependencies" && kind == issueops.DepTargetIssue {
-		eventWritten, addErr = t.addWispDepSuspendingIssueTargetFK(ctx, dep, actor, opts)
+		result, addErr = t.addWispDepSuspendingIssueTargetFK(ctx, dep, actor, opts)
 	} else {
-		eventWritten, addErr = issueops.AddDependencyInTx(ctx, t.txFor(table), dep, actor, opts)
+		result, addErr = issueops.AddDependencyInTxWithResult(ctx, t.txFor(table), dep, actor, opts)
 	}
 	if addErr != nil {
 		return addErr
 	}
+	if !result.Changed {
+		return nil
+	}
 	t.dirty.MarkDirty(table)
+	t.dirty.MarkDirty(opts.SourceTable)
 	// AddDependencyInTx records a dependency_added event on the source's event
 	// table only for a genuine emit (explicit verb + new edge); stage that table
 	// so StageAndCommit commits the event with the edge (a torn write otherwise
 	// leaves the event in the working set, dropped on reset). A structural or
 	// idempotent add writes no event, so leave eventTable unstaged.
-	if eventWritten {
+	if result.EventWritten {
 		t.dirty.MarkDirty(eventTable)
 	}
 	t.recordDepTierWrite(table)
@@ -1094,15 +1098,15 @@ func (t *doltTransaction) recordDepTierWrite(writeTable string) {
 // target's existence was just validated on the regular tx. The regular tx
 // commits before the ignored tx, so the committed end-state always satisfies
 // the FK; suspend the session's FK checks around this one statement scope.
-func (t *doltTransaction) addWispDepSuspendingIssueTargetFK(ctx context.Context, dep *types.Dependency, actor string, opts issueops.AddDependencyOpts) (bool, error) {
+func (t *doltTransaction) addWispDepSuspendingIssueTargetFK(ctx context.Context, dep *types.Dependency, actor string, opts issueops.AddDependencyOpts) (issueops.DependencyWriteResult, error) {
 	if _, err := t.ignoredTx.ExecContext(ctx, "SET foreign_key_checks = 0"); err != nil {
-		return false, fmt.Errorf("suspend foreign key checks for cross-tier dependency: %w", err)
+		return issueops.DependencyWriteResult{}, fmt.Errorf("suspend foreign key checks for cross-tier dependency: %w", err)
 	}
-	eventWritten, addErr := issueops.AddDependencyInTx(ctx, t.ignoredTx, dep, actor, opts)
+	result, addErr := issueops.AddDependencyInTxWithResult(ctx, t.ignoredTx, dep, actor, opts)
 	if _, err := t.ignoredTx.ExecContext(ctx, "SET foreign_key_checks = 1"); err != nil && addErr == nil {
 		addErr = fmt.Errorf("restore foreign key checks after cross-tier dependency: %w", err)
 	}
-	return eventWritten, addErr
+	return result, addErr
 }
 
 // readDepTargetForPrecheck validates a dependency target on the transaction
@@ -1209,16 +1213,22 @@ func (t *doltTransaction) RemoveDependencyWithOptions(ctx context.Context, issue
 		table = "wisp_dependencies"
 		eventTable = "wisp_events"
 	}
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, t.txFor(table), issueID, dependsOnID, actor, rmOpts.EmitEvent)
+	result, err := issueops.RemoveDependencyInTxWithResult(ctx, t.txFor(table), issueID, dependsOnID, actor, rmOpts.EmitEvent)
 	if err != nil {
 		return wrapExecError("remove dependency in tx", err)
 	}
+	if !result.Changed {
+		return nil
+	}
 	t.dirty.MarkDirty(table)
+	if table == "dependencies" {
+		t.dirty.MarkDirty("issues")
+	}
 	// RemoveDependencyInTx records a dependency_removed event on the source's
 	// event table only for a genuine emit (explicit verb + edge removal); stage
 	// that table so it commits with the edge. A structural or missing-edge remove
 	// writes no event, so leave eventTable unstaged.
-	if eventWritten {
+	if result.EventWritten {
 		t.dirty.MarkDirty(eventTable)
 	}
 	return nil
@@ -1233,11 +1243,18 @@ func (t *doltTransaction) AddLabel(ctx context.Context, issueID, label, actor st
 		eventTable = "wisp_events"
 	}
 
-	if err := issueops.AddLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+	changed, err := issueops.AddLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor)
+	if err != nil {
 		return wrapExecError("add label in tx", err)
+	}
+	if !changed {
+		return nil
 	}
 	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
+	if table == "labels" {
+		t.dirty.MarkDirty("issues")
+	}
 	return nil
 }
 
@@ -1273,11 +1290,18 @@ func (t *doltTransaction) RemoveLabel(ctx context.Context, issueID, label, actor
 		eventTable = "wisp_events"
 	}
 
-	if err := issueops.RemoveLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor); err != nil {
+	changed, err := issueops.RemoveLabelInTx(ctx, t.txFor(table), table, eventTable, issueID, label, actor)
+	if err != nil {
 		return wrapExecError("remove label in tx", err)
+	}
+	if !changed {
+		return nil
 	}
 	t.dirty.MarkDirty(table)
 	t.dirty.MarkDirty(eventTable)
+	if table == "labels" {
+		t.dirty.MarkDirty("issues")
+	}
 	return nil
 }
 
@@ -1371,11 +1395,25 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	}
 
 	createdAtText := issueops.FormatAuxTime(createdAt)
-	id, _, err := issueops.InsertDerivedComment(ctx, t.txFor(table), table, issueID, author, text, createdAtText)
+	id, existed, err := issueops.InsertDerivedComment(ctx, t.txFor(table), table, issueID, author, text, createdAtText)
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
-	t.dirty.MarkDirty(table)
+	if !existed {
+		t.dirty.MarkDirty(table)
+		issueTable := "issues"
+		if table == "wisp_comments" {
+			issueTable = "wisps"
+		}
+		if err := issueops.TouchRowVersionInTx(ctx, t.txFor(table), issueTable, issueID); err != nil {
+			return nil, fmt.Errorf("failed to add comment: %w", err)
+		}
+		if table == "wisp_comments" {
+			t.dirty.MarkDirty("wisps")
+		} else {
+			t.dirty.MarkDirty("issues")
+		}
+	}
 
 	stored, err := issueops.ParseAuxTime(createdAtText)
 	if err != nil {
@@ -1438,7 +1476,19 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 	if err != nil {
 		return wrapExecError("add comment in tx", err)
 	}
+	issueTable := "issues"
+	if table == "wisp_events" {
+		issueTable = "wisps"
+	}
+	if err := issueops.TouchRowVersionInTx(ctx, t.txFor(table), issueTable, issueID); err != nil {
+		return wrapExecError("add comment in tx", err)
+	}
 	t.dirty.MarkDirty(table)
+	if table == "wisp_events" {
+		t.dirty.MarkDirty("wisps")
+	} else {
+		t.dirty.MarkDirty("issues")
+	}
 	stored, err := issueops.ParseAuxTime(createdAt)
 	if err != nil {
 		return wrapExecError("add comment in tx", err)

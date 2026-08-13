@@ -264,10 +264,10 @@ type UpdateRequest struct {
 	//   - THE TOKEN IS OPAQUE AND COMPARED FOR EQUALITY ONLY. RowVersion is
 	//     minted afresh on every lifecycle write rather than incremented, so
 	//     "newer" and "older" are not questions a version guard can answer.
-	//   - IT GUARDS THE ROW'S LIFECYCLE STATE, NOT ITS GRAPH. RowVersion is
-	//     reminted by status, assignee and started_at writes and deliberately
-	//     not by label, dependency, rename or is_blocked writes, so a matching
-	//     token does not promise the row's edges are the ones the caller saw.
+	//   - IT GUARDS THE USER-AUTHORED AGGREGATE, INCLUDING labels, comments and
+	//     dependency edges. Exact no-ops preserve it. Derived is_blocked cache
+	//     recomputation is excluded; the graph edit that caused it remints its
+	//     source aggregate instead.
 	//   - nil DISABLES THE CHECK. Each is a pointer so that "do not check" is
 	//     distinct from a caller requiring the never-written version 0, or the
 	//     empty assignee, which is a real guard meaning "expected unassigned".

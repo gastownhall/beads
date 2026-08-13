@@ -334,12 +334,12 @@ func ApplyLabelPatch(ctx context.Context, tx DBTX, current *types.Issue, patch p
 		return false, fmt.Errorf("apply labels: transaction must be *sql.Tx")
 	}
 	for _, label := range stringSetDifference(existing, target) {
-		if err := RemoveLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
+		if _, err := RemoveLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
 			return false, err
 		}
 	}
 	for _, label := range stringSetDifference(target, existing) {
-		if err := AddLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
+		if _, err := AddLabelInTx(ctx, sqlTx, "", "", current.ID, label, actor); err != nil {
 			return false, err
 		}
 	}
@@ -381,12 +381,12 @@ func ApplyParentPatch(ctx context.Context, tx DBTX, current *types.Issue, parent
 	}
 	var recomputed RecomputeIsBlockedResult
 	for _, parentID := range stringSetDifference(existing, target) {
-		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed); err != nil {
+		if _, err := removeDependencyInTx(ctx, sqlTx, current.ID, parentID, actor, false, &recomputed, nil); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}
 	for _, parentID := range stringSetDifference(target, existing) {
-		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed); err != nil {
+		if _, err := addDependencyInTx(ctx, sqlTx, &types.Dependency{IssueID: current.ID, DependsOnID: parentID, Type: types.DepParentChild}, actor, AddDependencyOpts{}, &recomputed, nil); err != nil {
 			return ParentPatchResult{}, err
 		}
 	}

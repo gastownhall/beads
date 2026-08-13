@@ -152,18 +152,25 @@ func (r *commentSQLRepositoryImpl) InsertRecord(ctx context.Context, comment *ty
 	}
 	createdAtText := issueops.FormatAuxTime(copy.CreatedAt)
 	commentTable := pickCommentTable(opts.UseWispsTable)
+	inserted := true
 	if copy.ID == "" {
-		id, _, err := issueops.InsertDerivedComment(ctx, r.runner, commentTable, copy.IssueID, copy.Author, copy.Text, createdAtText)
+		id, existed, err := issueops.InsertDerivedComment(ctx, r.runner, commentTable, copy.IssueID, copy.Author, copy.Text, createdAtText)
 		if err != nil {
 			return nil, fmt.Errorf("db: CommentSQLRepository.InsertRecord: %w", err)
 		}
 		copy.ID = id
+		inserted = !existed
 	} else {
 		//nolint:gosec // G201: commentTable is one of two hardcoded constants
 		if _, err := r.runner.ExecContext(ctx, fmt.Sprintf(`
 			INSERT INTO %s (id, issue_id, author, text, created_at)
 			VALUES (?, ?, ?, ?, ?)
 		`, commentTable), copy.ID, copy.IssueID, copy.Author, copy.Text, createdAtText); err != nil {
+			return nil, fmt.Errorf("db: CommentSQLRepository.InsertRecord: %w", err)
+		}
+	}
+	if inserted {
+		if err := issueops.TouchRowVersionInTx(ctx, r.runner, issueTable, copy.IssueID); err != nil {
 			return nil, fmt.Errorf("db: CommentSQLRepository.InsertRecord: %w", err)
 		}
 	}

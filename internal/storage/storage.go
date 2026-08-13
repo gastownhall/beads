@@ -568,13 +568,10 @@ type CloseIssueOptions struct {
 	// requires version 0. Force bypasses child and blocker policy, not this
 	// version check.
 	//
-	// RowVersion tracks lifecycle/ownership writes only — it is rewritten by
-	// status, assignee, and started_at changes (claim, close, reclaim, unclaim,
-	// updateIssueInTx). So this is a "close only if the issue's lifecycle state
-	// is unchanged" guard, NOT an all-columns check: concurrent label, dependency,
-	// rename, is_blocked, or compaction-only writes intentionally do not bump
-	// row_lock and are not caught here (see the freshRowLock invariant in
-	// internal/storage/issueops/lease.go).
+	// RowVersion tracks every supported user-authored aggregate mutation,
+	// including labels, comments and dependency edges. Exact no-ops and derived
+	// is_blocked cache recomputation preserve it (see the freshRowLock invariant
+	// in internal/storage/issueops/lease.go).
 	ExpectedVersion *int64
 }
 

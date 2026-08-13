@@ -116,6 +116,7 @@ func insertIssueCreateOnly(ctx context.Context, tx DBTX, table string, issue *ty
 
 //nolint:gosec // G201: table is a hardcoded constant ("issues" or "wisps")
 func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types.Issue, suffix string) error {
+	rowVersion := freshRowLock()
 	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (
 			id, content_hash, title, description, design, acceptance_criteria, notes,
@@ -151,10 +152,13 @@ func executeIssueInsert(ctx context.Context, tx DBTX, table string, issue *types
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), FormatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, JSONMetadata(issue.Metadata),
-		freshRowLock(), NullString(string(issue.StorageClass.Normalize())),
+		rowVersion, NullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("insert issue into %s: %w", table, err)
+	}
+	if suffix == "" {
+		issue.RowVersion = rowVersion
 	}
 	return nil
 }

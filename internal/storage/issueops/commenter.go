@@ -55,6 +55,9 @@ func ExecuteAddComment(ctx context.Context, tx *sql.Tx, request publicops.AddCom
 	}
 	tables := ChangedTables{}
 	tables.Add(commentTable)
+	if commentTable == "comments" {
+		tables.Add("issues")
+	}
 	return publicops.AddCommentResult{Comment: comment}, tables, nil
 }
 

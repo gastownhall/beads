@@ -173,8 +173,8 @@ func (t *embeddedTransaction) AddDependency(ctx context.Context, dep *types.Depe
 }
 
 func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep *types.Dependency, actor string, addOpts storage.DependencyAddOptions) error {
-	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
-	eventWritten, err := issueops.AddDependencyInTx(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
+	issueTable, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, dep.IssueID))
+	result, err := issueops.AddDependencyInTxWithResult(ctx, t.tx, dep, actor, issueops.AddDependencyOpts{
 		IsCrossPrefix:  types.ExtractPrefix(dep.IssueID) != types.ExtractPrefix(dep.DependsOnID),
 		SkipCycleCheck: addOpts.SkipCycleCheck,
 		EmitEvent:      addOpts.EmitEvent,
@@ -182,11 +182,15 @@ func (t *embeddedTransaction) AddDependencyWithOptions(ctx context.Context, dep 
 	if err != nil {
 		return err
 	}
+	if !result.Changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTable)
 	t.dirty.MarkDirty(depTable)
 	// AddDependencyInTx records a dependency_added event on the source's event
 	// table only for a genuine emit (explicit verb + new edge); stage it so the
 	// event commits with the edge. A structural or idempotent add writes no event.
-	if eventWritten {
+	if result.EventWritten {
 		t.dirty.MarkDirty(eventTable)
 	}
 	return nil
@@ -210,17 +214,21 @@ func (t *embeddedTransaction) RemoveDependency(ctx context.Context, issueID, dep
 func (t *embeddedTransaction) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, rmOpts storage.DependencyRemoveOptions) error {
 	// Route dirty marking on the source's wisp status: a wisp-source remove
 	// stages wisp_dependencies/wisp_events, a permanent one dependencies/events.
-	_, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
-	eventWritten, err := issueops.RemoveDependencyInTx(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+	issueTable, _, eventTable, depTable := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
+	result, err := issueops.RemoveDependencyInTxWithResult(ctx, t.tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 	if err != nil {
 		return err
 	}
+	if !result.Changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTable)
 	t.dirty.MarkDirty(depTable)
 	// RemoveDependencyInTx records a dependency_removed event on the source's
 	// event table only for a genuine emit (explicit verb + edge removal); stage
 	// it so it commits with the edge. A structural or missing-edge remove writes
 	// no event.
-	if eventWritten {
+	if result.EventWritten {
 		t.dirty.MarkDirty(eventTable)
 	}
 	return nil
@@ -236,9 +244,14 @@ func (t *embeddedTransaction) GetDependencyRecords(ctx context.Context, issueID 
 
 func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
-	if err := issueops.AddLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+	changed, err := issueops.AddLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor)
+	if err != nil {
 		return err
 	}
+	if !changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
 	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
 	return nil
@@ -246,12 +259,24 @@ func (t *embeddedTransaction) AddLabel(ctx context.Context, issueID, label, acto
 
 func (t *embeddedTransaction) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	_, labelTable, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, issueID))
-	if err := issueops.RemoveLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor); err != nil {
+	changed, err := issueops.RemoveLabelInTx(ctx, t.tx, labelTable, eventTable, issueID, label, actor)
+	if err != nil {
 		return err
 	}
+	if !changed {
+		return nil
+	}
+	t.dirty.MarkDirty(issueTableForLabelTable(labelTable))
 	t.dirty.MarkDirty(labelTable)
 	t.dirty.MarkDirty(eventTable)
 	return nil
+}
+
+func issueTableForLabelTable(labelTable string) string {
+	if labelTable == "wisp_labels" {
+		return "wisps"
+	}
+	return "issues"
 }
 
 func (t *embeddedTransaction) GetLabels(ctx context.Context, issueID string) ([]string, error) {

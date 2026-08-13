@@ -59,8 +59,7 @@ var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 
 // auxOrExemptMarkers identify a matched write that legitimately does NOT stamp
 // row_lock. The exemption set is main's freshRowLock invariant (lease.go):
-// row_lock guards status/assignee/started_at against the reclaim/close races,
-// and paths touching only orthogonal cells are safe to merge with a reclaim.
+// row_lock guards the complete user-authored aggregate against stale writes.
 //
 //   - is_blocked: the denormalized is_blocked recompute deliberately preserves
 //     updated_at (blocked_state.go x4, dependencies.go, domain/db/dependency.go)
@@ -70,14 +69,6 @@ var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 //     (The PR's other exemption, the lease heartbeat, is moot on main: since
 //     bd-lrgn1 heartbeats live entirely in the ephemeral leases table and never
 //     touch the issues row.)
-//   - "compaction_level = ": compaction apply/restore rewrites bookkeeping and
-//     compacted body text only — cells the reclaim/close races don't care
-//     about, exempted by name in the freshRowLock invariant. The assignment
-//     form (not the bare column name) keeps the create INSERT, whose column
-//     list also names compaction_level, checkable.
-//   - "SET id = ?": rename (updateIssueIDInTx/updateWispIDInTx) is the only
-//     writer of the primary key, exempted by name in the freshRowLock
-//     invariant.
 //   - "SELECT %s FROM": the persistence move's fully-templated aux-table copy
 //     (INSERT INTO %s (%s) SELECT %s FROM %s ...) — it copies snapshot/event
 //     side tables verbatim; the issues/wisps row itself is re-inserted through
@@ -100,15 +91,13 @@ var sqlWriteKeywordRe = regexp.MustCompile(`(?i)\b(?:SET|VALUES|SELECT)\b`)
 // status in the same statement as an is_blocked-marked WHERE predicate must
 // still stamp. See setClauseAssignsLifecycleField.
 var auxOrExemptMarkers = []string{
-	"is_blocked",          // is_blocked recompute (exempt by design)
-	"compaction_level = ", // compaction bookkeeping/restore (exempt by design)
-	"SET id = ?",          // rename: primary-key rewrite (exempt by design)
-	"SELECT %s FROM",      // persistence move's verbatim aux-table copy
-	"issue_id",            // events / dependencies / comments / snapshots FK
-	"depends_on",          // dependency edge + retarget writes
-	"parent_id",           // child_counters
-	"last_child",          // child_counters
-	"event_type",          // events / wisp_events
+	"is_blocked",     // is_blocked recompute (exempt by design)
+	"SELECT %s FROM", // persistence move's verbatim aux-table copy
+	"issue_id",       // events / dependencies / comments / snapshots FK
+	"depends_on",     // dependency edge + retarget writes
+	"parent_id",      // child_counters
+	"last_child",     // child_counters
+	"event_type",     // events / wisp_events
 }
 
 // funcNameExemptions are functions whose issues/wisps write is deliberately
@@ -141,22 +130,14 @@ var funcNameExemptions = map[string]string{
 	"resolveOneConflictRow": "whole-row `theirs` adoption: the adopted row_lock already vouches for the (identical) adopted content",
 }
 
-// TestAllIssueRowWritesStampRowLock is the load-bearing completeness guard for
-// the freshRowLock invariant: it proves, at build time, that EVERY issues/wisps
-// row write across both whole-row write stacks (issueops and the proxied
-// internal/storage/domain/db) either stamps a fresh row_lock or matches a
-// documented exemption. A forgotten write path is a test failure, catching an
-// accidental reintroduction of the zombie-merge bug before it ships.
+// TestAllIssueRowWritesStampRowLock is the source-completeness guard for the
+// packages it inventories: every issues/wisps SQL write in issueops,
+// domain/db, and versioncontrolops either stamps row_lock or matches the single
+// reviewed whole-row-adoption exemption below. Behavioral backend tests cover
+// orchestration outside these SQL-owning packages.
 //
-// This does not mean every documented exemption is itself free of a stale-CAS
-// hole in RowVersion — two of them knowingly are one: compaction rewrites
-// bookkeeping and compacted body text while deliberately preserving row_lock
-// (documented at storage.go:319-325, the same "lifecycle/ownership only"
-// contract this guard enforces), and a rename (updateIssueIDInTx) changes the
-// primary key without reminting the old row's token — but that is safe by
-// construction: the CAS predicate is keyed on id, so a stale ExpectedVersion
-// read against the pre-rename id matches no row at all rather than winning
-// against renamed content.
+// Auxiliary-table writers are covered behaviorally by the aggregate revision
+// mutation matrix because their SQL does not target issues/wisps directly.
 func TestAllIssueRowWritesStampRowLock(t *testing.T) {
 	// versioncontrolops is included alongside issueops and the proxied
 	// domain/db: it writes issues/wisps rows too, both from automerge's
@@ -194,6 +175,62 @@ func TestAllIssueRowWritesStampRowLock(t *testing.T) {
 		t.Fatal("guard verified zero issue-table writes — the scan regex or directory set is wrong")
 	}
 	t.Logf("verified %d issues/wisps row writes across both stacks stamp row_lock", checked)
+}
+
+// TestAllAuxiliaryAggregateWritersTouchRowVersion complements the SQL-row scan
+// above by pinning the known SQL-owning chokepoints for labels, comments and
+// dependency edges. It is an explicit inventory, not discovery of future
+// writers; the real-backend mutation matrix provides the supported-surface
+// check. Design adapted from Julian Knutsen's completeness guards in
+// gastownhall/beads#4682 and #4697.
+func TestAllAuxiliaryAggregateWritersTouchRowVersion(t *testing.T) {
+	writers := map[string][]string{
+		"labels.go":       {"AddLabelInTx", "RemoveLabelInTx"},
+		"comments.go":     {"addIssueCommentInTx", "AddCommentEventInTx"},
+		"dependencies.go": {"addDependencyInTx", "removeDependencyInTx"},
+		filepath.Join("..", "domain", "db", "label.go"):      {"Insert", "Delete"},
+		filepath.Join("..", "domain", "db", "comment.go"):    {"InsertRecord"},
+		filepath.Join("..", "domain", "db", "dependency.go"): {"Insert", "Delete"},
+	}
+	for path, names := range writers {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, src, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		for _, name := range names {
+			var found, touched bool
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Name.Name != name || fn.Body == nil {
+					continue
+				}
+				found = true
+				ast.Inspect(fn.Body, func(node ast.Node) bool {
+					call, ok := node.(*ast.CallExpr)
+					if !ok {
+						return true
+					}
+					switch callee := call.Fun.(type) {
+					case *ast.Ident:
+						touched = callee.Name == "TouchRowVersionInTx" || touched
+					case *ast.SelectorExpr:
+						touched = callee.Sel.Name == "TouchRowVersionInTx" || touched
+					}
+					return true
+				})
+			}
+			if !found {
+				t.Errorf("%s: aggregate writer %s not found; update the completeness inventory", path, name)
+			} else if !touched {
+				t.Errorf("%s: aggregate writer %s does not touch RowVersion", path, name)
+			}
+		}
+	}
 }
 
 // scanIssueWriteRowLockStamps parses one Go source file and returns the number
@@ -258,8 +295,14 @@ func scanIssueWriteRowLockStamps(t *testing.T, path string, src []byte) (checked
 				continue
 			}
 
-			if hasAnyMarker(stmt, auxOrExemptMarkers) && !setClauseAssignsLifecycleField(stmt) {
-				continue // auxiliary table or documented exemption: no stamp
+			if hasAnyMarker(stmt, auxOrExemptMarkers) {
+				// Auxiliary-table markers are definitive because issues/wisps do
+				// not have those columns. is_blocked is different: it exists on the
+				// aggregate row and exempts only derived-cache-only SET clauses.
+				isBlockedMarker := strings.Contains(strings.ToLower(stmt), "is_blocked")
+				if !isBlockedMarker || !setClauseAssignsLifecycleField(stmt) {
+					continue
+				}
 			}
 			checked++
 
@@ -310,20 +353,14 @@ func setClause(stmt string) string {
 	return clause
 }
 
-// lifecycleFieldAssignRe matches an assignment to one of the three columns
-// the freshRowLock invariant (lease.go) exists to guard: status, assignee,
-// started_at (see storage.go's ExpectedVersion doc). A write assigning any of
-// these must stamp row_lock regardless of an aux/exempt marker matched
-// elsewhere in the statement.
-var lifecycleFieldAssignRe = regexp.MustCompile(`(?i)\b(?:status|assignee|started_at)\s*=`)
+// lifecycleFieldAssignRe includes scalar aggregate columns that could otherwise
+// hide behind an is_blocked marker in the WHERE clause. The historical name is
+// retained to keep this adversarial guard's helper churn small.
+var lifecycleFieldAssignRe = regexp.MustCompile(`(?i)\b(?:title|description|design|acceptance_criteria|notes|status|priority|issue_type|assignee|owner|estimated_minutes|created_at|closed_at|close_reason|closed_by_session|due_at|defer_until|started_at|external_ref|source_repo|metadata|parent_id|compaction_level|compacted_at|compacted_at_commit|original_size|id)\s*=`)
 
 // setClauseAssignsLifecycleField reports whether stmt's SET clause (not its
-// WHERE predicate) assigns status, assignee, or started_at. Used to refuse an
-// aux/exempt marker match outright when the write is really a lifecycle
-// write that merely happens to share a marker word — e.g. a hypothetical
-// `UPDATE issues SET status = ?, assignee = NULL WHERE is_blocked = 0` must
-// not be waved through by the is_blocked marker just because that word
-// appears in WHERE.
+// WHERE predicate) assigns user-authored aggregate content. Used to refuse an
+// is_blocked exemption when that marker merely occurs in a WHERE predicate.
 func setClauseAssignsLifecycleField(stmt string) bool {
 	return lifecycleFieldAssignRe.MatchString(setClause(stmt))
 }
@@ -557,6 +594,14 @@ func w(tx T, id, s string) {
 }`)
 	if n, v := scanIssueWriteRowLockStamps(t, "lifecycle.go", lifecycleEscapeAttempt); n != 1 || len(v) != 1 {
 		t.Errorf("lifecycle write behind an is_blocked WHERE marker: got checked=%d violations=%d; want checked=1 violations=1 (a marker in WHERE must not exempt a SET that assigns status/assignee/started_at)", n, len(v))
+	}
+
+	contentEscapeAttempt := []byte(`package p
+func w(tx T, id, title string) {
+	tx.ExecContext(ctx, "UPDATE issues SET title = ? WHERE is_blocked = 0", title, id)
+}`)
+	if n, v := scanIssueWriteRowLockStamps(t, "content.go", contentEscapeAttempt); n != 1 || len(v) != 1 {
+		t.Errorf("content write behind an is_blocked WHERE marker: got checked=%d violations=%d; want checked=1 violations=1", n, len(v))
 	}
 
 	// finding 3: the stamp check used to be computed once per FUNCTION, so an
