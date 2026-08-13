@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -98,6 +99,9 @@ func TestFindBeadsDir(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
 		t.Fatalf("write metadata: %v", err)
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("BEADS_DIR canonicalization test requires symlink support")
 	}
 	beadsDirLink := filepath.Join(root, "beads-link")
 	if err := os.Symlink(beadsDir, beadsDirLink); err != nil {
