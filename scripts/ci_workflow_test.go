@@ -60,6 +60,44 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowExercisesInitGatewayCredentialOnWindows(t *testing.T) {
+	const (
+		jobName     = "test-windows-liveness"
+		stepCommand = "go test -tags gms_pure_go -count=1 -run '^TestApplyInitGatewayCredential' ./cmd/bd"
+		gateKey     = "TEST_WINDOWS_LIVENESS"
+	)
+
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.RunsOn != "windows-latest" {
+		t.Errorf("native Windows process job runner = %q, want windows-latest", job.RunsOn)
+	}
+	if job.If != "" || job.ContinueOnError {
+		t.Errorf("native Windows process job is bypassable: if=%q continue-on-error=%v", job.If, job.ContinueOnError)
+	}
+	matchingSteps := 0
+	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) != stepCommand {
+			continue
+		}
+		matchingSteps++
+		if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+			t.Errorf("gateway credential step is bypassable: if=%q continue-on-error=%v", step.If, step.ContinueOnError)
+		}
+	}
+	if matchingSteps != 1 {
+		t.Fatalf("native Windows process job has %d exact gateway credential commands, want 1", matchingSteps)
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, jobName) || gateEnv[gateKey] != "${{ needs.test-windows-liveness.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate does not require the native Windows process lane: needs=%v %s=%q required=%q",
+			gate.Needs, gateKey, gateEnv[gateKey], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")

@@ -250,13 +250,12 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
-  # The lingering-handle liveness regression test is //go:build windows: the
-  # Ubuntu job above selects it by name but compiles it out, and main.yml's
-  # Windows job runs only on pushes to main (build/smoke, no go test). Run
-  # exactly the liveness pair on windows-latest so the regression guard
-  # actually executes at PR time.
+  # Native Windows cmd/bd process regressions are not exercised by the Linux
+  # package lane, and main.yml's Windows job runs only on pushes to main
+  # (build/smoke, no go test). Keep the focused liveness and gateway credential
+  # boundaries required at PR time.
   test-windows-liveness:
-    name: Test (Windows) cmd/bd liveness regression
+    name: Test (Windows) cmd/bd process regressions
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -270,6 +269,9 @@ jobs:
 
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
+
+      - name: Run init gateway credential fixture
+        run: go test -tags gms_pure_go -count=1 -run '^TestApplyInitGatewayCredential' ./cmd/bd
 
   # internal/doltversion carries Windows-specific branches (PATHEXT
   # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
