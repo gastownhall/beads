@@ -74,6 +74,9 @@ func TestOpen(t *testing.T) {
 func TestFindDatabasePath(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "beads.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("create BEADS_DB path: %v", err)
+	}
 	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DB", path)
 
