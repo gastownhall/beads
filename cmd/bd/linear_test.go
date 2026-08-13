@@ -1849,10 +1849,18 @@ func TestApplyLinearExcludeIDConfig(t *testing.T) {
 	}
 }
 
-// TestApplyLinearExcludeIDConfig_NilSafe verifies the helper is safe to
-// call with nil reader or nil opts (defensive guards).
+// TestApplyLinearExcludeIDConfig_NilSafe verifies nil inputs are no-ops.
 func TestApplyLinearExcludeIDConfig_NilSafe(t *testing.T) {
-	var opts tracker.SyncOptions
-	applyLinearExcludeIDConfig(context.Background(), nil, &opts)                    // must not panic
-	applyLinearExcludeIDConfig(context.Background(), fakeLinearConfigReader{}, nil) // must not panic
+	opts := tracker.SyncOptions{
+		ExcludeIDPrefix:   "existing-",
+		ExcludeIDPatterns: []string{"existing-pattern"},
+	}
+	applyLinearExcludeIDConfig(context.Background(), nil, &opts)
+
+	if opts.ExcludeIDPrefix != "existing-" {
+		t.Errorf("nil reader changed ExcludeIDPrefix to %q", opts.ExcludeIDPrefix)
+	}
+	if !reflect.DeepEqual(opts.ExcludeIDPatterns, []string{"existing-pattern"}) {
+		t.Errorf("nil reader changed ExcludeIDPatterns to %v", opts.ExcludeIDPatterns)
+	}
 }

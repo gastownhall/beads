@@ -72,17 +72,28 @@ func TestOpen(t *testing.T) {
 }
 
 func TestFindDatabasePath(t *testing.T) {
-	// This will return empty string in test environment without a database
-	path := beads.FindDatabasePath()
-	// Just verify it doesn't panic
-	_ = path
+	path := filepath.Join(t.TempDir(), "beads.db")
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DB", path)
+
+	if got := beads.FindDatabasePath(); got != path {
+		t.Errorf("FindDatabasePath() = %q, want BEADS_DB path %q", got, path)
+	}
 }
 
 func TestFindBeadsDir(t *testing.T) {
-	// This will return empty string or a valid path
-	dir := beads.FindBeadsDir()
-	// Just verify it doesn't panic
-	_ = dir
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create beads directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+
+	if got := beads.FindBeadsDir(); got != beadsDir {
+		t.Errorf("FindBeadsDir() = %q, want BEADS_DIR %q", got, beadsDir)
+	}
 }
 
 func TestOpenFromConfig_Embedded(t *testing.T) {

@@ -334,7 +334,6 @@ func TestRemoteApplyResultUsesSuccessfulRemoteRecheck(t *testing.T) {
 }
 
 func TestPrintApplyResults(t *testing.T) {
-	// Smoke test — just ensure no panic
 	results := []ApplyResult{
 		{Check: "hooks", Action: "none", Status: applyStatusOK, Message: "up to date"},
 		{Check: "remote", Action: "add_remote", Status: applyStatusApplied, Message: "added"},
@@ -342,12 +341,31 @@ func TestPrintApplyResults(t *testing.T) {
 		{Check: "hooks", Action: "reinstall", Status: applyStatusDryRun, Message: "would reinstall"},
 		{Check: "remote", Action: "none", Status: applyStatusSkipped, Message: "skipped"},
 	}
-	// Redirect stdout to avoid test noise
-	old := os.Stdout
-	os.Stdout, _ = os.Open(os.DevNull)
-	defer func() { os.Stdout = old }()
-	printApplyResults(results)
-	printApplyResults(nil)
+
+	output := captureStdout(t, func() error {
+		printApplyResults(results)
+		return nil
+	})
+	for _, want := range []string{
+		"✓ hooks: up to date",
+		"✓ remote: added",
+		"✗ server: failed",
+		"error: no dolt",
+		"~ hooks: would reinstall",
+		"– remote: skipped",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("printApplyResults() output = %q, want substring %q", output, want)
+		}
+	}
+
+	emptyOutput := captureStdout(t, func() error {
+		printApplyResults(nil)
+		return nil
+	})
+	if emptyOutput != "No actions to apply\n" {
+		t.Errorf("printApplyResults(nil) = %q, want %q", emptyOutput, "No actions to apply\\n")
+	}
 }
 
 // fakeOriginRemoteEvidence simulates the two evidence sources

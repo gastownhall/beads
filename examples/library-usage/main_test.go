@@ -121,24 +121,45 @@ func TestExampleCompiles(t *testing.T) {
 	t.Log("✅ All example operations work correctly")
 }
 
-// TestDependencyConstants ensures all constants are accessible
+// TestDependencyConstants ensures the example's public constants retain their
+// documented wire values.
 func TestDependencyConstants(t *testing.T) {
-	// Test that all constants from the example are accessible
-	_ = beads.StatusOpen
-	_ = beads.StatusInProgress
-	_ = beads.StatusClosed
-	_ = beads.StatusBlocked
+	statuses := map[beads.Status]string{
+		beads.StatusOpen:       "open",
+		beads.StatusInProgress: "in_progress",
+		beads.StatusClosed:     "closed",
+		beads.StatusBlocked:    "blocked",
+	}
+	for got, want := range statuses {
+		if string(got) != want {
+			t.Errorf("status constant = %q, want %q", got, want)
+		}
+	}
 
-	_ = beads.TypeBug
-	_ = beads.TypeFeature
-	_ = beads.TypeTask
-	_ = beads.TypeEpic
-	_ = beads.TypeChore
+	issueTypes := map[beads.IssueType]string{
+		beads.TypeBug:     "bug",
+		beads.TypeFeature: "feature",
+		beads.TypeTask:    "task",
+		beads.TypeEpic:    "epic",
+		beads.TypeChore:   "chore",
+	}
+	for got, want := range issueTypes {
+		if string(got) != want {
+			t.Errorf("issue type constant = %q, want %q", got, want)
+		}
+	}
 
-	_ = beads.DepBlocks
-	_ = beads.DepRelated
-	_ = beads.DepParentChild
-	_ = beads.DepDiscoveredFrom
+	dependencyTypes := map[beads.DependencyType]string{
+		beads.DepBlocks:         "blocks",
+		beads.DepRelated:        "related",
+		beads.DepParentChild:    "parent-child",
+		beads.DepDiscoveredFrom: "discovered-from",
+	}
+	for got, want := range dependencyTypes {
+		if string(got) != want {
+			t.Errorf("dependency type constant = %q, want %q", got, want)
+		}
+	}
 }
 
 // TestFindDatabasePath tests database discovery

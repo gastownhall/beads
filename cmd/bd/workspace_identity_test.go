@@ -1,25 +1,27 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"testing"
 )
 
 func TestValidateWorkspaceIdentity_NilStore(t *testing.T) {
-	// When store is nil, validateWorkspaceIdentity should be a no-op
-	// (no panic, no os.Exit)
 	origStore := store
 	store = nil
-	defer func() { store = nil; store = origStore }()
+	t.Cleanup(func() { store = origStore })
 
-	validateWorkspaceIdentity(nil, "/nonexistent")
-	// If we got here, no os.Exit was called — pass
+	if err := validateWorkspaceIdentity(context.Background(), filepath.Join(t.TempDir(), ".beads")); err != nil {
+		t.Errorf("validateWorkspaceIdentity() with nil store = %v, want nil", err)
+	}
 }
 
 func TestValidateWorkspaceIdentity_NonexistentDir(t *testing.T) {
-	// When beadsDir doesn't exist, configfile.Load fails and we skip validation
 	origStore := store
 	store = nil
-	defer func() { store = origStore }()
+	t.Cleanup(func() { store = origStore })
 
-	validateWorkspaceIdentity(nil, "/nonexistent/path/that/does/not/exist")
+	if err := validateWorkspaceIdentity(context.Background(), filepath.Join(t.TempDir(), "missing", ".beads")); err != nil {
+		t.Errorf("validateWorkspaceIdentity() with no config = %v, want nil", err)
+	}
 }

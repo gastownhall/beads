@@ -1,7 +1,7 @@
 package main
 
 import (
-	"os"
+	"strings"
 	"testing"
 )
 
@@ -137,20 +137,23 @@ func TestCheckConfigUnsetSideEffects_UnknownKey(t *testing.T) {
 }
 
 func TestPrintConfigSideEffects(t *testing.T) {
-	// Redirect stderr to avoid test noise
-	old := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-	defer func() { w.Close(); r.Close(); os.Stderr = old }()
+	if output := captureStderr(t, func() { printConfigSideEffects(nil) }); output != "" {
+		t.Errorf("printConfigSideEffects(nil) = %q, want no output", output)
+	}
 
-	// Should not panic with empty, single, or multiple effects
-	printConfigSideEffects(nil)
-	printConfigSideEffects([]configSideEffect{})
-	printConfigSideEffects([]configSideEffect{
-		{Message: "test hint", Command: "bd test"},
+	output := captureStderr(t, func() {
+		printConfigSideEffects([]configSideEffect{
+			{Message: "no command hint"},
+			{Message: "with command", Command: "bd apply"},
+		})
 	})
-	printConfigSideEffects([]configSideEffect{
-		{Message: "no command hint"},
-		{Message: "with command", Command: "bd apply"},
-	})
+	for _, want := range []string{
+		"Hint: no command hint",
+		"Hint: with command",
+		"→ bd apply",
+	} {
+		if !strings.Contains(output, want) {
+			t.Errorf("printConfigSideEffects() output = %q, want substring %q", output, want)
+		}
+	}
 }

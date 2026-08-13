@@ -1,8 +1,10 @@
 package main
 
 import (
+	"os/exec"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -27,10 +29,30 @@ func TestIsNumericID_EdgeCases(t *testing.T) {
 	}
 }
 
-func TestGetWorktreeGitDir(_ *testing.T) {
-	gitDir := getWorktreeGitDir()
-	// Just verify it doesn't panic and returns a string
-	_ = gitDir
+func TestGetWorktreeGitDir(t *testing.T) {
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	t.Chdir(t.TempDir())
+
+	if got := getWorktreeGitDir(); got != "" {
+		t.Errorf("getWorktreeGitDir() = %q outside a git repository, want empty", got)
+	}
+}
+
+func TestGetWorktreeGitDirInRepository(t *testing.T) {
+	git.ResetCaches()
+	t.Cleanup(git.ResetCaches)
+	repo := t.TempDir()
+	cmd := exec.Command("git", "init", "-q")
+	cmd.Dir = repo
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init: %v\n%s", err, output)
+	}
+	t.Chdir(repo)
+
+	if got := getWorktreeGitDir(); got != ".git" {
+		t.Errorf("getWorktreeGitDir() = %q, want .git", got)
+	}
 }
 
 func TestExtractPrefix(t *testing.T) {
