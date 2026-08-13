@@ -43,6 +43,10 @@ type listInput struct {
 func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in := listInput{}
 
+	// The custom filter values persist across in-process Execute() calls;
+	// clear them once this read has copied them out.
+	defer resetListFilterFlags()
+
 	in.Status, _ = cmd.Flags().GetString("status")
 	if in.Status == "" {
 		in.Status, _ = cmd.Flags().GetString("state")

@@ -185,6 +185,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd list` no longer silently drops all but the last repeated filter flag.**
+  `--status`, `--state`, and `--id` were plain string flags, so
+  `bd list --status open --status closed --status pinned` kept only `pinned` —
+  a census over 477 issues quietly answered over 3, with nothing in the output
+  to distinguish the narrowed answer from a correct one. Repeats of those three
+  flags now union with the comma form (`--status open --status closed` ≡
+  `--status open,closed`). `--type` and `--assignee` are single-valued all the
+  way down — unioning would fail type validation or exact-match nobody — so a
+  repeat of either now refuses loudly instead of silently keeping the last
+  value: `--type given more than once (already "bug"); pass a single value`.
+  Single-flag and comma-form spellings behave exactly as before.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session
