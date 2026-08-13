@@ -470,7 +470,7 @@ jobs:
           restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
 
       - name: Exercise native date and Bash process boundary
-        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestDocFreshness' ./scripts
+        run: go test '-tags=integration,gms_pure_go' -count=1 -run '^(TestDocFreshness.*|TestRequiredSuiteContract)$' ./scripts -args -required-suite=doc-freshness
 
       - name: Exercise repository text EOL policy boundary
         run: go test '-tags=integration,gms_pure_go' -count=1 ./scripts/gitattributespolicy -args -required-host -expected-goos '${{ matrix.expected_goos }}'
