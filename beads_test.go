@@ -82,21 +82,22 @@ func TestFindDatabasePath(t *testing.T) {
 }
 
 func TestFindBeadsDir(t *testing.T) {
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, "real", ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatalf("create beads directory: %v", err)
 	}
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt"}`), 0o600); err != nil {
 		t.Fatalf("write metadata: %v", err)
 	}
-	t.Setenv("BEADS_DIR", beadsDir)
-
-	want, err := filepath.EvalSymlinks(beadsDir)
-	if err != nil {
-		t.Fatalf("canonicalize BEADS_DIR: %v", err)
+	beadsDirLink := filepath.Join(root, "beads-link")
+	if err := os.Symlink(beadsDir, beadsDirLink); err != nil {
+		t.Fatalf("link beads directory: %v", err)
 	}
-	if got := beads.FindBeadsDir(); got != want {
-		t.Errorf("FindBeadsDir() = %q, want canonical BEADS_DIR %q", got, want)
+	t.Setenv("BEADS_DIR", beadsDirLink)
+
+	if got := beads.FindBeadsDir(); got != beadsDir {
+		t.Errorf("FindBeadsDir() = %q, want canonical BEADS_DIR %q", got, beadsDir)
 	}
 }
 
