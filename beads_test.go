@@ -72,12 +72,18 @@ func TestOpen(t *testing.T) {
 }
 
 func TestFindDatabasePath(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "beads.db")
+	dir := t.TempDir()
+	path := filepath.Join(dir, "beads.db")
 	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BEADS_DB", path)
 
-	if got := beads.FindDatabasePath(); got != path {
-		t.Errorf("FindDatabasePath() = %q, want BEADS_DB path %q", got, path)
+	canonicalDir, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatalf("canonicalize BEADS_DB parent: %v", err)
+	}
+	want := filepath.Join(canonicalDir, "beads.db")
+	if got := beads.FindDatabasePath(); got != want {
+		t.Errorf("FindDatabasePath() = %q, want canonical BEADS_DB path %q", got, want)
 	}
 }
 
@@ -96,8 +102,12 @@ func TestFindBeadsDir(t *testing.T) {
 	}
 	t.Setenv("BEADS_DIR", beadsDirLink)
 
-	if got := beads.FindBeadsDir(); got != beadsDir {
-		t.Errorf("FindBeadsDir() = %q, want canonical BEADS_DIR %q", got, beadsDir)
+	want, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatalf("canonicalize real BEADS_DIR: %v", err)
+	}
+	if got := beads.FindBeadsDir(); got != want {
+		t.Errorf("FindBeadsDir() = %q, want canonical BEADS_DIR %q", got, want)
 	}
 }
 
