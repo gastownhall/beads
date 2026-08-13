@@ -48,6 +48,11 @@ func TestGetWorktreeGitDirInRepository(t *testing.T) {
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git init: %v\n%s", err, output)
 	}
+	cmd = exec.Command("git", "config", "core.hooksPath", ".git/hooks")
+	cmd.Dir = repo
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("configure repository-local hooks: %v\n%s", err, output)
+	}
 	t.Chdir(repo)
 
 	if got := getWorktreeGitDir(); got != ".git" {

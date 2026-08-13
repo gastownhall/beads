@@ -1780,6 +1780,15 @@ func (f fakeLinearConfigReader) GetConfig(_ context.Context, key string) (string
 	return f[key], nil
 }
 
+type countingLinearConfigReader struct {
+	calls int
+}
+
+func (f *countingLinearConfigReader) GetConfig(context.Context, string) (string, error) {
+	f.calls++
+	return "", nil
+}
+
 // TestApplyLinearExcludeIDConfig covers the bd-ee0 config-read path that
 // wires linear.exclude_id_prefix / linear.exclude_id_patterns into
 // SyncOptions. The engine-side filter behavior (applying the rules to
@@ -1851,16 +1860,27 @@ func TestApplyLinearExcludeIDConfig(t *testing.T) {
 
 // TestApplyLinearExcludeIDConfig_NilSafe verifies nil inputs are no-ops.
 func TestApplyLinearExcludeIDConfig_NilSafe(t *testing.T) {
-	opts := tracker.SyncOptions{
-		ExcludeIDPrefix:   "existing-",
-		ExcludeIDPatterns: []string{"existing-pattern"},
-	}
-	applyLinearExcludeIDConfig(context.Background(), nil, &opts)
+	t.Run("nil reader preserves options", func(t *testing.T) {
+		opts := tracker.SyncOptions{
+			ExcludeIDPrefix:   "existing-",
+			ExcludeIDPatterns: []string{"existing-pattern"},
+		}
+		applyLinearExcludeIDConfig(context.Background(), nil, &opts)
 
-	if opts.ExcludeIDPrefix != "existing-" {
-		t.Errorf("nil reader changed ExcludeIDPrefix to %q", opts.ExcludeIDPrefix)
-	}
-	if !reflect.DeepEqual(opts.ExcludeIDPatterns, []string{"existing-pattern"}) {
-		t.Errorf("nil reader changed ExcludeIDPatterns to %v", opts.ExcludeIDPatterns)
-	}
+		if opts.ExcludeIDPrefix != "existing-" {
+			t.Errorf("nil reader changed ExcludeIDPrefix to %q", opts.ExcludeIDPrefix)
+		}
+		if !reflect.DeepEqual(opts.ExcludeIDPatterns, []string{"existing-pattern"}) {
+			t.Errorf("nil reader changed ExcludeIDPatterns to %v", opts.ExcludeIDPatterns)
+		}
+	})
+
+	t.Run("nil options do not query reader", func(t *testing.T) {
+		reader := &countingLinearConfigReader{}
+		applyLinearExcludeIDConfig(context.Background(), reader, nil)
+
+		if reader.calls != 0 {
+			t.Errorf("nil options queried config reader %d times, want 0", reader.calls)
+		}
+	})
 }

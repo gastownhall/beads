@@ -124,41 +124,31 @@ func TestExampleCompiles(t *testing.T) {
 // TestDependencyConstants ensures the example's public constants retain their
 // documented wire values.
 func TestDependencyConstants(t *testing.T) {
-	statuses := map[beads.Status]string{
-		beads.StatusOpen:       "open",
-		beads.StatusInProgress: "in_progress",
-		beads.StatusClosed:     "closed",
-		beads.StatusBlocked:    "blocked",
+	tests := []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"StatusOpen", string(beads.StatusOpen), "open"},
+		{"StatusInProgress", string(beads.StatusInProgress), "in_progress"},
+		{"StatusClosed", string(beads.StatusClosed), "closed"},
+		{"StatusBlocked", string(beads.StatusBlocked), "blocked"},
+		{"TypeBug", string(beads.TypeBug), "bug"},
+		{"TypeFeature", string(beads.TypeFeature), "feature"},
+		{"TypeTask", string(beads.TypeTask), "task"},
+		{"TypeEpic", string(beads.TypeEpic), "epic"},
+		{"TypeChore", string(beads.TypeChore), "chore"},
+		{"DepBlocks", string(beads.DepBlocks), "blocks"},
+		{"DepRelated", string(beads.DepRelated), "related"},
+		{"DepParentChild", string(beads.DepParentChild), "parent-child"},
+		{"DepDiscoveredFrom", string(beads.DepDiscoveredFrom), "discovered-from"},
 	}
-	for got, want := range statuses {
-		if string(got) != want {
-			t.Errorf("status constant = %q, want %q", got, want)
-		}
-	}
-
-	issueTypes := map[beads.IssueType]string{
-		beads.TypeBug:     "bug",
-		beads.TypeFeature: "feature",
-		beads.TypeTask:    "task",
-		beads.TypeEpic:    "epic",
-		beads.TypeChore:   "chore",
-	}
-	for got, want := range issueTypes {
-		if string(got) != want {
-			t.Errorf("issue type constant = %q, want %q", got, want)
-		}
-	}
-
-	dependencyTypes := map[beads.DependencyType]string{
-		beads.DepBlocks:         "blocks",
-		beads.DepRelated:        "related",
-		beads.DepParentChild:    "parent-child",
-		beads.DepDiscoveredFrom: "discovered-from",
-	}
-	for got, want := range dependencyTypes {
-		if string(got) != want {
-			t.Errorf("dependency type constant = %q, want %q", got, want)
-		}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.got != tt.want {
+				t.Errorf("constant = %q, want %q", tt.got, tt.want)
+			}
+		})
 	}
 }
 

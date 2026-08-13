@@ -1,6 +1,7 @@
 package storage_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 
@@ -52,6 +53,37 @@ func TestNewHookFiringStoreNilRunnerPreservesWrappedStore(t *testing.T) {
 	}
 	if got := wrapped.Unwrap(); got != raw {
 		t.Errorf("NewHookFiringStore(...).Unwrap() = %T, want original store %T", got, raw)
+	}
+}
+
+type transactionRecordingStore struct {
+	storage.DoltStorage
+	commitMessage string
+	callbackRan   bool
+}
+
+func (s *transactionRecordingStore) RunInTransaction(_ context.Context, commitMessage string, fn func(storage.Transaction) error) error {
+	s.commitMessage = commitMessage
+	s.callbackRan = true
+	return fn(nil)
+}
+
+func TestHookFiringStoreNilRunnerDelegatesTransaction(t *testing.T) {
+	raw := &transactionRecordingStore{}
+	wrapped := storage.NewHookFiringStore(raw, nil)
+
+	callbackRan := false
+	if err := wrapped.RunInTransaction(context.Background(), "test transaction", func(storage.Transaction) error {
+		callbackRan = true
+		return nil
+	}); err != nil {
+		t.Fatalf("RunInTransaction() = %v", err)
+	}
+	if !raw.callbackRan || !callbackRan {
+		t.Error("RunInTransaction() did not invoke the wrapped store and callback")
+	}
+	if raw.commitMessage != "test transaction" {
+		t.Errorf("wrapped transaction message = %q, want %q", raw.commitMessage, "test transaction")
 	}
 }
 
