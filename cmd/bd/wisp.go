@@ -808,7 +808,9 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	for i, issue := range abandoned {
 		ids[i] = issue.ID
 	}
-	if err := deleteBatch(nil, ids, true, false, true, jsonOutput, false, "wisp gc"); err != nil {
+	// findAbandonedWisps already expanded the cascade under the --age contract;
+	// re-cascading at delete time would sweep fresh children past that filter.
+	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
 	return nil
@@ -885,6 +887,10 @@ func findAbandonedWisps(ctx context.Context, r molReader, cleanAll bool, ageThre
 					continue
 				}
 				if isProtectedWisp(child, blockedSet, protectedStatuses) {
+					continue
+				}
+				// Children are held to the same --age contract as parents.
+				if now.Sub(child.UpdatedAt) <= ageThreshold {
 					continue
 				}
 				abandoned = append(abandoned, child)
