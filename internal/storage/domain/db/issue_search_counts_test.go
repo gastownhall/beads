@@ -18,6 +18,7 @@ func (s *testSuite) TestIssueSearchAcrossIssuesAndWispsWithCounts() {
 	s.Run("LimitRespected", s.searchCountsLimit)
 	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.searchCountsCollision)
 	s.Run("PredicateFormMatchesByIDsForm", s.searchCountsPredicateMatchesByIDs)
+	s.Run("PredicateFormMatchesByIDsFormOnWispPlane", s.searchCountsWispPredicateMatchesByIDs)
 }
 
 func (s *testSuite) searchCountsDepAndRDep() {
@@ -288,6 +289,48 @@ func (s *testSuite) searchCountsPredicateMatchesByIDs() {
 	s.Equal(*i.Parent, *p.Parent, "parent parity")
 	s.ElementsMatch(i.Issue.Labels, p.Issue.Labels, "labels parity")
 	s.Require().Len(p.Issue.Dependencies, len(i.Issue.Dependencies), "deps_json length parity")
+}
+
+// searchCountsWispPredicateMatchesByIDs is the wisp-plane twin of
+// searchCountsPredicateMatchesByIDs. The two forms resolve labels through
+// different tables — the wisp plane reads wisp_labels, and that unfiltered
+// join is what motivated bounding the aggregates to the driver's row set in
+// the first place (be-dlt6f: a fixed ~1.6s regardless of how narrow the search
+// was). A bound that is right on the issues plane and wrong here would leave
+// the motivating case unpinned, so assert parity on the plane that pays for it.
+func (s *testSuite) searchCountsWispPredicateMatchesByIDs() {
+	r := s.issueRepo()
+	uc := s.labelUseCase()
+
+	w := newTestIssue("bd-srxc-wpar-1", "wisp parity")
+	w.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+	s.Require().NoError(uc.AddWispLabel(s.Ctx(), "bd-srxc-wpar-1", "alpha", "tester"))
+	s.Require().NoError(uc.AddWispLabel(s.Ctx(), "bd-srxc-wpar-1", "beta", "tester"))
+
+	// Ephemeral pins both reads to the wisp plane; IDPrefix drives the
+	// predicate form (whereSQL bounds the driver, ids empty) and IDs drives
+	// the by-IDs form. Same wisp, same filter intent.
+	yes := true
+	byPredicate, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDPrefix: "bd-srxc-wpar-1", Ephemeral: &yes})
+	s.Require().NoError(err)
+	s.Require().Len(byPredicate.Items, 1)
+
+	byID, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDs: []string{"bd-srxc-wpar-1"}, Ephemeral: &yes})
+	s.Require().NoError(err)
+	s.Require().Len(byID.Items, 1)
+
+	p, i := byPredicate.Items[0], byID.Items[0]
+	// Guard the premise first: labels parity is vacuous if the reference side
+	// came back empty, which is exactly what a wisp_labels bound that dropped
+	// the row would look like.
+	s.Require().NotEmpty(i.Issue.Labels, "fixture must give the reference side wisp labels")
+	s.ElementsMatch(i.Issue.Labels, p.Issue.Labels, "wisp labels parity")
+	s.Equal(i.DependencyCount, p.DependencyCount, "dependency_count parity")
+	s.Equal(i.DependentCount, p.DependentCount, "dependent_count parity")
+	s.Equal(i.CommentCount, p.CommentCount, "comment_count parity")
 }
 
 func iwcIDs(page domain.SearchCountsPage) []string {
