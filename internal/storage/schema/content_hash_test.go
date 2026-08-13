@@ -146,6 +146,9 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 		WillReturnRows(showColumnsRows("content_hash"))
 	mock.ExpectQuery(`SHOW COLUMNS FROM ignored_schema_migrations LIKE 'content_hash'`).
 		WillReturnRows(showColumnsRows("content_hash"))
+	expectNoIDDefaultInvariantRepairSentinel(mock)
+	expectHealthyIDDefaultInvariants(mock, mainIDDefaultInvariantTables)
+	expectHealthyIDDefaultInvariants(mock, ignoredIDDefaultInvariantTables)
 	// No backfill pending (custom tables already populated).
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)

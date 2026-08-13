@@ -1491,6 +1491,25 @@ func TestCLICompatibleMigration0032UsesDirectDropColumn(t *testing.T) {
 	}
 }
 
+func TestCLICompatibleMigration0050UsesDirectInvariantDDL(t *testing.T) {
+	got := cliCompatibleMigrationSQL("0050_dependencies_deterministic_id.up.sql", "source migration")
+	for _, want := range []string{
+		"ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_issue_target",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_wisp_target",
+		"CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_external_target",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("0050 CLI migration missing %q", want)
+		}
+	}
+	for _, forbidden := range []string{"PREPARE", "EXECUTE", "DEALLOCATE"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("0050 CLI migration contains prepared-DDL marker %q", forbidden)
+		}
+	}
+}
+
 func TestCLICompatibleMigration0049UsesDirectLongtextDDL(t *testing.T) {
 	got := cliCompatibleMigrationSQL("0049_longtext_large_content_columns.up.sql", "source migration")
 	for _, want := range []string{
@@ -1534,6 +1553,7 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE schema_migrations DROP COLUMN applied_at",
 		"ALTER TABLE issues MODIFY COLUMN close_reason LONGTEXT DEFAULT ''",
 		"ALTER TABLE comments MODIFY COLUMN text LONGTEXT NOT NULL",
+		"ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1582,6 +1602,18 @@ WHERE table_schema = DATABASE()
   AND table_name = 'schema_migrations'
   AND column_name = 'applied_at'`, "schema_migrations.applied_at")
 	requireDoltFKRules(t, dir, "fk_comments_issue", "CASCADE", "CASCADE")
+	requireDoltNoRows(t, dir, `
+SELECT column_name
+FROM information_schema.columns
+WHERE table_schema = DATABASE()
+  AND table_name = 'dependencies'
+  AND column_name = 'id'
+  AND column_default IS NOT NULL`, "dependencies.id default")
+	for _, index := range []string{"uk_dep_issue_target", "uk_dep_wisp_target", "uk_dep_external_target"} {
+		requireDoltCount(t, dir,
+			fmt.Sprintf(`SELECT COUNT(DISTINCT index_name) AS c FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name = 'dependencies' AND index_name = %s`, doltSQLString(index)),
+			"1")
+	}
 	requireDoltColumnShape(t, dir, "comments", "text", "longtext", "NO")
 	requireDoltColumnShape(t, dir, "issues", "description", "longtext", "NO")
 	requireDoltColumnShape(t, dir, "wisps", "description", "longtext", "NO")
@@ -1972,6 +2004,10 @@ func TestRunMigrationsUsesProvidedSource(t *testing.T) {
 	stderr = &bytes.Buffer{}
 	defer func() { stderr = orig }()
 
+	origInvariantRepair := repairMigrationIDDefaultInvariants
+	repairMigrationIDDefaultInvariants = func(context.Context, DBConn, []string) ([]string, error) { return nil, nil }
+	defer func() { repairMigrationIDDefaultInvariants = origInvariantRepair }()
+
 	// Stub the large-rig row counter for the same reason as
 	// TestRunMigrationsStderrOutput: mockDB.QueryRowContext panics.
 	origCounter := issueRowCounter
@@ -2017,9 +2053,12 @@ func TestRunMigrationsLargeRigNoticeOnlyOnMainSource(t *testing.T) {
 	var mainBuf bytes.Buffer
 	orig := stderr
 	stderr = &mainBuf
-	// Bounded below migration 40 for the same reason as
-	// TestRunMigrationsStderrOutput: the panic-stub mock can't answer the
-	// queries versions 40/41/47/53 issue on the pinned connection.
+	origInvariantRepair := repairMigrationIDDefaultInvariants
+	repairMigrationIDDefaultInvariants = func(context.Context, DBConn, []string) ([]string, error) { return nil, nil }
+	defer func() { repairMigrationIDDefaultInvariants = origInvariantRepair }()
+
+	// Main stays bounded below migrations 40/41/47/53, whose repairs query
+	// the pinned connection.
 	if _, err := runMigrations(context.Background(), &mockDB{}, mainSource, 0, 39, false); err != nil {
 		stderr = orig
 		t.Fatalf("runMigrations(mainSource): %v", err)

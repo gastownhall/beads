@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -157,12 +158,16 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 
 	expectIgnorePatternSeed(mock, LatestVersion())
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
-	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
+	// present, schema invariants hold, and no custom backfill is pending -> no
+	// work, so MigrateUp short-circuits.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
+	expectNoIDDefaultInvariantRepairSentinel(mock)
+	expectHealthyIDDefaultInvariants(mock, mainIDDefaultInvariantTables)
+	expectHealthyIDDefaultInvariants(mock, ignoredIDDefaultInvariantTables)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// The seed inserted rows and no migration pass follows to commit them, so
@@ -202,6 +207,9 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
 	expectContentHashColumnExists(mock)
+	expectNoIDDefaultInvariantRepairSentinel(mock)
+	expectHealthyIDDefaultInvariants(mock, mainIDDefaultInvariantTables)
+	expectHealthyIDDefaultInvariants(mock, ignoredIDDefaultInvariantTables)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 
@@ -310,6 +318,9 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?)")).
 		WithArgs(sqlmock.AnyArg()).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
+	expectNoIDDefaultInvariantRepairSentinel(mock)
+	expectHealthyIDDefaultInvariants(mock, mainIDDefaultInvariantTables)
+	expectHealthyIDDefaultInvariants(mock, mainIDDefaultInvariantTables)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_types", "count", 1)
 	expectScalar(mock, "SELECT COUNT(*) FROM custom_statuses", "count", 1)
 	// rekeyDependencyIDs probes whether each edge table has an id column; this
@@ -329,6 +340,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// too, not just in migrationWorkNeeded.
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
+	expectHealthyIDDefaultInvariants(mock, ignoredIDDefaultInvariantTables)
 	expectDoltStatusRows(mock)
 	expectDoltStatusRows(mock)
 	mock.ExpectQuery("(?s)SELECT t\\.TABLE_NAME\\s+FROM INFORMATION_SCHEMA\\.TABLES t").
@@ -360,6 +372,23 @@ func expectColumnExists(mock sqlmock.Sqlmock, present bool) {
 func expectContentHashColumnExists(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery(`SHOW COLUMNS FROM \w+ LIKE 'content_hash'`).
 		WillReturnRows(showColumnsRows("content_hash"))
+}
+
+func expectNoIDDefaultInvariantRepairSentinel(mock sqlmock.Sqlmock) {
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM INFORMATION_SCHEMA\.TABLES`).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
+}
+
+func expectHealthyIDDefaultInvariants(mock sqlmock.Sqlmock, tables []string) {
+	args := make([]driver.Value, len(tables))
+	rows := sqlmock.NewRows([]string{"TABLE_NAME", "COLUMN_DEFAULT"})
+	for i, table := range tables {
+		args[i] = table
+		rows.AddRow(table, nil)
+	}
+	mock.ExpectQuery(`(?s)SELECT TABLE_NAME, COLUMN_DEFAULT.*FROM INFORMATION_SCHEMA\.COLUMNS.*TABLE_NAME IN`).
+		WithArgs(args...).
+		WillReturnRows(rows)
 }
 
 func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {

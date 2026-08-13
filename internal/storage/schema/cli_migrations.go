@@ -57,6 +57,10 @@ func cliCompatibleMigrationSQL(name, sqlText string) string {
 		return cliMigration0046AddIsBlocked
 	case "0049_longtext_large_content_columns.up.sql":
 		return cliMigration0049LongtextLargeContentColumns
+	case "0050_dependencies_deterministic_id.up.sql":
+		// Direct DDL: the Dolt CLI batch path can report success while a
+		// prepared ALTER silently no-ops (dolthub/dolt#11345).
+		return cliMigration0050DependenciesDeterministicID
 	case "0051_drop_aux_id_defaults.up.sql":
 		// Direct DDL: the source migration's PREPARE/EXECUTE guards exist for
 		// re-run safety on upgraded databases; a fresh bundle always has the
@@ -171,6 +175,11 @@ SET FOREIGN_KEY_CHECKS = 1;`
 
 const cliMigration0046AddIsBlocked = `ALTER TABLE issues ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0;
 CREATE INDEX idx_issues_is_blocked ON issues(is_blocked, status);`
+
+const cliMigration0050DependenciesDeterministicID = `ALTER TABLE dependencies ALTER COLUMN id DROP DEFAULT;
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_issue_target ON dependencies (issue_id, depends_on_issue_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_wisp_target ON dependencies (issue_id, depends_on_wisp_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uk_dep_external_target ON dependencies (issue_id, depends_on_external);`
 
 const cliMigration0049LongtextLargeContentColumns = `ALTER TABLE issues MODIFY COLUMN description LONGTEXT NOT NULL, MODIFY COLUMN design LONGTEXT NOT NULL, MODIFY COLUMN acceptance_criteria LONGTEXT NOT NULL, MODIFY COLUMN notes LONGTEXT NOT NULL;
 ALTER TABLE issues MODIFY COLUMN close_reason LONGTEXT DEFAULT '';

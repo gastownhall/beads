@@ -563,10 +563,49 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		return applied, err
 	}
 
+	if len(dirtyBefore) > 0 {
+		invariantTargets, err := idDefaultTablesNeedingRepair(ctx, db, mainIDDefaultInvariantTables)
+		if err != nil {
+			return applied, fmt.Errorf("check main migration invariants: %w", err)
+		}
+		var dirtyInvariantTargets []string
+		for _, table := range invariantTargets {
+			if _, wasDirty := dirtyBefore[table]; wasDirty {
+				dirtyInvariantTargets = append(dirtyInvariantTargets, table)
+			}
+		}
+		if len(dirtyInvariantTargets) > 0 {
+			return applied, &DirtyTablesError{Tables: dirtyInvariantTargets}
+		}
+	}
+	invariantRepairPending, err := idDefaultInvariantRepairPending(ctx, db)
+	if err != nil {
+		return applied, fmt.Errorf("check migration invariant repair sentinel: %w", err)
+	}
+	invariantTargets, err := idDefaultTablesNeedingRepair(ctx, db, mainIDDefaultInvariantTables)
+	if err != nil {
+		return applied, fmt.Errorf("check main migration invariants: %w", err)
+	}
+	if len(invariantTargets) > 0 && !invariantRepairPending {
+		if err := setIDDefaultInvariantRepairPending(ctx, db); err != nil {
+			return applied, fmt.Errorf("record migration invariant repair sentinel: %w", err)
+		}
+		invariantRepairPending = true
+	}
+	invariantsRepaired, err := repairIDDefaultInvariants(ctx, db, mainIDDefaultInvariantTables)
+	if err != nil {
+		return applied, fmt.Errorf("repair main migration invariants: %w", err)
+	}
+	if invariantRepairPending {
+		if err := commitIDDefaultInvariantRepairs(ctx, db, invariantsRepaired); err != nil {
+			return applied, err
+		}
+	}
 	backfilled, err := ensureBackfilledCustomStatusesCustomTypes(ctx, db)
 	if err != nil {
 		return applied, fmt.Errorf("backfill custom tables: %w", err)
 	}
+	backfilled = backfilled || len(invariantsRepaired) > 0
 
 	// #4259: rewrite any per-clone-random dependency ids (minted by 0043's
 	// DEFAULT (UUID()) before this fix) to the deterministic key, so independently
@@ -618,6 +657,11 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	if err != nil {
 		return applied, fmt.Errorf("ignored migrations: %w", err)
 	}
+	ignoredInvariantsRepaired, err := repairIDDefaultInvariants(ctx, db, ignoredIDDefaultInvariantTables)
+	if err != nil {
+		return applied, fmt.Errorf("repair ignored migration invariants: %w", err)
+	}
+	backfilled = backfilled || len(ignoredInvariantsRepaired) > 0
 	if err := unstageIgnoredTables(ctx, db); err != nil {
 		return applied, fmt.Errorf("unstaging ignored migration tables: %w", err)
 	}
@@ -670,6 +714,13 @@ func migrationWorkNeeded(ctx context.Context, db DBConn) (bool, error) {
 		return false, err
 	}
 	if !hasIgnoredHash {
+		return true, nil
+	}
+	invariantRepairNeeded, err := idDefaultInvariantNeedsRepair(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if invariantRepairNeeded {
 		return true, nil
 	}
 	return needsBackfilledCustomStatusesCustomTypes(ctx, db)
@@ -1434,11 +1485,15 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		if err := src.preMigrationRepair(ctx, db, mf.version); err != nil {
 			return count, fmt.Errorf("pre-repair for migration %s: %w", mf.name, err)
 		}
+		invariantTables := migrationIDDefaultTables(mf.name)
 
 		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
 		start := time.Now()
 		if err := execMigrationBody(ctx, db, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
+		}
+		if _, err := repairMigrationIDDefaultInvariants(ctx, db, invariantTables); err != nil {
+			return count, fmt.Errorf("verifying migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
 		contentHash := hex.EncodeToString(sum[:])
