@@ -1,11 +1,14 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // A count printed next to a noun is read as a fact about the database, not as a
@@ -128,6 +131,70 @@ func TestListFooterLineUnfilteredKeepsBreakdown(t *testing.T) {
 		if !strings.Contains(line, want) {
 			t.Errorf("unfiltered summary lost %q, got: %q", want, line)
 		}
+	}
+}
+
+// The footer is correct as a pure function only if every renderer actually
+// tells it that --ready is in force. The display wrappers are where that can be
+// lost: they take readyFiltered as a parameter, and a caller that omits it (or
+// a wrapper that defaults it) silently restores the vacuous count with
+// listFooterLine itself still passing every test above.
+//
+// These two tests pin the wrappers the --watch paths display through — the
+// surface where a stale "0 in progress" is most likely to be read as a live
+// fact, because it is re-rendered every two seconds under a heading that says
+// the data is current.
+//
+// bd list --ready --watch (direct) → displayWatchedIssueList.
+func TestDisplayWatchedIssueListReadyFooterDisclosesFilter(t *testing.T) {
+	// Open by construction: --ready pinned the query, so these are all the
+	// rows any database could return here.
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+		{ID: "bd-2", Title: "B", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+	}
+	// A nil store is the no-dependency-data arm the function already guards
+	// for; the footer is what is under test, and this keeps the file free of
+	// the cgo-tagged stub so it still compiles under CGO_ENABLED=0.
+	out := captureStdout(t, func() error {
+		displayWatchedIssueList(context.Background(), nil, issues, false, true)
+		return nil
+	})
+
+	if strings.Contains(out, "in progress)") {
+		t.Errorf("--ready --watch summary asserts an in-progress count its own filter forced to zero: %q", out)
+	}
+	if !strings.Contains(out, "excludes in_progress") {
+		t.Errorf("--ready --watch summary must disclose what it filtered, got: %q", out)
+	}
+}
+
+// bd list --ready --watch (proxied) displays through displayPrettyListWithDeps
+// directly, so the parameter has to survive that wrapper too.
+func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusOpen, Priority: 1, IssueType: types.TypeTask},
+	}
+
+	out := captureStdout(t, func() error {
+		displayPrettyListWithDeps(issues, false, nil, false, true)
+		return nil
+	})
+	if strings.Contains(out, "in progress)") {
+		t.Errorf("proxied --ready --watch summary asserts a filtered-out count: %q", out)
+	}
+	if !strings.Contains(out, "excludes in_progress") {
+		t.Errorf("proxied --ready --watch summary must disclose its filter, got: %q", out)
+	}
+
+	// The other half: without --ready the same wrapper must keep the breakdown,
+	// so the fix cannot be "never print counts".
+	plain := captureStdout(t, func() error {
+		displayPrettyListWithDeps(issues, false, nil, false, false)
+		return nil
+	})
+	if !strings.Contains(plain, "in progress)") {
+		t.Errorf("unfiltered listing lost its status breakdown: %q", plain)
 	}
 }
 

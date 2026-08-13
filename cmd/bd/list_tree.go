@@ -144,13 +144,19 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 
 // displayPrettyList displays issues in pretty tree format (GH#654)
 // Uses buildIssueTree which only supports dotted ID hierarchy
+// There is no --ready arm behind this one: it is the plain tree, so the
+// summary keeps its status breakdown.
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
-	displayPrettyListWithDeps(issues, showHeader, nil, false)
+	displayPrettyListWithDeps(issues, showHeader, nil, false, false)
 }
 
 // displayPrettyListWithDeps displays issues in tree format using dependency data.
-func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated bool) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, false)
+// readyFiltered must be threaded from the caller's --ready state rather than
+// defaulted here: the watch paths reach the summary through this wrapper, and a
+// hardcoded false silently restores the vacuous "(N open, 0 in progress)" that
+// listFooterLine exists to suppress.
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered)
 }
 
 // listFooterLine renders the one-line summary under a text listing.
