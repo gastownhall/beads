@@ -409,6 +409,128 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 }
 
+// leftJoinSubqueries returns the body of each "LEFT JOIN ( ... )" derived table
+// in sql, matching parentheses so a nested subquery (the reverse-blocker UNION)
+// stays inside its parent block rather than ending it early. Plain joins that
+// are not derived tables — "LEFT JOIN leases ON ..." — are skipped: they are
+// 1:1 lookups on the driver's id, not aggregates over a side table.
+func leftJoinSubqueries(sql string) []string {
+	const marker = "LEFT JOIN ("
+	var out []string
+	for i := 0; ; {
+		j := strings.Index(sql[i:], marker)
+		if j < 0 {
+			return out
+		}
+		start := i + j + len(marker)
+		depth, k := 1, start
+		for ; k < len(sql) && depth > 0; k++ {
+			switch sql[k] {
+			case '(':
+				depth++
+			case ')':
+				depth--
+			}
+		}
+		out = append(out, sql[start:k])
+		i = k
+	}
+}
+
+// TestSearchCountsSQLPredicateFormBoundsEverySubqueryAcrossHydration pins the
+// filtered predicate form in every hydration cell, not just the fully hydrated
+// one TestSearchCountsSQLShape asserts against.
+//
+// A fixed reference count cannot do that job: filtered_ids appears 9 times
+// under full hydration but only 5 under SkipCounts and 4 under both opt-outs,
+// because SkipLabels and SkipCounts delete whole subqueries. A count tuned to
+// one cell either fails on the others or is loose enough to miss a genuinely
+// unbounded scan. The property that must hold in EVERY cell is the one the fix
+// exists to guarantee:
+//
+//   - whereSQL is rendered exactly once. The CTE is its sole owner, so every
+//     other reference is by id; a second rendering would add placeholders the
+//     caller — which sizes its own args for one occurrence, since the predicate
+//     form returns nil — never fills in.
+//   - every aggregate subquery that survives the hydration flags bounds its
+//     scan to filtered_ids, instead of aggregating its whole side table before
+//     the outer join discards the non-matching rows (be-dlt6f: that unfiltered
+//     wisp_labels join cost a fixed ~1.6s however narrow the search was).
+func TestSearchCountsSQLPredicateFormBoundsEverySubqueryAcrossHydration(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		hyd  CountsHydration
+	}{
+		{"full", CountsHydration{}},
+		{"skipLabels", CountsHydration{SkipLabels: true}},
+		{"skipCounts", CountsHydration{SkipCounts: true}},
+		{"skipLabels+skipCounts", CountsHydration{SkipLabels: true, SkipCounts: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			sql, args := SearchCountsSQL(IssuesFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, tc.hyd)
+
+			if len(args) != 0 {
+				t.Errorf("predicate form must return nil args (caller supplies its own), got %d", len(args))
+			}
+			if n := strings.Count(sql, "WHERE x = ?"); n != 1 {
+				t.Errorf("WHERE x = ? must appear exactly once (else caller args desync), got %d:\n%s", n, sql)
+			}
+			if !strings.Contains(sql, "WITH filtered_ids AS (") {
+				t.Errorf("filtered predicate form must open with the filtered_ids CTE:\n%s", sql)
+			}
+			// The driver reads through the CTE rather than re-filtering the
+			// main table, so the aggregates below drive off the narrowed set.
+			if !strings.Contains(sql, "FROM filtered_ids i") {
+				t.Errorf("driver must select from filtered_ids:\n%s", sql)
+			}
+
+			joins := leftJoinSubqueries(sql)
+			if len(joins) == 0 {
+				t.Fatalf("expected at least one aggregate subquery:\n%s", sql)
+			}
+			for _, block := range joins {
+				if !strings.Contains(block, "filtered_ids") {
+					t.Errorf("aggregate subquery aggregates its whole side table instead of bounding to filtered_ids:\n%s", block)
+				}
+			}
+		})
+	}
+}
+
+// TestSearchCountsSQLSkipCountsPredicateForm covers the SkipCounts x
+// predicate-form cell specifically: the cardinality joins must be gone even
+// when a filter is present, so SkipCounts cannot smuggle an unbounded dc/rc/cc
+// scan back in through the filtered path.
+func TestSearchCountsSQLSkipCountsPredicateForm(t *testing.T) {
+	t.Parallel()
+
+	sql, _ := SearchCountsSQL(IssuesFilterTables, nil, "WHERE x = ?", "ORDER BY y", "LIMIT 5", true, CountsHydration{SkipCounts: true})
+
+	for _, gone := range []string{"dc ON dc.issue_id", "rc ON rc.dep_id", "cc ON cc.issue_id", "COALESCE(dc.cnt, 0)", "UNION ALL"} {
+		if strings.Contains(sql, gone) {
+			t.Errorf("filtered SkipCounts form must drop %q:\n%s", gone, sql)
+		}
+	}
+	// The surviving subqueries are labels, pc and d — each bounded to the CTE.
+	for _, want := range []string{
+		"WHERE issue_id IN (SELECT id FROM filtered_ids)",
+		"0 AS dep_count",
+		"0 AS rdep_count",
+		"0 AS comment_count",
+	} {
+		if !strings.Contains(sql, want) {
+			t.Errorf("filtered SkipCounts form missing %q:\n%s", want, sql)
+		}
+	}
+	// Labels survive SkipCounts and must be bounded like any other aggregate.
+	if !strings.Contains(sql, "JSON_ARRAYAGG(label)") {
+		t.Error("SkipCounts must not drop the labels join")
+	}
+}
+
 func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 	t.Parallel()
 
