@@ -91,8 +91,12 @@ func TestFindBeadsDir(t *testing.T) {
 	}
 	t.Setenv("BEADS_DIR", beadsDir)
 
-	if got := beads.FindBeadsDir(); got != beadsDir {
-		t.Errorf("FindBeadsDir() = %q, want BEADS_DIR %q", got, beadsDir)
+	want, err := filepath.EvalSymlinks(beadsDir)
+	if err != nil {
+		t.Fatalf("canonicalize BEADS_DIR: %v", err)
+	}
+	if got := beads.FindBeadsDir(); got != want {
+		t.Errorf("FindBeadsDir() = %q, want canonical BEADS_DIR %q", got, want)
 	}
 }
 

@@ -1,7 +1,10 @@
 package main
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/git"
@@ -39,25 +42,40 @@ func TestGetWorktreeGitDir(t *testing.T) {
 	}
 }
 
-func TestGetWorktreeGitDirInRepository(t *testing.T) {
+func TestGetWorktreeGitDirInWorktree(t *testing.T) {
 	git.ResetCaches()
 	t.Cleanup(git.ResetCaches)
-	repo := t.TempDir()
-	cmd := exec.Command("git", "init", "-q")
-	cmd.Dir = repo
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git init: %v\n%s", err, output)
-	}
-	cmd = exec.Command("git", "config", "core.hooksPath", ".git/hooks")
-	cmd.Dir = repo
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("configure repository-local hooks: %v\n%s", err, output)
-	}
-	t.Chdir(repo)
 
-	if got := getWorktreeGitDir(); got != ".git" {
-		t.Errorf("getWorktreeGitDir() = %q, want .git", got)
+	repo := t.TempDir()
+	runGitInDir(t, repo, "init", "-q")
+	runGitInDir(t, repo, "config", "core.hooksPath", ".git/hooks")
+	runGitInDir(t, repo, "config", "user.email", "test@example.com")
+	runGitInDir(t, repo, "config", "user.name", "Test")
+	if err := os.WriteFile(filepath.Join(repo, "README"), []byte("test\n"), 0o600); err != nil {
+		t.Fatalf("write initial worktree file: %v", err)
 	}
+	runGitInDir(t, repo, "add", "README")
+	runGitInDir(t, repo, "commit", "-qm", "initial")
+
+	worktree := filepath.Join(t.TempDir(), "linked")
+	runGitInDir(t, repo, "worktree", "add", "-q", "-b", "test-worktree", worktree)
+	t.Chdir(worktree)
+
+	want := runGitInDir(t, worktree, "rev-parse", "--git-dir")
+	if got := getWorktreeGitDir(); got != want {
+		t.Errorf("getWorktreeGitDir() = %q, want git worktree directory %q", got, want)
+	}
+}
+
+func runGitInDir(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, output)
+	}
+	return strings.TrimSpace(string(output))
 }
 
 func TestExtractPrefix(t *testing.T) {
