@@ -1155,7 +1155,21 @@ var rootCmd = &cobra.Command{
 		// setup before they inspect server mode or per-project Dolt settings.
 		// Rebind them to the selected workspace so explicit --db / BEADS_DB
 		// targets behave consistently across doctor/bootstrap/context/dolt.
+		//
+		// Capture redirect info BEFORE selectedNoDBBeadsDir() resolves the
+		// beads dir, mirroring the store-requiring path below (be-xil):
+		// selectedNoDBBeadsDir() always returns the post-redirect target
+		// directory (every branch bottoms out in beads.FindBeadsDir() or a
+		// dbPath already resolved through it, both of which call
+		// FollowRedirect internally). Calling preserveRedirectSourceDatabase
+		// with that already-resolved target means beads.ResolveRedirect finds
+		// no redirect file there and silently never preserves the source's
+		// configured dolt_database — so doctor (and other no-DB commands)
+		// would fall through to the shared target directory's own default
+		// database instead of the source's, producing false "wrong database"
+		// diagnoses against an unrelated rig's schema.
 		if skipsStoreInit {
+			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
 			beadsDir := selectedNoDBBeadsDir(cmd)
 			prepareSelectedNoDBContext(beadsDir)
 			refreshBoundCommandConfig(cmd)
