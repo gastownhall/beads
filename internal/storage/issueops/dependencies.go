@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -213,14 +214,35 @@ type DepTargetPrecheck struct {
 // same terms; only a genuinely change-free re-add (identical type and metadata,
 // no new thread) mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
+	result, err := AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
+	return result.EventWritten, err
+}
+
+// DependencyWriteResult reports what a dependency write actually did:
+// Changed is whether durable state was mutated (so the caller knows a Dolt
+// commit is warranted and the source's row_lock advanced), EventWritten
+// whether an audit event row landed (so the caller knows to stage the events
+// table). A change-free re-add reports neither (#5738).
+type DependencyWriteResult struct {
+	Changed      bool
+	EventWritten bool
+}
+
+// AddDependencyInTxWithResult is AddDependencyInTx reporting both the event
+// write and whether durable state changed (#5738).
+func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, nil, true, &result)
+	result.EventWritten = eventWritten
+	return result, err
 }
 
 // addDependencyInTx is the body of AddDependencyInTx. mintVersion controls
 // whether a new edge mints the source's version row here: the exported entry
 // point always does, while a parent patch (applyParentPatch) rewires several
 // edges for one caller-visible mutation and mints once after the last of them.
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
+// result, when non-nil, has Changed set if durable state was mutated.
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool, result *DependencyWriteResult) (bool, error) {
 	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
 		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
 	}
@@ -336,6 +358,14 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 				metadata, thread, dep.IssueID, dep.DependsOnID); err != nil {
 				return false, fmt.Errorf("failed to update dependency metadata: %w", err)
 			}
+			// The refresh is durable state: the aggregate row_lock token
+			// advances with it, in the same transaction (#5738).
+			if err := TouchRowVersionInTx(ctx, tx, sourceTable, dep.IssueID); err != nil {
+				return false, fmt.Errorf("touch dependency row versions: %w", err)
+			}
+			if result != nil {
+				result.Changed = true
+			}
 			// A same-type add refreshes the edge's metadata or thread. It is an
 			// observable graph mutation, so journal the replacement edge for
 			// replay even though no audit event is written. EventDep has no
@@ -373,6 +403,12 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		VALUES (?, ?, ?, ?, UTC_TIMESTAMP(), ?, ?, ?)
 	`, writeTable, targetCol), depid.New(dep.IssueID, dep.DependsOnID), dep.IssueID, dep.DependsOnID, dep.Type, actor, metadata, dep.ThreadID); err != nil {
 		return false, fmt.Errorf("failed to add dependency: %w", err)
+	}
+	if err := TouchRowVersionInTx(ctx, tx, sourceTable, dep.IssueID); err != nil {
+		return false, fmt.Errorf("touch dependency row versions: %w", err)
+	}
+	if result != nil {
+		result.Changed = true
 	}
 	if dep.Type == types.DepParentChild {
 		if err := TouchDependencyCoordinationTableInTx(ctx, tx, dep.DependsOnID, writeTable); err != nil {
@@ -1123,17 +1159,28 @@ func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, n
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
-	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
+	result, err := RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, emitEvent)
+	return result.EventWritten, err
+}
+
+// RemoveDependencyInTxWithResult is RemoveDependencyInTx reporting both the
+// event write and whether durable state changed (#5738).
+func RemoveDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (DependencyWriteResult, error) {
+	var result DependencyWriteResult
+	eventWritten, err := removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true, &result)
+	result.EventWritten = eventWritten
+	return result, err
 }
 
 // removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a
-// change to the source issue's durable state and mints one version row for it,
-// whether or not an audit event was requested; an absent edge returns before
-// any write and mints nothing. mintVersion is addDependencyInTx's, for the
-// same reason.
-func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
+// change to the source issue's durable state: it advances the source's
+// aggregate row_lock and mints one version row for it, whether or not an audit
+// event was requested; an absent edge returns before any write and mints
+// nothing. mintVersion is addDependencyInTx's, for the same reason, and
+// result, when non-nil, has Changed set if durable state was mutated.
+func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult, mintVersion bool, result *DependencyWriteResult) (bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
-	_, _, eventTable, depTable := WispTableRouting(isWisp)
+	issueTable, _, eventTable, depTable := WispTableRouting(isWisp)
 
 	// Capture the row's type before deleting so we can dispatch the right
 	// affected-set helper. If no row matches, treat as a no-op.
@@ -1152,6 +1199,12 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 		`DELETE FROM %s WHERE issue_id = ? AND %s = ?`, depTable, DepTargetExpr),
 		issueID, dependsOnID); err != nil {
 		return false, fmt.Errorf("remove dependency: %w", err)
+	}
+	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+		return false, fmt.Errorf("touch dependency row versions: %w", err)
+	}
+	if result != nil {
+		result.Changed = true
 	}
 
 	// The lookup above returned early when no row matched, so reaching here means

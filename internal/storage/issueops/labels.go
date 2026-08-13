@@ -132,41 +132,38 @@ func getLabelsIntoFromTable(ctx context.Context, tx DBTX, labelTable string, ids
 // AddLabelInTx adds a label to an issue and records an event within an existing
 // transaction. Automatically routes to wisp tables if the ID is an active wisp.
 // Uses INSERT IGNORE for idempotency. A label is part of the issue's durable
-// state, so a label that was actually inserted mints a version row; an
-// idempotent re-add (INSERT IGNORE affecting no row) mints nothing.
-func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+// state, so a label that was actually inserted mints a version row and
+// advances the issue's aggregate row_lock token (#5738); an idempotent
+// re-add (INSERT IGNORE affecting no row) mints and touches nothing. The
+// returned bool reports whether a row actually landed.
+func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) (bool, error) {
 	return addLabelInTx(ctx, tx, labelTable, eventTable, issueID, label, actor, true)
 }
 
 // addLabelInTx is the body of AddLabelInTx. mintVersion controls whether an
-// inserted label mints its own version row: the exported entry point always
-// does, while a label patch (applyLabelPatch) writes several rows for one
-// caller-visible mutation and mints once after the last of them.
-func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) error {
+// inserted label mints its own version row and row_lock touch: the exported
+// entry point always does, while a label patch (applyLabelPatch) writes
+// several rows for one caller-visible mutation and mints and touches once
+// after the last of them.
+func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) (bool, error) {
 	// Reject an over-length label up front. The INSERT IGNORE below would
 	// otherwise silently truncate it to the VARCHAR(255) column, storing a label
 	// the caller never sent; a typed ErrFieldTooLong is the clean rejection.
 	if err := types.CheckFieldLen("label", label); err != nil {
-		return err
+		return false, err
 	}
-	if labelTable == "" || eventTable == "" {
-		isWisp := IsActiveWispInTx(ctx, tx, issueID)
-		_, lt, et, _ := WispTableRouting(isWisp)
-		if labelTable == "" {
-			labelTable = lt
-		}
-		if eventTable == "" {
-			eventTable = et
-		}
+	issueTable, labelTable, eventTable, err := resolveLabelTables(ctx, tx, labelTable, eventTable, issueID)
+	if err != nil {
+		return false, err
 	}
 	//nolint:gosec // G201: labelTable is from WispTableRouting ("labels" or "wisp_labels")
 	res, err := tx.ExecContext(ctx, fmt.Sprintf(`INSERT IGNORE INTO %s (issue_id, label) VALUES (?, ?)`, labelTable), issueID, label)
 	if err != nil {
-		return fmt.Errorf("add label: %w", err)
+		return false, fmt.Errorf("add label: %w", err)
 	}
 	inserted, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("add label: rows affected: %w", err)
+		return false, fmt.Errorf("add label: rows affected: %w", err)
 	}
 	comment := "Added label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -175,27 +172,37 @@ func addLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 		Actor:     actor,
 		Comment:   str(comment),
 	}); err != nil {
-		return fmt.Errorf("add label: record event: %w", err)
+		return false, fmt.Errorf("add label: record event: %w", err)
 	}
 	// A label is part of the bead snapshot, so a label write journals as an
 	// update carrying the complete post-mutation set.
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
-		return err
+		return false, err
 	}
-	// Version only when a row landed: INSERT IGNORE on an existing label is
-	// the no-op case, and a no-op mints nothing (the same gate the dependency
-	// helpers draw on their inserted/deleted row).
-	if !mintVersion || inserted == 0 {
-		return nil
+	// Version and touch only when a row landed: INSERT IGNORE on an existing
+	// label is the no-op case, and a no-op mints nothing (the same gate the
+	// dependency helpers draw on their inserted/deleted row).
+	if inserted == 0 {
+		return false, nil
 	}
-	return RecordVersionInTx(ctx, tx, issueID, actor)
+	if !mintVersion {
+		return true, nil
+	}
+	// The label set is durable state, so the aggregate row_lock token
+	// advances with it in the same transaction (#5738).
+	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+		return false, fmt.Errorf("add label: %w", err)
+	}
+	return true, RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
 // an existing transaction. Automatically routes to wisp tables if the ID is
-// an active wisp. A deleted label row mints a version row; a DELETE that
-// matched no row is a no-op and mints nothing.
-func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) error {
+// an active wisp. A deleted label row mints a version row and advances the
+// issue's aggregate row_lock token (#5738); a DELETE that matched no row is
+// a no-op and mints nothing. The returned bool reports whether a row was
+// actually deleted.
+func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string) (bool, error) {
 	return removeLabelInTx(ctx, tx, labelTable, eventTable, issueID, label, actor, true)
 }
 
@@ -203,24 +210,18 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 // addLabelInTx's, for the same reason.
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) error {
-	if labelTable == "" || eventTable == "" {
-		isWisp := IsActiveWispInTx(ctx, tx, issueID)
-		_, lt, et, _ := WispTableRouting(isWisp)
-		if labelTable == "" {
-			labelTable = lt
-		}
-		if eventTable == "" {
-			eventTable = et
-		}
+func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID, label, actor string, mintVersion bool) (bool, error) {
+	issueTable, labelTable, eventTable, err := resolveLabelTables(ctx, tx, labelTable, eventTable, issueID)
+	if err != nil {
+		return false, err
 	}
 	res, err := tx.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE issue_id = ? AND label = ?`, labelTable), issueID, label)
 	if err != nil {
-		return fmt.Errorf("remove label: %w", err)
+		return false, fmt.Errorf("remove label: %w", err)
 	}
 	deleted, err := res.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("remove label: rows affected: %w", err)
+		return false, fmt.Errorf("remove label: rows affected: %w", err)
 	}
 	comment := "Removed label: " + label
 	if err := InsertDerivedEvent(ctx, tx, eventTable, AuxEvent{
@@ -229,26 +230,35 @@ func removeLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 		Actor:     actor,
 		Comment:   str(comment),
 	}); err != nil {
-		return fmt.Errorf("remove label: record event: %w", err)
+		return false, fmt.Errorf("remove label: record event: %w", err)
 	}
 	if err := RecordEventInTx(ctx, tx, EventUpdate, issueID, actor); err != nil {
-		return err
+		return false, err
 	}
-	if !mintVersion || deleted == 0 {
-		return nil
+	if deleted == 0 {
+		return false, nil
 	}
-	return RecordVersionInTx(ctx, tx, issueID, actor)
+	if !mintVersion {
+		return true, nil
+	}
+	// The label set is durable state, so the aggregate row_lock token
+	// advances with it in the same transaction (#5738).
+	if err := TouchRowVersionInTx(ctx, tx, issueTable, issueID); err != nil {
+		return false, fmt.Errorf("remove label: %w", err)
+	}
+	return true, RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
 // renameLabelPlanes pairs each label table with the event table journaling
 // its issues, so RenameLabelInTx sweeps both without hardcoding the pairing
 // twice.
 var renameLabelPlanes = [2]struct {
+	issueTable string
 	labelTable string
 	eventTable string
 }{
-	{labelTable: "labels", eventTable: "events"},
-	{labelTable: "wisp_labels", eventTable: "wisp_events"},
+	{issueTable: "issues", labelTable: "labels", eventTable: "events"},
+	{issueTable: "wisps", labelTable: "wisp_labels", eventTable: "wisp_events"},
 }
 
 // ErrRenameLabelSameName is returned when RenameLabelInTx is asked to rename
@@ -281,7 +291,7 @@ func RenameLabelInTx(ctx context.Context, tx DBTX, oldLabel, newLabel, actor str
 		return 0, 0, nil, err
 	}
 	for _, plane := range renameLabelPlanes {
-		r, m, planeIDs, err := renameLabelInPlane(ctx, tx, plane.labelTable, plane.eventTable, oldLabel, newLabel, actor)
+		r, m, planeIDs, err := renameLabelInPlane(ctx, tx, plane.issueTable, plane.labelTable, plane.eventTable, oldLabel, newLabel, actor)
 		if err != nil {
 			return 0, 0, nil, fmt.Errorf("rename label in %s: %w", plane.labelTable, err)
 		}
@@ -296,7 +306,7 @@ func RenameLabelInTx(ctx context.Context, tx DBTX, oldLabel, newLabel, actor str
 // for oldLabel and returns the touched-id and already-had-newLabel counts.
 //
 //nolint:gosec // G201: labelTable/eventTable are hardcoded routing constants from renameLabelPlanes ("labels"/"events" or "wisp_labels"/"wisp_events").
-func renameLabelInPlane(ctx context.Context, tx DBTX, labelTable, eventTable, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+func renameLabelInPlane(ctx context.Context, tx DBTX, issueTable, labelTable, eventTable, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
 	oldIDs, err := issueIDsWithLabelInTx(ctx, tx, labelTable, oldLabel)
 	if err != nil {
 		return 0, 0, nil, fmt.Errorf("query issues carrying %q: %w", oldLabel, err)
@@ -415,6 +425,12 @@ func renameLabelInPlane(ctx context.Context, tx DBTX, labelTable, eventTable, ol
 		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
 			return 0, 0, nil, fmt.Errorf("rename label: version %s: %w", id, err)
 		}
+		// The aggregate row_lock token advances with the label set, on this
+		// plane's own issue table (#5738); unlike RecordVersionInTx it is NOT
+		// a wisp no-op, because wisps carry their own row_lock cell.
+		if err := TouchRowVersionInTx(ctx, tx, issueTable, id); err != nil {
+			return 0, 0, nil, fmt.Errorf("rename label: touch %s: %w", id, err)
+		}
 	}
 	return len(oldIDs), merged, oldIDs, nil
 }
@@ -438,4 +454,26 @@ func issueIDsWithLabelInTx(ctx context.Context, tx DBTX, labelTable, label strin
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// resolveLabelTables resolves the issue/label/event tables for a label
+// mutation: explicit tables are validated against each other, and empty ones
+// are routed by whether issueID is an active wisp. The issue table rides
+// along so the mutation can advance the row's aggregate row_lock (#5738).
+func resolveLabelTables(ctx context.Context, tx DBTX, labelTable, eventTable, issueID string) (string, string, string, error) {
+	if (labelTable == "labels" && eventTable == "wisp_events") || (labelTable == "wisp_labels" && eventTable == "events") {
+		return "", "", "", fmt.Errorf("label tables disagree: %s and %s", labelTable, eventTable)
+	}
+	isWisp := labelTable == "wisp_labels" || eventTable == "wisp_events"
+	if labelTable == "" && eventTable == "" {
+		isWisp = IsActiveWispInTx(ctx, tx, issueID)
+	}
+	issueTable, resolvedLabel, resolvedEvent, _ := WispTableRouting(isWisp)
+	if labelTable == "" {
+		labelTable = resolvedLabel
+	}
+	if eventTable == "" {
+		eventTable = resolvedEvent
+	}
+	return issueTable, labelTable, eventTable, nil
 }

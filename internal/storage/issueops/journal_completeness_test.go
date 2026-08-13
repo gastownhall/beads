@@ -175,6 +175,7 @@ var beadDMLExemptions = map[string]string{
 	"DeleteWispFromDependenciesInTx":         "cleans up dep rows during a delete that journals the delete",
 	"DeleteWispsFromDependenciesInTx":        "cleans up dep rows during a delete that journals the delete",
 	"DeleteWispAuxRowsInTx":                  "cleans up wisp label/event/comment/counter rows during a delete that journals the delete",
+	"TouchRowVersionInTx":                    "constituent aggregate-token write; the calling label/comment/dependency entry point journals the mutation",
 
 	// (4) compaction maintenance — a lossy content rewrite outside the
 	// create/update/close/delete/dep/label op vocabulary. Carried from the

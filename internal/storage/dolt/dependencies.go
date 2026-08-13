@@ -54,7 +54,7 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
+	var result issueops.DependencyWriteResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -65,18 +65,21 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 			EmitEvent:     addOpts.EmitEvent,
 		}
 		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
+		result, e = issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
 		return e
 	}); err != nil {
 		return err
+	}
+	if !result.Changed {
+		return nil
 	}
 	// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
 	// Stage events only when AddDependencyInTx actually recorded a
 	// dependency_added event (explicit verb + genuine new edge). A structural or
 	// idempotent add writes no event, so staging events would sweep unrelated
 	// pending event rows into this dependency commit.
-	tables := []string{"dependencies"}
-	if eventWritten {
+	tables := []string{"issues", "dependencies"}
+	if result.EventWritten {
 		tables = append(tables, "events")
 	}
 	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
@@ -138,7 +141,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		clearRecheckScope := issueops.ScopeBlockedRecheckTransaction(tx)
 		defer clearRecheckScope()
 
-		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		result, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
 			return err
 		}
@@ -150,13 +153,16 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// removal's own Dolt commit so the recheck's commit follows it.
 		pending := issueops.TakeBlockedRecheck(tx)
 		defer s.settleBlockedRecheck(ctx, pending)
+		if !result.Changed {
+			return nil
+		}
 		// GH#2455: Use explicit DOLT_ADD to avoid sweeping up stale config changes.
 		// Stage events only when RemoveDependencyInTx actually recorded a
 		// dependency_removed event (explicit verb + genuine edge removal). A
 		// structural or missing-edge remove writes no event, so staging events would
 		// sweep unrelated pending event rows into this dependency commit.
-		tables := []string{"dependencies"}
-		if eventWritten {
+		tables := []string{"issues", "dependencies"}
+		if result.EventWritten {
 			tables = append(tables, "events")
 		}
 		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
