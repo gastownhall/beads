@@ -159,10 +159,20 @@ title = "Merge results"
 needs = ["test-a", "test-b"]     # fan-in on named steps
 
 [[steps]]
+id = "fan-out"
+title = "Spawn a worker per shard"
+
+[[steps]]
 id = "summarize"
 title = "Summarize all spawned work"
-waits_for = "all-children"       # or "any-children", or "children-of(step-id)"
+needs = ["fan-out"]              # the spawner whose children to wait for
+waits_for = "all-children"       # or "any-children", or "children-of(fan-out)"
 ```
+
+`all-children` and `any-children` wait for the children of `needs[0]`, so a step
+using them must declare `needs`; `children-of(step-id)` names the spawner itself
+and does not. A bare gate with neither is rejected when the formula is cooked,
+because it would wait for no one.
 
 ## Working with gated molecules
 
