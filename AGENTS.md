@@ -288,3 +288,43 @@ This protocol applies when ending a Beads implementation workflow. It is subordi
 - If a required sync or push is blocked, stop and report the exact command and error.
 
 <!-- END BEADS INTEGRATION -->
+
+## Cursor Cloud specific instructions
+
+Standard build/test/lint commands live in [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md)
+and [engdocs/TESTING.md](engdocs/TESTING.md) (`make build`, `make test`,
+`make ci-pr-lint`). The notes below only cover non-obvious cloud-environment
+caveats; the startup update script already installs Go modules and
+`golangci-lint`.
+
+- **CGO + `gms_pure_go` are mandatory.** Every `go`/`make` invocation needs
+  `CGO_ENABLED=1` and `-tags=gms_pure_go` (embedded Dolt + no-ICU). `make`
+  targets set this automatically; for bare `go` commands either `source
+  .buildflags` or rely on the persisted `GOFLAGS=-tags=gms_pure_go` (set via
+  `go env -w`, baked into the snapshot). A bare `go build ./cmd/bd` without the
+  tag fails with an ICU `uregex.h` linker error — run `make doctor-build` to
+  diagnose.
+- **`golangci-lint` must be built with the go.mod toolchain.** It is pinned to
+  v2.10.1 and installed at `~/go/bin` (on `PATH` via `~/.bashrc`). It must be
+  compiled with the Go version in `go.mod` (currently go1.26.5); a binary built
+  with an older toolchain makes `make ci-pr-lint` fail with "the Go language
+  version used to build golangci-lint is lower than the targeted Go version".
+  Reinstall with `GOTOOLCHAIN=go$(awk '/^go [0-9]/{print $2; exit}' go.mod)
+  GOFLAGS= go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1`.
+- **Two `make test` failures are cloud-sandbox artifacts, not code bugs:**
+  - `cmd/bd TestRunApplyAllOK` — the repo's git `core.hooksPath` points at
+    Cursor's agent-hooks dispatcher (`~/.cursor/agent-hooks/.../pre-commit` is a
+    symlink to `.dispatcher`), so the hooks-apply check refuses to overwrite it.
+    It passes with a clean hooks path, e.g. `GIT_CONFIG_COUNT=1
+    GIT_CONFIG_KEY_0=core.hooksPath GIT_CONFIG_VALUE_0=$(mktemp -d) go test
+    ./cmd/bd -run '^TestRunApplyAllOK$'`.
+  - `cmd/bd TestTestServerConnection/unreachable_host` — dials the RFC 5737
+    TEST-NET address `192.0.2.1:3307` expecting the connect to fail, but the
+    cloud egress proxy accepts it. Unavoidable here; unrelated to beads.
+- **No Docker / no `dolt` CLI is expected.** `bd` uses embedded Dolt in-process,
+  so build/test/run work without them. `make test` prints `WARN: Docker not
+  available, skipping Dolt tests` and skips external-Dolt/server-mode paths by
+  design. Only install the standalone `dolt` CLI + Docker if you specifically
+  need server-mode or corpus-regen paths.
+- The full `make test` suite takes ~10-15 min (`cmd/bd` is by far the slowest
+  package); run it in a tmux session or background it rather than blocking.
