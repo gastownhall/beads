@@ -28,9 +28,16 @@
 package formula
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 )
+
+// ErrValidation wraps a formula validation failure so callers with a fallback
+// resolution path (e.g. "is this actually a proto/issue ID rather than a
+// formula name?") can tell "not a formula" from "is a formula, but it does not
+// validate" with errors.Is, instead of reporting the latter as not found.
+var ErrValidation = errors.New("formula validation failed")
 
 // FormulaType categorizes formulas by their purpose.
 type FormulaType string
@@ -674,7 +681,7 @@ func (f *Formula) Validate() error {
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("formula validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+		return fmt.Errorf("%w:\n  - %s", ErrValidation, strings.Join(errs, "\n  - "))
 	}
 
 	return nil
