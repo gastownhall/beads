@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
@@ -120,6 +121,27 @@ func openStatsReporter() (issueops.StatsReporter, error) {
 	return store.StatsReporter()
 }
 
+// suppressedTypeSummary describes the counted rows that a default bd list will
+// not show, so the totals above can be reconciled against a listing instead of
+// looking like a phantom.
+func suppressedTypeSummary(stats *types.Statistics) string {
+	var parts []string
+	if stats.GateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-gates)", pluralCount(stats.GateIssues, "gate")))
+	}
+	if stats.TemplateIssues > 0 {
+		parts = append(parts, fmt.Sprintf("%s (--include-templates)", pluralCount(stats.TemplateIssues, "template")))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func pluralCount(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
 func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary) error {
 	output := &StatusOutput{
 		Summary:             stats,
@@ -153,6 +175,10 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 		fmt.Printf("  Ready to Work:          %s\n", ui.MutedStyle.Render("(skipped)"))
 	} else {
 		fmt.Printf("  Ready to Work:          %s\n", ui.RenderPass(fmt.Sprintf("%d", *stats.ReadyIssues)))
+	}
+
+	if suppressed := suppressedTypeSummary(stats); suppressed != "" {
+		fmt.Printf("  Not shown by bd list:   %s\n", suppressed)
 	}
 
 	// Extended statistics (only show if non-zero)
