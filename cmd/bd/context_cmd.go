@@ -2,8 +2,6 @@ package main
 
 import (
 	"fmt"
-	"path/filepath"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -77,23 +75,7 @@ Examples:
 			prepareSelectedNoDBContext(selected)
 		}
 
-		rc, err := beads.GetRepoContext()
-		if err != nil && strings.Contains(err.Error(), "cannot determine repository root") {
-			// bd context is documented to work in degraded states and reads
-			// only from config files. Reaching this error means a valid,
-			// boundary-checked .beads directory was already found and the sole
-			// failure was the absence of a git repository root. Git is only a
-			// means of locating the repo root, not a hard requirement here, so
-			// fall back to the .beads parent as the repo root and continue —
-			// backend identity still resolves from config (GH#4772).
-			if beadsDir := beads.FindBeadsDir(); beadsDir != "" {
-				rc = &beads.RepoContext{
-					BeadsDir: beadsDir,
-					RepoRoot: filepath.Dir(beadsDir),
-				}
-				err = nil
-			}
-		}
+		rc, err := beads.GetRepoContextAllowingNoGit()
 		if err != nil {
 			if jsonOutput {
 				if jerr := outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)}); jerr != nil {
