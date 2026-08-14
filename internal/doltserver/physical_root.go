@@ -241,9 +241,9 @@ func isRemoteServerHost(host string) bool {
 //     exist). The CLI's nil-config branch honors no other env rescue.
 //
 // Roots are returned absolute. Symlink canonicalization is deliberately NOT
-// performed here: workspacegate.ForPhysicalRoot canonicalizes the gate
-// file's parent itself (and refuses symlinked roots), and resolving here too
-// would double-handle and could disagree with the gate's own rules.
+// performed here: workspacegate.ForPhysicalRoot resolves an existing root
+// symlink and canonicalizes the gate file's parent. Resolving here too would
+// double-handle the path and could disagree with the gate's own rules.
 func ResolvePhysicalRoots(beadsDir string) (PhysicalRoots, error) {
 	abs, err := filepath.Abs(beadsDir)
 	if err != nil {
