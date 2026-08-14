@@ -809,28 +809,45 @@ func commentOutYamlKey(content, key string) string {
 }
 
 func commentOutFlatYamlKey(content, key string) (string, bool) {
-	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
+	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:(.*)$`)
 
-	found := false
-	var result []string
+	var lines []string
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
-		line := scanner.Text()
-		if keyPattern.MatchString(line) {
-			matches := keyPattern.FindStringSubmatch(line)
-			indent := ""
-			if len(matches) > 1 {
-				indent = matches[1]
-			}
-			// Comment out the line, preserving indentation
-			result = append(result, indent+"# "+strings.TrimLeft(line, " \t"))
-			found = true
-		} else {
-			result = append(result, line)
-		}
+		lines = append(lines, scanner.Text())
 	}
 
-	return strings.Join(result, "\n"), found
+	found := false
+	for i, line := range lines {
+		matches := keyPattern.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+		// Commenting out a key whose value is the block beneath it would
+		// orphan that block's lines at an indentation no key introduces,
+		// leaving a config.yaml that no longer parses.
+		if strings.TrimSpace(matches[2]) == "" && opensYamlBlock(lines, i, len(matches[1])) {
+			continue
+		}
+		// Comment out the line, preserving indentation
+		lines[i] = matches[1] + "# " + strings.TrimLeft(line, " \t")
+		found = true
+	}
+
+	return strings.Join(lines, "\n"), found
+}
+
+// opensYamlBlock reports whether the line at idx introduces an indented block,
+// judged by the first following line that carries content.
+func opensYamlBlock(lines []string, idx, indent int) bool {
+	for _, next := range lines[idx+1:] {
+		trimmed := strings.TrimLeft(next, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return len(next)-len(trimmed) > indent
+	}
+	return false
 }
 
 // commentOutNestedYamlKey comments out the leaf line of a dotted key written in
