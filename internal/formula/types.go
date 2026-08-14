@@ -630,7 +630,7 @@ func (f *Formula) Validate() error {
 		// Validate waits_for field
 		// Valid formats: "all-children", "any-children", "children-of(step-id)"
 		if step.WaitsFor != "" {
-			if err := validateWaitsFor(step.WaitsFor, stepIDLocations); err != nil {
+			if err := validateWaitsFor(step.WaitsFor, stepIDLocations, step.Needs); err != nil {
 				errs = append(errs, fmt.Sprintf("steps[%d] (%s): %s", i, step.ID, err.Error()))
 			}
 		}
@@ -747,9 +747,17 @@ func ParseWaitsFor(value string) *WaitsForSpec {
 //   - "all-children": wait for all dynamically-bonded children
 //   - "any-children": wait for first child to complete
 //   - "children-of(step-id)": wait for children of a specific step
-func validateWaitsFor(value string, stepIDLocations map[string]string) error {
+//
+// The bare gates name no spawner, so cooking infers one from needs[0] and emits
+// no dependency at all when there is nothing to infer from. A step that gates on
+// nothing is rejected here rather than cooked into a step that carries a
+// gate:<value> label, waits for no one and is immediately ready.
+func validateWaitsFor(value string, stepIDLocations map[string]string, needs []string) error {
 	// Simple gate types
 	if value == "all-children" || value == "any-children" {
+		if len(needs) == 0 {
+			return fmt.Errorf("waits_for %q waits for the children of needs[0], but this step declares no needs (add needs, or name the spawner with children-of(step-id))", value)
+		}
 		return nil
 	}
 
@@ -785,7 +793,7 @@ func validateChildDependsOn(children []*Step, idLocations map[string]string, err
 		}
 		// Validate waits_for field
 		if child.WaitsFor != "" {
-			if err := validateWaitsFor(child.WaitsFor, idLocations); err != nil {
+			if err := validateWaitsFor(child.WaitsFor, idLocations, child.Needs); err != nil {
 				*errs = append(*errs, fmt.Sprintf("%s (%s): %s", childPrefix, child.ID, err.Error()))
 			}
 		}
