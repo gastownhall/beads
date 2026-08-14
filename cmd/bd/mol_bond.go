@@ -485,6 +485,16 @@ func buildAttachCloneOpts(subgraph *TemplateSubgraph, mol *types.Issue, bondType
 	if childRef != "" {
 		opts.ParentID = mol.ID
 		opts.ChildRef = childRef
+
+		// A --ref arm is nested INSIDE mol, and its ID already records that.
+		// Blocking it on mol as well is unsatisfiable in both directions: the
+		// arm waits for mol to close, and mol cannot close while it holds an
+		// open arm. Nesting carries the attachment, so the blocking edge is
+		// dropped rather than deadlocking the molecule it was bonded into.
+		if depType == types.DepBlocks || depType == types.DepConditionalBlocks {
+			opts.AttachToID = ""
+			opts.AttachDepType = ""
+		}
 	}
 	return opts, nil
 }
