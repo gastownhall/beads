@@ -740,12 +740,6 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return err
 	}
 
-	// Commit the workspace files bootstrap just wrote/updated (config.yaml,
-	// metadata.json, and any appended .beads/.gitignore patterns) so an
-	// adopt-from-remote flow leaves a clean working tree, matching bd init
-	// (GH#4644).
-	commitBeadsWorkspaceFiles(plan.BeadsDir)
-
 	// Open and close the store to ensure dolt_ignore'd wisp tables are
 	// created in the working set. Clone does not include these tables
 	// (they are never committed), so they must be recreated after clone.
@@ -779,6 +773,17 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 	}
 	configureInitDoltRemote(ctx, warmupStore, plan.SyncRemote, false)
 	_ = warmupStore.Close()
+
+	// Commit the workspace files bootstrap just wrote/updated (config.yaml,
+	// metadata.json, and any appended .beads/.gitignore patterns) so an
+	// adopt-from-remote flow leaves a clean working tree, matching bd init
+	// (GH#4644).
+	//
+	// Deliberately last: every way this bootstrap can still fail (most
+	// notably the remote-migrate gate above, which returns a non-zero exit)
+	// happens before it, so a failed bootstrap never leaves a commit behind
+	// advertising a workspace it did not finish setting up.
+	commitBeadsWorkspaceFiles(plan.BeadsDir)
 
 	return nil
 }
