@@ -853,7 +853,7 @@ func opensYamlBlock(lines []string, idx, indent int) bool {
 // commentOutNestedYamlKey comments out the leaf line of a dotted key written in
 // nested form (sync:\n  branch: main), the shape SetYamlConfig produces via
 // updateNestedYamlKey and the config.yaml template documents. It edits the
-// source line rather than re-marshalling the tree so the file's comments and
+// source line rather than re-marshaling the tree so the file's comments and
 // layout survive, and it refuses any leaf whose value is not a scalar sharing
 // the key's line, because commenting one line of a multi-line value would leave
 // the file unparseable.
