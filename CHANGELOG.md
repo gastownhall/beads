@@ -131,6 +131,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `scripts/check-versions.sh` and `bd preflight` list the three that work: with
   `cmd/bd/version.go` already at the release version, that re-run rewrites only
   the `.githooks` markers and `uv.lock` and leaves any other drifted file as it was.
+- **BREAKING (fail-closed): bd no longer migrates an existing database without
+  explicit consent** (Beads 1.2 release remediation). The 1.2.0/1.2.1 releases
+  applied migrations 54–65 at store open on ANY command — including pure reads
+  like `bd list` — with no prompt, and older binaries then refuse the migrated
+  database (schema-skew guard). Every command against an existing database with
+  pending main-sequence migrations now refuses with guidance instead of
+  migrating, and the refused open performs ZERO writes (dolt_ignore seeding and
+  clone-local migrations included). Consent is any of: the explicit verbs
+  `bd migrate` / `bd migrate schema` (a preview flag withholds it),
+  `bd migrate --force`, or `BD_ALLOW_MIGRATE=1` for scripts/CI
+  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Fresh databases
+  (`bd init`) still migrate to latest — creating a database is consent for its
+  schema — and a database already at this binary's latest version never
+  consults the gate, so already-migrated (v65) workspaces see no change. The
+  remote-backed case keeps all of the #4259 remote-migrate gate's additional
+  protections (smart gate, adopt fast-forward, fork-skew analysis) unchanged.
+  JSON consumers: the refusal renders as a structured error carrying a
+  `migrate_consent` object (`current_version`, `required_version`, `pending`).
+- **Shipped migrations are frozen by CI** (same remediation): the content hash
+  of every released up-migration (main 0001–0065, ignored 0001–0024) is pinned
+  by `TestShippedMigrationsAreFrozen`. Schema v65 is de-facto shipped; any
+  amendment to a released migration must land as a new migration (0066+) so
+  installed schemas and freshly-migrated ones cannot fork.
 
 ### Fixed
 - **PRs based on `hotfix/**` branches now run full CI, not just

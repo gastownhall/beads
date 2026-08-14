@@ -213,6 +213,7 @@ go_library(
         "metadata_flag.go",
         "metrics.go",
         "migrate.go",
+        "migrate_consent.go",
         "migrate_dolt_mode.go",
         "migrate_hooks.go",
         "migrate_hooks_apply.go",

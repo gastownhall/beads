@@ -415,6 +415,18 @@ func renderTypedOpenError(err error) bool {
 		}
 		return true
 	}
+	// The migration-consent gate blocks silent in-place migration of
+	// ANY existing database (1.2 release remediation) and tells the
+	// operator how to consent.
+	var consentErr *schema.MigrateConsentError
+	if errors.As(err, &consentErr) {
+		if jsonOutput {
+			handleMigrateConsentJSON(consentErr)
+		} else {
+			fmt.Fprint(os.Stderr, consentErr.UserMessage())
+		}
+		return true
+	}
 	return false
 }
 
@@ -434,6 +446,19 @@ func renderTypedOpenError(err error) bool {
 // `--force` still unlocks from either migrate command.
 func isSchemaMigrateVerb(cmd *cobra.Command) bool {
 	return cmd == migrateSchemaCmd
+}
+
+// isMigrateConsentCommand reports whether cmd is one of the explicit
+// migration verbs (`bd migrate`, `bd migrate schema`) invoked for real:
+// typing the verb IS the operator consenting to apply pending schema
+// migrations (migrate_consent.go), no --force required. Preview flags
+// withhold the consent — a --dry-run/--inspect must not consent to the work
+// it only inspects.
+func isMigrateConsentCommand(cmd *cobra.Command) bool {
+	if cmd != migrateCmd && cmd != migrateSchemaCmd {
+		return false
+	}
+	return forcedMigratePreviewFlag(cmd) == ""
 }
 
 // forcedMigratePreviewFlag returns the name of a preview flag (--dry-run,
@@ -1747,6 +1772,12 @@ var rootCmd = &cobra.Command{
 		// migrate on the way to printing what it would do. Same set-or-clear
 		// discipline as the --force override above.
 		schema.SetSharedMigrateConsent(isSchemaMigrateVerb(cmd) && !previewMode)
+
+		// The explicit migration verbs carry migration consent on their own
+		// (migrate_consent.go): every other command refuses to apply pending
+		// schema migrations to an existing database. Same unconditional
+		// set-or-clear discipline as the gate override above.
+		schema.SetLocalMigrateConsent(isMigrateConsentCommand(cmd))
 
 		// Auto-migrate database on version bump (bd-jgxi).
 		// Runs for ALL non-preview commands (including read-only ones) because
