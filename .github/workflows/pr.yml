@@ -474,6 +474,12 @@ jobs:
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
 
+      - name: Exercise credential command fixtures on Windows
+        if: matrix.os == 'windows-latest'
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -run '^(TestCommandSourceRealShell|TestCredentialCommandFixtureProtocol|TestApplyGatewayCredentialCommand|TestApplyGatewayCredentialJSONEnvelope|TestApplyGatewayCredentialFailsClosed|TestApplyGatewayCredentialPresetWins|TestApplyGatewayCredentialRejectsBadCharToken|TestApplyResolvedConfigGatewayCredential)$' ./internal/creds ./internal/storage/dolt
+
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
         shell: bash

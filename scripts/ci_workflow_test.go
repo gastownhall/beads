@@ -108,6 +108,36 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 }
 
+func TestPRPreflightPlatformsExercisesCredentialCommandFixturesOnWindows(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	step := job.step(t, "Exercise credential command fixtures on Windows")
+
+	if step.If != "matrix.os == 'windows-latest'" {
+		t.Errorf("credential command fixture selector = %q, want native Windows only", step.If)
+	}
+	if step.Shell != "" {
+		t.Errorf("credential command fixture shell = %q, want the Windows runner default", step.Shell)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("credential command fixture step may not continue on error")
+	}
+	if got := step.Env["CGO_ENABLED"]; got != "0" {
+		t.Errorf("credential command fixture CGO_ENABLED = %q, want 0", got)
+	}
+	const command = "go test -tags gms_pure_go -count=1 -run '^(TestCommandSourceRealShell|TestCredentialCommandFixtureProtocol|TestApplyGatewayCredentialCommand|TestApplyGatewayCredentialJSONEnvelope|TestApplyGatewayCredentialFailsClosed|TestApplyGatewayCredentialPresetWins|TestApplyGatewayCredentialRejectsBadCharToken|TestApplyResolvedConfigGatewayCredential)$' ./internal/creds ./internal/storage/dolt"
+	assertStepRunsExactly(t, job, step.Name, command)
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") ||
+		gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Errorf("credential command fixture job is not required by ci-gate: needs=%v result=%q required=%q",
+			gate.Needs, gateEnv["PR_PREFLIGHT_PLATFORMS"], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
