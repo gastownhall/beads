@@ -28,7 +28,10 @@ import (
 //     honored as an alias for continuity with the remote gate's hatch).
 //
 // Fresh databases (no schema_migrations table, version 0) are exempt: creating
-// a database is consent for its schema. Databases already at this binary's
+// a database is consent for its schema. The same creation principle covers a
+// workspace this invocation just CLONED into existence (`bd init --remote`,
+// `bd bootstrap` sync) — those paths record the consent explicitly, and the
+// #4259 remote-migrate gate still applies to them unchanged. Databases already at this binary's
 // latest version never consult the gate. The ignored (clone-local, dolt_ignored)
 // migration sequence is deliberately NOT gated on its own: it only materializes
 // per-clone bookkeeping tables and runs on every fresh clone — but when the

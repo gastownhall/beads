@@ -143,8 +143,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bd migrate --force`, or `BD_ALLOW_MIGRATE=1` for scripts/CI
   (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Fresh databases
   (`bd init`) still migrate to latest — creating a database is consent for its
-  schema — and a database already at this binary's latest version never
-  consults the gate, so already-migrated (v65) workspaces see no change. The
+  schema — and the same creation principle covers a workspace the invocation
+  just cloned into existence (`bd init --remote`, `bd bootstrap` sync), so the
+  #4259 behind-remote flows keep their exact behavior. A database already at
+  this binary's latest version never consults the gate, so already-migrated
+  (v65) workspaces see no change. The
   remote-backed case keeps all of the #4259 remote-migrate gate's additional
   protections (smart gate, adopt fast-forward, fork-skew analysis) unchanged.
   JSON consumers: the refusal renders as a structured error carrying a
