@@ -774,6 +774,13 @@ jobs:
       - name: Test domain + uow + tracker
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
+          # internal/storage/domain, internal/storage/uow, and internal/tracker
+          # run as concurrent package test binaries in this one invocation.
+          # testcontainers-go shares one Ryuk reaper per host; a failed
+          # handshake in one process can reap a sibling's live Dolt container
+          # mid-suite (be-2on). The runner is destroyed after the job, so the
+          # reaper buys nothing here and only costs this race.
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 15m -v ./internal/storage/domain/... ./internal/storage/uow/... ./internal/tracker/...
 
       # The doctor/fix DB-backed suite spins its own Dolt container in
@@ -784,6 +791,8 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_FIX_REQUIRE_DOLT: "1"
+          # Same shared-Ryuk-reaper race as the step above (be-2on).
+          TESTCONTAINERS_RYUK_DISABLED: "true"
         run: go test -tags gms_pure_go -race -count=1 -timeout 10m -v ./cmd/bd/doctor/fix/
 
   # macOS-only regressions were landing on main undetected: main.yml's Test
