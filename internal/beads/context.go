@@ -99,6 +99,53 @@ func GetRepoContext() (*RepoContext, error) {
 	return repoCtx, repoCtxErr
 }
 
+// NoRepoRootError reports that a .beads directory was found and cleared the
+// SEC-003 safe-boundary check, but no git repository root could be determined
+// for it — i.e. the workspace simply is not inside a git repo.
+//
+// It is deliberately distinct from the other two failures buildRepoContext can
+// return ("no .beads directory found" and the unsafe-location rejection):
+// those mean bd does not know which workspace it is looking at, while this one
+// means it does. Only this failure is safe for a git-independent caller to
+// recover from, and only a typed error can say so — the unsafe-location
+// message embeds the offending path verbatim, so any substring test over the
+// message text is a path-controlled discriminator.
+type NoRepoRootError struct {
+	// BeadsDir is the resolved, boundary-checked .beads directory.
+	BeadsDir string
+	// Err is the underlying git failure.
+	Err error
+}
+
+func (e *NoRepoRootError) Error() string {
+	return fmt.Sprintf("cannot determine repository root: %v", e.Err)
+}
+
+func (e *NoRepoRootError) Unwrap() error { return e.Err }
+
+// GetRepoContextAllowingNoGit returns the repository context for callers that
+// only need to locate the workspace, not operate on git — `bd context` and the
+// context provider behind the proxied route, both of which read config files
+// and are documented to answer in degraded states.
+//
+// It behaves exactly like GetRepoContext except for NoRepoRootError, where it
+// synthesizes a context rooted at the .beads parent. Every other failure,
+// including the unsafe-location rejection, propagates untouched. Callers that
+// actually run git commands must keep using GetRepoContext, so that a missing
+// repository stays an error at the point where it matters (GH#4772).
+func GetRepoContextAllowingNoGit() (*RepoContext, error) {
+	rc, err := GetRepoContext()
+	var noRoot *NoRepoRootError
+	if !errors.As(err, &noRoot) {
+		return rc, err
+	}
+	return &RepoContext{
+		BeadsDir:    noRoot.BeadsDir,
+		RepoRoot:    filepath.Dir(noRoot.BeadsDir),
+		CWDRepoRoot: git.GetRepoRoot(), // "" outside a git repo
+	}, nil
+}
+
 // buildRepoContext constructs the RepoContext by resolving all paths.
 // This is called once per process via sync.Once.
 func buildRepoContext() (*RepoContext, error) {
@@ -133,7 +180,12 @@ func buildRepoContext() (*RepoContext, error) {
 		var err error
 		repoRoot, err = git.GetMainRepoRoot()
 		if err != nil {
-			return nil, fmt.Errorf("cannot determine repository root: %w", err)
+			// Typed so callers that can work without git select this exact
+			// failure with errors.As instead of matching the message text.
+			// beadsDir is carried along because it has already cleared steps
+			// 1 and 2 above (found, and inside the safe boundary), which is
+			// precisely what makes the no-git fallback safe to take.
+			return nil, &NoRepoRootError{BeadsDir: beadsDir, Err: err}
 		}
 	}
 
