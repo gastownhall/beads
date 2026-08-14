@@ -1023,6 +1023,30 @@ func TestCommentOutYamlKey(t *testing.T) {
 			expected: "a:\n  b:\n    # c: 1\n",
 		},
 		{
+			name:     "block opener is left alone rather than orphaning its children",
+			content:  "backup:\n  enabled: false\n  interval: 15m",
+			key:      "backup",
+			expected: "backup:\n  enabled: false\n  interval: 15m",
+		},
+		{
+			name:     "block opener with an interleaved comment is left alone",
+			content:  "backup:\n  # whether to back up\n  enabled: false",
+			key:      "backup",
+			expected: "backup:\n  # whether to back up\n  enabled: false",
+		},
+		{
+			name:     "key with an empty value and no block is still commented",
+			content:  "actor:\nother: value",
+			key:      "actor",
+			expected: "# actor:\nother: value",
+		},
+		{
+			name:     "key with an empty value at end of file is still commented",
+			content:  "other: value\nactor:",
+			key:      "actor",
+			expected: "other: value\n# actor:",
+		},
+		{
 			name:     "flat form wins when both are present",
 			content:  "backup.enabled: false\nbackup:\n  enabled: true",
 			key:      "backup.enabled",
