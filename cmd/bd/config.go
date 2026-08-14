@@ -621,14 +621,23 @@ var configUnsetCmd = &cobra.Command{
 		}
 		noteDirectConfigWrite()
 
+		location := "database"
+		if config.GetYamlConfig(result.Key) != "" {
+			if err := config.UnsetYamlConfig(result.Key); err != nil {
+				return HandleError("deleting config from config.yaml: %v", err)
+			}
+			location = "database, config.yaml"
+		}
+
 		if jsonOutput {
 			if err := outputJSON(map[string]string{
-				"key": result.Key,
+				"key":      result.Key,
+				"location": location,
 			}); err != nil {
 				return err
 			}
 		} else {
-			fmt.Printf("Unset %s\n", result.Key)
+			fmt.Printf("Unset %s (in %s)\n", result.Key, location)
 		}
 		printConfigSideEffects(checkConfigUnsetSideEffects(result.Key))
 		return nil

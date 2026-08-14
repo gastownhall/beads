@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -156,6 +157,36 @@ func TestEmbeddedConfig(t *testing.T) {
 		m := bdConfigListJSON(t, bd, dir)
 		if _, ok := m["test.removeme"]; ok {
 			t.Error("expected test.removeme to be absent from config list after unset")
+		}
+	})
+
+	// A key that config.yaml carries but IsYamlOnlyKey does not claim was
+	// unset from the database alone, so it stayed effective while bd reported
+	// success.
+	t.Run("config_unset_clears_yaml_layer", func(t *testing.T) {
+		configPath := filepath.Join(dir, ".beads", "config.yaml")
+		original, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml: %v", err)
+		}
+		if err := os.WriteFile(configPath, append(original, []byte("\ntest.fromyaml: yamlvalue\n")...), 0600); err != nil {
+			t.Fatalf("write config.yaml: %v", err)
+		}
+
+		out := bdConfig(t, bd, dir, "unset", "test.fromyaml")
+		if !strings.Contains(out, "config.yaml") {
+			t.Errorf("unset output should name config.yaml as a cleared location: %s", out)
+		}
+
+		after, err := os.ReadFile(configPath)
+		if err != nil {
+			t.Fatalf("read config.yaml after unset: %v", err)
+		}
+		if strings.Contains(string(after), "\ntest.fromyaml: yamlvalue") {
+			t.Errorf("test.fromyaml still set in config.yaml after unset:\n%s", after)
+		}
+		if !strings.Contains(string(after), "# test.fromyaml: yamlvalue") {
+			t.Errorf("expected the unset key to remain as a comment:\n%s", after)
 		}
 	})
 
