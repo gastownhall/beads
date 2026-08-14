@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -184,7 +185,10 @@ func runPour(cmd *cobra.Command, args []string) error {
 		attachSubgraphs = append(attachSubgraphs, a.subgraph)
 	}
 	if err := checkPourVars(subgraph, attachSubgraphs, vars); err != nil {
-		return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", missingVarHint(subgraph, attachSubgraphs, vars)))
+		if hint := missingVarHint(subgraph, attachSubgraphs, vars); hint != "" {
+			return HandleErrorWithHint(err.Error(), fmt.Sprintf("Provide them with: --var %s=<value>", hint))
+		}
+		return HandleError("%v", err)
 	}
 
 	if in.dryRun {
@@ -260,7 +264,59 @@ func checkPourVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgra
 	if len(missingVars) > 0 {
 		return fmt.Errorf("missing required variables: %s", strings.Join(missingVars, ", "))
 	}
-	return nil
+	return checkUnknownVars(subgraph, attachSubgraphs, vars)
+}
+
+// checkUnknownVars rejects --var names the protos being poured cannot consume.
+// A name is accepted if any proto declares it or references it as a {{handlebar}},
+// so documentation handlebars and vars belonging to an --attach proto still pass;
+// what is left over cannot affect the pour, and silently dropping it turns a typo
+// in an optional var into a conditional step that quietly never appears.
+func checkUnknownVars(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) error {
+	known := knownVarsAcross(subgraph, attachSubgraphs)
+
+	var unknown []string
+	for name := range vars {
+		if !known[name] {
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+
+	knownNames := make([]string, 0, len(known))
+	for name := range known {
+		knownNames = append(knownNames, name)
+	}
+	sort.Strings(knownNames)
+
+	if len(knownNames) == 0 {
+		return fmt.Errorf("unknown variables: %s (this proto takes no variables)", strings.Join(unknown, ", "))
+	}
+	return fmt.Errorf("unknown variables: %s (available: %s)", strings.Join(unknown, ", "), strings.Join(knownNames, ", "))
+}
+
+func knownVarsAcross(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph) map[string]bool {
+	known := make(map[string]bool)
+	add := func(sg *TemplateSubgraph) {
+		if sg == nil {
+			return
+		}
+		for name := range sg.VarDefs {
+			known[name] = true
+		}
+		for _, name := range extractAllVariables(sg) {
+			known[name] = true
+		}
+	}
+
+	add(subgraph)
+	for _, attachSubgraph := range attachSubgraphs {
+		add(attachSubgraph)
+	}
+	return known
 }
 
 func missingVarHint(subgraph *TemplateSubgraph, attachSubgraphs []*TemplateSubgraph, vars map[string]string) string {
