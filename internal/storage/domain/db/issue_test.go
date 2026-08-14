@@ -18,6 +18,9 @@ func (s *testSuite) TestIssueSQLRepository() {
 		s.Run("RecordsCreatedEvent", s.issueInsertRecordsEvent)
 		s.Run("RoutesToWispsTable", s.issueInsertWispRouting)
 		s.Run("ComputesContentHashWhenMissing", s.issueInsertComputesHash)
+		s.Run("PreservesClosedBySession", s.issueInsertPreservesClosedBySession)
+		s.Run("PreservesClosedBySessionOnWisp", s.wispInsertPreservesClosedBySession)
+		s.Run("UpsertRewritesClosedBySession", s.issueUpsertRewritesClosedBySession)
 	})
 	s.Run("InsertBatch", func() {
 		s.Run("AllIssuesInserted", s.issueInsertBatchAll)
@@ -126,6 +129,68 @@ func (s *testSuite) issueInsertRoundTrip() {
 	s.Equal(types.TypeTask, out.IssueType)
 	s.Require().NotNil(out.EstimatedMinutes)
 	s.Equal(45, *out.EstimatedMinutes)
+}
+
+// issueInsertPreservesClosedBySession proves the domain/UOW writer stores
+// closed_by_session, so an issue created through the proxied stack reads back
+// with the same closing-session provenance the classic writer preserves
+// (GH#4662).
+//
+// The column defaults to the empty string in every schema and the shared
+// scanner hydrates whatever is stored, so a writer that omits it loses the
+// value silently: the insert succeeds, the read succeeds, and only the
+// provenance is gone.
+func (s *testSuite) issueInsertPreservesClosedBySession() {
+	r := s.issueRepo()
+	in := newTestIssue("bd-cbs-1", "closed elsewhere")
+	in.Status = types.StatusClosed
+	in.CloseReason = "done"
+	in.ClosedBySession = "sess-xyz"
+
+	s.Require().NoError(r.Insert(s.Ctx(), in, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-1", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("sess-xyz", out.ClosedBySession, "closed_by_session must survive a domain/UOW insert")
+	s.Equal("done", out.CloseReason)
+}
+
+// wispInsertPreservesClosedBySession is the wisp-table counterpart: promotion
+// reads a wisp and re-inserts it as an issue, so the value has to survive on
+// the wisp side too or there is nothing left to promote.
+func (s *testSuite) wispInsertPreservesClosedBySession() {
+	r := s.issueRepo()
+	wisp := newTestIssue("bd-cbs-wisp", "closed wisp")
+	wisp.Ephemeral = true
+	wisp.Status = types.StatusClosed
+	wisp.ClosedBySession = "sess-wisp"
+
+	s.Require().NoError(r.Insert(s.Ctx(), wisp, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-wisp", domain.IssueTableOpts{UseWispsTable: true})
+	s.Require().NoError(err)
+	s.Equal("sess-wisp", out.ClosedBySession, "closed_by_session must survive a domain/UOW wisp insert")
+}
+
+// issueUpsertRewritesClosedBySession covers the ON DUPLICATE KEY UPDATE half.
+// Import re-inserts existing IDs through this same statement, so a column
+// listed in the INSERT but missing from the upsert assignments would carry the
+// value on first write and silently keep the stale one forever after.
+func (s *testSuite) issueUpsertRewritesClosedBySession() {
+	r := s.issueRepo()
+	first := newTestIssue("bd-cbs-upsert", "first")
+	first.Status = types.StatusClosed
+	first.ClosedBySession = "sess-first"
+	s.Require().NoError(r.Insert(s.Ctx(), first, "tester", domain.InsertIssueOpts{}))
+
+	second := newTestIssue("bd-cbs-upsert", "second")
+	second.Status = types.StatusClosed
+	second.ClosedBySession = "sess-second"
+	s.Require().NoError(r.Insert(s.Ctx(), second, "tester", domain.InsertIssueOpts{}))
+
+	out, err := r.Get(s.Ctx(), "bd-cbs-upsert", domain.IssueTableOpts{})
+	s.Require().NoError(err)
+	s.Equal("sess-second", out.ClosedBySession, "the upsert must rewrite closed_by_session, not keep the stale value")
 }
 
 func (s *testSuite) issueInsertRequiresID() {
