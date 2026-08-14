@@ -99,3 +99,21 @@ func TestCheckPourVarsReportsMissingBeforeUnknown(t *testing.T) {
 		t.Errorf("checkPourVars() error = %q, want the missing-variable error", err)
 	}
 }
+
+// bd mol wisp takes --var through its own check, which must reject an
+// unusable name for the same reason bd mol pour does.
+func TestCheckRequiredVarsRejectsUnknownVars(t *testing.T) {
+	subgraph := varSubgraph("build {{component}}", map[string]formula.VarDef{"component": {Default: strPtr("core")}})
+
+	if err := checkRequiredVars(subgraph, map[string]string{"component": "rule"}); err != nil {
+		t.Fatalf("checkRequiredVars() = %v, want nil for a declared var", err)
+	}
+
+	err := checkRequiredVars(subgraph, map[string]string{"compnent": "rule"})
+	if err == nil {
+		t.Fatal("checkRequiredVars() = nil, want an unknown-variable error")
+	}
+	if !strings.Contains(err.Error(), "compnent") {
+		t.Errorf("checkRequiredVars() error = %q, want it to name the unknown var", err)
+	}
+}
