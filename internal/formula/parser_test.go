@@ -520,6 +520,21 @@ func TestExtractVariables(t *testing.T) {
 			{ID: "s1", Title: "Deploy {{project}} to {{env}}"},
 			{ID: "s2", Title: "Notify {{owner}}"},
 			{ID: "s3", Gate: &Gate{Type: "gh:{{gate_kind}}", AwaitID: "{{pr_url}}", Timeout: "{{gate_timeout}}", Repo: "{{gate_repo}}"}},
+			// The fields below are substituted by cook/pour, so they must be
+			// scanned here too - otherwise a var used only in one of them is
+			// never demanded and ships as a literal placeholder (GH#5110,
+			// GH#5754).
+			{
+				ID:       "s4",
+				Notes:    "see {{runbook}}",
+				Assignee: "{{agent}}",
+				Labels:   []string{"static", "widget:{{widget_id}}"},
+				Metadata: map[string]interface{}{
+					"ado_id": "{{ado_id}}",
+					"count":  3,
+					"nested": map[string]interface{}{"k": "{{nested_var}}"},
+				},
+			},
 		},
 	}
 
@@ -532,6 +547,11 @@ func TestExtractVariables(t *testing.T) {
 		"pr_url":       true,
 		"gate_timeout": true,
 		"gate_repo":    true,
+		"runbook":      true,
+		"agent":        true,
+		"widget_id":    true,
+		"ado_id":       true,
+		"nested_var":   true,
 	}
 
 	if len(vars) != len(want) {
