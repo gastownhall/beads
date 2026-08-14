@@ -4,6 +4,7 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -56,6 +57,31 @@ func TestProxiedServerContext(t *testing.T) {
 		}
 		if info.ServerHost != "" || info.ServerPort != 0 {
 			t.Errorf("server host/port must be empty in proxied-server mode: host=%q port=%d", info.ServerHost, info.ServerPort)
+		}
+	})
+
+	// The proxied route must survive a workspace outside git for the same
+	// reason the direct route does — its context provider reads config files
+	// only (GH#4772). This gets its own project because it removes .git, which
+	// the shared one's parallel subtests still need.
+	t.Run("json_without_git_repo", func(t *testing.T) {
+		t.Parallel()
+		np := newSharedProxiedProject(t, bd, "ctxng")
+		if err := os.RemoveAll(filepath.Join(np.dir, ".git")); err != nil {
+			t.Fatalf("remove .git: %v", err)
+		}
+
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, np.dir, "context", "--json")
+		if err != nil {
+			t.Fatalf("bd context --json failed outside git repo: %v\nstdout:\n%s\nstderr:\n%s", err, stdout, stderr)
+		}
+		var info ContextInfo
+		if jerr := json.Unmarshal([]byte(stdout), &info); jerr != nil {
+			t.Fatalf("decoding context JSON: %v\noutput:\n%s", jerr, stdout)
+		}
+		assertNonGitContext(t, info, np.dir)
+		if info.DoltMode != configfile.DoltModeProxiedServer {
+			t.Errorf("dolt_mode = %q, want %q", info.DoltMode, configfile.DoltModeProxiedServer)
 		}
 	})
 

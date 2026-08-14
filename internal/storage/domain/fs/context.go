@@ -26,8 +26,12 @@ func (r *contextRepositoryImpl) beadsDir(ctx context.Context) string {
 	return r.fsRepo.ResolveBeadsDirPath(ctx).BeadsDir
 }
 
+// RepoContext resolves the workspace paths behind `bd context`'s proxied
+// route. It tolerates the absence of a git repository for the same reason the
+// direct route does: this provider only reads config files, and a workspace
+// outside git is a supported degraded state, not a failure (GH#4772).
 func (r *contextRepositoryImpl) RepoContext(ctx context.Context) (domain.RepoPaths, error) {
-	rc, err := beads.GetRepoContext()
+	rc, err := beads.GetRepoContextAllowingNoGit()
 	if err != nil {
 		return domain.RepoPaths{}, err
 	}
@@ -41,10 +45,12 @@ func (r *contextRepositoryImpl) RepoContext(ctx context.Context) (domain.RepoPat
 }
 
 func (r *contextRepositoryImpl) Role(ctx context.Context) (string, bool, error) {
-	rc, err := beads.GetRepoContext()
+	rc, err := beads.GetRepoContextAllowingNoGit()
 	if err != nil {
 		return "", false, err
 	}
+	// Outside a git repo there is no `git config beads.role` to read, so
+	// rc.Role() reports "not configured" rather than failing the command.
 	role, ok := rc.Role()
 	return string(role), ok, nil
 }
