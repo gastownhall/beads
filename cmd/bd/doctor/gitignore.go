@@ -154,7 +154,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Name:    "Gitignore",
 			Status:  "warning",
 			Message: ".beads/.gitignore not found",
-			Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -167,7 +167,7 @@ func CheckGitignore(repoPath string) DoctorCheck {
 			Status:  "warning",
 			Message: "Outdated .beads/.gitignore (missing required patterns)",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
@@ -727,7 +727,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 				Name:    "Project Gitignore",
 				Status:  StatusWarning,
 				Message: "No project .gitignore found — Dolt/credential files may be committed accidentally",
-				Fix:     "Run: bd init (safe to re-run) or bd doctor --fix",
+				Fix:     "Run: bd doctor --fix",
 			}
 		}
 		return DoctorCheck{
@@ -751,7 +751,7 @@ func CheckProjectGitignore(repoPath string) DoctorCheck {
 			Status:  StatusWarning,
 			Message: "Project .gitignore missing required exclusion patterns",
 			Detail:  "Missing: " + strings.Join(missing, ", "),
-			Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			Fix:     "Run: bd doctor --fix",
 		}
 	}
 
