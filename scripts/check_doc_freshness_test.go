@@ -23,8 +23,8 @@ var freshnessDocuments = []struct {
 	{"docs/recovery/init-safety.md", []string{"cmd/bd/init.go", "cmd/bd/init_safety.go", "cmd/bd/init_safety_test.go"}},
 	{"engdocs/ERROR_HANDLING.md", []string{"cmd/bd/*.go", "cmd/bd/errors.go"}},
 	{"engdocs/SERVE_RUNBOOK.md", []string{"internal/httpapi/server.go", "internal/httpapi/events_watch.go", "cmd/bd/serve.go", "internal/httpapi/auth.go"}},
-	{"engdocs/LINTING.md", []string{".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile", ".github/workflows/pr.yml", ".github/workflows/main.yml"}},
-	{"engdocs/CI_CLEANUP_PLAN.md", []string{"engdocs/CI_TEST_SURFACE_AUDIT.md", ".github/workflows/*.yml", ".buildflags", ".golangci.yml", "scripts/ci/pr-lint.sh", "Makefile"}},
+	{"engdocs/LINTING.md", []string{".golangci.yml", "scripts/ci/pr-lint.sh", "scripts/pr-lint/", "Makefile", ".github/workflows/pr.yml", ".github/workflows/main.yml"}},
+	{"engdocs/CI_CLEANUP_PLAN.md", []string{"engdocs/CI_TEST_SURFACE_AUDIT.md", ".github/workflows/*.yml", ".buildflags", ".golangci.yml", "scripts/ci/pr-lint.sh", "scripts/pr-lint/", "Makefile"}},
 	{"engdocs/design/otel/otel-data-model.md", []string{"internal/telemetry/", "internal/storage/dolt/store.go", "internal/compact/haiku.go", "cmd/bd/find_duplicates.go", "internal/hooks/"}},
 }
 

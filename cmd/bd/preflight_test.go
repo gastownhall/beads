@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -221,43 +224,178 @@ func TestRunLintCheck_SkipLintFlag(t *testing.T) {
 	}
 }
 
-func TestRunFmtCheck_Formatted(t *testing.T) {
-	dir := t.TempDir()
-	// Write a properly formatted Go file
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	if err != nil {
-		t.Fatal(err)
+func TestLintInvocationForRootMatchesChecklistAndProjectType(t *testing.T) {
+	beads := writeMarkerDir(t, map[string]string{"go.mod": "module github.com/steveyegge/beads\n"})
+	beadsInvocation := lintInvocationForRoot(beads)
+	if beadsInvocation.display != beadsPRLintDriverCommand {
+		t.Fatalf("Beads command = %q, want %q", beadsInvocation.display, beadsPRLintDriverCommand)
+	}
+	if beadsInvocation.executable != "go" {
+		t.Fatalf("Beads executable = %q, want go", beadsInvocation.executable)
+	}
+	wantBeadsArgs := []string{"run", "-mod=readonly", "-tags=gms_pure_go", "./scripts/pr-lint"}
+	if !reflect.DeepEqual(beadsInvocation.args, wantBeadsArgs) {
+		t.Fatalf("Beads args = %#v, want %#v", beadsInvocation.args, wantBeadsArgs)
+	}
+	if beadsInvocation.dir != beads {
+		t.Fatalf("Beads command dir = %q, want %q", beadsInvocation.dir, beads)
+	}
+	if checklist := strings.Join(buildPreflightChecklist(beads), "\n"); !strings.Contains(checklist, "make ci-pr-lint") {
+		t.Fatalf("Beads checklist does not report supported lint entrypoint:\n%s", checklist)
 	}
 
-	// Run gofmt -l in the temp dir
-	cmd := exec.Command("gofmt", "-l", ".")
-	cmd.Dir = dir
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("gofmt failed: %v: %s", err, output)
+	generic := writeMarkerDir(t, map[string]string{"go.mod": "module example.com/generic\n"})
+	genericInvocation := lintInvocationForRoot(generic)
+	if genericInvocation.display != "golangci-lint run ./..." {
+		t.Fatalf("generic command = %q, want direct lint contract", genericInvocation.display)
 	}
-	if strings.TrimSpace(string(output)) != "" {
-		t.Fatalf("expected no unformatted files, got: %s", output)
+	if genericInvocation.executable != "golangci-lint" {
+		t.Fatalf("generic executable = %q, want golangci-lint", genericInvocation.executable)
+	}
+	if want := []string{"run", "./..."}; !reflect.DeepEqual(genericInvocation.args, want) {
+		t.Fatalf("generic args = %#v, want %#v", genericInvocation.args, want)
+	}
+	if checklist := strings.Join(buildPreflightChecklist(generic), "\n"); !strings.Contains(checklist, genericInvocation.display) {
+		t.Fatalf("generic checklist does not report executable lint command %q:\n%s", genericInvocation.display, checklist)
 	}
 }
 
-func TestRunFmtCheck_Unformatted(t *testing.T) {
-	dir := t.TempDir()
-	// Write a poorly formatted Go file (extra spaces, no newline)
-	err := os.WriteFile(filepath.Join(dir, "bad.go"), []byte("package main\nfunc  main( )  {  }\n"), 0644)
+func TestRunLintCheckAtBeadsExecutesCheckoutDriverAndReportsJSONCommand(t *testing.T) {
+	realGo, err := exec.LookPath("go")
 	if err != nil {
+		t.Fatalf("locate Go toolchain for subprocess fixture: %v", err)
+	}
+	helperDir := t.TempDir()
+	helperSource := filepath.Join(helperDir, "fake-go.go")
+	const source = `package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+func main() {
+	dir, err := os.Getwd()
+	if err != nil {
+		panic(err)
+	}
+	marker, err := os.Create(os.Getenv("PREFLIGHT_LINT_MARKER"))
+	if err != nil {
+		panic(err)
+	}
+	defer marker.Close()
+	if err := json.NewEncoder(marker).Encode(map[string]any{"args": os.Args[1:], "dir": dir}); err != nil {
+		panic(err)
+	}
+	fmt.Println("synthetic checkout lint success")
+}
+`
+	if err := os.WriteFile(helperSource, []byte(source), 0o600); err != nil {
+		t.Fatalf("write fake Go source: %v", err)
+	}
+	helperName := "go"
+	if runtime.GOOS == "windows" {
+		helperName += ".exe"
+	}
+	helperPath := filepath.Join(helperDir, helperName)
+	build := exec.Command(realGo, "build", "-o", helperPath, helperSource)
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build fake Go executable: %v\n%s", err, output)
+	}
+
+	beads := writeMarkerDir(t, map[string]string{"go.mod": "module github.com/steveyegge/beads\n"})
+	marker := filepath.Join(t.TempDir(), "invocation.json")
+	t.Setenv("PATH", helperDir)
+	t.Setenv("PREFLIGHT_LINT_MARKER", marker)
+	result := runLintCheckAt(beads, false)
+	if !result.Passed {
+		t.Fatalf("checkout lint invocation failed: %s", result.Output)
+	}
+	if result.Command != beadsPRLintDriverCommand {
+		t.Fatalf("reported command = %q, want %q", result.Command, beadsPRLintDriverCommand)
+	}
+	if !strings.Contains(result.Output, "synthetic checkout lint success") {
+		t.Fatalf("missing subprocess output: %q", result.Output)
+	}
+
+	var invocation struct {
+		Args []string `json:"args"`
+		Dir  string   `json:"dir"`
+	}
+	markerData, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("read invocation marker: %v", err)
+	}
+	if err := json.Unmarshal(markerData, &invocation); err != nil {
+		t.Fatalf("decode invocation marker: %v", err)
+	}
+	wantArgs := []string{"run", "-mod=readonly", "-tags=gms_pure_go", "./scripts/pr-lint"}
+	if !reflect.DeepEqual(invocation.Args, wantArgs) {
+		t.Fatalf("subprocess args = %#v, want %#v", invocation.Args, wantArgs)
+	}
+	if invocation.Dir != beads {
+		t.Fatalf("subprocess dir = %q, want checkout root %q", invocation.Dir, beads)
+	}
+
+	encoded, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("marshal CheckResult: %v", err)
+	}
+	var reported CheckResult
+	if err := json.Unmarshal(encoded, &reported); err != nil {
+		t.Fatalf("unmarshal CheckResult: %v", err)
+	}
+	if reported.Command != beadsPRLintDriverCommand || !reported.Passed {
+		t.Fatalf("JSON evidence = %#v, want passing checkout driver command", reported)
+	}
+}
+
+func TestRunFmtCheckAtFormattedRoot(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command("gofmt", "-l", ".")
-	cmd.Dir = dir
-	output, _ := cmd.CombinedOutput()
-	unformatted := strings.TrimSpace(string(output))
-	if unformatted == "" {
-		t.Fatal("expected unformatted files to be listed")
+	result := runFmtCheckAt(dir)
+	if !result.Passed {
+		t.Fatalf("formatted root failed: %s", result.Output)
 	}
-	if !strings.Contains(unformatted, "bad.go") {
-		t.Fatalf("expected bad.go in output, got: %s", unformatted)
+}
+
+func TestRunFmtCheckAtFindsUnformattedFileOutsideCallerSubtree(t *testing.T) {
+	root := t.TempDir()
+	callerDir := filepath.Join(root, "nested", "caller")
+	outsideCaller := filepath.Join(root, "sibling", "bad.go")
+	if err := os.MkdirAll(callerDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(outsideCaller), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(outsideCaller, []byte("package sibling\nfunc  bad( )  {  }\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	originalDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(callerDir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalDir); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+
+	result := runFmtCheckAt(root)
+	if result.Passed {
+		t.Fatal("root formatting check passed despite unformatted sibling file")
+	}
+	if !strings.Contains(result.Output, "bad.go") {
+		t.Fatalf("root formatting check missed sibling file: %s", result.Output)
 	}
 }
 
