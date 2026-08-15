@@ -2546,7 +2546,12 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				host := cfg.GetDoltServerHost()
 				port := doltserver.DefaultConfig(beadsDir).Port
 				dbName := cfg.GetDoltDatabase()
-				password := cfg.GetDoltServerPassword()
+				// Fail closed: a configured-but-failing password helper aborts
+				// rather than silently downgrading to the credentials file.
+				password, err := cfg.GetDoltServerPassword()
+				if err != nil {
+					return fmt.Errorf("resolving dolt server password: %w", err)
+				}
 				user := cfg.GetDoltServerUser()
 
 				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())

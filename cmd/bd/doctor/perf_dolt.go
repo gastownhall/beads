@@ -107,16 +107,20 @@ func runDoltServerDiagnostics(metrics *DoltPerfMetrics, host string, port int, d
 	metrics.ServerMode = true
 
 	// Resolve credentials from config and environment, matching openDoltDB behavior.
-	// GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD env first, then
-	// falls back to ~/.config/beads/credentials keyed by [host:port] — required
-	// for externally-hosted Dolt servers (bd-h5k7).
+	// BEADS_DOLT_PASSWORD, then the BEADS_DOLT_PASSWORD_COMMAND helper, then
+	// ~/.config/beads/credentials keyed by [host:port] — required for
+	// externally-hosted Dolt servers (bd-h5k7). A failing configured helper
+	// fails closed instead of silently downgrading to the file.
 	user := configfile.DefaultDoltServerUser
 	var password string
 	var tls bool
 	if cfg, err := configfile.Load(beadsDir); err == nil && cfg != nil {
 		user = cfg.GetDoltServerUser()
 		tls = cfg.GetDoltServerTLS()
-		password = cfg.GetDoltServerPasswordForPort(port)
+		password, err = cfg.GetDoltServerPasswordForPort(port)
+		if err != nil {
+			return fmt.Errorf("resolving dolt server password: %w", err)
+		}
 	}
 
 	dsn := doltutil.ServerDSN{

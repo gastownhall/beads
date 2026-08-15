@@ -39,7 +39,16 @@ func doltServerConfig(beadsDir, doltPath string) *dolt.Config {
 		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
 		cfg.ServerUser = bcfg.GetDoltServerUser()
 		cfg.ServerTLS = bcfg.GetDoltServerTLS()
-		cfg.ServerPassword = bcfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+		// doltServerConfig has ~a dozen DoctorCheck callers and no error
+		// channel, so a failing password helper is reported on stderr and the
+		// password stays empty — the check then fails its own connection
+		// (access denied) instead of silently downgrading to the credentials
+		// file. Fail-closed holds; the reason is one stderr line away.
+		if password, err := bcfg.GetDoltServerPasswordForPort(cfg.ServerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "bd doctor: %v\n", err)
+		} else {
+			cfg.ServerPassword = password
+		}
 	}
 	dolt.ApplyCLIAutoStart(beadsDir, cfg)
 	return cfg

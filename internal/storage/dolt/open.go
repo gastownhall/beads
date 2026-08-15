@@ -275,10 +275,16 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
 	// SharedStore) fail to reach externally-hosted Dolt servers that keep
 	// credentials in ~/.config/beads/credentials, while bd create/list/close
-	// succeed (bd-h5k7). GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD
-	// env first, then credentials file keyed by [host:resolved-port].
+	// succeed (bd-h5k7). GetDoltServerPasswordForPort walks BEADS_DOLT_PASSWORD,
+	// then the BEADS_DOLT_PASSWORD_COMMAND helper, then the credentials file
+	// keyed by [host:resolved-port] — and fails closed when a configured helper
+	// errors, so the open aborts instead of downgrading to the file.
 	if cfg.ServerPassword == "" {
-		cfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+		password, err := fileCfg.GetDoltServerPasswordForPort(cfg.ServerPort)
+		if err != nil {
+			return fmt.Errorf("resolving dolt server password: %w", err)
+		}
+		cfg.ServerPassword = password
 	}
 	if !cfg.ServerTLS {
 		cfg.ServerTLS = fileCfg.GetDoltServerTLS()

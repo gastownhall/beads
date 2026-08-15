@@ -428,11 +428,21 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 	}
 
 	if isServer {
+		// Fail closed: a configured-but-failing BEADS_DOLT_PASSWORD_COMMAND
+		// must not silently downgrade the probe to the credentials file.
+		// Report it through the plan (same shape as a failed DB check below)
+		// so bootstrap refuses to act on unverifiable credentials.
+		probePass, err := cfg.GetDoltServerPassword()
+		if err != nil {
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("Could not resolve dolt server password: %v", err)
+			return plan, true
+		}
 		probeCfg := bootstrapServerProbeConfig{
 			host:     cfg.GetDoltServerHost(),
 			port:     bootstrapServerPort(beadsDir, cfg, isSharedServer),
 			user:     cfg.GetDoltServerUser(),
-			pass:     cfg.GetDoltServerPassword(),
+			pass:     probePass,
 			database: cfg.GetDoltDatabase(),
 			tls:      cfg.GetDoltServerTLS(),
 		}
@@ -946,12 +956,18 @@ func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) e
 // servers where bd does not know the filesystem layout.
 func cloneViaServer(ctx context.Context, beadsDir, remoteURL, dbName string, cfg *configfile.Config) error {
 	port := serverClonePort(beadsDir, cfg)
+	// Fail closed: a configured-but-failing password helper aborts the clone
+	// rather than silently downgrading to the credentials file.
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		return fmt.Errorf("resolve dolt server password for clone: %w", err)
+	}
 	dsn := doltutil.ServerDSN{
 		Socket:   cfg.GetDoltServerSocket(),
 		Host:     cfg.GetDoltServerHost(),
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
+		Password: password,
 		TLS:      cfg.GetDoltServerTLS(),
 		// No Database — DOLT_CLONE creates the database.
 	}.String()

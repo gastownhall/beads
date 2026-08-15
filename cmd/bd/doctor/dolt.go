@@ -40,12 +40,16 @@ func openDoltDB(beadsDir string) (*sql.DB, *configfile.Config, error) {
 	}
 
 	// Resolve the password using the credentials file fallback keyed by the
-	// resolved runtime port — matching the CRUD path. Env var BEADS_DOLT_PASSWORD
-	// still takes precedence inside GetDoltServerPasswordForPort. Without this,
-	// externally-hosted Dolt servers that keep credentials in
-	// ~/.config/beads/credentials fail doctor checks with "Access denied" while
-	// regular CRUD commands succeed (bd-h5k7).
-	password := cfg.GetDoltServerPasswordForPort(port)
+	// resolved runtime port — matching the CRUD path. BEADS_DOLT_PASSWORD, then
+	// the BEADS_DOLT_PASSWORD_COMMAND helper, then the credentials file — and a
+	// failing configured helper fails closed. Without this, externally-hosted
+	// Dolt servers that keep credentials in ~/.config/beads/credentials fail
+	// doctor checks with "Access denied" while regular CRUD commands succeed
+	// (bd-h5k7).
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolving dolt server password: %w", err)
+	}
 
 	connStr := doltutil.ServerDSN{
 		Host:     host,

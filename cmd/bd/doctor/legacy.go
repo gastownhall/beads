@@ -489,7 +489,18 @@ func CheckFreshClone(repoPath string) DoctorCheck {
 			// the actual server runs on a different port (e.g. 3306 for
 			// externally-hosted Dolt). That mismatch produced spurious
 			// "Fresh clone detected" warnings (bd-tzo9).
-			password := cfg.GetDoltServerPasswordForPort(port)
+			// Fail closed: a failing password helper surfaces as the check's
+			// error rather than silently downgrading to the credentials file.
+			password, err := cfg.GetDoltServerPasswordForPort(port)
+			if err != nil {
+				return DoctorCheck{
+					Name:    "Fresh Clone",
+					Status:  StatusError,
+					Message: "Could not resolve dolt server password",
+					Detail:  err.Error(),
+					Fix:     "Fix or unset BEADS_DOLT_PASSWORD_COMMAND, then re-run bd doctor",
+				}
+			}
 			dbName := cfg.GetDoltDatabase()
 			result := checkFreshCloneDB(host, port, user, password, dbName, cfg.GetDoltServerTLS())
 			if result.Reachable {

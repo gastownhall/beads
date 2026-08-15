@@ -273,7 +273,13 @@ func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *
 	}
 	// Use the resolved port for credential lookup — metadata.json port
 	// and runtime port can diverge (e.g., tunnel on 3308 vs local on 3307).
-	doltCfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
+	// Fails closed: a configured-but-failing BEADS_DOLT_PASSWORD_COMMAND aborts
+	// here rather than silently downgrading to the credentials file.
+	password, err := fileCfg.GetDoltServerPasswordForPort(doltCfg.ServerPort)
+	if err != nil {
+		return fmt.Errorf("resolving dolt server password: %w", err)
+	}
+	doltCfg.ServerPassword = password
 	doltCfg.ServerTLS = fileCfg.GetDoltServerTLS()
 	return nil
 }

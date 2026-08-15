@@ -289,12 +289,23 @@ func checkDoltVersion(cfg *configfile.Config, beadsDir string) (DoctorCheck, *sq
 	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 
-	// Resolve password the same way the CRUD path does: BEADS_DOLT_PASSWORD env
-	// takes precedence (checked inside GetDoltServerPasswordForPort), with a
-	// fallback to ~/.config/beads/credentials keyed by [host:port]. Using the
-	// resolved runtime port is required because the port file may differ from
-	// the metadata port (bd-h5k7).
-	password := cfg.GetDoltServerPasswordForPort(port)
+	// Resolve password the same way the CRUD path does: BEADS_DOLT_PASSWORD,
+	// then the BEADS_DOLT_PASSWORD_COMMAND helper, then the credentials file
+	// keyed by [host:port]. Using the resolved runtime port is required because
+	// the port file may differ from the metadata port (bd-h5k7). A failing
+	// configured helper fails closed — the check reports it instead of silently
+	// downgrading to the file.
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		return DoctorCheck{
+			Name:     "Dolt Version",
+			Status:   StatusError,
+			Message:  "Could not resolve dolt server password",
+			Detail:   err.Error(),
+			Fix:      "Fix or unset BEADS_DOLT_PASSWORD_COMMAND, then re-run bd doctor",
+			Category: CategoryFederation,
+		}, nil
+	}
 
 	// Build DSN without database (just to test server connectivity)
 	connStr := doltutil.ServerDSN{

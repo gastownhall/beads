@@ -17,7 +17,12 @@ func openFixDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	host := cfg.GetDoltServerHost()
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
-	password := cfg.GetDoltServerPassword()
+	// Fail closed: a configured-but-failing password helper aborts rather than
+	// silently downgrading to the credentials file.
+	password, err := cfg.GetDoltServerPassword()
+	if err != nil {
+		return nil, fmt.Errorf("resolving dolt server password: %w", err)
+	}
 	port := doltserver.DefaultConfig(beadsDir).Port
 
 	connStr := doltutil.ServerDSN{

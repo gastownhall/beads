@@ -1,6 +1,7 @@
 package configfile
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
+	"github.com/steveyegge/beads/internal/creds"
 	"github.com/steveyegge/beads/internal/storage/backendnames"
 )
 
@@ -555,6 +557,20 @@ func (c *Config) GetDoltCredentialCommand() string {
 	return os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
 }
 
+// GetDoltPasswordCommand returns the Dolt server password command:
+// BEADS_DOLT_PASSWORD_COMMAND. Empty means no command — the static
+// BEADS_DOLT_PASSWORD / credentials-file path applies. The command's stdout is a
+// short-lived secret (bare, or a {token,expirationTimestamp} / {access_token,expires_in}
+// envelope) placed in the password slot of a direct server connection, so an external
+// helper (vault, a token-minting CLI) can supply the Dolt password without it ever
+// being persisted. It is deliberately read from the environment only, NOT
+// metadata.json: a metadata-sourced command is arbitrary code run on open, so
+// persisting it waits on a workspace-trust gate — the same trust gate as
+// BEADS_DOLT_CREDENTIAL_COMMAND above.
+func (c *Config) GetDoltPasswordCommand() string {
+	return os.Getenv("BEADS_DOLT_PASSWORD_COMMAND")
+}
+
 // GetDoltDatabase returns the Dolt SQL database name.
 // Checks BEADS_DOLT_SERVER_DATABASE env var first, then config, then default.
 func (c *Config) GetDoltDatabase() string {
@@ -580,14 +596,15 @@ func (c *Config) GetGlobalProjectID() string {
 // GetDoltServerPassword returns the Dolt server password.
 // Checks in order:
 //  1. BEADS_DOLT_PASSWORD env var (highest priority, existing behavior)
-//  2. Credentials file lookup by [host:port] section
+//  2. BEADS_DOLT_PASSWORD_COMMAND helper (see GetDoltServerPasswordForPort)
+//  3. Credentials file lookup by [host:port] section
 //     (path from BEADS_CREDENTIALS_FILE env var, or ~/.config/beads/credentials)
-//  3. Empty string (no password)
+//  4. Empty string (no password)
 //
 // Note: uses the port from configfile (metadata.json / env var), which may differ
 // from the resolved runtime port (doltserver port file). If you have the resolved
 // port, prefer GetDoltServerPasswordForPort for correct credentials file lookup.
-func (c *Config) GetDoltServerPassword() string {
+func (c *Config) GetDoltServerPassword() (string, error) {
 	return c.GetDoltServerPasswordForPort(c.GetDoltServerPort())
 }
 
@@ -598,15 +615,72 @@ func (c *Config) GetDoltServerPassword() string {
 // This avoids a mismatch where metadata.json says port 3308 (tunnel) but the
 // doltserver port file says 3307 (local), causing the credentials file lookup
 // to use the wrong [host:port] section.
-func (c *Config) GetDoltServerPasswordForPort(port int) string {
-	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
-		return p
+//
+// Resolution walks creds.ResolveLadder, first configured rung wins:
+//  1. BEADS_DOLT_PASSWORD env var (a static secret beats a helper — no exec)
+//  2. BEADS_DOLT_PASSWORD_COMMAND helper (creds.CommandSource, KindSecret)
+//  3. Credentials file lookup by [host:port] section
+//
+// The signature returns an error where it used to return a bare string. That
+// change is the point of the command rung: a configured-but-failing helper must
+// fail closed — abort — not silently downgrade to the credentials file, which is
+// exactly the downgrade ResolveLadder exists to prevent. Swallowing the error
+// here (string return, log-and-continue) was rejected: callers would build a DSN
+// with an empty password and surface a misleading "access denied" far from the
+// broken helper. This mirrors ApplyGatewayCredential, the existing fail-closed
+// credential hook for BEADS_DOLT_CREDENTIAL_COMMAND. context.Background() is fine:
+// the helper self-caps at creds' 30 s command timeout, and these call sites do not
+// thread a request context. A helper may also print a username (Vault dynamic
+// pair); it is deliberately ignored — wiring it would change user resolution,
+// which is GetDoltServerUser's job.
+func (c *Config) GetDoltServerPasswordForPort(port int) (string, error) {
+	cred, ok, err := creds.ResolveLadder(context.Background(),
+		envSecretSource{envVar: "BEADS_DOLT_PASSWORD"},
+		creds.CommandSource{
+			Command: c.GetDoltPasswordCommand(),
+			Kind:    creds.KindSecret,
+			Label:   "BEADS_DOLT_PASSWORD_COMMAND",
+		},
+		filePasswordSource{cfg: c, port: port},
+	)
+	if err != nil {
+		return "", err
 	}
-	host := c.GetDoltServerHost()
-	if p := LookupCredentialsPassword(host, port); p != "" {
-		return p
+	if !ok {
+		return "", nil
 	}
-	return ""
+	return cred.Value, nil
+}
+
+// envSecretSource is the static env-var rung of the password ladder: configured
+// when the variable is set to a non-empty value. It cannot fail.
+type envSecretSource struct{ envVar string }
+
+func (s envSecretSource) Name() string { return s.envVar }
+
+func (s envSecretSource) Resolve(context.Context) (creds.Credential, bool, error) {
+	if v := os.Getenv(s.envVar); v != "" {
+		return creds.Credential{Value: v, Kind: creds.KindSecret}, true, nil
+	}
+	return creds.Credential{}, false, nil
+}
+
+// filePasswordSource is the credentials-file rung, keyed by [host:port].
+// LookupCredentialsPassword returns "" on any error (missing/unreadable file),
+// so this rung reports "not configured" rather than failing — an absent file
+// falls through to no password, the pre-ladder behavior.
+type filePasswordSource struct {
+	cfg  *Config
+	port int
+}
+
+func (s filePasswordSource) Name() string { return "credentials-file" }
+
+func (s filePasswordSource) Resolve(context.Context) (creds.Credential, bool, error) {
+	if p := LookupCredentialsPassword(s.cfg.GetDoltServerHost(), s.port); p != "" {
+		return creds.Credential{Value: p, Kind: creds.KindSecret}, true, nil
+	}
+	return creds.Credential{}, false, nil
 }
 
 // GetDoltServerTLS returns whether TLS is enabled for server connections.

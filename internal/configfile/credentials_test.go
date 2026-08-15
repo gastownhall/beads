@@ -99,7 +99,10 @@ func TestLookupCredentialsPassword_EnvVarTakesPrecedence(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PASSWORD", "envPass")
 
 	cfg := DefaultConfig()
-	got := cfg.GetDoltServerPassword()
+	got, err := cfg.GetDoltServerPassword()
+	if err != nil {
+		t.Fatalf("GetDoltServerPassword() error = %v", err)
+	}
 	if got != "envPass" {
 		t.Errorf("GetDoltServerPassword() = %q, want %q (env var should take precedence)", got, "envPass")
 	}
@@ -120,7 +123,10 @@ func TestLookupCredentialsPassword_FallsBackToFile(t *testing.T) {
 	t.Setenv("BEADS_DOLT_PASSWORD", "")
 
 	cfg := DefaultConfig()
-	got := cfg.GetDoltServerPassword()
+	got, err := cfg.GetDoltServerPassword()
+	if err != nil {
+		t.Fatalf("GetDoltServerPassword() error = %v", err)
+	}
 	if got != "filePass" {
 		t.Errorf("GetDoltServerPassword() = %q, want %q (should fall back to credentials file)", got, "filePass")
 	}
@@ -148,7 +154,10 @@ password=workServerPass
 	personal := DefaultConfig()
 	personal.DoltServerHost = "127.0.0.1"
 	personal.DoltServerPort = 3307
-	got := personal.GetDoltServerPassword()
+	got, err := personal.GetDoltServerPassword()
+	if err != nil {
+		t.Fatalf("personal project password resolve error: %v", err)
+	}
 	if got != "personalDevPass" {
 		t.Errorf("personal project password = %q, want %q", got, "personalDevPass")
 	}
@@ -157,7 +166,10 @@ password=workServerPass
 	work := DefaultConfig()
 	work.DoltServerHost = "beads.work.internal"
 	work.DoltServerPort = 3307
-	got = work.GetDoltServerPassword()
+	got, err = work.GetDoltServerPassword()
+	if err != nil {
+		t.Fatalf("work project password resolve error: %v", err)
+	}
 	if got != "workServerPass" {
 		t.Errorf("work project password = %q, want %q", got, "workServerPass")
 	}
@@ -190,21 +202,98 @@ password=tunnelPass
 	cfg.DoltServerPort = 3308 // metadata.json says tunnel port
 
 	// GetDoltServerPassword uses config port (3308) → tunnelPass
-	got := cfg.GetDoltServerPassword()
+	got, err := cfg.GetDoltServerPassword()
+	if err != nil {
+		t.Fatalf("GetDoltServerPassword() error = %v", err)
+	}
 	if got != "tunnelPass" {
 		t.Errorf("GetDoltServerPassword() = %q, want %q", got, "tunnelPass")
 	}
 
 	// GetDoltServerPasswordForPort with resolved runtime port (3307) → localPass
-	got = cfg.GetDoltServerPasswordForPort(3307)
+	got, err = cfg.GetDoltServerPasswordForPort(3307)
+	if err != nil {
+		t.Fatalf("GetDoltServerPasswordForPort(3307) error = %v", err)
+	}
 	if got != "localPass" {
 		t.Errorf("GetDoltServerPasswordForPort(3307) = %q, want %q", got, "localPass")
 	}
 
 	// GetDoltServerPasswordForPort with tunnel port (3308) → tunnelPass
-	got = cfg.GetDoltServerPasswordForPort(3308)
+	got, err = cfg.GetDoltServerPasswordForPort(3308)
+	if err != nil {
+		t.Fatalf("GetDoltServerPasswordForPort(3308) error = %v", err)
+	}
 	if got != "tunnelPass" {
 		t.Errorf("GetDoltServerPasswordForPort(3308) = %q, want %q", got, "tunnelPass")
+	}
+}
+
+// The BEADS_DOLT_PASSWORD_COMMAND rung: a working helper beats the credentials
+// file, the static env var beats the helper, no helper falls back to the file,
+// and a failing helper aborts — it must never silently downgrade to the file.
+func TestGetDoltServerPasswordForPort_CommandRung(t *testing.T) {
+	tmpDir := t.TempDir()
+	credFile := filepath.Join(tmpDir, "credentials")
+	if err := os.WriteFile(credFile, []byte("[127.0.0.1:3307]\npassword=filePass\n"), 0600); err != nil {
+		t.Fatalf("failed to write credentials file: %v", err)
+	}
+	t.Setenv("BEADS_CREDENTIALS_FILE", credFile)
+
+	tests := []struct {
+		name            string
+		envPassword     string
+		passwordCommand string
+		wantPass        string
+		wantErr         bool
+	}{
+		{
+			name:            "command beats credentials file",
+			passwordCommand: "printf cmdPass",
+			wantPass:        "cmdPass",
+		},
+		{
+			name:            "static BEADS_DOLT_PASSWORD beats command",
+			envPassword:     "envPass",
+			passwordCommand: "printf overriddenCmdPass",
+			wantPass:        "envPass",
+		},
+		{
+			name:     "no command falls back to credentials file",
+			wantPass: "filePass",
+		},
+		{
+			name:            "failing helper never falls back to credentials file",
+			passwordCommand: "exit 1",
+			wantErr:         true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_PASSWORD", tt.envPassword)
+			t.Setenv("BEADS_DOLT_PASSWORD_COMMAND", tt.passwordCommand)
+
+			cfg := DefaultConfig()
+			cfg.DoltServerHost = "127.0.0.1"
+
+			got, err := cfg.GetDoltServerPasswordForPort(3307)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("GetDoltServerPasswordForPort(3307) = %q, nil error; want an error — a configured helper that exits non-zero must abort the ladder, not fall back to the credentials file (fail-closed regression)", got)
+				}
+				if got != "" {
+					t.Fatalf("GetDoltServerPasswordForPort(3307) = %q alongside error %v; want empty password on error", got, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("GetDoltServerPasswordForPort(3307) error = %v", err)
+			}
+			if got != tt.wantPass {
+				t.Errorf("GetDoltServerPasswordForPort(3307) = %q, want %q", got, tt.wantPass)
+			}
+		})
 	}
 }
 

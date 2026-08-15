@@ -43,13 +43,20 @@ func runCheckHealth(path string) error {
 	}
 	database := cfg.GetDoltDatabase()
 
+	// Fail closed: a configured-but-failing password helper aborts the health
+	// check rather than silently downgrading to the credentials file.
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		return fmt.Errorf("resolving dolt server password: %w", err)
+	}
+
 	var issues []string
 
 	dsn := doltutil.ServerDSN{
 		Host:     host,
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
+		Password: password,
 		Database: database,
 		Timeout:  2 * time.Second,
 		TLS:      cfg.GetDoltServerTLS(),

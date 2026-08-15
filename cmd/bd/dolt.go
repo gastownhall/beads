@@ -1227,7 +1227,13 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
 	tls := cfg.GetDoltServerTLS()
-	password := cfg.GetDoltServerPasswordForPort(port)
+	// Fail closed: a configured-but-failing password helper aborts the status
+	// report rather than silently downgrading to the credentials file.
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error resolving dolt server password: %v\n", err)
+		return
+	}
 
 	dsn := doltutil.ServerDSN{
 		Host:     host,

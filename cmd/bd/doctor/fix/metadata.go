@@ -523,11 +523,17 @@ func isExpectedProbeError(err error) bool {
 
 func openServerCatalogDB(beadsDir string, cfg *configfile.Config) (*sql.DB, error) {
 	port := doltserver.DefaultConfig(beadsDir).Port
+	// Fail closed: a configured-but-failing password helper aborts rather than
+	// silently downgrading to the credentials file.
+	password, err := cfg.GetDoltServerPasswordForPort(port)
+	if err != nil {
+		return nil, fmt.Errorf("resolving dolt server password: %w", err)
+	}
 	connStr := doltutil.ServerDSN{
 		Host:     cfg.GetDoltServerHost(),
 		Port:     port,
 		User:     cfg.GetDoltServerUser(),
-		Password: cfg.GetDoltServerPasswordForPort(port),
+		Password: password,
 		TLS:      cfg.GetDoltServerTLS(),
 	}.String()
 	return sql.Open("mysql", connStr)
