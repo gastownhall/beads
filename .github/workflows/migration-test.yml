@@ -65,9 +65,20 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install test dependencies
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq libicu74
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get \
+                 -o Acquire::Retries=3 \
+                 -o Acquire::http::Timeout=30 \
+                 -o Acquire::https::Timeout=30 \
+                 update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out; retrying"
+            sleep 10
+          done
+          sudo timeout 180 apt-get install -y jq libicu74
 
       - name: Install Dolt test runtime
         if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0"]'), matrix.version)

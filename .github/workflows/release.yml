@@ -123,9 +123,20 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install cross-compilation toolchains and signing tools
+        timeout-minutes: 8
         run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get \
+                 -o Acquire::Retries=3 \
+                 -o Acquire::http::Timeout=30 \
+                 -o Acquire::https::Timeout=30 \
+                 update; then
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out; retrying"
+            sleep 10
+          done
+          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
 
       - name: Install go-winres for Windows PE resource embedding
         run: go install github.com/tc-hib/go-winres@latest
