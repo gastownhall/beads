@@ -11,9 +11,7 @@ package dolt
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -139,18 +137,6 @@ func setupBenchStore(tb testing.TB) (*DoltStore, func()) {
 	}
 
 	return store, cleanup
-}
-
-// uniqueBenchDBName returns a database name unique to this process+sample.
-// MySQL identifiers are <= 64 chars; hex encoding of 8 random bytes + pid
-// fits well inside that bound.
-func uniqueBenchDBName() string {
-	buf := make([]byte, 8)
-	if _, err := cryptorand.Read(buf); err != nil {
-		// Fall back to timestamp+pid if crypto/rand fails.
-		return fmt.Sprintf("benchdb_%d_%d", os.Getpid(), time.Now().UnixNano())
-	}
-	return fmt.Sprintf("benchdb_%d_%s", os.Getpid(), hex.EncodeToString(buf))
 }
 
 // dropBenchDB issues DROP DATABASE to keep the shared Dolt server from

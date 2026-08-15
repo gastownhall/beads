@@ -5,6 +5,7 @@ package testutil
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -304,4 +305,24 @@ func DoltContainerCrashError() error {
 		return fmt.Errorf("Dolt container exited (status=%s, exit=%d)", state.Status, state.ExitCode)
 	}
 	return nil
+}
+
+// DoltContainerExec runs cmd inside the shared Dolt container and returns its
+// exit code and combined output. Used by tests that need to inspect the
+// container's filesystem (e.g. the .dolt_dropped_databases/ directory),
+// which has no host-visible path since the container is started without a
+// bind-mounted data dir.
+func DoltContainerExec(ctx context.Context, cmd []string) (int, string, error) {
+	if doltSingletonSrv == nil || doltSingletonSrv.container == nil {
+		return 0, "", fmt.Errorf("no shared Dolt container running")
+	}
+	code, reader, err := doltSingletonSrv.container.Exec(ctx, cmd)
+	if err != nil {
+		return 0, "", fmt.Errorf("exec in Dolt container: %w", err)
+	}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		return code, "", fmt.Errorf("reading exec output: %w", err)
+	}
+	return code, string(out), nil
 }

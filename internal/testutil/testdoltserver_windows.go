@@ -3,6 +3,7 @@
 package testutil
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -44,3 +45,8 @@ func DoltContainerCrashed() bool { return false }
 
 // DoltContainerCrashError always returns nil on Windows (no container to monitor).
 func DoltContainerCrashError() error { return nil }
+
+// DoltContainerExec is not supported on Windows (no container to exec into).
+func DoltContainerExec(ctx context.Context, cmd []string) (int, string, error) {
+	return 0, "", fmt.Errorf("no shared Dolt container running")
+}
