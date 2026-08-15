@@ -32,11 +32,14 @@ while IFS=: read -r file line _; do
 
   func=$(
     awk -v target="$line" '
-      NR <= target && /^func [A-Za-z0-9_]+\(/ {
+      NR > target { exit }
+      /^func [A-Za-z0-9_]+\(/ {
         current = $0
         sub(/^func /, "", current)
         sub(/\(.*/, "", current)
+        next
       }
+      current != "" && /^}/ { current = "" }
       END { print current }
     ' "$file"
   )
