@@ -51,6 +51,21 @@ func TestCheckTestingShortReportsUnknownAboveFirstFunc(t *testing.T) {
 	}
 }
 
+func TestCheckTestingShortReportsUnknownBetweenFunctions(t *testing.T) {
+	out, err := runCheckTestingShort(t, map[string]string{
+		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nfunc TestA(t *testing.T) {\n\tt.Log(\"a\")\n}\n\nvar shortAgain = " + shortCall + "\n\nfunc TestB(t *testing.T) {}\n",
+	})
+	if err == nil {
+		t.Fatalf("real %s call between two functions should still fail the gate; output=%s", shortCall, out)
+	}
+	if !strings.Contains(out, "unknown") {
+		t.Errorf("expected 'unknown' function name for a hit between two functions (not truly inside either body), got: %s", out)
+	}
+	if strings.Contains(out, "TestA") {
+		t.Errorf("hit between two functions must not be attributed to the preceding func TestA: %s", out)
+	}
+}
+
 func TestCheckTestingShortPassesOnCleanRepoTree(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("checker is a Bash boundary")
