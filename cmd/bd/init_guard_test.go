@@ -531,3 +531,101 @@ func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 		t.Errorf("message must name a recovery path, got:\n%s", err)
 	}
 }
+
+// be-ab3b: TestInitGuard_ExistingProjectMissingServerDB_Refuses above proves
+// initAllowRecreateMissing is REQUIRED (refuses without it); this proves it is
+// SUFFICIENT (permits init to proceed with it), covering both guard sites the
+// flag gates — init.go:2566 (server reachable, database confirmed missing) and
+// init.go:2578 (server unreachable, or errored, while checking). Without this,
+// a wiring bug could silently strand the documented --recreate-missing
+// recovery path (asymmetric risk: fails safe by blocking a legitimate
+// recreate, but untested is untested).
+func TestInitGuard_ExistingProjectMissingServerDB_RecreateMissingAllows(t *testing.T) {
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = true
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	newExistingProjectMetadata := func() []byte {
+		metadata := map[string]interface{}{
+			"database":      "dolt",
+			"backend":       "dolt",
+			"dolt_mode":     "server",
+			"dolt_database": "myproject",
+			"project_id":    "existing-0000-1111-2222-333344445555",
+		}
+		data, _ := json.Marshal(metadata)
+		return data
+	}
+
+	t.Run("server_reachable_db_missing (init.go:2566)", func(t *testing.T) {
+		testutil.RequireDoltBinary(t)
+
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+
+		dataDir := t.TempDir()
+		port, err := testutil.FindFreePort()
+		if err != nil {
+			t.Fatalf("FindFreePort: %v", err)
+		}
+
+		// #nosec G204 -- fixed args, no user input
+		serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
+		if err := serverCmd.Start(); err != nil {
+			t.Fatalf("failed to start dolt sql-server: %v", err)
+		}
+		t.Cleanup(func() {
+			_ = serverCmd.Process.Kill()
+			_ = serverCmd.Wait()
+		})
+		if !testutil.WaitForServer(port, 15*time.Second) {
+			t.Fatal("dolt sql-server did not become ready within timeout")
+		}
+		t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		// Same fixture as TestInitGuard_ExistingProjectMissingServerDB_Refuses
+		// (existing project, server up, "myproject" DB absent) — only
+		// initAllowRecreateMissing differs.
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), newExistingProjectMetadata(), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := checkExistingBeadsDataAt(beadsDir, "myproject"); err != nil {
+			t.Fatalf("existing project with --recreate-missing must permit init to proceed when the server-side database is missing, got refusal: %v", err)
+		}
+	})
+
+	t.Run("server_unreachable (init.go:2578)", func(t *testing.T) {
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+
+		// Port 1 is a privileged port nothing listens on in test environments —
+		// same deterministic-unreachable technique as
+		// TestInitGuardDBCheck_ServerUnreachable. No real dolt server needed:
+		// this exercises the "server unreachable or error during check" branch,
+		// not the "confirmed missing" branch above.
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), newExistingProjectMetadata(), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := checkExistingBeadsDataAt(beadsDir, "myproject"); err != nil {
+			t.Fatalf("existing project with --recreate-missing must permit init to proceed even when the server is unreachable, got refusal: %v", err)
+		}
+	})
+}
