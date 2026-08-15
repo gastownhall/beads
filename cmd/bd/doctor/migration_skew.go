@@ -131,10 +131,13 @@ func checkMigrationContentSkew(ctx context.Context, db *sql.DB, remote string) D
 	ref := "remotes/" + remote + "/" + branch
 	remoteHashes, err := schema.ReadMigrationContentHashes(ctx, db, ref)
 	if err != nil {
-		// The remote-tracking ref is not cached yet (e.g. never pushed/pulled),
-		// or the cached ref predates schema_migrations/content_hash.
-		if schema.RemoteRefUnavailableErr(err) || schema.MissingMigrationObjectErr(err) {
+		// The remote-tracking ref is not cached yet (e.g. never pushed/pulled).
+		if schema.RemoteRefUnavailableErr(err) {
 			return ok(fmt.Sprintf("No cached remote ref %q to compare", ref))
+		}
+		// The cached ref exists but predates schema_migrations/content_hash.
+		if schema.MissingMigrationObjectErr(err) {
+			return ok(fmt.Sprintf("Cached remote ref %q predates migration content hashes — nothing to compare", ref))
 		}
 		return cannot(fmt.Sprintf("read schema_migrations at %q", ref), err)
 	}

@@ -50,6 +50,8 @@ func TestNewExternalDoltServerUOWProvider_ValidationErrors(t *testing.T) {
 				"",
 				0,
 				0,
+				false,
+				"",
 			)
 			assert.Nil(t, p)
 			require.Error(t, err)
@@ -92,6 +94,8 @@ func TestNewExternalDoltServerUOWProvider_EndToEnd(t *testing.T) {
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
@@ -167,6 +171,8 @@ func TestNewExternalDoltServerUOWProvider_ConcurrentInstantiation(t *testing.T) 
 				"",
 				0,
 				0,
+				false,
+				"",
 			)
 			results[i] = result{provider: p, err: err}
 		}()
@@ -260,6 +266,8 @@ func TestNewExternalDoltServerUOWProvider_FreshInitSelfHealsAfterMidPassFailure(
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	require.NoError(t, err, "fresh init must converge after a mid-pass transient failure, not trip the #4566 guard on its own bootstrap debris")
 	require.NotNil(t, provider)
@@ -342,6 +350,8 @@ func TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed(t 
 		"",
 		0,
 		0,
+		false,
+		"",
 	)
 	if provider != nil {
 		t.Cleanup(func() { _ = provider.Close(context.Background()) })

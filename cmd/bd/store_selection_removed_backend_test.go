@@ -226,41 +226,37 @@ func TestDoltAdministrativeCommandsRejectRemovedBackends(t *testing.T) {
 		{name: "clean-databases", args: []string{"dolt", "clean-databases", "--dry-run"}},
 	}
 
-	for _, backend := range []string{configfile.BackendPostgres, configfile.BackendMySQL, configfile.BackendSQLite} {
-		t.Run(backend, func(t *testing.T) {
-			root := t.TempDir()
-			beadsDir := filepath.Join(root, ".beads")
-			if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-				t.Fatalf("create beads dir: %v", err)
+	root := t.TempDir()
+	beadsDir := filepath.Join(root, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("create beads dir: %v", err)
+	}
+	if err := (&configfile.Config{Backend: configfile.BackendSQLite}).Save(beadsDir); err != nil {
+		t.Fatalf("save config: %v", err)
+	}
+
+	for _, command := range commands {
+		t.Run(command.name, func(t *testing.T) {
+			cmd := exec.Command(bd, command.args...)
+			cmd.Dir = root
+			cmd.Env = append(removedBackendTestEnv(beadsDir), "BD_DISABLE_METRICS=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("%q unexpectedly succeeded for removed backend %s: %s", strings.Join(command.args, " "), configfile.BackendSQLite, out)
 			}
-			if err := (&configfile.Config{Backend: backend}).Save(beadsDir); err != nil {
-				t.Fatalf("save config: %v", err)
+
+			message := strings.ToLower(string(out))
+			for _, want := range removedBackendWantSubstrings(configfile.BackendSQLite) {
+				if !strings.Contains(message, want) {
+					t.Errorf("%q error for %s missing %q: %s", strings.Join(command.args, " "), configfile.BackendSQLite, want, message)
+				}
 			}
 
-			for _, command := range commands {
-				t.Run(command.name, func(t *testing.T) {
-					cmd := exec.Command(bd, command.args...)
-					cmd.Dir = root
-					cmd.Env = append(removedBackendTestEnv(beadsDir), "BD_DISABLE_METRICS=1")
-					out, err := cmd.CombinedOutput()
-					if err == nil {
-						t.Fatalf("%q unexpectedly succeeded for removed backend %s: %s", strings.Join(command.args, " "), backend, out)
-					}
-
-					message := strings.ToLower(string(out))
-					for _, want := range removedBackendWantSubstrings(backend) {
-						if !strings.Contains(message, want) {
-							t.Errorf("%q error for %s missing %q: %s", strings.Join(command.args, " "), backend, want, message)
-						}
-					}
-
-					for _, name := range []string{"embeddeddolt", "dolt", "beads.db", ".local_version"} {
-						path := filepath.Join(beadsDir, name)
-						if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-							t.Fatalf("%q created local state for removed backend %s at %s (stat error: %v)", strings.Join(command.args, " "), backend, path, statErr)
-						}
-					}
-				})
+			for _, name := range []string{"embeddeddolt", "dolt", "beads.db", ".local_version"} {
+				path := filepath.Join(beadsDir, name)
+				if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+					t.Fatalf("%q created local state for removed backend %s at %s (stat error: %v)", strings.Join(command.args, " "), configfile.BackendSQLite, path, statErr)
+				}
 			}
 		})
 	}

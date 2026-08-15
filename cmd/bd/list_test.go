@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"io"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -196,7 +197,7 @@ func TestListCommandSuite(t *testing.T) {
 			if derr != nil {
 				t.Fatalf("GetAllDependencyRecords: %v", derr)
 			}
-			err := outputDotFormat(h.issues, deps)
+			err := outputDotFormat(io.Discard, h.issues, deps)
 			if err != nil {
 				t.Errorf("outputDotFormat failed: %v", err)
 			}
@@ -204,7 +205,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list dot", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "dot")
+			err := outputFormattedList(io.Discard, h.issues, deps, "dot")
 			if err != nil {
 				t.Errorf("outputFormattedList with dot format failed: %v", err)
 			}
@@ -212,7 +213,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list digraph preset", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "digraph")
+			err := outputFormattedList(io.Discard, h.issues, deps, "digraph")
 			if err != nil {
 				t.Errorf("outputFormattedList with digraph format failed: %v", err)
 			}
@@ -220,7 +221,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list custom template", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "{{.ID}} {{.Title}}")
+			err := outputFormattedList(io.Discard, h.issues, deps, "{{.ID}} {{.Title}}")
 			if err != nil {
 				t.Errorf("outputFormattedList with custom template failed: %v", err)
 			}
@@ -228,7 +229,7 @@ func TestListCommandSuite(t *testing.T) {
 
 		t.Run("output formatted list invalid template", func(t *testing.T) {
 			deps, _ := h.store.GetAllDependencyRecords(h.ctx)
-			err := outputFormattedList(h.issues, deps, "{{.ID")
+			err := outputFormattedList(io.Discard, h.issues, deps, "{{.ID")
 			if err == nil {
 				t.Error("Expected error for invalid template")
 			}

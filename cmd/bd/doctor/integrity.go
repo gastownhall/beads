@@ -613,7 +613,7 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
-	currentRepoID, err := beads.ComputeRepoIDForPath(path)
+	currentRepoID, currentSource, err := beads.ComputeRepoIDForPathWithSource(path)
 	if err != nil {
 		if strings.Contains(err.Error(), "not a git repository") {
 			return DoctorCheck{
@@ -630,7 +630,30 @@ func checkRepoFingerprintWithStore(store *dolt.DoltStore, path string) DoctorChe
 		}
 	}
 
+	return classifyRepoFingerprint(storedRepoID, currentRepoID, currentSource)
+}
+
+// classifyRepoFingerprint turns a stored-vs-current fingerprint comparison into
+// a doctor check. Pure so the mismatch branches are unit-testable without a
+// store.
+func classifyRepoFingerprint(storedRepoID, currentRepoID string, currentSource beads.RepoIDSource) DoctorCheck {
 	if storedRepoID != currentRepoID {
+		// bd-46vla: with no origin remote here, the local fingerprint is a
+		// path hash that can never match a remote-derived stored id — the
+		// signature of a synced clone on a host without the canonical remote.
+		// The stored id is the shared value; repo_id lives in the VERSIONED
+		// metadata table, so 'bd migrate --update-repo-id' would stamp this
+		// host's path hash into shared state and propagate it to every clone
+		// on the next sync (the GH#4361 class).
+		if currentSource == beads.RepoIDSourcePath {
+			return DoctorCheck{
+				Name:    "Repo Fingerprint",
+				Status:  StatusWarning,
+				Message: "Fingerprint differs, but this checkout has no origin remote",
+				Detail:  fmt.Sprintf("stored: %s, current (path hash): %s — on a synced clone the stored id is the canonical shared value and this mismatch is cosmetic", truncateID(storedRepoID), truncateID(currentRepoID)),
+				Fix:     "On a synced clone, leave it (or add the canonical origin remote). Only run 'bd migrate --update-repo-id' if this checkout is the canonical repository — the new id propagates to every clone on the next sync",
+			}
+		}
 		return DoctorCheck{
 			Name:    "Repo Fingerprint",
 			Status:  StatusError,

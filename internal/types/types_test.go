@@ -679,7 +679,11 @@ func TestIssueCompoundHelpers(t *testing.T) {
 }
 
 func TestDependencyTypeIsValid(t *testing.T) {
-	// IsValid now accepts any non-empty string up to 50 chars (Decision 004)
+	// IsValid accepts any non-empty string the type column can hold (Decision
+	// 004 for the open vocabulary; MaxDependencyTypeLen for the bound). The
+	// boundary cases below are the load-bearing ones: at the limit the type is
+	// storable and must be accepted, one past it no edge could carry it and a
+	// filter built from it would match nothing, so it is refused up front.
 	tests := []struct {
 		depType DependencyType
 		valid   bool
@@ -698,6 +702,8 @@ func TestDependencyTypeIsValid(t *testing.T) {
 		{DependencyType("custom-type"), true}, // Custom types are now valid
 		{DependencyType("any-string"), true},  // Any non-empty string is valid
 		{DependencyType(""), false},           // Empty is still invalid
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen)), true},                            // Exactly the column width
+		{DependencyType(strings.Repeat("x", MaxDependencyTypeLen+1)), false},                         // One past it: unstorable
 		{DependencyType("this-is-a-very-long-dependency-type-that-exceeds-fifty-characters"), false}, // Too long
 	}
 
@@ -939,13 +945,13 @@ func TestIssueLeaseJSONSerialization(t *testing.T) {
 	}
 }
 
-// TestRowVersionNeverSerialized locks in the Go-only decision for RowVersion:
-// it is a live Go field (library call sites build an optimistic-concurrency
-// token from it) but json:"-", so its random-per-write value never reaches any
-// bd --json surface or bd export. Serializing it would break stable protocol
-// goldens and export round-trips because the value is regenerated on every
-// write. The value must be absent from the bare Issue and from the two
-// embedding wrappers that back show/list/ready (IssueDetails, IssueWithCounts).
+// TestRowVersionNeverSerialized locks in the storage/interchange boundary:
+// RowVersion stays absent from generic Issue JSON and from the LIST/INTERCHANGE
+// wrapper, whatever the detail view publishes. IssueWithCounts is the row
+// `bd export` writes to JSONL, so a token there would put a per-write-random
+// value into a git-tracked file; the detail view neither lists nor
+// interchanges, which is why it is the one shape allowed to project the token
+// (see TestNewIssueDetailsProjectsTheRevisionToken).
 func TestRowVersionNeverSerialized(t *testing.T) {
 	iss := Issue{ID: "test-1", Title: "Versioned", Status: StatusOpen, RowVersion: 123456789}
 
@@ -959,7 +965,6 @@ func TestRowVersionNeverSerialized(t *testing.T) {
 		v    any
 	}{
 		{"Issue", iss},
-		{"IssueDetails", IssueDetails{Issue: iss}},
 		{"IssueWithCounts", IssueWithCounts{Issue: &iss}},
 	}
 	for _, tc := range surfaces {
@@ -973,6 +978,46 @@ func TestRowVersionNeverSerialized(t *testing.T) {
 				t.Errorf("%s JSON must not contain %q, got: %s", tc.name, forbidden, s)
 			}
 		}
+	}
+}
+
+// TestNewIssueDetailsProjectsTheRevisionToken pins the constructor that is the
+// only door to the published token: it reads RowVersion off the row and writes
+// it under the storage-neutral wire name, always present and never under a
+// storage spelling.
+//
+// The zero case is not a formality. 0 is the migration-0054 backfill token, a
+// legitimate value a guarded client must be able to send, so `revision` carries
+// no omitempty and an absent member never stands in for a legacy-zero row.
+func TestNewIssueDetailsProjectsTheRevisionToken(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token int64
+		want  string
+	}{
+		{"a mutated row", 123456789, `"revision":123456789`},
+		{"a legacy un-mutated row", 0, `"revision":0`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			details := NewIssueDetails(Issue{ID: "test-1", Title: "Versioned", RowVersion: tc.token})
+			if details.Revision != tc.token {
+				t.Errorf("Revision = %d, want %d", details.Revision, tc.token)
+			}
+
+			b, err := json.Marshal(details)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(b)
+			if !strings.Contains(s, tc.want) {
+				t.Errorf("IssueDetails JSON missing %s, got: %s", tc.want, s)
+			}
+			for _, forbidden := range []string{"row_version", "RowVersion", "row_lock"} {
+				if strings.Contains(s, forbidden) {
+					t.Errorf("IssueDetails JSON leaked storage field %q: %s", forbidden, s)
+				}
+			}
+		})
 	}
 }
 

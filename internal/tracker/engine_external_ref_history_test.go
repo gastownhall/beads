@@ -27,6 +27,7 @@ import (
 // call the promoted methods.
 type historyQuerierStore struct {
 	storage.Storage
+	storage.IssueLifecycleStore
 
 	prevRef   string
 	prevFound bool

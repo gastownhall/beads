@@ -13,7 +13,7 @@ internal/storage/dolt/concurrent_test.go::TestHighContentionStress
 internal/storage/dolt/concurrent_test.go::TestConcurrentWorkQueueDrain
 internal/storage/dolt/lease_test.go::TestConcurrentHeartbeatReclaimClose
 internal/storage/uow/lostupdate_dolt_test.go::TestUOW_ConcurrentMergeOps_NoLostUpdate
-cmd/bd/prune_bench_test.go::TestPruneLargeFixture
+internal/workapi/sweep_test.go::TestCandidateIDMatcherLargeFixture
 EOF
 )
 

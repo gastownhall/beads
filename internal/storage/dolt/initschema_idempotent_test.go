@@ -26,7 +26,7 @@ import (
 // (editing them would fork already-upgraded clones via schema_migrations
 // .content_hash — see scripts/check-migration-hygiene.sh check C). Instead it
 // (a) drains every CALL DOLT_* result set so the transient no longer arises
-// (drainCall in internal/storage/schema/schema.go), and (b) registers
+// (schema.DrainCall in internal/storage/schema/schema.go), and (b) registers
 // pre-migration repairs keyed to versions 40 and 41 that normalise
 // dolt_nonlocal_tables before each frozen body replays
 // (internal/storage/schema/migration_repairs.go). Re-init is therefore

@@ -8,15 +8,20 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 )
 
-// storeSizeBytes returns the on-disk size of the store's data directory, or
-// -1 when it cannot be determined (no local path, walk error). Measured
-// around DOLT_GC so a no-op reclaim is visible to the operator (bd-agctw).
-func storeSizeBytes() int64 {
-	loc, ok := storage.UnwrapStore(store).(storage.StoreLocator)
-	if !ok || loc.Path() == "" {
+// storeSizeBytes returns the approximate on-disk size of the active database,
+// or -1 when that database cannot be measured. It deliberately does not fall
+// back to StoreLocator.Path: both concrete locator paths can contain sibling
+// databases whose activity is unrelated to the current GC operation.
+func storeSizeBytes(ctx context.Context) int64 {
+	return storeSizeBytesForStore(ctx, store)
+}
+
+func storeSizeBytesForStore(ctx context.Context, candidate storage.DoltStorage) int64 {
+	sizer, ok := storage.UnwrapStore(candidate).(storage.ActiveDatabaseSizer)
+	if !ok {
 		return -1
 	}
-	size, err := getDirSize(loc.Path())
+	size, err := sizer.ActiveDatabaseSize(ctx)
 	if err != nil {
 		return -1
 	}

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// resolveSocketTransport implements a socket-first / TCP-fallback policy for
+// ResolveSocketTransport implements a socket-first / TCP-fallback policy for
 // Dolt server connections (gt-28itz). These tests stub dialProbe so they run
 // without a live Dolt server.
 
@@ -36,7 +36,7 @@ func withStubbedDialProbe(t *testing.T, reachable map[string]bool) *[]probeCall 
 // No socket configured → pure TCP, no probing, returns "".
 func TestResolveSocketTransport_NoSocket(t *testing.T) {
 	calls := withStubbedDialProbe(t, map[string]bool{})
-	got := resolveSocketTransport("", "127.0.0.1", 52756, 100*time.Millisecond)
+	got := ResolveSocketTransport("", "127.0.0.1", 52756, 100*time.Millisecond)
 	if got != "" {
 		t.Errorf("expected empty socket (TCP), got %q", got)
 	}
@@ -50,7 +50,7 @@ func TestResolveSocketTransport_SocketUp(t *testing.T) {
 	withStubbedDialProbe(t, map[string]bool{
 		"unix|/tmp/mysql.sock": true,
 	})
-	got := resolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
+	got := ResolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
 	if got != "/tmp/mysql.sock" {
 		t.Errorf("expected socket kept, got %q", got)
 	}
@@ -63,7 +63,7 @@ func TestResolveSocketTransport_SocketDownTCPUp_FallsBack(t *testing.T) {
 		"tcp|" + net.JoinHostPort("127.0.0.1", "52756"): true,
 		// unix socket intentionally absent from the reachable set
 	})
-	got := resolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
+	got := ResolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
 	if got != "" {
 		t.Errorf("expected TCP fallback (empty socket), got %q", got)
 	}
@@ -73,7 +73,7 @@ func TestResolveSocketTransport_SocketDownTCPUp_FallsBack(t *testing.T) {
 // the outage with its socket-specific hint (no silent transport swap).
 func TestResolveSocketTransport_BothDown_KeepsSocket(t *testing.T) {
 	withStubbedDialProbe(t, map[string]bool{})
-	got := resolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
+	got := ResolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 52756, 100*time.Millisecond)
 	if got != "/tmp/mysql.sock" {
 		t.Errorf("expected socket kept (both down), got %q", got)
 	}
@@ -84,7 +84,7 @@ func TestResolveSocketTransport_SocketDownNoPort_KeepsSocket(t *testing.T) {
 	withStubbedDialProbe(t, map[string]bool{
 		"tcp|" + net.JoinHostPort("127.0.0.1", "0"): true, // should never be probed
 	})
-	got := resolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 0, 100*time.Millisecond)
+	got := ResolveSocketTransport("/tmp/mysql.sock", "127.0.0.1", 0, 100*time.Millisecond)
 	if got != "/tmp/mysql.sock" {
 		t.Errorf("expected socket kept (no TCP port), got %q", got)
 	}

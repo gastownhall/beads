@@ -49,9 +49,17 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 
 	// Merge wisps count when caller hasn't opted out (same semantics as SearchIssuesInTx).
 	// Issues and wisps are always in separate tables (PromoteFromEphemeral deletes the
-	// wisps row), so the two counts don't double-count. count trusts that disjoint-table
-	// invariant; SearchIssuesInTx is the corruption detector — it errors loudly if an ID
-	// appears in both tables ("id %q exists in both issues and wisps").
+	// wisps row), so the two counts don't double-count.
+	//
+	// This count TRUSTS that disjoint-table invariant and no read enforces it:
+	// SearchIssuesInTx used to be described here as the corruption detector, and
+	// it is not one — it collapses a cross-table duplicate to the canonical wisp
+	// row and answers (be-iabdi), as the union seam now does too. So a store
+	// holding one dual-resident id counts it TWICE here while the listing shows
+	// it once. `bd doctor`'s Cross-Table Duplicates check is the detector, and
+	// `--check=validate --fix` the repair. (There is no `--check=cross-table`
+	// selector: the four the flag accepts are artifacts, conventions, pollution
+	// and validate, and the cross-table check runs in the default sweep.)
 	wispCount, wispErr := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
 	if wispErr != nil && !isTableNotExistError(wispErr) {
 		return 0, fmt.Errorf("count wisps (merge): %w", wispErr)

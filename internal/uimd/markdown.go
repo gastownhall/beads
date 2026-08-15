@@ -16,12 +16,13 @@ import (
 	"golang.org/x/term"
 )
 
-// RenderMarkdown renders markdown text using glamour's terminal style.
-// Returns the rendered markdown or the original text if rendering fails.
-// Word wraps at terminal width (or 80 columns if width can't be detected).
-func RenderMarkdown(markdown string) string {
+// WrapWidth reports the column width RenderMarkdown wraps body text to, or 0
+// in agent mode, where the text is emitted verbatim and nothing wraps. Callers
+// deciding whether a value is short enough to sit inline instead of becoming a
+// rendered section use this so their idea of "one line" matches the renderer's.
+func WrapWidth() int {
 	if ui.IsAgentMode() {
-		return markdown
+		return 0
 	}
 
 	// Cap at 100 chars for readability; wider lines are harder to scan.
@@ -32,6 +33,17 @@ func RenderMarkdown(markdown string) string {
 	}
 	if wrapWidth > maxReadableWidth {
 		wrapWidth = maxReadableWidth
+	}
+	return wrapWidth
+}
+
+// RenderMarkdown renders markdown text using glamour's terminal style.
+// Returns the rendered markdown or the original text if rendering fails.
+// Word wraps at terminal width (or 80 columns if width can't be detected).
+func RenderMarkdown(markdown string) string {
+	wrapWidth := WrapWidth()
+	if wrapWidth == 0 {
+		return markdown
 	}
 
 	// Markdown rendering and terminal escape emission are separate concerns.
@@ -59,10 +71,18 @@ func RenderMarkdown(markdown string) string {
 		return markdown
 	}
 
-	rendered, err := renderer.Render(markdown)
+	// Bead bodies are plain text, not HTML. Goldmark (glamour's parser) treats any
+	// "<" that looks like the start of an HTML tag as inline/block raw HTML, and
+	// glamour's renderer sanitizes those raw-HTML nodes down to nothing — silently
+	// deleting the tag-shaped span (and, for an unclosed tag, everything up to the
+	// next ">", across lines). Escape angle brackets before rendering so nothing
+	// is ever parsed as raw HTML, then unescape the entities glamour leaves intact
+	// in its plain-text output so the visible result matches the stored text.
+	rendered, err := renderer.Render(escapeAngleBrackets(markdown))
 	if err != nil {
 		return markdown
 	}
+	rendered = unescapeAngleBrackets(rendered)
 
 	if !useHyperlinks {
 		rendered = stripOSC8Hyperlinks(rendered)
@@ -73,6 +93,25 @@ func RenderMarkdown(markdown string) string {
 
 	return rendered
 }
+
+// escapeAngleBrackets replaces literal "<" and ">" with their HTML entity
+// equivalents so goldmark's inline/block HTML parsing never triggers on them.
+func escapeAngleBrackets(s string) string {
+	return angleEscaper.Replace(s)
+}
+
+// unescapeAngleBrackets reverses escapeAngleBrackets on rendered output.
+// Glamour's plain-text rendering path passes entities through unchanged, so
+// after rendering the escaped markdown, "&lt;"/"&gt;" in the output are the
+// original literal angle brackets, not markup that needs to stay escaped.
+func unescapeAngleBrackets(s string) string {
+	return angleUnescaper.Replace(s)
+}
+
+var (
+	angleEscaper   = strings.NewReplacer("<", "&lt;", ">", "&gt;")
+	angleUnescaper = strings.NewReplacer("&lt;", "<", "&gt;", ">")
+)
 
 // stripOSC8Hyperlinks removes only OSC 8 hyperlink open/close sequences.
 // Glamour emits OSC 8 whenever it renders links, but OSC 8 support is separate

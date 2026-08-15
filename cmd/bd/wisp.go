@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -209,6 +210,12 @@ func runWispCreateCore(cmd *cobra.Command, args []string) error {
 	if err == nil {
 		subgraph = sg
 		protoID = sg.Root.ID
+	} else if errors.Is(err, formula.ErrVarValidation) {
+		// args[0] IS a formula; the --var values it was given fail
+		// enum/pattern/required-empty constraints. Report that directly
+		// instead of falling through to the legacy proto-ID lookup below,
+		// which would otherwise mask this as "not found as formula or proto".
+		return HandleError("%v", err)
 	}
 
 	if subgraph == nil {
@@ -801,7 +808,14 @@ func runWispGC(cmd *cobra.Command, args []string) error {
 	for i, issue := range abandoned {
 		ids[i] = issue.ID
 	}
-	if err := deleteBatch(nil, ids, true, false, true, jsonOutput, false, "wisp gc"); err != nil {
+	// Cascade must stay OFF here too. findAbandonedWisps has already expanded
+	// dependents and kept only the unprotected ones, so a deleteBatch cascade
+	// would re-expand from that set to ALL transitive dependents — including
+	// blocked/in-progress steps that isProtectedWisp just excluded (GH#4394's
+	// protection is only enforced in the pre-filter; cascade bypasses it).
+	// Without cascade the list is deleted exactly as filtered and live
+	// dependents are orphaned (edges dropped, is_blocked recomputed).
+	if err := deleteBatch(nil, ids, true, false, false, jsonOutput, false, "wisp gc"); err != nil {
 		return HandleError("%v", err)
 	}
 	return nil
@@ -962,7 +976,16 @@ func runWispPurgeClosed(ctx context.Context, dryRun bool, force bool, excludeTyp
 		fmt.Println()
 	}
 
-	if err := deleteBatch(nil, ids, force, dryRun, true, jsonOutput, false, "wisp gc --closed"); err != nil {
+	// Cascade must stay OFF here. The closed set above is already the complete
+	// purge candidate list, so cascade can only ever add NON-closed dependents
+	// to the batch. In a linear molecule DAG a closed step's transitive
+	// dependents are every other (live) step — cascading swept whole active
+	// molecules into deletion, steps, dependency links and events all at once
+	// (wisp gc --closed --force self-destructed the deacon patrol).
+	// Without cascade, closed wisps are deleted and live dependents are
+	// orphaned (edges dropped, is_blocked recomputed) — the same semantics as
+	// a plain `bd delete`.
+	if err := deleteBatch(nil, ids, force, dryRun, false, jsonOutput, false, "wisp gc --closed"); err != nil {
 		return HandleError("%v", err)
 	}
 

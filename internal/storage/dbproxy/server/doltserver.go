@@ -254,7 +254,9 @@ func (s *DoltServer) Start(ctx context.Context) error {
 		cmd.Stderr = s.logFile
 	}
 
-	cmd.Env = os.Environ()
+	// The proxied server runs CALL DOLT_PUSH/FETCH in-process; see
+	// doltserver.ServerSpawnEnv for the guards it needs (GH#4272).
+	cmd.Env = doltserver.ServerSpawnEnv()
 
 	if err := cmd.Start(); err != nil {
 		s.eg, s.egCtx, s.cancel = nil, nil, nil

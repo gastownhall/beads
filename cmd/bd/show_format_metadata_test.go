@@ -5,8 +5,120 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/uimd"
 )
+
+// closedWithReason builds a closed issue whose remaining metadata lines — the
+// external ref and the compaction stat — are the ones a close reason rendered
+// in place would strand below the body text.
+func closedWithReason(reason string) *types.Issue {
+	return &types.Issue{
+		ID: "test-cr", Title: "t", IssueType: types.TypeTask,
+		Status: types.StatusClosed, CloseReason: reason,
+		ExternalRef:     strPtr("gh#1"),
+		CompactionLevel: 1, OriginalSize: 4096,
+	}
+}
+
+// metadataLine returns the whole output line starting with prefix, unstyled,
+// or "" when no line does. Whole-line equality is what catches a value that
+// passed the fit check trimmed but was then rendered untrimmed.
+func metadataLine(out, prefix string) string {
+	for _, line := range strings.Split(ansi.Strip(out), "\n") {
+		if strings.HasPrefix(line, prefix) {
+			return line
+		}
+	}
+	return ""
+}
+
+// TestFormatIssueMetadata_CloseReason guards the rule that a close reason too
+// long or too structured for a metadata line is rendered as body text, the way
+// DESCRIPTION and NOTES are, instead of being dumped raw into the metadata
+// block where it wraps at the terminal edge and its continuation lines read as
+// separate metadata entries.
+func TestFormatIssueMetadata_CloseReason(t *testing.T) {
+	// Force non-agent mode so the width test is live and deterministic;
+	// in agent mode nothing wraps and WrapWidth reports 0.
+	t.Setenv("BD_AGENT_MODE", "0")
+	t.Setenv("CLAUDE_CODE", "")
+
+	// Surrounding whitespace is not structure. --reason-file and heredoc
+	// content almost always ends in a newline, so a one-liner that arrives
+	// with one has to stay inline, and has to render without it.
+	for name, reason := range map[string]string{
+		"short":            "Fixed",
+		"trailing newline": "Fixed\n",
+		"trailing CRLF":    "Fixed\r\n",
+		"padded":           "\n  Fixed  \n\n",
+	} {
+		t.Run(name+" reason stays on a metadata line", func(t *testing.T) {
+			out := formatIssueMetadata(closedWithReason(reason))
+			if got := metadataLine(out, "Close reason:"); got != "Close reason: Fixed" {
+				t.Errorf("inline reason = %q, want %q; full output:\n%s", got, "Close reason: Fixed", out)
+			}
+			if strings.Contains(out, "CLOSE REASON") {
+				t.Errorf("%s reason should not get its own section, got:\n%s", name, out)
+			}
+		})
+	}
+
+	for name, reason := range map[string]string{
+		"multi-line": "Fixed the leak.\n\n- reverted the cache\n- added a regression test",
+		"overlong":   strings.Repeat("long ", 40),
+	} {
+		t.Run(name+" reason becomes a rendered section", func(t *testing.T) {
+			out := formatIssueMetadata(closedWithReason(reason))
+			if !strings.Contains(out, "CLOSE REASON") {
+				t.Fatalf("%s reason should get its own section, got:\n%s", name, out)
+			}
+			if strings.Contains(out, "Close reason:") {
+				t.Errorf("%s reason should not also appear inline, got:\n%s", name, out)
+			}
+			// The section must come last: metadata lines emitted after the
+			// close reason would otherwise be stranded below the body text.
+			sectionAt := strings.Index(out, "CLOSE REASON")
+			for _, trailing := range []string{"External: gh#1", "reduction)"} {
+				if at := strings.Index(out, trailing); at < 0 || at > sectionAt {
+					t.Errorf("metadata line %q must precede the CLOSE REASON section, got:\n%s", trailing, out)
+				}
+			}
+			// Body text wraps; that is the whole point of promoting it.
+			for _, line := range strings.Split(out[sectionAt:], "\n") {
+				if ansi.StringWidth(line) > uimd.WrapWidth() {
+					t.Errorf("section line exceeds wrap width %d: %q", uimd.WrapWidth(), line)
+				}
+			}
+		})
+	}
+
+	// Agent mode emits body text verbatim, so promotion there is about
+	// getting the reason out of the metadata block, not about wrapping.
+	t.Run("agent mode", func(t *testing.T) {
+		t.Setenv("BD_AGENT_MODE", "1")
+		reason := "Fixed the leak.\n\n- reverted the cache\n- added a regression test"
+
+		out := formatIssueMetadata(closedWithReason(reason))
+		if !strings.Contains(out, "CLOSE REASON") {
+			t.Fatalf("multi-line reason should still get its own section, got:\n%s", out)
+		}
+		if !strings.Contains(out, reason) {
+			t.Errorf("agent mode must emit the reason verbatim, got:\n%s", out)
+		}
+
+		// Nothing wraps here, so width alone never promotes a one-liner.
+		long := strings.Repeat("long ", 40)
+		out = formatIssueMetadata(closedWithReason(long))
+		if strings.Contains(out, "CLOSE REASON") {
+			t.Errorf("an overlong one-liner should stay inline in agent mode, got:\n%s", out)
+		}
+		if got := metadataLine(out, "Close reason:"); got != "Close reason: "+strings.TrimSpace(long) {
+			t.Errorf("inline reason = %q, want the whole trimmed one-liner", got)
+		}
+	})
+}
 
 func TestFormatIssueCustomMetadata_Nil(t *testing.T) {
 	t.Parallel()

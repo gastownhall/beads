@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 func TestResolveChangeDirBeadsDirDoesNotChangeCWD(t *testing.T) {
@@ -61,5 +63,34 @@ func TestResolveChangeDirBeadsDirRejectsFile(t *testing.T) {
 func TestResolveChangeDirBeadsDirRejectsDirectoryWithoutProject(t *testing.T) {
 	if _, err := resolveChangeDirBeadsDir(t.TempDir()); err == nil {
 		t.Fatal("expected -C target without a beads project to fail")
+	}
+}
+
+func TestIsPreviewCommand(t *testing.T) {
+	tests := []struct {
+		name string
+		flag string
+		set  string
+		want bool
+	}{
+		{name: "dry run", flag: "dry-run", set: "true", want: true},
+		{name: "inspect", flag: "inspect", set: "true", want: true},
+		{name: "false preview flag", flag: "dry-run", set: "false", want: false},
+		{name: "no preview flag", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := &cobra.Command{Use: "test"}
+			if tt.flag != "" {
+				cmd.Flags().Bool(tt.flag, false, "")
+				if err := cmd.Flags().Set(tt.flag, tt.set); err != nil {
+					t.Fatalf("set %s: %v", tt.flag, err)
+				}
+			}
+			if got := isPreviewCommand(cmd); got != tt.want {
+				t.Fatalf("isPreviewCommand() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }

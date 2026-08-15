@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
 )
@@ -31,6 +32,13 @@ func OpenBestAvailable(ctx context.Context, beadsDir string) (Storage, error) {
 	}
 	if !configfile.IsSupportedBackend(cfg.Backend) {
 		return nil, configuredBackendUnavailable(cfg.Backend)
+	}
+
+	// Dispatch to a registered extension backend before any Dolt path, mirroring
+	// the CLI store factories so SDK callers get the backend they registered
+	// instead of a silently-opened embedded Dolt store.
+	if backend, ok := backends.Lookup(cfg.GetBackend()); ok {
+		return backend.Open(ctx, beadsDir)
 	}
 
 	if cfg.IsDoltServerMode() {

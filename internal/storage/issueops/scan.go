@@ -33,17 +33,10 @@ const IssueSelectColumns = sqlbuild.IssueSelectColumns
 // IssueSelectColumnsLite must include sqlbuild.LeaseJoin(table) in its FROM
 // clause, exactly as full hydration does (see issueLiteProjection in
 // search.go, joinLeases: true).
-const IssueSelectColumnsLite = `id, content_hash, title,
-	       status, priority, issue_type, assignee, estimated_minutes,
-	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
-	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason,
-	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
-	       await_type, await_id, timeout_ns,
-	       mol_type,
-	       event_kind, actor, target,
-	       due_at, defer_until,
-	       work_type, source_system, metadata, row_lock,
-	       leases.lease_expires_at, leases.heartbeat_at, leases.granted_node`
+// The list itself lives in internal/storage/sqlbuild beside IssueSelectColumns,
+// shared with the domain/db stack and with the counts mega-query, which renders
+// a qualified variant of it.
+const IssueSelectColumnsLite = sqlbuild.IssueSelectColumnsLite
 
 // HeavyDropList enumerates the columns omitted from IssueSelectColumnsLite.
 // Test-only: the schema-parity test asserts
@@ -83,26 +76,27 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason sql.NullString
+	var contentHash, sourceRepo, closeReason, closedBySession sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target, payload sql.NullString
 	var awaitType, awaitID, waiters sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
-	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title, &issue.Description, &issue.Design,
 		&issue.AcceptanceCriteria, &issue.Notes, &issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason, &closedBySession,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs, &waiters,
 		&molType,
 		&eventKind, &actor, &target, &payload,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -161,6 +155,9 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -226,6 +223,11 @@ func ScanIssueFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
 	// this is normally valid; a NULL (defensive) maps to 0.
 	issue.RowVersion = rowLock.Int64
+	// storage_class (migration 0060); NULL = unset (EffectiveStorageClass
+	// resolves the default per Protocol v0.1 C1.2).
+	if storageClass.Valid {
+		issue.StorageClass = types.StorageClass(storageClass.String)
+	}
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time
@@ -255,26 +257,27 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	var estimatedMinutes, originalSize, timeoutNs sql.NullInt64
 	var createdBy sql.NullString
 	var assignee, externalRef, specID, compactedAtCommit, owner sql.NullString
-	var contentHash, sourceRepo, closeReason sql.NullString
+	var contentHash, sourceRepo, closeReason, closedBySession sql.NullString
 	var workType, sourceSystem sql.NullString
 	var sender, wispType, molType, eventKind, actor, target sql.NullString
 	var awaitType, awaitID sql.NullString
 	var ephemeral, noHistory, pinned, isTemplate sql.NullInt64
 	var metadata sql.NullString
-	var rowLock sql.NullInt64 // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var rowLock sql.NullInt64       // row_lock column (NOT NULL DEFAULT 0); scanned defensively so NULL maps to 0
+	var storageClass sql.NullString // storage_class column (migration 0060); NULL = unset, resolves per EffectiveStorageClass
 
 	dests := []any{
 		&issue.ID, &contentHash, &issue.Title,
 		&issue.Status,
 		&issue.Priority, &issue.IssueType, &assignee, &estimatedMinutes,
 		&createdAtStr, &createdBy, &owner, &updatedAtStr, &startedAt, &closedAt, &externalRef, &specID,
-		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason,
+		&issue.CompactionLevel, &compactedAt, &compactedAtCommit, &originalSize, &sourceRepo, &closeReason, &closedBySession,
 		&sender, &ephemeral, &noHistory, &wispType, &pinned, &isTemplate,
 		&awaitType, &awaitID, &timeoutNs,
 		&molType,
 		&eventKind, &actor, &target,
 		&dueAt, &deferUntil,
-		&workType, &sourceSystem, &metadata, &rowLock,
+		&workType, &sourceSystem, &metadata, &rowLock, &storageClass,
 		&leaseExpiresAt, &heartbeatAt, &leaseGrantedNode,
 	}
 	dests = append(dests, extra...)
@@ -331,6 +334,9 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	}
 	if closeReason.Valid {
 		issue.CloseReason = closeReason.String
+	}
+	if closedBySession.Valid {
+		issue.ClosedBySession = closedBySession.String
 	}
 	if sender.Valid {
 		issue.Sender = sender.String
@@ -389,6 +395,11 @@ func ScanIssueLiteFrom(s IssueScanner, extra ...any) (*types.Issue, error) {
 	// row_lock surfaced as the opaque RowVersion token. NOT NULL DEFAULT 0, so
 	// this is normally valid; a NULL (defensive) maps to 0.
 	issue.RowVersion = rowLock.Int64
+	// storage_class (migration 0060); NULL = unset (EffectiveStorageClass
+	// resolves the default per Protocol v0.1 C1.2).
+	if storageClass.Valid {
+		issue.StorageClass = types.StorageClass(storageClass.String)
+	}
 	// Lease columns (migration 0054); NULL when no active lease.
 	if leaseExpiresAt.Valid {
 		issue.LeaseExpiresAt = &leaseExpiresAt.Time

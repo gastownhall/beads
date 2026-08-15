@@ -31,24 +31,12 @@ type testEnv struct {
 // sets the issue_prefix config, and returns a testEnv with raw SQL access.
 func newTestEnv(t *testing.T, prefix string) *testEnv {
 	t.Helper()
-	ctx := t.Context()
-	beadsDir := filepath.Join(t.TempDir(), ".beads")
-	store, err := embeddeddolt.Open(ctx, beadsDir, prefix, "main")
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { store.Close() })
-
-	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
-		t.Fatalf("SetConfig(issue_prefix): %v", err)
-	}
-	if err := store.Commit(ctx, "bd init"); err != nil {
-		t.Fatalf("Commit: %v", err)
-	}
+	fixture := newPristineEmbeddedDoltFixture(t, prefix)
+	t.Cleanup(func() { closeEmbeddedDoltStore(t, fixture.store) })
 	return &testEnv{
-		store:    store,
-		dataDir:  filepath.Join(beadsDir, "embeddeddolt"),
-		database: prefix,
+		store:    fixture.store,
+		dataDir:  fixture.dataDir,
+		database: fixture.database,
 	}
 }
 
@@ -1020,7 +1008,6 @@ func TestCreateIssues(t *testing.T) {
 		var skipped []string
 
 		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{regular, wisp}, "tester", storage.BatchCreateOptions{
-			OrphanHandling:                 storage.OrphanAllow,
 			SkipPrefixValidation:           true,
 			SkipDependencyValidationErrors: true,
 			OnSkippedDependency: func(issueID, dependsOnID, reason string) {

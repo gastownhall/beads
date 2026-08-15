@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +11,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var showCmd = &cobra.Command{
@@ -46,6 +46,7 @@ var showCmd = &cobra.Command{
 		currentMode, _ := cmd.Flags().GetBool("current")
 		includeDepends, _ := cmd.Flags().GetBool("include-dependents")
 		includeComments, _ := cmd.Flags().GetBool("include-comments")
+		briefDeps, _ := cmd.Flags().GetBool("brief-deps")
 		ctx := rootCtx
 
 		// Helper to format timestamp based on --local-time flag
@@ -142,99 +143,28 @@ var showCmd = &cobra.Command{
 			}
 
 			if jsonOutput {
-				// be-ijck6q: default is count-only (no dependents/comments slice in output).
-				// Use --include-dependents / --include-comments to stream the full lists.
-				details := &types.IssueDetails{Issue: *issue}
-				details.Labels, _ = issueStore.GetLabels(ctx, issue.ID)
-				details.Dependencies, _ = issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
-
-				// Aggregate counts — O(1) queries, no row materialization.
-				depCount, _ := issueStore.CountDependents(ctx, issue.ID)
-				details.DependentCount = &depCount
-				depnCount, _ := issueStore.CountDependencies(ctx, issue.ID)
-				details.DependencyCount = &depnCount
-				cmtCount, _ := issueStore.CountIssueComments(ctx, issue.ID)
-				details.CommentCount = &cmtCount
-
-				// --include-dependents: stream via Iter, shallow-copy each item.
-				// May be slow on hub beads with many dependents.
-				if includeDepends {
-					iter, err := issueStore.IterDependentsWithMetadata(ctx, issue.ID)
-					if err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
-					}
-					defer iter.Close() //nolint:errcheck
-					var shallowDeps []*types.IssueWithDependencyMetadata
-					for iter.Next(ctx) {
-						item := iter.Value()
-						shallowDeps = append(shallowDeps, &types.IssueWithDependencyMetadata{
-							Issue: types.Issue{
-								ID:        item.Issue.ID,
-								Status:    item.Issue.Status,
-								IssueType: item.Issue.IssueType,
-								Priority:  item.Issue.Priority,
-								Title:     item.Issue.Title,
-							},
-							DependencyType: item.DependencyType,
-						})
-					}
-					if err := iter.Err(); err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter dependents %s: %v", issue.ID, err)
-					}
-					details.Dependents = shallowDeps
-
-					// Epic progress from streamed dependents.
-					if issue.IssueType == types.TypeEpic && len(shallowDeps) > 0 {
-						total, closed := 0, 0
-						for _, dep := range shallowDeps {
-							if dep.DependencyType == types.DepParentChild {
-								total++
-								if dep.Issue.Status == types.StatusClosed {
-									closed++
-								}
-							}
-						}
-						if total > 0 {
-							details.EpicTotalChildren = &total
-							details.EpicClosedChildren = &closed
-							closeable := total == closed
-							details.EpicCloseable = &closeable
-						}
-					}
+				// Shaping the detail view belongs to the reader role, not the
+				// CLI: the count-only default (be-ijck6q), the
+				// comments-omitted flag (ga-clgh), and the shallow dependent
+				// rows (be-4d36f2) have to read the same from every frontend,
+				// and going through the accessor is what makes that true by
+				// construction rather than by everyone remembering to call the
+				// same helper.
+				//
+				// The id handed over is the CANONICAL one this command already
+				// resolved. Fuzzy and cross-repo resolution stay here on
+				// purpose: an affordance that can answer with a different
+				// issue than the caller named has no place on a contract an
+				// unattended HTTP client also calls.
+				rd, rerr := issueStore.IssueReader()
+				if rerr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", rerr)
 				}
-
-				// --include-comments: stream via Iter.
-				// May be slow on issues with many comments.
-				if includeComments {
-					iter, err := issueStore.IterIssueComments(ctx, issue.ID)
-					if err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
-					}
-					defer iter.Close() //nolint:errcheck
-					for iter.Next(ctx) {
-						details.Comments = append(details.Comments, iter.Value())
-					}
-					if err := iter.Err(); err != nil {
-						result.Close()
-						return HandleErrorRespectJSON("iter comments %s: %v", issue.ID, err)
-					}
-				} else if cmtCount > 0 {
-					// ga-clgh: comment_count alone announces content exists without
-					// saying the representation is partial. Flag it explicitly so a
-					// caller reading only `.comments` doesn't read absence as "none".
-					omitted := true
-					details.CommentsOmitted = &omitted
-				}
-
-				// Compute parent from dependencies.
-				for _, dep := range details.Dependencies {
-					if dep.DependencyType == types.DepParentChild {
-						details.Parent = &dep.ID
-						break
-					}
+				details, derr := rd.Get(ctx, showGetRequest(issue.ID, includeDepends, includeComments, briefDeps))
+				if derr != nil {
+					result.Close()
+					return HandleErrorRespectJSON("%v", derr)
 				}
 				allDetails = append(allDetails, details)
 				result.Close()
@@ -249,20 +179,6 @@ var showCmd = &cobra.Command{
 
 			// Metadata: Owner · Type | Created · Updated
 			fmt.Println(formatIssueMetadata(issue))
-
-			// Compaction info (if applicable)
-			if issue.CompactionLevel > 0 {
-				fmt.Println()
-				if issue.OriginalSize > 0 {
-					currentSize := len(issue.Description) + len(issue.Design) + len(issue.Notes) + len(issue.AcceptanceCriteria)
-					saved := issue.OriginalSize - currentSize
-					if saved > 0 {
-						reduction := float64(saved) / float64(issue.OriginalSize) * 100
-						fmt.Printf("📊 %d → %d bytes (%.0f%% reduction)\n",
-							issue.OriginalSize, currentSize, reduction)
-					}
-				}
-			}
 
 			// Content sections — always show DESCRIPTION header so the user
 			// can distinguish "empty" from "hidden" (GH#3336).
@@ -298,110 +214,20 @@ var showCmd = &cobra.Command{
 
 			// Show dependencies - grouped by dependency type for clarity
 			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
-
-			if len(depsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, parent, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range depsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						parent = append(parent, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(parent) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("PARENT"))
-					for _, dep := range parent {
-						fmt.Println(formatDependencyLine("↑", dep))
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DEPENDS ON"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("→", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED FROM"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
-				}
+			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
+				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
 			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
-			if len(dependentsWithMeta) > 0 {
-				// Group by dependency type
-				var blocks, children, discovered []*types.IssueWithDependencyMetadata
-				for _, dep := range dependentsWithMeta {
-					switch dep.DependencyType {
-					case types.DepBlocks:
-						blocks = append(blocks, dep)
-					case types.DepParentChild:
-						children = append(children, dep)
-					case types.DepRelated, types.DepRelatesTo:
-						relatedSeen[dep.ID] = dep
-					case types.DepDiscoveredFrom:
-						discovered = append(discovered, dep)
-					default:
-						blocks = append(blocks, dep) // Default to blocks
-					}
-				}
-
-				if len(children) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("CHILDREN"))
-					for _, dep := range children {
-						fmt.Println(formatDependencyLine("↳", dep))
-					}
-					// Epic progress summary
-					if issue.IssueType == types.TypeEpic {
-						closedCount := 0
-						for _, dep := range children {
-							if dep.Issue.Status == types.StatusClosed {
-								closedCount++
-							}
-						}
-						pct := 0
-						if len(children) > 0 {
-							pct = (closedCount * 100) / len(children)
-						}
-						if closedCount == len(children) {
-							fmt.Printf("  %s %d/%d complete (%d%%) — eligible for close\n", ui.RenderPass("✓"), closedCount, len(children), pct)
-						} else {
-							fmt.Printf("  %s %d/%d complete (%d%%)\n", ui.RenderMuted("◐"), closedCount, len(children), pct)
-						}
-					}
-				}
-				if len(blocks) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("BLOCKS"))
-					for _, dep := range blocks {
-						fmt.Println(formatDependencyLine("←", dep))
-					}
-				}
-				if len(discovered) > 0 {
-					fmt.Printf("\n%s\n", ui.RenderBold("DISCOVERED"))
-					for _, dep := range discovered {
-						fmt.Println(formatDependencyLine("◊", dep))
-					}
+			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
+				printDepSection(sec)
+				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
+					printEpicChildProgress(sec.Deps)
 				}
 			}
 
-			// Print deduplicated RELATED section (bidirectional links shown once)
-			if len(relatedSeen) > 0 {
-				fmt.Printf("\n%s\n", ui.RenderBold("RELATED"))
-				for _, dep := range relatedSeen {
-					fmt.Println(formatDependencyLine("↔", dep))
-				}
-			}
+			printRelatedSection(relatedSeen)
 
 			// Show comments
 			comments, _ := issueStore.GetIssueComments(ctx, issue.ID) // Best effort: show issue even if comments unavailable
@@ -450,40 +276,6 @@ var showCmd = &cobra.Command{
 	},
 }
 
-// shallowDependentsForJSON returns a copy of raw with each embedded Issue
-// stripped down to identity-and-shape fields (ID, Status, IssueType, Priority,
-// Title). The heavy fields (Description, Design, Notes, AcceptanceCriteria,
-// metadata blobs, etc.) are dropped.
-//
-// be-4d36f2: hub beads with thousands of dependents previously caused
-// `bd show --json <hub>` to allocate 5-13 GB while marshaling full Issue
-// records into JSON. The shallow shape preserves what callers actually
-// consume (counts, status, type) and drops what they don't (free-form
-// text fields). On a 4-dependent hub this trims output ~60%; on a hub
-// with thousands of dependents, savings scale linearly.
-func shallowDependentsForJSON(raw []*types.IssueWithDependencyMetadata) []*types.IssueWithDependencyMetadata {
-	if len(raw) == 0 {
-		return nil
-	}
-	shallow := make([]*types.IssueWithDependencyMetadata, 0, len(raw))
-	for _, dep := range raw {
-		if dep == nil {
-			continue
-		}
-		shallow = append(shallow, &types.IssueWithDependencyMetadata{
-			Issue: types.Issue{
-				ID:        dep.Issue.ID,
-				Status:    dep.Issue.Status,
-				IssueType: dep.Issue.IssueType,
-				Priority:  dep.Issue.Priority,
-				Title:     dep.Issue.Title,
-			},
-			DependencyType: dep.DependencyType,
-		})
-	}
-	return shallow
-}
-
 func init() {
 	showCmd.Flags().Bool("thread", false, "Show full conversation thread (for messages)")
 	showCmd.Flags().Bool("short", false, "Show compact one-line output per issue")
@@ -497,46 +289,19 @@ func init() {
 	showCmd.Flags().Bool("current", false, "Show the currently active issue (in-progress, hooked, or last touched)")
 	showCmd.Flags().Bool("include-dependents", false, "Stream full dependent issues in JSON output (--json only; may be slow on hub beads)")
 	showCmd.Flags().Bool("include-comments", false, "Stream full comment bodies in JSON output (--json only; may be slow on issues with many comments)")
+	showCmd.Flags().Bool("brief-deps", false, "Reduce each dependency to its identity fields in JSON output (--json only; drops description, design, notes and acceptance criteria)")
 	showCmd.ValidArgsFunction = issueIDCompletion
 	rootCmd.AddCommand(showCmd)
 }
 
-// resolveCurrentIssueID determines the current active issue for the agent.
-// Priority: in-progress assigned to actor > hooked > last touched.
-func resolveCurrentIssueID(ctx context.Context) string {
-	if store == nil {
-		// No store — fall back to last touched
-		return GetLastTouchedID()
+// showGetRequest carries the show flags onto the read contract. Extracted so
+// the hop is reachable from a test: both show routes build this request
+// independently, and a dropped field here is invisible to every other test.
+func showGetRequest(id string, includeDependents, includeComments, briefDeps bool) issueops.GetRequest {
+	return issueops.GetRequest{
+		ID:                id,
+		IncludeDependents: includeDependents,
+		IncludeComments:   includeComments,
+		BriefDeps:         briefDeps,
 	}
-
-	currentActor := getActorWithGit()
-
-	// 1. In-progress issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusInProgress
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 2. Hooked issues assigned to current actor
-	if currentActor != "" {
-		status := types.StatusHooked
-		filter := types.IssueFilter{
-			Status:   &status,
-			Assignee: &currentActor,
-		}
-		issues, err := store.SearchIssues(ctx, "", filter)
-		if err == nil && len(issues) > 0 {
-			return issues[0].ID
-		}
-	}
-
-	// 3. Last touched issue (fallback)
-	return GetLastTouchedID()
 }

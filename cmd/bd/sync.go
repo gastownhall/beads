@@ -683,6 +683,8 @@ Examples:
 func init() {
 	syncCmd.Flags().String("remote", "", "Sync with a specific named remote instead of the default")
 	syncCmd.Flags().Int("attempts", defaultSyncAttempts, "Maximum pull/push attempts before reporting a transient retry exhaustion (exit 3)")
+	syncCmd.Flags().BoolP("yes", "y", false, "Consent to adopting a Dolt remote derived from git origin when none is configured")
+	syncCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	rootCmd.AddCommand(syncCmd)
 }
 
@@ -693,7 +695,7 @@ func init() {
 // real thing in dolt_test.go; letting it run for real from a runSyncCommand
 // unit test would mutate whatever repo the tests happen to be run from. The
 // production binding is pinned by TestSyncAdoptGitOriginIsWiredToAdoption.
-var syncAdoptGitOrigin = adoptGitOriginRemoteForPush
+var syncAdoptGitOrigin func(context.Context, storage.DoltStorage, adoptPolicy, adoptOptIn) (bool, error) = adoptGitOriginRemoteForPush
 
 func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	if usesProxiedServer() {
@@ -753,7 +755,11 @@ func runSyncCommand(cmd *cobra.Command, _ []string) error {
 	// or persisted on disk — adoption is a hasConfiguredRemote no-op, so the
 	// steady-state cost is the one listing the error path already paid.
 	if remote == "" {
-		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st)
+		// Same consent gate as `bd dolt push` (#5068): sync publishes the same
+		// history to the same derived remote, so it cannot be the soft way in.
+		syncYes, _ := cmd.Flags().GetBool("yes")
+		syncNoAdopt, _ := cmd.Flags().GetBool("no-adopt")
+		adopted, adoptErr := syncAdoptGitOrigin(rootCtx, st, currentAdoptPolicy(syncYes, syncNoAdopt, stdinIsTerminal(), jsonOutput), syncAdoptOptIn)
 		if adoptErr != nil {
 			return HandleErrorRespectJSON("sync failed: adopting git origin as Dolt remote: %v", adoptErr)
 		}

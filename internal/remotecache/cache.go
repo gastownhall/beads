@@ -11,6 +11,8 @@ import (
 
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/lockfile"
 	"github.com/steveyegge/beads/internal/storage"
 )
@@ -144,8 +146,7 @@ func (c *Cache) Push(ctx context.Context, remoteURL string) error {
 	}
 	defer c.releaseLock(lock)
 
-	cmd := exec.CommandContext(ctx, "dolt", "push", "origin", "main")
-	cmd.Dir = target
+	cmd := doltCmd(ctx, target, "push", "origin", "main")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("dolt push failed: %w\nOutput: %s", err, output)
 	}
@@ -189,11 +190,21 @@ func (c *Cache) doltExists(dbPath string) bool {
 
 // doltClone clones a remote into the target directory.
 func (c *Cache) doltClone(ctx context.Context, remoteURL, target string) error {
-	cmd := exec.CommandContext(ctx, "dolt", doltCloneArgs(remoteURL, target)...)
+	cmd := doltCmd(ctx, "", doltCloneArgs(remoteURL, target)...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\nOutput: %s", err, output)
 	}
 	return nil
+}
+
+// doltCmd builds a dolt CLI invocation for cache transfers with git tracing
+// scrubbed (internal/gittraceenv) and templated hooks disabled (GH#4272).
+// dir "" runs in the process working directory.
+func doltCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "dolt", args...) // #nosec G204 -- fixed command with validated remote/ref args
+	cmd.Dir = dir
+	cmd.Env = githooksenv.DisabledEnv(gittraceenv.ScrubEnv(os.Environ()))
+	return cmd
 }
 
 func doltCloneArgs(remoteURL, target string) []string {
@@ -206,8 +217,7 @@ func doltCloneArgs(remoteURL, target string) []string {
 
 // doltPull pulls from origin in the given database directory.
 func (c *Cache) doltPull(ctx context.Context, dbDir string) error {
-	cmd := exec.CommandContext(ctx, "dolt", "pull", "origin", "main")
-	cmd.Dir = dbDir
+	cmd := doltCmd(ctx, dbDir, "pull", "origin", "main")
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("%w\nOutput: %s", err, output)
 	}

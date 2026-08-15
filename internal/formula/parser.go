@@ -2,6 +2,7 @@ package formula
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,13 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/git"
 )
+
+// ErrVarValidation wraps a variable validation failure so callers with a
+// fallback resolution path (e.g. "is this actually a proto/issue ID rather
+// than a formula name?") can distinguish "not a formula" from "is a formula,
+// but the provided variables are invalid" and surface the latter directly
+// with errors.Is, instead of silently falling through to a worse error.
+var ErrVarValidation = errors.New("variable validation failed")
 
 // Formula file extensions. TOML is preferred, JSON is legacy fallback.
 const (
@@ -404,6 +412,7 @@ func ExtractVariables(formula *Formula) []string {
 			extract(step.Gate.ID)
 			extract(step.Gate.AwaitID)
 			extract(step.Gate.Timeout)
+			extract(step.Gate.Repo)
 		}
 		for _, child := range step.Children {
 			extractFromStep(child)
@@ -443,46 +452,96 @@ func ValidateVars(formula *Formula, values map[string]string) error {
 			continue
 		}
 
-		// Use default if not provided
-		if !provided && def.Default != nil {
-			val = *def.Default
-		}
-
-		// Skip further validation if no value
-		if val == "" {
-			continue
-		}
-
-		// Check enum constraint
-		if len(def.Enum) > 0 {
-			found := false
-			for _, allowed := range def.Enum {
-				if val == allowed {
-					found = true
-					break
-				}
-			}
-			if !found {
-				errs = append(errs, fmt.Sprintf("variable %q: value %q not in allowed values %v", name, val, def.Enum))
-			}
-		}
-
-		// Check pattern constraint
-		if def.Pattern != "" {
-			re, err := regexp.Compile(def.Pattern)
-			if err != nil {
-				errs = append(errs, fmt.Sprintf("variable %q: invalid pattern %q: %v", name, def.Pattern, err))
-			} else if !re.MatchString(val) {
-				errs = append(errs, fmt.Sprintf("variable %q: value %q does not match pattern %q", name, val, def.Pattern))
-			}
-		}
+		errs = append(errs, validateVarValue(name, def, val, provided)...)
 	}
 
 	if len(errs) > 0 {
-		return fmt.Errorf("variable validation failed:\n  - %s", strings.Join(errs, "\n  - "))
+		return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
 	}
 
 	return nil
+}
+
+// ValidateProvidedVars checks enum/pattern/required-empty constraints only
+// for variables that are present in values; it does not flag variables that
+// are entirely absent. Callers that already surface a more specific
+// missing-variable message (e.g. bd mol pour/wisp's hint path) should keep
+// using that path for absent vars — this exists so those same callers still
+// catch malformed *provided* values, which a presence-only check misses
+// (mybd-u2r6).
+func ValidateProvidedVars(formula *Formula, values map[string]string) error {
+	var errs []string
+
+	for name, def := range formula.Vars {
+		val, provided := values[name]
+		if !provided {
+			continue
+		}
+
+		errs = append(errs, validateVarValue(name, def, val, provided)...)
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("%w:\n  - %s", ErrVarValidation, strings.Join(errs, "\n  - "))
+	}
+
+	return nil
+}
+
+// validateVarValue applies the required-empty, enum, and pattern checks for
+// a single variable given its (possibly defaulted) value. It assumes any
+// "required and not provided at all" check has already been handled by the
+// caller, since that case is presented differently by ValidateVars vs.
+// ValidateProvidedVars.
+func validateVarValue(name string, def *VarDef, val string, provided bool) []string {
+	var errs []string
+
+	// A variable with no default is effectively required: the command paths
+	// (extractRequiredVariables) demand a value for it, so a provided-but-empty
+	// value is the same unset-shell-variable trap as for required=true.
+	if (def.Required || def.Default == nil) && provided && val == "" {
+		errs = append(errs, fmt.Sprintf("variable %q is required and cannot be empty", name))
+		return errs
+	}
+
+	// Use default if not provided
+	if !provided && def.Default != nil {
+		val = *def.Default
+	}
+
+	// Skip further validation only when the var was genuinely not
+	// provided (absent from the map). A value that was explicitly
+	// provided as "" must still be checked against enum/pattern
+	// constraints rather than silently passing.
+	if !provided && val == "" {
+		return errs
+	}
+
+	// Check enum constraint
+	if len(def.Enum) > 0 {
+		found := false
+		for _, allowed := range def.Enum {
+			if val == allowed {
+				found = true
+				break
+			}
+		}
+		if !found {
+			errs = append(errs, fmt.Sprintf("variable %q: value %q not in allowed values %v", name, val, def.Enum))
+		}
+	}
+
+	// Check pattern constraint
+	if def.Pattern != "" {
+		re, err := regexp.Compile(def.Pattern)
+		if err != nil {
+			errs = append(errs, fmt.Sprintf("variable %q: invalid pattern %q: %v", name, def.Pattern, err))
+		} else if !re.MatchString(val) {
+			errs = append(errs, fmt.Sprintf("variable %q: value %q does not match pattern %q", name, val, def.Pattern))
+		}
+	}
+
+	return errs
 }
 
 // ApplyDefaults returns a new map with default values filled in.

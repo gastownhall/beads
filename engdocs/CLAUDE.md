@@ -61,19 +61,18 @@ See `internal/types/types.go`:
 
 ## Development Command Source
 
-Use [AGENT_INSTRUCTIONS.md](../AGENT_INSTRUCTIONS.md#testing-commands-no-ambiguity)
-for the current command policy. This file should not duplicate command matrices
-or version-management workflows.
+Use the canonical [TESTING.md](TESTING.md) for test commands, test design, and
+PR-readiness gates. This file should not duplicate command matrices or
+version-management workflows.
 
 > **Do NOT** use `go build -o bd` or `go install` directly — they create
 > stale binaries that shadow `~/.local/bin/bd`. Always use `make install`.
 
-## Testing Philosophy
+## Testing
 
-Testing guidance lives in [TESTING.md](TESTING.md) and
-[TESTING_PHILOSOPHY.md](TESTING_PHILOSOPHY.md). Architecture-specific notes for
-Claude are limited to where tests touch agent setup, hooks, or instruction-file
-generation.
+Testing guidance lives in [TESTING.md](TESTING.md). Architecture-specific notes
+for Claude are limited to where tests touch agent setup, hooks, or
+instruction-file generation.
 
 ## Important Notes
 

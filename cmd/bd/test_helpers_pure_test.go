@@ -89,8 +89,16 @@ func generateUniqueTestID(t *testing.T, prefix string, index int) string {
 // Tests automatically opt out of <module-root>/.beads/config.yaml via
 // BEADS_TEST_IGNORE_REPO_CONFIG; tests that want the repo config must override
 // before calling this helper.
+//
+// BEADS_DIR is pinned via t.Setenv here so that a test earlier in the binary which
+// resolved a real BEADS_DIR via raw os.Setenv (e.g. running actual CLI command
+// dispatch) doesn't leak it forward past this test. config.Initialize honors
+// BEADS_TEST_IGNORE_REPO_CONFIG on the BEADS_DIR source too, so such a leaked value
+// can no longer re-import the repo's own config (ga-e6h6i); tests that want the repo
+// config must unset the flag before calling this helper.
 func initConfigForTest(t *testing.T) {
 	t.Helper()
+	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
 	if err := config.Initialize(); err != nil {
@@ -112,6 +120,10 @@ func ensureCleanGlobalState(t *testing.T) {
 	t.Helper()
 	// Reset CommandContext so accessor functions fall back to globals
 	resetCommandContext()
+	// Pin BEADS_DIR so real CLI command dispatch this test triggers (which sets
+	// BEADS_DIR via raw os.Setenv with no restore, e.g. prepareSelectedCommandContext)
+	// doesn't leak into later tests in the same binary.
+	t.Setenv("BEADS_DIR", os.Getenv("BEADS_DIR"))
 }
 
 // savedGlobals holds a snapshot of package-level globals for safe restoration.

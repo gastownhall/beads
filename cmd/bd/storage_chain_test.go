@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"os"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/hooks"
@@ -23,19 +22,10 @@ func (s *stubChainStore) ActiveDatabaseSize(context.Context) (int64, error) {
 	return s.databaseSize, nil
 }
 
-// clearTelemetryEnv unsets every BD_OTEL_* variable telemetry.Enabled
-// inspects, so each test starts from a known baseline.
-func clearTelemetryEnv(t *testing.T) {
-	t.Helper()
-	for _, k := range []string{
-		"BD_OTEL_METRICS_URL",
-		"BD_OTEL_LOGS_URL",
-		"BD_OTEL_STDOUT",
-	} {
-		t.Setenv(k, "")
-		_ = os.Unsetenv(k)
-	}
-}
+// clearTelemetryEnv is defined once for the package, in
+// command_telemetry_test.go; it unsets every BD_OTEL_* / OTEL_* variable
+// telemetry.Enabled or the SDK looks at, so each test starts from a known
+// baseline.
 
 func TestWireStorageDecorators_NilStorePassesThrough(t *testing.T) {
 	if got := wireStorageDecorators(nil, hooks.NewRunner("/nonexistent"), false); got != nil {
@@ -96,6 +86,17 @@ func TestDoltBackupSizeUnwrapsStorageDecorators(t *testing.T) {
 	}
 	if !available || size != 99 {
 		t.Fatalf("doltBackupSizeForStore = (%d, %v), want (99, true)", size, available)
+	}
+}
+
+func TestGCStoreSizeUnwrapsStorageDecorators(t *testing.T) {
+	clearTelemetryEnv(t)
+	t.Setenv("BD_OTEL_STDOUT", "true")
+	raw := &stubChainStore{databaseSize: 99}
+	wrapped := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
+
+	if got := storeSizeBytesForStore(t.Context(), wrapped); got != 99 {
+		t.Fatalf("storeSizeBytesForStore = %d, want 99", got)
 	}
 }
 
