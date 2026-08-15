@@ -3,9 +3,14 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 func TestInitGuardServerMessage(t *testing.T) {
@@ -449,5 +454,74 @@ func TestInitGuardServerMessage_DiagnosticsBeforeForce(t *testing.T) {
 	if doctorIdx > forceIdx {
 		t.Errorf("'bd doctor' (at %d) must appear before '--force' (at %d) in message:\n%s",
 			doctorIdx, forceIdx, msg)
+	}
+}
+
+// be-5up5: 2026-08-11 fleet-wide data loss. In server mode there is NEVER a
+// local dolt/ directory, whether this is a genuine fresh clone or an existing
+// project whose server-side database was lost — doltDirExists==false alone
+// (GH#2433's signal) cannot tell them apart. metadata.json's project_id is
+// only written by a real prior init, so a non-empty project_id here is proof
+// this is an existing project recovering from a missing database, not
+// GH#2433's fresh-clone case (whose fixture carries no project_id — see
+// TestInitGuard_FreshCloneWithMetadataJSON above). init must refuse and
+// point at bd bootstrap, not silently recreate an empty database on the
+// server (mirrors scripts/repro-bd-init-recreates-empty-db.sh step 4).
+func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+
+	dataDir := t.TempDir()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+
+	// #nosec G204 -- fixed args, no user input
+	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The server above has no "myproject" database — simulating server-side
+	// data loss on an existing project, not a never-initialized clone.
+	metadata := map[string]interface{}{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "myproject",
+		"project_id":    "existing-0000-1111-2222-333344445555",
+	}
+	data, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = checkExistingBeadsDataAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("existing project (non-empty project_id) with missing server-side database must refuse init, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("expected refusal message about missing database, got: %v", err)
+	}
+	if strings.Contains(err.Error(), "init --force") {
+		t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
 	}
 }
