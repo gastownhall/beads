@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -161,6 +162,14 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	}); err != nil {
 		return fmt.Errorf("add label: record event: %w", err)
 	}
+	// A label write bypasses UpdateIssueInTx entirely, so it must bump
+	// updated_at itself -- otherwise --updated-after filtering, stale-upsert
+	// rejection, and LWW merge are all blind to label-only churn (#5442).
+	// Must run before RecordEventInTx below so the journal snapshot below
+	// captures the bumped value, matching UpdateIssueInTx's own ordering.
+	if err := touchUpdatedAtInTx(ctx, tx, issueTableFor(labelTable), issueID); err != nil {
+		return fmt.Errorf("add label: %w", err)
+	}
 	// A label is part of the bead snapshot, so a label write journals as an
 	// update carrying the complete post-mutation set.
 	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
@@ -194,5 +203,42 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
+	if err := touchUpdatedAtInTx(ctx, tx, issueTableFor(labelTable), issueID); err != nil {
+		return fmt.Errorf("remove label: %w", err)
+	}
 	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
+}
+
+// issueTableFor returns the issue table ("issues" or "wisps") that owns
+// labelTable ("labels" or "wisp_labels"). WispTableRouting only ever
+// produces these two pairings, so the mapping is exhaustive -- deriving it
+// this way avoids an extra IsActiveWispInTx probe query when the caller
+// already resolved and passed in labelTable/eventTable explicitly (e.g.
+// embeddeddolt/dolt Transaction.AddLabel, which also need the routed table
+// name for their own dirty-table tracking).
+func issueTableFor(labelTable string) string {
+	if labelTable == "wisp_labels" {
+		return "wisps"
+	}
+	return "issues"
+}
+
+// touchUpdatedAtInTx bumps an issue's updated_at without touching any other
+// column. Callers that mutate an issue through a side channel other than
+// UpdateIssueInTx -- label add/remove write directly to the labels/
+// wisp_labels table, bypassing the normal field-update path entirely --
+// must call this so --updated-after filtering, stale-upsert rejection, and
+// LWW merge all see the edit (#5442). Also mints a fresh row_lock, matching
+// every other issues/wisps content write (see the freshRowLock invariant in
+// lease.go) -- otherwise this write would be invisible to RowVersion-gated
+// optimistic-concurrency checks.
+func touchUpdatedAtInTx(ctx context.Context, tx DBTX, issueTable, issueID string) error {
+	rowLockClause, rowLockArgs := RowLockClause()
+	args := append([]interface{}{time.Now().UTC()}, rowLockArgs...)
+	args = append(args, issueID)
+	//nolint:gosec // G201: issueTable is from issueTableFor ("issues" or "wisps")
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET updated_at = ?, %s WHERE id = ?`, issueTable, rowLockClause), args...); err != nil {
+		return fmt.Errorf("touch updated_at: %w", err)
+	}
+	return nil
 }
