@@ -465,12 +465,23 @@ func MigrateUpTo(ctx context.Context, db DBConn, maxVersion int) (int, error) {
 // backfills, rekeys, ignored source, final commit — has returned, so a
 // concurrent prober can never fast-path into a half-finished pass; migrateUp
 // itself revokes the sentinel before its first mutation.
+//
+// A failed stamp is NOT a failed migration. The sentinel row only enables an
+// optimization: without it every later open takes the locked path, which is
+// exactly the pre-sentinel behavior and is always correct. Returning the stamp
+// error here would fail an already-successful migration and, worse, invite the
+// caller to retry a pass that has nothing left to do. So it warns and the
+// migration reports success.
 func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	applied, err := migrateUp(ctx, db)
 	if err != nil {
 		return applied, err
 	}
-	return applied, ensureMigrationPassComplete(ctx, db)
+	if err := ensureMigrationPassComplete(ctx, db); err != nil {
+		log.Printf("schema migration completed, but recording the pass-completion sentinel failed: %v; "+
+			"later opens will take the migration lock instead of the lock-free fast path", err)
+	}
+	return applied, nil
 }
 
 func migrateUp(ctx context.Context, db DBConn) (int, error) {

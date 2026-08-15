@@ -301,6 +301,43 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	}
 }
 
+// TestMigrateUpSucceedsWhenPassSentinelStampFails pins the review finding that
+// a failed sentinel stamp must not fail an already-successful migration. The
+// row only enables an optimization: without it every later open takes the
+// migration lock, which is the pre-sentinel behavior and always correct.
+// Returning the stamp error would report a migration failure to a caller whose
+// database is in fact fully current, and invite a retry of a pass with nothing
+// left to do.
+func TestMigrateUpSucceedsWhenPassSentinelStampFails(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	expectIgnorePatternSeedNoop(mock)
+	expectNoMigrationWork(mock)
+	// Sentinel absent, so the pass tries to stamp it — and the write fails
+	// (e.g. a read-only or otherwise wedged local_metadata).
+	expectPassSentinel(mock, sqlmock.NewRows([]string{"value"}))
+	mock.ExpectExec(`CREATE TABLE IF NOT EXISTS local_metadata`).
+		WillReturnResult(sqlmock.NewResult(0, 0))
+	mock.ExpectExec(regexp.QuoteMeta("REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)")).
+		WithArgs(migrationPassCompleteKey, fmt.Sprintf("%d/%d", LatestVersion(), LatestIgnoredVersion())).
+		WillReturnError(errors.New("local_metadata is read-only"))
+
+	applied, err := MigrateUp(context.Background(), db)
+	if err != nil {
+		t.Fatalf("MigrateUp() error = %v; a failed pass-completion stamp must warn and degrade to locked opens, not fail a migration that already succeeded", err)
+	}
+	if applied != 0 {
+		t.Fatalf("MigrateUp() applied = %d, want 0", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // TestMigrateUpWithLockLocksWhenPassSentinelMissing pins the review finding on
 // the fast path's interleaving hazard: probe inputs alone (seeds present, both
 // cursors at latest, hash columns, backfill done) are all satisfied MID-PASS by
