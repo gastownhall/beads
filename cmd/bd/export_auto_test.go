@@ -1404,6 +1404,31 @@ func TestLoadExistingIssueLines_MissingFileReturnsEmpty(t *testing.T) {
 // beads dir, and registers cleanup. Returns the store, beads dir, and ctx.
 func setupIncrementalExportTest(t *testing.T) (*testHarness, context.Context) {
 	t.Helper()
+	return setupIncrementalExportTestWithReadTimeout(t, 0)
+}
+
+// bulkSeedPoolReadTimeout is the Config.PoolReadTimeout given to tests whose
+// own write volume, not server health, needs more slack than
+// defaultPoolReadTimeout's 10s (internal/storage/dolt/store.go). be-uoat
+// round 2: TestTryIncrementalExport_ThresholdExceededFallsBack's 5001-row
+// mustCreateBatch seed writes sequentially over one held connection
+// (MaxOpenConns=1 on the shared-branch test path), so any single read
+// stalling past 10s under host contention trips the pool timeout mid-batch
+// ("invalid connection" / "i/o timeout") — independently reproduced 2 of 3
+// runs at 269.44s/316.35s/67.80s wall-clock (release-gates/be-uoat-dolt-diff-
+// export-gate.md), evidence of real contention, not a hung process. 5m
+// reuses the same tier already established in this codebase for this exact
+// class of host-contention stall (execWithLongTimeout's push/pull deadline,
+// and testStoreOpenTimeout's 300s in test_helpers_test.go) rather than a
+// guessed value — comfortably above any observed run, while still bounded
+// so a genuine hang still fails.
+const bulkSeedPoolReadTimeout = 5 * time.Minute
+
+// setupIncrementalExportTestWithReadTimeout is setupIncrementalExportTest
+// with a caller-specified Config.PoolReadTimeout (0 = defaultPoolReadTimeout,
+// i.e. identical to setupIncrementalExportTest). See bulkSeedPoolReadTimeout.
+func setupIncrementalExportTestWithReadTimeout(t *testing.T, readTimeout time.Duration) (*testHarness, context.Context) {
+	t.Helper()
 	if testDoltServerPort == 0 {
 		t.Skip("Dolt test server not available")
 	}
@@ -1429,7 +1454,7 @@ func setupIncrementalExportTest(t *testing.T) (*testHarness, context.Context) {
 	dbName := uniqueTestDBName(t)
 	testDBPath := filepath.Join(beadsDir, "dolt")
 	writeTestMetadata(t, testDBPath, dbName)
-	s := newTestStore(t, testDBPath)
+	s := newTestStoreWithPrefixAndReadTimeout(t, testDBPath, "test", readTimeout)
 	store = s
 	storeMutex.Lock()
 	storeActive = true
@@ -1681,7 +1706,7 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 }
 
 func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
-	h, ctx := setupIncrementalExportTest(t)
+	h, ctx := setupIncrementalExportTestWithReadTimeout(t, bulkSeedPoolReadTimeout)
 
 	// Seed one issue so the file exists; baseline commit.
 	h.mustCreate(t, ctx, "thr-0", "seed")
@@ -1721,6 +1746,48 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	if len(sizeBefore) != len(sizeAfter) {
 		t.Errorf("file was touched on fallback (size %d → %d)", len(sizeBefore), len(sizeAfter))
 	}
+}
+
+// TestNewTestStoreWithReadTimeout_AppliesConfiguredTimeout proves the
+// PoolReadTimeout parameter added for be-uoat round 2 actually reaches the
+// live connection, rather than just being accepted and ignored. An
+// unreasonably short timeout must make store creation fail fast (the
+// configured value is live); a normal one must still succeed (the plumbing
+// doesn't break the default path). TestBuildServerDSN_PoolTimeouts
+// (internal/storage/dolt/store_unit_test.go) already covers that
+// Config.PoolReadTimeout is formatted into the DSN correctly — this test is
+// at the cmd/bd harness layer instead, against the real test Dolt server, to
+// prove the new newTestStoreSharedBranchWithReadTimeout/
+// newTestStoreWithPrefixAndReadTimeout plumbing actually threads the caller's
+// value through to that mechanism.
+func TestNewTestStoreWithReadTimeout_AppliesConfiguredTimeout(t *testing.T) {
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+	ensureTestMode(t)
+
+	ok := t.Run("unreasonably short timeout fails fast", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, ".beads", "dolt")
+		// 1ns can never survive a real handshake/query round trip — this is
+		// not a race with a slow-but-real server, it's a guaranteed trip.
+		newTestStoreWithPrefixAndReadTimeout(t, dbPath, "test", 1*time.Nanosecond)
+	})
+	if ok {
+		t.Error("expected store creation to fail with an unreasonably short PoolReadTimeout, but it succeeded")
+	}
+
+	t.Run("normal timeout still succeeds", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		dbPath := filepath.Join(tmpDir, ".beads", "dolt")
+		s := newTestStoreWithPrefixAndReadTimeout(t, dbPath, "test", bulkSeedPoolReadTimeout)
+		if s == nil {
+			t.Fatal("expected non-nil store")
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
