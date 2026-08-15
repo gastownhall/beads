@@ -524,4 +524,10 @@ func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 	if strings.Contains(err.Error(), "init --force") {
 		t.Errorf("message must NOT suggest deprecated --force, got:\n%s", err)
 	}
+	if strings.Contains(err.Error(), "bd bootstrap") {
+		t.Errorf("message must NOT recommend bd bootstrap for a server-mode workspace (bootstrap has its own related mode-blind create bug — be-cy41), got:\n%s", err)
+	}
+	if !strings.Contains(err.Error(), "bd backup restore") {
+		t.Errorf("message must name a recovery path, got:\n%s", err)
+	}
 }
