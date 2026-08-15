@@ -1073,12 +1073,9 @@ func TestEmbeddedCreateCrossRepoDryRunWithParent(t *testing.T) {
 	}
 }
 
-// TestEmbeddedCreateCrossRepoUninit verifies that bd create --repo works when
-// the target directory has NOT been initialized with bd init. This is a
-// regression test for be-sy8 / GH#2988: newDoltStoreFromConfig used to pass
-// an empty database name to the embedded Dolt engine, causing "no database
-// selected" during schema init.
-func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
+// TestEmbeddedCreateCrossRepoUninitIsRefused verifies that bd create --repo
+// refuses an uninitialized target without leaving a stray .beads directory.
+func TestEmbeddedCreateCrossRepoUninitIsRefused(t *testing.T) {
 	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
 		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt create tests")
 	}
@@ -1096,27 +1093,13 @@ func TestEmbeddedCreateCrossRepoUninit(t *testing.T) {
 	}
 	initGitRepoAt(t, targetDir)
 
-	// This should succeed: ensureBeadsDirForPath creates .beads,
-	// and newDoltStoreFromConfig defaults to database "beads".
-	issue := bdCreate(t, bd, dir, "Issue in uninit target", "--repo", targetDir)
-	if issue.ID == "" {
-		t.Fatal("expected issue ID")
+	out := bdCreateFail(t, bd, dir, "Issue in uninit target", "--repo", targetDir)
+	if !strings.Contains(out, "not an initialized beads workspace") || !strings.Contains(out, "bd init") {
+		t.Errorf("error message must name the problem and the fix, got: %s", out)
 	}
 
-	// Verify issue exists in the target store
-	targetBeadsDir := filepath.Join(targetDir, ".beads")
-	tgtStore, err := newDoltStoreFromConfig(t.Context(), targetBeadsDir)
-	if err != nil {
-		t.Fatalf("failed to open target store: %v", err)
-	}
-	defer tgtStore.Close()
-
-	got, err := tgtStore.GetIssue(t.Context(), issue.ID)
-	if err != nil {
-		t.Fatalf("GetIssue in target: %v", err)
-	}
-	if got.Title != "Issue in uninit target" {
-		t.Errorf("title: got %q, want %q", got.Title, "Issue in uninit target")
+	if _, err := os.Stat(filepath.Join(targetDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf("target .beads exists after refusal (stat err = %v); want no directory", err)
 	}
 }
 

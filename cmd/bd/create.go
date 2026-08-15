@@ -13,13 +13,11 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
@@ -413,8 +411,8 @@ var createCmd = &cobra.Command{
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
-					return HandleError("failed to initialize target repo: %v", err)
+				if err := requireInitializedRepoPath(targetBeadsDir); err != nil {
+					return HandleError("%v", err)
 				}
 
 				targetBeadsDirPath := filepath.Join(targetBeadsDir, ".beads")
@@ -953,63 +951,19 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	return store, nil
 }
 
-// ensureBeadsDirForPath ensures a beads directory exists at the target path.
-// If the .beads directory doesn't exist, it creates it and initializes with
-// the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
-	beadsDir := filepath.Join(targetPath, ".beads")
-	metadataPath := filepath.Join(beadsDir, "metadata.json")
-
-	// Check if beads directory already exists with a Dolt database.
-	// metadata.json is the canonical marker for an initialized beads dir.
+// requireInitializedRepoPath rejects a --repo target that is not already an
+// initialized beads workspace.
+//
+// Auto-initializing here strands writes in a new embedded database with no
+// remotes. `bd init` is the explicit command for creating a workspace;
+// `bd create` must only write to one that already exists.
+func requireInitializedRepoPath(targetPath string) error {
+	metadataPath := filepath.Join(targetPath, ".beads", "metadata.json")
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("cannot inspect %s: %w", metadataPath, err)
 	}
-
-	// Create .beads directory
-	if err := os.MkdirAll(beadsDir, 0750); err != nil {
-		return fmt.Errorf("cannot create .beads directory: %w", err)
-	}
-
-	// Initialize database via NewFromConfigWithOptions to respect Dolt config.
-	// Set the prefix if source store has one (T012: prefix inheritance).
-	if sourceStore != nil {
-		sourcePrefix, err := sourceStore.GetConfig(ctx, "issue_prefix")
-		if err == nil && sourcePrefix != "" {
-			// Sanitize prefix for SQL database name (same as bd init).
-			dbName := strings.ReplaceAll(sourcePrefix, "-", "_")
-
-			// Open target store temporarily to set prefix.
-			// Use newDoltStore with explicit config since the target .beads
-			// directory was just created and has no metadata.json yet.
-			tempStore, err := newDoltStore(ctx, &dolt.Config{
-				BeadsDir:        beadsDir,
-				Database:        dbName,
-				CreateIfMissing: true,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to initialize target database: %w", err)
-			}
-			if err := tempStore.SetConfig(ctx, "issue_prefix", sourcePrefix); err != nil {
-				_ = tempStore.Close() // Best effort cleanup on error path
-				return fmt.Errorf("failed to set prefix in target store: %w", err)
-			}
-			if err := tempStore.Close(); err != nil {
-				return fmt.Errorf("failed to close target store: %w", err)
-			}
-
-			// Write metadata.json so newDoltStoreFromConfig can find the
-			// correct database name on subsequent opens (GH#2988).
-			cfg := configfile.DefaultConfig()
-			cfg.Backend = configfile.BackendDolt
-			cfg.DoltDatabase = dbName
-			cfg.DoltMode = configfile.DoltModeEmbedded
-			cfg.ProjectID = configfile.GenerateProjectID()
-			if err := cfg.Save(beadsDir); err != nil {
-				return fmt.Errorf("failed to write metadata.json: %w", err)
-			}
-		}
-	}
-
-	return nil
+	return fmt.Errorf("target repo %s is not an initialized beads workspace (no .beads/metadata.json); "+
+		"run 'bd init' there first, or drop --repo to write to the workspace that 'bd where' resolves", targetPath)
 }
