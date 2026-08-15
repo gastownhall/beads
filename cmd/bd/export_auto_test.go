@@ -1769,15 +1769,14 @@ func TestNewTestStoreWithReadTimeout_AppliesConfiguredTimeout(t *testing.T) {
 	}
 	ensureTestMode(t)
 
-	ok := t.Run("unreasonably short timeout fails fast", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		dbPath := filepath.Join(tmpDir, ".beads", "dolt")
-		// 1ns can never survive a real handshake/query round trip — this is
-		// not a race with a slow-but-real server, it's a guaranteed trip.
-		newTestStoreWithPrefixAndReadTimeout(t, dbPath, "test", 1*time.Nanosecond)
-	})
-	if ok {
-		t.Error("expected store creation to fail with an unreasonably short PoolReadTimeout, but it succeeded")
+	tmpDir := t.TempDir()
+	dbPath := filepath.Join(tmpDir, ".beads", "dolt")
+	// 1ns can never survive a real handshake/query round trip — this is
+	// not a race with a slow-but-real server, it's a guaranteed trip.
+	s, err := tryNewTestStoreWithReadTimeout(t, dbPath, 1*time.Nanosecond)
+	if err == nil {
+		s.Close()
+		t.Fatal("expected store creation to fail with an unreasonably short PoolReadTimeout, but it succeeded")
 	}
 
 	t.Run("normal timeout still succeeds", func(t *testing.T) {

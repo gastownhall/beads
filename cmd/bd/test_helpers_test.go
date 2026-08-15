@@ -345,6 +345,63 @@ func newTestStoreWithPrefixAndReadTimeout(t *testing.T, dbPath string, prefix st
 	return s
 }
 
+// tryNewTestStoreWithReadTimeout is the dolt.New portion of
+// newTestStoreWithPrefixAndReadTimeout (same branching, same Config shape),
+// returning the error directly instead of calling t.Fatal on it. Use this
+// when the caller expects the open itself to fail — e.g. proving a short
+// PoolReadTimeout is actually honored — since a t.Run subtest's failure
+// always propagates FAIL to the parent test and the process exit code in
+// Go's testing package regardless of what the parent does with t.Run's bool
+// return; there is no way to observe an "expected" subtest failure without
+// also failing the overall run.
+func tryNewTestStoreWithReadTimeout(t *testing.T, dbPath string, readTimeout time.Duration) (*dolt.DoltStore, error) {
+	t.Helper()
+
+	ensureTestMode(t)
+
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
+
+	// Fast path: use shared DB with branch-per-test isolation (bd-xmf)
+	if testSharedDB != "" {
+		writeTestMetadata(t, dbPath, testSharedDB)
+		doltNewMutex.Lock()
+		s, err := dolt.New(ctx, &dolt.Config{
+			Path:            dbPath,
+			ServerHost:      "127.0.0.1",
+			ServerPort:      testDoltServerPort,
+			Database:        testSharedDB,
+			MaxOpenConns:    1,
+			PoolReadTimeout: readTimeout,
+		})
+		doltNewMutex.Unlock()
+		return s, err
+	}
+
+	// Fallback: per-test database (original slow path)
+	cfg := &dolt.Config{
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        uniqueTestDBName(t),
+		CreateIfMissing: true,
+		PoolReadTimeout: readTimeout,
+	}
+	writeTestMetadata(t, dbPath, cfg.Database)
+
+	doltNewMutex.Lock()
+	s, err := dolt.New(ctx, cfg)
+	doltNewMutex.Unlock()
+	return s, err
+}
+
 // dropTestDatabase drops a test database from the shared server (best-effort cleanup).
 func dropTestDatabase(dbName string, port int) {
 	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
