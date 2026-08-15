@@ -55,14 +55,14 @@ func TestSchemaAfterInit(t *testing.T) {
 		},
 		"dependencies": {
 			"thread_id", "metadata", "idx_dependencies_thread",
-			"idx_dependencies_depends_on_type", "fk_dep_issue",
+			"idx_dep_type_issue", "fk_dep_issue",
 		},
 		"wisps": {
 			"defer_until", "due_at", "rig", "idx_wisps_status",
 		},
 		"wisp_dependencies": {
-			"thread_id", "metadata", "idx_wisp_dep_depends",
-			"idx_wisp_dep_type", "idx_wisp_dep_type_depends",
+			"thread_id", "metadata", "fk_wisp_dep_issue_target",
+			"idx_wisp_dep_type", "idx_wisp_dep_type_issue",
 		},
 	}
 
