@@ -1,0 +1,4 @@
+interface:
+  display_name: "Promote Fork PR Upstream"
+  short_description: "Promote clean fork changes upstream"
+  default_prompt: "Use $promote-fork-pr-upstream to turn these fork changes into a clean upstream pull request."

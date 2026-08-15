@@ -1,0 +1,6 @@
+interface:
+  display_name: "Resume from Codex"
+  short_description: "Resume interrupted Codex CLI work"
+  default_prompt: "Use $resume-from-codex to continue the interrupted Codex session."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Ship PR"
+  short_description: "Ship current work through a green PR"
+  default_prompt: "Use $ship-pr to ship the current work through a pull request."
+policy:
+  allow_implicit_invocation: false

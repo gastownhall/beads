@@ -1,0 +1,6 @@
+interface:
+  display_name: "To Summary"
+  short_description: "Reduce a large source into a concise summary"
+  default_prompt: "Use $to-summary to summarise this source."
+policy:
+  allow_implicit_invocation: false

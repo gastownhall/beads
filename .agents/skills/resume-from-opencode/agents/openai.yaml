@@ -1,0 +1,6 @@
+interface:
+  display_name: "Resume from OpenCode"
+  short_description: "Resume interrupted OpenCode work"
+  default_prompt: "Use $resume-from-opencode to continue the interrupted OpenCode session."
+policy:
+  allow_implicit_invocation: false
