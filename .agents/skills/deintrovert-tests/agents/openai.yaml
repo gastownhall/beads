@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deintrovert Tests"
+  short_description: "Check whether tests observe production behavior"
+  default_prompt: "Use $deintrovert-tests to check the evidence in these tests."

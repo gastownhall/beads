@@ -1,0 +1,13 @@
+Vendored coding-agent skills installed into this repository.
+
+mattpocock/skills
+  url: https://github.com/mattpocock/skills
+  license: MIT (see LICENSE.mattpocock-skills)
+  revision: 8b78b531ab965735c5dc74f6f7a219e1e37326df
+
+jonbaldie/skills
+  url: https://github.com/jonbaldie/skills
+  revision: ed354da5a1f41907d3adefe4784da9ae885c1e35
+
+Installed with jonbaldie/skills/install.sh:
+  --project --agent universal --copy --with-prereqs --yes

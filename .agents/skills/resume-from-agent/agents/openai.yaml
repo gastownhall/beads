@@ -1,0 +1,6 @@
+interface:
+  display_name: "Resume from agent"
+  short_description: "Resume interrupted work from any coding-agent session"
+  default_prompt: "Use $resume-from-agent to continue the latest interrupted coding-agent session for this workspace."
+policy:
+  allow_implicit_invocation: false
