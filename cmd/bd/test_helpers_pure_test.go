@@ -354,3 +354,28 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
 	}
 }
+
+// initGitRepoAt turns dir into a git repository with a test identity, giving
+// the no-workspace tests a walk boundary so FindBeadsDir cannot climb out of
+// the temp dir into a real .beads above it.
+//
+// This lives in the pure-Go helper file, not alongside the embedded-Dolt
+// helpers: cmd/bd/where_test.go carries no build tag, so it compiles under
+// CGO_ENABLED=0 where every `//go:build cgo` file is excluded. Keep this
+// helper stdlib-only and keep it here.
+func initGitRepoAt(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		// Force repo-local hooks so tests ignore any global hooksPath override.
+		{"config", "core.hooksPath", ".git/hooks"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+		}
+	}
+}
