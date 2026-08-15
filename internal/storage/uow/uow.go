@@ -5,6 +5,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/domain/db"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 type UnitOfWork interface {
@@ -53,6 +54,12 @@ type baseUOW struct {
 
 func (u *baseUOW) Commit(ctx context.Context, message string) error {
 	return u.tx.Commit(ctx, message)
+}
+
+// StatementRunner exposes the open transaction as the DBTX seam the shared
+// Lifecycle body (ExecuteCreate and siblings) runs on.
+func (u *baseUOW) StatementRunner() storageissueops.DBTX {
+	return u.tx.Runner()
 }
 
 func (u *baseUOW) Close(ctx context.Context) {

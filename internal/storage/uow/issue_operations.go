@@ -59,6 +59,26 @@ func isNilUnitOfWorkProvider(provider UnitOfWorkProvider) bool {
 
 var _ publicops.Lifecycle = (*issueOperations)(nil)
 
+// statementSource is the optional seam a unit of work offers so Lifecycle
+// can run the shared Execute* body on the open transaction.
+type statementSource interface {
+	StatementRunner() storageissueops.DBTX
+}
+
+func lifecycleStatementRunner(uw UnitOfWork) (storageissueops.DBTX, error) {
+	if src, ok := uw.(statementSource); ok {
+		if runner := src.StatementRunner(); runner != nil {
+			return runner, nil
+		}
+	}
+	return nil, fmt.Errorf("lifecycle: %T does not expose a statement runner", uw)
+}
+
+func notifyLifecycle(uw UnitOfWork) *notifyingUOW {
+	n, _ := uw.(*notifyingUOW)
+	return n
+}
+
 // Create creates one issue in a retried unit-of-work transaction.
 func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRequest) (publicops.CreateResult, error) {
 	snapshot := storageissueops.CloneCreateRequest(request)
@@ -66,47 +86,18 @@ func (o *issueOperations) Create(ctx context.Context, request publicops.CreateRe
 		return publicops.CreateResult{}, err
 	}
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.CreateResult, string, error) {
-		attempt := storageissueops.CloneCreateRequest(snapshot)
-		createContext, err := uw.ConfigUseCase().LoadCreateContext(ctx)
+		tx, err := lifecycleStatementRunner(uw)
 		if err != nil {
 			return publicops.CreateResult{}, "", err
 		}
-		attempt, err = storageissueops.PreparePublicCreateRequest(attempt, storageissueops.PublicCreateContext{
-			IssuePrefix:     createContext.IssuePrefix,
-			AllowedPrefixes: createContext.AllowedPrefixes,
-			CustomStatuses:  types.CustomStatusNames(createContext.CustomStatuses),
-			CustomTypes:     createContext.CustomTypes,
-		})
+		result, _, err := storageissueops.ExecuteCreate(ctx, tx, snapshot)
 		if err != nil {
 			return publicops.CreateResult{}, "", err
 		}
-		// Configured infra types live in the wisp tables, the same routing the
-		// stores' own CreateIssue applies (internal/storage/dolt/issues.go) and
-		// the public facade applies in issueops.ExecuteCreate. Mark the issue
-		// before createParams reads it so ID minting and table routing agree on
-		// the destination. A no-history create keeps its own retention mode and
-		// already routes to wisps.
-		if attempt.Issue != nil && !attempt.Issue.Ephemeral && !attempt.Issue.NoHistory && createContext.InfraTypes[string(attempt.Issue.IssueType)] {
-			attempt.Issue.Ephemeral = true
+		if n := notifyLifecycle(uw); n != nil && result.Issue != nil {
+			n.recordCreate(ctx, result.Issue.ID, snapshot)
 		}
-		params, useWisp, err := createParams(attempt)
-		if err != nil {
-			return publicops.CreateResult{}, "", validationError(err)
-		}
-		var created domain.CreateIssueResult
-		if useWisp {
-			created, err = uw.IssueUseCase().CreateWisp(ctx, params, attempt.Actor)
-		} else {
-			created, err = uw.IssueUseCase().CreateIssue(ctx, params, attempt.Actor)
-		}
-		if err != nil {
-			return publicops.CreateResult{}, "", storageissueops.ClassifyPublicCreateError(err)
-		}
-		issue, err := hydrateIssueOperation(ctx, uw, created.Issue, true, false)
-		if err != nil {
-			return publicops.CreateResult{}, "", err
-		}
-		return publicops.CreateResult{Issue: issue}, "create issue", nil
+		return result, "create issue", nil
 	})
 }
 
@@ -139,7 +130,7 @@ func createParams(request publicops.CreateRequest) (domain.CreateIssueParams, bo
 	return params, issue.Ephemeral || issue.NoHistory, nil
 }
 
-func hydrateIssueOperation(ctx context.Context, uw UnitOfWork, issue *types.Issue, includeComments, issuePlaneOnly bool) (*types.Issue, error) {
+func hydrateIssueOperation(ctx context.Context, uw UnitOfWork, issue *types.Issue, issuePlaneOnly bool) (*types.Issue, error) {
 	if issue == nil {
 		return nil, fmt.Errorf("hydrate issue operation: created issue is nil")
 	}
@@ -148,9 +139,7 @@ func hydrateIssueOperation(ctx context.Context, uw UnitOfWork, issue *types.Issu
 		return nil, fmt.Errorf("hydrate issue operation: %w", err)
 	}
 	clone := storageissueops.CloneCreateRequest(publicops.CreateRequest{Issue: stored}).Issue
-	if !includeComments {
-		clone.Comments = nil
-	}
+	clone.Comments = nil
 	labels := uw.LabelUseCase()
 	if labels == nil {
 		return nil, fmt.Errorf("hydrate issue labels: label use case is unavailable")
@@ -178,21 +167,6 @@ func hydrateIssueOperation(ctx context.Context, uw UnitOfWork, issue *types.Issu
 		return nil, fmt.Errorf("hydrate issue dependencies: %w", err)
 	}
 	clone.Dependencies = records[clone.ID]
-
-	if includeComments {
-		comments := uw.CommentUseCase()
-		if comments == nil {
-			return nil, fmt.Errorf("hydrate issue comments: comment use case is unavailable")
-		}
-		if useWisp {
-			clone.Comments, err = comments.GetCommentsForWisp(ctx, clone.ID)
-		} else {
-			clone.Comments, err = comments.GetCommentsForIssue(ctx, clone.ID)
-		}
-		if err != nil {
-			return nil, fmt.Errorf("hydrate issue comments: %w", err)
-		}
-	}
 	return storageissueops.CloneCreateRequest(publicops.CreateRequest{Issue: clone}).Issue, nil
 }
 
@@ -203,46 +177,18 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 		return publicops.UpdateResult{}, err
 	}
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.UpdateResult, string, error) {
-		attempt := storageissueops.CloneUpdateRequest(snapshot)
-		spec, err := updateSpec(attempt)
-		if err != nil {
-			return publicops.UpdateResult{}, "", validationError(err)
-		}
-		before, _, err := operationIssue(ctx, uw, attempt.IssueID, attempt.IssuePlaneOnly)
+		tx, err := lifecycleStatementRunner(uw)
 		if err != nil {
 			return publicops.UpdateResult{}, "", err
 		}
-		before, err = hydrateIssueOperation(ctx, uw, before, false, attempt.IssuePlaneOnly)
+		result, _, err := storageissueops.ExecuteUpdate(ctx, tx, snapshot)
 		if err != nil {
 			return publicops.UpdateResult{}, "", err
 		}
-		// The assignee fence belongs here, over the same-transaction row the
-		// update is about to mutate, and not in ApplyUpdate: callers build their
-		// own UpdateSpec, which carries no override, so a fence down there
-		// silently ignores a caller's --force. A stale compare-and-set
-		// precondition outranks the fence on the other backends, which check
-		// version and status before authorizing, so when one is stale the fence
-		// stands down and ApplyUpdate reports the mismatch instead.
-		if updatePreconditionsHold(attempt, before) {
-			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
-				return publicops.UpdateResult{}, "", err
-			}
+		if n := notifyLifecycle(uw); n != nil {
+			n.recordUpdate(ctx, snapshot)
 		}
-		// ActorMatches (not a verbatim compare, ga-v2k49): a holder re-claiming
-		// under a respelled identity is a real CAS win one layer down (domain/db's
-		// Claim already canonicalizes), so this bookkeeping must recognize it as
-		// the same no-op rather than staging a phantom history entry.
-		claimChanged := attempt.Claim && (before.Status != types.StatusInProgress || !storageissueops.ActorMatches(before.Assignee, attempt.Actor))
-		updated, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, spec, attempt.Actor)
-		if err != nil {
-			return publicops.UpdateResult{}, "", err
-		}
-		issue, err := hydrateIssueOperation(ctx, uw, updated, false, attempt.IssuePlaneOnly)
-		if err != nil {
-			return publicops.UpdateResult{}, "", err
-		}
-		changed := claimChanged || !semanticIssueEqual(before, issue)
-		return publicops.UpdateResult{Issue: issue, Changed: changed}, updateHistoryEntry(attempt, changed), nil
+		return result, updateHistoryEntry(snapshot, result.Changed), nil
 	})
 }
 
@@ -390,38 +336,18 @@ func (o *issueOperations) Close(ctx context.Context, request publicops.CloseRequ
 		return publicops.CloseResult{}, err
 	}
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.CloseResult, string, error) {
-		attempt := storageissueops.CloneCloseRequest(snapshot)
-		issue, useWisp, err := operationIssue(ctx, uw, attempt.IssueID, false)
+		tx, err := lifecycleStatementRunner(uw)
 		if err != nil {
 			return publicops.CloseResult{}, "", err
 		}
-		if attempt.ExpectedVersion != nil {
-			if _, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, domain.UpdateSpec{ExpectedVersion: attempt.ExpectedVersion}, attempt.Actor); err != nil {
-				return publicops.CloseResult{}, "", err
-			}
-		}
-		before, err := hydrateIssueOperation(ctx, uw, issue, false, false)
+		result, _, err := storageissueops.ExecuteClose(ctx, tx, snapshot)
 		if err != nil {
 			return publicops.CloseResult{}, "", err
 		}
-		var closed domain.CloseIssueResult
-		if useWisp {
-			closed, err = uw.IssueUseCase().CloseWispChecked(ctx, attempt.IssueID, domain.CloseIssueParams{Reason: attempt.Reason, Session: attempt.Session}, attempt.Actor, attempt.Force)
-		} else {
-			closed, err = uw.IssueUseCase().CloseIssueChecked(ctx, attempt.IssueID, domain.CloseIssueParams{Reason: attempt.Reason, Session: attempt.Session}, attempt.Actor, attempt.Force)
+		if n := notifyLifecycle(uw); n != nil {
+			n.recordClose(ctx, snapshot.IssueID)
 		}
-		if err != nil {
-			return publicops.CloseResult{}, "", err
-		}
-		if closed.Issue != nil {
-			issue = closed.Issue
-		}
-		hydrated, err := hydrateIssueOperation(ctx, uw, issue, false, false)
-		if err != nil {
-			return publicops.CloseResult{}, "", err
-		}
-		return publicops.CloseResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated), OpenChildren: closed.OpenChildren},
-			"close issue", nil
+		return result, "close issue", nil
 	})
 }
 
@@ -432,38 +358,18 @@ func (o *issueOperations) Reopen(ctx context.Context, request publicops.ReopenRe
 		return publicops.ReopenResult{}, err
 	}
 	return RunTxResult(ctx, o.provider, func(ctx context.Context, uw UnitOfWork) (publicops.ReopenResult, string, error) {
-		attempt := storageissueops.CloneReopenRequest(snapshot)
-		issue, useWisp, err := operationIssue(ctx, uw, attempt.IssueID, false)
+		tx, err := lifecycleStatementRunner(uw)
 		if err != nil {
 			return publicops.ReopenResult{}, "", err
 		}
-		if attempt.ExpectedVersion != nil {
-			if _, err := uw.IssueUseCase().ApplyUpdate(ctx, attempt.IssueID, domain.UpdateSpec{ExpectedVersion: attempt.ExpectedVersion}, attempt.Actor); err != nil {
-				return publicops.ReopenResult{}, "", err
-			}
-		}
-		before, err := hydrateIssueOperation(ctx, uw, issue, false, false)
+		result, _, err := storageissueops.ExecuteReopen(ctx, tx, snapshot)
 		if err != nil {
 			return publicops.ReopenResult{}, "", err
 		}
-		var reopened domain.ReopenIssueResult
-		if useWisp {
-			reopened, err = uw.IssueUseCase().ReopenWisp(ctx, attempt.IssueID, domain.ReopenIssueParams{Reason: attempt.Reason}, attempt.Actor)
-		} else {
-			reopened, err = uw.IssueUseCase().ReopenIssue(ctx, attempt.IssueID, domain.ReopenIssueParams{Reason: attempt.Reason}, attempt.Actor)
+		if n := notifyLifecycle(uw); n != nil {
+			n.recordReopen(ctx, snapshot.IssueID, result.Changed)
 		}
-		if err != nil {
-			return publicops.ReopenResult{}, "", err
-		}
-		if reopened.Issue != nil {
-			issue = reopened.Issue
-		}
-		hydrated, err := hydrateIssueOperation(ctx, uw, issue, false, false)
-		if err != nil {
-			return publicops.ReopenResult{}, "", err
-		}
-		return publicops.ReopenResult{Issue: hydrated, Changed: !semanticIssueEqual(before, hydrated)},
-			storageissueops.HistoryEntry(attempt.Provenance, "reopen issue"), nil
+		return result, storageissueops.HistoryEntry(snapshot.Provenance, "reopen issue"), nil
 	})
 }
 

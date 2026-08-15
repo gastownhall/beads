@@ -116,7 +116,7 @@ func closeBatchItem(ctx context.Context, uw UnitOfWork, request publicops.CloseB
 	if closed.Issue != nil {
 		current = closed.Issue
 	}
-	hydrated, err := hydrateIssueOperation(ctx, uw, current, false, false)
+	hydrated, err := hydrateIssueOperation(ctx, uw, current, false)
 	if err != nil {
 		return publicops.CloseOutcome{IssueID: item.IssueID, Err: err}
 	}

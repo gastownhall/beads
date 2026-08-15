@@ -185,71 +185,6 @@ func TestNewIssueOperationsRejectsTypedNilProvider(t *testing.T) {
 	}
 }
 
-func TestIssueOperationsCreateRetriesUsingRunTxResult(t *testing.T) {
-	first := &mockUnitOfWork{
-		commitErr:         newMySQLError(1213),
-		configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{}},
-		labelUseCase:      hydrationLabelUseCaseStub{},
-		dependencyUseCase: hydrationDependencyUseCaseStub{},
-		commentUseCase:    hydrationCommentUseCaseStub{},
-		issueUseCase: createIssueUseCaseStub{create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-			params.Issue.Labels[0] = "mutated-first-attempt"
-			return domain.CreateIssueResult{Issue: &types.Issue{ID: "bd-first", Title: params.Issue.Title}}, nil
-		}},
-	}
-	second := &mockUnitOfWork{
-		configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{}},
-		labelUseCase:      hydrationLabelUseCaseStub{},
-		dependencyUseCase: hydrationDependencyUseCaseStub{},
-		commentUseCase:    hydrationCommentUseCaseStub{},
-		issueUseCase: createIssueUseCaseStub{create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-			if got := params.Issue.Labels; len(got) != 1 || got[0] != "caller-label" {
-				t.Fatalf("retry labels = %#v, want pristine caller snapshot", got)
-			}
-			return domain.CreateIssueResult{Issue: &types.Issue{ID: "bd-second", Title: params.Issue.Title}}, nil
-		}},
-	}
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{first, second}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-	result, err := operations.Create(context.Background(), issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{Title: "retry create", IssueType: types.TypeTask, Labels: []string{"caller-label"}}})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	if result.Issue == nil || result.Issue.ID != "bd-second" {
-		t.Fatalf("Create() result = %#v, want successful retry result", result)
-	}
-	if first.commitCount != 1 || second.commitCount != 1 {
-		t.Fatalf("commit counts = (%d, %d), want (1, 1)", first.commitCount, second.commitCount)
-	}
-}
-
-func TestIssueOperationsCreateUsesConfiguredStatusesAndTypes(t *testing.T) {
-	var received domain.CreateIssueParams
-	uw := &mockUnitOfWork{
-		configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{IssuePrefix: "bd", CustomStatuses: []types.CustomStatus{{Name: "review"}}, CustomTypes: []string{"research"}}},
-		labelUseCase:      hydrationLabelUseCaseStub{},
-		dependencyUseCase: hydrationDependencyUseCaseStub{},
-		commentUseCase:    hydrationCommentUseCaseStub{},
-		issueUseCase: createIssueUseCaseStub{create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-			received = params
-			return domain.CreateIssueResult{Issue: &types.Issue{ID: params.Issue.ID}}, nil
-		}},
-	}
-	operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}})
-	if err != nil {
-		t.Fatalf("NewIssueOperations() error = %v", err)
-	}
-	_, err = operations.Create(context.Background(), issueops.CreateRequest{Actor: "tester", Issue: &issueops.Issue{ID: "bd-custom", Title: "custom", Status: "review", IssueType: "research"}})
-	if err != nil {
-		t.Fatalf("Create() error = %v", err)
-	}
-	if received.Issue.Status != "review" || received.Issue.IssueType != "research" {
-		t.Fatalf("Create() parameters = %#v, want configured status and type", received.Issue)
-	}
-}
-
 // TestIssueOperationsLifecycleWithRealUnitOfWork is one issue's whole life
 // through one real unit-of-work provider, and what it is for after the
 // IssueOperations and LifecycleCloseReopen contracts took the per-verb
@@ -484,60 +419,10 @@ func assertNoDurableIssueRows(t *testing.T, ctx context.Context, provider UnitOf
 	}
 }
 
-type createIssueUseCaseStub struct {
-	domain.IssueUseCase
-	create func(context.Context, domain.CreateIssueParams, string) (domain.CreateIssueResult, error)
-}
-type createConfigUseCaseStub struct {
-	domain.ConfigUseCase
-	context domain.CreateContext
-	err     error
-}
-
-func (s createConfigUseCaseStub) LoadCreateContext(context.Context) (domain.CreateContext, error) {
-	return s.context, s.err
-}
-
 type operationIssueUseCaseStub struct {
 	domain.IssueUseCase
 	getIssue func(context.Context, string) (*types.Issue, error)
 	getWisp  func(context.Context, string) (*types.Issue, error)
-}
-
-type hydrationLabelUseCaseStub struct {
-	domain.LabelUseCase
-}
-
-func (hydrationLabelUseCaseStub) GetLabels(context.Context, string) ([]string, error) {
-	return []string{"complete"}, nil
-}
-
-func (hydrationLabelUseCaseStub) GetWispLabels(context.Context, string) ([]string, error) {
-	return []string{"complete"}, nil
-}
-
-type hydrationDependencyUseCaseStub struct {
-	domain.DependencyUseCase
-}
-
-func (hydrationDependencyUseCaseStub) GetIssueDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
-	return map[string][]*types.Dependency{ids[0]: {}}, nil
-}
-
-func (hydrationDependencyUseCaseStub) GetWispDependencyRecords(_ context.Context, ids []string) (map[string][]*types.Dependency, error) {
-	return map[string][]*types.Dependency{ids[0]: {}}, nil
-}
-
-type hydrationCommentUseCaseStub struct {
-	domain.CommentUseCase
-}
-
-func (hydrationCommentUseCaseStub) GetCommentsForIssue(context.Context, string) ([]*types.Comment, error) {
-	return []*types.Comment{}, nil
-}
-
-func (hydrationCommentUseCaseStub) GetCommentsForWisp(context.Context, string) ([]*types.Comment, error) {
-	return []*types.Comment{}, nil
 }
 
 func (s operationIssueUseCaseStub) GetIssue(ctx context.Context, id string) (*types.Issue, error) {
@@ -545,83 +430,6 @@ func (s operationIssueUseCaseStub) GetIssue(ctx context.Context, id string) (*ty
 }
 func (s operationIssueUseCaseStub) GetWisp(ctx context.Context, id string) (*types.Issue, error) {
 	return s.getWisp(ctx, id)
-}
-
-func TestIssueOperationsCreateRejectsIncompleteUnitOfWork(t *testing.T) {
-	issueUseCase := createIssueUseCaseStub{
-		create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-			return domain.CreateIssueResult{Issue: &types.Issue{ID: params.Issue.ID, Title: params.Issue.Title}}, nil
-		},
-	}
-
-	t.Run("labels", func(t *testing.T) {
-		uw := &mockUnitOfWork{
-			configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{IssuePrefix: "bd"}},
-			issueUseCase:      issueUseCase,
-			dependencyUseCase: hydrationDependencyUseCaseStub{},
-			commentUseCase:    hydrationCommentUseCaseStub{},
-		}
-		operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}})
-		if err != nil {
-			t.Fatalf("NewIssueOperations() error = %v", err)
-		}
-		_, err = operations.Create(context.Background(), issueops.CreateRequest{
-			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-labels", Title: "missing labels", IssueType: types.TypeTask},
-		})
-		if err == nil || !strings.Contains(err.Error(), "hydrate issue labels") {
-			t.Fatalf("Create() error = %v, want missing-label capability context", err)
-		}
-		if uw.commitCount != 0 {
-			t.Fatalf("Create() commits = %d, want 0", uw.commitCount)
-		}
-	})
-
-	t.Run("dependencies", func(t *testing.T) {
-		uw := &mockUnitOfWork{
-			configUseCase:  createConfigUseCaseStub{context: domain.CreateContext{IssuePrefix: "bd"}},
-			issueUseCase:   issueUseCase,
-			labelUseCase:   hydrationLabelUseCaseStub{},
-			commentUseCase: hydrationCommentUseCaseStub{},
-		}
-		operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}})
-		if err != nil {
-			t.Fatalf("NewIssueOperations() error = %v", err)
-		}
-		_, err = operations.Create(context.Background(), issueops.CreateRequest{
-			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-dependencies", Title: "missing dependencies", IssueType: types.TypeTask},
-		})
-		if err == nil || !strings.Contains(err.Error(), "hydrate issue dependencies") {
-			t.Fatalf("Create() error = %v, want missing-dependency capability context", err)
-		}
-		if uw.commitCount != 0 {
-			t.Fatalf("Create() commits = %d, want 0", uw.commitCount)
-		}
-	})
-
-	t.Run("create comments", func(t *testing.T) {
-		uw := &mockUnitOfWork{
-			configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{IssuePrefix: "bd"}},
-			issueUseCase:      issueUseCase,
-			labelUseCase:      hydrationLabelUseCaseStub{},
-			dependencyUseCase: hydrationDependencyUseCaseStub{},
-		}
-		operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{uw}})
-		if err != nil {
-			t.Fatalf("NewIssueOperations() error = %v", err)
-		}
-		_, err = operations.Create(context.Background(), issueops.CreateRequest{
-			Actor: "tester",
-			Issue: &issueops.Issue{ID: "bd-incomplete-comments", Title: "missing comments", IssueType: types.TypeTask},
-		})
-		if err == nil || !strings.Contains(err.Error(), "hydrate issue comments") {
-			t.Fatalf("Create() error = %v, want missing-comment capability context", err)
-		}
-		if uw.commitCount != 0 {
-			t.Fatalf("Create() commits = %d, want 0", uw.commitCount)
-		}
-	})
 }
 
 func TestOperationIssueFallsBackOnlyAfterNotFoundWispRead(t *testing.T) {
@@ -728,71 +536,5 @@ func TestUpdateSpecLowersPersistenceMode(t *testing.T) {
 	}
 	if spec.Persistence == nil || *spec.Persistence != types.PersistenceModeEphemeral {
 		t.Fatalf("updateSpec().Persistence = %v, want ephemeral", spec.Persistence)
-	}
-}
-func (s createIssueUseCaseStub) CreateIssue(ctx context.Context, params domain.CreateIssueParams, actor string) (domain.CreateIssueResult, error) {
-	return s.create(ctx, params, actor)
-}
-func (createIssueUseCaseStub) GetWisp(context.Context, string) (*types.Issue, error) {
-	return nil, storage.ErrNotFound
-}
-func (createIssueUseCaseStub) GetIssue(_ context.Context, id string) (*types.Issue, error) {
-	return &types.Issue{ID: id}, nil
-}
-
-// The two stub cases that used to sit here — Close and Reopen at a missing id
-// answering ErrNotFound rather than ErrVersionMismatch — are now
-// RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps, which names an id that
-// was never created both with and without a precondition and asserts the
-// sentinel on all three backends. Their second assertion, that no row-level
-// update was ATTEMPTED, went with them: the flag never caught the reorder it
-// was written for, because the requests carried no ExpectedVersion and so never
-// entered the guarded branch a version-first body would hoist.
-
-func TestIssueOperationsCreateRetriesOnSerializationSQLStates(t *testing.T) {
-	for _, state := range []string{"40001", "40P01"} {
-		t.Run(state, func(t *testing.T) {
-			first := &mockUnitOfWork{
-				commitErr:         sqlStateError(state),
-				configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{}},
-				labelUseCase:      hydrationLabelUseCaseStub{},
-				dependencyUseCase: hydrationDependencyUseCaseStub{},
-				commentUseCase:    hydrationCommentUseCaseStub{},
-				issueUseCase: createIssueUseCaseStub{create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-					params.Issue.Labels[0] = "changed-by-rejected-attempt"
-					return domain.CreateIssueResult{Issue: &types.Issue{ID: "bd-first", Title: params.Issue.Title}}, nil
-				}},
-			}
-			second := &mockUnitOfWork{
-				configUseCase:     createConfigUseCaseStub{context: domain.CreateContext{}},
-				labelUseCase:      hydrationLabelUseCaseStub{},
-				dependencyUseCase: hydrationDependencyUseCaseStub{},
-				commentUseCase:    hydrationCommentUseCaseStub{},
-				issueUseCase: createIssueUseCaseStub{create: func(_ context.Context, params domain.CreateIssueParams, _ string) (domain.CreateIssueResult, error) {
-					if got := params.Issue.Labels; len(got) != 1 || got[0] != "caller-label" {
-						t.Fatalf("retry labels = %#v, want pristine caller snapshot", got)
-					}
-					return domain.CreateIssueResult{Issue: &types.Issue{ID: "bd-second", Title: params.Issue.Title}}, nil
-				}},
-			}
-			operations, err := NewIssueOperations(&mockUnitOfWorkProvider{uows: []*mockUnitOfWork{first, second}})
-			if err != nil {
-				t.Fatalf("NewIssueOperations() error = %v", err)
-			}
-
-			result, err := operations.Create(context.Background(), issueops.CreateRequest{
-				Actor: "tester",
-				Issue: &issueops.Issue{Title: "retry create", IssueType: types.TypeTask, Labels: []string{"caller-label"}},
-			})
-			if err != nil {
-				t.Fatalf("Create() error = %v", err)
-			}
-			if result.Issue == nil || result.Issue.ID != "bd-second" {
-				t.Fatalf("Create() result = %#v, want second-attempt result", result)
-			}
-			if first.commitCount != 1 || second.commitCount != 1 {
-				t.Fatalf("commit counts = (%d, %d), want (1, 1)", first.commitCount, second.commitCount)
-			}
-		})
 	}
 }

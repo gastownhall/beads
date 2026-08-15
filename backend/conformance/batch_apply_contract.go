@@ -23,14 +23,11 @@ import (
 // checks. dolt and embeddeddolt share
 // internal/storage/issueops.ApplyBatchInTx, each wrapping it in its own
 // transaction. The unit-of-work leg (internal/storage/uow.batchApplier) has its
-// OWN body, and the reason is mechanical rather than chosen: the shared body
-// composes issueops.ExecuteCreate, ExecuteUpdate and ExecuteClose, every one of
-// which takes a *sql.Tx, while a unit of work's runner is a *sql.Conn with a
-// transaction open on it. Neither publishes the other, so the store bodies
-// cannot be reached from there without rewriting three of the oldest write
-// paths in the tree to take an interface. So a per-leg failure here can be a
-// second implementation genuinely disagreeing about what a batch MEANS, not
-// only a wrapper losing a field.
+// OWN body. ExecuteCreate / ExecuteUpdate / ExecuteClose now take DBTX, which
+// the unit-of-work runner satisfies, and Lifecycle already uses that seam.
+// BatchApplier has not been routed yet. A per-leg failure here can still be a
+// second implementation disagreeing about what a batch MEANS, not only a
+// wrapper losing a field.
 //
 // THE CASES ARE STILL WRITTEN THE CAREFUL WAY. They read RAW ROWS through
 // QueryScalar rather than asking the role what it just did — a role-answer

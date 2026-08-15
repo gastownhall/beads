@@ -169,9 +169,7 @@ func TestValidatePublicCreateRequestAllowsEmptyWaitsForGate(t *testing.T) {
 // than refusing.
 //
 // This lives at the shared validator rather than in the conformance contract
-// because all three Lifecycle backends reach it: the two stores through
-// ExecuteCreate and the unit-of-work one through its own Create
-// (internal/storage/uow/issue_operations.go:64).
+// because all three Lifecycle adapters reach it through ExecuteCreate.
 func TestValidatePublicCreateRequestRejectsUnknownWaitsForGate(t *testing.T) {
 	for _, gate := range []string{"bogus", "ALL_CHILDREN", " all_children"} {
 		t.Run(gate, func(t *testing.T) {

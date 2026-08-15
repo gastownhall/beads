@@ -210,6 +210,66 @@ func TestNotifyingProviderOverARealProvider(t *testing.T) {
 		assertCarriesEdgeTo(t, runner.snapshots()[3], "nfy-graph-root")
 	})
 
+	t.Run("LifecycleCreateUpdateAndCloseFireHooks", func(t *testing.T) {
+		source, ok := provider.(IssueLifecycleSource)
+		if !ok {
+			t.Fatalf("wrapped provider %T does not offer the IssueLifecycle accessor", provider)
+		}
+		lifecycle, err := source.IssueLifecycle()
+		if err != nil {
+			t.Fatalf("IssueLifecycle(): %v", err)
+		}
+
+		create(t, domain.CreateIssueParams{
+			Issue:      &types.Issue{ID: "nfy-life-target", Title: "Existing", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+			ExplicitID: "nfy-life-target",
+			CreateOnly: true,
+		})
+
+		runner.reset()
+		if _, err := lifecycle.Create(ctx, publicops.CreateRequest{
+			Actor: "notify-test",
+			Issue: &types.Issue{ID: "nfy-life-src", Title: "Lifecycle create", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2},
+			Dependencies: []publicops.CreateDependency{
+				{Type: types.DepBlocks, TargetID: "nfy-life-target", Reverse: true},
+			},
+		}); err != nil {
+			t.Fatalf("Lifecycle.Create: %v", err)
+		}
+		assertFired(t, runner.events(), []firedHook{
+			{hooks.EventCreate, "nfy-life-src"},
+			{hooks.EventUpdate, "nfy-life-target"},
+		})
+		assertCarriesEdgeTo(t, runner.snapshots()[1], "nfy-life-src")
+
+		runner.reset()
+		if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{
+			Actor:   "notify-test",
+			IssueID: "nfy-life-src",
+			Patch:   publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "renamed"}},
+		}); err != nil {
+			t.Fatalf("Lifecycle.Update: %v", err)
+		}
+		assertFired(t, runner.events(), []firedHook{{hooks.EventUpdate, "nfy-life-src"}})
+
+		runner.reset()
+		if _, err := lifecycle.Update(ctx, publicops.UpdateRequest{
+			Actor:   "notify-test",
+			IssueID: "nfy-life-src",
+		}); err != nil {
+			t.Fatalf("precondition-only Lifecycle.Update: %v", err)
+		}
+		if got := runner.events(); len(got) != 0 {
+			t.Fatalf("expectation-only update fired %v, want nothing", got)
+		}
+
+		runner.reset()
+		if _, err := lifecycle.Close(ctx, publicops.CloseRequest{Actor: "notify-test", IssueID: "nfy-life-src"}); err != nil {
+			t.Fatalf("Lifecycle.Close: %v", err)
+		}
+		assertFired(t, runner.events(), []firedHook{{hooks.EventClose, "nfy-life-src"}})
+	})
+
 	t.Run("ImportRunsUnderTheWrapperAndFiresNothing", func(t *testing.T) {
 		// The import role reaches the transaction's statement runner directly
 		// (importer.go), which used to mean a type assertion on the concrete

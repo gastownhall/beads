@@ -147,12 +147,13 @@ in; 13 is the HTTP surface, which lands with the command rather than after it.
    `…InTx` function, and it is tempting to read that as the rule for tx-level
    bodies. It is not. Those two take a `DBTX`, which is exactly the method set
    `domain/db.Runner` publishes, so the unit-of-work leg reaches them through
-   the domain repository. `issueops.BatchApplier` cannot: its body COMPOSES
-   `ExecuteCreate`, `ExecuteUpdate` and `ExecuteClose`, every one of which takes
-   a `*sql.Tx`, and a unit of work's runner is a `*sql.Conn` with a transaction
-   open on it. No interface between the two publishes the other, and widening
-   three of the oldest write paths in the tree to take an interface is not a
-   role slice's change.
+   the domain repository.    `issueops.BatchApplier` still has two bodies: it composes create, update,
+   and close through the domain use cases rather than through
+   `ExecuteCreate` / `ExecuteUpdate` / `ExecuteClose`. Those Execute verbs now
+   take `DBTX`, which `domain/db.Runner` satisfies, so a later slice can route
+   the unit-of-work BatchApplier through the same body the store adapters use.
+   Lifecycle already does that. Do not treat the leftover BatchApplier fork as
+   evidence that Execute* cannot be reached from a unit of work.
 
    So that role has TWO bodies, and its contract says so at the top rather than
    claiming three legs and one reading. **The test is mechanical: does every

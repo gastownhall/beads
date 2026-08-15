@@ -111,5 +111,5 @@ func createBatchItem(ctx context.Context, uw UnitOfWork, request publicops.Creat
 	if err != nil {
 		return nil, storageissueops.ClassifyPublicCreateError(err)
 	}
-	return hydrateIssueOperation(ctx, uw, created.Issue, false, false)
+	return hydrateIssueOperation(ctx, uw, created.Issue, false)
 }

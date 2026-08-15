@@ -871,6 +871,101 @@ func TestHookEventForOp(t *testing.T) {
 	}
 }
 
+func TestCreateEdgeSourcesFromRequestUsesPreparedDependencies(t *testing.T) {
+	t.Parallel()
+	request := publicops.CreateRequest{
+		ParentID: "bd-parent",
+		WaitsFor: &publicops.WaitsFor{SpawnerID: "bd-spawner"},
+		Dependencies: []publicops.CreateDependency{
+			{Type: types.DepBlocks, TargetID: "bd-forward"},
+			{Type: types.DepBlocks, TargetID: "bd-target", Reverse: true},
+		},
+	}
+	got := createEdgeSourcesFromRequest("bd-new", request)
+	want := []string{"bd-new", "bd-target"}
+	if len(got) != len(want) {
+		t.Fatalf("sources = %q, want %q", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("sources = %q, want %q", got, want)
+		}
+	}
+
+	params := domain.CreateIssueParams{
+		ParentID: request.ParentID,
+		WaitsFor: &domain.WaitsForSpec{SpawnerID: request.WaitsFor.SpawnerID},
+		Dependencies: []domain.DependencySpec{
+			{Type: types.DepBlocks, TargetID: "bd-forward"},
+			{Type: types.DepBlocks, TargetID: "bd-target", SwapDirection: true},
+		},
+	}
+	fromParams := createEdgeSources("bd-new", params)
+	if len(fromParams) != len(got) {
+		t.Fatalf("createEdgeSources = %q, want the prepared-request sources %q", fromParams, got)
+	}
+	for i := range got {
+		if fromParams[i] != got[i] {
+			t.Fatalf("createEdgeSources = %q, want the prepared-request sources %q", fromParams, got)
+		}
+	}
+}
+
+func TestNotifyingUOWRecordsLifecycleHooksFromPublicRequest(t *testing.T) {
+	f := newNotifyFixture(t, seedIssue("bd-target"), seedIssue("bd-new"), seedIssue("bd-1"))
+	ctx := context.Background()
+	uw := f.newUOW(t)
+	n, ok := uw.(*notifyingUOW)
+	if !ok {
+		t.Fatalf("NewUOW = %T, want *notifyingUOW", uw)
+	}
+
+	n.recordCreate(ctx, "bd-new", publicops.CreateRequest{
+		Dependencies: []publicops.CreateDependency{
+			{Type: types.DepBlocks, TargetID: "bd-target", Reverse: true},
+		},
+	})
+	n.recordUpdate(ctx, publicops.UpdateRequest{IssueID: "bd-1"})
+	n.recordUpdate(ctx, publicops.UpdateRequest{
+		IssueID: "bd-1",
+		Patch:   publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "renamed"}},
+	})
+	n.recordClose(ctx, "bd-1")
+	n.recordReopen(ctx, "bd-1", false)
+	n.recordReopen(ctx, "bd-1", true)
+	if err := uw.Commit(ctx, "bd: test"); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	assertFired(t, f.runner.events(), []firedHook{
+		{hooks.EventCreate, "bd-new"},
+		{hooks.EventUpdate, "bd-target"},
+		{hooks.EventUpdate, "bd-1"},
+		{hooks.EventClose, "bd-1"},
+		{hooks.EventUpdate, "bd-1"},
+	})
+}
+
+func TestUpdateRequestWritesIgnoresExpectations(t *testing.T) {
+	t.Parallel()
+	version := int64(1)
+	for _, tc := range []struct {
+		name    string
+		request publicops.UpdateRequest
+		want    bool
+	}{
+		{"expected version alone", publicops.UpdateRequest{ExpectedVersion: &version}, false},
+		{"empty patch", publicops.UpdateRequest{}, false},
+		{"claim is a write", publicops.UpdateRequest{Claim: true}, true},
+		{"title patch is a write", publicops.UpdateRequest{Patch: publicops.IssuePatch{Title: publicops.Field[string]{Set: true, Value: "new"}}}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := updateRequestWrites(tc.request); got != tc.want {
+				t.Fatalf("updateRequestWrites() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func assertFired(t *testing.T, got, want []firedHook) {
 	t.Helper()
 	if len(got) != len(want) {

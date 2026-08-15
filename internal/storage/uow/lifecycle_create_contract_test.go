@@ -9,10 +9,9 @@ import (
 )
 
 // TestLifecycleCreateContract runs the accessor-only Create half of the
-// Lifecycle contract against the unit-of-work provider — the one Lifecycle
-// implementation that does not share the create body the two stores share. It
-// copies the request into its own createParams, so this is the wiring where a
-// field dropped on the way in shows up.
+// Lifecycle contract against the unit-of-work provider. This adapter runs
+// issueops.ExecuteCreate on the unit of work's statement runner, the same
+// body the two store adapters run.
 //
 // One provider for the whole block (each newUOWRoleFixtureProvider boots a real
 // Dolt sql-server) and NO t.Parallel: this backend has no per-test

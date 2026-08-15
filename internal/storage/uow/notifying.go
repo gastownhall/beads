@@ -12,10 +12,12 @@
 // fire-and-forget hooks the DoltStorage plumbing runs, with the same event per
 // operation (see hookEventForOp).
 //
-// THE WRAP IS AT THE PROVIDER, NOT AT EACH VERB. Every capability this package
-// publishes is built from a provider and reaches its writes through the unit of
-// work's use cases, so re-binding the accessors to the wrapper and recording at
-// the use-case seam covers all of them at once — including roles added later.
+// THE WRAP IS AT THE PROVIDER, NOT AT EACH VERB. Most capabilities this package
+// publishes reach their writes through the unit of work's use cases, so
+// re-binding the accessors to the wrapper and recording at the use-case seam
+// covers those roles — including roles added later. Lifecycle is the exception:
+// it runs the shared Execute* body on the statement runner and records hooks
+// from the result, so it does not depend on the use-case recorder.
 // The accessors are declared rather than delegated for the reason
 // hook_issue_operations.go gives: an accessor that hands back the INNER
 // provider's role builds it on the inner provider and silently drops every hook
@@ -56,10 +58,11 @@
 //     through the same engine and fires nothing either; a hook per imported
 //     issue would be a new behavior on both, not a fix to this one.
 //
-//  4. A GUARDED VERB'S PRECONDITION IS NOT AN UPDATE. `bd close
-//     --expect-version` spells its compare-and-set as a separate ApplyUpdate
-//     that writes nothing; the DoltStorage plumbing passes the precondition
-//     into the close. See specWrites.
+//  4. A GUARDED VERB'S PRECONDITION IS NOT AN UPDATE. Lifecycle close and
+//     reopen pass ExpectedVersion into ExecuteClose / ExecuteReopen, matching
+//     the store adapters. Other roles that still spell a compare-and-set as a
+//     separate ApplyUpdate must not record that precondition as an update.
+//     See specWrites.
 //
 //  5. THE PROMOTION COMMENT. `bd promote` records an audit comment on the
 //     promoted issue, and this plumbing's one comment verb fires on_update for
@@ -425,6 +428,15 @@ type notifyingUOW struct {
 	depUC     domain.DependencyUseCase
 	labelUC   domain.LabelUseCase
 	commentUC domain.CommentUseCase
+}
+
+// StatementRunner forwards the inner transaction so Lifecycle can run the
+// shared Execute* body without peeling this decorator.
+func (u *notifyingUOW) StatementRunner() storageissueops.DBTX {
+	if src, ok := u.UnitOfWork.(statementSource); ok {
+		return src.StatementRunner()
+	}
+	return nil
 }
 
 func (u *notifyingUOW) IssueUseCase() domain.IssueUseCase {
@@ -805,33 +817,74 @@ func (u *recordingIssueUC) created(
 	}
 }
 
+func (u *notifyingUOW) recordCreate(ctx context.Context, createdID string, request publicops.CreateRequest) {
+	u.rec.record(opCreate, u.snapshotter().anyPlane(ctx, createdID))
+	for _, source := range createEdgeSourcesFromRequest(createdID, request) {
+		u.rec.record(opDepAdd, u.snapshotter().anyPlaneWithEdges(ctx, source))
+	}
+}
+
+func (u *notifyingUOW) recordUpdate(ctx context.Context, request publicops.UpdateRequest) {
+	if !updateRequestWrites(request) {
+		return
+	}
+	u.rec.record(opUpdate, u.snapshotter().anyPlane(ctx, request.IssueID))
+}
+
+func (u *notifyingUOW) recordClose(ctx context.Context, id string) {
+	u.rec.record(opClose, u.snapshotter().anyPlane(ctx, id))
+}
+
+func (u *notifyingUOW) recordReopen(ctx context.Context, id string, changed bool) {
+	if !changed {
+		return
+	}
+	u.rec.record(opUpdate, u.snapshotter().anyPlane(ctx, id))
+}
+
+// updateRequestWrites reports whether a public update asked to change anything.
+// It is the Lifecycle twin of specWrites: expectations alone are not a write.
+func updateRequestWrites(request publicops.UpdateRequest) bool {
+	if request.Claim {
+		return true
+	}
+	return !reflect.DeepEqual(request.Patch, publicops.IssuePatch{})
+}
+
+// createEdgeSourcesFromRequest returns the distinct issue ids a create's edges
+// leave, in write order, using the same prepared dependencies ExecuteCreate
+// writes.
+func createEdgeSourcesFromRequest(createdID string, request publicops.CreateRequest) []string {
+	var sources []string
+	seen := map[string]bool{}
+	for _, dependency := range storage.CreatePublicCreateDependencies(createdID, request) {
+		if dependency == nil || dependency.IssueID == "" || seen[dependency.IssueID] {
+			continue
+		}
+		seen[dependency.IssueID] = true
+		sources = append(sources, dependency.IssueID)
+	}
+	return sources
+}
+
 // createEdgeSources returns the distinct issue ids a create's edges LEAVE, in
 // the order the edges are written, resolving the reverse-edge swap exactly as
 // storage.CreatePublicCreateDependencies does.
 func createEdgeSources(createdID string, params domain.CreateIssueParams) []string {
-	var sources []string
-	seen := map[string]bool{}
-	add := func(id string) {
-		if id == "" || seen[id] {
-			return
-		}
-		seen[id] = true
-		sources = append(sources, id)
-	}
-	if params.ParentID != "" {
-		add(createdID)
-	}
+	request := publicops.CreateRequest{ParentID: params.ParentID}
 	if params.WaitsFor != nil {
-		add(createdID)
+		request.WaitsFor = &publicops.WaitsFor{SpawnerID: params.WaitsFor.SpawnerID, Gate: params.WaitsFor.Gate}
 	}
 	for _, dependency := range params.Dependencies {
-		if dependency.SwapDirection {
-			add(dependency.TargetID)
-			continue
-		}
-		add(createdID)
+		request.Dependencies = append(request.Dependencies, publicops.CreateDependency{
+			TargetID: dependency.TargetID,
+			Type:     dependency.Type,
+			Reverse:  dependency.SwapDirection,
+			Metadata: dependency.Metadata,
+			ThreadID: dependency.ThreadID,
+		})
 	}
-	return sources
+	return createEdgeSourcesFromRequest(createdID, request)
 }
 
 // ApplyIssueGraph and ApplyWispGraph report a whole plan the way one create

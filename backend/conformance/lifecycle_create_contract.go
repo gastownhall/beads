@@ -41,13 +41,11 @@ import (
 //     hold — is the one a both-plane read cannot answer, and it is what
 //     WispExists is for.
 //
-// HOW MANY VOTES THE THREE LEGS ARE: two. The server-backed and embedded stores
-// share one create body (internal/storage/issueops, PreparePublicCreateRequest
-// into CreateIssuesInTxWithResult), so they are ONE reading of every rule below;
-// the unit-of-work backend copies the request into its own createParams, which
-// is the second. The field-surface case is where that split has teeth — a field
-// dropped on the way into either shape is a column the caller asked for and did
-// not get, reported as a success.
+// HOW MANY VOTES THE THREE LEGS ARE: one. All three Lifecycle adapters run
+// issueops.ExecuteCreate. The store adapters pass *sql.Tx. The unit-of-work
+// adapter passes the transaction's DBTX runner. A field dropped on the way
+// into that body is a column the caller asked for and did not get, reported
+// as a success, and one body means one place that can drop it.
 
 // LifecycleCreateFixture supplies adapter-specific storage access for the
 // create-role assertions. Every field but GetIssue and WispExists is named and

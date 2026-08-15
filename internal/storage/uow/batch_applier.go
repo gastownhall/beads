@@ -42,13 +42,11 @@ var _ publicops.BatchApplier = (*batchApplier)(nil)
 
 // ApplyBatch applies every item in ONE unit of work and commits them together.
 //
-// THIS LEG IS A GENUINELY INDEPENDENT BODY, unlike the third leg of MetadataCAS
-// or TreeWalker, and the reason is mechanical rather than chosen. The shared
-// store body composes issueops.ExecuteCreate, ExecuteUpdate and ExecuteClose,
-// every one of which takes a *sql.Tx; a unit of work's runner is a *sql.Conn
-// with a transaction open on it, and no interface between the two publishes the
-// other. So the store bodies could not be reached from here without rewriting
-// three of the oldest write paths in the tree to take an interface.
+// THIS LEG IS STILL A GENUINELY INDEPENDENT BODY. Lifecycle now reaches
+// ExecuteCreate / ExecuteUpdate / ExecuteClose through the unit of work's
+// DBTX runner. BatchApplier has not been routed yet: it still composes
+// create, update, and close through the domain use cases. That leftover
+// fork is a follow-up, not evidence that Execute* is unreachable.
 //
 // WHAT THAT MEANS FOR THE CONTRACT is stated in its header: this is a second
 // vote on what a batch MEANS, not a wrapper check, and the cases are worth
@@ -184,7 +182,7 @@ func (r *uowApplyRun) applyCreate(ctx context.Context, index int, item *publicop
 	if err != nil {
 		return itemErr(storageissueops.ClassifyPublicCreateError(err))
 	}
-	issue, err := hydrateIssueOperation(ctx, r.uw, created.Issue, false, false)
+	issue, err := hydrateIssueOperation(ctx, r.uw, created.Issue, false)
 	if err != nil {
 		return err
 	}
@@ -271,7 +269,7 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 	if err != nil {
 		return publicops.UpdateResult{}, err
 	}
-	before, err = hydrateIssueOperation(ctx, r.uw, before, false, request.IssuePlaneOnly)
+	before, err = hydrateIssueOperation(ctx, r.uw, before, request.IssuePlaneOnly)
 	if err != nil {
 		return publicops.UpdateResult{}, err
 	}
@@ -289,7 +287,7 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 	if err != nil {
 		return publicops.UpdateResult{}, err
 	}
-	issue, err := hydrateIssueOperation(ctx, r.uw, updated, false, request.IssuePlaneOnly)
+	issue, err := hydrateIssueOperation(ctx, r.uw, updated, request.IssuePlaneOnly)
 	if err != nil {
 		return publicops.UpdateResult{}, err
 	}
@@ -316,7 +314,7 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 			return itemErr(err)
 		}
 	}
-	before, err := hydrateIssueOperation(ctx, r.uw, issue, false, false)
+	before, err := hydrateIssueOperation(ctx, r.uw, issue, false)
 	if err != nil {
 		return err
 	}
@@ -338,7 +336,7 @@ func (r *uowApplyRun) applyClose(ctx context.Context, index int, item *publicops
 	if closed.Issue != nil {
 		issue = closed.Issue
 	}
-	hydrated, err := hydrateIssueOperation(ctx, r.uw, issue, false, false)
+	hydrated, err := hydrateIssueOperation(ctx, r.uw, issue, false)
 	if err != nil {
 		return err
 	}

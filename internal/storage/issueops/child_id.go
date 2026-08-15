@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-func GetNextChildIDTx(ctx context.Context, tx *sql.Tx, parentID string) (string, error) {
+func GetNextChildIDTx(ctx context.Context, tx DBTX, parentID string) (string, error) {
 	counterTable, issueTable := "child_counters", "issues"
 	if IsActiveWispInTx(ctx, tx, parentID) {
 		counterTable, issueTable = "wisp_child_counters", "wisps"

@@ -2,7 +2,6 @@ package issueops
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"strings"
 
@@ -34,7 +33,7 @@ func HistoryEntry(provenance, fallback string) string {
 }
 
 // ExecuteCreate applies a guarded create in tx and reports durable tables changed.
-func ExecuteCreate(ctx context.Context, tx *sql.Tx, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
+func ExecuteCreate(ctx context.Context, tx DBTX, request publicops.CreateRequest) (publicops.CreateResult, ChangedTables, error) {
 	attempt := CloneCreateRequest(request)
 	if err := ValidatePublicCreateRequest(attempt); err != nil {
 		return publicops.CreateResult{}, nil, err
@@ -122,7 +121,7 @@ func skippedDependencyError(skipped []skippedDependency) error {
 }
 
 // ExecuteUpdate applies a guarded update in tx and reports durable tables changed.
-func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
+func ExecuteUpdate(ctx context.Context, tx DBTX, request publicops.UpdateRequest) (publicops.UpdateResult, ChangedTables, error) {
 	attempt := CloneUpdateRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: update requires actor and issue ID", storage.ErrValidation)
@@ -270,7 +269,7 @@ func claimAdvancedTheRow(claimed *ClaimResult, actor string) bool {
 }
 
 // ExecuteClose applies a guarded close in tx and reports durable tables changed.
-func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseRequest) (publicops.CloseResult, ChangedTables, error) {
+func ExecuteClose(ctx context.Context, tx DBTX, request publicops.CloseRequest) (publicops.CloseResult, ChangedTables, error) {
 	attempt := CloneCloseRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
@@ -296,7 +295,7 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 }
 
 // ExecuteReopen applies a guarded reopen in tx and reports durable tables changed.
-func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequest) (publicops.ReopenResult, ChangedTables, error) {
+func ExecuteReopen(ctx context.Context, tx DBTX, request publicops.ReopenRequest) (publicops.ReopenResult, ChangedTables, error) {
 	attempt := CloneReopenRequest(request)
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.ReopenResult{}, nil, fmt.Errorf("%w: reopen requires actor and issue ID", storage.ErrValidation)

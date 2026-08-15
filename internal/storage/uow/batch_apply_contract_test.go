@@ -9,10 +9,9 @@ import (
 
 // TestBatchApplyContract runs the BatchApplier contract against the
 // unit-of-work provider, and this is the leg that makes the contract a TWO-VOTE
-// one. It is a genuinely independent body: the shared store body composes
-// issueops.ExecuteCreate, ExecuteUpdate and ExecuteClose, all of which take a
-// *sql.Tx, and a unit of work's runner is a *sql.Conn — so this leg re-derives
-// every rule the role promises through the domain use cases, reaching only the
+// one. It is still a genuinely independent body: Lifecycle now shares
+// ExecuteCreate / ExecuteUpdate / ExecuteClose, but this role still
+// re-derives those verbs through the domain use cases, reaching only the
 // SHARED pieces it can (storage.PlanApplyBatch for the request rules,
 // issueops.ApplyBatchCommitMessage for the entry).
 //
