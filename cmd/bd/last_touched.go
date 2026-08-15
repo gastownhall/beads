@@ -62,7 +62,10 @@ func GetLastTouchedID() string {
 // SetLastTouchedID saves the ID of the last touched issue.
 // Silently ignores errors (best-effort tracking).
 func SetLastTouchedID(issueID string) {
-	if issueID == "" {
+	// Strict --readonly promises not to mutate workspace-local state. Keep
+	// ordinary read commands writable here: `bd show` records last-touched by
+	// design even though its database store is opened read-only.
+	if issueID == "" || isReadonlyMode() {
 		return
 	}
 
