@@ -950,6 +950,7 @@ type ciWorkflowStep struct {
 	Run             string            `yaml:"run"`
 	Shell           string            `yaml:"shell"`
 	ContinueOnError any               `yaml:"continue-on-error"`
+	TimeoutMinutes  int               `yaml:"timeout-minutes"`
 	Env             map[string]string `yaml:"env"`
 	With            map[string]string `yaml:"with"`
 }
