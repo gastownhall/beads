@@ -1,54 +1,42 @@
 package dolt
 
 import (
-	"os"
-	"path/filepath"
+	"context"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/testutil"
 )
 
 // TestBenchDBPurgeDoesNotLeak is the regression gate for be-pq5: dropBenchDB
 // must DROP and then PURGE so the dropped-databases dir does not grow across
 // repeated bench samples. Without the PURGE call inside dropBenchDB, looped
-// setupBenchStore + cleanup leaks a benchdb_* dir into
-// .dolt_dropped_databases/ on every iteration.
+// store setup + cleanup leaks a benchdb_* dir into .dolt_dropped_databases/
+// on every iteration.
 //
 // Dolt 1.86 exposes no SQL view for the dropped-databases list, so the only
 // way to detect a leak is to count entries in the server's
-// .dolt_dropped_databases/ directory. This requires knowing the server's
-// data dir, which only the BEADS_TEST_EXTERNAL_DOLT_PORT branch can supply
-// (the testcontainer's data dir is opaque from the test's perspective). The
-// developer points BEADS_TEST_EXTERNAL_DOLT_DATA_DIR at the same dir as the
-// scratch dolt sql-server's --data-dir flag; the test reads from there.
-//
-// In all other modes the test self-skips. Run it manually after any change
-// to dropBenchDB:
-//
-//	SCRATCH=$(mktemp -d)
-//	dolt sql-server --port 33999 --host 127.0.0.1 --data-dir "$SCRATCH" &
-//	BEADS_TEST_EXTERNAL_DOLT_PORT=33999 \
-//	BEADS_TEST_EXTERNAL_DOLT_DATA_DIR="$SCRATCH" \
-//	  go test -run TestBenchDBPurgeDoesNotLeak ./internal/storage/dolt/...
+// .dolt_dropped_databases/ directory. The shared TestMain Dolt server runs
+// inside a Docker testcontainer with no host-visible data dir, so this reads
+// the directory by exec'ing into the container itself via
+// testutil.DoltContainerExec. It runs against the same shared container as
+// every other test in this package (via testServerPort) and needs no
+// external server, manual setup, or -short opt-out (be-eh6 round 2).
 func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
-	if testing.Short() {
-		t.Skip("skipping disk-leak regression in -short mode")
-	}
 	skipIfNoServer(t)
+	ctx := context.Background()
 
-	dataDir := os.Getenv("BEADS_TEST_EXTERNAL_DOLT_DATA_DIR")
-	if dataDir == "" {
-		t.Skip("BEADS_TEST_EXTERNAL_DOLT_DATA_DIR not set; cannot inspect dropped-databases dir")
-	}
-
-	droppedDir := filepath.Join(dataDir, ".dolt_dropped_databases")
-	baseline := countDroppedEntries(t, droppedDir)
+	baseline := countDroppedDatabaseEntries(t, ctx)
 
 	const iterations = 5
 	for i := 0; i < iterations; i++ {
-		_, cleanup := setupBenchStore(t)
-		cleanup()
+		dbName := benchDatabaseName()
+		store := newPurgeRegressionStore(t, ctx, dbName)
+		dropBenchDB(t, store, dbName)
+		store.Close()
 	}
 
-	post := countDroppedEntries(t, droppedDir)
+	post := countDroppedDatabaseEntries(t, ctx)
 	if post > baseline {
 		t.Fatalf("dolt_dropped_databases grew from %d to %d across %d setup/cleanup cycles; "+
 			"dropBenchDB likely missing PURGE step (be-pq5)",
@@ -56,17 +44,85 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 	}
 }
 
-// countDroppedEntries returns the number of entries in
-// .dolt_dropped_databases/, or 0 if the directory does not yet exist (the
-// server only creates it lazily after the first DROP DATABASE).
-func countDroppedEntries(t *testing.T, dir string) int {
+// newPurgeRegressionStore creates a throwaway store against the shared
+// TestMain-managed Dolt container, mirroring setupBenchStore's schema-init
+// shape without setupBenchStore's BEADS_BENCH_DOLT_PORT opt-in — that opt-in
+// firewalls real `go test -bench` runs from ambient production Dolt ports
+// (be-cfm3z) and is never set in CI, so a regression test that must actually
+// run under plain `go test` cannot depend on it.
+func newPurgeRegressionStore(t *testing.T, ctx context.Context, dbName string) *DoltStore {
 	t.Helper()
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0
-		}
-		t.Fatalf("read dropped-databases dir %q: %v", dir, err)
+	cfg := &Config{
+		Path:            t.TempDir(),
+		CommitterName:   "bench",
+		CommitterEmail:  "bench@example.com",
+		Database:        dbName,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testServerPort,
+		CreateIfMissing: true,
 	}
-	return len(entries)
+	store, err := New(ctx, cfg)
+	if err != nil {
+		t.Fatalf("failed to create purge-regression store: %v", err)
+	}
+	if err := store.SetConfig(ctx, "issue_prefix", "bench"); err != nil {
+		store.Close()
+		t.Fatalf("failed to set issue_prefix: %v", err)
+	}
+	return store
+}
+
+// countDroppedDatabaseEntries returns the number of entries in the shared
+// test container's .dolt_dropped_databases/ directory, or 0 if the
+// directory does not exist yet (the server only creates it lazily after the
+// first DROP DATABASE) or PURGE has removed it entirely.
+func countDroppedDatabaseEntries(t *testing.T, ctx context.Context) int {
+	t.Helper()
+
+	dir := findDroppedDatabasesDir(t, ctx)
+	if dir == "" {
+		return 0
+	}
+
+	code, out, err := testutil.DoltContainerExec(ctx, []string{"find", dir, "-mindepth", "1", "-maxdepth", "1"})
+	if err != nil {
+		t.Fatalf("exec find in container to list %q: %v", dir, err)
+	}
+	if code != 0 {
+		t.Fatalf("find %q in container exited %d: %s", dir, code, out)
+	}
+
+	count := 0
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+// findDroppedDatabasesDir locates the .dolt_dropped_databases directory
+// inside the shared test container's filesystem. Returns "" if it has not
+// been created yet (no DROP DATABASE has ever run against this container) or
+// has since been removed entirely by PURGE.
+func findDroppedDatabasesDir(t *testing.T, ctx context.Context) string {
+	t.Helper()
+
+	// -xdev keeps the search inside the container's single root filesystem
+	// (skips /proc, /sys, and similar mounts) and 2>/dev/null suppresses
+	// permission-denied noise; find's exit status is unreliable under
+	// suppressed errors so only stdout is trusted below.
+	_, out, err := testutil.DoltContainerExec(ctx, []string{
+		"sh", "-c", "find / -xdev -maxdepth 6 -type d -name .dolt_dropped_databases 2>/dev/null",
+	})
+	if err != nil {
+		t.Fatalf("exec find in container to locate dropped-databases dir: %v", err)
+	}
+
+	for _, line := range strings.Split(out, "\n") {
+		if p := strings.TrimSpace(line); p != "" {
+			return p
+		}
+	}
+	return ""
 }
