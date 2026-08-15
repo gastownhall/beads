@@ -27,6 +27,32 @@ import (
 // testDoltServerPort is the port of the shared test Dolt server (0 = not running).
 var testDoltServerPort int
 
+// testStoreOpenTimeout bounds dolt.New/dolt.NewFromConfig calls in these
+// helpers. The testcontainers wait strategy only confirms the TCP listener
+// is up, not that Dolt's SQL engine can serve queries yet (see
+// waitForDoltReady in internal/testutil/testdoltserver.go for the same class
+// of race on shared-container startup). A query issued with an unbounded
+// context in that narrow window can block indefinitely instead of erroring,
+// because nothing ever cancels it to unstick the read — confirmed via
+// goroutine dump during be-fgd round-2 triage: a per-test dolt.New() sat in
+// mysqlConn.readWithTimeout / net.Read for 2+ minutes after the container
+// had already logged ready.
+//
+// The fallback branch (per-test DB, exercised only when shared-schema init
+// in test_dolt_server_cgo_test.go fails) runs a full v0->v65 migration
+// replay from scratch, which is genuinely slow, not hung: a single isolated
+// measurement (BEADS_TEST_FORCE_FALLBACK_DIAG diagnostic, reverted after
+// use) clocked one such replay at 219.62s on this hardware. 60s (an earlier
+// calibration attempt, matching contributor_routing_e2e_test.go's precedent)
+// measurably undershot this and produced a clean "context deadline exceeded"
+// at exactly 60.01s instead of the real result. 300s gives that observed
+// value ~37% margin for run-to-run variance while still failing fast
+// relative to an actually-stuck connection. In normal operation the shared
+// fast path (newTestStoreSharedBranch) avoids this branch entirely and
+// resolves in under a second; this bound only matters for the rare/backstop
+// fallback case.
+const testStoreOpenTimeout = 300 * time.Second
+
 // writeTestMetadata writes metadata.json in the .beads directory (parent of dbPath)
 // so that NewFromConfig can find the correct database name and server settings when
 // routing reopens a store by path.
@@ -74,7 +100,8 @@ func newTestStoreIsolatedDB(t *testing.T, dbPath string, prefix string) *dolt.Do
 		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
 	}
 
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
 
 	cfg := &dolt.Config{
 		Path:            dbPath,
@@ -125,14 +152,15 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
 	}
 
-	ctx := context.Background()
-
 	// Fast path: use shared DB with branch-per-test isolation (bd-xmf)
 	if testSharedDB != "" {
 		return newTestStoreSharedBranch(t, dbPath, prefix)
 	}
 
 	// Fallback: per-test database (original slow path)
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
+
 	cfg := &dolt.Config{
 		Path:            dbPath,
 		ServerHost:      "127.0.0.1",
@@ -172,7 +200,8 @@ func newTestStoreWithPrefix(t *testing.T, dbPath string, prefix string) *dolt.Do
 // the expensive CREATE DATABASE + schema init + DROP DATABASE + PURGE cycle.
 func newTestStoreSharedBranch(t *testing.T, dbPath string, prefix string) *dolt.DoltStore {
 	t.Helper()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
 
 	// Write metadata.json pointing to the shared database
 	writeTestMetadata(t, dbPath, testSharedDB)
@@ -233,7 +262,8 @@ func openExistingTestDB(t *testing.T, dbPath string) (*dolt.DoltStore, error) {
 	// Serialize dolt.New() to avoid race in Dolt's InitStatusVariables (bd-cqjoi)
 	doltNewMutex.Lock()
 	defer doltNewMutex.Unlock()
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
 	// Try NewFromConfig which reads metadata.json for correct database name
 	beadsDir := filepath.Dir(dbPath)
 	if store, err := dolt.NewFromConfig(ctx, beadsDir); err == nil {

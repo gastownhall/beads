@@ -4,6 +4,7 @@ package testutil
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -162,11 +163,62 @@ func startDoltContainer() error {
 	}
 
 	doltTestPort = p.Port()
+
+	if err := waitForDoltReady(doltTestPort); err != nil {
+		_ = testcontainers.TerminateContainer(ctr)
+		return fmt.Errorf("waiting for Dolt server to be query-ready: %w", err)
+	}
+
 	doltSingletonSrv = &doltServer{
 		container: ctr,
 	}
 
 	return nil
+}
+
+// doltReadyProbeTimeout bounds how long waitForDoltReady polls before giving up.
+const doltReadyProbeTimeout = 30 * time.Second
+
+// waitForDoltReady polls the server with a trivial query until it responds
+// or doltReadyProbeTimeout elapses.
+//
+// The testcontainers wait strategy above only matches a log line ("Server
+// ready. Accepting connections."), which confirms the TCP listener is up but
+// not that Dolt's SQL engine can actually serve a query yet. In that narrow
+// startup window, a query issued with an unbounded context (as several test
+// helpers do) can block indefinitely instead of erroring, because nothing
+// ever cancels it to unstick the read — confirmed via goroutine dump during
+// be-fgd round-2 triage: the connection sat in mysqlConn.readWithTimeout /
+// net.Read for 2+ minutes after the container had already logged ready. Each
+// probe attempt here uses its own short bounded context, so a still-warming
+// server fails an attempt fast and gets retried, rather than wedging.
+func waitForDoltReady(port string) error {
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
+	deadline := time.Now().Add(doltReadyProbeTimeout)
+	var lastErr error
+	for {
+		lastErr = pingDoltOnce(dsn)
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("dolt server at port %s did not become query-ready within %s: %w", port, doltReadyProbeTimeout, lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// pingDoltOnce opens a short-lived connection and pings it with a bounded
+// context so a non-responsive server fails this attempt instead of hanging.
+func pingDoltOnce(dsn string) error {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return db.PingContext(ctx)
 }
 
 // terminateSharedContainer stops and removes the shared Dolt container.

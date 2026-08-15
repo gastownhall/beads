@@ -1466,6 +1466,29 @@ func (h *testHarness) mustCreate(t *testing.T, ctx context.Context, id, title st
 	}
 }
 
+// mustCreateBatch creates n issues (IDs "<prefix>NNNNN") in a single
+// transaction via CreateIssuesWithFullOptions, instead of n separate
+// CreateIssue round trips over the connection. SkipPrefixValidation matches
+// mustCreate/CreateIssue's single-issue behavior so callers can keep using
+// IDs that don't match the store's configured issue_prefix (as the existing
+// "thr-*" ids here do).
+func (h *testHarness) mustCreateBatch(t *testing.T, ctx context.Context, n int, prefix string) {
+	t.Helper()
+	issues := make([]*types.Issue, n)
+	for i := 0; i < n; i++ {
+		issues[i] = &types.Issue{
+			ID:        fmt.Sprintf("%s%05d", prefix, i),
+			Title:     fmt.Sprintf("t%05d", i),
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+	}
+	if err := h.store.CreateIssuesWithFullOptions(ctx, issues, "tester", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("CreateIssuesWithFullOptions(%d issues): %v", n, err)
+	}
+}
+
 func (h *testHarness) mustCommit(t *testing.T, ctx context.Context, msg string) string {
 	t.Helper()
 	if err := h.store.Commit(ctx, msg); err != nil {
@@ -1673,11 +1696,13 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create more issues than the threshold in a single commit.
-	for i := 0; i < incrementalExportThreshold+1; i++ {
-		id := fmt.Sprintf("thr-%05d", i)
-		h.mustCreate(t, ctx, id, fmt.Sprintf("t%05d", i))
-	}
+	// Create more issues than the threshold in a single transaction/commit
+	// (not incrementalExportThreshold+1 separate CreateIssue round trips —
+	// be-fgd round-2: holding one connection open across 5001 sequential
+	// writes intermittently tripped a mid-stream TCP read timeout ["write
+	// commit result indeterminate after connection loss"], at a different
+	// point in the loop on each of two consecutive runs).
+	h.mustCreateBatch(t, ctx, incrementalExportThreshold+1, "thr-")
 	c2 := h.mustCommit(t, ctx, "flood")
 
 	_, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2)
