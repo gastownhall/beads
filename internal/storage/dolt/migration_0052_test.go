@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -249,9 +250,15 @@ func verifySampleIssues(t *testing.T, ctx context.Context, store *DoltStore, ids
 // planner's index usage — be-eei §8 guardrail 4. Not a pass/fail gate — the
 // `go test -v` output is the artifact and the reviewer validates it. Skipped
 // unless explicitly opted in to keep CI quiet.
+//
+// The opt-in is an environment check rather than a short-mode skip: this is
+// a diagnostic-artifact boundary, not the runtime/stress/large-fixture case
+// that scripts/check-testing-short.sh reserves short-mode skips for. Matches
+// the BEADS_RUN_DOLT_UPSTREAM_REPRO gate on the sibling repro test in this
+// package.
 func TestMigration0052_ExplainCapture(t *testing.T) {
-	if testing.Short() {
-		t.Skip("explain capture is verbose; run with -v explicitly")
+	if os.Getenv("BEADS_RUN_EXPLAIN_CAPTURE") == "" {
+		t.Skip("set BEADS_RUN_EXPLAIN_CAPTURE=1 to capture migration 0052 EXPLAIN plans (run with -v)")
 	}
 
 	store, cleanup := setupTestStore(t)
