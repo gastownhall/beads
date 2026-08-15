@@ -221,39 +221,59 @@ func primeScenarioHookJSONStealthCompose(t *testing.T, binPath, workDir string) 
 	}
 }
 
-// TestPrime_HookJSON_GlobalPrimeOverride: with --hook-json and a
-// ~/.config/beads/PRIME.md file present (XDG path), output is the JSON
-// envelope wrapping that file's contents. This exercises the third
-// custom-PRIME.md path through the wrapper.
+// isolatedGlobalPrimeConfigFixture creates a complete temporary user profile,
+// asks the current platform where its user config directory is, and returns a
+// child environment that resolves to the same directory.
+func isolatedGlobalPrimeConfigFixture(t *testing.T) (string, []string) {
+	t.Helper()
+
+	profileRoot := t.TempDir()
+	profileVars := []struct {
+		key   string
+		value string
+	}{
+		{key: "HOME", value: filepath.Join(profileRoot, "home")},
+		{key: "USERPROFILE", value: filepath.Join(profileRoot, "home")},
+		{key: "APPDATA", value: filepath.Join(profileRoot, "appdata", "roaming")},
+		{key: "LOCALAPPDATA", value: filepath.Join(profileRoot, "appdata", "local")},
+		{key: "XDG_CONFIG_HOME", value: filepath.Join(profileRoot, "xdg-config")},
+	}
+
+	for _, variable := range profileVars {
+		t.Setenv(variable.key, variable.value)
+	}
+
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolve isolated user config dir: %v", err)
+	}
+	rel, err := filepath.Rel(profileRoot, configDir)
+	if err != nil || !filepath.IsLocal(rel) {
+		t.Fatalf("isolated user config dir %q escaped profile root %q", configDir, profileRoot)
+	}
+
+	return configDir, os.Environ()
+}
+
+// TestPrime_HookJSON_GlobalPrimeOverride: with --hook-json and a PRIME.md in
+// the platform-native user config directory, output is the JSON envelope
+// wrapping that file's contents. This exercises the third custom-PRIME.md path
+// through the wrapper.
 func primeScenarioHookJSONGlobalPrimeOverride(t *testing.T, binPath, workDir string) {
-	const custom = "# Global PRIME override\nGreetings from XDG.\n"
+	const custom = "# Global PRIME override\nGreetings from isolated config.\n"
 
-	// resolveGlobalPrimePath uses os.UserConfigDir, which on Linux honors
-	// XDG_CONFIG_HOME. On macOS it returns ~/Library/Application Support
-	// regardless of XDG, so we set HOME and also stage the macOS path to
-	// be cross-platform-safe.
-	xdg := t.TempDir()
-	home := t.TempDir()
-
-	xdgBeadsDir := filepath.Join(xdg, "beads")
-	if err := os.MkdirAll(xdgBeadsDir, 0o755); err != nil {
-		t.Fatalf("mkdir xdg beads dir: %v", err)
+	configDir, childEnv := isolatedGlobalPrimeConfigFixture(t)
+	beadsConfigDir := filepath.Join(configDir, "beads")
+	if err := os.MkdirAll(beadsConfigDir, 0o755); err != nil {
+		t.Fatalf("mkdir global beads config dir: %v", err)
 	}
-	writePrimeFile(t, filepath.Join(xdgBeadsDir, "PRIME.md"), custom)
-	// Cross-platform staging for macOS UserConfigDir.
-	macConfigDir := filepath.Join(home, "Library", "Application Support", "beads")
-	if err := os.MkdirAll(macConfigDir, 0o755); err != nil {
-		t.Fatalf("mkdir mac config dir: %v", err)
-	}
-	writePrimeFile(t, filepath.Join(macConfigDir, "PRIME.md"), custom)
+	writePrimeFile(t, filepath.Join(beadsConfigDir, "PRIME.md"), custom)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, binPath, "prime", "--hook-json")
 	cmd.Dir = workDir
-	cmd.Env = append(os.Environ(),
-		"HOME="+home,
-		"XDG_CONFIG_HOME="+xdg,
+	cmd.Env = append(childEnv,
 		"BEADS_TEST_IGNORE_REPO_CONFIG=1",
 		"BEADS_DIR=",
 		"BEADS_DB=",
