@@ -25,6 +25,11 @@ while IFS=: read -r file line _; do
     continue
   fi
 
+  content=$(sed -n "${line}p" "$file")
+  if [[ "$content" =~ ^[[:space:]]*// ]]; then
+    continue
+  fi
+
   func=$(
     awk -v target="$line" '
       NR <= target && /^func [A-Za-z0-9_]+\(/ {

@@ -9,21 +9,27 @@ import (
 	"testing"
 )
 
+// Built via concatenation so this file's own source never contains the
+// literal substring check-testing-short.sh scans for — otherwise this test
+// file would flag itself when TestCheckTestingShortPassesOnCleanRepoTree
+// runs the checker against the real repo tree.
+const shortCall = "testing" + ".Short()"
+
 func TestCheckTestingShortIgnoresCommentOnlyMention(t *testing.T) {
 	out, err := runCheckTestingShort(t, map[string]string{
-		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\t// this comment mentions testing.Short() and should not fail the gate\n}\n",
+		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nfunc TestFoo(t *testing.T) {\n\t// this comment mentions " + shortCall + " and should not fail the gate\n}\n",
 	})
 	if err != nil {
-		t.Fatalf("comment-only mention of testing.Short() should not fail the gate; err=%v output=%s", err, out)
+		t.Fatalf("comment-only mention of %s should not fail the gate; err=%v output=%s", shortCall, err, out)
 	}
 }
 
 func TestCheckTestingShortStillFlagsRealCallAndNamesFunc(t *testing.T) {
 	out, err := runCheckTestingShort(t, map[string]string{
-		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nfunc TestBar(t *testing.T) {\n\tif testing.Short() {\n\t\tt.Skip(\"slow\")\n\t}\n}\n",
+		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nfunc TestBar(t *testing.T) {\n\tif " + shortCall + " {\n\t\tt.Skip(\"slow\")\n\t}\n}\n",
 	})
 	if err == nil {
-		t.Fatalf("real testing.Short() call should still fail the gate; output=%s", out)
+		t.Fatalf("real %s call should still fail the gate; output=%s", shortCall, out)
 	}
 	if !strings.Contains(out, "TestBar") {
 		t.Errorf("expected offending function TestBar named in output, got: %s", out)
@@ -32,10 +38,10 @@ func TestCheckTestingShortStillFlagsRealCallAndNamesFunc(t *testing.T) {
 
 func TestCheckTestingShortReportsUnknownAboveFirstFunc(t *testing.T) {
 	out, err := runCheckTestingShort(t, map[string]string{
-		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nvar shortMode = testing.Short()\n\nfunc TestBaz(t *testing.T) {}\n",
+		"pkg_test.go": "package pkg\n\nimport \"testing\"\n\nvar shortMode = " + shortCall + "\n\nfunc TestBaz(t *testing.T) {}\n",
 	})
 	if err == nil {
-		t.Fatalf("real testing.Short() call above any func should still fail the gate; output=%s", out)
+		t.Fatalf("real %s call above any func should still fail the gate; output=%s", shortCall, out)
 	}
 	if !strings.Contains(out, "unknown") {
 		t.Errorf("expected 'unknown' function name for a hit above the first func, got: %s", out)
@@ -64,6 +70,14 @@ func runCheckTestingShort(t *testing.T, files map[string]string) (string, error)
 		t.Skip("checker is a Bash boundary")
 	}
 	dir := t.TempDir()
+	// A second, innocuous .go file keeps find+grep invoked with 2+ filenames,
+	// matching real usage (repo root always has many .go files): grep only
+	// prefixes matches with the filename when given more than one file, so a
+	// single-fixture temp dir would silently corrupt the file:line parse in
+	// check-testing-short.sh's read loop.
+	if err := os.WriteFile(filepath.Join(dir, "companion.go"), []byte("package pkg\n"), 0600); err != nil {
+		t.Fatalf("write companion.go: %v", err)
+	}
 	for rel, content := range files {
 		full := filepath.Join(dir, rel)
 		if err := os.MkdirAll(filepath.Dir(full), 0700); err != nil {
