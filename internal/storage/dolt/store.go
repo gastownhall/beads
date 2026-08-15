@@ -371,12 +371,14 @@ type Config struct {
 	ReadOnly       bool   // Open in read-only mode (skip schema init)
 	Preview        bool   // Non-mutating preview: embedded opens skip schema init and refuse writes
 
-	// LenientOpen opens the store leniently: embedded mode only. A migration
-	// gate refusal (#4259) or a dirty-working-set refusal (#4566) skips the
-	// migration instead of failing the open. Set for working-set-reconcile
-	// commands (bd dolt commit, bd vc commit; #4566), whose entire purpose is
-	// to clear the working set that the migration would otherwise refuse to
-	// touch. Ignored in server mode.
+	// LenientOpen opens the store leniently: a migration gate refusal (#4259)
+	// or a dirty-working-set refusal (#4566) skips the migration instead of
+	// failing the open. Set for working-set-reconcile commands (bd dolt
+	// commit, bd vc commit; #4566), whose entire purpose is to clear the
+	// working set that the migration would otherwise refuse to touch.
+	// Honored in embedded and server mode alike. Migrations still RUN on a
+	// lenient open — only those two refusals are tolerated — so a lenient
+	// open of a clean database converges normally.
 	LenientOpen bool
 
 	// Server connection options
@@ -2023,7 +2025,12 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	if !cfg.ReadOnly && !cfg.Gateway {
 		applied, err := store.initSchema(ctx, dbFacts.bootstrapHeal)
 		if err != nil {
-			return nil, fmt.Errorf("failed to initialize schema: %w", err)
+			if !cfg.LenientOpen || !warnLenientOpenRefusal(err) {
+				return nil, fmt.Errorf("failed to initialize schema: %w", err)
+			}
+			// A tolerated refusal still reports what the aborted pass
+			// applied (0 for both guards today, since each refuses before
+			// migrating), so the rebuild below stays correct either way.
 		}
 		// initSchema runs migrations over a separate pool (openMigrationDB).
 		// The Ping above already pinned a connection in store.db to the
@@ -2056,6 +2063,43 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// close above. Must be the last thing before the success return.
 	storeReady = true
 	return store, nil
+}
+
+// warnLenientOpenRefusal reports whether a lenient open (Config.LenientOpen)
+// may continue past err instead of failing, warning on stderr when it may.
+//
+// Server mode reaches the same two pending-migration refusals embedded mode
+// relaxes for this intent (embeddeddolt's openWorkingSetReconcile): the #4566
+// dirty-table guard, whose documented recovery IS the commit these opens exist
+// to run, and the #4259 remote-migrate gate, a coordination stop with no
+// business blocking a commit of the local working set. Against an external
+// server the operator cannot sidestep either by deleting a local database, so
+// leaving them fatal here left the refusals with no in-band recovery at all
+// (#5781).
+//
+// Every other migration failure still fails the open, and the schema-skew and
+// identity guards run before this point either way: lenient relaxes migration,
+// not safety.
+func warnLenientOpenRefusal(err error) bool {
+	var dirtyErr *schema.DirtyTablesError
+	if errors.As(err, &dirtyErr) {
+		fmt.Fprintf(os.Stderr,
+			"Warning: %v\n"+
+				"  Committing the working set at the current schema; when it completes,\n"+
+				"  re-run 'bd migrate'.\n",
+			dirtyErr)
+		return true
+	}
+	var gateErr *schema.RemoteMigrateGateError
+	if errors.As(err, &gateErr) {
+		fmt.Fprintf(os.Stderr,
+			"Warning: %s"+
+				"  Working-set reconcile command: continuing on schema v%d without\n"+
+				"  migrating; the commit applies to the working set at the current schema.\n",
+			gateErr.UserMessage(), gateErr.CurrentVersion)
+		return true
+	}
+	return false
 }
 
 var (

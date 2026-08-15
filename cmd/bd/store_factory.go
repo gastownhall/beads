@@ -104,7 +104,9 @@ func newDoltStore(ctx context.Context, cfg *dolt.Config) (s storage.DoltStorage,
 		// Working-set-reconcile commands (bd dolt commit, bd vc commit) must
 		// not be bricked by a pending-migration dirty-table refusal: that
 		// refusal's documented recovery is exactly the commit these commands
-		// run, so failing the open here would deadlock (#4566).
+		// run, so failing the open here would deadlock (#4566). The server
+		// arm above honors the same cfg.LenientOpen inside dolt.New; this
+		// branch is the embedded half of one policy, not the whole of it.
 		return embeddeddolt.OpenForWorkingSetReconcile(ctx, cfg.BeadsDir, cfg.Database, "main")
 	}
 	return embeddeddolt.Open(ctx, cfg.BeadsDir, cfg.Database, "main")

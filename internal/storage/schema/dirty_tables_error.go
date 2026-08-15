@@ -14,10 +14,12 @@ import "strings"
 // run cleanly. But those commit commands also open the store, and an open
 // runs MigrateUp - hitting this same guard before the commit that would
 // clear the dirty state ever gets a chance to run (gastownhall/beads#4566).
-// To break that deadlock, working-set-reconcile opens (embeddeddolt.
-// OpenForWorkingSetReconcile) detect this error type at open time via
-// errors.As and skip the migration instead of failing the open, so the
-// commit can proceed and clear the working set.
+// To break that deadlock, working-set-reconcile opens detect this error type
+// at open time via errors.As and skip the migration instead of failing the
+// open, so the commit can proceed and clear the working set. Both storage
+// modes do this — embeddeddolt.OpenForWorkingSetReconcile and server mode's
+// dolt.Config.LenientOpen — so the recovery this message names is reachable
+// wherever the guard fires.
 type DirtyTablesError struct {
 	Tables []string
 }
