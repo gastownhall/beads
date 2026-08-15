@@ -223,7 +223,6 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
-	os.Stdout = w
 
 	done := make(chan string, 1)
 	go func() {
@@ -232,13 +231,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 		done <- buf.String()
 	}()
 
+	os.Stdout = w
+	restored := false
+	restore := func() string {
+		if restored {
+			return ""
+		}
+		restored = true
+		w.Close()
+		os.Stdout = oldStdout
+		out := <-done
+		_ = r.Close()
+		return out
+	}
+	defer restore()
+
 	err := fn()
 
-	w.Close()
-	os.Stdout = oldStdout
-	out := <-done
-	_ = r.Close()
-
+	out := restore()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -258,7 +268,6 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stderr = w
 
 	var buf bytes.Buffer
 	done := make(chan struct{})
@@ -267,11 +276,22 @@ func captureStderr(t *testing.T, fn func()) string {
 		close(done)
 	}()
 
+	os.Stderr = w
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		_ = w.Close()
+		os.Stderr = old
+		<-done
+		_ = r.Close()
+	}
+	defer restore()
+
 	fn()
-	_ = w.Close()
-	os.Stderr = old
-	<-done
-	_ = r.Close()
+	restore()
 
 	return buf.String()
 }
