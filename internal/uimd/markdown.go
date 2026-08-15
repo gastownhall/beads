@@ -59,7 +59,7 @@ func RenderMarkdown(markdown string) string {
 	}
 	if useANSI {
 		options = append(options,
-			glamour.WithEnvironmentConfig(),
+			glamour.WithStylePath(glamourStylePath()),
 			glamour.WithChromaFormatter("terminal256"),
 		)
 	} else {
@@ -92,6 +92,26 @@ func RenderMarkdown(markdown string) string {
 	}
 
 	return rendered
+}
+
+// glamourStylePath picks the glamour style name for the markdown body.
+// glamour.WithEnvironmentConfig defaults to styles.DarkStyle whenever
+// GLAMOUR_STYLE is unset, with no regard for the terminal's actual
+// background — unlike internal/ui's own adaptive colors (used for the
+// section header wrapping this body), which probe the real background via
+// lipgloss.HasDarkBackground. That left the DESCRIPTION header adapting
+// correctly while the rendered body underneath always used dark-style
+// colors, which read poorly on a light-background terminal. Honor an
+// explicit GLAMOUR_STYLE override first, then fall back to the same
+// detected background internal/ui already uses.
+func glamourStylePath() string {
+	if envStyle := os.Getenv("GLAMOUR_STYLE"); envStyle != "" {
+		return envStyle
+	}
+	if ui.IsDarkBackground {
+		return styles.DarkStyle
+	}
+	return styles.LightStyle
 }
 
 // escapeAngleBrackets replaces literal "<" and ">" with their HTML entity
