@@ -238,6 +238,113 @@ func newTestStoreSharedBranch(t *testing.T, dbPath string, prefix string) *dolt.
 	return s
 }
 
+// newTestStoreSharedBranchWithReadTimeout is newTestStoreSharedBranch with a
+// caller-specified Config.PoolReadTimeout. Existing shared-branch callers
+// stay on the 10s default (defaultPoolReadTimeout in internal/storage/dolt);
+// this is for the rare test whose own write volume — not server health —
+// needs more slack, e.g. a bulk seed of thousands of rows over the single
+// held connection that MaxOpenConns=1 forces on this path (be-uoat round 2).
+func newTestStoreSharedBranchWithReadTimeout(t *testing.T, dbPath string, prefix string, readTimeout time.Duration) *dolt.DoltStore {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
+
+	// Write metadata.json pointing to the shared database
+	writeTestMetadata(t, dbPath, testSharedDB)
+
+	// Open store against the shared database with MaxOpenConns=1
+	// (required for DOLT_CHECKOUT session affinity)
+	doltNewMutex.Lock()
+	s, err := dolt.New(ctx, &dolt.Config{
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        testSharedDB,
+		MaxOpenConns:    1,
+		PoolReadTimeout: readTimeout,
+	})
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("Failed to create dolt store (shared): %v", err)
+	}
+
+	// Create isolated branch for this test
+	_, branchCleanup := testutil.StartTestBranch(t, s.DB(), testSharedDB)
+
+	// Set prefix for this test (overrides the shared schema's default)
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		branchCleanup()
+		s.Close()
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+
+	t.Cleanup(func() {
+		branchCleanup()
+		s.Close()
+	})
+	return s
+}
+
+// newTestStoreWithPrefixAndReadTimeout is newTestStoreWithPrefix with a
+// caller-specified Config.PoolReadTimeout, threaded through whichever branch
+// (shared-DB fast path or per-test-DB fallback) actually runs. See
+// newTestStoreSharedBranchWithReadTimeout for why this knob exists.
+func newTestStoreWithPrefixAndReadTimeout(t *testing.T, dbPath string, prefix string, readTimeout time.Duration) *dolt.DoltStore {
+	t.Helper()
+
+	ensureTestMode(t)
+
+	if testDoltServerPort == 0 {
+		t.Skip("Dolt test server not available, skipping")
+	}
+	if testutil.DoltContainerCrashed() {
+		t.Skipf("Dolt test server crashed: %v", testutil.DoltContainerCrashError())
+	}
+
+	// Fast path: use shared DB with branch-per-test isolation (bd-xmf)
+	if testSharedDB != "" {
+		return newTestStoreSharedBranchWithReadTimeout(t, dbPath, prefix, readTimeout)
+	}
+
+	// Fallback: per-test database (original slow path)
+	ctx, cancel := context.WithTimeout(context.Background(), testStoreOpenTimeout)
+	defer cancel()
+
+	cfg := &dolt.Config{
+		Path:            dbPath,
+		ServerHost:      "127.0.0.1",
+		ServerPort:      testDoltServerPort,
+		Database:        uniqueTestDBName(t),
+		CreateIfMissing: true,
+		PoolReadTimeout: readTimeout,
+	}
+	writeTestMetadata(t, dbPath, cfg.Database)
+
+	doltNewMutex.Lock()
+	s, err := dolt.New(ctx, cfg)
+	doltNewMutex.Unlock()
+	if err != nil {
+		t.Fatalf("Failed to create dolt store: %v", err)
+	}
+
+	if err := s.SetConfig(ctx, "issue_prefix", prefix); err != nil {
+		s.Close()
+		t.Fatalf("Failed to set issue_prefix: %v", err)
+	}
+	if err := s.SetConfig(ctx, "types.custom", "molecule,gate,convoy,merge-request,slot,agent,role,rig,event,message"); err != nil {
+		s.Close()
+		t.Fatalf("Failed to set types.custom: %v", err)
+	}
+
+	t.Cleanup(func() {
+		s.Close()
+		if cfg.Database != "" {
+			dropTestDatabase(cfg.Database, testDoltServerPort)
+		}
+	})
+	return s
+}
+
 // dropTestDatabase drops a test database from the shared server (best-effort cleanup).
 func dropTestDatabase(dbName string, port int) {
 	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: port, User: "root"}.String()
