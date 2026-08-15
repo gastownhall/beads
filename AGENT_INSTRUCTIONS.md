@@ -8,6 +8,9 @@ This document contains detailed operational instructions for AI agents working o
 
 ### Code Standards
 
+Follow [CODING_STANDARDS.md](CODING_STANDARDS.md) for tests, comments, Go,
+and common footguns.
+
 - **Go version**: see `go.mod` for the required version (currently 1.26+)
 - **Linting**: `make ci-pr-lint` must pass with zero issues; see
   [engdocs/LINTING.md](engdocs/LINTING.md)
@@ -528,4 +531,5 @@ is the bidirectional override and takes precedence when both are set.
 - **README.md** - Main documentation (keep this updated!)
 - **ADVANCED.md** - Advanced features (rename, merge, compaction)
 - **CONTRIBUTING.md** - Contribution guidelines
+- **CODING_STANDARDS.md** - Tests, comments, Go, and common footguns
 - **SECURITY.md** - Security policy

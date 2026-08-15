@@ -7,6 +7,7 @@ rules here; those details drift quickly when repeated across agent entrypoints.
 
 - **Workflow and safety**: [AGENTS.md](AGENTS.md)
 - **Detailed agent operations**: [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md)
+- **Coding standards**: [CODING_STANDARDS.md](CODING_STANDARDS.md)
 - **Architecture orientation**: [engdocs/CLAUDE.md](engdocs/CLAUDE.md)
 - **PR maintenance policy**: [PR_MAINTAINER_GUIDELINES.md](PR_MAINTAINER_GUIDELINES.md)
 

@@ -30,6 +30,8 @@ beads is small and clean. PRs that respect the existing layering land fastest. T
 
 ## Code Style
 
+Follow [CODING_STANDARDS.md](CODING_STANDARDS.md) for the full contract.
+
 **Minimize inline code comments.** The reviewer routinely asks for inline comments to be removed. Let the commit message and PR description carry the why. Use comments only for non-obvious invariants that cannot be expressed in the code itself.
 
 **Commit messages over inline comments.** If you feel the need to explain a block of code with a comment, write that explanation in the commit message instead.

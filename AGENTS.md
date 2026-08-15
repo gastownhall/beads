@@ -14,6 +14,7 @@ expected and should not be flagged.
 
 - **Issue Tracking** - How to use bd for work management
 - **Development Guidelines** - Code standards and testing
+- **Coding Standards** - Read [CODING_STANDARDS.md](CODING_STANDARDS.md) for tests, comments, Go, and common footguns
 - **Project Scope** - Read [engdocs/PROJECT_CHARTER.md](engdocs/PROJECT_CHARTER.md) before adding new feature surface area
 - **Visual Design System** - Status icons, colors, and semantic styling for CLI output
 - **Contributor Protection** - Read [CONTRIBUTING.md](CONTRIBUTING.md) before handling external PRs

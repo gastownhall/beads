@@ -51,13 +51,19 @@ second test policy.
 
 ## Code Style
 
-We follow standard Go conventions:
+Follow [CODING_STANDARDS.md](CODING_STANDARDS.md) for tests, comments, Go,
+and common footguns. That file is the contributor contract. Command matrices
+and lint-gate details stay in [engdocs/TESTING.md](engdocs/TESTING.md) and
+[engdocs/LINTING.md](engdocs/LINTING.md).
+
+We also follow standard Go conventions:
 
 - Use `gofmt` to format your code (runs automatically in most editors)
 - Follow the [Effective Go](https://golang.org/doc/effective_go) guidelines
 - Keep functions small and focused
 - Write clear, descriptive variable names
-- Add comments for exported functions and types
+- Add comments only for invariants and non-obvious reasons; see
+  [CODING_STANDARDS.md](CODING_STANDARDS.md)
 
 ### Linting
 

@@ -112,6 +112,11 @@ make check-testing-short
 
 ## Test Design
 
+Quality bars that apply to every tier — real boundaries, no mocks of owned
+code, assert production results — live in
+[CODING_STANDARDS.md](../CODING_STANDARDS.md). This section is the seam and
+admission rules.
+
 ### Seams, Scenarios, and Doubles
 
 Write one scenario at the smallest seam that demonstrates the behavior. Cover

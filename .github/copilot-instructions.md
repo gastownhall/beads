@@ -120,6 +120,7 @@ Use the beads MCP server for native function calls instead of shell commands:
 ### Key Documentation
 - **AGENTS.md** - Comprehensive AI agent guide (detailed workflows, advanced features)
 - **AGENT_INSTRUCTIONS.md** - Development procedures, testing, releases
+- **CODING_STANDARDS.md** - Tests, comments, Go, and common footguns
 - **README.md** - User-facing documentation
 - **docs/CLI_REFERENCE.md** - Complete command reference
 
