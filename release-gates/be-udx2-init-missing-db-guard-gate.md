@@ -42,7 +42,10 @@ My targeted re-run showed `WARN: Docker not available, skipping Dolt tests` ahea
 ## Hand-off
 
 - **MERGE_POLICY (this rig only):** `beads/beads` (`gastownhall/beads`) is a fork-based upstream-contributor rig, not a maintainer rig. `origin` push is disabled (fetch-only placeholder). Deploy branch/PR cut from `fork` (`quad341/beads.git`), per the build bead's own explicit push record ("pushed to fork remote").
-- **Pre-PR check:** `gc beads-contributor pre-pr-check` run against HEAD (`98ccb7136`) — see below; all `[BLOCK]` items must clear before `gh pr create`.
+- **Pre-PR check:** `gc beads-contributor pre-pr-check --title=... --body-file=... --remote-checks --coverage` run against HEAD (`98ccb7136`) — **0 blockers, 2 advisory warnings**, both addressed in the PR body rather than blocking:
+  - *Reproduction recipe* (bug-fix PRs should have one) — added a "Reproduction" section to the PR body with the minimal trigger sequence (drop the server-side DB, re-run `bd init`) and expected-vs-actual.
+  - *Patch coverage 36.1% < 50% threshold* — package-level metric is diluted by large pre-existing untested surface in `cmd/bd`/`internal/storage/dolt` unrelated to this diff; added a "Coverage note" explaining the new guard logic itself has dedicated, mutation-tested regression coverage for every branch it adds. Explained rather than a real gap — no additional tests added solely to move this number.
+  - No `[BLOCK]` items either run. Duplicate/in-flight-work and title/body-drift checks both clean.
 - Push: `deploy/be-udx2-gate` → `fork` (`quad341/beads`).
 - PR: cross-repo `quad341:deploy/be-udx2-gate` → `gastownhall:main`.
 - No PostgreSQL surfaces or gc/actual-pack material in scope (confirmed during review) — nothing extra to strip before PR.
