@@ -186,6 +186,67 @@ func TestDoctorPersistentPreRunPreservesSourceDatabaseAcrossRedirect(t *testing.
 	}
 }
 
+// TestDoctorPersistentPreRunExplicitDBTargetOverridesAmbientRedirect covers
+// be-fyt round 1: the be-xil fix above called preserveRedirectSourceDatabase
+// unconditionally in the skipsStoreInit branch (main.go ~1168), unlike its
+// dbPath-guarded sibling at ~1223. beads.GetRedirectInfo() always resolves
+// from the ambient CWD repo's local .beads regardless of --db/BEADS_DIR
+// (bd-wayc3), so when the ambient repo itself has an active redirect AND the
+// caller passes an explicit --db target, the ambient repo's redirect-source
+// database silently shadowed the explicit target's own configured database —
+// reopening be-xil's exact "wrong database" failure mode via a narrower
+// trigger. Neither TestDoctorPersistentPreRunUsesExplicitDBTarget (no
+// ambient redirect) nor TestDoctorPersistentPreRunPreservesSourceDatabaseAcrossRedirect
+// (no explicit --db target) exercises the combination; this test does.
+func TestDoctorPersistentPreRunExplicitDBTargetOverridesAmbientRedirect(t *testing.T) {
+	ambientSourceDir := filepath.Join(t.TempDir(), "ambient-source")
+	ambientSourceBeadsDir := filepath.Join(ambientSourceDir, ".beads")
+	writeTestConfigYAML(t, ambientSourceBeadsDir, "")
+	writeMetadataConfig(t, ambientSourceBeadsDir, configfile.DoltModeServer, "ambient_source_db")
+
+	ambientSharedBeadsDir := filepath.Join(t.TempDir(), "ambient-shared", ".beads")
+	writeTestConfigYAML(t, ambientSharedBeadsDir, "")
+	writeMetadataConfig(t, ambientSharedBeadsDir, configfile.DoltModeServer, "ambient_shared_default_db")
+
+	if err := os.WriteFile(filepath.Join(ambientSourceBeadsDir, "redirect"), []byte(ambientSharedBeadsDir), 0o600); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+
+	targetRepo := filepath.Join(t.TempDir(), "target")
+	targetBeadsDir := filepath.Join(targetRepo, ".beads")
+	writeTestConfigYAML(t, targetBeadsDir, "")
+	writeMetadataConfig(t, targetBeadsDir, configfile.DoltModeServer, "explicit_target_db")
+
+	// Run from within the ambient repo, whose own .beads has an active
+	// redirect, while an explicit --db points at a wholly unrelated target.
+	t.Chdir(ambientSourceDir)
+	t.Setenv("BEADS_DIR", ambientSourceBeadsDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+
+	targetDBPath := filepath.Join(targetBeadsDir, "dolt")
+	dbPath = targetDBPath
+	if flag := rootCmd.PersistentFlags().Lookup("db"); flag != nil {
+		flag.Changed = true
+	}
+
+	if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
+
+	if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want \"\" (ambient repo's redirect-source database leaked past an explicit --db target)", got)
+	}
+	if got := os.Getenv("BEADS_DIR"); got != targetBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q (explicit --db target)", got, targetBeadsDir)
+	}
+}
+
 func TestBootstrapPersistentPreRunUsesExplicitDBTarget(t *testing.T) {
 	callerRepo := filepath.Join(t.TempDir(), "caller")
 	callerBeadsDir := filepath.Join(callerRepo, ".beads")
