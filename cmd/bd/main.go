@@ -1169,7 +1169,16 @@ var rootCmd = &cobra.Command{
 		// database instead of the source's, producing false "wrong database"
 		// diagnoses against an unrelated rig's schema.
 		if skipsStoreInit {
-			preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			// be-fyt round 1: guard exactly like the store-requiring sibling at
+			// line ~1223 does. beads.GetRedirectInfo() always resolves from the
+			// ambient CWD repo's local .beads regardless of --db/BEADS_DIR
+			// (bd-wayc3), so calling it unconditionally let an explicit --db/
+			// BEADS_DB/BD_DB target's own database be silently shadowed by the
+			// ambient repo's unrelated redirect-source database — reopening
+			// be-xil's failure mode via a narrower trigger.
+			if dbPath == "" {
+				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			}
 			beadsDir := selectedNoDBBeadsDir(cmd)
 			prepareSelectedNoDBContext(beadsDir)
 			refreshBoundCommandConfig(cmd)
