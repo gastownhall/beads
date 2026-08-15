@@ -109,6 +109,12 @@ func TestInitFreshWithUnreachableGitOriginSucceeds(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(workDir, ".beads")); err != nil {
 		t.Fatalf(".beads should have been created by a successful init: %v", err)
 	}
+
+	if _, err := os.Stat(filepath.Join(homeDir, ".beads", "eventsData")); !os.IsNotExist(err) {
+		t.Errorf("metrics queue dir was created under the isolated HOME (err=%v); "+
+			"the detached send-metrics child will race t.TempDir cleanup "+
+			"(see test_repo_beads_guard_test.go:118)", err)
+	}
 }
 
 // TestInitReinitLocalConfiguredRemoteWithDoltDataRefuses is the sibling case:
