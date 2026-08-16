@@ -203,6 +203,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	// 'a, b'` stores " b" with pflag's leading space and can never match its own
 	// filter.
 	in.labels = utils.NormalizeLabels(in.labels)
+	warnLabelsContainingWhitespace(in.labels)
 	in.deps, _ = cmd.Flags().GetStringSlice("deps")
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")

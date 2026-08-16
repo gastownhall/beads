@@ -51,6 +51,7 @@ Example:
 		issueType, _ := cmd.Flags().GetString("type")
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 		parentID, _ := cmd.Flags().GetString("parent")
 
 		priority, err := validation.ValidatePriority(priorityStr)

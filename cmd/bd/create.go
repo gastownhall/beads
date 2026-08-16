@@ -181,6 +181,7 @@ var createCmd = &cobra.Command{
 			labels = append(labels, labelAlias...)
 		}
 		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")

@@ -25,7 +25,7 @@ Labels provide flexible, multi-dimensional categorization for issues beyond the 
 ## Quick Start
 
 ```bash
-# Add labels when creating issues
+# Add labels when creating issues (comma-separated)
 bd create "Fix auth bug" -t bug -p 1 -l auth,backend,urgent
 
 # Add labels to existing issues
@@ -56,6 +56,41 @@ bd list --label-any frontend,backend
 # Combine filters
 bd list --status open --priority 1 --label security
 ```
+
+## Separating labels, and labels with spaces
+
+Labels are separated by **commas**, or by repeating the flag:
+
+```bash
+bd create "Fix auth bug" -l auth,backend
+bd create "Fix auth bug" -l auth -l backend
+```
+
+A space does **not** separate labels. bd honours the word boundaries your shell
+already decided, exactly as it does for a filename containing a space — so all
+three of these create the single label `good first issue`:
+
+```bash
+bd create "Starter task" -l 'good first issue'
+bd create "Starter task" -l "good first issue"
+bd create "Starter task" -l good\ first\ issue
+```
+
+Because that is also what a missed comma looks like, bd warns when it stores a
+label containing a space:
+
+```
+⚠ Stored "auth backend" as ONE label — it contains a space.
+  If you meant several labels, separate them with commas (a,b) or repeat the flag.
+```
+
+The warning is advice, not an error — the label is stored as asked. Silence it
+with `--quiet`. To find labels already stored this way in an existing database,
+run `bd doctor` and look at the `Label Whitespace` check.
+
+Note that an *unquoted* space is not a label separator either — it ends the
+flag's value, so `-l auth backend` leaves `backend` as a stray positional
+argument and the command fails.
 
 ## Common Label Patterns
 

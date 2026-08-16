@@ -6,28 +6,32 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 // labelTables are the label tables scanned for whitespace damage, mirroring
 // issueops.WispTableRouting.
 var labelTables = []string{"labels", "wisp_labels"}
 
-// LabelWhitespaceAnomalies summarizes one table's labels that no filter can
-// match (#5812).
+// LabelWhitespaceAnomalies summarizes one table's labels carrying whitespace
+// damage (#5812).
 //
-// Both classes are unambiguous corruption: bd normalizes labels on every FILTER
-// path but historically did not on any WRITE path, so a stored " a" can never
-// match its own `--label a` filter and a filtered list is silently short.
+// Untrimmed and Blank are unambiguous corruption: bd normalizes labels on every
+// FILTER path but historically did not on any WRITE path, so a stored " a" can
+// never match its own `--label a` filter and a filtered list is silently short.
 //
-// A label whose trimmed form still contains whitespace (`--labels 'a b'` storing
-// one label rather than two) is deliberately NOT reported here. That case turns
-// on what a space between labels should mean, which is a semantic question this
-// change does not settle — and "good first issue" is a legitimate multi-word
-// label, so it cannot be called corruption without deciding that first.
+// Internal — a trimmed label that still contains a space — is reported
+// SEPARATELY and is not called corruption. bd honors the shell's word
+// boundaries, so `--labels 'one two'` legitimately means one label, exactly as
+// it means one filename. But it is also what someone typed when they meant a
+// comma, which is how #5812's 150 corrupt rows were made. New writes now warn
+// at the keystroke; this class is how a database finds the ones already in it,
+// and a human decides which were meant.
 type LabelWhitespaceAnomalies struct {
 	Table     string
 	Untrimmed []LabelRow // label differs from its trimmed form
 	Blank     []LabelRow // label is empty or whitespace-only
+	Internal  []LabelRow // trimmed label still contains whitespace
 }
 
 // LabelRow identifies one damaged label by the issue carrying it.
@@ -46,15 +50,17 @@ const (
 	LabelBlank
 	// LabelUntrimmed has leading or trailing whitespace.
 	LabelUntrimmed
+	// LabelInternalSpace is trimmed but still contains whitespace.
+	LabelInternalSpace
 )
 
-// ClassifyLabelWhitespace reports whether a label is one no filter can match,
+// ClassifyLabelWhitespace reports which class of whitespace a label carries,
 // using strings.TrimSpace so that tabs, newlines and Unicode spaces are treated
 // exactly as utils.NormalizeLabels treats them.
 //
-// A label whose trimmed form still contains whitespace is LabelClean here: it is
-// matchable by an identical filter string, so it is not corruption by this
-// definition, whatever else it may be.
+// A label is reported under one class only: leading/trailing whitespace is the
+// actionable finding for an untrimmed label, so it is not also counted as an
+// internal space.
 func ClassifyLabelWhitespace(label string) LabelWhitespaceClass {
 	trimmed := strings.TrimSpace(label)
 	switch {
@@ -62,14 +68,16 @@ func ClassifyLabelWhitespace(label string) LabelWhitespaceClass {
 		return LabelBlank
 	case trimmed != label:
 		return LabelUntrimmed
+	case strings.ContainsFunc(trimmed, unicode.IsSpace):
+		return LabelInternalSpace
 	default:
 		return LabelClean
 	}
 }
 
-// Total returns the number of damaged rows across both classes.
+// Total returns the number of flagged rows across all three classes.
 func (a LabelWhitespaceAnomalies) Total() int {
-	return len(a.Untrimmed) + len(a.Blank)
+	return len(a.Untrimmed) + len(a.Blank) + len(a.Internal)
 }
 
 // ScanLabelWhitespace reports labels carrying whitespace damage in both label
@@ -112,6 +120,8 @@ func ScanLabelWhitespace(ctx context.Context, db *sql.DB) ([]LabelWhitespaceAnom
 				a.Blank = append(a.Blank, row)
 			case LabelUntrimmed:
 				a.Untrimmed = append(a.Untrimmed, row)
+			case LabelInternalSpace:
+				a.Internal = append(a.Internal, row)
 			}
 		}
 		_ = rows.Close()
@@ -121,6 +131,7 @@ func ScanLabelWhitespace(ctx context.Context, db *sql.DB) ([]LabelWhitespaceAnom
 		if a.Total() > 0 {
 			sortLabelRows(a.Untrimmed)
 			sortLabelRows(a.Blank)
+			sortLabelRows(a.Internal)
 			out = append(out, a)
 		}
 	}

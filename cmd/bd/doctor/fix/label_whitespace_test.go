@@ -21,12 +21,12 @@ func TestClassifyLabelWhitespace(t *testing.T) {
 		{"trailing space", "theme:b ", LabelUntrimmed},
 		{"trailing newline", "theme:b\n", LabelUntrimmed},
 
-		// An internal space is matchable by an identical filter string, so it is
-		// not corruption by this definition. Whether a space between labels
-		// should separate them is a semantic question settled elsewhere.
-		{"internal space", "theme:a theme:b", LabelClean},
-		{"internal tab", "theme:a\ttheme:b", LabelClean},
-		{"multi-word github label", "good first issue", LabelClean},
+		// A space-containing label is legal — the shell said one word — but it is
+		// also what a missed comma looks like, so it is surfaced for review
+		// rather than called corruption.
+		{"internal space", "theme:a theme:b", LabelInternalSpace},
+		{"internal tab", "theme:a\ttheme:b", LabelInternalSpace},
+		{"multi-word github label", "good first issue", LabelInternalSpace},
 
 		// Outer whitespace is the finding even when the label also has an
 		// internal space — the trimmed form is what a filter would match.

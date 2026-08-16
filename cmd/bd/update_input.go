@@ -146,6 +146,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	if cmd.Flags().Changed("add-label") {
 		addLabels, _ := cmd.Flags().GetStringSlice("add-label")
 		in.addLabels = utils.NormalizeLabels(addLabels)
+		warnLabelsContainingWhitespace(in.addLabels)
 	}
 	if cmd.Flags().Changed("remove-label") {
 		removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
@@ -157,6 +158,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		// normalizes to empty, and a nil slice here would still be a non-nil
 		// pointer to an empty slice, which is the clear instruction.
 		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 		in.setLabels = &labels
 	}
 	if cmd.Flags().Changed("parent") {
