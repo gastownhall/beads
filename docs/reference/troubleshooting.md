@@ -387,6 +387,38 @@ bd dolt stop
 bd dolt start
 ```
 
+### Proxied-server mode: "dolt is older than the recommended minimum" warning
+
+Managed proxied-server mode spawns an external `dolt` CLI it finds via
+`BEADS_DOLT_BIN` or PATH (in that order — see
+[Environment Variables](/reference/configuration#environment-variables); a
+clone-local sidecar setting will slot between the two when the sidecar
+reader lands in contract part 2). On
+startup it probes that binary with `dolt version` and recommends
+**dolt >= 2.0.0**: the 2026-07-25 cross-version compatibility matrix found
+that cross-reading storage written by the beads Dolt Go module (as opposed
+to writing it, which older dolt CLIs can also do) requires dolt >= 2.0.0 —
+dolt 1.85 can *serve* proxied mode but cannot *read* storage the module
+wrote, and dolt 1.52.1 fails at both serving and reading.
+
+This is a warning, not a hard failure — there is deliberately no hard
+version floor, so an older dolt can still be used at your own risk. To
+resolve it, install a current dolt (https://docs.dolthub.com/introduction/installation)
+and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
+
+The advisory repeats at most once per day, not on every command: the probe
+result and the warning timestamp are cached (keyed by the binary's path,
+size, and mtime, in the user cache directory), so day-to-day `bd` use stays
+quiet while the reminder still resurfaces until the binary is upgraded.
+Upgrading or replacing the dolt binary re-probes immediately.
+
+If the probe can't parse `dolt version`'s output at all (most commonly a
+dev/custom build with non-standard version output), that also only warns —
+proxied-server mode still starts, since an unparseable version means "we
+don't know", not "this is definitely broken". A genuinely missing or
+broken `dolt` binary (not found, not executable, or the probe itself
+fails/times out) is a hard error, not a warning.
+
 ## Sync Issues
 
 ### Changes not syncing

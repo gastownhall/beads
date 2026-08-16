@@ -283,3 +283,13 @@ require (
 )
 
 tool github.com/oapi-codegen/oapi-codegen/v2/cmd/oapi-codegen
+
+// v1.2.0 and v1.2.1 were published accidentally without release testing and
+// auto-migrated local databases to an unsupported schema (v54..v65); v1.1.1
+// was a burned tag that never shipped. v1.2.2 re-releases the tested 1.1
+// line — retracting these keeps `go install ...@latest` off the bad versions.
+retract (
+	v1.2.1 // accidental untested release; superseded by v1.2.2
+	v1.2.0 // burned tag for the accidental 1.2 release, never published
+	v1.1.1 // burned tag, never published; superseded by v1.1.2
+)

@@ -152,7 +152,11 @@ func loadWatchedIssues(ctx context.Context, store storage.DoltStorage, filter ty
 	return issues, nil
 }
 
-func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue, truncated bool) {
+// readyFiltered carries watchIssues' own --ready state so the refreshed summary
+// names its scope instead of asserting an in-progress count the ready filter
+// forced to zero. A watch loop is where a stale "0 in progress" is most likely
+// to be read as a live fact, so this is the path that most needs it.
+func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore, issues []*types.Issue, truncated, readyFiltered bool) {
 	var allDeps map[string][]*types.Dependency
 	if store != nil {
 		deps, err := store.GetAllDependencyRecords(ctx)
@@ -160,7 +164,7 @@ func displayWatchedIssueList(ctx context.Context, store watchListDependencyStore
 			allDeps = deps
 		}
 	}
-	displayPrettyListWithDeps(issues, true, allDeps, truncated)
+	displayPrettyListWithDeps(issues, true, allDeps, truncated, readyFiltered)
 }
 
 // watchIssues returns an error only for the initial query — a failure there
@@ -180,7 +184,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 	// below depends on; what is left is the cut and its verdict, and those are
 	// the shared epilogue's on every other listing this command has.
 	issues, truncated := workapi.FinishPage(issues, "", false, effectiveLimit, false)
-	displayWatchedIssueList(ctx, store, issues, truncated)
+	displayWatchedIssueList(ctx, store, issues, truncated, ready)
 	printTruncationHint(truncated, effectiveLimit)
 	lastSnapshot := issueSnapshot(issues)
 
@@ -210,7 +214,7 @@ func watchIssues(ctx context.Context, store storage.DoltStorage, filter types.Is
 			snap := issueSnapshot(issues)
 			if snap != lastSnapshot {
 				lastSnapshot = snap
-				displayWatchedIssueList(ctx, store, issues, truncated)
+				displayWatchedIssueList(ctx, store, issues, truncated, ready)
 				printTruncationHint(truncated, effectiveLimit)
 				fmt.Fprintf(os.Stderr, "\nWatching for changes... (Press Ctrl+C to exit)\n")
 			}
@@ -252,7 +256,7 @@ func runListProxiedHierarchicalParent(ctx context.Context, uw uow.UnitOfWork, in
 	}
 
 	// Hierarchical --parent walks use an unlimited per-level query; never page-truncated.
-	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false)
+	displayPrettyListWithDepsMode(treeIssues, false, depsByIssueID, in.depsMode, false, in.ReadyFlag)
 	printSkipLabelsFooter(in.SkipLabels)
 	return nil
 }
