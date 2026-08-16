@@ -74,6 +74,83 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # examples/ holds separate Go modules that reach the parent through a
+  # `replace` directive, so their go.mod/go.sum record the parent's whole
+  # dependency graph and go stale whenever the root module's does. Nothing in
+  # CI compiled them, so that drift was invisible: on 2026-08-01 BOTH example
+  # modules failed a plain `go build` on main with "updates to go.mod needed".
+  # Examples are the first code a new user copies; this keeps them buildable.
+  #
+  # Advisory on purpose, and NOT in ci-gate's required list.
+  #
+  # Because of the `replace` directive, any root go.mod change that is not
+  # mirrored into the examples fails this job. Whether that should block a merge
+  # is a maintainer call about contributor friction, so this PR does not make it
+  # one. Advisory has to be implemented at the STEP level: a job-level
+  # continue-on-error job still reports its check run as FAILURE in the PR
+  # rollup (only the workflow-run conclusion turns success), and pr-preflight
+  # and the pr-babysit merge patrol gate on per-check-run conclusions — so a
+  # job-level red here would stall the merge lane repo-wide while claiming to
+  # be optional. Step-level continue-on-error (the cygwin-leg precedent below)
+  # keeps the check run green and surfaces failures as warning annotations.
+  #
+  # To promote it to a real gate: drop the step's continue-on-error and the
+  # warning step, then add `build-examples` to ci-gate's `needs`,
+  # `CI_GATE_REQUIRED`, and its env map.
+  build-examples:
+    name: Build example modules
+    runs-on: ubuntu-latest
+    # No job-level timeout on purpose: a job-level timeout CANCELS the job,
+    # and a cancelled advisory job is a red check run — blocking again by a
+    # different door. Instead every step below carries its own
+    # timeout-minutes AND continue-on-error, so a hang or failure anywhere
+    # (setup download stall, cache stall, build hang) degrades to a warning
+    # annotation while the job itself always concludes green.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        id: checkout
+        continue-on-error: true
+        timeout-minutes: 5
+
+      - name: Set up Go
+        id: setup-go
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      # The examples' dependency graph is the parent module's (via the
+      # `replace` directive), so the repo-wide module cache key is a
+      # near-perfect hit; without it this job cold-downloads the whole
+      # dolt-sized graph on every PR.
+      - name: Restore Go module cache
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/go/pkg/mod
+          key: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-${{ hashFiles('go.mod', 'go.sum') }}
+          restore-keys: beads-go-mod-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-
+
+      - name: Type-check every module under examples/
+        id: build-examples
+        if: steps.checkout.outcome == 'success' && steps.setup-go.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: ./scripts/build-examples.sh
+
+      - name: Warn when example modules are stale or fail to build
+        if: steps.build-examples.outcome == 'failure'
+        run: |
+          echo "::warning title=Example modules out of date::examples/ failed to type-check against this tree. Run 'go mod tidy' in each module under examples/ (see scripts/build-examples.sh output above). Advisory only; this does not block the merge."
+
+      - name: Warn when the advisory job could not run at all
+        if: steps.checkout.outcome != 'success' || steps.setup-go.outcome != 'success'
+        run: |
+          echo "::warning title=Example build check skipped::checkout or Go setup failed, so examples/ could not be checked this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}). Advisory only; this does not block the merge."
+
   # Fast check: every `go build|test|run|generate|install` invocation in
   # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
   # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
@@ -193,6 +270,30 @@ jobs:
 
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
+
+  # internal/doltversion carries Windows-specific branches (PATHEXT
+  # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
+  # executable-bit carve-out) and its behavioral tests run there via .cmd
+  # stubs — but the Ubuntu test jobs compile those branches without ever
+  # executing them. Same pattern as the liveness job above: run exactly
+  # this package on windows-latest so the platform it targets actually
+  # exercises it at PR time. Small on purpose (~1 min).
+  test-windows-doltversion:
+    name: Test (Windows) doltversion package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run doltversion package tests on Windows
+        run: go test -tags gms_pure_go -count=1 ./internal/doltversion/
 
   # Destructive worktree removal depends on native Windows path identity.
   # This focused process suite requires NTFS per-directory case sensitivity

@@ -7,6 +7,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`bd reclaim` summarizes the leases its replica guard declined instead of
+  naming every one, every run** (wy-sp2l4). A lease granted by another replica
+  is by construction never reclaimed here, so the audit was not a one-off: it
+  repeated identically on every run, one stderr line per stranded remote lease.
+  A supervisor on a 1-minute timer against a federated store with 47 of them
+  printed 47 lines a minute, indefinitely. The default is now ONE line —
+  `reclaim: skipped 47 stale leases granted by other replicas — "mini" (30),
+  "mini2" (17), not this node ("laptop")…` — naming at most three replicas and
+  collapsing the rest into a count, with the exact total preserved. `bd -v`
+  (or `BD_DEBUG=1`) expands it to the per-lease lines, itself capped at 20 with
+  a collapsed tail. Still stderr-only: `bd reclaim --json` owns stdout and its
+  payload is unchanged. Under `--quiet` the audit now skips its queries
+  entirely rather than running them to discard the output.
+
+### Documentation
+
+- **The heartbeat/re-home invariant and the two states it can strand are now
+  documented where the code lives** (wy-sp2l4): a heartbeat proves the holder
+  is alive, not that the lease moved, so `granted_node` is backfilled but never
+  overwritten. A renamed replica (`mini` → `mini2`) and an imported foreign
+  lease whose holder name also exists locally therefore keep reading foreign
+  while a local heartbeat keeps them alive, recoverable only with
+  `bd reclaim --any-replica`. Reviewed and KEPT rather than re-homed: re-homing
+  would let a heartbeat silently reassign enforcement of a lease another
+  replica granted — the robbery the guard exists to prevent. Recorded in
+  `HeartbeatIssueInTx`, `docs/multi-agent/federation.md`, and
+  `bd reclaim --help`.
+
+## [1.2.2] - 2026-08-15
+
+Recovery release, cut from the v1.1.2 tree on branch `release/v1.2.2` (not
+from main). v1.2.0 and v1.2.1 were published by accident on 2026-08-11
+without release testing (v1.2.0's tag burned pre-publish; only v1.2.1
+reached users). This release supersedes them by re-releasing the **tested
+1.1 line**: it is the v1.1.2 code under a higher version number, so every
+install channel (Homebrew, npm, the install script,
+`go install ...@latest`) moves forward onto tested code. The 1.2.x-only
+features listed under [1.2.1] below are **not** in this release; they
+remain on main for a properly tested future release.
+
+**If v1.2.1 migrated your database** (running any command once was enough),
+v1.2.2 stops with `schema version mismatch: database is at v65, binary
+knows up to v53`. See the recovery guide
+([site](https://beads.gascity.com/recovery/accidental-1-2-1-release),
+[repo copy at the tag](https://github.com/gastownhall/beads/blob/v1.2.2/docs/RECOVERY-1.2.1.md))
+for the two-minute fix (roll the schema cursor back to v53) and a verified
+stopgap (`BD_IGNORE_SCHEMA_SKEW=1`).
+
+### Changed
+
+- **The forward-skew error recognizes the accidental-release window** (on
+  the release branch): a v53 binary opening a database at schema v54–v65
+  points at the recovery guide instead of advising "install the latest
+  release" (which would loop back to that binary).
+- **`go.mod` retracts v1.2.1, v1.2.0, and v1.1.1** so
+  `go install github.com/steveyegge/beads/cmd/bd@latest` resolves to this
+  release instead of the accidental one. (The retract block is also
+  carried on main so future tags keep the retractions.)
+
 ## [1.2.1] - 2026-08-11
 
 (Released as 1.2.1: the v1.2.0 tag burned pre-publish on a freebsd
