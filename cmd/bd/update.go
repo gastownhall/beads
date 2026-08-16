@@ -253,15 +253,15 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("add-label") {
 			addLabels, _ := cmd.Flags().GetStringSlice("add-label")
-			updates["add_labels"] = addLabels
+			updates["add_labels"] = utils.NormalizeLabels(addLabels)
 		}
 		if cmd.Flags().Changed("remove-label") {
 			removeLabels, _ := cmd.Flags().GetStringSlice("remove-label")
-			updates["remove_labels"] = removeLabels
+			updates["remove_labels"] = utils.NormalizeLabels(removeLabels)
 		}
 		if cmd.Flags().Changed("set-labels") {
 			setLabels, _ := cmd.Flags().GetStringSlice("set-labels")
-			updates["set_labels"] = setLabels
+			updates["set_labels"] = utils.NormalizeLabels(setLabels)
 		}
 		if cmd.Flags().Changed("parent") {
 			parent, _ := cmd.Flags().GetString("parent")
