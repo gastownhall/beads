@@ -3170,6 +3170,49 @@ func (s *DoltStore) CommitWithConfig(ctx context.Context, message string) error 
 	})
 }
 
+// CommitAll creates a single Dolt commit of ALL uncommitted changes in the
+// working set — config included — with the given message, and reports whether
+// a commit actually landed. It is the storage entry point for the explicit
+// operator commands (bd vc commit, bd dolt commit), which promise "any
+// uncommitted changes in the working set":
+//
+//   - Unlike Commit, it stages config. Plain Commit deliberately excludes
+//     config (GH#2455) to keep AUTOMATIC commits from sweeping a concurrent
+//     writer's half-applied config change, but that made the explicit
+//     commands silently skip out-of-band config dirt (a table modified by an
+//     external writer, or by any path that bypasses bd's dirty-table
+//     tracking) — a working set the doctor's dirty-working-set warning flags
+//     while recommending exactly these commands as the remedy. An operator
+//     explicitly asking to commit everything is the same trust level as
+//     CommitPending, which has always included config for that reason.
+//
+//   - The committed bool is the atomic signal the CLI's HEAD-before/
+//     HEAD-after comparison approximated (the committed-bool threading
+//     tracked as bd mybd-z9h7j; CommitPending already had the shape). It
+//     returns (false, nil) when nothing was committable — clean working set,
+//     or only dolt_ignore'd tables such as wisps dirty ('-A' skips those) —
+//     without the concurrent-writer misattribution race of comparing HEADs.
+func (s *DoltStore) CommitAll(ctx context.Context, message string) (bool, error) {
+	committed := false
+	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
+		conn, err := s.db.Conn(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to acquire connection: %w", err)
+		}
+		defer conn.Close()
+
+		if err := schema.DrainCall(ctx, conn, "CALL DOLT_COMMIT('-Am', ?, '--author', ?)", message, s.commitAuthorString()); err != nil {
+			if isDoltNothingToCommit(err) {
+				return nil
+			}
+			return s.wrapDoltPublicationFailure(ctx, "failed to commit", err)
+		}
+		committed = true
+		return nil
+	})
+	return committed, err
+}
+
 // doltAddAndCommit stages the specified tables and commits on a pinned
 // connection. This prevents DOLT_COMMIT('-Am') from sweeping up stale
 // working set changes from concurrent operations (GH#2455). Every caller has
@@ -3275,19 +3318,11 @@ func (s *DoltStore) CommitPending(ctx context.Context, actor string) (bool, erro
 	}
 
 	msg := s.buildBatchCommitMessage(ctx, actor)
-	// GH#2455: CommitPending is an explicit user action (bd dolt commit) that
-	// should include ALL pending changes, including config. Use CommitWithConfig
-	// instead of Commit to ensure intentional config changes are committed.
-	if err := s.CommitWithConfig(ctx, msg); err != nil {
-		// Dolt may report "nothing to commit" even when Status() showed changes
-		// (e.g., system tables or schema-only diffs). Treat as no-op.
-		errLower := strings.ToLower(err.Error())
-		if strings.Contains(errLower, "nothing to commit") || strings.Contains(errLower, "no changes") {
-			return false, nil
-		}
-		return false, err
-	}
-	return true, nil
+	// GH#2455: CommitPending is an explicit user action that should include ALL
+	// pending changes, including config. CommitAll does exactly that, and maps
+	// Dolt reporting "nothing to commit" despite the status pre-check (e.g.,
+	// system tables or schema-only diffs) to an honest (false, nil) no-op.
+	return s.CommitAll(ctx, msg)
 }
 
 // buildBatchCommitMessage generates a descriptive commit message summarizing
