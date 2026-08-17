@@ -164,13 +164,17 @@ func TestWrapUOWProviderFiltersProxiedReadyWork(t *testing.T) {
 }
 
 func TestWrapUOWProviderPreservesIssueReader(t *testing.T) {
-	provider := WrapUOWProvider(&fakeUOWProvider{uw: &fakeUOW{}}, nil, nil)
+	inner := &fakeUOWProvider{uw: &fakeUOW{}}
+	provider := WrapUOWProvider(inner, nil, nil)
 	source, ok := provider.(uow.IssueReaderSource)
 	if !ok {
 		t.Fatalf("wrapped provider %T does not preserve IssueReaderSource", provider)
 	}
 	if reader, err := source.IssueReader(); err != nil || reader == nil {
 		t.Fatalf("IssueReader() = %T, %v", reader, err)
+	}
+	if got := uow.UnwrapProvider(provider); got != inner {
+		t.Fatalf("UnwrapProvider() = %T, want the wrapped provider", got)
 	}
 }
 

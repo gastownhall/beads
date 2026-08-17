@@ -82,8 +82,8 @@ func TestExternalCapabilityBlocksEmbeddedReadyAndAppearsInTree(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetDependencyTree: %v", err)
 	}
-	if len(tree) != 2 || tree[1].ID != externalRef || tree[1].Status != types.StatusBlocked {
-		t.Fatalf("tree = %+v, want blocked synthetic external leaf", tree)
+	if len(tree) != 2 || tree[1].ID != externalRef || tree[1].Status != types.StatusOpen {
+		t.Fatalf("tree = %+v, want open synthetic external leaf", tree)
 	}
 
 	provider := &types.Issue{

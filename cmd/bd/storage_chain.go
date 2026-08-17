@@ -15,13 +15,13 @@ import (
 // wireStorageDecorators composes the storage chain in the order the rest of
 // bd expects:
 //
-//	caller → externaldeps.Store → HookFiringStore → InstrumentedStorage → raw DoltStorage
+//	caller → HookFiringStore → externaldeps.Store → InstrumentedStorage → raw DoltStorage
 //
 // telemetry.WrapStorage is a no-op when telemetry is disabled, so the
 // instrumentation layer is only present when BD_OTEL_ENABLED=true (or a
 // legacy BD_OTEL_* selector is set). The hook layer sits outside telemetry so
-// storage spans measure pure DB time without hook-firing overhead. External
-// dependency policy is outermost so all ready/tree callers observe it.
+// storage spans measure pure DB time without hook-firing overhead. The policy
+// sits directly beneath hooks so serve's one hook-layer peel retains it.
 //
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
@@ -31,10 +31,11 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
+	store = wireExternalDependencyPolicy(store)
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
-	return wireExternalDependencyPolicy(store)
+	return store
 }
 
 // wireExternalDependencyPolicy applies only the read/guard policy. Routed

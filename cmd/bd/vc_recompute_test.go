@@ -67,16 +67,16 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookAndTelemetryLayers(t *testing.T
 
 	// Prove the chain really is two layers deep, so this is not a
 	// hooks-only peel wearing a telemetry label.
-	ext, ok := decorated.(*externaldeps.Store)
+	hf, ok := decorated.(*storage.HookFiringStore)
 	if !ok {
-		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", decorated)
+		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", decorated)
 	}
-	hf, ok := ext.Unwrap().(*storage.HookFiringStore)
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
 	if !ok {
-		t.Fatalf("second decorator: got %T; want *storage.HookFiringStore", ext.Unwrap())
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
 	}
-	if _, ok := hf.Unwrap().(*telemetry.InstrumentedStorage); !ok {
-		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", hf.Unwrap())
+	if _, ok := ext.Unwrap().(*telemetry.InstrumentedStorage); !ok {
+		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", ext.Unwrap())
 	}
 
 	assertRecomputeReachesRaw(t, decorated, raw)
@@ -90,12 +90,12 @@ func TestBlockedAfterMergeRecomputerFor_PeelsHookLayerOnly(t *testing.T) {
 	raw := &recomputingStore{}
 	decorated := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
 
-	ext, ok := decorated.(*externaldeps.Store)
+	hf, ok := decorated.(*storage.HookFiringStore)
 	if !ok {
-		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", decorated)
+		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", decorated)
 	}
-	if _, ok := ext.Unwrap().(*storage.HookFiringStore); !ok {
-		t.Fatalf("second decorator: got %T; want *storage.HookFiringStore", ext.Unwrap())
+	if _, ok := hf.Unwrap().(*externaldeps.Store); !ok {
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
 	}
 
 	assertRecomputeReachesRaw(t, decorated, raw)

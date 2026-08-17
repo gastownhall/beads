@@ -39,20 +39,20 @@ func TestWireStorageDecorators_TelemetryOff_HookOn(t *testing.T) {
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
 
-	ext, ok := got.(*externaldeps.Store)
+	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
-		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
+		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	hf, ok := ext.Unwrap().(*storage.HookFiringStore)
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
 	if !ok {
-		t.Fatalf("second decorator: got %T; want *storage.HookFiringStore", ext.Unwrap())
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
 	}
-	if inner := hf.Unwrap(); inner.(*stubChainStore) != raw {
-		t.Errorf("HookFiringStore.Unwrap() should return raw store directly when telemetry off; got %T", inner)
+	if inner := ext.Unwrap(); inner.(*stubChainStore) != raw {
+		t.Errorf("external dependency policy should wrap raw store directly when telemetry off; got %T", inner)
 	}
 }
 
-// Asserts the full externaldeps.Store → HookFiringStore → InstrumentedStorage
+// Asserts the full HookFiringStore → externaldeps.Store → InstrumentedStorage
 // → raw chain that the rest of bd depends on for storage spans + bd.storage.* / bd.issue.count
 // metrics. This is the regression test for the original PR-3475 bug, where
 // WrapStorage was implemented but never called.
@@ -62,17 +62,17 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), false)
 
-	ext, ok := got.(*externaldeps.Store)
+	hf, ok := got.(*storage.HookFiringStore)
 	if !ok {
-		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
+		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	hf, ok := ext.Unwrap().(*storage.HookFiringStore)
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
 	if !ok {
-		t.Fatalf("second decorator: got %T; want *storage.HookFiringStore", ext.Unwrap())
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
 	}
-	inst, ok := hf.Unwrap().(*telemetry.InstrumentedStorage)
+	inst, ok := ext.Unwrap().(*telemetry.InstrumentedStorage)
 	if !ok {
-		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", hf.Unwrap())
+		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", ext.Unwrap())
 	}
 	if inner := inst.Unwrap(); inner.(*stubChainStore) != raw {
 		t.Errorf("InstrumentedStorage.Unwrap() should return raw store; got %T", inner)
