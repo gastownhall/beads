@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestProxiedServerReassignFence proves the bd-98s5c live-claim reassign

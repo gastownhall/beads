@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 func init() {

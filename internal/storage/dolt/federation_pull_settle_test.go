@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
 )
 
 // TestPullFromSettlesFKCascadeViolations is the end-to-end regression test for

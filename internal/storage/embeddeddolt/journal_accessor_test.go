@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestEventsJournalAccessor guards the embedded store's events-journal

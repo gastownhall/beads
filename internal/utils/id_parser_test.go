@@ -9,10 +9,10 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 func newTestStore(t *testing.T) *dolt.DoltStore {

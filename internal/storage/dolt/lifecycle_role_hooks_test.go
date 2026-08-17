@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // This file holds the server-backed store's answers to the OUT-OF-BAND hooks the

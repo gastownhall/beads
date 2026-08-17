@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // Audit cases for the "labels-comments-events" slice. Each case pins a strange

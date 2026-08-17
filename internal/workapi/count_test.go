@@ -5,8 +5,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // TestBuildCountFilterIncludeInfraMirrorsListFilter pins `bd count

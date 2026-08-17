@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 type fakeCommitPendingStore struct {

@@ -7,9 +7,9 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // validTablePattern matches valid table names

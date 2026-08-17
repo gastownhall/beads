@@ -3,8 +3,8 @@ package workapi
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // TestPinnedDefaultBySelector owns the rule that decides whether a listing

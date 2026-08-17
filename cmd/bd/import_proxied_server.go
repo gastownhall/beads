@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/types"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // proxiedImporter hands back the guarded bulk-import surface for the

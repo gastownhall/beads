@@ -11,10 +11,10 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // doctorTestServerPort returns the Dolt server port for doctor tests.

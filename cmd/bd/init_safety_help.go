@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/metrics"
 )
 
 // initSafetyHelpCmd documents the init flag surface and the destroy-token

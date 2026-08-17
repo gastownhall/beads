@@ -11,7 +11,7 @@ import (
 	"testing"
 
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 // TestFixMissingMetadata_NotBeadsWorkspace verifies that FixMissingMetadata

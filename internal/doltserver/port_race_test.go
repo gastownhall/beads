@@ -10,8 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/testutil/integration"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/testutil/integration"
 )
 
 // TestPortRace_ConcurrentStart verifies that when two goroutines call Start()

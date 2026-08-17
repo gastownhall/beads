@@ -5,8 +5,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func (s *testSuite) TestCommentSQLRepository() {

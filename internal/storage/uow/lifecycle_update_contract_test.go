@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestLifecycleUpdateContract runs the accessor-only Update half of the

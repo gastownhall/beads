@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // The role seam, and the one guarantee this package cannot get by asking for

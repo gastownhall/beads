@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // These cover the transport half of GET /v0/beads/dependencies: the two size

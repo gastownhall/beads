@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestEventsJournalPruneNeverSplitsASkewedPair is the regression guard for the

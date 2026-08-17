@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/journalops"
+	"github.com/jonbaldie/beads/journalops"
 )
 
 // The COMPILE-TIME half, which fires before any test runs. A pointer type is

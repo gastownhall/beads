@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/backend"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/backend"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 func TestErrCommitIndeterminateAliasesStorageSentinel(t *testing.T) {

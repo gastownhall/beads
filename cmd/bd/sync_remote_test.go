@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	internalbeads "github.com/steveyegge/beads/internal/beads"
-	internalgit "github.com/steveyegge/beads/internal/git"
+	internalbeads "github.com/jonbaldie/beads/internal/beads"
+	internalgit "github.com/jonbaldie/beads/internal/git"
 )
 
 func TestNormalizeRemoteURL(t *testing.T) {

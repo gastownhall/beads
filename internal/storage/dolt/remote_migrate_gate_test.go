@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/schema"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 // TestDoltNew_RemoteMigrateGate_BlocksReopen is a full-chain integration test:

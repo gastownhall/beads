@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // EnsureIssueIDAvailableInTx serializes same-shard creates and rejects occupied IDs.

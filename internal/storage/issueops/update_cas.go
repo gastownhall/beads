@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // CheckExpectedFieldsInTx reads the current assignee and status for id and

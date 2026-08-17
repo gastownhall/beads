@@ -16,8 +16,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // IterIssues streams issues matching the filter (slice-then-walk).

@@ -22,8 +22,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // ConfigKey is the workspace setting that turns the journal on.

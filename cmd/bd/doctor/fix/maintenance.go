@@ -6,8 +6,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // StaleClosedIssues deletes stale closed issues.

@@ -12,11 +12,11 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/backend"
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
-const internalPrefix = "github.com/steveyegge/beads/internal/"
+const internalPrefix = "github.com/jonbaldie/beads/internal/"
 
 // TestPublicSurfaceComplete is the drift guard on the external-backend door:
 // every named internal type reachable from the contract an external module

@@ -5,7 +5,7 @@ package embeddeddolt_test
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
 // TestQuerierContract runs the Querier contract against the embedded store,

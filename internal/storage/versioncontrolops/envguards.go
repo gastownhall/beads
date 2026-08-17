@@ -1,8 +1,8 @@
 package versioncontrolops
 
 import (
-	"github.com/steveyegge/beads/internal/githooksenv"
-	"github.com/steveyegge/beads/internal/gittraceenv"
+	"github.com/jonbaldie/beads/internal/githooksenv"
+	"github.com/jonbaldie/beads/internal/gittraceenv"
 )
 
 // withRemoteEnvGuards runs fn — an engine statement that can touch a

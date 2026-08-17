@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
 )
 
 // `bd serve` against a SERVER-MODE workspace — `bd init --server` pointed at a

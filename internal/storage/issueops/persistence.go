@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // PersistenceMoveResult reports the durable tables changed by a persistence move.

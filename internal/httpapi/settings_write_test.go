@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // The wire edge of the two settings WRITES, on a fake role.

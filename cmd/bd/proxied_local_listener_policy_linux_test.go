@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
 )
 
 func TestManagedLocalProxiedListenerPolicy(t *testing.T) {

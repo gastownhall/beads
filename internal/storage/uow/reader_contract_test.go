@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
 // The Reader contract, wired at the unit-of-work backend. This is the one

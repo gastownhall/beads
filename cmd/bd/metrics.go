@@ -12,8 +12,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/metrics"
 )
 
 // metricsCmd lets users see and control anonymous usage metrics without ever

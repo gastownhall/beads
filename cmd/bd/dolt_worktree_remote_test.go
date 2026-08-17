@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 func TestDoltRemoteAddPersistsSyncRemoteToSharedWorktreeConfig(t *testing.T) {

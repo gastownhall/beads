@@ -3,7 +3,7 @@ package issueops
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // Comment is one comment on an issue.

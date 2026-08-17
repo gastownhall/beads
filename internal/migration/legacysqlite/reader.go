@@ -21,9 +21,9 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 var acceptedVersions = map[string]bool{"0.49.6": true, "0.50.3": true}

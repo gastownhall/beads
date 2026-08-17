@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // These tests pin ignored migration 0023, the events-journal shape repair

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // bdStale runs "bd stale" with the given args and returns raw stdout.

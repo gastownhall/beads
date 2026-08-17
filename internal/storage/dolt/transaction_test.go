@@ -12,9 +12,9 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestRunInTransactionCallbackConnectionErrorIsNotReplayed establishes the

@@ -8,11 +8,11 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/utils"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 var molDistillCmd = &cobra.Command{

@@ -6,11 +6,11 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func TestReExportCommitIndeterminate(t *testing.T) {

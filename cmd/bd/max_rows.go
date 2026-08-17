@@ -6,8 +6,8 @@ import (
 	"os"
 	"strconv"
 
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // maxRowsEnvVar names the environment variable that opts in to the defensive

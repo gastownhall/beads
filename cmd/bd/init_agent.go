@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/templates/agents"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/templates/agents"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 // addAgentsInstructions creates or updates the agents file with embedded template content.

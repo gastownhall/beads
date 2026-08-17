@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 func TestCheckDatabaseIntegrity(t *testing.T) {

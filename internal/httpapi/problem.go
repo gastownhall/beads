@@ -13,10 +13,10 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // Every non-2xx byte this server emits is an RFC 9457 problem+json document

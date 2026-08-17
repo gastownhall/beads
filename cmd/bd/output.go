@@ -6,7 +6,7 @@ import (
 	"os"
 	"reflect"
 
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 const JSONSchemaVersion = 1

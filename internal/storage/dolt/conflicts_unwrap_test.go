@@ -3,7 +3,7 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // The wy-jpd3.5 review BLOCKER, guarded WITHOUT dolt (wy-wrq9o F6). The CLI

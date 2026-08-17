@@ -5,9 +5,9 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // metadataCASRequestMembers is the document's member list for

@@ -7,11 +7,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/cmd/bd/doctor/fix"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/ui"
 	"golang.org/x/term"
 )
 

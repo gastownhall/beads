@@ -9,8 +9,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)

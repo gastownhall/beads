@@ -3,7 +3,7 @@ package doctor
 import (
 	"fmt"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/jonbaldie/beads/cmd/bd/doctor/fix"
 )
 
 // CheckCrossTableDuplicates detects IDs that exist in both the issues and

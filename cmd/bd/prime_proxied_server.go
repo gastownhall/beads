@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // Proxied-server dual of prime's memory read (bd-mm8wf, from lion's #5361

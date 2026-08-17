@@ -4,7 +4,7 @@ import (
 	"errors"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // ClaimConflict describes why a claim failed, recovered from the claim error.

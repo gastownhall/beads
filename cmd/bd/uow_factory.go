@@ -9,13 +9,13 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/doltversion"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/doltversion"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 // doltVersionWarnOnce ensures the dolt-version advisory (old/unverifiable

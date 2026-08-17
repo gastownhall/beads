@@ -9,7 +9,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 // TestGetRepoContextForWorkspace_NormalRepo tests context resolution for a normal git repository

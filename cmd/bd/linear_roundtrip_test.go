@@ -13,9 +13,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/linear"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/linear"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // mockLinearServer is a stateful mock that only stores what the Linear client

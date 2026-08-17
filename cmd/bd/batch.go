@@ -10,11 +10,11 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // Scope note:

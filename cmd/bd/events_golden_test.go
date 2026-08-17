@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // goldenPath is the committed consumer contract: one journal line per record, in

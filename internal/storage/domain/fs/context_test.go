@@ -10,11 +10,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage/backendnames"
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/storage/backendnames"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 func newContextRepoForTest(t *testing.T) (workDir, beadsDir string, repo domain.ContextRepository) {

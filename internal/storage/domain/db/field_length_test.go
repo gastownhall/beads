@@ -3,8 +3,8 @@ package db
 import (
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestFieldLengthGuards proves the proxied-server (uow) write stack enforces the

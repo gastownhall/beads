@@ -6,12 +6,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/idgen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dberrors"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/validation"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/idgen"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/validation"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 type InsertIssueOpts struct {

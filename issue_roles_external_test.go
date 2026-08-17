@@ -5,10 +5,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/telemetry"
+	"github.com/jonbaldie/beads"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/telemetry"
 )
 
 // TestReadyClaimerLayersHooksOutsideTelemetry pins the decorator order the

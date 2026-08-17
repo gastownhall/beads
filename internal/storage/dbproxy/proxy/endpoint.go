@@ -15,16 +15,16 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/steveyegge/beads/internal/atomicfile"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/fdhygiene"
-	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/procid"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
+	"github.com/jonbaldie/beads/internal/atomicfile"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/fdhygiene"
+	"github.com/jonbaldie/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/procid"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/identity"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/pidfile"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/server"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/util"
 )
 
 type ErrUpstreamMismatch struct {

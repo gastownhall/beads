@@ -12,15 +12,15 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/linear"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/linear"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // linearCmd is the root command for Linear integration.

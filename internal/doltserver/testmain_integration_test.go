@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/doltserver"
 )
 
 // TestMain covers the integration-tagged tests in this file's package

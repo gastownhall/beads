@@ -7,7 +7,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
 )
 
 // validMigrationRefPattern matches the refs this package builds for AS OF reads

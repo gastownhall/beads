@@ -3,7 +3,7 @@ package issueops
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/journalscan"
+	"github.com/jonbaldie/beads/internal/storage/journalscan"
 )
 
 // The emit helpers a function calls to journal a row directly.

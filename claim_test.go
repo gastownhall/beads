@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 // TestClaimSentinelsWrapPreservation proves that errors produced the way the

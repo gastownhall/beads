@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workapi"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
 )
 
 var infoCmd = &cobra.Command{

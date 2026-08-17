@@ -4,9 +4,9 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	storeops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // TreeWalker returns the guarded dependency-tree surface for this store.

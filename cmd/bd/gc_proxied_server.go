@@ -7,11 +7,11 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func runGCProxiedServer(ctx context.Context) error {

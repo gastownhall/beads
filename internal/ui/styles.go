@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	lipgloss "charm.land/lipgloss/v2"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func init() {

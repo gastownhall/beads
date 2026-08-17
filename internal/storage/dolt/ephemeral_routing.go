@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 var permanentIssueAuxTables = []string{"issues", "labels", "dependencies", "events", "comments", "provenance_events"}

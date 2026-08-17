@@ -3,8 +3,8 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/depid"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/depid"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestGetDependentRecords verifies the target-keyed raw dependents read:

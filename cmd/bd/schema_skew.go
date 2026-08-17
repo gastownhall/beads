@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"os"
 
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 func handleSchemaSkewJSON(e *schema.SchemaSkewError) {

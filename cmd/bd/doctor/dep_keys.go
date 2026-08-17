@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/cmd/bd/doctor/fix"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 // CheckDependencyKeysWithStore reports dependency rows left behind by the

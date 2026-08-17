@@ -1,6 +1,6 @@
 package setup
 
-import "github.com/steveyegge/beads/internal/templates/agents"
+import "github.com/jonbaldie/beads/internal/templates/agents"
 
 var opencodeIntegration = agentsIntegration{
 	name:         "OpenCode",

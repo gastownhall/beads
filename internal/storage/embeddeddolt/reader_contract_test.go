@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
 // The Reader contract, wired at the embedded store. This accessor returns the

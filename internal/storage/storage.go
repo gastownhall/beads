@@ -12,14 +12,14 @@ import (
 	"errors"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
-	"github.com/steveyegge/beads/journalops"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
+	"github.com/jonbaldie/beads/journalops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // The guarded issue-operation error vocabulary is declared and documented by
-// the public contract package, github.com/steveyegge/beads/issueops. These are
+// the public contract package, github.com/jonbaldie/beads/issueops. These are
 // the same values, so every storage.ErrX reference and every errors.Is site
 // keeps matching the identical error.
 var (

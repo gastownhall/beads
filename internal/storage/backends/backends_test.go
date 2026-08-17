@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/backends"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/backends"
 )
 
 var errFixtureOpen = errors.New("fixture backend open")

@@ -17,7 +17,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // dsn is the shape a driver or dial error takes in the wild: it names the

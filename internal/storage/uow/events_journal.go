@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // EventsJournalCursorSource is the capability accessor a unit-of-work provider

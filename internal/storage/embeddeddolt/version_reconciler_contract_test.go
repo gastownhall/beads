@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // TestVersionReconcilerContract runs the VersionReconciler contract against the

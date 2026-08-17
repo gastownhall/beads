@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 // TestMigrateIssues_FilterHasZeroMaxRows is the be-x42v.4 opt-out gate

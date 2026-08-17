@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
 )
 
 // The two plumbings the root pre-run never reached. Both are end-to-end on

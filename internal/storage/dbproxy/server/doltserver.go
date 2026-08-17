@@ -21,12 +21,12 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/procid"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/procid"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/identity"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/pidfile"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/util"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 const defaultKeepAlivePeriod = 30 * time.Second

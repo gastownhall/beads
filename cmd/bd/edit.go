@@ -6,10 +6,10 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/ui"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/ui"
 )
 
 var editCmd = &cobra.Command{

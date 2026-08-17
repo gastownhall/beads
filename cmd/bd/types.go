@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // coreWorkTypes are the built-in types that beads validates without configuration.

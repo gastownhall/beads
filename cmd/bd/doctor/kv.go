@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/kvkeys"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/kvkeys"
 )
 
 // kvPrefix matches the prefix used in cmd/bd/kv.go

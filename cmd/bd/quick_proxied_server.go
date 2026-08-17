@@ -7,10 +7,10 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/validation"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/validation"
 )
 
 func runQuickProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {

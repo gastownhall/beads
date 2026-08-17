@@ -14,10 +14,10 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workapi"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // newReadyFlagsCommand clones readyCmd's flag definitions onto a fresh command

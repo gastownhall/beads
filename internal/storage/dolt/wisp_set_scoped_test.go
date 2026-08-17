@@ -7,8 +7,8 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // setKeys is defined in wisp_set_routing_test.go (same package).

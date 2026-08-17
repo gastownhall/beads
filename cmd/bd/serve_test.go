@@ -16,10 +16,10 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/httpapi"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/httpapi"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // TestServeFlags pins the flag surface. Every bound that is NOT here — the

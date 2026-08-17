@@ -3,7 +3,7 @@ package telemetry
 import (
 	"context"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // VersionReconciler returns the inner store's version-marker surface wrapped in

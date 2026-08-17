@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 func setupIntegrationTestMain(root string) (func(), error) {

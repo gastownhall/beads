@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // Commenter returns the inner store's add-comment surface with this

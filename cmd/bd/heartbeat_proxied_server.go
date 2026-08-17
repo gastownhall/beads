@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // heartbeatProxiedOutcome carries what the render layer needs out of the

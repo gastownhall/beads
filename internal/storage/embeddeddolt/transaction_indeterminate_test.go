@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func TestRunInTransactionPostCommitStageFailureIsIndeterminate(t *testing.T) {

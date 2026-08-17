@@ -5,16 +5,16 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jonbaldie/beads/internal/ado"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/github"
+	"github.com/jonbaldie/beads/internal/gitlab"
+	"github.com/jonbaldie/beads/internal/jira"
+	"github.com/jonbaldie/beads/internal/linear"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/notion"
+	"github.com/jonbaldie/beads/internal/tracker"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ado"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/github"
-	"github.com/steveyegge/beads/internal/gitlab"
-	"github.com/steveyegge/beads/internal/jira"
-	"github.com/steveyegge/beads/internal/linear"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/notion"
-	"github.com/steveyegge/beads/internal/tracker"
 )
 
 // trackerPushPullFlags holds shared flags for push/pull subcommands.

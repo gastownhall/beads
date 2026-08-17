@@ -9,8 +9,8 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 // presentedAuth is what a remote entry point was handed, plus the environment

@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // InitVerifier returns the inner store's identity-read surface.

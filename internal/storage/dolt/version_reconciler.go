@@ -1,9 +1,9 @@
 package dolt
 
 import (
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/workapi/storeversionreconciler"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/workapi/storeversionreconciler"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // VersionReconciler returns the clone-local version markers for this store.

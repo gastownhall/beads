@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // MappingConfig configures how GitHub fields map to beads fields.

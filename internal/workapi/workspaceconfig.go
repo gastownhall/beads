@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/kvkeys"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage/kvkeys"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // The single definition of what a write to the workspace's durable settings

@@ -3,7 +3,7 @@ package eventsjournal
 import (
 	"encoding/json"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // The record envelope every consumer of the journal receives, in ONE place.

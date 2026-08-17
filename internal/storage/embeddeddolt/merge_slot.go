@@ -5,8 +5,8 @@ package embeddeddolt
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // MergeSlotCreate creates the merge slot bead for the current rig.

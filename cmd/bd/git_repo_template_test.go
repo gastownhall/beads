@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 // Template git repository optimization (bd-ktng):

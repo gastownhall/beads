@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // mergeSlotLabel is the label attached to every merge slot bead so that

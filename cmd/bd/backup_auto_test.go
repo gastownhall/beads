@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 func TestIsBackupAutoEnabled(t *testing.T) {

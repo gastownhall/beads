@@ -8,17 +8,17 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/remotecache"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/remotecache"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
 )
 
 var configCmd = &cobra.Command{

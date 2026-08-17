@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // What this file still holds, after the metadata PATCH SEMANTICS moved to the

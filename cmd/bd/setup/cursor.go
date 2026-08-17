@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/recipes"
+	"github.com/jonbaldie/beads/internal/recipes"
 )
 
 const (

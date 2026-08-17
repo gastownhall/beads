@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // cursorVersion prefixes every token this server mints. It is the ONLY thing

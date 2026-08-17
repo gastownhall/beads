@@ -4,10 +4,10 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // defaultTreeDepth is the document's `max_depth` default, and it is the CLI's

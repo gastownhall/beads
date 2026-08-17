@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // Real-Dolt coverage for the pre-0058 wisp_dependencies forward repair

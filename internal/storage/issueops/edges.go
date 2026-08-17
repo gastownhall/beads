@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // ValidateEdgeReadRequest applies the request rules every EdgeReader

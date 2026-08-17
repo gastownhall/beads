@@ -9,12 +9,12 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/configfile"
+	internalgit "github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/utils"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	internalgit "github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 // TestWorktreeCommandNoStoreContract locks the complete command subtree that

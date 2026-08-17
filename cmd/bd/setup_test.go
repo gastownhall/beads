@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/recipes"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/recipes"
 )
 
 func resetSetupResolutionCaches(t *testing.T) {

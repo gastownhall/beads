@@ -11,12 +11,12 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/schema"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 // federationStagingBranchPrefix identifies temporary filtered-push branches.

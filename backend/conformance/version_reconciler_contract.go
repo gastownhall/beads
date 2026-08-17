@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // This file holds the contract every implementation of

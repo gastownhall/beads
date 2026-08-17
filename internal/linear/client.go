@@ -15,8 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // projectsQuery is the GraphQL query for fetching projects.

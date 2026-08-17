@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 // DeepValidationResult holds all deep validation check results

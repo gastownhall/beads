@@ -9,9 +9,9 @@ import (
 	"runtime/debug"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/metrics"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var (

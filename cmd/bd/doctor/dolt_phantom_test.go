@@ -10,9 +10,9 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 // openSharedDoltForPhantom returns a *sql.DB connected to a "beads" database on

@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // Deleter returns the inner store's named-row erasure surface.

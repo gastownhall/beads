@@ -7,8 +7,8 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 func chdirForDriftTest(t *testing.T, dir string) {

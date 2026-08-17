@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // proxiedQuerier hands back the guarded boolean-query surface for the

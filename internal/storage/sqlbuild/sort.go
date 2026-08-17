@@ -5,7 +5,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // SortDef maps a user-facing sort key to its column and default direction.

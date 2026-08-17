@@ -8,14 +8,14 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/ado"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ado"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // ADOConfig holds Azure DevOps connection configuration.

@@ -13,9 +13,9 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/steveyegge/beads/internal/githooksenv"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/githooksenv"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
 )
 
 // Ref names anchoring a git-backed Dolt remote's data plane, as published by

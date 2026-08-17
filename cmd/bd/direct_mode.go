@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/beads"
 )
 
 // ensureDirectMode makes sure the CLI is operating in direct-storage mode.

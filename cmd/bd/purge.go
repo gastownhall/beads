@@ -6,10 +6,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/issueops"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/issueops"
 )
 
 // purgeScope is what `bd purge` and `bd prune` still differ by once the

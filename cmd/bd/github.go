@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/github"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/github"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // GitHubConfig holds GitHub connection configuration.

@@ -3,8 +3,8 @@ package fix
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 // openBeadMutatingStore opens a repair handler's store WITH the workspace's

@@ -118,7 +118,7 @@ Use Homebrew, npm, or the install script if you do not specifically need `go ins
 
 ICU headers are not required. The embedded-capable command uses `gms_pure_go` so go-mysql-server uses Go's stdlib regexp instead of ICU.
 
-Use the `github.com/steveyegge/beads` path for `go install`. The repository now lives under `gastownhall/beads`, but released Go modules still declare `github.com/steveyegge/beads` for compatibility.
+This fork declares `github.com/jonbaldie/beads` in `go.mod`. Published upstream releases still declare `github.com/steveyegge/beads`. Use that published path for `go install ...@latest` until this fork cuts a release under the new module path.
 
 If you don't have a preference, `brew install beads` or the install script give you the embedded-capable build with no fuss.
 

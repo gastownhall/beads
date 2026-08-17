@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/sqlbuild"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestSearchCountsFilterBeforeJoinParity proves that the filter-before-join

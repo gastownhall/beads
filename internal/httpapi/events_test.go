@@ -8,9 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // The events journal read. Three of these cases are about a distinction the

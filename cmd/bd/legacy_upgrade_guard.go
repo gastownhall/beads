@@ -8,12 +8,12 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 // guardLegacyUpgradeWorkspace rejects the reviewed pre-Dolt and legacy-Dolt

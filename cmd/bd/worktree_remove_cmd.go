@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/jonbaldie/beads/internal/worktreeremove"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/worktreeremove"
 )
 
 type singleWorktreeStringFlag struct {

@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/ui"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/ui"
 )
 
 // Status constants for doctor checks

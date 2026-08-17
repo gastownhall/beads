@@ -6,9 +6,9 @@ import (
 	"io"
 	"os"
 
+	"github.com/jonbaldie/beads/internal/audit"
+	"github.com/jonbaldie/beads/internal/metrics"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/metrics"
 )
 
 var (

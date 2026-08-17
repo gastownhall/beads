@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/templates/agents"
+	"github.com/jonbaldie/beads/internal/templates/agents"
 )
 
 func newClaudeTestEnv(t *testing.T) (claudeEnv, *bytes.Buffer, *bytes.Buffer) {

@@ -6,10 +6,10 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/uimd"
 )
 
 // showIssueChildren displays only the children of the specified issue(s)

@@ -16,10 +16,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/ado"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ado"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // mockADOServer is a stateful mock that stores only what the ADO client sends,

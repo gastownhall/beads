@@ -8,11 +8,11 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/ui"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"github.com/steveyegge/beads/internal/ui"
 )
 
 // `bd conflicts` is the operator surface for a merge that halted (federation

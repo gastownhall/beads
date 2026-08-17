@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // The durable events journal, published as a read.

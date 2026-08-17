@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 func TestProxiedServerContext(t *testing.T) {

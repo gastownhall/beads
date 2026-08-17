@@ -3,7 +3,7 @@ package issueops
 import (
 	"fmt"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // MissingDependencySource builds the refusal for an edge whose SOURCE names no

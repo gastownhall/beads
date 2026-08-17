@@ -5,8 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 // TestResolveBeadsDirForDBPath_EmbeddedNonDotBeads guards GH#4574: an embedded

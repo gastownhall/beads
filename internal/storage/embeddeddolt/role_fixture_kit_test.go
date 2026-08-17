@@ -6,10 +6,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // roleFixtureKit is the embedded store's answer to the hooks every issueops

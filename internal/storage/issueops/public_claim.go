@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // ClaimCommitMessage names the claimed issue and its claimant in the storage

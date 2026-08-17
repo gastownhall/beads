@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 // These tests cover #4992: `bd vc merge --strategy` was dead code because the

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // TestPreviewStoreRefusesLocalMetadataWrite pins the classification the CLI's

@@ -3,7 +3,7 @@ package setup
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/templates/agents"
+	"github.com/jonbaldie/beads/internal/templates/agents"
 )
 
 // stubDetectRenderOpts overrides detectRenderOptsImpl to return

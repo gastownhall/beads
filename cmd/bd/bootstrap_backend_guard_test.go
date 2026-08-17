@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 func TestBootstrapRejectsRemovedBackendsBeforeWorkspaceWrites(t *testing.T) {

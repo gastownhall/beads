@@ -7,7 +7,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // TestCheckForwardDrift_ForwardDrift_ReturnsSchemaSkewError verifies that

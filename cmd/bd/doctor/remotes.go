@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltremote"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/doltremote"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 var querySQLRemotesForDoctor = querySQLRemotes

@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 func TestExportAuthenticatedLegacySQLite(t *testing.T) {

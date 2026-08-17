@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestEventsJournalAccessor_ServerMode guards the OTHER store's journal

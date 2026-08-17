@@ -5,7 +5,7 @@ import (
 	"maps"
 	"testing"
 
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // TestDeriveKeyGoldenTable is the pin that matters most in this package.

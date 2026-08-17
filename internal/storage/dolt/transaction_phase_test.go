@@ -9,7 +9,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 func newTransactionPhaseFixture(t *testing.T) (*DoltStore, *sql.Conn, *doltTransaction, sqlmock.Sqlmock, sqlmock.Sqlmock) {

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // applyBatchCommitResult builds a result from a (kind, changed) list, which is

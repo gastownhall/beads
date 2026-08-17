@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 func TestFindBeadsRepoRoot_WorktreeFallback(t *testing.T) {

@@ -310,7 +310,7 @@ jobs:
           package_manifest="artifacts/linux-integration-hybrid-packages-${SHARD}-of-${TOTAL_SHARDS}.txt"
           write_package_manifest() {
             GO_TEST_SHARD_TAGS=integration,gms_pure_go \
-              GO_TEST_SHARD_EXCLUDE_REGEX="^github.com/steveyegge/beads/cmd/bd$" \
+              GO_TEST_SHARD_EXCLUDE_REGEX="^github.com/jonbaldie/beads/cmd/bd$" \
               scripts/ci/go-test-shard-packages.sh "$SHARD" "$TOTAL_SHARDS" > "$package_manifest"
           }
           ci_time "list integration package shard ${SHARD}/${TOTAL_SHARDS}" -- write_package_manifest

@@ -3,7 +3,7 @@ package db
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/journalscan"
+	"github.com/jonbaldie/beads/internal/storage/journalscan"
 )
 
 // TestEveryRepositoryMutatorJournals is the completeness guard for the

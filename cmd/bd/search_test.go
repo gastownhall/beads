@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestSearchCommand_HelpErrorHandling verifies that the search command handles

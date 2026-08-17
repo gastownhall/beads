@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/templates"
+	"github.com/jonbaldie/beads/internal/templates"
 )
 
 // inTempDir chdir's into a fresh temp directory for the duration of the test.

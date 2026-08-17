@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // Domain-aware auto-merge (federation ask #1, the flagship).

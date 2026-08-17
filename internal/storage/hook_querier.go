@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // Querier returns the inner store's boolean-query surface.

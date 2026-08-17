@@ -7,12 +7,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/issueops"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/issueops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // TestServeDatabaseSourceClassifiesTheWorkspace drives the one decision point

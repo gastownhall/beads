@@ -1,7 +1,7 @@
 package storage
 
 import (
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // IssueReader returns the inner store's query surface.

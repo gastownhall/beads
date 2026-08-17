@@ -7,8 +7,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/metrics"
 )
 
 var molSeedCmd = &cobra.Command{

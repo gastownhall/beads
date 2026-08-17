@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // TestBuildReadyCountFilterIsTheUnboundedReadyFilter is the filter-level half

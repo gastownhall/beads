@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
-	"github.com/steveyegge/beads/internal/storage/depid"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/storage/depid"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // preReshapeVersion is the last schema version before the 0041/0043/0050

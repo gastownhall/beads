@@ -3,7 +3,7 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestIsBlockedBatch is the batch-is_blocked regression on the reference Dolt

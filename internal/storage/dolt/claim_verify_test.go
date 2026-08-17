@@ -10,8 +10,8 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // Tests for claim-family verify-after-write (bd-zccb9, wyvern incident

@@ -3,8 +3,8 @@ package db
 import (
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestIssueSearchPerTableWindow is the per-table (and counts-twin) copy of

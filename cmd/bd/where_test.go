@@ -8,10 +8,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/utils"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/utils"
 )
 
 func TestResolveWhereBeadsDir_FallsBackToFindBeadsDir(t *testing.T) {

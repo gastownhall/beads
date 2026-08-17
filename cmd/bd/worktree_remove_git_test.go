@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/worktreeremove"
+	"github.com/jonbaldie/beads/internal/worktreeremove"
 )
 
 // runWorktreeRemoveGitAdapter exercises the real Git and filesystem adapter

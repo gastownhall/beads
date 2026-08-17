@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

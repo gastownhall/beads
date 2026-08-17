@@ -1,8 +1,8 @@
 package issueops
 
 import (
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/sqlbuild"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // FilterTables configures table names for BuildIssueFilterClauses,

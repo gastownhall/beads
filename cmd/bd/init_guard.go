@@ -10,8 +10,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 // initGuardDBCheck holds the result of checking whether a database exists on a

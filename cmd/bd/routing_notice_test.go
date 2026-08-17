@@ -14,7 +14,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/routing"
+	"github.com/jonbaldie/beads/internal/routing"
 )
 
 // TestRoutingNoticeText_VariesByRule verifies the notice's reason and fix

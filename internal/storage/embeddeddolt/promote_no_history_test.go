@@ -5,7 +5,7 @@ package embeddeddolt_test
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestPromoteClearsNoHistory is the promote half of bd-r9uce: a promoted wisp

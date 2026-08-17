@@ -5,8 +5,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 var assignCmd = &cobra.Command{

@@ -3,7 +3,7 @@ package issueops
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // RelatedIssue is one issue on the far end of an edge, carrying the edge's

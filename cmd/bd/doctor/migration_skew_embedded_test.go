@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // bd-578h9.13: SharedStore only ever opens a server-mode store, so in an

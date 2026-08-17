@@ -10,7 +10,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // dependencyCommitBoundaryDriver models dependency writes through their SQL

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func runStatusesProxiedServer(ctx context.Context) error {

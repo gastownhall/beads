@@ -6,9 +6,9 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // DependencyEditor returns the guarded dependency-edge surface for this store.

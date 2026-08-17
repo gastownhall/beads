@@ -12,10 +12,10 @@ import (
 
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
-	"github.com/steveyegge/beads/internal/storage/schema"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

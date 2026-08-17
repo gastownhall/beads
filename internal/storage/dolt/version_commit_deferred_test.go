@@ -3,9 +3,9 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
-	rootissueops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	rootissueops "github.com/jonbaldie/beads/issueops"
 )
 
 // bd-4wamg: a context carrying WithDeferredVersionCommit must leave writes in

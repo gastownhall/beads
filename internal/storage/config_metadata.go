@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // ConfigMetadataStore provides extended config, metadata, and type introspection.

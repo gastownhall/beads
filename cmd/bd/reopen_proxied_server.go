@@ -7,12 +7,12 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/workapi"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/audit"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/workapi"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // reopenProxiedTarget is one id that resolved, carrying the status it sat at

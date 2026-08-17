@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 // stubPrimeStoreUnavailable temporarily disconnects prime from any ambient

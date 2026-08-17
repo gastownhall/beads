@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/workspacegate"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/workspacegate"
 )
 
 // Workspace operation gate wiring (see internal/workspacegate).

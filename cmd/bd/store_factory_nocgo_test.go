@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 // TestNocgoNewDoltStore_ErrorSuggestsCorrectFlag verifies that newDoltStore

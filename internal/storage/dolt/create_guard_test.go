@@ -10,7 +10,7 @@ import (
 	"testing"
 
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
 )
 
 // Tests for the CreateIfMissing guard on CREATE DATABASE.

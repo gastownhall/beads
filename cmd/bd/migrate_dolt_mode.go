@@ -8,16 +8,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/server"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/util"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 const migrateLockFileName = "migrate.lock"

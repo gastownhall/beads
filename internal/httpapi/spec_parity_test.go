@@ -12,9 +12,9 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/httpapi/spec"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/httpapi/spec"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // These tests are the spec drift gates. They are pure — no database, no

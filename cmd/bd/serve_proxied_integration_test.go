@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/httpapi"
+	"github.com/jonbaldie/beads/internal/httpapi"
 )
 
 // End-to-end lifecycle for `bd serve`, driven as a subprocess exactly as an

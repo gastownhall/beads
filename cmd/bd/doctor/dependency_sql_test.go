@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 func TestDoctorDependencyTargetExprMatchesCanonical(t *testing.T) {

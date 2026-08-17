@@ -33,14 +33,14 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/fdhygiene"
-	"github.com/steveyegge/beads/internal/githooksenv"
-	"github.com/steveyegge/beads/internal/gittraceenv"
-	"github.com/steveyegge/beads/internal/lockfile"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/fdhygiene"
+	"github.com/jonbaldie/beads/internal/githooksenv"
+	"github.com/jonbaldie/beads/internal/gittraceenv"
+	"github.com/jonbaldie/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
 )
 
 // ErrServerNotRunning is returned by Stop when the Dolt server is not running.

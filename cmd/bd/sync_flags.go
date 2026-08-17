@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
+	"github.com/jonbaldie/beads/internal/tracker"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/tracker"
 )
 
 // registerSelectiveSyncFlags adds --issues and --parent flags to a tracker sync command.

@@ -9,7 +9,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func bdProxiedQueryJSON(t *testing.T, bd string, p proxiedProject, args ...string) []*types.IssueWithCounts {

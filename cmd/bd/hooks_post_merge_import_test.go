@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 // TestImportJSONLForSync_GuardClauses exercises the early-return paths so

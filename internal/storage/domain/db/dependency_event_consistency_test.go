@@ -1,8 +1,8 @@
 package db
 
 import (
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestDependencyEventConsistency locks in the explicit-verb boundary: the

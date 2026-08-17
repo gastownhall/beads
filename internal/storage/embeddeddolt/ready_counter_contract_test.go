@@ -5,7 +5,7 @@ package embeddeddolt_test
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
 // TestReadyCounterContract runs the ReadyCounter contract against the embedded

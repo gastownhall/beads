@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 // SuppressConfigPrefix is the config namespace for suppressing specific doctor warnings.

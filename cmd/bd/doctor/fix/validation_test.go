@@ -13,11 +13,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // fixTestServerPort returns the Dolt server port for fix tests.

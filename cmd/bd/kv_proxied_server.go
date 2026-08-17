@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 // Proxied-server handlers for `bd kv`. The kv store is a thin prefix layer

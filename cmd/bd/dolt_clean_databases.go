@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 type cleanDatabasesOptions struct {

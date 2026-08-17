@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 //nolint:gosec // G201: table names are hardcoded constants

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/debug"
 )
 
 // Issue represents a Jira issue from the REST API.

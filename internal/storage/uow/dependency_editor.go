@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // DependencyEditorSource is the capability accessor a unit-of-work provider

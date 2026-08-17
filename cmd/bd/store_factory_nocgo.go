@@ -6,11 +6,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/backends"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/backends"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/util"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 func usesSQLServer() bool {

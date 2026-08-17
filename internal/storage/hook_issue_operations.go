@@ -3,8 +3,8 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // IssueLifecycle returns the inner store's lifecycle with this decorator's

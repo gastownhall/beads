@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // bdGate runs "bd gate" with the given args and returns stdout.

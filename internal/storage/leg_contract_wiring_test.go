@@ -15,7 +15,7 @@ import (
 )
 
 // conformancePackage is the import path whose Run entrypoints each leg wires.
-const conformancePackage = "github.com/steveyegge/beads/backend/conformance"
+const conformancePackage = "github.com/jonbaldie/beads/backend/conformance"
 
 // neverSatisfiedTags are build tags nothing ever sets. A file behind one is in
 // no build, so what it names is not wiring.

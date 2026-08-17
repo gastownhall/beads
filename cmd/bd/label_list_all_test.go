@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // searchOnlyStore records the SearchIssues calls countLabelsAcrossIssues

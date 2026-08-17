@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func runDuplicatesProxiedServer(ctx context.Context, autoMerge, dryRun bool) error {

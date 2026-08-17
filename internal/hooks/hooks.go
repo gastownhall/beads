@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // Event types

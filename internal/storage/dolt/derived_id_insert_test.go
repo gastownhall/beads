@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/rowid"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/rowid"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // derivedIDDigestColumns mirrors the FROZEN digest column lists in

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 func runCompactDoltProxiedServer(ctx context.Context) error {

@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 func TestEmbeddedIssueOperationsCreateRoutesInfraTypesToWisps(t *testing.T) {

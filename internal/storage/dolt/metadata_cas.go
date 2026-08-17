@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	storeops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // MetadataCAS returns the conditional single-key metadata write for this store.

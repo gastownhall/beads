@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 func TestDetermineTargetRepo(t *testing.T) {

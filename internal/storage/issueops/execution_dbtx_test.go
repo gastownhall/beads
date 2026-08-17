@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // TestExecuteLifecycleVerbsTakeDBTX pins the seam that lets both Lifecycle

@@ -76,7 +76,7 @@ import (
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
 )
 
-const instrumentationScope = "github.com/steveyegge/beads"
+const instrumentationScope = "github.com/jonbaldie/beads"
 
 var shutdownFns []func(context.Context) error
 

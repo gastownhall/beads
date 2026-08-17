@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func runFindDuplicatesProxiedServer(ctx context.Context, filter types.IssueFilter, status, method string, threshold float64, limit int, model string) error {

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // bdFederation runs "bd federation" with extra args. Returns combined output.

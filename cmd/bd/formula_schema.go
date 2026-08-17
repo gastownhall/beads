@@ -5,9 +5,9 @@ import (
 	"os"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/ui"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/ui"
 )
 
 var formulaSchemaCmd = &cobra.Command{

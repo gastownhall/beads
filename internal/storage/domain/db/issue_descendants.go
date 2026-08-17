@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 type predBundle struct {

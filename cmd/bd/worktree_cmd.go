@@ -16,13 +16,13 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/worktreeremove"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/worktreeremove"
 )
 
 // WorktreeInfo contains information about a git worktree

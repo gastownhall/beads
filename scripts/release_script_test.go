@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/formula"
 )
 
 func TestReleaseScriptUsesVerifiedInstalledBDBeforeStaleRepoBD(t *testing.T) {

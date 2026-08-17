@@ -5,9 +5,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // newListLimitCommand registers the flags the limit policy reads, with

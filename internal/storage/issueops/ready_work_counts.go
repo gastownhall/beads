@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/steveyegge/beads/internal/storage/sqlbuild"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/sqlbuild"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // readyHydrationFor reads a ready filter's hydration opt-outs, the twin of

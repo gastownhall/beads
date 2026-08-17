@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 type fakeAutoPushTarget struct {

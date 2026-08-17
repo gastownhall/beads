@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/validation"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/validation"
 )
 
 // runConventionsCheck runs a composite conventions check: lint, stale, and orphans.

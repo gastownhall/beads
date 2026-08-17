@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 func runSQLProxiedServer(ctx context.Context, query string, csvOutput bool) error {

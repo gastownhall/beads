@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/beadserrors"
+	"github.com/jonbaldie/beads/beadserrors"
 )
 
 // ErrAlreadyClaimed is returned when attempting to claim an issue that is already

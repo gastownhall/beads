@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // proxiedVersionReconciler hands back the clone-local version markers for the

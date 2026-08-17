@@ -10,8 +10,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 // These tests run the bd-6dnrw.4 / GH#2466 merge-settlement coverage against

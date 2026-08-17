@@ -11,7 +11,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 var commentedMetricsRe = regexp.MustCompile(`(?m)^\s*#\s*metrics\s*:`)

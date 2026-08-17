@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // TestEventsJournalProxiedServer is the end-to-end guard for bd's SECOND write

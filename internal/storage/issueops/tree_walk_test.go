@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // The pure half of the tree walk: the request vocabulary, the ancestor-keeping

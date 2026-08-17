@@ -10,11 +10,11 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
-const storageScopeName = "github.com/steveyegge/beads/storage"
+const storageScopeName = "github.com/jonbaldie/beads/storage"
 
 // InstrumentedStorage wraps storage.DoltStorage with OTel tracing and metrics.
 // Methods on the core Storage interface are overridden to emit bd.storage.*

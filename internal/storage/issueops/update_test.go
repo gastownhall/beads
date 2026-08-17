@@ -3,7 +3,7 @@ package issueops
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestManageLeaseOnUpdate pins the clear-only contract (bd-9hpgf, GH#4716):

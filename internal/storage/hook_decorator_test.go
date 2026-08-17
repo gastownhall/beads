@@ -6,9 +6,9 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // mockHookRunner records hook invocations synchronously for testing.

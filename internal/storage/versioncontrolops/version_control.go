@@ -6,8 +6,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // validTablePattern matches valid SQL table names (letters, digits, underscores).

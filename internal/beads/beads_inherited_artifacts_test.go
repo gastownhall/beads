@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 // TestFindBeadsDir_WorktreeWithInheritedArtifacts covers the case where a

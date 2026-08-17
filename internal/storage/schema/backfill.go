@@ -7,8 +7,8 @@ import (
 	"log"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func ensureBackfilledCustomStatusesCustomTypes(ctx context.Context, db DBConn) (bool, error) {

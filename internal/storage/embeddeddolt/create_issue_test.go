@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // testEnv bundles a store with the paths needed to open raw SQL connections.

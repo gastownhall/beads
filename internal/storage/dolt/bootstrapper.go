@@ -4,10 +4,10 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/workapi"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	storeops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/workapi"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // Bootstrapper returns the guarded identity-seeding surface for this store.

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/git"
 )
 
 func TestConfigureBeadsHooksPath_WorktreeUsesMainRepo(t *testing.T) {

@@ -1,8 +1,8 @@
 package contextinfo
 
 import (
-	"github.com/steveyegge/beads/internal/storage/domain"
-	domainfs "github.com/steveyegge/beads/internal/storage/domain/fs"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	domainfs "github.com/jonbaldie/beads/internal/storage/domain/fs"
 )
 
 type ContextProvider interface {

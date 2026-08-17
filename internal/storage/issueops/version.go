@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // CheckVersionInTx reads the current row_lock (the RowVersion token) for id and

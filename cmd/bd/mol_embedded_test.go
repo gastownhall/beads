@@ -6,9 +6,9 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/formula"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestSpawnMolecule_PreservesStepLabels verifies that a cooked formula with

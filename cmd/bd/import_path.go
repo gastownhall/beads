@@ -3,7 +3,7 @@ package main
 import (
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 const defaultImportJSONLPath = "issues.jsonl"

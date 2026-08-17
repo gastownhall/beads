@@ -6,8 +6,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/internal/ui"
 	"golang.org/x/term"
 )
 

@@ -2,7 +2,7 @@ module example.com/beads-library-demo
 
 go 1.26.5
 
-require github.com/steveyegge/beads v0.0.0
+require github.com/jonbaldie/beads v0.0.0
 
 require (
 	cel.dev/expr v0.25.2 // indirect
@@ -179,4 +179,4 @@ require (
 )
 
 // For local development, replace with local path
-replace github.com/steveyegge/beads => ../..
+replace github.com/jonbaldie/beads => ../..

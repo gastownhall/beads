@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
 )
 
 // TestSetupGitExclude_Worktree verifies that setupGitExclude writes to the main

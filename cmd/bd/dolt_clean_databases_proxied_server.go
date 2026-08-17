@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 func runDoltCleanDatabasesProxied(ctx context.Context, beadsDir string, opts cleanDatabasesOptions) error {

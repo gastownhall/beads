@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // The wrapper-routing residue of the issueops.Claimer contract, and the THIRD

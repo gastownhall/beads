@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/lockfile"
 	"golang.org/x/sys/windows"
 )
 

@@ -10,16 +10,16 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/eventsjournal"
-	"github.com/steveyegge/beads/internal/httpapi"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/backends"
-	"github.com/steveyegge/beads/internal/storage/contextinfo"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/issueops"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/eventsjournal"
+	"github.com/jonbaldie/beads/internal/httpapi"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/backends"
+	"github.com/jonbaldie/beads/internal/storage/contextinfo"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/issueops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // serveCmdName is the command name, shared with the root command's post-run

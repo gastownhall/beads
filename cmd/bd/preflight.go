@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/git"
+	"github.com/jonbaldie/beads/internal/metrics"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/cmd/bd/doctor"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/git"
-	"github.com/steveyegge/beads/internal/metrics"
 )
 
 // CheckResult represents the result of a single preflight check.
@@ -184,7 +184,7 @@ func isBeadsRepo(dir string) bool {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "module ") {
-			return strings.TrimSpace(strings.TrimPrefix(line, "module ")) == "github.com/steveyegge/beads"
+			return strings.TrimSpace(strings.TrimPrefix(line, "module ")) == "github.com/jonbaldie/beads"
 		}
 	}
 	return false

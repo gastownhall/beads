@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonbaldie/beads/internal/types"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/types"
 )
 
 func schedDep(from, to string) *types.Dependency {

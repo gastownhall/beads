@@ -4,9 +4,9 @@ import (
 	"path/filepath"
 	"sync"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 var resolveBeadsDirCache sync.Map

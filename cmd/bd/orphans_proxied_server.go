@@ -3,9 +3,9 @@ package main
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/uow"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func runOrphansProxiedServer(ctx context.Context, labels, labelsAny []string, fix, details bool) error {

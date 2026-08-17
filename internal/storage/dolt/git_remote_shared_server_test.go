@@ -13,8 +13,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestCredentialCLIRoutingE2ESharedServer verifies that shared-server mode can

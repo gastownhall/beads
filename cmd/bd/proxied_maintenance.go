@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 func runProxiedNonTx(ctx context.Context, fn func(ctx context.Context, conn *sql.Conn) error) error {

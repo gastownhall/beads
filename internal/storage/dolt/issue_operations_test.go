@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // coordinationFields are the only two patch fields an assignee/status re-read

@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestConfigSetManyArgParsing tests argument parsing for the set-many command.

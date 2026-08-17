@@ -12,7 +12,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/tracker"
 )
 
 // testAPIURL returns an ADO API URL for a work item ID used in tests.

@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 	"github.com/spf13/viper"
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/dolt"
 )
 
 // validRoutingModes are the allowed values for routing.mode

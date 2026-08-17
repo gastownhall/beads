@@ -3,7 +3,7 @@ package dolt
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/journalscan"
+	"github.com/jonbaldie/beads/internal/storage/journalscan"
 )
 
 // scopeCalls are the ways a function binds journal activation to the concrete

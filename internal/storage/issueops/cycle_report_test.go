@@ -7,7 +7,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // The database-free half of the cycle report. Both of the owner's rulings live

@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/tracker"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // jiraFieldMapper implements tracker.FieldMapper for Jira.

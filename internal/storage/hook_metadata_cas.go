@@ -3,7 +3,7 @@ package storage
 import (
 	"context"
 
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // MetadataCAS returns the inner store's conditional metadata write with this

@@ -1,4 +1,4 @@
-module github.com/steveyegge/beads
+module github.com/jonbaldie/beads
 
 go 1.26.5
 

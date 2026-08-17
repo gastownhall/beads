@@ -9,9 +9,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/issueops"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/issueops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // roleAccessorNames is the capability surface every storage decorator has to
