@@ -2,7 +2,7 @@
 # build-examples.sh — type-check every Go module under examples/.
 #
 # The example modules are separate Go modules that reach the parent through a
-# `replace github.com/steveyegge/beads => ../..` directive, so their go.mod and
+# `replace github.com/jonbaldie/beads => ../..` directive, so their go.mod and
 # go.sum record the parent's full dependency graph. Nothing in CI compiled them,
 # which meant they went stale silently: on 2026-08-01 both
 # examples/bd-example-extension-go and examples/library-usage failed a plain

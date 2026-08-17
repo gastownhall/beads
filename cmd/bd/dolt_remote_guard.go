@@ -1,6 +1,6 @@
 package main
 
-import "github.com/steveyegge/beads/internal/doltremote"
+import "github.com/jonbaldie/beads/internal/doltremote"
 
 // doltRemoteMatchesGitOrigin reports whether doltURL refers to the same
 // repository as the git origin. Handles git+https://, git+ssh://, SCP-style,

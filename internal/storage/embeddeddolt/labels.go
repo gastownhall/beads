@@ -6,7 +6,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 func (s *EmbeddedDoltStore) GetLabels(ctx context.Context, issueID string) ([]string, error) {

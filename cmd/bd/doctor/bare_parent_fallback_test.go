@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 func TestResolveBeadsDirForRepo_BareParentWorktreeFallback(t *testing.T) {

@@ -1,9 +1,9 @@
 package dolt
 
 import (
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/workapi/storestats"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/workapi/storestats"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // StatsReporter returns the guarded summary-statistics surface for this store.

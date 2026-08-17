@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/tracker"
 )
 
 // TestParentFlagRegistered verifies --parent flag exists on all tracker sync commands.

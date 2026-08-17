@@ -8,8 +8,8 @@
 //
 // This is the CONSUMER surface: it opens and uses bd's own storage. To
 // IMPLEMENT a storage backend out of tree — and prove it with the
-// conformance suite — use github.com/steveyegge/beads/backend and
-// github.com/steveyegge/beads/backend/conformance instead.
+// conformance suite — use github.com/jonbaldie/beads/backend and
+// github.com/jonbaldie/beads/backend/conformance instead.
 package beads
 
 import (
@@ -20,14 +20,14 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/steveyegge/beads/internal/beads"
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/dolt"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workspacegate"
+	"github.com/jonbaldie/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workspacegate"
 )
 
 // Storage is the interface for beads storage operations. Its

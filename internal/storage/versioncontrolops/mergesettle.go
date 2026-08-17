@@ -9,8 +9,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/kvkeys"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/kvkeys"
 )
 
 // memoryConfigKeyPrefix is the config-table key prefix under which `bd remember`

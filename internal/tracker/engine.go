@@ -14,14 +14,14 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 // syncTracer is the OTel tracer for tracker sync spans.
-var syncTracer = otel.Tracer("github.com/steveyegge/beads/tracker")
+var syncTracer = otel.Tracer("github.com/jonbaldie/beads/tracker")
 
 // rateLimitExhaustedError is implemented by tracker errors (e.g.
 // linear.ErrRateLimitExhausted) that signal the API quota floor has been

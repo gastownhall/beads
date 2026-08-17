@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/steveyegge/beads/internal/beads"
+	"github.com/jonbaldie/beads/internal/beads"
 )
 
 const lastTouchedFile = "last-touched"

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/worktreeremove"
+	"github.com/jonbaldie/beads/internal/worktreeremove"
 )
 
 func TestWorktreeRemovalCommandRecordsApprovedOperations(t *testing.T) {

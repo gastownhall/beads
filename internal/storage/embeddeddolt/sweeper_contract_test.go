@@ -6,8 +6,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // TestSweeperContract runs the Sweeper contract against the embedded store,

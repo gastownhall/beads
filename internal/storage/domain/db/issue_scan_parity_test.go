@@ -7,7 +7,7 @@ import (
 	"time"
 
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

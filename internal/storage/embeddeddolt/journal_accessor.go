@@ -7,8 +7,8 @@ import (
 	"database/sql"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // EmbeddedDoltStore reads and prunes the durable events journal through its

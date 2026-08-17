@@ -17,8 +17,8 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/steveyegge/beads/internal/githooksenv"
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/githooksenv"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // Credential storage and encryption for federation peers.

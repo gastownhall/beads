@@ -3,8 +3,8 @@ package storage
 import (
 	"encoding/json"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // CreatePublicCreateDependencies returns the dependency snapshot described by

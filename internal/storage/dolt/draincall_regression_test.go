@@ -10,7 +10,7 @@ import (
 	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	mysql "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // TestDoltAddAndCommitDrainsCallResultSets pins doltAddAndCommit to routing its

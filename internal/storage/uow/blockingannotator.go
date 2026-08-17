@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	publicops "github.com/steveyegge/beads/issueops"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // BlockingAnnotatorSource is the capability accessor a unit-of-work provider

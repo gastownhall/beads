@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // TestCycleDetectorContract runs the CycleDetector contract against the embedded

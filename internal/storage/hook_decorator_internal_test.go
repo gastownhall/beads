@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 type recordingHookRunner struct {

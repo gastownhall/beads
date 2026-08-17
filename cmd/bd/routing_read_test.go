@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/routing"
+	"github.com/jonbaldie/beads/internal/routing"
 )
 
 func TestDetermineAutoRoutedRepoPath_ContributorToPlanning(t *testing.T) {

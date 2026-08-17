@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/metrics"
 )
 
 type exitError struct {

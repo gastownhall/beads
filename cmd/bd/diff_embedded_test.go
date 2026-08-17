@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // bdDiff runs "bd diff" with the given args and returns raw stdout.

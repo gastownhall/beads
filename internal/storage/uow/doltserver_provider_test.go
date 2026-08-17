@@ -14,8 +14,8 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -216,7 +216,7 @@ func buildBDBinary(t *testing.T) string {
 			name = "bd.exe"
 		}
 		bdBinary = filepath.Join(tmpDir, name)
-		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBinary, "github.com/steveyegge/beads/cmd/bd")
+		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", bdBinary, "github.com/jonbaldie/beads/cmd/bd")
 		if out, err := cmd.CombinedOutput(); err != nil {
 			bdBinaryErr = fmt.Errorf("go build bd: %v\n%s", err, out)
 		}

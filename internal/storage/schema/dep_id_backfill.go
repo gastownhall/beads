@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/jonbaldie/beads/internal/storage/depid"
 )
 
 // rekeyDependencyIDs rewrites the surrogate primary key of every dependencies

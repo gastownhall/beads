@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads"
+	"github.com/jonbaldie/beads"
 )
 
 func TestOpenBestAvailable_NoCGO_EmbeddedMode_ReturnsError(t *testing.T) {

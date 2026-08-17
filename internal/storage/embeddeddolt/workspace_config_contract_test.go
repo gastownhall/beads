@@ -6,7 +6,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/jonbaldie/beads/backend/conformance"
 )
 
 // TestWorkspaceConfigContract runs the WorkspaceConfig contract against the

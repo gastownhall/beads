@@ -3,8 +3,8 @@ package issueops
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/workapi"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/workapi"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // This file holds the store-backed bodies behind issueops.Bootstrapper and

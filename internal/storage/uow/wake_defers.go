@@ -7,8 +7,8 @@ import (
 
 	"context"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // WakeExpiredDefers runs the lazy defer-wake sweep in its own unit of work,

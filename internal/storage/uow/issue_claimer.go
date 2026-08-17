@@ -5,10 +5,10 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // IssueClaimerSource is the capability accessor a unit-of-work provider offers

@@ -94,7 +94,7 @@ linters:
             - "**/internal/httpapi/**"
             - "!$test"
           deny:
-            - pkg: github.com/steveyegge/beads/internal/workapi
+            - pkg: github.com/jonbaldie/beads/internal/workapi
               desc: "internal/httpapi is transport only: a read handler asks the provider for issueops.Reader and passes the whole request - it never builds a filter - see internal/httpapi/reads.go"
         # The OTHER way past the roles, and the one the rule above does not
         # close. Denying internal/workapi stops a handler BUILDING a filter; it
@@ -132,7 +132,7 @@ linters:
             - "!**/internal/httpapi/server.go"
             - "!**/internal/httpapi/handlers.go"
           deny:
-            - pkg: github.com/steveyegge/beads/internal/storage/domain
+            - pkg: github.com/jonbaldie/beads/internal/storage/domain
               desc: "internal/httpapi is transport only: a handler reaches storage through an issueops role accessor on the provider, never through the domain use cases - see internal/httpapi/claim.go"
         # The same boundary, transposed onto the front door that was last past
         # it. cmd/bd cannot be closed to the domain wholesale — thirty of its
@@ -195,9 +195,9 @@ linters:
             - "**/cmd/bd/state.go"
             - "!$test"
           deny:
-            - pkg: github.com/steveyegge/beads/internal/storage/domain
+            - pkg: github.com/jonbaldie/beads/internal/storage/domain
               desc: "bd label and bd state reach storage through an issueops role accessor, never through the domain use cases - see openIssueLifecycle in cmd/bd/label.go"
-            - pkg: github.com/steveyegge/beads/internal/storage/uow
+            - pkg: github.com/jonbaldie/beads/internal/storage/uow
               desc: "these commands do not open a unit of work: the route fork is the accessor (openIssueLifecycle/openIssueReader), and a unit of work here is how a use-case call gets back in - see cmd/bd/label.go"
         # store.IssueReader() is the door to the reader role, and a store wears
         # decorators (telemetry spans, hook firing) that each add their layer in
@@ -222,19 +222,19 @@ linters:
           files:
             - "**/cmd/bd/**"
           deny:
-            - pkg: github.com/steveyegge/beads/internal/workapi/storereader
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storereader
               desc: "a command reaches the reader role through store.IssueReader(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereader/reader.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storecounter
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storecounter
               desc: "a command reaches the count role through store.Counter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storecounter/counter.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storeworkspaceconfig
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storeworkspaceconfig
               desc: "a command reaches the workspace-settings role through store.WorkspaceConfig(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storeworkspaceconfig/workspaceconfig.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storeversionreconciler
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storeversionreconciler
               desc: "a command reaches the version-marker role through store.VersionReconciler(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storeversionreconciler/versionreconciler.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storestats
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storestats
               desc: "a command reaches the summary role through store.StatsReporter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storestats/reporter.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storereadycounter
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storereadycounter
               desc: "a command reaches the ready-count role through store.ReadyCounter(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storereadycounter/counter.go"
-            - pkg: github.com/steveyegge/beads/internal/workapi/storequerier
+            - pkg: github.com/jonbaldie/beads/internal/workapi/storequerier
               desc: "a command reaches the boolean-query role through store.Querier(), never through the constructor: the accessor is where each storage decorator adds its layer - see internal/workapi/storequerier/querier.go"
         # beadserrors sits BENEATH every role leaf, so whatever it imports is
         # imported by all of them - which is the reason it exists. The second
@@ -299,7 +299,7 @@ linters:
         - pattern: 'LabelUseCase$'
           msg: "reach the label plane through issueops.Lifecycle (Patch.Labels) and issueops.Reader, never the domain use case - see openIssueLifecycle in cmd/bd/label.go"
         - pattern: '^types\.(IssueFilter|WorkFilter)$'
-          pkg: '^github\.com/steveyegge/beads/internal/types$'
+          pkg: '^github\.com/jonbaldie/beads/internal/types$'
           msg: "do not write a filter here: take one back from a builder in internal/workapi, or pass the whole request to issueops.Reader. internal/httpapi may never name these types; cmd/bd denies them by default and lists the files that legitimately build their own, with the reason for each, in .golangci.yml - see issueops/reader.go"
     errcheck:
       exclude-functions:

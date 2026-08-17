@@ -18,8 +18,8 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/steveyegge/beads/internal/storage/depid"
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/storage/depid"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 func TestPendingMigrationDirtyTablesDetectsMigration0043Dependencies(t *testing.T) {

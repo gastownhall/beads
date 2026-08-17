@@ -3,7 +3,7 @@ package fix
 import (
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 func TestFixDependencyTargetExprMatchesCanonical(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
-	beadsplugin "github.com/steveyegge/beads/plugins/beads"
+	beadsplugin "github.com/jonbaldie/beads/plugins/beads"
 )
 
 // RecipeType indicates how the recipe is installed.

@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/depid"
+	"github.com/jonbaldie/beads/internal/storage/depid"
 )
 
 // Pre-migration repairs run immediately before a specific pending migration

@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/journalscan"
+	"github.com/jonbaldie/beads/internal/storage/journalscan"
 )
 
 // Journal coverage has three halves, and this is the third. The issueops guards
@@ -46,27 +46,27 @@ import (
 // is the worst failure mode a guard like this can have, because it reports
 // success while checking nothing.
 var storeConstructors = map[string]map[string]bool{
-	"github.com/steveyegge/beads/internal/storage/dolt": {
+	"github.com/jonbaldie/beads/internal/storage/dolt": {
 		"New":                         true,
 		"NewFromConfig":               true,
 		"NewFromConfigWithOptions":    true,
 		"NewFromConfigWithCLIOptions": true,
 	},
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt": {
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt": {
 		"Open":                       true,
 		"OpenReadOnly":               true,
 		"OpenForReadOnlyCommand":     true,
 		"OpenForPreviewCommand":      true,
 		"OpenForWorkingSetReconcile": true,
 	},
-	"github.com/steveyegge/beads/internal/storage/uow": {
+	"github.com/jonbaldie/beads/internal/storage/uow": {
 		"NewDoltServerUOWProvider":         true,
 		"NewExternalDoltServerUOWProvider": true,
 	},
 	// The pluggable backend registry: Lookup is what turns a configured backend
 	// name into something that can Open, so a function that calls it is
 	// constructing a store just as much as the direct opens above.
-	"github.com/steveyegge/beads/internal/storage/backends": {"Lookup": true},
+	"github.com/jonbaldie/beads/internal/storage/backends": {"Lookup": true},
 }
 
 // activationCalls are the helpers that apply a workspace's configured
@@ -80,7 +80,7 @@ var activationCalls = map[string]bool{
 
 // qualifiedActivationCalls are the same, keyed by import path and function.
 var qualifiedActivationCalls = map[string]map[string]bool{
-	"github.com/steveyegge/beads/internal/eventsjournal": {
+	"github.com/jonbaldie/beads/internal/eventsjournal": {
 		"ActivateStore": true,
 		"Apply":         true,
 	},

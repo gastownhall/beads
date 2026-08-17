@@ -12,10 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/testutil"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // testTimeout is the maximum time for any single test operation.
@@ -1159,7 +1159,7 @@ func TestDoltStoreDeleteIssue(t *testing.T) {
 
 // TestDeleteIssuesBatchPerformance verifies that batch deletion works correctly
 // with a large number of issues and chain dependencies. This exercises the batched
-// IN-clause query paths that prevent N+1 hangs on embedded Dolt (steveyegge/beads#1692).
+// IN-clause query paths that prevent N+1 hangs on embedded Dolt (jonbaldie/beads#1692).
 func TestDeleteIssuesBatchPerformance(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

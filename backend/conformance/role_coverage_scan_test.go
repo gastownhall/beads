@@ -15,10 +15,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/issueops"
-	"github.com/steveyegge/beads/journalops"
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/issueops"
+	"github.com/jonbaldie/beads/journalops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // roleMethod names one method of one role interface on the public facade.
@@ -34,7 +34,7 @@ func (rm roleMethod) String() string { return rm.Role + "." + rm.Method }
 
 // modulePath is this module's import path, used to turn an in-module import
 // into the directory that declares it.
-const modulePath = "github.com/steveyegge/beads"
+const modulePath = "github.com/jonbaldie/beads"
 
 // facadePackages maps each facade package's import path to the qualifier this
 // gate names its interfaces by. The paths come from real types rather than
@@ -618,7 +618,7 @@ func TestScanRoleCallsResolvesFixtureFieldsHelpersAndAliases(t *testing.T) {
 import (
 	"context"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 type ReaderFixture struct {
@@ -677,7 +677,7 @@ func TestScanRoleCallsIgnoresAHelperNoEntrypointRuns(t *testing.T) {
 import (
 	"context"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 type ReaderFixture struct {
@@ -715,7 +715,7 @@ func TestScanRoleCallsIgnoresAMethodNoEntrypointRuns(t *testing.T) {
 import (
 	"context"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 type ReaderFixture struct {
@@ -761,7 +761,7 @@ func TestScanRoleCallsTellsRoleMethodsApartFromLookalikes(t *testing.T) {
 import (
 	"context"
 
-	publicops "github.com/steveyegge/beads/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 type LifecycleFixture struct {

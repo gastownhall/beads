@@ -7,7 +7,7 @@ import (
 	"context"
 	"database/sql"
 
-	ischema "github.com/steveyegge/beads/internal/storage/schema"
+	ischema "github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // DBConn is the minimal query interface satisfied by *sql.DB, *sql.Tx, and

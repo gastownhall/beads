@@ -26,8 +26,8 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/backendnames"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/backendnames"
 )
 
 // Backend describes a registered storage backend.

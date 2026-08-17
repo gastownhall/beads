@@ -7,9 +7,9 @@ import (
 	"encoding/json"
 	"time"
 
-	eventsjournal "github.com/steveyegge/beads/internal/eventsjournal"
-	types "github.com/steveyegge/beads/internal/types"
-	issueops "github.com/steveyegge/beads/issueops"
+	eventsjournal "github.com/jonbaldie/beads/internal/eventsjournal"
+	types "github.com/jonbaldie/beads/internal/types"
+	issueops "github.com/jonbaldie/beads/issueops"
 )
 
 const (

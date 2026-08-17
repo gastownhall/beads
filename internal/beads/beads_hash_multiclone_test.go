@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 // getBDPath returns the test bd binary path

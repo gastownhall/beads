@@ -4,9 +4,9 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // ImporterSource is the capability accessor a unit-of-work provider offers

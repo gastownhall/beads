@@ -50,7 +50,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/lockfile"
 )
 
 // Mode selects shared (normal command) or exclusive (maintenance

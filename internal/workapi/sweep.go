@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // The shared, DATABASE-FREE half of issueops.Sweeper: what a sweep request

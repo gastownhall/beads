@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 func NewRemoteSQLRepository(runner Runner) domain.RemoteSQLRepository {

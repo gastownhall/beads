@@ -1,6 +1,6 @@
 package memoryops
 
-import "github.com/steveyegge/beads/beadserrors"
+import "github.com/jonbaldie/beads/beadserrors"
 
 // ErrValidation classifies this role's deterministic request-validation
 // failures. It is an ALIAS of beadserrors.ErrValidation, not a second sentinel,

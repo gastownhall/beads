@@ -7,7 +7,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/atomicfile"
+	"github.com/jonbaldie/beads/internal/atomicfile"
 )
 
 type PidFile struct {

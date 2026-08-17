@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	mysql "github.com/go-sql-driver/mysql"
-	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/schema"
 )
 
 // TestInitSchemaOnDBWithRetryAndGate_GateErrorClassification verifies the gate

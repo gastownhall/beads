@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 func TestEnginePushWithIssueIDsFilter(t *testing.T) {

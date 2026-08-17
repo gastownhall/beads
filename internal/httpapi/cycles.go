@@ -3,8 +3,8 @@ package httpapi
 import (
 	"net/http"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // handleDependencyCycles answers GET /v0/beads/dependencies/cycles.

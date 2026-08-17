@@ -129,7 +129,7 @@ for beads package boundaries, test gates, and domain terms.
   user-controlled paths, subprocess arguments, SQL identifiers, and
   external input before use. Linter exclusions are not evidence that an
   operation is safe.
-- Keep the module path `github.com/steveyegge/beads` and the Go version in
+- Keep the module path `github.com/jonbaldie/beads` and the Go version in
   `go.mod` honest. Do not use newer language features without deliberately
   updating the module version.
 - Follow Zero Framework Cognition: Go code transports data, enforces

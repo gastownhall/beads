@@ -23,8 +23,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // bdRunRaw runs bd with the given args and env extras (appended to bdEnv(dir)).

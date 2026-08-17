@@ -4,9 +4,9 @@ import (
 	"context"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/telemetry"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/telemetry"
 )
 
 // recomputingStore stands in for a concrete store (dolt.DoltStore /

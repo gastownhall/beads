@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/utils"
+	"github.com/jonbaldie/beads/internal/utils"
 )
 
 func TestSharedStore_NilSafe(t *testing.T) {

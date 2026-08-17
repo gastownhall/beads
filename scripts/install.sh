@@ -482,8 +482,8 @@ install_with_go() {
         bin_dir="$(go env GOPATH)/bin"
     fi
 
-    # The repository lives under gastownhall, but the Go module path remains
-    # github.com/steveyegge/beads for compatibility with released tags.
+    # This fork declares github.com/jonbaldie/beads. Fallback go install still
+    # uses the published upstream module github.com/steveyegge/beads@latest.
     if CGO_ENABLED=1 GOFLAGS="${GOFLAGS:+$GOFLAGS }-tags=gms_pure_go" go install github.com/steveyegge/beads/cmd/bd@latest; then
         log_success "bd installed via go install (embedded-capable)"
         LAST_INSTALL_PATH="$bin_dir/bd"

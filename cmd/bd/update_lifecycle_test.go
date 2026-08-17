@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/issueops"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 type recordingDirectIssueUpdater struct {

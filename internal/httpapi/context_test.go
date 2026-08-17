@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 // fakeCredential is a realistic sync remote: a token in the userinfo of an

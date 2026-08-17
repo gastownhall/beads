@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 // TestDatabaseConfigFix_DoltBackend tests that DatabaseConfig returns a clear error for Dolt backends.

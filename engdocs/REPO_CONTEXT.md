@@ -19,7 +19,7 @@ leading to bugs when assumptions don't match reality.
 The `RepoContext` API provides a single source of truth for repository resolution:
 
 ```go
-import "github.com/steveyegge/beads/internal/beads"
+import "github.com/jonbaldie/beads/internal/beads"
 
 rc, err := beads.GetRepoContext()
 if err != nil {

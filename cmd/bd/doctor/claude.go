@@ -453,7 +453,7 @@ func CheckClaudePlugin() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
+			Fix:     "Install plugin: /plugin marketplace add jonbaldie/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
 		}
 	}
 
@@ -519,7 +519,7 @@ func CheckClaudePluginLocalOnly() DoctorCheck {
 			Name:    "Claude Plugin",
 			Status:  StatusWarning,
 			Message: "beads plugin not installed",
-			Fix:     "Install plugin: /plugin marketplace add steveyegge/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
+			Fix:     "Install plugin: /plugin marketplace add jonbaldie/beads && /plugin install beads (see docs/integrations/claude-code-plugin.md)",
 		}
 	}
 

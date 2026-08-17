@@ -2,7 +2,7 @@ package fix
 
 import (
 	"fmt"
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 	"os"
 )
 

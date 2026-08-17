@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // bdList runs "bd list" with the given flags and returns stdout.

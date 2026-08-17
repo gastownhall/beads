@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestDemoteToWisp_InfraDepMirrorUsesSplitColumns verifies that DemoteToWisp

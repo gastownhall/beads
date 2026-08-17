@@ -6,11 +6,11 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/backends"
-	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/backends"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/util"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 func usesSQLServer() bool {
@@ -152,6 +152,6 @@ Three options:
   3. Reinstall with embedded-mode support:
        brew install beads                              # macOS / Linux
        npm install -g @beads/bd                        # any platform with Node
-       curl -fsSL https://raw.githubusercontent.com/steveyegge/beads/main/scripts/install.sh | bash
+       curl -fsSL https://raw.githubusercontent.com/jonbaldie/beads/main/scripts/install.sh | bash
 
 See docs/getting-started/installation.md for the full comparison.`

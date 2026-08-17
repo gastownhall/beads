@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor"
+	"github.com/jonbaldie/beads/cmd/bd/doctor"
 )
 
 // agentDoctorResult is the top-level output for --agent mode.

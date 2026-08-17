@@ -29,7 +29,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // crossModeEnv is one initialized workspace plus the environment that selects

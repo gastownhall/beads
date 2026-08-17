@@ -1,6 +1,6 @@
 package issueops
 
-import "github.com/steveyegge/beads/internal/storage/dberrors"
+import "github.com/jonbaldie/beads/internal/storage/dberrors"
 
 const queryBatchSize = 200
 

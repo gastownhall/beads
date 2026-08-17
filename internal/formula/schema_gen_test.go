@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/formula/schemagen"
+	"github.com/jonbaldie/beads/internal/formula/schemagen"
 )
 
 // TestSchemaGenIsCurrent re-runs the schemagen walker over types.go

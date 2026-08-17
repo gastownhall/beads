@@ -3,8 +3,8 @@ package db
 import (
 	"errors"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 func (s *testSuite) TestIssueSQLRepositoryAsOf() {

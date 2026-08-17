@@ -5,7 +5,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // IssueValidator validates an issue and returns an error if validation fails.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
 )
 
 // runRecomputeBlockedProxiedServer routes bd recompute-blocked through the

@@ -16,7 +16,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/config"
 )
 
 // hermeticInitEnv sets sync.remote via BD_SYNC_REMOTE (viper AutomaticEnv,

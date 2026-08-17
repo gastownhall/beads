@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const modulePrefix = "github.com/steveyegge/beads/"
+const modulePrefix = "github.com/jonbaldie/beads/"
 
 // TestImportBoundaries pins the layering around the shared SQL-builder seam
 // (bd-6dnrw.46): sqlbuild is the bottom shared layer under both stacks, and

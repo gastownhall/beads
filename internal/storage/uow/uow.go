@@ -3,9 +3,9 @@ package uow
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/domain/db"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain/db"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 type UnitOfWork interface {

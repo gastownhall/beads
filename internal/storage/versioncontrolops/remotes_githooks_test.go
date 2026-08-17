@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/githooksenv"
+	"github.com/jonbaldie/beads/internal/githooksenv"
 )
 
 // envRecordingConn records the GIT_CONFIG_PARAMETERS value visible at the

@@ -5,8 +5,8 @@ package embeddeddolt_test
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // This file holds the embedded store's answers to the OUT-OF-BAND hooks the two

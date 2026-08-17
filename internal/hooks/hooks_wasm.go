@@ -11,7 +11,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 var errHookExecutionUnsupported = errors.New("hook execution is not supported on js/wasm")
@@ -19,7 +19,7 @@ var errHookExecutionUnsupported = errors.New("hook execution is not supported on
 func (*Runner) runHook(hookPath, event string, issue *types.Issue) (retErr error) {
 	// Hooks are fire-and-forget so they have no parent span; create the same
 	// root span as native runners so asynchronous refusals remain observable.
-	tracer := otel.Tracer("github.com/steveyegge/beads/hooks")
+	tracer := otel.Tracer("github.com/jonbaldie/beads/hooks")
 	_, span := tracer.Start(context.Background(), "hook.exec",
 		trace.WithAttributes(
 			attribute.String("hook.event", event),

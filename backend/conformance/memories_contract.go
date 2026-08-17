@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/memoryops"
+	"github.com/jonbaldie/beads/memoryops"
 )
 
 // This file holds the contract every implementation of memoryops.Memories must

@@ -3,7 +3,7 @@ package domain
 import (
 	"context"
 
-	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/configfile"
 )
 
 type ContextRepository interface {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 func execCycleFixture(t *testing.T, db *sql.DB, stmt string, args ...any) {

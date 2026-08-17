@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/backends"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/backends"
 )
 
 func validateConfiguredBackend(cfg *configfile.Config) error {

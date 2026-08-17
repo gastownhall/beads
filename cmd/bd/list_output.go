@@ -7,8 +7,8 @@ import (
 	"os"
 	"text/template"
 
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
 )
 
 // printTruncationHint emits a one-line notice to stderr when the list output

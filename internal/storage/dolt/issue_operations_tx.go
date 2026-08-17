@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"sort"
 
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 func (s *DoltStore) runIssueOperationTx(ctx context.Context, commitMsg string, fn func(*sql.Tx) (storageissueops.ChangedTables, error)) error {

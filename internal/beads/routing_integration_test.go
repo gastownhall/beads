@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/routing"
-	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/jonbaldie/beads/internal/routing"
+	"github.com/jonbaldie/beads/internal/storage/dolt"
 )
 
 func TestRoutingIntegration(t *testing.T) {

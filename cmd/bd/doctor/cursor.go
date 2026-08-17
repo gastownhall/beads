@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/setup"
+	"github.com/jonbaldie/beads/cmd/bd/setup"
 )
 
 // CheckCursor reports whether beads-managed Cursor agent hooks are installed.

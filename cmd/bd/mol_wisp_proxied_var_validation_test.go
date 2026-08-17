@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/formula"
 )
 
 // Regression coverage for mybd-u2r6 on the proxied-server pour/wisp paths

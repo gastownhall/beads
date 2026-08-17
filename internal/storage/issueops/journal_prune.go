@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // Reading and pruning the durable events journal (bd_events_journal). Both

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/steveyegge/beads/cmd/bd/doctor/fix"
+	"github.com/jonbaldie/beads/cmd/bd/doctor/fix"
 )
 
 // CheckCloneLocalFKs detects clone-local (dolt_ignored) tables whose foreign

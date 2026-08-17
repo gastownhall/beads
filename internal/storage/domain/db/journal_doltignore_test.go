@@ -1,8 +1,8 @@
 package db
 
 import (
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // TestEventsJournal_IsDoltIgnored asserts the journal table is registered in

@@ -25,7 +25,7 @@
 // and a setting does not — not because a caller has to construct it.
 //
 // WHAT THIS PACKAGE IMPORTS: stdlib, plus
-// github.com/steveyegge/beads/beadserrors for the error sentinel and nothing
+// github.com/jonbaldie/beads/beadserrors for the error sentinel and nothing
 // else. That is narrower than the issueops leaf rule ("internal/types and
 // stdlib"): a memory is a string under a string key, so nothing in
 // internal/types is needed here and importing it would only invite issue-shaped

@@ -6,9 +6,9 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 var infoCmd = &cobra.Command{
@@ -313,7 +313,7 @@ var versionChanges = []VersionChange{
 		Version: "1.0.2",
 		Date:    "2026-04-15",
 		Changes: []string{
-			"FIX: npm publish — updated npm-package/package.json URLs (repository, bugs, homepage) from steveyegge/beads to gastownhall/beads so sigstore provenance validation accepts the artifact (v1.0.0 and v1.0.1 npm publishes failed E422 on provenance verification)",
+			"FIX: npm publish — updated npm-package/package.json URLs (repository, bugs, homepage) from jonbaldie/beads to gastownhall/beads so sigstore provenance validation accepts the artifact (v1.0.0 and v1.0.1 npm publishes failed E422 on provenance verification)",
 		},
 	},
 	{

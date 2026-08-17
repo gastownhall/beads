@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/DATA-DOG/go-sqlmock"
-	"github.com/steveyegge/beads/internal/storage/rowid"
+	"github.com/jonbaldie/beads/internal/storage/rowid"
 )
 
 var commentsTable = auxRekeyTables[1]

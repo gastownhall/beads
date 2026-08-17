@@ -6104,7 +6104,7 @@ components:
       x-go-type: types.Issue
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [id, title, priority, created_at, updated_at]
       properties:
         id:
@@ -6313,7 +6313,7 @@ components:
       x-go-type: types.IssueWithCounts
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required:
         [id, title, priority, created_at, updated_at, dependency_count, dependent_count, comment_count]
       properties:
@@ -6403,7 +6403,7 @@ components:
       x-go-type: types.IssueDetails
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [id, title, priority, created_at, updated_at, revision]
       properties:
         # --- repeated from Issue (see the pinned-schema note above) ---
@@ -6570,7 +6570,7 @@ components:
       x-go-type: types.IssueWithDependencyMetadata
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [id, title, priority, created_at, updated_at, dependency_type]
       properties:
         # --- repeated from Issue (see the pinned-schema note above) ---
@@ -6656,7 +6656,7 @@ components:
       x-go-type: types.TreeNode
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [id, title, priority, created_at, updated_at, depth, parent_id, truncated]
       properties:
         # --- repeated from Issue (see the pinned-schema note above) ---
@@ -6760,7 +6760,7 @@ components:
       x-go-type: types.Dependency
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [issue_id, depends_on_id, type, created_at]
       properties:
         id: { type: string }
@@ -6781,7 +6781,7 @@ components:
       x-go-type: types.Comment
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [id, issue_id, author, text, created_at]
       properties:
         id: { type: string }
@@ -6852,7 +6852,7 @@ components:
       x-go-type: types.BondRef
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required: [source_id, bond_type]
       properties:
         source_id: { type: string }
@@ -6873,7 +6873,7 @@ components:
       x-go-type: types.Statistics
       x-go-type-import:
         name: types
-        path: github.com/steveyegge/beads/internal/types
+        path: github.com/jonbaldie/beads/internal/types
       required:
         - total_issues
         - open_issues
@@ -6973,7 +6973,7 @@ components:
       x-go-type: issueops.CycleMember
       x-go-type-import:
         name: issueops
-        path: github.com/steveyegge/beads/issueops
+        path: github.com/jonbaldie/beads/issueops
       required: [id]
       properties:
         id:
@@ -6994,7 +6994,7 @@ components:
       x-go-type: issueops.Cycle
       x-go-type-import:
         name: issueops
-        path: github.com/steveyegge/beads/issueops
+        path: github.com/jonbaldie/beads/issueops
       required: [members, partial]
       properties:
         members:
@@ -7031,7 +7031,7 @@ components:
       x-go-type: issueops.IssueBlocking
       x-go-type-import:
         name: issueops
-        path: github.com/steveyegge/beads/issueops
+        path: github.com/jonbaldie/beads/issueops
       required: [id, blocked_by, blocks]
       properties:
         id:
@@ -7722,7 +7722,7 @@ components:
       x-go-type: eventsjournal.Record
       x-go-type-import:
         name: eventsjournal
-        path: github.com/steveyegge/beads/internal/eventsjournal
+        path: github.com/jonbaldie/beads/internal/eventsjournal
       required: [seq, ts, op, issue_id, issue]
       properties:
         seq:

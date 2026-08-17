@@ -9,7 +9,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql"
 
-	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
 )
 
 // freshCloneDBCheck holds the result of checking whether a database exists on

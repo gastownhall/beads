@@ -5,9 +5,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/beads/internal/query"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/query"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // DefaultQueryLimit is the default number of rows `bd query` returns when the

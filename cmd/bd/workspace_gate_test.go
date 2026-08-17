@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/workspacegate"
+	"github.com/jonbaldie/beads/internal/workspacegate"
 )
 
 // resetGateTestEnv pins every env var the physical-root resolver consults so

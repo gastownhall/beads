@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/steveyegge/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage"
 )
 
 // ValidateMetadataFilters refuses a metadata key the query layer cannot spell.

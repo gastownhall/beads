@@ -68,7 +68,7 @@ GROUP BY i.id, e.id
 
 ```bash
 # Install from the repository
-go install github.com/steveyegge/beads/examples/bd-example-extension-go@latest
+go install github.com/jonbaldie/beads/examples/bd-example-extension-go@latest
 
 # Or install from local source
 cd examples/bd-example-extension-go

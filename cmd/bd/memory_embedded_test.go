@@ -11,8 +11,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/storage/embeddeddolt"
 )
 
 // countMemoryDoltCommits reads dolt_log for an embedded workspace. It is how

@@ -39,17 +39,17 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/configfile"
-	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/doltserver"
-	"github.com/steveyegge/beads/internal/gittraceenv"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/doltutil"
-	"github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/storage/kvkeys"
-	"github.com/steveyegge/beads/internal/storage/schema"
-	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/configfile"
+	"github.com/jonbaldie/beads/internal/debug"
+	"github.com/jonbaldie/beads/internal/doltserver"
+	"github.com/jonbaldie/beads/internal/gittraceenv"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/storage/doltutil"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/kvkeys"
+	"github.com/jonbaldie/beads/internal/storage/schema"
+	"github.com/jonbaldie/beads/internal/storage/versioncontrolops"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // DefaultSQLPort is the default port for dolt sql-server.
@@ -853,7 +853,7 @@ func (s *DoltStore) recordRetryFailure(ctx context.Context, err error) error {
 
 // doltTracer is the OTel tracer for SQL-level spans.
 // It uses the global provider, which is a no-op until telemetry.Init() is called.
-var doltTracer = otel.Tracer("github.com/steveyegge/beads/storage/dolt")
+var doltTracer = otel.Tracer("github.com/jonbaldie/beads/storage/dolt")
 
 // doltMetrics holds OTel metric instruments for the dolt storage backend.
 // Instruments are registered against the global delegating provider at init time,
@@ -874,7 +874,7 @@ var doltMetrics struct {
 }
 
 func init() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
+	m := otel.Meter("github.com/jonbaldie/beads/storage/dolt")
 	doltMetrics.retryCount, _ = m.Int64Counter("bd.db.retry_count",
 		metric.WithDescription("SQL operations retried due to server-mode transient errors"),
 		metric.WithUnit("{retry}"),
@@ -929,7 +929,7 @@ func init() {
 // on each OTel collection cycle. These are essential for diagnosing shared-server
 // degradation under multi-worktree load (GH#3140).
 func (s *DoltStore) registerPoolGauges() {
-	m := otel.Meter("github.com/steveyegge/beads/storage/dolt")
+	m := otel.Meter("github.com/jonbaldie/beads/storage/dolt")
 	db := s.db
 
 	m.Int64ObservableGauge("bd.db.pool_open", //nolint:errcheck,gosec

@@ -3,8 +3,8 @@ package db
 import (
 	"encoding/json"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/issueops"
 )
 
 // TestIssueSQLRepository_MergeOps covers the read-merge-write operation keys

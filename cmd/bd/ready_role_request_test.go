@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // TestReadyRoleRequestDropsThePage pins what both role-taking questions of

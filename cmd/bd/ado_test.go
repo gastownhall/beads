@@ -14,8 +14,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/ado"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ado"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // adoStdioMutex serializes tests that redirect os.Stdout/os.Stderr.

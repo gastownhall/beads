@@ -4,8 +4,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/kvkeys"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/jonbaldie/beads/internal/storage/kvkeys"
+	"github.com/jonbaldie/beads/internal/workapi"
 )
 
 // TestInfoConfigExcludesTheKVPlane pins that `bd info --json` does not serve

@@ -8,8 +8,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/issueops"
 )
 
 // The request body's member vocabulary. The schema is

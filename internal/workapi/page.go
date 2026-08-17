@@ -3,7 +3,7 @@ package workapi
 import (
 	"slices"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // PageRow is the two row shapes a work page can carry: the bare issue the text

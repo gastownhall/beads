@@ -8,10 +8,10 @@ import (
 	"time"
 
 	"github.com/charmbracelet/x/ansi"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
-	"github.com/steveyegge/beads/internal/uimd"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/uimd"
 )
 
 // formatShortIssue returns a compact one-line representation of an issue

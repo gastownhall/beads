@@ -319,7 +319,7 @@ func writeMarkerDir(t *testing.T, files map[string]string) string {
 }
 
 func TestBuildPreflightChecklist(t *testing.T) {
-	beadsGoMod := "module github.com/steveyegge/beads\n\ngo 1.22\n"
+	beadsGoMod := "module github.com/jonbaldie/beads\n\ngo 1.22\n"
 	otherGoMod := "module example.com/foo\n\ngo 1.22\n"
 
 	cases := []struct {
@@ -388,7 +388,7 @@ func TestBuildPreflightChecklist(t *testing.T) {
 }
 
 func TestIsBeadsRepo(t *testing.T) {
-	beads := writeMarkerDir(t, map[string]string{"go.mod": "module github.com/steveyegge/beads\n"})
+	beads := writeMarkerDir(t, map[string]string{"go.mod": "module github.com/jonbaldie/beads\n"})
 	if !isBeadsRepo(beads) {
 		t.Error("expected beads module to be detected as the beads repo")
 	}

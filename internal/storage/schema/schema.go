@@ -19,7 +19,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage/dberrors"
+	"github.com/jonbaldie/beads/internal/storage/dberrors"
 	"golang.org/x/term"
 )
 
@@ -108,7 +108,7 @@ func (e *SchemaSkewError) UserMessage() string {
 		"    CGO_ENABLED=0 go build -tags gms_pure_go ./cmd/bd\n" +
 		"\n" +
 		"  Or install the latest release:\n" +
-		"    CGO_ENABLED=0 go install -tags gms_pure_go github.com/steveyegge/beads/cmd/bd@latest\n" +
+		"    CGO_ENABLED=0 go install -tags gms_pure_go github.com/jonbaldie/beads/cmd/bd@latest\n" +
 		"\n" +
 		"  To proceed despite the risk (some read commands may still work):\n" +
 		"    BD_IGNORE_SCHEMA_SKEW=1 bd <command>\n" +

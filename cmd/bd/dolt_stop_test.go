@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/jonbaldie/beads/internal/storage/dbproxy/proxy"
 )
 
 func TestDoltStopHelpStatesForceExecutableSafety(t *testing.T) {

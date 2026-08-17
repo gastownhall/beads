@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	beadsplugin "github.com/steveyegge/beads/plugins/beads"
+	beadsplugin "github.com/jonbaldie/beads/plugins/beads"
 )
 
 func TestBuiltinRecipes(t *testing.T) {

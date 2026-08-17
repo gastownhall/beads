@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/formula"
+	"github.com/jonbaldie/beads/internal/formula"
 )
 
 func twoStepFormula(name, stepTitle string) *formula.Formula {

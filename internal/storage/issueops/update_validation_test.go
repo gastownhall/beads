@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/storage"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 func TestValidateUpdateRequestRejectsInvalidCanonicalFields(t *testing.T) {

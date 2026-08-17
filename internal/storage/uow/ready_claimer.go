@@ -4,10 +4,10 @@ import (
 	"context"
 	"fmt"
 
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/workapi"
-	publicops "github.com/steveyegge/beads/issueops"
+	storageissueops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/workapi"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // ReadyClaimerSource is the capability accessor a unit-of-work provider offers

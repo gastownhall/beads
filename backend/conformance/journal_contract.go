@@ -6,8 +6,8 @@ import (
 	"math"
 	"testing"
 
-	storeops "github.com/steveyegge/beads/internal/storage/issueops"
-	"github.com/steveyegge/beads/journalops"
+	storeops "github.com/jonbaldie/beads/internal/storage/issueops"
+	"github.com/jonbaldie/beads/journalops"
 )
 
 // This file holds the contract every implementation of journalops.Journal must

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/storage/uow"
 )
 
 func runDoltRemoteRemoveProxied(ctx context.Context, name string) error {

@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 func (s *testSuite) TestIsGitRepo_FalseOutsideRepo() {

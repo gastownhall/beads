@@ -24,7 +24,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/testutil"
+	"github.com/jonbaldie/beads/internal/testutil"
 )
 
 func TestDoctorConventionsMaxRows_EnvOnly_Exits2(t *testing.T) {

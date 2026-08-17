@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/tracker"
 )
 
 func TestIsRecognizedConfigKey(t *testing.T) {

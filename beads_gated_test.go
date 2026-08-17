@@ -8,8 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/steveyegge/beads"
-	"github.com/steveyegge/beads/internal/workspacegate"
+	"github.com/jonbaldie/beads"
+	"github.com/jonbaldie/beads/internal/workspacegate"
 )
 
 // OpenGated must fail fast (never reaching the storage open) while a

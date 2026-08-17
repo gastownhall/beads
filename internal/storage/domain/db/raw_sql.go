@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 func NewRawSQLRepository(runner Runner) domain.RawSQLRepository {

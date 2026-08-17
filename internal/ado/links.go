@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/tracker"
+	"github.com/jonbaldie/beads/internal/tracker"
 )
 
 // LinkResolver handles bidirectional link sync between beads dependencies

@@ -11,7 +11,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // bdEpic runs "bd epic" with the given args and returns raw stdout.

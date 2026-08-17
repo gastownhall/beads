@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/backend/conformance"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/domain/db"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/backend/conformance"
+	"github.com/jonbaldie/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/storage/domain/db"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 // TestCommenterContract runs the Commenter contract against the unit-of-work

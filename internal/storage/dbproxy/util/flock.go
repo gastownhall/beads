@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/steveyegge/beads/internal/lockfile"
+	"github.com/jonbaldie/beads/internal/lockfile"
 )
 
 // Unlocker is the interface for releasing an acquired lock.

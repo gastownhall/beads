@@ -2,7 +2,7 @@ module bd-example-extension-go
 
 go 1.26.5
 
-require github.com/steveyegge/beads v0.0.0-00010101000000-000000000000
+require github.com/jonbaldie/beads v0.0.0-00010101000000-000000000000
 
 require (
 	cel.dev/expr v0.25.2 // indirect
@@ -179,4 +179,4 @@ require (
 )
 
 // For local development - remove when beads is published
-replace github.com/steveyegge/beads => ../..
+replace github.com/jonbaldie/beads => ../..

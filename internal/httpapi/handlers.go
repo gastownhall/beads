@@ -5,8 +5,8 @@ import (
 	"net/http"
 	"slices"
 
-	"github.com/steveyegge/beads/internal/httpapi/apigen"
-	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/jonbaldie/beads/internal/httpapi/apigen"
+	"github.com/jonbaldie/beads/internal/storage/domain"
 )
 
 // handleHealth answers from the process and touches nothing that can fail.

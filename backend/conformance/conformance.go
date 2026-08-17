@@ -65,7 +65,7 @@
 //	}
 //
 // An EXTERNAL module writes the same test naming the engine interface through
-// its public alias, github.com/steveyegge/beads/backend.DoltStorage — the
+// its public alias, github.com/jonbaldie/beads/backend.DoltStorage — the
 // identical type, so the factory literal satisfies Factory as-is. The whole
 // public contract an external backend implements (interface, signature types,
 // registry, sentinels) lives in that backend package.
@@ -89,8 +89,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/types"
 )
 
 var (

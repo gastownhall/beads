@@ -15,11 +15,11 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/option"
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/metrics"
-	"github.com/steveyegge/beads/internal/telemetry"
-	"github.com/steveyegge/beads/internal/types"
-	"github.com/steveyegge/beads/internal/ui"
+	"github.com/jonbaldie/beads/internal/config"
+	"github.com/jonbaldie/beads/internal/metrics"
+	"github.com/jonbaldie/beads/internal/telemetry"
+	"github.com/jonbaldie/beads/internal/types"
+	"github.com/jonbaldie/beads/internal/ui"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 )
@@ -462,7 +462,7 @@ func analyzeWithAI(ctx context.Context, client anthropic.Client, model anthropic
 		sb.WriteString("\n")
 	}
 
-	tracer := telemetry.Tracer("github.com/steveyegge/beads/ai")
+	tracer := telemetry.Tracer("github.com/jonbaldie/beads/ai")
 	aiCtx, aiSpan := tracer.Start(ctx, "anthropic.messages.new")
 	aiSpan.SetAttributes(
 		attribute.String("bd.ai.model", model),

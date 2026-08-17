@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/steveyegge/beads/internal/hooks"
-	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/telemetry"
+	"github.com/jonbaldie/beads/internal/hooks"
+	"github.com/jonbaldie/beads/internal/storage"
+	"github.com/jonbaldie/beads/internal/telemetry"
 )
 
 // wireStorageDecorators composes the storage chain in the order the rest of

@@ -6,8 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/steveyegge/beads/internal/storage"
-	publicops "github.com/steveyegge/beads/issueops"
+	"github.com/jonbaldie/beads/internal/storage"
+	publicops "github.com/jonbaldie/beads/issueops"
 )
 
 // CompareAndSetMetadataKeyInTx is the body behind issueops.MetadataCAS: read

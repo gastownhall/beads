@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/steveyegge/beads/internal/storage/rowid"
+	"github.com/jonbaldie/beads/internal/storage/rowid"
 )
 
 // auxRekeyPass names one clone-local convergence pass over the aux tables.
