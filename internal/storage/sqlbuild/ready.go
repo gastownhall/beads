@@ -113,6 +113,21 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 	}
 
+	if filter.LeavesOnly {
+		// Prefer leaves: claim a child, not the parent epic, while children are open.
+		whereClauses = append(whereClauses, fmt.Sprintf(`NOT EXISTS (
+			SELECT 1 FROM %s _leaf_d
+			INNER JOIN %s _leaf_c ON _leaf_c.id = _leaf_d.issue_id
+			WHERE _leaf_d.type = 'parent-child'
+			  AND %s = id
+			  AND _leaf_c.status NOT IN ('closed', 'tombstone')
+		) AND NOT EXISTS (
+			SELECT 1 FROM %s _leaf_dot
+			WHERE _leaf_dot.id LIKE CONCAT(id, '.%%')
+			  AND _leaf_dot.status NOT IN ('closed', 'tombstone')
+		)`, tables.Dependencies, tables.Main, qualifiedDepTarget("_leaf_d"), tables.Main))
+	}
+
 	if filter.Priority != nil {
 		whereClauses = append(whereClauses, "priority = ?")
 		args = append(args, *filter.Priority)

@@ -6,7 +6,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-func runLintProxiedServer(ctx context.Context, args []string, typeFilter, statusFilter string) error {
+func runLintProxiedServer(ctx context.Context, args []string, typeFilter, statusFilter string, strict bool) error {
 	uw, err := openProxiedListUOW(ctx)
 	if err != nil {
 		return HandleError("%v", err)
@@ -24,5 +24,5 @@ func runLintProxiedServer(ctx context.Context, args []string, typeFilter, status
 		issues = page.Items
 	}
 
-	return runLint(issues)
+	return runLint(issues, strict)
 }

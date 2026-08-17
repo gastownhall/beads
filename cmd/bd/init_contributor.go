@@ -14,8 +14,19 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// runContributorWizard guides the user through OSS contributor setup
-func runContributorWizard(ctx context.Context, store storage.DoltStorage) error {
+// contributorWizardOpts controls contributor routing setup. Non-interactive
+// mode applies defaults (planning repo at ~/.beads-planning unless overridden)
+// so agents can run `bd init --contributor --non-interactive`.
+type contributorWizardOpts struct {
+	NonInteractive bool
+	PlanningRepo   string
+	Quiet          bool
+}
+
+func runContributorWizard(ctx context.Context, store storage.DoltStorage, opts contributorWizardOpts) error {
+	if opts.NonInteractive {
+		return applyContributorSetup(ctx, store, opts)
+	}
 	fmt.Printf("\n%s %s\n\n", ui.RenderBold("bd"), ui.RenderBold("Contributor Workflow Setup Wizard"))
 	fmt.Println("This wizard will configure beads for OSS contribution.")
 	fmt.Println()
@@ -400,4 +411,68 @@ func checkPushAccess() (hasPush bool, originURL string) {
 
 	// Other protocols (file://, etc.) assume push access
 	return true, originURL
+}
+
+func applyContributorSetup(ctx context.Context, store storage.DoltStorage, opts contributorWizardOpts) error {
+	planningPath := strings.TrimSpace(opts.PlanningRepo)
+	if planningPath == "" {
+		if beadsDir := os.Getenv("BEADS_DIR"); beadsDir != "" {
+			planningPath = beadsDir
+		}
+	}
+	if planningPath == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to get home directory: %w", err)
+		}
+		planningPath = filepath.Join(homeDir, ".beads-planning")
+	}
+	if err := ensurePlanningRepo(ctx, planningPath); err != nil {
+		return err
+	}
+	if err := store.SetConfig(ctx, "routing.mode", "auto"); err != nil {
+		return fmt.Errorf("failed to set routing.mode: %w", err)
+	}
+	if err := store.SetConfig(ctx, "routing.contributor", planningPath); err != nil {
+		return fmt.Errorf("failed to set routing.contributor: %w", err)
+	}
+	if isFork, _ := detectForkSetup(); isFork {
+		if err := store.SetConfig(ctx, "sync.remote", "upstream"); err != nil {
+			return fmt.Errorf("failed to set sync.remote: %w", err)
+		}
+	}
+	if configPath, err := config.FindConfigYAMLPath(); err == nil {
+		if addErr := config.AddRepo(configPath, planningPath); addErr != nil && !strings.Contains(addErr.Error(), "already exists") {
+			// Non-fatal: hydration config failure doesn't block routing setup
+		}
+	}
+	if !opts.Quiet {
+		fmt.Printf("\n%s Contributor routing configured\n", ui.RenderAccent("▶"))
+		fmt.Printf("  %s Planning repo: %s\n", ui.RenderPass("✓"), planningPath)
+		fmt.Printf("  %s Issues will route to planning repo (routing.mode=auto)\n", ui.RenderPass("✓"))
+	}
+	return nil
+}
+
+func ensurePlanningRepo(ctx context.Context, planningPath string) error {
+	if _, err := os.Stat(planningPath); os.IsNotExist(err) {
+		if err := os.MkdirAll(planningPath, 0750); err != nil {
+			return fmt.Errorf("failed to create planning repo: %w", err)
+		}
+		gitInit := exec.Command("git", "init")
+		gitInit.Dir = planningPath
+		if err := gitInit.Run(); err != nil {
+			return fmt.Errorf("failed to init git in planning repo: %w", err)
+		}
+	}
+	planningBeadsDir := filepath.Join(planningPath, ".beads")
+	if err := os.MkdirAll(planningBeadsDir, 0750); err != nil {
+		return fmt.Errorf("failed to create .beads in planning repo: %w", err)
+	}
+	// Initialize the planning Dolt schema so later commands can open the store.
+	// Non-fatal: no-CGO and server-mode builds skip this silently.
+	if planningStore, storeErr := newDoltStoreFromConfig(ctx, planningBeadsDir); storeErr == nil {
+		_ = planningStore.Close()
+	}
+	return nil
 }

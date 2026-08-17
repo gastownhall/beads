@@ -243,12 +243,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 			if stats, statsErr := activeStore.GetStatistics(ctx); statsErr == nil {
 				hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 			}
-			if hasOpenIssues {
-				fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-					ui.RenderWarn("✨"))
-			} else {
-				fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
-			}
+			printReadyEmptyHuman(hasOpenIssues, hasStoredBlockedStatus(ctx, activeStore.SearchIssues))
 			maybeShowTip(store)
 			return nil
 		}
@@ -256,7 +251,7 @@ This is useful for agents executing molecules to see which steps can run next.`,
 
 		usePlain := in.plainFormat || !in.prettyFormat
 		if usePlain {
-			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
+			fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("▸"), len(issues))
 			for i, issue := range issues {
 				fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
 					ui.RenderPriority(issue.Priority),
@@ -316,25 +311,52 @@ var blockedCmd = &cobra.Command{
 			}
 			return outputJSON(blocked)
 		}
-		if len(blocked) == 0 {
-			fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-			return nil
-		}
-		fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
-		for _, issue := range blocked {
-			fmt.Printf("[%s] %s: %s\n",
-				ui.RenderPriority(issue.Priority),
-				ui.RenderID(issue.ID), issue.Title)
+		printBlockedHuman(blocked)
+		return nil
+	},
+}
+
+func hasStoredBlockedStatus(ctx context.Context, search func(context.Context, string, types.IssueFilter) ([]*types.Issue, error)) bool {
+	if search == nil {
+		return false
+	}
+	st := types.StatusBlocked
+	held, err := search(ctx, "", types.IssueFilter{Status: &st, Limit: 1})
+	return err == nil && len(held) > 0
+}
+
+func printReadyEmptyHuman(hasOpenIssues, hasStoredBlocked bool) {
+	switch {
+	case hasOpenIssues:
+		fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n", ui.RenderWarn("○"))
+	case hasStoredBlocked:
+		fmt.Printf("\n%s No ready work found (remaining issues have stored status blocked; use 'bd blocked' or 'bd update <id> --claim' to resume)\n\n", ui.RenderWarn("○"))
+	default:
+		fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("○"))
+	}
+}
+
+func printBlockedHuman(blocked []*types.BlockedIssue) {
+	if len(blocked) == 0 {
+		fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("○"))
+		return
+	}
+	fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("●"), len(blocked))
+	for _, issue := range blocked {
+		fmt.Printf("[%s] %s: %s\n",
+			ui.RenderPriority(issue.Priority),
+			ui.RenderID(issue.ID), issue.Title)
+		if issue.BlockedByCount == 0 {
+			fmt.Printf("  Stored status blocked (no open dependencies). Resume with: bd update %s --claim\n", issue.ID)
+		} else {
 			blockedBy := issue.BlockedBy
 			if blockedBy == nil {
 				blockedBy = []string{}
 			}
-			fmt.Printf("  Blocked by %d open dependencies: %v\n",
-				issue.BlockedByCount, blockedBy)
-			fmt.Println()
+			fmt.Printf("  Blocked by %d open dependencies: %v\n", issue.BlockedByCount, blockedBy)
 		}
-		return nil
-	},
+		fmt.Println()
+	}
 }
 
 // readyTotal sizes the whole ready set for the request `bd ready` just listed
@@ -514,7 +536,7 @@ func runReadyExplain(_ *cobra.Command) error {
 		return outputJSON(explanation)
 	}
 
-	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
+	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("▸"))
 
 	// Ready section
 	if len(explanation.Ready) > 0 {
@@ -623,7 +645,7 @@ func runMoleculeReady(_ *cobra.Command, molIDArg string) error {
 	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
 
 	if len(readySteps) == 0 {
-		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
+		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("○"))
 		return nil
 	}
 
@@ -644,7 +666,7 @@ func runMoleculeReady(_ *cobra.Command, molIDArg string) error {
 		}
 	}
 
-	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("📋"))
+	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("▸"))
 	for i, step := range readySteps {
 		// Show parallel group if in one
 		groupAnnotation := ""

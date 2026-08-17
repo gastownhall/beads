@@ -152,6 +152,9 @@ pointless).`,
 				return HandleErrorRespectJSON("invalid status %q (built-in: open, in_progress, blocked, deferred, closed, pinned, hooked; or configure custom statuses via 'bd config set status.custom')", status)
 			}
 			updates["status"] = status
+			if status == string(types.StatusBlocked) && !jsonOutput {
+				fmt.Fprintf(os.Stderr, "%s status %q is stored, not computed from dependencies. The issue leaves the ready queue. Add a blocker with `bd dep add` if another issue is blocking this work. Resume with `bd update --claim` or `--status open`.\n", ui.RenderWarn("!"), status)
+			}
 
 			// If status is being set to closed, include session if provided
 			if status == "closed" {

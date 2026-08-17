@@ -638,3 +638,101 @@ func TestReadyCommandInit(t *testing.T) {
 		t.Errorf("--exclude-label default should be '[]', got %q", excludeLabelFlag.DefValue)
 	}
 }
+
+func TestGetBlockedIssuesIncludesStoredBlocked(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
+
+	held := &types.Issue{
+		ID: "qa-hold", Title: "Parked", Status: types.StatusBlocked,
+		Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now(),
+	}
+	if err := s.CreateIssue(ctx, held, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	blocked, err := s.GetBlockedIssues(ctx, types.WorkFilter{})
+	if err != nil {
+		t.Fatalf("GetBlockedIssues: %v", err)
+	}
+	found := false
+	for _, issue := range blocked {
+		if issue.ID == "qa-hold" {
+			found = true
+			if issue.BlockedByCount != 0 {
+				t.Errorf("stored-blocked with no deps has BlockedByCount=%d", issue.BlockedByCount)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("stored status=blocked issue must appear in GetBlockedIssues")
+	}
+
+	if err := s.ClaimIssue(ctx, "qa-hold", "agent"); err != nil {
+		t.Fatalf("ClaimIssue on stored-blocked: %v", err)
+	}
+	got, err := s.GetIssue(ctx, "qa-hold")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.StatusInProgress {
+		t.Fatalf("claim should resume stored-blocked, status=%s", got.Status)
+	}
+}
+
+func TestClaimReadyIssuePrefersLeafOverEpic(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
+
+	epic := &types.Issue{
+		ID: "qa-epic", Title: "Parent epic", Status: types.StatusOpen,
+		Priority: 1, IssueType: types.TypeEpic, CreatedAt: time.Now(),
+	}
+	child := &types.Issue{
+		ID: "qa-epic.1", Title: "Leaf work", Status: types.StatusOpen,
+		Priority: 1, IssueType: types.TypeTask, CreatedAt: time.Now(),
+	}
+	for _, issue := range []*types.Issue{epic, child} {
+		if err := s.CreateIssue(ctx, issue, "test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{
+		IssueID: "qa-epic.1", DependsOnID: "qa-epic", Type: types.DepParentChild, CreatedAt: time.Now(),
+	}, "test"); err != nil {
+		t.Fatal(err)
+	}
+
+	listed, err := s.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	listedIDs := map[string]bool{}
+	for _, issue := range listed {
+		listedIDs[issue.ID] = true
+	}
+	if !listedIDs["qa-epic"] {
+		t.Fatal("bd ready listing should still include the parent epic")
+	}
+	if !listedIDs["qa-epic.1"] {
+		t.Fatal("bd ready listing should include the leaf")
+	}
+
+	claimed, err := s.ClaimReadyIssue(ctx, types.WorkFilter{}, "agent")
+	if err != nil {
+		t.Fatalf("ClaimReadyIssue: %v", err)
+	}
+	if claimed == nil {
+		t.Fatal("ClaimReadyIssue returned nil")
+	}
+	if claimed.ID == "qa-epic" {
+		t.Fatal("ClaimReadyIssue took the epic instead of the leaf")
+	}
+	if claimed.ID != "qa-epic.1" {
+		t.Fatalf("ClaimReadyIssue took %s, want qa-epic.1", claimed.ID)
+	}
+}

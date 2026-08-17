@@ -377,6 +377,29 @@ func TestSearchCountsSQLShape(t *testing.T) {
 	}
 }
 
+func TestBuildReadyWorkWhereLeavesOnly(t *testing.T) {
+	t.Parallel()
+
+	plain, _, err := BuildReadyWorkWhere(types.WorkFilter{}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Contains(plain, "_leaf_d") || strings.Contains(plain, "_leaf_dot") {
+		t.Fatalf("listing ready work must not exclude parents; where = %s", plain)
+	}
+
+	leaves, _, err := BuildReadyWorkWhere(types.WorkFilter{LeavesOnly: true}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(leaves, "_leaf_d") || !strings.Contains(leaves, "parent-child") {
+		t.Fatalf("LeavesOnly must exclude parents via parent-child edges; where = %s", leaves)
+	}
+	if !strings.Contains(leaves, "_leaf_dot") || !strings.Contains(leaves, "CONCAT(id, '.%") {
+		t.Fatalf("LeavesOnly must exclude dotted descendants; where = %s", leaves)
+	}
+}
+
 func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 	t.Parallel()
 

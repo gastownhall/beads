@@ -240,11 +240,12 @@ func GetDescendantIDsInTx(ctx context.Context, tx DBTX, rootID string, maxDepth 
 func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter) ([]*types.BlockedIssue, error) {
 	var blockedIDList []string
 	blockedSet := make(map[string]bool)
+	storedBlocked := make(map[string]bool)
 	for _, table := range []string{"issues", "wisps"} {
 		//nolint:gosec // G201: table is one of two hardcoded values.
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
-			SELECT id FROM %s
-			WHERE is_blocked = 1 AND status <> 'closed' AND status <> 'pinned'
+			SELECT id, status FROM %s
+			WHERE (is_blocked = 1 OR status = 'blocked') AND status <> 'closed' AND status <> 'pinned'
 		`, table))
 		if err != nil {
 			if optionalBlockedTable(table) && isTableNotExistError(err) {
@@ -253,14 +254,17 @@ func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter)
 			return nil, fmt.Errorf("read blocked ids from %s: %w", table, err)
 		}
 		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var id, status string
+			if err := rows.Scan(&id, &status); err != nil {
 				_ = rows.Close()
 				return nil, fmt.Errorf("scan blocked id from %s: %w", table, err)
 			}
 			if !blockedSet[id] {
 				blockedSet[id] = true
 				blockedIDList = append(blockedIDList, id)
+			}
+			if status == string(types.StatusBlocked) {
+				storedBlocked[id] = true
 			}
 		}
 		_ = rows.Close()
@@ -313,6 +317,15 @@ func GetBlockedIssuesInTx(ctx context.Context, tx DBTX, filter types.WorkFilter)
 					blockerMap[childID] = []string{parentID}
 				}
 			}
+		}
+	}
+
+	// Stored status "blocked" is a manual hold. Include those issues even when
+	// they have no remaining computed blockers so they cannot vanish from both
+	// bd ready and bd blocked.
+	for id := range storedBlocked {
+		if _, ok := blockerMap[id]; !ok {
+			blockerMap[id] = []string{}
 		}
 	}
 

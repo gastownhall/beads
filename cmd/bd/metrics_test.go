@@ -205,6 +205,8 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 
 		initCmd := &cobra.Command{Use: "init"}
 		initCmd.Flags().Bool("stealth", false, "")
+		initCmd.Flags().Bool("quiet", false, "")
+		initCmd.Flags().Bool("non-interactive", false, "")
 		root.AddCommand(initCmd)
 		cmds["init"] = initCmd
 		return cmds
@@ -266,6 +268,28 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 		reset()
 		if firstRunNoticeSuppressedByContext(newTree()["init"]) {
 			t.Errorf("plain `bd init` should NOT be suppressed (interactive consent is expected)")
+		}
+	})
+
+	t.Run("quiet init is suppressed", func(t *testing.T) {
+		reset()
+		cmds := newTree()
+		if err := cmds["init"].Flags().Set("quiet", "true"); err != nil {
+			t.Fatalf("set quiet flag: %v", err)
+		}
+		if !firstRunNoticeSuppressedByContext(cmds["init"]) {
+			t.Errorf("`bd init --quiet` should suppress the first-run notice")
+		}
+	})
+
+	t.Run("non-interactive init is suppressed", func(t *testing.T) {
+		reset()
+		cmds := newTree()
+		if err := cmds["init"].Flags().Set("non-interactive", "true"); err != nil {
+			t.Fatalf("set non-interactive flag: %v", err)
+		}
+		if !firstRunNoticeSuppressedByContext(cmds["init"]) {
+			t.Errorf("`bd init --non-interactive` should suppress the first-run notice")
 		}
 	})
 

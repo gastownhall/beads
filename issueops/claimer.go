@@ -43,10 +43,10 @@ type Claimer interface {
 	// Claim validates and commits the complete request as one atomic
 	// compare-and-set mutation: it sets Assignee to Actor and Status to
 	// StatusInProgress only while the issue's status is built-in StatusOpen or
-	// a configured active status and the issue is unassigned, assigned to
-	// Actor, or assigned to a configured claim pool. StatusInProgress held by
-	// the same Actor is an idempotent success with Changed false and no
-	// persisted mutation.
+	// StatusBlocked, or a configured active status, and the issue is
+	// unassigned, assigned to Actor, or assigned to a configured claim pool.
+	// StatusInProgress held by the same Actor is an idempotent success with
+	// Changed false and no persisted mutation.
 	//
 	// A foreign holder refuses with a wrapped ErrAlreadyClaimed and an
 	// ineligible status with a wrapped ErrNotClaimable; when the refusing state

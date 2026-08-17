@@ -279,6 +279,9 @@ func ClaimReadyIssueInTx(
 	claimFilter.Limit = 0
 	claimFilter.MaxRows = 0
 	claimFilter.MaxRowsSource = ""
+	// Claim the leaf, not the parent epic, so `bd ready --claim` takes
+	// ep-7j4.2 rather than the still-open container.
+	claimFilter.LeavesOnly = true
 
 	readyIssues, err := GetReadyWorkInTx(ctx, tx, claimFilter)
 	if err != nil {
@@ -331,15 +334,16 @@ func ParseClaimPools(raw string) []string {
 }
 
 // ClaimableSourceStatusesInTx returns the set of statuses an issue may be
-// claimed FROM: the built-in "open" status plus any configured custom status
-// whose category is "active" (the same category that surfaces issues in
-// bd ready). Custom statuses in the wip/done/frozen categories are intentionally
-// excluded so claim retains its anti-steal protection (GH-3570) — an
-// in_progress/blocked issue, or a custom alias for one, is never silently
-// re-claimable. Unspecified-category customs are also excluded, matching their
-// absence from bd ready.
+// claimed FROM: the built-in "open" and "blocked" statuses plus any configured
+// custom status whose category is "active" (the same category that surfaces
+// issues in bd ready). Stored blocked is claimable so an agent can resume after
+// a manual hold (`bd update --status blocked` then later `--claim`). Custom
+// statuses in the wip/done/frozen categories are intentionally excluded so
+// claim retains its anti-steal protection (GH-3570) — an in_progress issue, or
+// a custom alias for one, is never silently re-claimable. Unspecified-category
+// customs are also excluded, matching their absence from bd ready.
 func ClaimableSourceStatusesInTx(ctx context.Context, tx DBTX) ([]string, error) {
-	statuses := []string{string(types.StatusOpen)}
+	statuses := []string{string(types.StatusOpen), string(types.StatusBlocked)}
 	customs, err := ResolveCustomStatusesDetailedInTx(ctx, tx)
 	if err != nil {
 		return nil, err

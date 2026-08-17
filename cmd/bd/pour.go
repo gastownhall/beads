@@ -315,13 +315,29 @@ func renderPourResult(result *InstantiateResult, totalAttached, attachCount int)
 	return nil
 }
 
-func init() {
-	// Pour command flags
-	pourCmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
-	pourCmd.Flags().Bool("dry-run", false, "Preview what would be created")
-	pourCmd.Flags().String("assignee", "", "Assign the root issue to this agent/user")
-	pourCmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
-	pourCmd.Flags().String("attach-type", types.BondTypeSequential, "Bond type for attachments: sequential, parallel, or conditional")
+func registerPourFlags(cmd *cobra.Command) {
+	cmd.Flags().StringArray("var", []string{}, "Variable substitution (key=value)")
+	cmd.Flags().Bool("dry-run", false, "Preview what would be created")
+	cmd.Flags().String("assignee", "", "Assign the root issue to this agent/user")
+	cmd.Flags().StringSlice("attach", []string{}, "Proto to attach after spawning (repeatable)")
+	cmd.Flags().String("attach-type", types.BondTypeSequential, "Bond type for attachments: sequential, parallel, or conditional")
+}
 
+// pourTopLevelCmd is the `bd pour` alias. Cobra cannot attach the same command
+// object to two parents, so this is a thin twin of pourCmd.
+var pourTopLevelCmd = &cobra.Command{
+	Use:           "pour <proto-id>",
+	Short:         "Instantiate a proto as a persistent mol (alias for 'bd mol pour')",
+	Long:          pourCmd.Long + "\n\nThis is an alias for `bd mol pour`.",
+	Args:          cobra.ExactArgs(1),
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	RunE:          runPour,
+}
+
+func init() {
+	registerPourFlags(pourCmd)
+	registerPourFlags(pourTopLevelCmd)
 	molCmd.AddCommand(pourCmd)
+	rootCmd.AddCommand(pourTopLevelCmd)
 }

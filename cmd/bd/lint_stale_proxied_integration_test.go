@@ -136,11 +136,17 @@ func TestProxiedServerLint(t *testing.T) {
 		}
 	})
 
-	t.Run("exit_code_1_on_warnings", func(t *testing.T) {
-		// Non-JSON lint returns SilentExit (exit 1) when warnings exist.
+	t.Run("exit_code_0_on_warnings", func(t *testing.T) {
 		out, err := bdProxiedRun(t, bd, p.dir, "lint")
+		if err != nil {
+			t.Errorf("expected exit 0 when warnings exist (report, not gate), got err %v:\n%s", err, out)
+		}
+	})
+
+	t.Run("exit_code_1_on_strict", func(t *testing.T) {
+		out, err := bdProxiedRun(t, bd, p.dir, "lint", "--strict")
 		if err == nil {
-			t.Errorf("expected non-zero exit when warnings exist, got success:\n%s", out)
+			t.Errorf("expected non-zero exit with --strict when warnings exist, got success:\n%s", out)
 		}
 	})
 

@@ -31,6 +31,12 @@ var (
 // mutually-exclusive target columns.
 const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
 
+// qualifiedDepTarget is DepTargetExpr with each column prefixed by alias so it
+// can be used in a joined subquery without colliding with the outer row.
+func qualifiedDepTarget(alias string) string {
+	return "COALESCE(" + alias + ".depends_on_issue_id, " + alias + ".depends_on_wisp_id, " + alias + ".depends_on_external)"
+}
+
 // IssueBaseColumns is the column list for the issues/wisps row itself,
 // without the lease overlay. Use IssueSelectColumns for full hydration;
 // this split exists so callers that alias the main table (QualifyColumns)

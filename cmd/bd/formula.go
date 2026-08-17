@@ -159,14 +159,16 @@ func runFormulaList(cmd *cobra.Command, args []string) error {
 
 	if len(entries) == 0 {
 		fmt.Println("No formulas found.")
-		fmt.Println("\nSearch paths:")
+		fmt.Println("\nFormulas are .formula.toml / .formula.json files in:")
 		for _, p := range searchPaths {
 			fmt.Printf("  %s\n", p)
 		}
+		fmt.Println("\n`bd cook --persist` writes a proto to the database, not a formula file.")
+		fmt.Println("Pour a formula file directly with: bd pour <file.formula.toml>")
 		return nil
 	}
 
-	fmt.Printf("📜 Formulas (%d found)\n\n", len(entries))
+	fmt.Printf("Formulas (%d found)\n\n", len(entries))
 
 	byType := make(map[string][]FormulaListEntry)
 	for _, e := range entries {

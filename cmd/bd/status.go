@@ -132,7 +132,7 @@ func renderStatus(stats *types.Statistics, recentActivity *RecentActivitySummary
 	}
 
 	// Human-readable colorized output using semantic ui package
-	fmt.Printf("\n%s Issue Database Status\n\n", ui.RenderAccent("📊"))
+	fmt.Printf("\n%s Issue Database Status\n\n", ui.RenderAccent("▸"))
 	fmt.Printf("Summary:\n")
 	fmt.Printf("  Total Issues:           %d\n", stats.TotalIssues)
 	fmt.Printf("  Open:                   %s\n", ui.RenderPass(fmt.Sprintf("%d", stats.OpenIssues)))

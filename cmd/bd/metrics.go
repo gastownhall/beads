@@ -341,15 +341,33 @@ var firstRunNoticeSuppressedCommands = map[string]bool{
 	"powershell":                  true,
 }
 
+// commandBoolFlag reports whether cmd has a boolean flag of the given name set
+// true. It checks local flags first so a command-specific --quiet (for example
+// `bd init --quiet`) is visible even when it does not bind the root quietFlag.
+func commandBoolFlag(cmd *cobra.Command, name string) bool {
+	if cmd == nil {
+		return false
+	}
+	if v, err := cmd.Flags().GetBool(name); err == nil && v {
+		return true
+	}
+	return false
+}
+
 // firstRunNoticeSuppressedByContext reports whether the current command/output
 // context must never emit the friendly first-run metrics notice. This is the
 // pure context decision — independent of whether metrics are enabled or the
 // notice was already shown — so it stays unit-testable. It suppresses machine
 // output (JSON/quiet/hook-json), git-hook execution (BD_GIT_HOOK), the metrics
 // command itself, hook/protocol/completion/shell-init commands, the root
-// --version/-V probe, and stealth init.
+// --version/-V probe, stealth init, and init --quiet / --non-interactive.
 func firstRunNoticeSuppressedByContext(cmd *cobra.Command) bool {
 	if jsonOutput || quietFlag || primeHookJSONMode {
+		return true
+	}
+	// Init has its own local --quiet / --non-interactive flags that do not set
+	// the root persistent quietFlag. Agent init is `bd init --quiet --non-interactive`.
+	if commandBoolFlag(cmd, "quiet") || commandBoolFlag(cmd, "non-interactive") {
 		return true
 	}
 	if os.Getenv("BD_GIT_HOOK") == "1" {

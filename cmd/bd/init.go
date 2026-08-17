@@ -358,7 +358,8 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   • Role defaults to "maintainer" (override with --role)
   • Fork exclude auto-configured when fork detected
   • Auto-export left at default (disabled)
-  • --contributor and --team flags are rejected (wizards require interaction)
+  • --contributor uses defaults (planning repo at ~/.beads-planning, no prompts)
+  • --team is rejected (wizard requires a server URL)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
 	RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
 		prefix, _ := cmd.Flags().GetString("prefix")
@@ -572,10 +573,7 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
-		// Fail-fast: contributor/team wizards require interaction
-		if nonInteractive && contributor {
-			return fmt.Errorf("--contributor requires interactive prompts and cannot be used with --non-interactive")
-		}
+		// --team still needs a server URL. --contributor can apply defaults.
 		if nonInteractive && team {
 			return fmt.Errorf("--team requires interactive prompts and cannot be used with --non-interactive")
 		}
@@ -1875,7 +1873,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 
 		// Run contributor wizard if --contributor flag is set or user chose contributor
 		if contributor {
-			if err := runContributorWizard(ctx, store); err != nil {
+			planningRepo, _ := cmd.Flags().GetString("planning-repo")
+			if err := runContributorWizard(ctx, store, contributorWizardOpts{
+				NonInteractive: nonInteractive,
+				PlanningRepo:   planningRepo,
+				Quiet:          quiet,
+			}); err != nil {
 				canceled := isCanceled(err)
 				if canceled {
 					fmt.Fprintln(os.Stderr, "Setup canceled.")
@@ -2285,6 +2288,7 @@ func init() {
 	initCmd.Flags().StringP("prefix", "p", "", "Issue prefix (default: current directory name)")
 	initCmd.Flags().BoolP("quiet", "q", false, "Suppress output (quiet mode)")
 	initCmd.Flags().Bool("contributor", false, "Run OSS contributor setup wizard")
+	initCmd.Flags().String("planning-repo", "", "Planning repo path for --contributor (default: ~/.beads-planning)")
 	initCmd.Flags().Bool("team", false, "Run team workflow setup wizard")
 	initCmd.Flags().Bool("stealth", false, "Enable stealth mode: global gitattributes and gitignore, no local repo tracking")
 	initCmd.Flags().Bool("setup-exclude", false, "Configure .git/info/exclude to keep beads files local (for forks)")

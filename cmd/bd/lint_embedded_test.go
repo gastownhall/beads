@@ -37,7 +37,7 @@ func bdLintJSON(t *testing.T, bd, dir string, args ...string) map[string]interfa
 	cmd.Dir = dir
 	cmd.Env = bdEnv(dir)
 	stdout, stderr, err := runCommandBuffers(t, cmd)
-	// lint exits 1 on warnings even with --json, so ignore exit error
+	// lint --json prints the report even when warnings exist
 	if err != nil {
 		if _, ok := err.(*exec.ExitError); !ok {
 			t.Fatalf("bd lint --json %s failed: %v\nstdout:\n%s\nstderr:\n%s", strings.Join(args, " "), err, stdout.String(), stderr.String())
@@ -202,12 +202,19 @@ func TestEmbeddedLint(t *testing.T) {
 		}
 	})
 
-	// ===== Exit code 1 when warnings found =====
+	// ===== Exit 0 on warnings unless --strict =====
 
-	t.Run("exit_code_1_on_warnings", func(t *testing.T) {
+	t.Run("exit_code_0_on_warnings", func(t *testing.T) {
 		_, exitCode := bdLint(t, bd, dir)
+		if exitCode != 0 {
+			t.Errorf("expected exit code 0 when warnings exist (report, not gate), got %d", exitCode)
+		}
+	})
+
+	t.Run("exit_code_1_on_strict", func(t *testing.T) {
+		_, exitCode := bdLint(t, bd, dir, "--strict")
 		if exitCode != 1 {
-			t.Errorf("expected exit code 1 when warnings exist, got %d", exitCode)
+			t.Errorf("expected exit code 1 with --strict when warnings exist, got %d", exitCode)
 		}
 	})
 
@@ -300,10 +307,7 @@ func TestEmbeddedLintConcurrent(t *testing.T) {
 			cmd.Env = bdEnv(dir)
 			out, err := cmd.CombinedOutput()
 			if err != nil {
-				// lint exits 1 on warnings, which is expected
-				if _, ok := err.(*exec.ExitError); !ok {
-					r.err = fmt.Errorf("worker %d lint: %v\n%s", worker, err, out)
-				}
+				r.err = fmt.Errorf("worker %d lint: %v\n%s", worker, err, out)
 			}
 
 			results[worker] = r

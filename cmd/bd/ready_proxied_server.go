@@ -96,23 +96,7 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		_ = outputJSON(blocked)
 		return nil
 	}
-	if len(blocked) == 0 {
-		fmt.Printf("\n%s No blocked issues\n\n", ui.RenderPass("✨"))
-		return nil
-	}
-	fmt.Printf("\n%s Blocked issues (%d):\n\n", ui.RenderFail("🚫"), len(blocked))
-	for _, issue := range blocked {
-		fmt.Printf("[%s] %s: %s\n",
-			ui.RenderPriority(issue.Priority),
-			ui.RenderID(issue.ID), issue.Title)
-		blockedBy := issue.BlockedBy
-		if blockedBy == nil {
-			blockedBy = []string{}
-		}
-		fmt.Printf("  Blocked by %d open dependencies: %v\n",
-			issue.BlockedByCount, blockedBy)
-		fmt.Println()
-	}
+	printBlockedHuman(blocked)
 	return nil
 }
 
@@ -169,19 +153,19 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		if stats, statsErr := uw.IssueUseCase().GetStatistics(ctx); statsErr == nil {
 			hasOpenIssues = stats.OpenIssues > 0 || stats.InProgressIssues > 0
 		}
-		if hasOpenIssues {
-			fmt.Printf("\n%s No ready work found (all issues have blocking dependencies)\n\n",
-				ui.RenderWarn("✨"))
-		} else {
-			fmt.Printf("\n%s No open issues\n\n", ui.RenderPass("✨"))
+		hasStoredBlocked := false
+		st := types.StatusBlocked
+		if page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{Status: &st, Limit: 1}); err == nil && len(page.Items) > 0 {
+			hasStoredBlocked = true
 		}
+		printReadyEmptyHuman(hasOpenIssues, hasStoredBlocked)
 		return nil
 	}
 
 	parentEpicMap := buildParentEpicMapProxied(ctx, uw, issues)
 	usePlain := in.plainFormat || !in.prettyFormat
 	if usePlain {
-		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("📋"), len(issues))
+		fmt.Printf("\n%s Ready work (%d issues with no active blockers):\n\n", ui.RenderAccent("▸"), len(issues))
 		for i, issue := range issues {
 			fmt.Printf("%d. [%s] [%s] %s: %s\n", i+1,
 				ui.RenderPriority(issue.Priority),
@@ -354,7 +338,7 @@ func runReadyProxiedExplain(ctx context.Context, uw uow.UnitOfWork, _ readyInput
 		return nil
 	}
 
-	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("📊"))
+	fmt.Printf("\n%s Ready Work Explanation\n\n", ui.RenderAccent("▸"))
 	if len(explanation.Ready) > 0 {
 		fmt.Printf("%s Ready (%d issues):\n\n", ui.RenderPass("●"), len(explanation.Ready))
 		for _, item := range explanation.Ready {
@@ -444,7 +428,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 	fmt.Printf("   ID: %s\n", moleculeID)
 	fmt.Printf("   Total: %d steps, %d ready\n", analysis.TotalSteps, len(readySteps))
 	if len(readySteps) == 0 {
-		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("✨"))
+		fmt.Printf("\n%s No ready steps (all blocked or completed)\n\n", ui.RenderWarn("○"))
 		return nil
 	}
 	if len(analysis.ParallelGroups) > 0 {
@@ -461,7 +445,7 @@ func runReadyProxiedMolecule(ctx context.Context, uw uow.UnitOfWork, in readyInp
 			}
 		}
 	}
-	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("📋"))
+	fmt.Printf("\n%s Ready steps:\n\n", ui.RenderPass("▸"))
 	for i, step := range readySteps {
 		groupAnnotation := ""
 		if step.ParallelGroup != "" {

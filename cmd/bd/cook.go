@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -404,6 +405,12 @@ func runCook(cmd *cobra.Command, args []string) error {
 	if !flags.persist {
 		if err := outputCookEphemeral(resolved, flags.runtimeMode, flags.inputVars, vars); err != nil {
 			return HandleError("%v", err)
+		}
+		if !jsonOutput {
+			fmt.Fprintf(os.Stderr, "Note: cook is ephemeral and did not persist a proto.\n")
+			fmt.Fprintf(os.Stderr, "  Pour this formula directly:  bd pour %s\n", flags.formulaPath)
+			fmt.Fprintf(os.Stderr, "  Persist a proto first:       bd cook %s --persist\n", flags.formulaPath)
+			fmt.Fprintf(os.Stderr, "  Then:                        bd mol pour <name>\n")
 		}
 		return nil
 	}

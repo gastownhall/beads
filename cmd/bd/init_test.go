@@ -1190,6 +1190,58 @@ func TestInitNonInteractiveAlwaysSetsRole(t *testing.T) {
 	}
 }
 
+// TestInitContributorNonInteractiveSucceeds pins the QA workflow: agents run
+// `bd init --contributor --non-interactive` and must get defaults instead of a
+// rejected wizard.
+func TestInitContributorNonInteractiveSucceeds(t *testing.T) {
+	skipIfNoDolt(t)
+
+	origDBPath := dbPath
+	defer func() { dbPath = origDBPath }()
+	dbPath = ""
+
+	beads.ResetCaches()
+	git.ResetCaches()
+	defer func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	}()
+
+	_ = initCmd.Flags().Set("contributor", "false")
+	_ = initCmd.Flags().Set("team", "false")
+	_ = initCmd.Flags().Set("force", "false")
+	_ = initCmd.Flags().Set("role", "")
+	_ = initCmd.Flags().Set("planning-repo", "")
+	t.Cleanup(func() {
+		_ = initCmd.Flags().Set("contributor", "false")
+		_ = initCmd.Flags().Set("planning-repo", "")
+	})
+
+	tmpDir := newGitRepo(t)
+	t.Chdir(tmpDir)
+
+	testHome := t.TempDir()
+	t.Setenv("HOME", testHome)
+	t.Setenv("BEADS_DIR", "")
+
+	planningPath := filepath.Join(testHome, ".beads-planning")
+	rootCmd.SetArgs([]string{"init", "--prefix", "test", "--quiet", "--non-interactive", "--contributor"})
+	if err := rootCmd.Execute(); err != nil {
+		t.Fatalf("init --contributor --non-interactive failed: %v", err)
+	}
+
+	role, hasRole := getBeadsRole()
+	if !hasRole {
+		t.Fatal("expected beads.role to be configured")
+	}
+	if role != "contributor" {
+		t.Fatalf("beads.role = %q, want %q", role, "contributor")
+	}
+	if _, err := os.Stat(planningPath); err != nil {
+		t.Fatalf("expected default planning repo at %s: %v", planningPath, err)
+	}
+}
+
 // TestInitWithRedirect verifies that bd init creates the database in the redirect target,
 // not in the local .beads directory. (GH#bd-0qel)
 // TestInitRedirect groups redirect-related init tests.

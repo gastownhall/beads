@@ -36,8 +36,12 @@ Section requirements by type:
   epic:     Success Criteria (or Acceptance Criteria)
   chore:    (none)
 
+Missing recommended sections are warnings. The command exits 0 unless
+--strict is set, so bd lint can run as a report on a fresh tutorial repo.
+
 Examples:
-  bd lint                    # Lint all open issues
+  bd lint                    # Lint all open issues (exit 0 on warnings)
+  bd lint --strict           # Exit 1 when warnings are found
   bd lint bd-abc             # Lint specific issue
   bd lint bd-abc bd-def      # Lint multiple issues
   bd lint --type bug         # Lint only bugs
@@ -55,9 +59,10 @@ Examples:
 
 		typeFilter, _ := cmd.Flags().GetString("type")
 		statusFilter, _ := cmd.Flags().GetString("status")
+		strict, _ := cmd.Flags().GetBool("strict")
 
 		if usesProxiedServer() {
-			return runLintProxiedServer(rootCtx, args, typeFilter, statusFilter)
+			return runLintProxiedServer(rootCtx, args, typeFilter, statusFilter, strict)
 		}
 
 		ctx := rootCtx
@@ -83,7 +88,7 @@ Examples:
 			}
 		}
 
-		return runLint(issues)
+		return runLint(issues, strict)
 	},
 }
 
@@ -123,7 +128,7 @@ func lintCollectByIDs(ctx context.Context, ids []string, get func(context.Contex
 	return issues
 }
 
-func runLint(issues []*types.Issue) error {
+func runLint(issues []*types.Issue, strict bool) error {
 	var results []LintResult
 	totalWarnings := 0
 
@@ -166,6 +171,9 @@ func runLint(issues []*types.Issue) error {
 		}
 		data, _ := json.MarshalIndent(output, "", "  ")
 		fmt.Println(string(data))
+		if strict && totalWarnings > 0 {
+			return SilentExit()
+		}
 		return nil
 	}
 
@@ -183,12 +191,16 @@ func runLint(issues []*types.Issue) error {
 		fmt.Println()
 	}
 
+	if !strict {
+		return nil
+	}
 	return SilentExit()
 }
 
 func init() {
 	lintCmd.Flags().StringP("type", "t", "", "Filter by issue type (bug, task, feature, epic, decision, spike, story, chore, milestone)")
 	lintCmd.Flags().StringP("status", "s", "", "Filter by status (default: open, use 'all' for all)")
+	lintCmd.Flags().Bool("strict", false, "Exit 1 when template warnings are found (default: print warnings and exit 0)")
 
 	rootCmd.AddCommand(lintCmd)
 }

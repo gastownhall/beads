@@ -2167,6 +2167,12 @@ type WorkFilter struct {
 	// (SkipLabels, SkipCounts) have no WorkFilter counterpart on purpose; see
 	// issueops.readyHydrationFor.
 	Lite bool
+
+	// LeavesOnly excludes issues that still have open children (parent-child
+	// edges or dotted descendants). Used by `bd ready --claim` so claim takes
+	// a leaf like ep-7j4.2 instead of the parent epic. Listing `bd ready`
+	// leaves this false so molecule roots still appear as ready work.
+	LeavesOnly bool
 }
 
 // StaleFilter is used to filter stale issue queries
