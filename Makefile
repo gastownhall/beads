@@ -61,8 +61,8 @@ else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
 
-# Dolt backend requires CGO for embedded database support.
-# Without CGO, builds will fail with "dolt backend requires CGO".
+# Fast default: pure-Go / server-mode binary. Embedded Dolt still needs
+# CGO_ENABLED=1 (make test-full-cgo, or CGO_ENABLED=1 make build).
 #
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
@@ -70,7 +70,8 @@ endif
 #   - CGO_ENABLED=1 needs a GCC-compatible Windows CGO compiler but does NOT
 #     need ICU. Supported local toolchains include MinGW-w64/MSYS2 gcc and
 #     MSYS2 clang/LLVM targeting windows-gnu.
-export CGO_ENABLED := 1
+CGO_ENABLED ?= 0
+export CGO_ENABLED
 
 # When go.mod requires a newer Go version than the locally installed one,
 # GOTOOLCHAIN=auto downloads the right compiler but coverage instrumentation
@@ -93,6 +94,7 @@ REGRESSION_TIMEOUT ?= 20m
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
+ifneq ($(CGO_ENABLED),0)
 	@if [ -n "$$CC" ]; then \
 		echo "Using CC=$$CC"; \
 		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
@@ -118,6 +120,9 @@ ifeq ($(OS),Windows_NT)
 		echo "       Put it on PATH, set CC, or set WINDOWS_CGO_BINS=/path/to/toolchain/bin." >&2; \
 		exit 1; \
 	fi
+else
+	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+endif
 else
 	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)

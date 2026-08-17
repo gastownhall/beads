@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 SKIP_FILE="$REPO_ROOT/.test-skip"
 
-# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
+# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=0).
 # Opt-in ICU-path coverage remains available via scripts/test-icu-path.sh.
 # shellcheck source=../.buildflags
 source "$REPO_ROOT/.buildflags"

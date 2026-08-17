@@ -21,7 +21,7 @@ if [[ "$PERSISTED_GOFLAGS" != *gms_pure_go* ]]; then
   go env -w GOFLAGS="$PERSISTED_GOFLAGS"
 fi
 
-# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
+# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=0).
 # shellcheck source=../.buildflags
 source "$(dirname "$0")/../.buildflags"
 

@@ -121,10 +121,10 @@ for beads package boundaries, test gates, and domain terms.
   rulesets `design`, `codesize`, and `unusedcode`.
 - Those production changes should report a covered-MSI of 80% or above
   from `mutago`.
-- Production builds need `CGO_ENABLED=1` and `-tags=gms_pure_go`. Use
-  `make build`, `make test`, or `./scripts/test.sh`. A bare
-  `go build ./cmd/bd` fails the ICU linker path. See
-  [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md).
+- Default production builds are `CGO_ENABLED=0` and `-tags=gms_pure_go`.
+  Run them through `scripts/dev-docker.sh`. Embedded Dolt is the
+  `CGO_ENABLED=1` exception. A CGO build without `-tags=gms_pure_go` fails
+  the ICU linker path. See [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md).
 - Validate trust boundaries manually as well as with linters. Check
   user-controlled paths, subprocess arguments, SQL identifiers, and
   external input before use. Linter exclusions are not evidence that an

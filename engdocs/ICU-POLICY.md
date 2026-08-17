@@ -35,12 +35,12 @@ The `gms_pure_go` build tag tells `go-mysql-server` to use Go's `regexp`
 package instead of `go-icu-regex`. This eliminates the ICU shared-library
 dependency at the binary level.
 
-**CGO stays enabled.** CGO is required for the embedded Dolt database
-(file locking, SQL engine). CGO and ICU are independent concerns:
+**CGO and ICU are independent.** The default compile is `CGO_ENABLED=0`.
+Embedded Dolt is the `CGO_ENABLED=1` exception:
 
-- `CGO_ENABLED=1` + `gms_pure_go` = Dolt works, no ICU (what we ship)
-- `CGO_ENABLED=1` without `gms_pure_go` = Dolt works, ICU linked (test-only)
-- `CGO_ENABLED=0` = no Dolt backend at all
+- `CGO_ENABLED=0` + `gms_pure_go` = server-mode Dolt, no ICU (default)
+- `CGO_ENABLED=1` + `gms_pure_go` = embedded Dolt, no ICU (opt-in)
+- `CGO_ENABLED=1` without `gms_pure_go` = embedded Dolt, ICU linked (test-only)
 
 ## Where `gms_pure_go` Must Be Set
 
@@ -63,7 +63,7 @@ Every build path that produces a binary for users must include `-tags gms_pure_g
 ### Canonical pattern: source `.buildflags`
 
 The preferred way for a shell script to comply is to source `.buildflags`
-at the top. That sets `CGO_ENABLED=1` **and** puts `-tags=gms_pure_go`
+at the top. That defaults `CGO_ENABLED=0` and puts `-tags=gms_pure_go`
 into `GOFLAGS`, so every subsequent bare `go` invocation in the script
 picks it up automatically:
 

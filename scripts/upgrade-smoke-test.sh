@@ -38,7 +38,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=1).
+# Canonical build flags (GOFLAGS=-tags=gms_pure_go, CGO_ENABLED=0).
 # shellcheck source=../.buildflags
 source "$PROJECT_ROOT/.buildflags"
 

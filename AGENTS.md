@@ -1,14 +1,21 @@
 # Agent Instructions
 
-<!-- bd-doctor-divergence: ok -->
+This file is the constitution for this repository. `CLAUDE.md` is a symlink
+to this file. Detailed operations live in
+[AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md).
 
-See [AGENT_INSTRUCTIONS.md](AGENT_INSTRUCTIONS.md) for full instructions.
+## Host protection
 
-This file exists for compatibility with tools that look for AGENTS.md.
+Compile, test, and lint through `scripts/dev-docker.sh`. That script is the
+single resource-capped recipe. Do not run `go test`, `go build`, or
+`golangci-lint` on the host.
 
-The marker above tells `bd doctor` that the intentional divergence between
-this file and `CLAUDE.md` (different audiences, different reading orders) is
-expected and should not be flagged.
+```bash
+scripts/dev-docker.sh go test ./test/constitution
+```
+
+The default build is `CGO_ENABLED=0` (pure Go, server-mode Dolt). Embedded
+Dolt still needs `CGO_ENABLED=1` and still runs through the same script.
 
 ## Key Sections
 
@@ -128,8 +135,8 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 
 1. **File issues for remaining work** - Create issues for anything that needs follow-up
 2. **Run quality gates** (if code changed):
-   - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
-   - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
+   - `scripts/dev-docker.sh make ci-pr-lint` (required zero-finding formatting and lint wrapper)
+   - `scripts/dev-docker.sh make test` (and `scripts/dev-docker.sh make test-icu-path` only if you intentionally need the ICU regex path)
    - File a P0 issue if quality gates are broken
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
@@ -298,13 +305,10 @@ and [engdocs/TESTING.md](engdocs/TESTING.md) (`make build`, `make test`,
 caveats; the startup update script already installs Go modules and
 `golangci-lint`.
 
-- **CGO + `gms_pure_go` are mandatory.** Every `go`/`make` invocation needs
-  `CGO_ENABLED=1` and `-tags=gms_pure_go` (embedded Dolt + no-ICU). `make`
-  targets set this automatically; for bare `go` commands either `source
-  .buildflags` or rely on the persisted `GOFLAGS=-tags=gms_pure_go` (set via
-  `go env -w`, baked into the snapshot). A bare `go build ./cmd/bd` without the
-  tag fails with an ICU `uregex.h` linker error — run `make doctor-build` to
-  diagnose.
+- **Default compile is `CGO_ENABLED=0` + `gms_pure_go`.** That is the fast
+  path. `make` and `.buildflags` default to it. Embedded Dolt is the
+  `CGO_ENABLED=1` exception; a CGO build without `-tags=gms_pure_go` fails
+  with an ICU `uregex.h` linker error — run `make doctor-build` to diagnose.
 - **`golangci-lint` must be built with the go.mod toolchain.** It is pinned to
   v2.10.1 and installed at `~/go/bin` (on `PATH` via `~/.bashrc`). It must be
   compiled with the Go version in `go.mod` (currently go1.26.5); a binary built
@@ -322,10 +326,9 @@ caveats; the startup update script already installs Go modules and
   - `cmd/bd TestTestServerConnection/unreachable_host` — dials the RFC 5737
     TEST-NET address `192.0.2.1:3307` expecting the connect to fail, but the
     cloud egress proxy accepts it. Unavoidable here; unrelated to beads.
-- **No Docker / no `dolt` CLI is expected.** `bd` uses embedded Dolt in-process,
-  so build/test/run work without them. `make test` prints `WARN: Docker not
-  available, skipping Dolt tests` and skips external-Dolt/server-mode paths by
-  design. Only install the standalone `dolt` CLI + Docker if you specifically
-  need server-mode or corpus-regen paths.
+- **Host compile/test/lint still goes through the capped Docker path above.**
+  Cursor Cloud snapshots may lack Docker; in that environment only, run the
+  same `CGO_ENABLED=0` commands on the snapshot. External Dolt server tests
+  still skip when the `dolt` CLI is missing.
 - The full `make test` suite takes ~10-15 min (`cmd/bd` is by far the slowest
   package); run it in a tmux session or background it rather than blocking.

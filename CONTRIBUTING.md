@@ -8,25 +8,31 @@ Thank you for your interest in contributing to bd! This document provides guidel
 
 - Go (see `go.mod` for the required version; currently 1.26+)
 - Git
-- A C compiler (CGO is required for the embedded Dolt database)
-- golangci-lint v2.10.1 for the required local lint gate
+- Docker (required for compile, test, and lint on this fork)
+- A C compiler only if you are building the optional embedded-Dolt binary (`CGO_ENABLED=1`)
 - ICU headers are **not required** for building -- see [engdocs/ICU-POLICY.md](engdocs/ICU-POLICY.md)
+
+### Host protection
+
+Compile, test, and lint through [`scripts/dev-docker.sh`](scripts/dev-docker.sh).
+That script is the single resource-capped recipe. Do not run `go test`,
+`go build`, or `golangci-lint` on the host. The full contract lives in
+[AGENTS.md](AGENTS.md#host-protection).
+
+`make` and `.buildflags` default to `CGO_ENABLED=0`. Use `CGO_ENABLED=1` only
+for embedded Dolt, and still run it through `scripts/dev-docker.sh`.
 
 ### Getting Started
 
 ```bash
 # Clone the repository
-git clone https://github.com/gastownhall/beads
+git clone https://github.com/jonbaldie/beads
 cd beads
 
-# Build the project (uses gms_pure_go tag via Makefile)
-make build
-
-# Run tests (uses correct build tags automatically)
-make test
-
-# Build and install locally to ~/.local/bin
-make install
+# Build, test, and lint inside the capped container
+scripts/dev-docker.sh make build
+scripts/dev-docker.sh make test
+scripts/dev-docker.sh make ci-pr-lint
 ```
 
 ## Project Structure
@@ -67,14 +73,11 @@ We also follow standard Go conventions:
 
 ### Linting
 
-Use the same pinned golangci-lint version and repository-owned wrapper as CI:
+Use the same pinned golangci-lint version and repository-owned wrapper as CI,
+through the capped container:
 
 ```bash
-# Install the version pinned by CI
-go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.10.1
-
-# Run the required formatting and lint contract
-make ci-pr-lint
+scripts/dev-docker.sh make ci-pr-lint
 ```
 
 `make ci-pr-lint` must pass with zero issues. It checks formatting, lints the
@@ -144,7 +147,7 @@ For test commands, test design, and PR-readiness gates, see the canonical
 
 - Follow the proportional validation budget in
   [engdocs/TESTING.md](engdocs/TESTING.md): docs-only changes use docs checks;
-  Go changes use focused and affected-package tests plus one final `make test`.
+  Go changes use focused and affected-package tests plus one final `scripts/dev-docker.sh make test`.
 - If you hit a test failure unrelated to your change, don't silently skip
   it -- check `.test-skip` and file an issue if it's not already tracked
   (see [engdocs/TESTING.md](engdocs/TESTING.md#failures-skips-and-review)).
@@ -263,7 +266,7 @@ All contributions go through code review:
 
 ```bash
 # Build and install your changes
-make install
+scripts/dev-docker.sh make install
 
 # Test specific functionality
 bd init --prefix test

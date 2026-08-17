@@ -6,10 +6,9 @@
 # uses SQL REGEXP, so we always build with -tags=gms_pure_go. See
 # engdocs/ICU-POLICY.md for the full policy.
 
-# Embedded Dolt requires CGO; server mode and nocgo builds do not. Default
-# to 1 for the embedded-capable build paths that sourced this, but respect
-# a caller who explicitly set CGO_ENABLED=0 (e.g. a static/nocgo build).
-: "${CGO_ENABLED:=1}"
+# Default to the fast pure-Go path. Embedded Dolt still requires CGO; callers
+# that need it set CGO_ENABLED=1 explicitly (make test-full-cgo, test-icu-path).
+: "${CGO_ENABLED:=0}"
 export CGO_ENABLED
 
 # Build tag that tells go-mysql-server to use Go's stdlib regex instead of
