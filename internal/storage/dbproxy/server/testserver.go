@@ -43,6 +43,7 @@ type TestDatabaseServerImpl struct {
 	counters  Counters
 	started   bool
 	openConns []net.Conn
+	crashErr  error // set by Crash; cleared by a successful Start, unlike DialErr
 }
 
 var _ TestDatabaseServer = (*TestDatabaseServerImpl)(nil)
@@ -76,6 +77,21 @@ func (s *TestDatabaseServerImpl) SetDialErr(err error) {
 	s.mu.Unlock()
 }
 
+// Crash simulates the backend process dying independently of anything
+// stopping it (e.g. `dolt sql-server` being killed out of band while the
+// proxy stays up): it flips started false and makes the next Dial fail with
+// err, without going through Stop. Use to reproduce GH#5842-style bugs
+// where the proxy never notices a dead backend. Unlike SetDialErr (which is
+// permanent until cleared explicitly), a crash clears itself on the next
+// successful Start, mimicking a real restarted process accepting dials
+// again.
+func (s *TestDatabaseServerImpl) Crash(err error) {
+	s.mu.Lock()
+	s.started = false
+	s.crashErr = err
+	s.mu.Unlock()
+}
+
 func (s *TestDatabaseServerImpl) Snapshot() Counters {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -101,6 +117,7 @@ func (s *TestDatabaseServerImpl) Start(_ context.Context) error {
 	s.counters.StartCalls++
 	if s.StartErr == nil {
 		s.started = true
+		s.crashErr = nil
 	}
 	err := s.StartErr
 	s.mu.Unlock()
@@ -134,6 +151,12 @@ func (s *TestDatabaseServerImpl) Dial(_ context.Context) (net.Conn, error) {
 	if s.DialErr != nil {
 		s.counters.DialErrors++
 		err := s.DialErr
+		s.mu.Unlock()
+		return nil, err
+	}
+	if s.crashErr != nil {
+		s.counters.DialErrors++
+		err := s.crashErr
 		s.mu.Unlock()
 		return nil, err
 	}

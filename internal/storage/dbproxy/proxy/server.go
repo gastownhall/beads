@@ -60,6 +60,13 @@ type proxyServer struct {
 	listener    net.Listener
 	activeConns atomic.Int64
 	conns       errgroup.Group
+
+	// shutdown cancels the ListenAndServe run loop from handleConn when it
+	// finds the backend dead. It is nil until ListenAndServe installs it, and
+	// guarded by shutdownOnce so a burst of connections that all hit the same
+	// dead backend triggers exactly one shutdown.
+	shutdown     context.CancelFunc
+	shutdownOnce sync.Once
 }
 
 const (
@@ -152,6 +159,7 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 
 	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+	p.shutdown = cancel
 
 	// Install signal handlers BEFORE Listen. Without this, Go's default
 	// SIGTERM action terminates the process during the startup window
@@ -442,6 +450,23 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()
 		_ = client.Close()
+		if !p.server.Running(ctx) {
+			// The backend (e.g. the dolt sql-server child) exited independently
+			// of this proxy process (GH#5842): DatabaseServer.Start is single-
+			// shot per instance (by design, see doltserver_test.go), so this
+			// proxy cannot restart it in place. Instead shut the proxy down
+			// cleanly so it removes its pidfile; the existing stale-pidfile
+			// self-heal on the client side then transparently spawns a fresh
+			// proxy (and a fresh backend instance) on the next command, rather
+			// than leaving every future connection failing forever.
+			p.shutdownOnce.Do(func() {
+				p.tracef("handleConn(%s) backend not running, shutting proxy down to self-heal", addr)
+				p.stats.IncBackendDeadShutdown()
+				if p.shutdown != nil {
+					p.shutdown()
+				}
+			})
+		}
 		return err
 	}
 	p.tracef("handleConn(%s) backend dial ok", addr)

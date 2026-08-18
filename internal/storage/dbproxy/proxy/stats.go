@@ -13,6 +13,7 @@ type Counters struct {
 	BackendDialAttempts  int64
 	BackendDialSuccess   int64
 	BackendDialErrors    int64
+	BackendDeadShutdowns int64
 	HandledConns         int64
 	BytesClientToBackend int64
 	BytesBackendToClient int64
@@ -51,7 +52,10 @@ func (s *Stats) IncAcceptError()        { s.update(func(c *Counters) { c.AcceptE
 func (s *Stats) IncBackendDialAttempt() { s.update(func(c *Counters) { c.BackendDialAttempts++ }) }
 func (s *Stats) IncBackendDialSuccess() { s.update(func(c *Counters) { c.BackendDialSuccess++ }) }
 func (s *Stats) IncBackendDialError()   { s.update(func(c *Counters) { c.BackendDialErrors++ }) }
-func (s *Stats) IncHandledConn()        { s.update(func(c *Counters) { c.HandledConns++ }) }
+func (s *Stats) IncBackendDeadShutdown() {
+	s.update(func(c *Counters) { c.BackendDeadShutdowns++ })
+}
+func (s *Stats) IncHandledConn() { s.update(func(c *Counters) { c.HandledConns++ }) }
 func (s *Stats) AddBytesClientToBackend(n int64) {
 	s.update(func(c *Counters) { c.BytesClientToBackend += n })
 }

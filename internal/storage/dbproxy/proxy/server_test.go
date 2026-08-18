@@ -406,6 +406,60 @@ func TestProxy_BackendDialError(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+// TestProxy_BackendCrash_ShutsDownToSelfHeal reproduces GH#5842: the backend
+// process (e.g. `dolt sql-server`) dies independently of the proxy, while
+// the proxy itself stays up. Before the fix, every connection after the
+// crash failed forever with no recovery path, because handleConn dialed the
+// backend with no health check at all and the proxy kept running.
+//
+// DatabaseServer.Start is single-shot per instance by design (see
+// doltserver_test.go's TestDoltServer_StartStopStart_SameInstanceErrors), so
+// the proxy cannot restart the same backend handle in place. Instead it must
+// notice the dead backend and shut itself down cleanly (removing its
+// pidfile), so the existing client-side stale-pidfile self-heal spawns a
+// fresh proxy + backend on the next command.
+func TestProxy_BackendCrash_ShutsDownToSelfHeal(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port, Server: ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	// Confirm the backend is healthy before crashing it.
+	conn := dialProxy(t, port)
+	_, err := conn.Write([]byte("hello"))
+	require.NoError(t, err)
+	buf := make([]byte, 5)
+	_, err = io.ReadFull(conn, buf)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(buf))
+	require.NoError(t, conn.Close())
+
+	// Simulate the backend process dying out of band: the proxy process
+	// itself is untouched.
+	ts.Crash(errors.New("dolt sql-server exited"))
+
+	// This connection is unavoidably lost (the backend really is down right
+	// now), but the proxy must notice and tear itself down instead of
+	// leaving every future connection failing forever.
+	conn2 := dialProxy(t, port)
+	_, err = conn2.Read(make([]byte, 1))
+	assert.Error(t, err, "connection racing the dead backend should fail")
+	require.NoError(t, conn2.Close())
+
+	require.NoError(t, h.waitErr(t, shutdownWait), "proxy should exit cleanly on its own after noticing the dead backend")
+	assertNoPidFile(t, root)
+
+	s := stats.Snapshot()
+	assert.Equal(t, int64(1), s.BackendDeadShutdowns)
+}
+
 func TestProxy_IdleTimeout_Fires(t *testing.T) {
 	t.Parallel()
 
