@@ -210,16 +210,20 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 
 	portStr := port.Port()
 	t.Setenv("BEADS_DOLT_PORT", portStr)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
 	return portStr
 }
 
-// ensureSharedContainer starts the singleton container and sets BEADS_DOLT_PORT.
+// ensureSharedContainer starts the singleton container and sets
+// BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT.
 func ensureSharedContainer() {
 	doltServerOnce.Do(func() {
 		doltServerErr = startDoltContainer()
 		if doltServerErr == nil && doltTestPort != "" {
 			if err := os.Setenv("BEADS_DOLT_PORT", doltTestPort); err != nil {
 				doltServerErr = fmt.Errorf("set BEADS_DOLT_PORT: %w", err)
+			} else if err := os.Setenv("BEADS_DOLT_SERVER_PORT", doltTestPort); err != nil {
+				doltServerErr = fmt.Errorf("set BEADS_DOLT_SERVER_PORT: %w", err)
 			}
 		}
 	})
@@ -227,7 +231,7 @@ func ensureSharedContainer() {
 
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
-// Sets BEADS_DOLT_PORT process-wide.
+// Sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
 func EnsureDoltContainerForTestMain() error {
 	if state := checkDolt(); state != doltReady {
 		return fmt.Errorf("%s", state)
