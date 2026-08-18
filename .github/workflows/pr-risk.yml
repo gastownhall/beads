@@ -325,11 +325,15 @@ jobs:
         run: /tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
 
   test-server-storage-full:
-    name: Test (Server Dolt Full Suite)
+    name: Test (Server Dolt Full Suite ${{ matrix.shard }}/${{ strategy.job-total }})
     needs: [detect-ci-tier, build-embedded]
     if: needs.detect-ci-tier.outputs.full_embedded == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -372,9 +376,16 @@ jobs:
         # PR-triggered lane and silently SKIPped for lack of a live server.
         # This sibling job reuses the same artifact and server setup and runs
         # everything else instead, so a SKIP there gets a real PASS/FAIL.
+        #
+        # Manifest-driven shard of the full suite (mirrors test-embedded-storage
+        # / server-storage-test-shard.sh): 1126 tests in one 15m-Go-timeout job
+        # never finished (job 95616282508 died at 256/1126 tests, 15m28s in,
+        # zero failures -- it just ran out of time). server-storage-test-shard.sh
+        # excludes TestConformance from discovery, so it never lands in one of
+        # these shards.
         env:
           BEADS_TEST_ENV_RUN_DOLT: "1"
-        run: /tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.skip '^TestConformance$'
+        run: bash .github/scripts/server-storage-test-shard.sh ${{ matrix.shard }} 16
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
