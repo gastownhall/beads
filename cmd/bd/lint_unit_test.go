@@ -9,6 +9,8 @@ import (
 
 func TestRunLintWarningsDoNotFailByDefault(t *testing.T) {
 	t.Parallel()
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
 
 	issues := []*types.Issue{{
 		ID:          "bd-feat",
@@ -25,6 +27,8 @@ func TestRunLintWarningsDoNotFailByDefault(t *testing.T) {
 
 func TestRunLintStrictFailsOnWarnings(t *testing.T) {
 	t.Parallel()
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
 
 	issues := []*types.Issue{{
 		ID:          "bd-feat",
@@ -46,6 +50,8 @@ func TestRunLintStrictFailsOnWarnings(t *testing.T) {
 
 func TestRunLintCleanIsSuccess(t *testing.T) {
 	t.Parallel()
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
 
 	issues := []*types.Issue{{
 		ID:          "bd-chore",

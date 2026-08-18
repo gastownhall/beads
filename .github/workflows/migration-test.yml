@@ -96,7 +96,8 @@ jobs:
           key: historical-dolt-${{ matrix.cache-identity }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build candidate
-        run: make build
+        # Historical sealed-copy expects embedded Dolt. Default make build is no-CGO.
+        run: CGO_ENABLED=1 make build
 
       - name: Set up Go 1.25 for v0.9.1 source build
         if: matrix.version == 'v0.9.1'

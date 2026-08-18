@@ -127,7 +127,8 @@ func TestProtocol_ReadyClaimComposesWithFilters(t *testing.T) {
 	lane := w.create("--title", "Lane work", "--type", "task", "-l", "lane:x")
 
 	// --parent claims only transitive descendants of the epic, never the
-	// outsider and never the lane issue.
+	// outsider and never the lane issue. Claim prefers leaves, so close each
+	// win before the next ancestor can enter the front.
 	underEpic := map[string]bool{child: true, grandchild: true}
 	for i := 0; i < 2; i++ {
 		claimed := claimReady(t, w, "alice", "--parent", epic)
@@ -139,6 +140,7 @@ func TestProtocol_ReadyClaimComposesWithFilters(t *testing.T) {
 			t.Fatalf("L3.5: --claim --parent %s claimed %s, which is not a descendant of the epic", epic, id)
 		}
 		delete(underEpic, id) // never the same issue twice
+		w.runEnv([]string{"BEADS_ACTOR=alice"}, "close", id, "--reason", "done")
 	}
 	if len(underEpic) != 0 {
 		t.Errorf("L3.5: --claim --parent left %v unclaimed; --parent must be transitive (R3)", underEpic)

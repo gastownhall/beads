@@ -174,7 +174,7 @@ func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	return addDependencyInTx(ctx, tx, dep, actor, opts, nil)
 }
 
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+func addDependencyInTx(ctx context.Context, tx DBTX, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
 	// Auto-detect source routing if not provided.
 	sourceTable := opts.SourceTable
 	writeTable := opts.WriteTable
@@ -382,7 +382,7 @@ func removeID(ids []string, remove string) []string {
 }
 
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx DBTX, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -921,7 +921,7 @@ func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil)
 }
 
-func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+func removeDependencyInTx(ctx context.Context, tx DBTX, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, depTable := WispTableRouting(isWisp)
 

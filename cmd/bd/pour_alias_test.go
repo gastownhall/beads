@@ -5,8 +5,6 @@ import (
 )
 
 func TestPourIsTopLevelCommand(t *testing.T) {
-	t.Parallel()
-
 	cmd, _, err := rootCmd.Find([]string{"pour"})
 	if err != nil {
 		t.Fatalf("bd pour should be a top-level command: %v", err)

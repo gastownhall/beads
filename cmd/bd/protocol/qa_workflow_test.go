@@ -70,15 +70,15 @@ func TestProtocol_LintTutorialFeatureExitsZero(t *testing.T) {
 
 	w.create("--title", "Add dark mode", "--type", "feature", "--description", "Ship the toggle")
 
-	out, code := w.runExpectError("lint")
-	if code != 0 {
-		t.Fatalf("bd lint should exit 0 on template warnings, got %d\n%s", code, out)
+	out, err := w.tryRun("lint")
+	if err != nil {
+		t.Fatalf("bd lint should exit 0 on template warnings, got %v\n%s", err, out)
 	}
 	if !strings.Contains(out, "Missing:") && !strings.Contains(out, "warning") {
 		t.Fatalf("bd lint should still report warnings:\n%s", out)
 	}
 
-	out, code = w.runExpectError("lint", "--strict")
+	out, code := w.runExpectError("lint", "--strict")
 	if code == 0 {
 		t.Fatalf("bd lint --strict should fail when warnings exist:\n%s", out)
 	}

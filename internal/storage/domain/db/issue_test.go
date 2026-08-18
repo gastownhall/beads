@@ -827,21 +827,23 @@ func (s *testSuite) issueClaimPoolUnconfiguredAlias() {
 // issueClaimPoolStatusConflict asserts a pool-assigned issue that loses the
 // CAS on status is flagged CurrentAssigneeIsPool, so the use-case layer
 // reports a status conflict instead of a held-by-pseudo-assignee refusal.
+// Closed is the unclaimable status here: stored blocked is a claimable
+// source so an agent can resume after a manual hold.
 func (s *testSuite) issueClaimPoolStatusConflict() {
 	cleanup := s.setClaimPools("fable-crew")
 	defer cleanup()
 
 	r := s.issueRepo()
-	in := newTestIssue("bd-claim-pool-blocked", "blocked pool item")
+	in := newTestIssue("bd-claim-pool-closed", "closed pool item")
 	in.Assignee = "fable-crew"
-	in.Status = types.StatusBlocked
+	in.Status = types.StatusClosed
 	s.Require().NoError(r.Insert(s.Ctx(), in, "dispatcher", domain.InsertIssueOpts{}))
 
-	res, err := r.Claim(s.Ctx(), "bd-claim-pool-blocked", "bob", domain.IssueTableOpts{})
+	res, err := r.Claim(s.Ctx(), "bd-claim-pool-closed", "bob", domain.IssueTableOpts{})
 	s.Require().NoError(err)
 	s.False(res.Updated)
 	s.True(res.CurrentAssigneeIsPool, "pool assignee must be flagged for status-conflict error mapping")
-	s.Equal(types.StatusBlocked, res.CurrentStatus)
+	s.Equal(types.StatusClosed, res.CurrentStatus)
 }
 
 // issueClaimCustomActiveStatus asserts the proxied-server claim path claims

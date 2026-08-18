@@ -395,8 +395,14 @@ func TestBuildReadyWorkWhereLeavesOnly(t *testing.T) {
 	if !strings.Contains(leaves, "_leaf_d") || !strings.Contains(leaves, "parent-child") {
 		t.Fatalf("LeavesOnly must exclude parents via parent-child edges; where = %s", leaves)
 	}
-	if !strings.Contains(leaves, "_leaf_dot") || !strings.Contains(leaves, "CONCAT(id, '.%") {
+	if !strings.Contains(leaves, "_leaf_dot") || !strings.Contains(leaves, "CONCAT(issues.id, '.%") {
 		t.Fatalf("LeavesOnly must exclude dotted descendants; where = %s", leaves)
+	}
+	if !strings.Contains(leaves, qualifiedDepTarget("_leaf_d")+" = issues.id") {
+		t.Fatalf("LeavesOnly must correlate parent-child edges to the outer issues.id; where = %s", leaves)
+	}
+	if strings.Contains(leaves, "= id\n") || strings.Contains(leaves, "CONCAT(id, ") {
+		t.Fatalf("LeavesOnly must not leave a bare id that Dolt treats as ambiguous; where = %s", leaves)
 	}
 }
 

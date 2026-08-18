@@ -35,6 +35,12 @@ die() {
     printf 'historical-upgrade: %s\n' "$*" >&2
     if [ -n "$workspace" ]; then
         printf 'historical-upgrade: retained diagnostics at %s\n' "$workspace" >&2
+        for dump in public-bridge.err public-bridge.out empty-public-bridge.err empty-public-bridge.out; do
+            if [ -s "$workspace/$dump" ]; then
+                printf 'historical-upgrade: %s:\n' "$dump" >&2
+                cat "$workspace/$dump" >&2
+            fi
+        done
     fi
     if [ -n "$public_bridge_destination" ]; then
         printf 'historical-upgrade: retained public bridge at %s\n' "$public_bridge_destination" >&2

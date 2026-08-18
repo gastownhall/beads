@@ -115,17 +115,20 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 
 	if filter.LeavesOnly {
 		// Prefer leaves: claim a child, not the parent epic, while children are open.
+		// Qualify the outer id. Dolt treats a bare id as ambiguous once _leaf_c
+		// and _leaf_d are in scope, and claim then fails with Error 1105.
+		outerID := tables.Main + ".id"
 		whereClauses = append(whereClauses, fmt.Sprintf(`NOT EXISTS (
 			SELECT 1 FROM %s _leaf_d
 			INNER JOIN %s _leaf_c ON _leaf_c.id = _leaf_d.issue_id
 			WHERE _leaf_d.type = 'parent-child'
-			  AND %s = id
+			  AND %s = %s
 			  AND _leaf_c.status NOT IN ('closed', 'tombstone')
 		) AND NOT EXISTS (
 			SELECT 1 FROM %s _leaf_dot
-			WHERE _leaf_dot.id LIKE CONCAT(id, '.%%')
+			WHERE _leaf_dot.id LIKE CONCAT(%s, '.%%')
 			  AND _leaf_dot.status NOT IN ('closed', 'tombstone')
-		)`, tables.Dependencies, tables.Main, qualifiedDepTarget("_leaf_d"), tables.Main))
+		)`, tables.Dependencies, tables.Main, qualifiedDepTarget("_leaf_d"), outerID, tables.Main, outerID))
 	}
 
 	if filter.Priority != nil {

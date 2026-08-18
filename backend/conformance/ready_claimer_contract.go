@@ -807,9 +807,14 @@ func RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T,
 	closed := readyClaimerIssue(blocker, 1, offstage)
 	closed.Status = types.StatusClosed
 	seedReadyClaimerIssue(t, ctx, fixture, closed)
-	for _, id := range []string{dependent, relatedOut, relatedIn, parent, child} {
+	for _, id := range []string{dependent, relatedOut, relatedIn, parent} {
 		seedReadyClaimerIssue(t, ctx, fixture, readyClaimerIssue(id, 1, offstage))
 	}
+	// Closed child keeps the incoming parent-child edge for the cardinality
+	// assertion without taking winner off the LeavesOnly claim front.
+	closedChild := readyClaimerIssue(child, 1, offstage)
+	closedChild.Status = types.StatusClosed
+	seedReadyClaimerIssue(t, ctx, fixture, closedChild)
 
 	seedReadyClaimerTypedEdge(t, ctx, fixture, winner, blocker, types.DepBlocks)
 	seedReadyClaimerTypedEdge(t, ctx, fixture, winner, relatedOut, types.DepRelatesTo)
