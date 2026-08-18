@@ -600,6 +600,69 @@ func TestGoCacheOwnershipTopology(t *testing.T) {
 	}
 }
 
+// TestPRRiskGateReachesFullServerDoltStorageSuite is the regression test for
+// be-aiy5: test-server-storage already keeps a live Dolt server up (via
+// build-embedded's /tmp/dolt-conformance-test binary, which compiles every
+// top-level test in package internal/storage/dolt, not just conformance),
+// but restricts execution to -test.run '^TestConformance$'. Every other
+// server-gated test in that same binary -- TestCreateGuard_*,
+// TestFederationPeerCredentialLifecycleLazyKeyInit, and diff-owned tests
+// such as TestBenchDBPurgeDoesNotLeak on PR #5792 -- is reached by no
+// PR-triggered lane, so it silently SKIPs instead of producing a real
+// PASS/FAIL. A sibling job must run everything else in the same binary
+// against the same live server, without a new build step, and must be wired
+// into ci-gate as required so a SKIP there can no longer hide behind green.
+func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
+	const jobName = "test-server-storage-full"
+
+	workflow := readCIWorkflow(t, "pr-risk.yml")
+	job := workflow.job(t, jobName)
+
+	if job.RunsOn != "ubuntu-latest" {
+		t.Errorf("%s runs-on = %q, want ubuntu-latest", jobName, job.RunsOn)
+	}
+	if job.TimeoutMinutes != 20 {
+		t.Errorf("%s timeout = %d minutes, want 20 (matches test-server-storage)", jobName, job.TimeoutMinutes)
+	}
+	if !contains(job.Needs, "detect-ci-tier") || !contains(job.Needs, "build-embedded") {
+		t.Errorf("%s needs = %v, want detect-ci-tier and build-embedded (reuse the existing artifact, no new build)", jobName, job.Needs)
+	}
+	if job.If != "needs.detect-ci-tier.outputs.full_embedded == 'true'" {
+		t.Errorf("%s if = %q, want the same tier gate as test-server-storage", jobName, job.If)
+	}
+
+	download := job.step(t, "Download binaries")
+	if download.With["name"] != "embedded-test-binaries" {
+		t.Errorf("%s does not download the existing embedded-test-binaries artifact (would require a new build step): %v", jobName, download.With)
+	}
+
+	const testCommand = `/tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.skip '^TestConformance$'`
+	assertStepRunsExactly(t, job, "Test", testCommand)
+	// federation_test.go Fatals instead of silently skipping when this is set
+	// and the server it expects isn't reachable -- this job's whole point is
+	// a real PASS/FAIL, not a hidden self-skip if its own setup regresses.
+	assertStepEnvValue(t, job, "Test", "BEADS_TEST_ENV_RUN_DOLT", "1")
+
+	// test-server-storage itself is untouched: conformance keeps its own
+	// dedicated job and timeout budget; this is an additive sibling, not a
+	// widened filter on the existing job.
+	existing := workflow.job(t, "test-server-storage")
+	assertStepRunsExactly(t, existing, "Test", `/tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'`)
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	const gateKey = "TEST_SERVER_STORAGE_FULL"
+	if !contains(gate.Needs, jobName) {
+		t.Errorf("ci-gate does not need %q: %v", jobName, gate.Needs)
+	}
+	if got, want := gateEnv[gateKey], fmt.Sprintf("${{ needs.%s.result }}", jobName); got != want {
+		t.Errorf("ci-gate env %s = %q, want %q", gateKey, got, want)
+	}
+	if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate CI_GATE_REQUIRED does not include %q", gateKey)
+	}
+}
+
 func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow, managed map[string]map[string]bool) {
 	t.Helper()
 
