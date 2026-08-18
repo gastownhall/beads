@@ -151,6 +151,26 @@ func runDoltSQL(t *testing.T, dir, query string) {
 	}
 }
 
+// TestRunDoltSQLHandlesLargeScript proves runDoltSQL can execute a SQL
+// script larger than Linux's per-argv MAX_ARG_STRLEN (128KiB = 131072
+// bytes). Passing the script as a single argv element (`dolt sql -q
+// <script>`) blows past that limit and fails execve with E2BIG; the real
+// schema init script (schema.AllMigrationsSQL()) is ~134KB and triggers it.
+func TestRunDoltSQLHandlesLargeScript(t *testing.T) {
+	skipIfNoDolt(t)
+
+	dir := t.TempDir()
+	runCmd(t, dir, "dolt", "init")
+
+	script := schema.AllMigrationsSQL()
+	const maxArgStrlen = 131072 // Linux MAX_ARG_STRLEN, in bytes
+	if len(script) <= maxArgStrlen {
+		t.Fatalf("schema script is %d bytes, must exceed MAX_ARG_STRLEN (%d) to exercise the argv-limit path", len(script), maxArgStrlen)
+	}
+
+	runDoltSQL(t, dir, script)
+}
+
 // skipIfNoGit skips if git is not available.
 func skipIfNoGit(t *testing.T) {
 	t.Helper()
