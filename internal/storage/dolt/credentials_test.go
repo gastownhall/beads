@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -837,6 +838,7 @@ func clearCloudAuthEnv(t *testing.T) {
 func TestCloudAuthCLIRouting(t *testing.T) {
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
+	start := time.Now()
 
 	tests := []struct {
 		name      string
@@ -883,6 +885,17 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
 			}
 		})
+	}
+
+	// Regression guard: this test previously created one Dolt database per
+	// case (16 total), each slower than the last as server load grew,
+	// pushing wall time into the hundreds of seconds for a test that only
+	// exercises a pure routing predicate. 90s sits below every measured
+	// unfixed run and comfortably above the shared-store fix's expected
+	// time, so it fails on the old per-case-store shape without flaking
+	// under normal CI load.
+	if elapsed := time.Since(start); elapsed > 90*time.Second {
+		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
 	}
 }
 
