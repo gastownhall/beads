@@ -145,7 +145,9 @@ func MaybeSpawnFlusher() {
 	// would let a hostile repository redirect where the user's telemetry is
 	// uploaded. Pin the endpoint to the value the parent already resolved from
 	// env + user-global config (see resolveMetricsEndpoint in cmd/bd) and mark
-	// the child as the flusher so it cannot recurse.
+	// the child as the flusher so it cannot recurse. The queue directory itself
+	// needs no pinning: DataDir() is machine-scoped (~/.config/bd/eventsData),
+	// not workspace-derived, so parent and child always agree on it.
 	cmd.Env = flusherChildEnv(os.Environ(), Endpoint())
 	if err := cmd.Start(); err != nil {
 		return

@@ -8,9 +8,175 @@ import (
 	"testing"
 )
 
+// wantDataDir mirrors DataDir()'s own construction, so tests assert against
+// the documented location (~/.config/bd/eventsData) rather than duplicating
+// a hardcoded path that could drift from the implementation. This is
+// deliberately a pure function of the home dir, NOT config.UserConfigYamlPath
+// — see TestDataDirStableRegardlessOfConfigFileExistence.
+func wantDataDir(t *testing.T) string {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home dir: %v", err)
+	}
+	return filepath.Join(home, ".config", "bd", "eventsData")
+}
+
+func TestDataDirUsesUserConfigDir(t *testing.T) {
+	isolateUserProfile(t)
+
+	got, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := wantDataDir(t); got != want {
+		t.Fatalf("DataDir() = %q, want %q", got, want)
+	}
+}
+
+// TestDataDirStableRegardlessOfConfigFileExistence is the regression for
+// GH#4828: DataDir() previously followed config.UserConfigYamlPath(), whose
+// result depends on which of two candidate config.yaml locations currently
+// exists on disk (~/.config/bd vs. the OS config dir — e.g. ~/Library/
+// Application Support on macOS). That meant DataDir() could resolve to a
+// different directory across runs as those files were created or removed,
+// silently switching the telemetry queue and stranding any already-queued
+// .evtq files at the old location. DataDir() must now be a pure function of
+// the home directory only, indifferent to which config.yaml (if any) exists.
+func TestDataDirStableRegardlessOfConfigFileExistence(t *testing.T) {
+	isolateUserProfile(t)
+	want := wantDataDir(t)
+
+	assertUnchanged := func(t *testing.T) {
+		t.Helper()
+		got, err := DataDir()
+		if err != nil {
+			t.Fatalf("DataDir: %v", err)
+		}
+		if got != want {
+			t.Fatalf("DataDir() = %q, want %q (must not depend on config.yaml existence)", got, want)
+		}
+	}
+
+	// Baseline: neither candidate config.yaml exists yet.
+	assertUnchanged(t)
+
+	// Candidate 1: the OS-native config dir (~/Library/Application Support/bd
+	// on macOS; identical to candidate 2 on platforms where os.UserConfigDir()
+	// already returns ~/.config, e.g. Linux under this test's env).
+	osConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("resolve os config dir: %v", err)
+	}
+	osCandidate := filepath.Join(osConfigDir, "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(osCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(osCandidate), err)
+	}
+	if err := os.WriteFile(osCandidate, []byte{}, 0o600); err != nil {
+		t.Fatalf("write %s: %v", osCandidate, err)
+	}
+	assertUnchanged(t)
+
+	if err := os.Remove(osCandidate); err != nil {
+		t.Fatalf("remove %s: %v", osCandidate, err)
+	}
+	assertUnchanged(t)
+
+	// Candidate 2: the documented cross-platform ~/.config/bd path.
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("resolve home dir: %v", err)
+	}
+	xdgCandidate := filepath.Join(home, ".config", "bd", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(xdgCandidate), 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", filepath.Dir(xdgCandidate), err)
+	}
+	if err := os.WriteFile(xdgCandidate, []byte{}, 0o600); err != nil {
+		t.Fatalf("write %s: %v", xdgCandidate, err)
+	}
+	assertUnchanged(t)
+}
+
+// TestDataDirIgnoresBeadsDir is the regression for the maintainer-reported gap
+// in GH#4807 that the earlier BEADS_DIR-aware design left open: a fresh
+// install with BEADS_DIR set but no workspace created yet still queued events
+// under a phantom directory. Since the queue is machine-scoped, not
+// workspace-scoped, DataDir() must not consult BEADS_DIR at all — set,
+// unset, or naming a directory that does not exist.
+func TestDataDirErrorsWithoutResolvableHome(t *testing.T) {
+	// config.UserConfigYamlPath returns the literal "~/.config/bd/config.yaml"
+	// display string when the home dir cannot be resolved. DataDir must reject
+	// that rather than queue events into a directory named "~" under the cwd.
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+
+	got, err := DataDir()
+	if err == nil {
+		t.Fatalf("DataDir() = %q, want error when the home dir cannot be resolved", got)
+	}
+	if got != "" {
+		t.Errorf("DataDir() returned path %q alongside its error, want empty", got)
+	}
+}
+
+// TestDataDirErrorsOnNonAbsoluteHome guards HOME=~, which os.UserHomeDir()
+// returns unchanged with no error and would otherwise yield a relative path.
+func TestDataDirErrorsOnNonAbsoluteHome(t *testing.T) {
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+
+	got, err := DataDir()
+	if err == nil {
+		t.Fatalf("DataDir() = %q, want error when the home dir is not absolute", got)
+	}
+	if got != "" {
+		t.Errorf("DataDir() returned path %q alongside its error, want empty", got)
+	}
+}
+
+func TestDataDirIgnoresBeadsDir(t *testing.T) {
+	isolateUserProfile(t)
+	want := wantDataDir(t)
+
+	for _, tc := range []struct {
+		name     string
+		beadsDir string
+	}{
+		{"unset", ""},
+		{"existing_dir", filepath.Join(t.TempDir(), "existing-workspace")},
+		{"not_yet_created", filepath.Join(t.TempDir(), "not-created-yet")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.beadsDir != "" {
+				if tc.name == "existing_dir" {
+					if err := os.MkdirAll(tc.beadsDir, 0o755); err != nil {
+						t.Fatalf("mkdir workspace: %v", err)
+					}
+				}
+				t.Setenv("BEADS_DIR", tc.beadsDir)
+			} else {
+				t.Setenv("BEADS_DIR", "")
+			}
+
+			got, err := DataDir()
+			if err != nil {
+				t.Fatalf("DataDir: %v", err)
+			}
+			if got != want {
+				t.Fatalf("DataDir() = %q, want %q (BEADS_DIR must not affect the machine-scoped queue)", got, want)
+			}
+			if tc.beadsDir != "" && tc.name == "not_yet_created" {
+				if _, err := os.Stat(tc.beadsDir); !os.IsNotExist(err) {
+					t.Fatalf("DataDir() created %s (stat error: %v)", tc.beadsDir, err)
+				}
+			}
+		})
+	}
+}
+
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateUserProfile(t)
+	dir := wantDataDir(t)
 
 	closeFn, err := Init("0.0.0-test", false, "")
 	if err != nil {
@@ -26,7 +192,6 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 	Global().CloseEventAndAdd(evt)
 	closeFn(context.Background())
 
-	dir := filepath.Join(home, ".beads", "eventsData")
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) == ".evtq" {
@@ -37,8 +202,7 @@ func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
 }
 
 func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateUserProfile(t)
 
 	closeFn, err := Init("0.0.0-test", true, "")
 	if err != nil {
@@ -50,12 +214,19 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 		t.Fatalf("Enabled() = false, want true")
 	}
 
+	dir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if want := wantDataDir(t); dir != want {
+		t.Fatalf("DataDir() = %q, want %q", dir, want)
+	}
+
 	evt := NewCommandEvent("init")
 	evt.SetAttribute("dolt_mode", "embedded")
 	Global().CloseEventAndAdd(evt)
 	closeFn(context.Background())
 
-	dir := filepath.Join(home, ".beads", "eventsData")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read eventsData: %v", err)
@@ -72,8 +243,28 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	}
 }
 
+// TestInitEnabledCreatesDataDirImmediately documents the design this PR
+// reverted to: DataDir() is a fixed, machine-scoped location
+// (~/.config/bd/eventsData), never a workspace directory, so it is safe for
+// Init to construct the file emitter (and its eager MkdirAll) unconditionally
+// and immediately, with no ordering dependency on workspace selection.
+func TestInitEnabledCreatesDataDirImmediately(t *testing.T) {
+	isolateUserProfile(t)
+
+	closeFn, err := Init("0.0.0-test", true, "")
+	if err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+	defer closeFn(context.Background())
+
+	dir := wantDataDir(t)
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("Init did not create %s: %v", dir, err)
+	}
+}
+
 func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateUserProfile(t)
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -84,7 +275,7 @@ func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
 }
 
 func TestMaybeSpawnFlusherNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateUserProfile(t)
 	_, err := Init("0.0.0-test", false, "")
 	if err != nil {
 		t.Fatalf("Init: %v", err)
@@ -135,7 +326,7 @@ func TestFlusherChildEnvPinsSanctionedEndpoint(t *testing.T) {
 // guard: a process already marked as the flusher must never spawn another one,
 // independent of send-metrics' os.Exit.
 func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
+	isolateUserProfile(t)
 	t.Setenv(EnvIsFlusher, "1")
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
@@ -151,14 +342,17 @@ func TestMaybeSpawnFlusherNoOpInsideFlusher(t *testing.T) {
 // of bypassing main()'s post-command tail, so an event queued earlier in the run
 // is still written to disk for the uploader rather than stranded.
 func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateUserProfile(t)
 	// Keep the detached uploader from actually forking during the test; we only
 	// assert the on-disk write that CloseAndFlush guarantees before an os.Exit.
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", true, ""); err != nil {
 		t.Fatalf("Init: %v", err)
+	}
+	dir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
 	}
 
 	evt := NewCommandEvent("create")
@@ -167,7 +361,9 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 	// Simulate an os.Exit guard finalizing metrics without the RunE/ExecuteC tail.
 	CloseAndFlush()
 
-	dir := filepath.Join(home, ".beads", "eventsData")
+	if want := wantDataDir(t); dir != want {
+		t.Fatalf("DataDir() = %q, want %q", dir, want)
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read eventsData: %v", err)
@@ -188,8 +384,7 @@ func TestCloseAndFlushPersistsQueuedEvents(t *testing.T) {
 // when metrics are disabled without panicking, spawning a flusher, or writing any
 // queue file.
 func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	isolateUserProfile(t)
 	t.Setenv(EnvDisableEventFlush, "1")
 
 	if _, err := Init("0.0.0-test", false, ""); err != nil {
@@ -198,7 +393,7 @@ func TestCloseAndFlushDisabledIsSafe(t *testing.T) {
 
 	CloseAndFlush()
 
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := wantDataDir(t)
 	if entries, err := os.ReadDir(dir); err == nil {
 		for _, e := range entries {
 			if filepath.Ext(e.Name()) == ".evtq" {

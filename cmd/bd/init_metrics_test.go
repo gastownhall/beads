@@ -27,7 +27,7 @@ type metricsEvent struct {
 
 func readInitEvent(t *testing.T, home, expectedCommand string) metricsEvent {
 	t.Helper()
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := filepath.Join(home, ".config", "bd", "eventsData")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatalf("read eventsData dir: %v", err)
@@ -84,14 +84,34 @@ func (e metricsEvent) attr(key string) (string, bool) {
 
 func metricsTestEnv(home string, extra ...string) []string {
 	base := bdEnv(home)
-	out := make([]string, 0, len(base)+len(extra)+1)
+	// bdEnv overrides HOME only. Keep the platform-specific profile variables
+	// aligned too, or os.UserHomeDir still resolves USERPROFILE on Windows and
+	// writes the queue outside this test's fixture.
+	out := make([]string, 0, len(base)+len(extra)+8)
 	for _, e := range base {
-		if strings.HasPrefix(e, "BD_DISABLE_METRICS=") || strings.HasPrefix(e, "DO_NOT_TRACK=") {
+		key, _, _ := strings.Cut(e, "=")
+		switch strings.ToUpper(key) {
+		case "HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+			"XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA",
+			"BD_DISABLE_METRICS", "DO_NOT_TRACK":
 			continue
 		}
 		out = append(out, e)
 	}
-	out = append(out, "BD_DISABLE_EVENT_FLUSH=1")
+	out = append(out,
+		"HOME="+home,
+		"USERPROFILE="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"APPDATA="+filepath.Join(home, "AppData", "Roaming"),
+		"LOCALAPPDATA="+filepath.Join(home, "AppData", "Local"),
+		"BD_DISABLE_EVENT_FLUSH=1",
+	)
+	if volume := filepath.VolumeName(home); volume != "" {
+		out = append(out,
+			"HOMEDRIVE="+volume,
+			"HOMEPATH="+strings.TrimPrefix(home, volume),
+		)
+	}
 	return append(out, extra...)
 }
 
@@ -188,7 +208,7 @@ func writeUserMetricsDisabled(t *testing.T, home string, disabled bool) {
 
 func evtqFilesIn(t *testing.T, home string) []string {
 	t.Helper()
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := filepath.Join(home, ".config", "bd", "eventsData")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -355,7 +375,7 @@ func TestInitMetricsDisabledSuppresses(t *testing.T) {
 		t.Fatalf("bd init failed: %v\n%s\n%s", err, stdout.String(), stderr.String())
 	}
 
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := filepath.Join(home, ".config", "bd", "eventsData")
 	if _, err := os.Stat(dir); err == nil {
 		entries, _ := os.ReadDir(dir)
 		var evtqs []string
@@ -376,7 +396,7 @@ func TestInitMetricsDisabledSuppresses(t *testing.T) {
 // one cli_command event).
 func allCommandEvents(t *testing.T, home string) []string {
 	t.Helper()
-	dir := filepath.Join(home, ".beads", "eventsData")
+	dir := filepath.Join(home, ".config", "bd", "eventsData")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil
@@ -442,7 +462,7 @@ func TestMetricsTodoAliasEmitsSingleEvent(t *testing.T) {
 	}
 
 	// Isolate the next invocation by dropping init's queued event.
-	if err := os.RemoveAll(filepath.Join(home, ".beads", "eventsData")); err != nil {
+	if err := os.RemoveAll(filepath.Join(home, ".config", "bd", "eventsData")); err != nil {
 		t.Fatalf("clear eventsData: %v", err)
 	}
 
@@ -476,7 +496,7 @@ func TestMetricsReadyGatedAliasEmitsSingleEvent(t *testing.T) {
 	}
 
 	// Isolate the next invocation by dropping init's queued event.
-	if err := os.RemoveAll(filepath.Join(home, ".beads", "eventsData")); err != nil {
+	if err := os.RemoveAll(filepath.Join(home, ".config", "bd", "eventsData")); err != nil {
 		t.Fatalf("clear eventsData: %v", err)
 	}
 
@@ -511,7 +531,7 @@ func TestMetricsWispAliasEmitsSingleEvent(t *testing.T) {
 	}
 
 	// Isolate the next invocation by dropping init's queued event.
-	if err := os.RemoveAll(filepath.Join(home, ".beads", "eventsData")); err != nil {
+	if err := os.RemoveAll(filepath.Join(home, ".config", "bd", "eventsData")); err != nil {
 		t.Fatalf("clear eventsData: %v", err)
 	}
 
@@ -603,7 +623,7 @@ func TestMetricsOffEmitsNoEvent(t *testing.T) {
 	if got := allCommandEvents(t, home); len(got) == 0 {
 		t.Fatalf("precondition: metrics-enabled `bd init` produced no event; env may be misconfigured")
 	}
-	if err := os.RemoveAll(filepath.Join(home, ".beads", "eventsData")); err != nil {
+	if err := os.RemoveAll(filepath.Join(home, ".config", "bd", "eventsData")); err != nil {
 		t.Fatalf("clear eventsData: %v", err)
 	}
 
