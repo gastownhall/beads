@@ -29,12 +29,15 @@ func runDoltSQL(t *testing.T, dir, query string) {
 // <script>`) blows past that limit and fails execve with E2BIG; the real
 // schema init script (schema.AllMigrationsSQL()) is ~134KB and triggers it.
 //
-// Gated on testutil.RequireDoltBinary (local dolt CLI only), not
-// skipIfNoDolt (dolt_test.go, which also requires the shared containerized
-// Dolt SQL server via testServerPort) — this test never touches that
-// server, so it belongs in the default build lane, not integration-only.
+// Gated on testutil.RequireDoltCLIOnly (local dolt CLI only), not
+// RequireDoltBinary/skipIfNoDolt (which also honor BEADS_TEST_SKIP=dolt, a
+// blanket switch broad test wrappers set to exclude tests that depend on the
+// shared containerized Dolt SQL server via testServerPort) — this test never
+// touches that server, so it belongs in the default build lane and must keep
+// running even when BEADS_TEST_SKIP=dolt is set for the container-dependent
+// tests around it.
 func TestRunDoltSQLHandlesLargeScript(t *testing.T) {
-	testutil.RequireDoltBinary(t)
+	testutil.RequireDoltCLIOnly(t)
 
 	dir := t.TempDir()
 	cmd := exec.Command("dolt", "init")
