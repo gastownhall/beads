@@ -164,12 +164,12 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 // missing-.beads-dir error path; nothing previously exercised the DELETE
 // itself against a live store.
 //
-// Uses the same local-dolt-binary auto-start harness as the sibling
-// TestDependencyKeys_RekeysAndRemovesLeftovers (dep_keys_test.go): dolt.New
-// with no ServerHost/ServerPort auto-starts a real `dolt sql-server`
-// subprocess via the local `dolt` binary (internal/doltserver), the same
-// mechanism `bd init` uses in production and the same one CI's
-// RequireDoltBinary check enforces — no Docker required.
+// Unlike the sibling TestDependencyKeys_RekeysAndRemovesLeftovers
+// (dep_keys_test.go), which uses requireFixDoltContainer and connects to
+// the shared BEADS_DOLT_PORT container, this test clears BEADS_DOLT_PORT
+// and has dolt.New auto-start its own local `dolt sql-server` subprocess
+// via the local `dolt` binary (internal/doltserver) — the same mechanism
+// `bd init` uses in production — no Docker required.
 func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
@@ -213,7 +213,7 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 		AutoStart:       true,
 	})
 	if err != nil {
-		t.Skipf("skipping: Dolt server not available: %v", err)
+		t.Fatalf("dolt.New with local auto-start: %v", err)
 	}
 	defer func() { _ = store.Close() }()
 
