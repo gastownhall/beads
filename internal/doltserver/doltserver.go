@@ -28,8 +28,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/dolthub/dolt/go/libraries/doltcore/servercfg"
-	"github.com/dolthub/dolt/go/libraries/utils/filesys"
 	_ "github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 
@@ -609,11 +607,15 @@ func configYamlPort(beadsDir string) int {
 	if _, err := os.Stat(path); err != nil {
 		return 0
 	}
-	cfg, err := servercfg.YamlConfigFromFile(filesys.LocalFS, path)
+	body, err := os.ReadFile(path) //nolint:gosec // G304: path is the internally resolved Dolt config location.
 	if err != nil {
 		return 0
 	}
-	return cfg.Port()
+	var cfg doltServerYAMLConfig
+	if err := yaml.Unmarshal(body, &cfg); err != nil {
+		return 0
+	}
+	return cfg.Listener.Port
 }
 
 // PortSource identifies which step of the port-resolution precedence chain
@@ -1153,6 +1155,20 @@ func resolveCfgDir(doltDir string) (string, error) {
 	return abs, nil
 }
 
+type doltServerYAMLConfig struct {
+	LogLevel string `yaml:"log_level"`
+	Listener struct {
+		Host string `yaml:"host"`
+		Port int    `yaml:"port"`
+	} `yaml:"listener"`
+	CfgDir   string `yaml:"cfg_dir"`
+	Behavior struct {
+		AutoGCBehavior struct {
+			ArchiveLevel int `yaml:"archive_level"`
+		} `yaml:"auto_gc_behavior"`
+	} `yaml:"behavior"`
+}
+
 // buildDoltServerYAMLConfig renders a minimal sql-server YAML config
 // equivalent to buildDoltServerArgs' CLI flags (host, port, log level), plus
 // auto_gc_behavior.archive_level: 0 so this managed server's background
@@ -1173,21 +1189,12 @@ func buildDoltServerYAMLConfig(host string, port int, debug bool, cfgDir string)
 	if debug {
 		logLevel = "debug"
 	}
-	archiveLevel := 0
-	yc := &servercfg.YAMLConfig{
-		LogLevelStr: &logLevel,
-		ListenerConfig: servercfg.ListenerYAMLConfig{
-			HostStr:    &host,
-			PortNumber: &port,
-		},
-		CfgDirStr: &cfgDir,
-		BehaviorConfig: servercfg.BehaviorYAMLConfig{
-			AutoGCBehavior: &servercfg.AutoGCBehaviorYAMLConfig{
-				ArchiveLevel_: &archiveLevel,
-			},
-		},
-	}
-	return yaml.Marshal(yc)
+	var cfg doltServerYAMLConfig
+	cfg.LogLevel = logLevel
+	cfg.Listener.Host = host
+	cfg.Listener.Port = port
+	cfg.CfgDir = cfgDir
+	return yaml.Marshal(cfg)
 }
 
 // buildDoltServerArgsWithConfig is the --config counterpart to

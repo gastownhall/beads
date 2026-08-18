@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	gmssql "github.com/dolthub/go-mysql-server/sql"
 	"github.com/go-sql-driver/mysql"
 	"github.com/jonbaldie/beads/internal/storage"
 	"github.com/jonbaldie/beads/internal/storage/depid"
@@ -709,7 +708,7 @@ func isCreateOnlyDuplicateError(err error) bool {
 	if errors.As(err, &mysqlError) && mysqlError.Number == 1062 {
 		return true
 	}
-	return gmssql.ErrPrimaryKeyViolation.Is(err) || gmssql.ErrUniqueKeyViolation.Is(err)
+	return isEmbeddedDuplicateError(err)
 }
 
 // InsertIssueStrictInTx inserts one issue without probing either storage plane.

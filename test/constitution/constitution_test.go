@@ -1,12 +1,14 @@
 package constitution
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func repoRoot(t *testing.T) string {
@@ -78,6 +80,23 @@ printf '%s' "$CGO_ENABLED"
 	}
 	if got := string(out); got != "0" {
 		t.Fatalf(".buildflags default CGO_ENABLED = %q, want 0", got)
+	}
+}
+
+func TestNoCGOSDKOmitsDoltHubPackages(t *testing.T) {
+	t.Setenv("CGO_ENABLED", "0")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "go", "list", "-deps", ".")
+	cmd.Dir = repoRoot(t)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("CGO_ENABLED=0 go list -deps .: %v\n%s", err, out)
+	}
+	for _, dep := range strings.Fields(string(out)) {
+		if strings.HasPrefix(dep, "github.com/dolthub/") {
+			t.Errorf("CGO-disabled public SDK imports %s", dep)
+		}
 	}
 }
 
