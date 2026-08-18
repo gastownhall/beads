@@ -1026,6 +1026,12 @@ func TestStepTypeToIssueType(t *testing.T) {
 		{"story", types.TypeStory},
 		// Aliases normalize to their canonical form.
 		{"enhancement", types.TypeFeature},
+		// Formula step kind "human" means a person does the work. It is not
+		// an issue type; map it to task so pour does not warn-and-flatten
+		// shipped examples as if "human" were a typo.
+		{"human", types.TypeTask},
+		{" human ", types.TypeTask},
+		{"Human", types.TypeTask},
 		// Non-built-in types pass through; at pour/cook time,
 		// flattenUnregisteredIssueTypes degrades them to task unless they
 		// are already registered in types.custom.
@@ -1035,5 +1041,38 @@ func TestStepTypeToIssueType(t *testing.T) {
 		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
 			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
 		}
+	}
+}
+
+func TestCookFormulaToSubgraph_HumanStepTypeMapsToTask(t *testing.T) {
+	// Pour seam: processStepToIssue must use the mapper so type=human
+	// lands as task on the cooked subgraph, not only in isolation.
+	f := &formula.Formula{
+		Formula: "feature-workflow",
+		Version: 1,
+		Type:    formula.TypeWorkflow,
+		Steps: []*formula.Step{
+			{ID: "design", Title: "Design it", Type: "human"},
+			{ID: "implement", Title: "Implement it"},
+		},
+	}
+
+	subgraph, err := cookFormulaToSubgraph(f, "feature-workflow")
+	if err != nil {
+		t.Fatalf("cookFormulaToSubgraph: %v", err)
+	}
+
+	var design *types.Issue
+	for _, issue := range subgraph.Issues {
+		if issue.ID == "feature-workflow.design" {
+			design = issue
+			break
+		}
+	}
+	if design == nil {
+		t.Fatal("feature-workflow.design not found")
+	}
+	if design.IssueType != types.TypeTask {
+		t.Fatalf("design IssueType = %q, want %q", design.IssueType, types.TypeTask)
 	}
 }

@@ -78,6 +78,7 @@ type envSnapshotValue struct {
 }
 
 var changeDirEnvSnapshot map[string]envSnapshotValue
+var changeDirOrigWD string
 
 var (
 	noColorFlag       bool
@@ -790,7 +791,9 @@ func init() {
 	rootCmd.SetHelpFunc(colorizedHelpFunc)
 }
 
-func resolveChangeDirBeadsDir(path string) (string, error) {
+var errNoBeadsProject = errors.New("no beads project found")
+
+func resolveChangeDirAbs(path string) (string, error) {
 	if strings.TrimSpace(path) == "" {
 		return "", nil
 	}
@@ -805,19 +808,71 @@ func resolveChangeDirBeadsDir(path string) (string, error) {
 	if !info.IsDir() {
 		return "", fmt.Errorf("cannot use -C directory %q: not a directory", path)
 	}
+	return absPath, nil
+}
+
+func resolveChangeDirBeadsDir(path string) (string, error) {
+	absPath, err := resolveChangeDirAbs(path)
+	if err != nil {
+		return "", err
+	}
+	if absPath == "" {
+		return "", nil
+	}
 	beadsDir := beads.FindBeadsDirFrom(absPath)
 	if beadsDir == "" {
-		return "", fmt.Errorf("cannot use -C directory %q: no beads project found", path)
+		return "", fmt.Errorf("cannot use -C directory %q: %w", path, errNoBeadsProject)
 	}
 	return beadsDir, nil
 }
 
-func applyChangeDirSelection() error {
+// allowsChangeDirWithoutProject reports whether -C may target a directory
+// that does not yet contain a beads project. Identify init by command
+// pointer, not by the name "init": bd notion init is a different command.
+func allowsChangeDirWithoutProject(cmd *cobra.Command) bool {
+	for current := cmd; current != nil; current = current.Parent() {
+		if current == initCmd {
+			return true
+		}
+	}
+	return false
+}
+
+func chdirForChangeDir(absPath string) error {
+	if changeDirOrigWD == "" {
+		wd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("cannot remember working directory for -C: %w", err)
+		}
+		changeDirOrigWD = wd
+	}
+	if err := os.Chdir(absPath); err != nil {
+		_ = os.Chdir(changeDirOrigWD)
+		changeDirOrigWD = ""
+		return fmt.Errorf("cannot change to -C directory %q: %w", absPath, err)
+	}
+	return nil
+}
+
+func applyChangeDirSelection(cmd *cobra.Command) error {
 	if strings.TrimSpace(changeDir) == "" {
 		return nil
 	}
+	absPath, err := resolveChangeDirAbs(changeDir)
+	if err != nil {
+		return HandleError("%v", err)
+	}
 	beadsDir, err := resolveChangeDirBeadsDir(changeDir)
 	if err != nil {
+		if !errors.Is(err, errNoBeadsProject) || !allowsChangeDirWithoutProject(cmd) {
+			return HandleError("%v", err)
+		}
+		if err := chdirForChangeDir(absPath); err != nil {
+			return HandleError("%v", err)
+		}
+		return nil
+	}
+	if err := chdirForChangeDir(absPath); err != nil {
 		return HandleError("%v", err)
 	}
 	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
@@ -830,17 +885,20 @@ func applyChangeDirSelection() error {
 }
 
 func restoreChangeDirSelection() {
-	if changeDirEnvSnapshot == nil {
-		return
-	}
-	for key, snapshot := range changeDirEnvSnapshot {
-		if snapshot.ok {
-			_ = os.Setenv(key, snapshot.value)
-		} else {
-			_ = os.Unsetenv(key)
+	if changeDirEnvSnapshot != nil {
+		for key, snapshot := range changeDirEnvSnapshot {
+			if snapshot.ok {
+				_ = os.Setenv(key, snapshot.value)
+			} else {
+				_ = os.Unsetenv(key)
+			}
 		}
+		changeDirEnvSnapshot = nil
 	}
-	changeDirEnvSnapshot = nil
+	if changeDirOrigWD != "" {
+		_ = os.Chdir(changeDirOrigWD)
+		changeDirOrigWD = ""
+	}
 }
 
 func guardLegacyNoStoreCommand(cmd *cobra.Command, beadsDir string) error {
@@ -942,7 +1000,7 @@ var rootCmd = &cobra.Command{
 		debug.SetVerbose(verboseFlag)
 		debug.SetQuiet(quietFlag)
 
-		if err := applyChangeDirSelection(); err != nil {
+		if err := applyChangeDirSelection(cmd); err != nil {
 			return err
 		}
 

@@ -14,9 +14,15 @@ import (
 func savePersistentPreRunState(t *testing.T) {
 	t.Helper()
 
-	// Track env vars that PersistentPreRun may modify via prepareSelectedCommandContext
-	// or applyChangeDirSelection. Without this, a call to PersistentPreRun leaves
-	// BEADS_DIR set to the project's .beads dir, corrupting subsequent tests.
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd: %v", err)
+	}
+
+	// Track env vars and cwd that PersistentPreRun may modify via
+	// prepareSelectedCommandContext or applyChangeDirSelection. Without
+	// this, a call to PersistentPreRun leaves BEADS_DIR set and cwd
+	// changed, corrupting subsequent tests.
 	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
 		t.Setenv(key, os.Getenv(key))
 	}
@@ -30,6 +36,8 @@ func savePersistentPreRunState(t *testing.T) {
 	oldDoltAutoCommit := doltAutoCommit
 	flagState := snapshotRootFlagState()
 	t.Cleanup(func() {
+		restoreChangeDirSelection()
+		_ = os.Chdir(origWD)
 		serverMode = oldServerMode
 		cmdCtx = oldCmdCtx
 		dbPath = oldDBPath
