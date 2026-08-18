@@ -680,6 +680,88 @@ func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
 	}
 }
 
+func TestServerStorageShardScriptRunsPrebuiltBinaryFromPackageDir(t *testing.T) {
+	// pr4107_corruption_test.go and journal_scope_completeness_test.go use
+	// paths relative to internal/storage/dolt (e.g. ../schema/migrations,
+	// ../issueops). `go test` runs a package's tests with cwd = the package
+	// dir, so those resolve; a prebuilt test binary inherits the invoking
+	// shell's cwd instead. server-storage-test-shard.sh is invoked from the
+	// repo root (see TestPRRiskGateReachesFullServerDoltStorageSuite above),
+	// so the prebuilt-binary branch must cd into the package dir itself,
+	// immediately before exec -- any earlier and it breaks the repo-root-
+	// relative manifest/discovery above it; any later, or absent, and the 6
+	// relative-path tests fail with "open ../issueops: no such file or
+	// directory".
+	path := filepath.Join(sourceRepoRoot(t), ".github", "scripts", "server-storage-test-shard.sh")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(string(data), "\n")
+
+	indexOfContains := func(want string) int {
+		for i, line := range lines {
+			if strings.Contains(line, want) {
+				return i
+			}
+		}
+		return -1
+	}
+	indexOfExact := func(want string) int {
+		for i, line := range lines {
+			if strings.TrimSpace(line) == want {
+				return i
+			}
+		}
+		return -1
+	}
+
+	discoveryIndex := indexOfContains(`grep -rh '^func Test' internal/storage/dolt/*_test.go`)
+	if discoveryIndex < 0 {
+		t.Fatal("could not find repo-root-relative test-discovery grep line")
+	}
+	prebuiltBranchIndex := indexOfContains(`if [ -x "$STORAGE_BINARY" ]; then`)
+	if prebuiltBranchIndex < 0 {
+		t.Fatal("could not find prebuilt-binary branch")
+	}
+	execIndex := indexOfContains(`exec "$STORAGE_BINARY"`)
+	if execIndex < 0 {
+		t.Fatal("could not find prebuilt-binary exec line")
+	}
+	fallbackExecIndex := indexOfContains(`exec go test`)
+	if fallbackExecIndex < 0 {
+		t.Fatal("could not find go-test fallback exec line")
+	}
+	if fallbackExecIndex < execIndex {
+		t.Fatal("go-test fallback exec line appears before the prebuilt-binary exec line -- branch order assumption violated")
+	}
+
+	cdIndex := indexOfExact("cd internal/storage/dolt")
+	if cdIndex < 0 {
+		t.Fatal(`script does not "cd internal/storage/dolt" before running the prebuilt binary -- ` +
+			`relative-path tests (../schema/migrations, ../issueops) will fail when this script ` +
+			`is invoked from the repo root, as pr-risk.yml's test-server-storage-full job does`)
+	}
+	if cdIndex <= discoveryIndex {
+		t.Fatalf("cd internal/storage/dolt at line %d is at or before the repo-root-relative test "+
+			"discovery grep at line %d -- that discovery must still run from the repo root",
+			cdIndex+1, discoveryIndex+1)
+	}
+	if cdIndex <= prebuiltBranchIndex || cdIndex >= execIndex {
+		t.Fatalf("cd internal/storage/dolt at line %d must sit strictly between the prebuilt-binary "+
+			"branch at line %d and its exec at line %d", cdIndex+1, prebuiltBranchIndex+1, execIndex+1)
+	}
+
+	// The go-test fallback already scopes via the ./internal/storage/dolt/
+	// argument (cwd = repo root is fine for `go test`); it must not also cd.
+	for i := execIndex + 1; i <= fallbackExecIndex; i++ {
+		if strings.TrimSpace(lines[i]) == "cd internal/storage/dolt" {
+			t.Fatalf("unexpected cd internal/storage/dolt at line %d in the go-test fallback branch -- "+
+				"it already scopes via the ./internal/storage/dolt/ argument", i+1)
+		}
+	}
+}
+
 func assertNoUnmanagedGoCacheSteps(t *testing.T, workflows map[string]ciWorkflow, managed map[string]map[string]bool) {
 	t.Helper()
 
