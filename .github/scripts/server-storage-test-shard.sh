@@ -144,6 +144,10 @@ if [ "${BEADS_TEST_SHARD_LIST_ONLY:-}" = "1" ]; then
 fi
 
 if [ -x "$STORAGE_BINARY" ]; then
+  # The tests use paths relative to their own package dir (e.g.
+  # ../schema/migrations, ../issueops). `go test` runs them with cwd = the
+  # package dir; a prebuilt binary inherits OUR cwd, so set it explicitly.
+  cd internal/storage/dolt
   exec "$STORAGE_BINARY" -test.v -test.count=1 -test.timeout=15m \
     -test.run "$RUN_REGEX" \
     "$@"
