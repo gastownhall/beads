@@ -251,7 +251,17 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		// Use doltserver.DefaultConfig for port resolution (env > port file >
 		// config.yaml > metadata > DerivePort). fileCfg.GetDoltServerPort()
 		// falls back to 3307 which is wrong for standalone repos.
-		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+		//
+		// PortSource/PortSharedServer must travel with Port: applyConfigDefaults
+		// infers "caller-explicit" from "ServerPort nonzero, ServerPortSource
+		// unset" (be-wf9a.1), so leaving the source unset here mislabels an
+		// ambient/stored resolution (e.g. the port file) as a deliberate
+		// caller assertion — which then makes the legacy BEADS_DOLT_PORT
+		// env-var override a silent no-op (be-9tju).
+		resolved := doltserver.DefaultConfig(beadsDir)
+		cfg.ServerPort = resolved.Port
+		cfg.ServerPortSource = resolved.PortSource
+		cfg.ServerPortSharedServer = resolved.PortSharedServer
 	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails

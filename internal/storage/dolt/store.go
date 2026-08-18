@@ -1436,7 +1436,14 @@ func applyConfigDefaults(cfg *Config) {
 	if envPort == "" {
 		envPort = os.Getenv("BEADS_DOLT_PORT") // legacy fallback
 	}
-	if envPort != "" && cfg.ServerPort == 0 {
+	// Also fires when ServerPort is already nonzero but its source isn't
+	// authoritative (e.g. PortSourcePortFile from applyResolvedConfig's own
+	// doltserver.DefaultConfig fallback above) — bd's own port-file
+	// bookkeeping must not silently outrank an explicit env override
+	// (be-9tju; regression of the hq-27t bug class). A genuinely
+	// caller-explicit ServerPort (PortSourceCallerExplicit, stamped above)
+	// still wins: IsAuthoritative() is true for it.
+	if envPort != "" && (cfg.ServerPort == 0 || !cfg.ServerPortSource.IsAuthoritative()) {
 		if p, err := strconv.Atoi(envPort); err == nil && p > 0 {
 			cfg.ServerPort = p
 			// This env read happens before doltserver.DefaultConfig is
