@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -636,8 +637,24 @@ func TestPRRiskGateReachesFullServerDoltStorageSuite(t *testing.T) {
 		t.Errorf("%s does not download the existing embedded-test-binaries artifact (would require a new build step): %v", jobName, download.With)
 	}
 
-	const testCommand = `/tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.skip '^TestConformance$'`
-	assertStepRunsExactly(t, job, "Test", testCommand)
+	// Pro-rata against the embedded lane (75 shard-minutes / 324 tests):
+	// 1126 tests at the same per-test cost is ~260 shard-minutes; 16 shards
+	// x 15m = 240 shard-minutes, with the ~9.5-minute TestCloudAuthCLIRouting
+	// outlier isolated on its own shard via the shard manifest.
+	const totalShards = 16
+	wantShards := make([]int, totalShards)
+	for i := range wantShards {
+		wantShards[i] = i + 1
+	}
+	if !reflect.DeepEqual(job.Strategy.Matrix.Shard, wantShards) {
+		t.Errorf("%s strategy.matrix.shard = %v, want %v", jobName, job.Strategy.Matrix.Shard, wantShards)
+	}
+	if job.Strategy.FailFast {
+		t.Errorf("%s strategy.fail-fast = true, want false (one slow/flaky shard should not cancel the others)", jobName)
+	}
+
+	wantTestCommand := fmt.Sprintf("bash .github/scripts/server-storage-test-shard.sh ${{ matrix.shard }} %d", totalShards)
+	assertStepRunsExactly(t, job, "Test", wantTestCommand)
 	// federation_test.go Fatals instead of silently skipping when this is set
 	// and the server it expects isn't reachable -- this job's whole point is
 	// a real PASS/FAIL, not a hidden self-skip if its own setup regresses.
@@ -989,11 +1006,13 @@ type ciWorkflowJob struct {
 }
 
 type ciWorkflowStrategy struct {
-	Matrix ciWorkflowMatrix `yaml:"matrix"`
+	FailFast bool             `yaml:"fail-fast"`
+	Matrix   ciWorkflowMatrix `yaml:"matrix"`
 }
 
 type ciWorkflowMatrix struct {
 	OS      []string                  `yaml:"os"`
+	Shard   []int                     `yaml:"shard"`
 	Include []ciWorkflowMatrixInclude `yaml:"include"`
 }
 
