@@ -141,11 +141,15 @@ func runCmd(t *testing.T, dir string, name string, args ...string) {
 	}
 }
 
-// runDoltSQL executes SQL via `dolt sql` CLI in the given directory.
+// runDoltSQL executes SQL via `dolt sql` CLI in the given directory. The
+// script is piped over stdin rather than passed as a `-q` argv element:
+// schema.AllMigrationsSQL() is ~134KB, past Linux's per-argv MAX_ARG_STRLEN
+// (131072 bytes), which fails execve with E2BIG when passed as an argument.
 func runDoltSQL(t *testing.T, dir, query string) {
 	t.Helper()
-	cmd := exec.Command("dolt", "sql", "-q", query)
+	cmd := exec.Command("dolt", "sql")
 	cmd.Dir = dir
+	cmd.Stdin = strings.NewReader(query)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("dolt sql failed in %s: %v\nQuery: %.200s...\nOutput: %s", dir, err, query, output)
 	}
