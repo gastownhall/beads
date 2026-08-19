@@ -1046,6 +1046,21 @@ type execer interface {
 // read or write runs on it. Every caller that opens its own connection
 // instead of using the shared pool (s.db) must call this before issuing any
 // branch-sensitive query — see openLongTimeoutConn's callers.
+//
+// Caveat: the SELECT active_branch() read below is only well-defined when the
+// pool behind s.db is effectively single-connection. Checkout() leases one
+// connection from that pool (s.db.Conn), runs DOLT_CHECKOUT on it and returns
+// it — the branch stays with that physical connection, because checkout is
+// per-connection session state. The pool defaults to defaultMaxOpenConns (10,
+// overridable by BEADS_DOLT_MAX_CONNS or dolt.max-conns), so on a genuinely
+// multi-connection pool this read may be served by a sibling connection that
+// never saw that checkout and still reports the branch it was opened with.
+// The paths that rely on this pin run effectively single-connection —
+// server-mode stores are pinned to MaxOpenConns=1 precisely because branch
+// isolation is session-level (see iter_issues.go) — so the read is reliable
+// in practice rather than by construction. The s.branch fallback does not
+// close the gap either: it fires only when the query errors, not when it
+// succeeds with another connection's answer.
 func (s *DoltStore) pinStoreBranch(ctx context.Context, conn execer) error {
 	var branch string
 	if scanErr := s.db.QueryRowContext(ctx, "SELECT active_branch()").Scan(&branch); scanErr == nil {
