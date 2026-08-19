@@ -419,7 +419,8 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
-		warnImplicitBlocksDefault(dt, cmd.Flags().Changed("type"))
+		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+		warnImplicitBlocksDefault(dt, explicit)
 
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
@@ -437,13 +438,14 @@ Examples:
 }
 
 // warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
-// with the implicit type=blocks default (no -t/--type passed) it warns on
-// stderr. A silent blocks edge drops the dependent from bd ready, which is
-// not what an operator usually means when wiring a structural parent/child
-// link. Explicit -t (including an explicit -t blocks) and non-blocks
-// defaults do not warn.
-func warnImplicitBlocksDefault(dt types.DependencyType, typeFlagSet bool) {
-	if typeFlagSet || dt != types.DepBlocks {
+// with the implicit type=blocks default it warns on stderr. A silent blocks
+// edge drops the dependent from bd ready, which is not what an operator
+// usually means when wiring a structural parent/child link. An explicit
+// choice never warns: -t (including an explicit -t blocks), and the
+// --blocked-by/--depends-on aliases, whose names already express the
+// blocking relationship. Non-blocks defaults do not warn either.
+func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
+	if explicit || dt != types.DepBlocks {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage\n") //nolint:gosec // G705: stderr, not a browser context

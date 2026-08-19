@@ -244,7 +244,8 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
 
-	warnImplicitBlocksDefault(dt, cmd.Flags().Changed("type"))
+	explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+	warnImplicitBlocksDefault(dt, explicit)
 
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{

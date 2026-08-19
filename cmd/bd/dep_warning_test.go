@@ -8,26 +8,28 @@ import (
 )
 
 // TestWarnImplicitBlocksDefault is the D1 guard test: a dep add edge created
-// with the implicit type=blocks default (no -t/--type) must warn on stderr
-// that the edge is type=blocks and that structural parent/child linkage
-// requires -t parent-child, so children don't silently drop from bd ready.
+// with the implicit type=blocks default must warn on stderr that the edge is
+// type=blocks and that structural parent/child linkage requires -t
+// parent-child, so children don't silently drop from bd ready. At the command
+// layer, explicit is true when the user passed -t (any value, including
+// blocks) or the --blocked-by/--depends-on aliases.
 func TestWarnImplicitBlocksDefault(t *testing.T) {
 	tests := []struct {
 		name     string
 		dt       types.DependencyType
-		flagSet  bool
+		explicit bool
 		wantWarn bool
 	}{
-		{name: "implicit blocks default warns", dt: types.DepBlocks, flagSet: false, wantWarn: true},
-		{name: "explicit blocks flag does not warn", dt: types.DepBlocks, flagSet: true, wantWarn: false},
-		{name: "parent-child default does not warn", dt: types.DepParentChild, flagSet: false, wantWarn: false},
-		{name: "tracks default does not warn", dt: types.DepTracks, flagSet: false, wantWarn: false},
+		{name: "implicit blocks default warns", dt: types.DepBlocks, explicit: false, wantWarn: true},
+		{name: "explicit blocks (-t or --blocked-by/--depends-on) does not warn", dt: types.DepBlocks, explicit: true, wantWarn: false},
+		{name: "parent-child default does not warn", dt: types.DepParentChild, explicit: false, wantWarn: false},
+		{name: "tracks default does not warn", dt: types.DepTracks, explicit: false, wantWarn: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := captureStderr(t, func() {
-				warnImplicitBlocksDefault(tt.dt, tt.flagSet)
+				warnImplicitBlocksDefault(tt.dt, tt.explicit)
 			})
 
 			if tt.wantWarn {
