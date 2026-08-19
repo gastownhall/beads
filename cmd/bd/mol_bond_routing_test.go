@@ -123,7 +123,7 @@ func TestDiscoverMolBondOperandRouting(t *testing.T) {
 				t.Fatalf("chdir repoDir: %v", err)
 			}
 
-			disc, err := discoverMolBondOperand(ctx, primaryStore, tc.operand)
+			disc, err := discoverMolBondOperand(ctx, primaryStore, tc.operand, nil)
 			if err != nil {
 				t.Fatalf("discoverMolBondOperand(%q): %v", tc.operand, err)
 			}
@@ -210,7 +210,7 @@ type = "task"
 		t.Fatalf("chdir repoDir: %v", err)
 	}
 
-	disc, err := discoverMolBondOperand(ctx, localStore, name)
+	disc, err := discoverMolBondOperand(ctx, localStore, name, nil)
 	if err != nil {
 		t.Fatalf("discoverMolBondOperand(%q): %v", name, err)
 	}
@@ -279,12 +279,12 @@ func TestMolBondPrefixRoutedWriteThrough(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.Chdir(oldWd) })
 
-	discA, err := discoverMolBondOperand(ctx, townStore, "gt-mol1")
+	discA, err := discoverMolBondOperand(ctx, townStore, "gt-mol1", nil)
 	if err != nil {
 		t.Fatalf("discover first routed operand: %v", err)
 	}
 	defer discA.Close()
-	discB, err := discoverMolBondOperand(ctx, townStore, "gt-mol2")
+	discB, err := discoverMolBondOperand(ctx, townStore, "gt-mol2", nil)
 	if err != nil {
 		t.Fatalf("discover second routed operand: %v", err)
 	}
@@ -339,12 +339,12 @@ func TestMolBondPrefixRoutedWriteThrough(t *testing.T) {
 	}
 	rr.Close()
 
-	crossA, err := discoverMolBondOperand(ctx, townStore, "gt-mol1")
+	crossA, err := discoverMolBondOperand(ctx, townStore, "gt-mol1", nil)
 	if err != nil {
 		t.Fatalf("discover cross-store operand A: %v", err)
 	}
 	defer crossA.Close()
-	crossB, err := discoverMolBondOperand(ctx, townStore, "zz-other")
+	crossB, err := discoverMolBondOperand(ctx, townStore, "zz-other", nil)
 	if err != nil {
 		t.Fatalf("discover cross-store operand B: %v", err)
 	}
@@ -359,11 +359,11 @@ func TestMolBondPrefixRoutedWriteThrough(t *testing.T) {
 	if err := os.WriteFile(routesPath, routes, 0644); err != nil {
 		t.Fatalf("write matched failure route: %v", err)
 	}
-	if _, err := discoverMolBondOperand(ctx, townStore, "bad-target"); err == nil || !strings.Contains(err.Error(), "no dolt_database") {
+	if _, err := discoverMolBondOperand(ctx, townStore, "bad-target", nil); err == nil || !strings.Contains(err.Error(), "no dolt_database") {
 		t.Fatalf("matched-route failure = %v, want actionable target metadata error", err)
 	}
 
-	drift, err := discoverMolBondOperand(ctx, townStore, "zz-other")
+	drift, err := discoverMolBondOperand(ctx, townStore, "zz-other", nil)
 	if err != nil {
 		t.Fatalf("discover drift fixture: %v", err)
 	}
@@ -501,12 +501,12 @@ func TestMolBondAutoRoutedReadOnlyFailsFast(t *testing.T) {
 		t.Fatalf("chdir repoDir: %v", err)
 	}
 
-	discA, err := discoverMolBondOperand(ctx, primaryStore, "shared-ro1")
+	discA, err := discoverMolBondOperand(ctx, primaryStore, "shared-ro1", nil)
 	if err != nil {
 		t.Fatalf("discover first auto-routed operand: %v", err)
 	}
 	defer discA.Close()
-	discB, err := discoverMolBondOperand(ctx, primaryStore, "shared-ro2")
+	discB, err := discoverMolBondOperand(ctx, primaryStore, "shared-ro2", nil)
 	if err != nil {
 		t.Fatalf("discover second auto-routed operand: %v", err)
 	}

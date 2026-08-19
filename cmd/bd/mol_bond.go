@@ -110,12 +110,12 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("no database connection")
 	}
 
-	discA, err := discoverMolBondOperand(ctx, store, in.argA)
+	discA, err := discoverMolBondOperand(ctx, store, in.argA, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	defer discA.Close()
-	discB, err := discoverMolBondOperand(ctx, store, in.argB)
+	discB, err := discoverMolBondOperand(ctx, store, in.argB, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -671,7 +671,7 @@ func (d *molBondDiscovery) Close() {
 // lets store-policy validation finish before any foreign database is opened
 // writable. Formula fallback remains unconditional: the parser decides whether
 // an operand names a formula (#3874).
-func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage, operand string) (*molBondDiscovery, error) {
+func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage, operand string, vars map[string]string) (*molBondDiscovery, error) {
 	rr, err := resolveAndGetIssueWithRouting(ctx, localStore, operand)
 	if err == nil {
 		return &molBondDiscovery{
@@ -686,6 +686,13 @@ func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage,
 	parser := formula.NewParser()
 	f, loadErr := parser.LoadByName(operand)
 	if loadErr == nil {
+		// Discovery must fail the same way materialization would: an
+		// enum/pattern/provided-empty violation in --var values fails the
+		// cook, so surfacing it here makes --dry-run and execution reject
+		// the bond identically, before any writable reopen (#5253).
+		if err := formula.ValidateProvidedVars(f, vars); err != nil {
+			return nil, err
+		}
 		return &molBondDiscovery{operand: operand, formula: f.Formula}, nil
 	}
 	if !isNotFoundErr(err) {
@@ -757,6 +764,12 @@ func materializeMolBondOperand(ctx context.Context, activeStore storage.DoltStor
 	if d.issue == nil {
 		subgraph, err := resolveAndCookFormulaWithVars(d.operand, nil, vars)
 		if err != nil {
+			if errors.Is(err, formula.ErrVarValidation) {
+				// Don't double-wrap: the operand IS a formula, and the --var
+				// values it was given fail enum/pattern/required-empty
+				// constraints, which is a distinct condition from "not found".
+				return nil, err
+			}
 			return nil, fmt.Errorf("'%s' not found as issue or formula: %w", d.operand, err)
 		}
 		return &molBondOperand{subgraph: subgraph, cooked: true}, nil
