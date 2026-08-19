@@ -247,7 +247,7 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	}
 	t.Log("✓ Original branch unchanged")
 
-	// Merge feature branch
+	// Merge feature branch into the isolated starting branch
 	conflicts, err := store.Merge(ctx, featureBranch)
 	if err != nil {
 		t.Fatalf("failed to merge: %v", err)
@@ -255,7 +255,7 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if len(conflicts) > 0 {
 		t.Logf("Merge produced %d conflicts", len(conflicts))
 	}
-	t.Log("✓ Merged feature-branch into main")
+	t.Logf("✓ Merged %s into %s", featureBranch, start)
 
 	// Verify merge result
 	mergedIssue, err := store.GetIssue(ctx, "vc-001")
@@ -1535,7 +1535,11 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 	}
 }
 
-// setupFederationStore creates a Dolt store for federation testing
+// setupFederationStore creates a Dolt store for federation testing. Each
+// town gets its own database (not just its own `path`): dolt.New has a
+// single exit, newServerMode, where cfg.Path is inert — every store in a
+// test process talks to the same Dolt server, so the database name is the
+// only thing that actually isolates one town's data from another's.
 func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
 	t.Helper()
 
