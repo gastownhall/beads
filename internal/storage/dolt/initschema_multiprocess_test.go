@@ -242,6 +242,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = decoyLn.Close() })
 	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(decoyLn.Addr().(*net.TCPAddr).Port))
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // isolate: this test manages its own throwaway server
 
 	state, err := doltserver.Start(beadsDir)
 	if err != nil {
