@@ -378,3 +378,30 @@ func TestPool_CloseReleasesUnderlyingConnections(t *testing.T) {
 		t.Errorf("opens=%d closes=%d — Close should release every opened connection", opens, closes)
 	}
 }
+
+// --- post-migration pool rebuild gate --------------------------------------
+
+// TestRebuildPoolAfterMigration_NoopWhenNotMigrated is the be-itm5 Done-when
+// guard: a non-migrating open (applied == 0, the common re-open-of-an-
+// already-migrated-database path) must not pay for a pool rebuild it does
+// not need. applied == 0 must return before ever touching s.db.
+func TestRebuildPoolAfterMigration_NoopWhenNotMigrated(t *testing.T) {
+	t.Parallel()
+
+	db, drv := openMockDB(t)
+	t.Cleanup(func() { _ = db.Close() })
+
+	s := &DoltStore{db: db, connStr: "ignored", cfg: &Config{}}
+	before := s.db
+
+	if err := s.rebuildPoolAfterMigration(context.Background(), 0); err != nil {
+		t.Fatalf("rebuildPoolAfterMigration(applied=0): %v", err)
+	}
+
+	if s.db != before {
+		t.Errorf("pool was rebuilt when applied=0; must be a no-op for a non-migrating open")
+	}
+	if opens := drv.opens.Load(); opens != 1 {
+		t.Errorf("driver opens = %d, want 1 (applied=0 must not open a new connection)", opens)
+	}
+}
