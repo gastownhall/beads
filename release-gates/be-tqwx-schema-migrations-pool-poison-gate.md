@@ -100,3 +100,40 @@ to `headfork` and open a PR against `gastownhall/beads:main`. Per this rig's
 contributor-only carve-out for `gastownhall/beads`, the deployer's job ends
 at the open PR — no merge (`gh pr merge` is forbidden for all rig agents), no
 merge-request routed to mayor/mpr, no wait on upstream maintainer action.
+
+## Post-hoc annotation — 2026-08-19 (be-crwzj, be-mv0ww)
+
+**The PASS verdict above is left exactly as recorded.** A release gate is an
+audit artifact: the verdict stands as what this gate concluded at the time, on
+the evidence it gathered. This section annotates that record rather than
+rewriting it.
+
+**What happened.** PR #5847 went red on CI after this gate passed. 37 tests
+across `internal/storage/schema` and `internal/storage/uow` fail on this branch.
+The cause is this diff: the new `information_schema` existence probe in
+`migrationSource.currentVersion` (`internal/storage/schema/schema.go:1115-1130`)
+runs ahead of the pre-existing cursor read, so every ordered sqlmock expectation
+that mocks that read now meets an unregistered query and errors with
+`could not match actual sql`. Investigated under be-crwzj; the test-expectation
+repair is tracked as be-1jha0. **The production change is correct and is not
+being reverted** — the stale artifacts are the mocks, not the fix.
+
+**Criterion 3 is not false, and is deliberately not being changed to FAIL.**
+Its evidence line is accurate: those 9 tests were run and did pass. The defect
+is that the criterion is *named* "Tests pass" while its actual *scope* is
+"diff-owned and named exit-contract tests pass". Concretely, this gate's own
+command filtered `./internal/storage/schema/...` through a `-run` regex naming
+9 tests, so the sqlmock tests living in that same package were never executed,
+and `internal/storage/uow` was not in the package list at all. `go vet` and
+`go build` do not execute tests, so no other check in this gate covered them.
+
+**Why this gate could not have caught it.** The break is in the *callers* of the
+changed function, not in the changed files: 3 files changed, 9 test files broken,
+in two packages the diff never touches. A gate that scopes its test run to the
+diff cannot observe a caller-side break by construction.
+
+**The durable fix is a template change, tracked as be-mv0ww** (P1, routed
+beads/architect): either run the callers of every changed function via a
+reverse-dependency query over the changed packages, or rename criterion 3 to
+"Diff-owned tests pass" and add a separate caller-scope criterion. This is a
+template defect, not a discipline failure by this gate's author.
