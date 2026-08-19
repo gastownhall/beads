@@ -19,6 +19,8 @@ func TestMigrationTestInstallDependenciesIsBoundedAndRetried(t *testing.T) {
 		"-o Acquire::http::Timeout=30",
 		"-o Acquire::https::Timeout=30",
 		"for attempt in 1 2 3",
+		`if [ "$attempt" -lt 3 ]; then`,
+		`echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"`,
 		"sudo timeout 180 apt-get install -y jq libicu74",
 	} {
 		if !strings.Contains(step.Run, required) {
@@ -41,6 +43,8 @@ func TestReleaseInstallCrossCompilationToolchainsIsBoundedAndRetried(t *testing.
 		"-o Acquire::http::Timeout=30",
 		"-o Acquire::https::Timeout=30",
 		"for attempt in 1 2 3",
+		`if [ "$attempt" -lt 3 ]; then`,
+		`echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"`,
 		"sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode",
 	} {
 		if !strings.Contains(step.Run, required) {

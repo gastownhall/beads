@@ -67,17 +67,29 @@ jobs:
       - name: Install test dependencies
         timeout-minutes: 6
         run: |
+          updated=""
           for attempt in 1 2 3; do
             if sudo timeout 120 apt-get \
                  -o Acquire::Retries=3 \
                  -o Acquire::http::Timeout=30 \
                  -o Acquire::https::Timeout=30 \
                  update; then
+              updated=yes
               break
             fi
-            echo "::warning::apt-get update attempt $attempt failed or timed out; retrying"
-            sleep 10
+            echo "::warning::apt-get update attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
           done
+          # Deliberate best-effort: a stale index still installs these packages
+          # from the runner image cache far more often than not, and failing the
+          # job here would turn a transient mirror outage into a red build. The
+          # warning is what makes the degraded path visible in the job log.
+          if [ -z "$updated" ]; then
+            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
+          fi
           sudo timeout 180 apt-get install -y jq libicu74
 
       - name: Install Dolt test runtime
