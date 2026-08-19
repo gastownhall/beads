@@ -391,6 +391,14 @@ func TestRebuildPoolAfterMigration_NoopWhenNotMigrated(t *testing.T) {
 	db, drv := openMockDB(t)
 	t.Cleanup(func() { _ = db.Close() })
 
+	// Warm up the one connection newServerMode's startup Ping would have
+	// already pinned into s.db before initSchema/rebuildPoolAfterMigration
+	// ever run. Without this, the baseline is 0 opens and the assertion
+	// below can't distinguish "no-op" from "never dialed anything".
+	if err := db.PingContext(context.Background()); err != nil {
+		t.Fatalf("warm-up ping: %v", err)
+	}
+
 	s := &DoltStore{db: db, connStr: "ignored", cfg: &Config{}}
 	before := s.db
 

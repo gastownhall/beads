@@ -318,6 +318,7 @@ type DoltStore struct {
 	// instance only (storage.EventsJournalConfigurer); never process-global.
 	eventsJournalEnabled atomic.Bool
 	connStr              string       // Connection string for reconnection
+	cfg                  *Config      // Config this store was opened with (rebuildPoolAfterMigration)
 	serverEndpoint       string       // Exact endpoint bound to bootstrap reset authority
 	mu                   sync.RWMutex // Protects concurrent access
 	readOnly             bool         // True if opened in read-only mode
@@ -1900,6 +1901,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		database:               cfg.Database,
 		localActiveDatabaseDir: resolveLocalActiveDatabaseDir(cfg),
 		connStr:                connStr,
+		cfg:                    cfg,
 		serverEndpoint:         serverEndpointIdentity(cfg),
 		breaker:                breaker,
 		committerName:          cfg.CommitterName,
@@ -1970,8 +1972,18 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// ReadOnly for schema — the forward-drift guard above still protects a stale client
 	// binary.
 	if !cfg.ReadOnly && !cfg.Gateway {
-		if err := store.initSchema(ctx, dbFacts.bootstrapHeal); err != nil {
+		applied, err := store.initSchema(ctx, dbFacts.bootstrapHeal)
+		if err != nil {
 			return nil, fmt.Errorf("failed to initialize schema: %w", err)
+		}
+		// initSchema runs migrations over a separate pool (openMigrationDB).
+		// The Ping above already pinned a connection in store.db to the
+		// pre-migration session root; without a rebuild, the first read
+		// through that stale connection returns 0 rows / table-not-found
+		// and does not self-heal on retry (be-itm5). Only a migrating open
+		// (applied > 0) needs this — rebuildPoolAfterMigration no-ops otherwise.
+		if err := store.rebuildPoolAfterMigration(ctx, applied); err != nil {
+			return nil, fmt.Errorf("failed to rebuild pool after migration: %w", err)
 		}
 	}
 
@@ -2592,7 +2604,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 	return applied, err
 }
 
-func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) error {
+func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) (int, error) {
 	// Schema migrations can run arbitrarily long (e.g. full-table recomputes
 	// such as the is_blocked backfill in migration 0047). The main connection
 	// pool sets a 10s ReadTimeout (see buildServerDSN); a slow migration over
@@ -2602,7 +2614,7 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	// is governed by the caller's context, not a fixed deadline.
 	migDB, err := s.openMigrationDB()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer migDB.Close()
 	// #4259: refuse to silently apply pending migrations to a remote-backed,
@@ -2643,8 +2655,8 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	gate := func(ctx context.Context, db *sql.DB) error {
 		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
-	_, err = initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
-	return err
+	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
+	return applied, err
 }
 
 // ApplySchemaMigrations runs idempotent schema migrations under the
@@ -2676,6 +2688,36 @@ func (s *DoltStore) openMigrationDB() (*sql.DB, error) {
 	}
 	db.SetMaxOpenConns(1)
 	return db, nil
+}
+
+// rebuildPoolAfterMigration replaces the main connection pool (s.db) after a
+// migrating open. Migrations run over a separate one-off pool
+// (openMigrationDB); a connection already pooled in s.db before migrations
+// ran (e.g. the startup Ping in newServerMode) stays pinned to the
+// pre-migration Dolt session root, so the first read through it returns 0
+// rows / table-not-found and does not self-heal on retry (be-itm5). A
+// non-migrating open (applied == 0 — the common re-open-of-an-
+// already-migrated-database path) has no stale state to fix and must return
+// before touching s.db or dialing anything.
+func (s *DoltStore) rebuildPoolAfterMigration(ctx context.Context, applied int) error {
+	if applied == 0 {
+		return nil
+	}
+
+	newDB, err := sql.Open("mysql", s.connStr)
+	if err != nil {
+		return fmt.Errorf("rebuild pool after migration: %w", err)
+	}
+	applyPoolLimits(newDB, s.cfg)
+
+	if err := newDB.PingContext(ctx); err != nil {
+		_ = newDB.Close()
+		return fmt.Errorf("rebuild pool after migration: %w", err)
+	}
+
+	old := s.db
+	s.db = newDB
+	return old.Close()
 }
 
 // IsClosed returns true if the store has been closed.
