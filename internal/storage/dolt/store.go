@@ -2185,10 +2185,14 @@ func buildServerDSN(cfg *Config, database string) string {
 // autocommit=1. Without this, Dolt rejects merges under autocommit because
 // it cannot expose conflict-resolution tables to the caller.
 //
-// Audited for be-b0am's fresh-connection branch hazard: safe. Every caller
-// (DOLT_PUSH, DOLT_FETCH) passes its target branch/ref explicitly as a query
-// arg rather than relying on the connection's implicit active_branch(), so
-// this fresh connection's default checkout never matters.
+// Audited for be-b0am's fresh-connection branch hazard: safe — but the two
+// callers are safe for different reasons, so the annotation names both.
+// federation.go's CALL DOLT_PUSH(?, ?) names the refspec explicitly. Its
+// CALL DOLT_FETCH(?) passes only the remote: with no refspec argument dolt
+// falls back to the remote's configured refspecs (ParseRefSpecs ->
+// GetRefSpecs), which are remote config rather than session state, and a
+// fetch writes only remote-tracking refs, never the working branch. Neither
+// depends on this fresh connection's default checkout.
 func (s *DoltStore) execWithLongTimeout(ctx context.Context, query string, args ...any) error {
 	cfg, err := mysql.ParseDSN(s.connStr)
 	if err != nil {
