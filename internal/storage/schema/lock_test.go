@@ -1,12 +1,14 @@
 package schema
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/DATA-DOG/go-sqlmock"
 )
@@ -90,6 +92,87 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	}
 	if applied != 1 {
 		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcquire
+// covers the gap left by TestInitSchemaCanceledLockWaitDoesNotBlockFutureInit
+// (dolt package) and TestMigrationLockReleaseIgnoresCanceledCallerContext
+// (this package): both exercise a caller context that is already canceled
+// before or during lock acquisition/release, but neither covers a context
+// that expires while a migration is actually executing under a held lock.
+//
+// A migration lock guards exclusive access to a shared database. Abandoning
+// the pass mid-flight because the caller's context expired leaves
+// schema_migrations short of latest under a now-released lock -- a state
+// indistinguishable to the next caller from an interrupted-bootstrap crash,
+// and outside the narrow, capability-gated fresh-bootstrap-heal recovery
+// path. Once MigrateUpWithLock holds the lock, the migration pass must run
+// to completion regardless of the caller's context.
+//
+// The expiry is anchored to a synchronization point inside the call rather
+// than to a wall-clock deadline. WithLockedPreparation runs after GET_LOCK
+// resolves and immediately before the first pass, so the cancel is scheduled
+// from there: the only margin that has to hold is inFlightCancelDelay against
+// the first query's much longer delay, both measured from the same anchor. An
+// earlier version timed this with context.WithTimeout from the top of the
+// test, which was documented as counting down "after GET_LOCK resolves" -- it
+// does not, WithTimeout starts at creation, so on a saturated runner the
+// deadline could fire during lock acquisition and flake.
+//
+// Today, an abandoned pass leaves the full expectation sequence unfulfilled,
+// so the deferred RELEASE_LOCK call also mismatches its (ordered,
+// not-yet-reached) expectation -- the resulting error is a join of the
+// context-cancellation failure and that mismatch, not just the latter alone.
+func TestMigrateUpWithLockContinuesMigrationAfterCallerContextExpiresPostLockAcquire(t *testing.T) {
+	const (
+		firstQueryDelay     = 250 * time.Millisecond
+		inFlightCancelDelay = 25 * time.Millisecond
+	)
+
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock, firstQueryDelay)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			// The lock is held and the first (delayed) query is next: expire
+			// the caller's context while that query is in flight. Returning a
+			// nil capability arms no heal, so this stays a plain pass.
+			go func() {
+				time.Sleep(inFlightCancelDelay)
+				cancel()
+			}()
+			return nil, nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the migration to run to completion despite caller context expiry after lock acquisition", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1 (migration must not be abandoned mid-flight)", applied)
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
@@ -221,9 +304,11 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 // MigrateUp runs before anything else, with every pattern actually inserted
 // (RowsAffected=1: an under-seeded database). mainVersion is what the seed's
 // cursor probe reports; version-gated patterns (events, >= 0062) are only
-// expected when it qualifies them.
-func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 1)
+// expected when it qualifies them. An optional firstDelay stalls the very
+// first seed exec (MigrateUp's first DB call) so a caller context can be
+// timed to expire while it is in flight.
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int, firstDelay ...time.Duration) {
+	expectIgnorePatternSeedRows(mock, mainVersion, 1, firstDelay...)
 }
 
 // expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
@@ -232,11 +317,14 @@ func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
 	expectIgnorePatternSeedRows(mock, mainVersion, 0)
 }
 
-func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64) {
-	for _, pattern := range doltIgnorePatterns {
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64, firstDelay ...time.Duration) {
+	for i, pattern := range doltIgnorePatterns {
+		exp := mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
 			WithArgs(pattern).
 			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
+		if i == 0 && len(firstDelay) > 0 {
+			exp.WillDelayFor(firstDelay[0])
+		}
 	}
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
 	for _, gated := range versionGatedDoltIgnorePatterns {
@@ -249,13 +337,13 @@ func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffe
 	}
 }
 
-func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
+func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock, firstStepDelay ...time.Duration) {
 	t.Helper()
 
 	latest := LatestVersion()
 	latestIgnored := LatestIgnoredVersion()
 
-	expectIgnorePatternSeed(mock, latest-1)
+	expectIgnorePatternSeed(mock, latest-1, firstStepDelay...)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
@@ -525,6 +613,202 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 	}
 	if err := mock.ExpectationsWereMet(); err != nil {
 		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires
+// covers the recovery unit between the two detached migration passes.
+// Detaching only the MigrateUp calls leaves the capability probes and
+// DOLT_RESET on the caller's context, so this PR's own scenario -- a deadline
+// that expires while the pass runs under a held lock -- still breaks the heal.
+//
+// Pass 1 is detached, so it reaches the #4566 dirty guard and returns
+// *DirtyTablesError as usual. The heal that follows must run to completion
+// too. On the caller's context it cannot: either the probes fail on the
+// expired context and the heal is silently skipped, or -- worse -- the probes
+// pass, the one-shot capability is consumed (consume precedes reset by
+// design), and DOLT_RESET then fails on the expired context. That burns the
+// capability with no reset performed, so no outer retry can heal this logical
+// open again: a retryable failure converted into a permanent one, inside the
+// very function whose invariant is that a pass runs to completion once the
+// lock is held.
+//
+// WithLockedPreparation is the deterministic seam for the expiry: it runs
+// after GET_LOCK resolves and before any migration work starts, so canceling
+// there reproduces the scenario exactly -- no timers, no dependence on how
+// loaded the runner is.
+func TestMigrateUpWithLockFreshBootstrapHealCompletesAfterCallerContextExpires(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// First pass: detached, so it still reaches the dirty guard and refuses.
+	expectDirtyGuardRefusal(t, mock)
+	// The heal must still revalidate, consume, reset and re-migrate.
+	expectFreshBootstrapIdentityMatch(mock)
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	capability := testFreshBootstrapHealCapability()
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			// The lock is held and no migration work has started yet: expire
+			// the caller's context exactly where the reported scenario does.
+			cancel()
+			return capability, nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the heal to run to completion despite caller context expiry after lock acquisition", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1 (the heal must reset and re-migrate)", applied)
+	}
+	if !capability.consumed.Load() {
+		t.Fatal("heal completed without consuming the one-shot capability")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockNoticesCallerInterruptDuringPass pins the signal-UX
+// side of detaching the pass: the caller's first Ctrl-C no longer stops the
+// migration, so the delta is disclosed on stderr instead of the process just
+// appearing to work on past the interrupt with no explanation. The notice is
+// emitted once, and only when the caller's context ended during the pass.
+//
+// It is written after the pass, from the calling goroutine, because MigrateUp
+// writes its own progress to the same stderr while the pass runs -- reporting
+// the interrupt live would mean two goroutines writing one writer.
+func TestMigrateUpWithLockNoticesCallerInterruptDuringPass(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	var buf bytes.Buffer
+	origStderr := stderr
+	stderr = &buf
+	defer func() { stderr = origStderr }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithLockedPreparation(testBootstrapEndpoint, func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+			cancel()
+			return nil, nil
+		}))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if got, want := buf.String(), "interrupt received mid-migration"; !strings.Contains(got, want) {
+		t.Fatalf("stderr = %q, want it to disclose that the pass ran on past the interrupt (%q)", got, want)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockOmitsInterruptNoticeWithoutCallerInterrupt keeps the
+// notice from becoming unconditional noise on the ordinary path. MigrateUp
+// still reports its own per-migration progress on stderr, so this asserts the
+// absence of the notice rather than silence.
+func TestMigrateUpWithLockOmitsInterruptNoticeWithoutCallerInterrupt(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	var buf bytes.Buffer
+	origStderr := stderr
+	stderr = &buf
+	defer func() { stderr = origStderr }()
+
+	if _, err := MigrateUpWithLock(ctx, conn, "testdb"); err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v", err)
+	}
+	if got := buf.String(); strings.Contains(got, "interrupt received mid-migration") {
+		t.Fatalf("stderr = %q, want no interrupt notice on an uninterrupted pass", got)
+	}
+}
+
+// TestDetachedMigrationContextSurvivesCallerCancelButStaysBounded pins both
+// halves of the post-lock context contract. WithoutCancel alone would make the
+// pass uncancelable forever, and the uow provider's DSN carries no driver
+// ReadTimeout to fall back on, so the detachment is paired with an explicit
+// cap that only has to be far above any real migration.
+func TestDetachedMigrationContextSurvivesCallerCancelButStaysBounded(t *testing.T) {
+	parent, cancelParent := context.WithCancel(context.Background())
+	migrateCtx, cancelMigrate := detachedMigrationContext(parent)
+	defer cancelMigrate()
+
+	cancelParent()
+
+	if err := migrateCtx.Err(); err != nil {
+		t.Fatalf("detached context Err() = %v, want nil after the caller cancels", err)
+	}
+	deadline, ok := migrateCtx.Deadline()
+	if !ok {
+		t.Fatal("detached context has no deadline: a wedged server would hang the pass forever")
+	}
+	if remaining := time.Until(deadline); remaining <= 0 || remaining > migrationPassTimeout {
+		t.Fatalf("detached context remaining = %v, want within (0, %v]", remaining, migrationPassTimeout)
 	}
 }
 
