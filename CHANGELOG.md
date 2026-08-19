@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING (fail-closed): bd no longer migrates an existing database without
+  explicit consent** (Beads 1.2 release remediation). The 1.2.0/1.2.1 releases
+  applied migrations 54–65 at store open on ANY command — including pure reads
+  like `bd list` — with no prompt, and older binaries then refuse the migrated
+  database (schema-skew guard). Every command against an existing database with
+  pending main-sequence migrations now refuses with guidance instead of
+  migrating, and the refused open performs ZERO writes (dolt_ignore seeding and
+  clone-local migrations included). Consent is any of: the explicit verbs
+  `bd migrate` / `bd migrate schema` (a preview flag withholds it),
+  `bd migrate --force`, or `BD_ALLOW_MIGRATE=1` for scripts/CI
+  (`BD_ALLOW_REMOTE_MIGRATE=1` is honored as an alias). Fresh databases
+  (`bd init`) still migrate to latest — creating a database is consent for its
+  schema — and the same creation principle covers a workspace the invocation
+  just cloned into existence (`bd init --remote`, `bd bootstrap` sync), so the
+  #4259 behind-remote flows keep their exact behavior. A database already at
+  this binary's latest version never consults the gate, so already-migrated
+  (v65) workspaces see no change. The
+  remote-backed case keeps all of the #4259 remote-migrate gate's additional
+  protections (smart gate, adopt fast-forward, fork-skew analysis) unchanged.
+  JSON consumers: the refusal renders as a structured error carrying a
+  `migrate_consent` object (`current_version`, `required_version`, `pending`).
+- **Shipped migrations are frozen by CI** (same remediation): the content hash
+  of every released up-migration (main 0001–0065, ignored 0001–0024) is pinned
+  by `TestShippedMigrationsAreFrozen`. Schema v65 is de-facto shipped; any
+  amendment to a released migration must land as a new migration (0066+) so
+  installed schemas and freshly-migrated ones cannot fork.
+- **go.mod retracts v1.2.0 and v1.2.1** so Go-module consumers are steered off
+  the escaped releases.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it

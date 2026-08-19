@@ -212,6 +212,17 @@ cand() { (cd "$WS" && "$CAND_BIN" "$@"); }
 prev_init() { prev init --quiet --non-interactive --skip-hooks --skip-agents; }
 cand_init() { cand init --quiet --non-interactive --skip-hooks --skip-agents; }
 
+# Upgrade an existing workspace to the candidate. Since the migration-consent
+# gate (Beads 1.2 release remediation) the candidate never migrates an
+# existing database from ordinary commands — `bd migrate schema` is the
+# consent step every real upgrade now includes, so the smoke upgrade includes
+# it too. Tolerates a workspace the old binary could not initialize (the
+# migrate is a no-op failure there and cand_init creates a fresh database).
+cand_upgrade() {
+    cand migrate schema >/dev/null 2>&1 || true
+    cand_init 2>/dev/null || true
+}
+
 # Create an issue with the previous binary, tolerating missing --silent flag.
 # Older binaries don't have --silent; we just need to know creation succeeded.
 # Sets _CREATED_ID to a non-empty value on success.
@@ -249,8 +260,21 @@ prev_create --title "Pre-upgrade issue" --type task --priority 1 || true
 ID1="${_CREATED_ID}"
 prev_create --title "Another issue" --type bug || true
 
-# Upgrade: run candidate init (simulates upgrade)
-cand_init 2>/dev/null || true
+# Migration-consent gate: before consenting, an ordinary candidate command on
+# the old-schema database must either work as-is (previous release already
+# ships the candidate's schema — nothing pending) or refuse WITH the consent
+# guidance. A failure without the guidance is a regression.
+GATE_OUT=$(cand list 2>&1) && GATE_RC=0 || GATE_RC=$?
+if [ "$GATE_RC" -eq 0 ]; then
+    pass "Candidate operates database directly (schema already current)"
+elif echo "$GATE_OUT" | grep -q "bd migrate schema"; then
+    pass "Candidate refuses un-migrated database with consent guidance"
+else
+    fail "Candidate failed on old database without consent guidance"
+fi
+
+# Upgrade: consent + candidate init (simulates upgrade)
+cand_upgrade
 
 # Verify
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
@@ -296,7 +320,7 @@ prev_init 2>/dev/null || true
 git -C "$WS" config beads.role contributor
 
 # Upgrade
-cand_init 2>/dev/null || true
+cand_upgrade
 
 ROLE=$(git -C "$WS" config --get beads.role 2>/dev/null || echo "MISSING")
 if [ "$ROLE" = "contributor" ]; then
@@ -330,7 +354,7 @@ else
 fi
 
 # Upgrade with candidate (always runs — verifies candidate defaults to embedded)
-cand_init 2>/dev/null || true
+cand_upgrade
 
 # Verify candidate created an embedded DB
 if embedded_db_exists; then
@@ -400,8 +424,8 @@ if [ -z "${MUT_ID:-}" ]; then
 else
     pass "Issue created with previous binary (id: $MUT_ID)"
 
-    # Upgrade: run candidate init
-    cand_init 2>/dev/null || true
+    # Upgrade: consent + candidate init
+    cand_upgrade
 
     # Mutate using the candidate binary
     cand update "$MUT_ID" --notes "smoke test mutation" 2>/dev/null || true
@@ -468,8 +492,8 @@ if ! $DEP_CREATED; then
 else
     pass "Dependency created with previous binary ($BLOCKED_ID depends on $BLOCKER_ID)"
 
-    # Upgrade (runs migrations 0041–0047, including the data-copy).
-    cand_init 2>/dev/null || true
+    # Upgrade (consents to and runs migrations 0041+, including the data-copy).
+    cand_upgrade
 
     # 1. Blocker queries must not error on the migrated dependency rows.
     if cand ready >/dev/null 2>&1; then

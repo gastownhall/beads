@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/schema"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -28,6 +29,11 @@ func TestMain(m *testing.M) {
 }
 
 func testMainInner(m *testing.M) int {
+	// Package-wide migration consent: these tests exercise the machinery that
+	// runs BELOW the consent gate (migrate_consent.go), exactly as production
+	// does once an operator has consented. Gate-behavior tests manage the
+	// consent state themselves.
+	schema.SetLocalMigrateConsent(true)
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// BEADS_TEST_PDEATHSIG=1 protects TestMultiProcessSchemaInit_DoltVerify
 	// (initschema_multiprocess_test.go), which calls doltserver.Start

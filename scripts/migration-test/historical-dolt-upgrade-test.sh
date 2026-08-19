@@ -998,6 +998,18 @@ run_embedded_dolt_upgrade() {
     jq -e '.backend == "dolt" and .dolt_mode == "embedded"' "$metadata" >/dev/null ||
         die "$version: source metadata does not select embedded Dolt"
     metadata_sha=$(sha256_file "$metadata") || die "$version: could not fingerprint source metadata"
+    # Migration-consent gate (Beads 1.2 remediation): the candidate no longer
+    # migrates an existing database from ordinary commands, so the explicit
+    # schema migration is now the FIRST candidate step — previously it ran
+    # later and was already a no-op because the first candidate open had
+    # silently migrated. Same effective sequence, now stated. Before
+    # consenting, assert the gate actually refuses an ordinary command.
+    if run_in_workspace "$candidate" list >/dev/null 2>"$workspace/consent-refusal.err"; then
+        die "$version: candidate operated an un-migrated database without consent"
+    fi
+    grep -q 'bd migrate schema' "$workspace/consent-refusal.err" ||
+        die "$version: consent refusal did not carry migration guidance"
+    migrate_schema_current "$version" first
     verify_surviving_fixture "$version" direct
     if [ "$version" = v1.0.0 ]; then
         [ "$(run_in_workspace "$candidate" config get status.custom)" = review:active ] || die "$version: candidate did not preserve custom status config"
@@ -1015,7 +1027,6 @@ run_embedded_dolt_upgrade() {
     blocker=$(sed -n '2p' "$workspace/fixture-ids")
     run_in_workspace "$candidate" show "$blocker" --json > "$workspace/after-first.json"
     jq -S . "$workspace/after-first.json" > "$workspace/after-first-canonical.json"
-    migrate_schema_current "$version" first
     verify_idempotent_migration "$version" direct
     run_in_workspace "$candidate" show "$task" --json --include-comments |
         jq -S . > "$workspace/direct-after-noops.json"

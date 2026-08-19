@@ -1335,6 +1335,15 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				syncFromRemote = false
 			} else {
 				bootstrappedFromRemote = true
+				// Creation-consent for the migration-consent gate
+				// (schema/migrate_consent.go): this invocation just CLONED the
+				// database into a workspace that did not exist before, so the
+				// operator's `bd init --remote` is consent for its schema —
+				// the same principle that exempts a fresh `bd init`. The
+				// #4259 remote-migrate gate is unaffected (consent is not its
+				// designated-migrator override), so the smart-gate /
+				// designated-migrator flows keep their exact behavior.
+				schema.SetLocalMigrateConsent(true)
 				if !quiet {
 					fmt.Printf("  %s Bootstrapped from remote: %s\n", ui.RenderPass("✓"), syncURL)
 				}

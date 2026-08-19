@@ -2,6 +2,12 @@ module github.com/steveyegge/beads
 
 go 1.26.5
 
+// v1.2.0 and v1.2.1 auto-migrated existing databases to schema v65 without
+// consent on any command, including reads; older binaries then refuse the
+// migrated database. Superseded by the migration-consent release (see
+// CHANGELOG "Beads 1.2 release remediation").
+retract [v1.2.0, v1.2.1]
+
 require (
 	charm.land/glamour/v2 v2.0.1
 	charm.land/huh/v2 v2.0.3

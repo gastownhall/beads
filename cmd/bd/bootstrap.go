@@ -740,6 +740,15 @@ func executeSyncAction(ctx context.Context, plan BootstrapPlan, cfg *configfile.
 		return err
 	}
 
+	// Creation-consent for the migration-consent gate
+	// (schema/migrate_consent.go): this sync action just CLONED the database
+	// fresh, so the operator's explicit bootstrap is consent for its schema —
+	// the same principle that exempts a fresh `bd init`. The #4259
+	// remote-migrate gate below is unaffected (consent is not its
+	// designated-migrator override), so the behind-remote refusal keeps its
+	// exact bd-6dnrw.31 behavior.
+	schema.SetLocalMigrateConsent(true)
+
 	// Open and close the store to ensure dolt_ignore'd wisp tables are
 	// created in the working set. Clone does not include these tables
 	// (they are never committed), so they must be recreated after clone.
