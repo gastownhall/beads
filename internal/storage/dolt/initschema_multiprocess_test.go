@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -225,6 +226,22 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 	// Start a local server.
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
 	t.Setenv("BEADS_DOLT_AUTO_START", "1")
+
+	// Regression coverage for a round-1 review finding: on shared hosts, an
+	// ambient BEADS_DOLT_SERVER_PORT left by an unrelated process pointed
+	// doltserver.Start at that process's port, and Start correctly refused to
+	// steal it — failing this test for a reason unrelated to schema init.
+	// Simulate that ambient pollution hermetically (independent of any real
+	// process on this host) with a decoy listener standing in for the
+	// unrelated server, so this test's own throwaway server must isolate
+	// itself from ambient port config the same way it already isolates
+	// BEADS_DOLT_SHARED_SERVER/BEADS_DOLT_AUTO_START above.
+	decoyLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen decoy: %v", err)
+	}
+	t.Cleanup(func() { _ = decoyLn.Close() })
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(decoyLn.Addr().(*net.TCPAddr).Port))
 
 	state, err := doltserver.Start(beadsDir)
 	if err != nil {
