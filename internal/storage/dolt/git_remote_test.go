@@ -141,15 +141,10 @@ func runCmd(t *testing.T, dir string, name string, args ...string) {
 	}
 }
 
-// runDoltSQL executes SQL via `dolt sql` CLI in the given directory.
-func runDoltSQL(t *testing.T, dir, query string) {
-	t.Helper()
-	cmd := exec.Command("dolt", "sql", "-q", query)
-	cmd.Dir = dir
-	if output, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("dolt sql failed in %s: %v\nQuery: %.200s...\nOutput: %s", dir, err, query, output)
-	}
-}
+// runDoltSQL lives in dolt_sql_large_script_test.go (untagged, so it's
+// always in scope here too) rather than in this integration-tagged file,
+// since TestRunDoltSQLHandlesLargeScript there needs it without the
+// integration tag.
 
 // skipIfNoGit skips if git is not available.
 func skipIfNoGit(t *testing.T) {

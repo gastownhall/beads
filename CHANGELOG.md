@@ -38,6 +38,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   encoding changes equivalence class silently, with no error to notice. Longer
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
 
+### Fixed
+
+- **Disabling telemetry no longer strands the queued eventsData backlog
+  forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics
+  *before* its prune step, and the spawn gate refused to schedule the child at
+  all when disabled — so the one machine whose queue can never again drain by
+  upload (the one that just opted out) kept every queued batch and orphaned
+  emitter temp indefinitely (2M+ files / 15.8GB observed on one control VM).
+  With metrics disabled, bd now still spawns the detached child under the same
+  marker-first throttle, and the child prunes by the normal TTL/cap policy and
+  exits without POSTing anything. Until that pre-existing backlog ages out, a
+  host that just opted out while its queue still holds batches younger than the
+  7-day TTL (and under the file/size caps) keeps forking the throttled,
+  detached, network-free prune child every flush interval — reclaiming nothing
+  until those batches age past the TTL — so new prune-only `bd send-metrics`
+  processes on a freshly disabled host are expected during that bounded window
+  and never POST. Once the backlog has decayed empty, spawns stop entirely; a
+  machine that never enabled telemetry has no queue directory and never forks.
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
@@ -527,6 +546,18 @@ never reused, per the v1.1.1 precedent.)
   now gone from the create path.
 
 ### Fixed
+
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **FreeBSD builds compile again** (#5661). The dbproxy process-identity arc
   (procid, unverified-process) shipped linux/darwin/windows implementations
@@ -2359,18 +2390,6 @@ remote-migrate gate from a blunt block into a state-aware one.
   ([#4516](https://github.com/gastownhall/beads/issues/4516)).
 
 ### Fixed
-
-- **`--label-any` is no longer silently dropped by `bd ready` and
-  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
-  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
-  filter was ignored on the ready/claim path (with or without `--parent`) on
-  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
-  this was dangerous rather than merely wrong: a worker fencing itself to its
-  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
-  happily claim another lane's issue and believe it was fenced. `--label-any`
-  now emits an OR-set membership clause that AND-combines with `--label`,
-  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
-  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **A failed v53 migration no longer traps the database, and the v53 repair
   now covers `wisp_dependencies` split-column drift.** rc.2 repaired the

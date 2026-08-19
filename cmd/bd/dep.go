@@ -783,6 +783,47 @@ func printDepListEdges(anchors []issueops.AnchorEdges) error {
 	return nil
 }
 
+// warnDroppedDepEdges prints a stderr-only notice for every stored "down"
+// dependency edge of anchorID that shown (the Relations role's answer) left
+// out because its target has no row in this database — i.e. a cross-repo or
+// `external:` target (bd-mtla: `bd link` across databases reports success
+// and writes the row, but the single-id `bd dep list <id>` a caller runs
+// right after has no way to tell that from no dependency existing at all).
+//
+// It never writes to stdout, so the documented `bd dep list <id>` and
+// `--json` shapes for the common (fully-local) case are unchanged; a script
+// parsing stdout sees nothing new. A best-effort read: an error here is
+// swallowed rather than surfaced, since the command's actual answer was
+// already produced successfully by the Relations role above.
+func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{anchorID}, Types: depTypes})
+	if err != nil || len(result.Anchors) != 1 {
+		return
+	}
+	known := make(map[string]struct{}, len(shown))
+	for _, iss := range shown {
+		known[iss.ID] = struct{}{}
+	}
+	var dropped []*types.Dependency
+	for _, dep := range result.Anchors[0].Edges {
+		if _, ok := known[dep.DependsOnID]; !ok {
+			dropped = append(dropped, dep)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", anchorID, len(dropped))
+	for _, dep := range dropped {
+		fmt.Fprintf(os.Stderr, "  %s via %s\n", dep.DependsOnID, dep.Type)
+	}
+	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", anchorID, anchorID)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -914,6 +955,22 @@ Examples:
 				return HandleErrorRespectJSON("%v", err)
 			}
 			allIssues = append(allIssues, issues...)
+		}
+
+		// Relations silently drops "down" edges whose target has no row in
+		// this database (the doc comment above the batch branch says so).
+		// EdgeReader doesn't have that gap, and batchMode&&"down" already
+		// used it above, so this is reached for "down" only when there is
+		// exactly one resolved anchor — warn on stderr (never stdout/--json,
+		// so the documented single-id shape and any script parsing it are
+		// untouched) naming any edge Relations left out, so a `bd link`
+		// across databases doesn't look indistinguishable from no link at
+		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
+		// role exists to detect it from here — tracked separately.
+		if direction == "down" && len(resolved) == 1 {
+			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+			}
 		}
 
 		if jsonOutput {

@@ -400,6 +400,19 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		allIssues = append(allIssues, issues...)
 	}
 
+	// Same gap as the embedded RunE for this command (cmd/bd/dep.go): Relations
+	// drops "down" edges whose target has no row in this database, and the
+	// `len(args) > 1 && direction == "down"` branch above already uses the
+	// (non-dropping) EdgeReader role for batch mode — so this loop only runs
+	// for "down" with exactly one arg. Warn on stderr so a cross-database
+	// `bd link` isn't indistinguishable from no link at all (bd-mtla); never
+	// touches stdout/--json.
+	if direction == "down" && len(args) == 1 {
+		if reader, err := proxiedEdgeReader(); err == nil {
+			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
+		}
+	}
+
 	if jsonOutput {
 		if allIssues == nil {
 			allIssues = []*issueops.RelatedIssue{}
