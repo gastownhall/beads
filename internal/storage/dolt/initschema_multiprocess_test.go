@@ -215,7 +215,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 		t.Fatalf("mkdir dolt: %v", err)
 	}
 
-	initCmd := exec.Command(doltPath, "init")
+	initCmd := exec.Command(doltPath, "init", "--name", "test", "--email", "test@example.com")
 	initCmd.Dir = doltDir
 	initCmd.Env = append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
 	if out, err := initCmd.CombinedOutput(); err != nil {
@@ -293,7 +293,7 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 		dbDir = doltDir
 	}
 
-	verifyCmd := exec.Command(doltPath, "verify")
+	verifyCmd := exec.Command(doltPath, "fsck")
 	verifyCmd.Dir = dbDir
 	verifyCmd.Env = append(os.Environ(), "HOME="+tmpDir, "DOLT_ROOT_PATH="+tmpDir)
 	verifyOut, verifyErr := verifyCmd.CombinedOutput()
