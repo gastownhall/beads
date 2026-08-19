@@ -568,7 +568,7 @@ func checkGateSatisfaction(issue *types.Issue) error {
 	case issue.AwaitType == "timer":
 		resolved, escalated, reason, err = checkTimer(issue, time.Now())
 	case issue.AwaitType == "bead":
-		resolved, reason = checkBeadGate(rootCtx, store, issue.AwaitID)
+		resolved, reason = checkBeadGate(rootCtx, routedBeadGateGetter{localStore: store}, issue.AwaitID)
 		if resolved {
 			return nil
 		}
