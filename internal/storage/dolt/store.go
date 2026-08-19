@@ -3984,14 +3984,27 @@ func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, quer
 }
 
 func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) error {
-	// Audited for be-b0am's fresh-connection branch hazard: store.go's two
-	// callers pass s.branch explicitly as a CALL DOLT_PULL(...) arg, so this
-	// fresh connection's default checkout never matters for them. But
-	// federation.go's peer-pull route calls this with no branch arg at all
-	// (CALL DOLT_PULL(?) with only the remote), which merges into whatever
-	// branch the connection defaults to — the same root cause be-b0am fixed
-	// for the recompute paths, on a call site out of that bead's scope
-	// (needs its own regression test). Tracked as be-5ybd.
+	// Audited for be-b0am's fresh-connection branch hazard: NOT safe, and all
+	// three callers share it. Passing a branch argument does not avoid it.
+	//
+	// DOLT_PULL's second positional arg names the remote ref to merge FROM
+	// (dolt's doDoltPull binds it to remoteRefName); the merge TARGET is
+	// always the session's current working branch (CWBHeadRef), which on this
+	// fresh openLongTimeoutConn connection is the database's default branch,
+	// never s.branch. So store.go's two callers, which pass s.branch to
+	// CALL DOLT_PULL(...), pin only the source and still merge into the
+	// default branch; federation.go's peer-pull route (CALL DOLT_PULL(?),
+	// remote only) derives both source and target from that same default
+	// branch. The GH#3144 fallback below has the same shape — DOLT_FETCH
+	// names the remote ref, but CALL DOLT_MERGE(trackingRef) merges into the
+	// current branch too.
+	//
+	// Left unfixed here deliberately: this is be-b0am's root cause on a
+	// pull/merge path, and a merge landing on the wrong branch has a much
+	// larger blast radius than a stale is_blocked flag, so it needs its own
+	// regression test asserting the merge target rather than riding an
+	// unrelated TDD cycle. Tracked as be-5ybd, which covers all three call
+	// sites. The fix is s.pinStoreBranch(ctx, db) before BeginTx below.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
 		return err
