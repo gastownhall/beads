@@ -433,8 +433,20 @@ func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected sync to fail for nonexistent file remote")
 	}
-	if federationStatusHasTable(t, ctx, store, "federation_peers") {
-		t.Fatal("sync should commit pending federation_peers metadata before fetch/merge")
+
+	// Sync's own post-fetch bookkeeping (e.g. last-sync metadata) can leave
+	// federation_peers dirty again after the fetch fails, so checking
+	// dolt_status here would be a false signal either way. Instead read the
+	// pre-existing pending write straight from HEAD: it must have been
+	// committed before fetch/merge ran, regardless of what Sync dirties after.
+	var sovereignty string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT sovereignty FROM federation_peers AS OF 'HEAD' WHERE name = ?", peer.Name,
+	).Scan(&sovereignty); err != nil {
+		t.Fatalf("query federation_peers AS OF HEAD: %v", err)
+	}
+	if sovereignty != "T3" {
+		t.Fatalf("federation_peers.sovereignty AS OF HEAD = %q, want T3 (pending metadata should be committed before fetch/merge)", sovereignty)
 	}
 }
 
