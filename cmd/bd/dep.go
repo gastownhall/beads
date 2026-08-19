@@ -419,6 +419,8 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
+		warnImplicitBlocksDefault(dt, cmd.Flags().Changed("type"))
+
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"status":        "added",
@@ -434,6 +436,19 @@ Examples:
 	},
 }
 
+// warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
+// with the implicit type=blocks default (no -t/--type passed) it warns on
+// stderr. A silent blocks edge drops the dependent from bd ready, which is
+// not what an operator usually means when wiring a structural parent/child
+// link. Explicit -t (including an explicit -t blocks) and non-blocks
+// defaults do not warn.
+func warnImplicitBlocksDefault(dt types.DependencyType, typeFlagSet bool) {
+	if typeFlagSet || dt != types.DepBlocks {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage\n") //nolint:gosec // G705: stderr, not a browser context
+}
+
 type bulkDepInput struct {
 	From        string `json:"from"`
 	To          string `json:"to"`
@@ -447,9 +462,13 @@ type bulkDepEdge struct {
 	IssueID     string
 	DependsOnID string
 	Type        types.DependencyType
-	Store       storage.DoltStorage
-	StoreKey    string
-	Cleanups    []func()
+	// Defaulted is true when the line carried no "type" and fell back to
+	// the command-line default (D1 guard: the implicit default is what the
+	// stderr warning targets; explicit per-line types are the user's choice).
+	Defaulted bool
+	Store     storage.DoltStorage
+	StoreKey  string
+	Cleanups  []func()
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -508,6 +527,15 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 
 	if !noCycleCheck {
 		warnIfCyclesExist(targetStore)
+	}
+
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range resolved {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
 	}
 
 	if jsonOutput {
@@ -572,7 +600,8 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			to = strings.TrimSpace(in.DependsOnID)
 		}
 		depType := strings.TrimSpace(in.Type)
-		if depType == "" {
+		defaulted := depType == ""
+		if defaulted {
 			depType = defaultType
 		}
 
@@ -596,6 +625,7 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			IssueID:     from,
 			DependsOnID: to,
 			Type:        dt,
+			Defaulted:   defaulted,
 		})
 	}
 	if err := scanner.Err(); err != nil {
