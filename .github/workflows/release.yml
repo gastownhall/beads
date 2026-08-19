@@ -123,7 +123,12 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install cross-compilation toolchains and signing tools
-        timeout-minutes: 8
+        # Backstop for a hang that escapes the inner `timeout` calls, so it has
+        # to sit ABOVE what those calls can legitimately consume: 3 update
+        # attempts x 120s + 2 backoffs x 10s + 300s install = 680s worst case.
+        # 13m leaves ~100s of headroom. This job sets no job-level
+        # timeout-minutes, so this cap is the only bound on a stuck apt.
+        timeout-minutes: 13
         run: |
           updated=""
           for attempt in 1 2 3; do
