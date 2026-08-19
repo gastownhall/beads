@@ -158,6 +158,31 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 		t.Fatalf("failed to get starting branch: %v", err)
 	}
 
+	start, err := store.CurrentBranch(ctx)
+	if err != nil {
+		t.Fatalf("failed to get starting branch: %v", err)
+	}
+	t.Logf("running on isolated branch %s", start)
+
+	// feature-branch must be unique per test: this store's underlying
+	// database is shared with every other test in the package (see
+	// setupTestStore), so a hardcoded name collides under t.Parallel.
+	featureBranch := "feature-branch-" + uniqueTestDBName(t)
+	defer func() {
+		// Runs before the outer `defer cleanup()` (LIFO), so the store
+		// connection is still open here.
+		_ = store.DeleteBranch(ctx, featureBranch)
+		branches, err := store.ListBranches(ctx)
+		if err != nil {
+			return
+		}
+		for _, b := range branches {
+			if b == featureBranch {
+				t.Errorf("feature branch %s was not cleaned up", featureBranch)
+			}
+		}
+	}()
+
 	// Create initial issue
 	issue := &types.Issue{
 		ID:        "vc-001",
@@ -176,13 +201,13 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	}
 
 	// Test branch creation
-	if err := store.Branch(ctx, "feature-branch"); err != nil {
+	if err := store.Branch(ctx, featureBranch); err != nil {
 		t.Fatalf("failed to create branch: %v", err)
 	}
-	t.Log("✓ Created feature-branch")
+	t.Logf("✓ Created %s", featureBranch)
 
 	// Test checkout
-	if err := store.Checkout(ctx, "feature-branch"); err != nil {
+	if err := store.Checkout(ctx, featureBranch); err != nil {
 		t.Fatalf("failed to checkout: %v", err)
 	}
 
@@ -191,8 +216,8 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get current branch: %v", err)
 	}
-	if branch != "feature-branch" {
-		t.Errorf("expected feature-branch, got %s", branch)
+	if branch != featureBranch {
+		t.Errorf("expected %s, got %s", featureBranch, branch)
 	}
 	t.Logf("✓ Checked out to %s", branch)
 
@@ -223,7 +248,7 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	t.Log("✓ Original branch unchanged")
 
 	// Merge feature branch
-	conflicts, err := store.Merge(ctx, "feature-branch")
+	conflicts, err := store.Merge(ctx, featureBranch)
 	if err != nil {
 		t.Fatalf("failed to merge: %v", err)
 	}
