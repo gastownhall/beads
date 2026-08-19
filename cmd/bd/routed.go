@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -192,7 +193,7 @@ func resolveViaPrefixRoutingWithAccess(ctx context.Context, id string, writable 
 	// Load routes from routes.jsonl
 	routes, err := loadPrefixRoutes(currentBeadsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, fmt.Errorf("%w: no routes available", errRoutingUnavailable)
 		}
 		return nil, fmt.Errorf("loading routes: %w", err)

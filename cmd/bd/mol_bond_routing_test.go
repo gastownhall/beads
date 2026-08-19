@@ -89,6 +89,8 @@ func TestDiscoverMolBondOperandRouting(t *testing.T) {
 			planningDir := filepath.Join(tmpDir, "planning")
 
 			runCmd(t, tmpDir, "git", "init", repoDir)
+			// Force repo-local hooks so tests ignore any global hooksPath override.
+			runCmd(t, repoDir, "git", "config", "core.hooksPath", ".git/hooks")
 			runCmd(t, repoDir, "git", "config", "beads.role", tc.role)
 
 			primaryStore := newTestStoreIsolatedDB(t, filepath.Join(repoDir, ".beads", "beads.db"), "shared")
@@ -475,6 +477,8 @@ func TestMolBondAutoRoutedReadOnlyFailsFast(t *testing.T) {
 	planningDir := filepath.Join(tmpDir, "planning")
 
 	runCmd(t, tmpDir, "git", "init", repoDir)
+	// Force repo-local hooks so tests ignore any global hooksPath override.
+	runCmd(t, repoDir, "git", "config", "core.hooksPath", ".git/hooks")
 	runCmd(t, repoDir, "git", "config", "beads.role", "contributor")
 
 	primaryStore := newTestStoreIsolatedDB(t, filepath.Join(repoDir, ".beads", "beads.db"), "shared")

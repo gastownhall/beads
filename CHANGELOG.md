@@ -242,7 +242,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message before any mutation is attempted. Two operands that live in the same
   routed rig share one store handle and bond normally; only a bond whose
   operands resolve to genuinely different databases is rejected rather than
-  written to the wrong one. Same routing-parity fix as
+  written to the wrong one. As part of this change, maintainer/default
+  auto-routed stores now open writable for any validated write-intent resolver
+  (`bd update`/`bd close` target resolution included, not just `mol bond`);
+  contributor auto-routes remain read-only and mutation-forbidden. Same
+  routing-parity fix as
   [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
   Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
 
