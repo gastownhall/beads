@@ -395,12 +395,12 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 }
 
 func init() {
-	listCmd.Flags().StringP("status", "s", "", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated for multiple: --status open,in_progress. Note: repeating -s/--status silently overwrites the previous value — always use the comma-separated form for multi-status filters.")
-	listCmd.Flags().String("state", "", "Alias for --status")
+	listCmd.Flags().VarP(&listStatusFlag, "status", "s", "Filter by stored status (open, in_progress, blocked, deferred, closed). Comma-separated or repeated for multiple: --status open,in_progress")
+	listCmd.Flags().Var(&listStateFlag, "state", "Alias for --status")
 	_ = listCmd.Flags().MarkHidden("state")
 	registerPriorityFlag(listCmd, "")
-	listCmd.Flags().StringP("assignee", "a", "", "Filter by assignee")
-	listCmd.Flags().StringP("type", "t", "", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
+	listCmd.Flags().VarP(&listAssigneeFlag, "assignee", "a", "Filter by assignee")
+	listCmd.Flags().VarP(&listTypeFlag, "type", "t", "Filter by type (bug, feature, task, epic, chore, decision, merge-request, molecule, gate, convoy). Aliases: mr→merge-request, feat→feature, mol→molecule, dec/adr→decision")
 	listCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
 	listCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
 	listCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
@@ -408,7 +408,7 @@ func init() {
 	listCmd.Flags().String("label-regex", "", "Filter by label regex pattern (e.g., 'tech-(debt|legacy)')")
 	listCmd.Flags().String("title", "", "Filter by title text (case-insensitive substring match)")
 	listCmd.Flags().String("spec", "", "Filter by spec_id prefix")
-	listCmd.Flags().String("id", "", "Filter by specific issue IDs (comma-separated, e.g., bd-1,bd-5,bd-10)")
+	listCmd.Flags().Var(&listIDFlag, "id", "Filter by specific issue IDs (comma-separated or repeated, e.g., bd-1,bd-5,bd-10)")
 	listCmd.Flags().IntP("limit", "n", workapi.DefaultListLimit, "Limit results (default 50, use 0 for unlimited)")
 	listCmd.Flags().Int("offset", 0, "Skip the first N matching results (0-based). Only supported under --proxied-server.")
 	listCmd.Flags().String("format", "", "Output format: 'digraph' (for golang.org/x/tools/cmd/digraph), 'dot' (Graphviz), or Go template")
