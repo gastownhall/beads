@@ -149,8 +149,25 @@ var emphasisRestorer = strings.NewReplacer(
 //
 // Only both-flanking runs are hidden. A run that can only open or only close
 // ("**bold**", "*italic*", "SELECT * FROM t", "-name *.log") is left alone, so
-// authored emphasis still renders exactly as before. Flanking is judged against
-// the original text so that hiding one run cannot change how the next is read.
+// ordinary authored emphasis renders as before. Flanking is judged against the
+// original text so that hiding one run cannot change how the next is read.
+//
+// This is a deliberate trade, not a free win, and it costs two narrow shapes:
+//
+//   - An authored CLOSER that is itself both-flanking no longer pairs, so
+//     'see *"quoted"*, next' renders literally instead of italicized. Only the
+//     color path changes; glamour's notty style already printed that shape
+//     literally.
+//   - A backslash-escaped delimiter that is both-flanking keeps its backslash
+//     on screen, because the sentinel replaces the character the escape was
+//     reaching for: '\*.captured' renders as "\*.captured", not "*.captured".
+//     An escape whose delimiter is not both-flanking ('a \*literal\* b') is
+//     unaffected.
+//
+// Both are shapes CommonMark itself treats as ambiguous, and for bead bodies --
+// which are stored plain text, not authored markdown -- showing the stored
+// characters is the better failure. TestRenderMarkdownKnownEmphasisTrades pins
+// both so a future change to the predicate cannot widen them unnoticed.
 func neutralizeAmbiguousEmphasis(s string) string {
 	if !strings.ContainsAny(s, "*_") {
 		return s

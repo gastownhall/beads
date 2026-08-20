@@ -23,6 +23,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload is unchanged. Under `--quiet` the audit now skips its queries
   entirely rather than running them to discard the output.
 
+### Fixed
+
+- **`bd show` no longer corrupts shell globs and other quoted wildcards in a
+  description or notes**
+  ([#5799](https://github.com/gastownhall/beads/pull/5799)). CommonMark lets a
+  `*` or `_` run act as both an opener and a closer when the characters
+  flanking it fall in the same class, and a quoted glob is exactly that shape —
+  the `*` in `'*.captured'` sits between `'` and `.`. Two such runs therefore
+  paired, including across lines, since goldmark joins a paragraph's lines
+  before parsing. Everything between them rendered as emphasis: with color the
+  asterisks were consumed and **silently vanished** from the command, leaving a
+  still-plausible but different one on screen; without color, glamour's notty
+  style wrote a literal `**` into the middle of the text. Storage was never
+  affected — `bd show --json` always returned the body byte-for-byte — but the
+  rendered text is what a reader acts on, and what an agent reads when it takes
+  its instructions from a bead. Runs that can act as both opener and closer are
+  now hidden from the parser and restored afterwards, so `bd show` prints what
+  was stored.
+
+  **The known trade**, in two narrow shapes, both pinned by test: an authored
+  closer that is itself both-flanking no longer pairs, so `see *"quoted"*,
+  next` renders literally rather than italicized (color path only — notty
+  already printed it literally); and a backslash escape reaching for a
+  both-flanking delimiter keeps its backslash, so `\*.captured` renders as
+  `\*.captured`. An escape whose delimiter is not both-flanking, such as
+  `a \*literal\* b`, is unchanged. Both are shapes CommonMark itself treats as
+  ambiguous, and for a bead body — stored plain text, not authored markdown —
+  showing the stored characters is the better of the two failures. Ordinary
+  emphasis (`**bold**`, `*italic*`), `SELECT * FROM t`, code spans and fenced
+  blocks all render exactly as before.
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now

@@ -300,6 +300,77 @@ func TestRenderMarkdownPreservesQuotedGlobs(t *testing.T) {
 	})
 }
 
+// TestRenderMarkdownKnownEmphasisTrades pins the two shapes that neutralizing
+// both-flanking delimiter runs deliberately costs. Neither is a bug to be fixed
+// later: for a stored-plain-text bead body, showing the characters that were
+// stored is the better outcome in both. They are pinned so that a future change
+// to the flanking predicate cannot widen the trade without a test failing.
+func TestRenderMarkdownKnownEmphasisTrades(t *testing.T) {
+	colorEnv := map[string]string{
+		"NO_COLOR": "", "TERM": "xterm-256color", "CLICOLOR_FORCE": "1",
+		"FORCE_HYPERLINK": "", "BD_AGENT_MODE": "", "CLAUDE_CODE": "",
+	}
+	noColorEnv := map[string]string{
+		"NO_COLOR": "1", "TERM": "dumb", "CLICOLOR_FORCE": "",
+		"FORCE_HYPERLINK": "", "BD_AGENT_MODE": "", "CLAUDE_CODE": "",
+	}
+
+	// An authored closer flanked by punctuation on both sides is itself
+	// both-flanking, so it is neutralized and the pair no longer forms. This
+	// changes the color path only -- the notty style already rendered this
+	// shape literally, so no-color output is unchanged from before the fix.
+	t.Run("color/both-flanking authored closer renders literally", func(t *testing.T) {
+		withMarkdownEnv(t, colorEnv)
+
+		out := stripSGR(RenderMarkdown(`see *"quoted"*, next` + "\n"))
+		if !strings.Contains(out, `see *"quoted"*, next`) {
+			t.Fatalf("expected the stored text verbatim, got %q", out)
+		}
+	})
+
+	// An opener-only delimiter is untouched, so emphasis whose closer is not
+	// both-flanking still renders -- the trade above is not a blanket loss.
+	t.Run("color/ordinary emphasis is unaffected alongside it", func(t *testing.T) {
+		withMarkdownEnv(t, colorEnv)
+
+		out := stripSGR(RenderMarkdown(`*"q"*, and *italic* too` + "\n"))
+		if !strings.Contains(out, `*"q"*`) {
+			t.Fatalf("expected the both-flanking pair literal, got %q", out)
+		}
+		if strings.Contains(out, "*italic*") {
+			t.Fatalf("expected ordinary emphasis still consumed, got %q", out)
+		}
+	})
+
+	// A backslash escape reaching for a both-flanking delimiter keeps its
+	// backslash: the sentinel replaces the very character the escape targets,
+	// so goldmark never sees an escape sequence to process.
+	for _, mode := range []struct {
+		name string
+		env  map[string]string
+	}{{"color", colorEnv}, {"nocolor", noColorEnv}} {
+		t.Run(mode.name+"/escaped both-flanking delimiter keeps its backslash", func(t *testing.T) {
+			withMarkdownEnv(t, mode.env)
+
+			out := stripSGR(RenderMarkdown(`glob \*.captured here` + "\n"))
+			if !strings.Contains(out, `glob \*.captured here`) {
+				t.Fatalf("expected the backslash to remain visible, got %q", out)
+			}
+		})
+
+		// The same escape where the delimiter is NOT both-flanking is
+		// processed exactly as before, which bounds the trade above.
+		t.Run(mode.name+"/escaped opener-only delimiter is unaffected", func(t *testing.T) {
+			withMarkdownEnv(t, mode.env)
+
+			out := stripSGR(RenderMarkdown(`a \*literal\* b` + "\n"))
+			if !strings.Contains(out, "a *literal* b") {
+				t.Fatalf("expected the backslash consumed as before, got %q", out)
+			}
+		})
+	}
+}
+
 // stripSGR removes ANSI SGR sequences so assertions compare visible characters.
 func stripSGR(s string) string {
 	var out strings.Builder
