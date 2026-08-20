@@ -8,7 +8,7 @@
 - **Related beads:** be-rl6tm (P2, needs-architecture — residual gap split out of be-h2h25 by architect-6a to keep this fix scoped to its actual root cause; the 2 diff-owned SKIPs are waived against this tracker via `mayor-2026-08-20-be-h2h25-c3`), be-ckoic (pre-existing gosec G602 false positives in `backend/conformance/*.go`, blocking clean `make ci-pr-lint` — unrelated path, attributed per criterion 3a)
 - **Deploy branch:** `deploy/be-napos-gate`, derived mechanically via `resolve_deploy_branch_target`
 - **Push target:** `headfork` (`quad341/beads-sec003-contrib.git`) — `origin` push is disabled by design on this rig (`DISABLED-upstream-is-fetch-only-push-to-fork-and-PR`)
-- **PR:** (recorded below once opened)
+- **PR:** [gastownhall/beads#5885](https://github.com/gastownhall/beads/pull/5885) — OPEN, MERGEABLE
 - **Evaluated:** 2026-08-20 by beads/deployer
 
 ## SHA correction (recorded on be-napos)
@@ -120,5 +120,7 @@ is warranted.
 
 ## Verdict
 
-**PASS 7/7** — proceeding to push `deploy/be-napos-gate` to `headfork` and
-open the PR against `gastownhall/beads:main`.
+**PASS 7/7** — pushed `deploy/be-napos-gate` to `headfork`, opened
+[gastownhall/beads#5885](https://github.com/gastownhall/beads/pull/5885)
+against `main`, independently confirmed OPEN/MERGEABLE via `gh pr view`.
+Standing down; merge belongs to upstream maintainers.
