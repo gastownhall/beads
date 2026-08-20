@@ -34,17 +34,21 @@ var doltCmd = &cobra.Command{
 	Short:   "Configure Dolt database settings",
 	Long: `Configure and manage Dolt database settings and server lifecycle.
 
-Beads uses a dolt sql-server for all database operations. The server is
-auto-started transparently when needed. Use these commands for explicit
-control or diagnostics.
+Beads runs Dolt embedded (in-process) by default: there is no sql-server and
+nothing is auto-started. A database only uses a dolt sql-server when it is
+configured for one: shared-server mode, an explicit server mode, or a
+non-localhost dolt_server_host. The server-only commands below fail with
+"not supported in embedded mode (no Dolt server)" on an embedded database.
 
-Server lifecycle:
+Server lifecycle (server mode only):
   bd dolt start        Start the Dolt server for this project
   bd dolt stop         Stop the Dolt server for this project
-  bd dolt status       Show Dolt server status
 
-Configuration:
+Diagnostics (both modes):
+  bd dolt status       Show Dolt engine status (embedded: in-process, data dir)
   bd dolt show         Show current Dolt configuration with connection test
+
+Configuration (server mode only):
   bd dolt set <k> <v>  Set a configuration value
   bd dolt test         Test server connection
 

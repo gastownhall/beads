@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestInitDisabledKeepsEnabledFalse(t *testing.T) {
@@ -72,23 +73,92 @@ func TestInitEnabledFlipsEnabledTrue(t *testing.T) {
 	}
 }
 
-func TestRunSendMetricsNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	_, err := Init("0.0.0-test", false, "")
-	if err != nil {
+// TestRunSendMetricsDisabledPrunesWithoutUploading is the regression for
+// GH#5712: RunSendMetrics used to early-return on !Enabled() BEFORE PruneQueue,
+// so the machine that just opted out of telemetry — the one whose queue can
+// never again drain by upload — kept its eventsData backlog forever (2M+ files
+// / 15.8GB observed on one control VM). Disabled mode must prune by the normal
+// policy and must not upload.
+func TestRunSendMetricsDisabledPrunesWithoutUploading(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".beads", "eventsData")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir eventsData: %v", err)
+	}
+	stale := filepath.Join(dir, "stale"+queuedEventExt)
+	orphan := filepath.Join(dir, writeTempPrefix+"orphan")
+	fresh := filepath.Join(dir, "fresh"+queuedEventExt)
+	for _, p := range []string{stale, orphan, fresh} {
+		if err := os.WriteFile(p, []byte("x"), 0o600); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	old := time.Now().Add(-pruneTTL - time.Hour)
+	for _, p := range []string{stale, orphan} {
+		if err := os.Chtimes(p, old, old); err != nil {
+			t.Fatalf("chtimes %s: %v", p, err)
+		}
+	}
+
+	// The endpoint is unreachable by construction: if the disabled path ever
+	// fell through to the upload half, Flush would fail on fresh.evtq and
+	// RunSendMetrics would return nonzero.
+	if _, err := Init("0.0.0-test", false, "http://127.0.0.1:1/collect"); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
 	if code := RunSendMetrics(); code != 0 {
-		t.Errorf("RunSendMetrics() = %d, want 0", code)
+		t.Fatalf("RunSendMetrics() = %d, want 0 (disabled mode must prune and skip the upload)", code)
+	}
+
+	for _, p := range []string{stale, orphan} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived a disabled-mode prune (stat err %v)", filepath.Base(p), err)
+		}
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh batch did not survive: %v (disabled mode prunes by the same TTL/cap policy, it does not purge)", err)
 	}
 }
 
-func TestMaybeSpawnFlusherNoOpWhenDisabled(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	_, err := Init("0.0.0-test", false, "")
-	if err != nil {
+// TestSpawnGateIgnoresDisabledMetrics pins the spawn-side half of the GH#5712
+// fix: the env half of the spawn gate must NOT require Enabled(), or the
+// disable path could never schedule the prune-only child that drains a
+// leftover queue. The stateful half still applies — with no queued backlog
+// nothing is due, so a machine that never enabled telemetry never forks.
+func TestSpawnGateIgnoresDisabledMetrics(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	// Hermetically clear the two env suppressors (the repo's own runner exports
+	// BEADS_TEST_MODE=1, and CI exports BD_DISABLE_EVENT_FLUSH=1 workflow-wide)
+	// so the assertion below is gated on Enabled() alone. shouldSpawnFlusher is
+	// a pure decision — nothing forks here.
+	t.Setenv(EnvTestMode, "")
+	os.Unsetenv(EnvTestMode)
+	t.Setenv(EnvDisableEventFlush, "")
+	os.Unsetenv(EnvDisableEventFlush)
+
+	if _, err := Init("0.0.0-test", false, ""); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
+	if Enabled() {
+		t.Fatalf("Enabled() = true, want false")
+	}
+	if !shouldSpawnFlusher() {
+		t.Errorf("shouldSpawnFlusher() = false with metrics disabled, want true (prune-only child, GH#5712)")
+	}
+
+	// Stateful half: Init(disabled) never creates eventsData, so nothing is
+	// due. MaybeSpawnFlusher is exercised only with the test-mode guard
+	// restored, so a regression in flusherDue cannot fork a real child.
+	dir, err := DataDir()
+	if err != nil {
+		t.Fatalf("DataDir: %v", err)
+	}
+	if flusherDue(dir, time.Now()) {
+		t.Errorf("flusherDue(no queue dir) = true, want false")
+	}
+	t.Setenv(EnvTestMode, "1")
 	MaybeSpawnFlusher()
 }
 

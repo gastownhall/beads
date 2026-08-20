@@ -223,7 +223,6 @@ func captureStdout(t *testing.T, fn func() error) string {
 
 	oldStdout := os.Stdout
 	r, w, _ := os.Pipe()
-	os.Stdout = w
 
 	done := make(chan string, 1)
 	go func() {
@@ -232,13 +231,24 @@ func captureStdout(t *testing.T, fn func() error) string {
 		done <- buf.String()
 	}()
 
+	os.Stdout = w
+	restored := false
+	restore := func() string {
+		if restored {
+			return ""
+		}
+		restored = true
+		w.Close()
+		os.Stdout = oldStdout
+		out := <-done
+		_ = r.Close()
+		return out
+	}
+	defer restore()
+
 	err := fn()
 
-	w.Close()
-	os.Stdout = oldStdout
-	out := <-done
-	_ = r.Close()
-
+	out := restore()
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -258,7 +268,6 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
-	os.Stderr = w
 
 	var buf bytes.Buffer
 	done := make(chan struct{})
@@ -267,11 +276,22 @@ func captureStderr(t *testing.T, fn func()) string {
 		close(done)
 	}()
 
+	os.Stderr = w
+	restored := false
+	restore := func() {
+		if restored {
+			return
+		}
+		restored = true
+		_ = w.Close()
+		os.Stderr = old
+		<-done
+		_ = r.Close()
+	}
+	defer restore()
+
 	fn()
-	_ = w.Close()
-	os.Stderr = old
-	<-done
-	_ = r.Close()
+	restore()
 
 	return buf.String()
 }
@@ -352,5 +372,30 @@ func runGitForBootstrapTest(t *testing.T, dir string, args ...string) {
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v failed: %v\n%s", args, err, string(output))
+	}
+}
+
+// initGitRepoAt turns dir into a git repository with a test identity, giving
+// the no-workspace tests a walk boundary so FindBeadsDir cannot climb out of
+// the temp dir into a real .beads above it.
+//
+// This lives in the pure-Go helper file, not alongside the embedded-Dolt
+// helpers: cmd/bd/where_test.go carries no build tag, so it compiles under
+// CGO_ENABLED=0 where every `//go:build cgo` file is excluded. Keep this
+// helper stdlib-only and keep it here.
+func initGitRepoAt(t *testing.T, dir string) {
+	t.Helper()
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+		// Force repo-local hooks so tests ignore any global hooksPath override.
+		{"config", "core.hooksPath", ".git/hooks"},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
+		}
 	}
 }

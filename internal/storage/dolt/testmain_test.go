@@ -63,6 +63,16 @@ func testMainInner(m *testing.M) int {
 		defer testutil.TerminateDoltContainer()
 		testServerPort = testutil.DoltContainerPortInt()
 
+		// Guard against the ambient-Dolt-port bug (be-33se): confirm
+		// applyConfigDefaults actually resolves to this suite's own
+		// container rather than a stray ambient BEADS_DOLT_SERVER_PORT.
+		resolveCfg := &Config{ServerPort: 0}
+		applyConfigDefaults(resolveCfg)
+		if resolveCfg.ServerPort != testServerPort {
+			fmt.Fprintf(os.Stderr, "FATAL: applyConfigDefaults resolved port %d, want this suite's container port %d (ambient BEADS_DOLT_SERVER_PORT redirect?)\n", resolveCfg.ServerPort, testServerPort)
+			return 1
+		}
+
 		// Set up shared database for branch-per-test isolation
 		testSharedDB = "dolt_pkg_shared"
 		db, err := testutil.SetupSharedTestDB(testServerPort, testSharedDB)
