@@ -751,6 +751,65 @@ protection → Ransomware protection → Controlled folder access → "Allow an
 app through Controlled folder access" → browse to `bd.exe` (typically
 `%USERPROFILE%\go\bin\bd.exe`). Then retry `bd init`.
 
+### Windows: `ENOENT` when a Node program spawns `bd`
+
+**Symptom:** An editor extension, MCP server, or script that shells out to
+`bd` fails on Windows with `spawn bd ENOENT`, even though `bd` runs fine in
+the same terminal.
+
+The npm package installs `bd` as a generated `bd.cmd` shim, not as an
+executable named `bd`. Node's `execFile()` and `spawn()` run their target
+directly instead of through a shell, so they never apply the `PATHEXT`
+resolution that finds `bd.cmd` — and a batch file is not directly executable
+in the first place.
+
+**Solution:** Name the shim explicitly and give it a shell:
+
+```js
+const { execFile } = require('node:child_process');
+
+const isWindows = process.platform === 'win32';
+
+execFile(
+  isWindows ? 'bd.cmd' : 'bd',
+  ['ready', '--json'],
+  { shell: isWindows },
+  (err, stdout) => { /* ... */ },
+);
+```
+
+To avoid a shell — and the argument quoting that comes with it — spawn the
+native binary the shim wraps, at `node_modules/@beads/bd/bin/bd.exe`.
+
+### Windows: `/tmp` paths silently land in the drive root
+
+**Symptom:** A `bd` command given a `/tmp/...` path reports success, but
+the file is not where you look for it — it was written to `C:\tmp\...`.
+
+`bd.exe` is a native Windows binary and does not share Git Bash's emulated
+POSIX filesystem. When a literal `/tmp/...` string reaches `bd`, it resolves
+against the current drive root.
+
+In a default interactive Git Bash this usually does *not* happen — Git for
+Windows converts standalone POSIX-path arguments to Windows paths before
+`bd.exe` sees them. The trap appears when that conversion is out of play:
+
+- `MSYS_NO_PATHCONV=1` or `MSYS2_ARG_CONV_EXCL` is set (common in
+  Docker-heavy environments)
+- the path comes from a config value or a file, not a command-line argument
+- `bd` is spawned by a non-MSYS parent — a Node script, editor extension,
+  or MCP server — which passes the string through verbatim:
+
+```js
+// From Node on Windows: no path conversion happens
+execFile('bd.cmd', ['export', '-o', '/tmp/issues.jsonl'], { shell: true }, ...);
+// bd writes C:\tmp\issues.jsonl — and exits 0
+```
+
+**Solution:** Hand `bd` a Windows path — `os.tmpdir()` from Node,
+`"$(cygpath -w /tmp)\issues.jsonl"` from Git Bash scripts. This applies to
+any path argument, including `--db` and config values.
+
 ### macOS: Gatekeeper blocking execution
 
 1. Verify the downloaded binary checksum matches the release `checksums.txt`.

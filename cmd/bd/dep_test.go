@@ -614,11 +614,11 @@ func TestOutputMermaidTree(t *testing.T) {
 			old := os.Stdout
 			r, w, _ := os.Pipe()
 			os.Stdout = w
+			defer func() { os.Stdout = old }()
 
 			outputMermaidTree(tt.tree, tt.rootID)
 
 			w.Close()
-			os.Stdout = old
 
 			var buf bytes.Buffer
 			io.Copy(&buf, r)
@@ -674,11 +674,11 @@ func TestOutputMermaidTree_Siblings(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	outputMermaidTree(tree, "BD-1")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -913,11 +913,11 @@ func TestRenderTreeOutput(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 50, "down")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -968,11 +968,11 @@ func TestRenderTreeOutputShowsDependencyTypeLabelsInMixedGraph(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 3, "both")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)

@@ -120,6 +120,28 @@ func TestFormatIssueMetadata_CloseReason(t *testing.T) {
 	})
 }
 
+// TestFormatIssueMetadata_CreatedByLabel guards against the text view
+// mislabelling created_by as "Owner:" — a real, distinct field also named
+// Owner exists on types.Issue and holds a different value (a git author
+// email), so a rendered "Owner:" line must never carry the created_by value.
+func TestFormatIssueMetadata_CreatedByLabel(t *testing.T) {
+	t.Parallel()
+	issue := &types.Issue{
+		ID: "test-created-by", Title: "t", IssueType: types.TypeTask,
+		CreatedBy: "alice", Owner: "bob@example.com", Assignee: "carol",
+	}
+	out := formatIssueMetadata(issue)
+	if !strings.Contains(out, "Created by: alice") {
+		t.Errorf("expected %q in output, got:\n%s", "Created by: alice", out)
+	}
+	if !strings.Contains(out, "Assignee: carol") {
+		t.Errorf("expected %q in output, got:\n%s", "Assignee: carol", out)
+	}
+	if strings.Contains(out, "Owner: ") {
+		t.Errorf("label %q must not appear — created_by must not render under the Owner label, got:\n%s", "Owner: ", out)
+	}
+}
+
 func TestFormatIssueCustomMetadata_Nil(t *testing.T) {
 	t.Parallel()
 	issue := &types.Issue{}

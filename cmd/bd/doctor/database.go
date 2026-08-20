@@ -498,7 +498,7 @@ func isNoDbModeConfigured(beadsDir string) bool {
 
 // CheckDatabaseSize warns when the database has accumulated many closed issues.
 // This is purely informational - pruning is NEVER auto-fixed because it
-// permanently deletes data. Users must explicitly run 'bd cleanup' to prune.
+// permanently deletes data. Users must explicitly run 'bd prune' to prune.
 //
 // Config: doctor.suggest_pruning_issue_count (default: 5000, 0 = disabled)
 //
@@ -577,18 +577,26 @@ func checkDatabaseSizeWithStore(store *dolt.DoltStore) DoctorCheck {
 	}
 
 	if stats.ClosedIssues > threshold {
-		return DoctorCheck{
-			Name:    "Large Database",
-			Status:  StatusWarning,
-			Message: fmt.Sprintf("%d closed issues (threshold: %d)", stats.ClosedIssues, threshold),
-			Detail:  "Large number of closed issues may impact performance",
-			Fix:     "Consider running 'bd cleanup --older-than 90' to prune old closed issues",
-		}
+		return largeDatabaseWarning(stats.ClosedIssues, threshold)
 	}
 
 	return DoctorCheck{
 		Name:    "Large Database",
 		Status:  StatusOK,
 		Message: fmt.Sprintf("%d closed issues (threshold: %d)", stats.ClosedIssues, threshold),
+	}
+}
+
+// largeDatabaseWarning builds the over-threshold Large Database check. Split
+// out so tests can pin the recommended remedy to a command that actually
+// exists: 'bd prune' is the root-level lifecycle command ('cleanup' only
+// exists as 'bd admin cleanup').
+func largeDatabaseWarning(closedIssues, threshold int) DoctorCheck {
+	return DoctorCheck{
+		Name:    "Large Database",
+		Status:  StatusWarning,
+		Message: fmt.Sprintf("%d closed issues (threshold: %d)", closedIssues, threshold),
+		Detail:  "Large number of closed issues may impact performance",
+		Fix:     "Consider running 'bd prune --older-than 90d' to prune old closed issues (preview; add --force to delete)",
 	}
 }
