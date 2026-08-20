@@ -187,7 +187,13 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	}
 	defer func() {
 		if releaseErr := ReleaseMigrationLock(conn, lockName); releaseErr != nil {
-			err = errors.Join(err, releaseErr)
+			if err != nil {
+				// Two %w verbs keep errors.Is/As working for both errors
+				// without errors.Join's separator newline, primary first.
+				err = fmt.Errorf("%w (lock release also failed: %w)", err, releaseErr)
+			} else {
+				err = errors.Join(err, releaseErr)
+			}
 		}
 	}()
 	if o.lockedPreparation != nil && o.lockedPreparation.fn != nil {
