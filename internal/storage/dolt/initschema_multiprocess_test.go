@@ -6,7 +6,6 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -227,22 +226,16 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
 	t.Setenv("BEADS_DOLT_AUTO_START", "1")
 
-	// Regression coverage for a round-1 review finding: on shared hosts, an
-	// ambient BEADS_DOLT_SERVER_PORT left by an unrelated process pointed
-	// doltserver.Start at that process's port, and Start correctly refused to
-	// steal it — failing this test for a reason unrelated to schema init.
-	// Simulate that ambient pollution hermetically (independent of any real
-	// process on this host) with a decoy listener standing in for the
-	// unrelated server, so this test's own throwaway server must isolate
-	// itself from ambient port config the same way it already isolates
-	// BEADS_DOLT_SHARED_SERVER/BEADS_DOLT_AUTO_START above.
-	decoyLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen decoy: %v", err)
-	}
-	t.Cleanup(func() { _ = decoyLn.Close() })
-	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(decoyLn.Addr().(*net.TCPAddr).Port))
-	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // isolate: this test manages its own throwaway server
+	// Regression coverage for a round-1 review finding: BEADS_DOLT_SERVER_PORT
+	// is the top-priority, authoritative port source (see portSources in
+	// internal/doltserver/doltserver.go) — an ambient value left by an
+	// unrelated process on a shared host pointed doltserver.Start at that
+	// process's port, and Start correctly refused to steal it, failing this
+	// test for a reason unrelated to schema init. This test manages its own
+	// throwaway server, so it isolates itself from ambient port config the
+	// same way it already isolates BEADS_DOLT_SHARED_SERVER/
+	// BEADS_DOLT_AUTO_START above.
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 
 	state, err := doltserver.Start(beadsDir)
 	if err != nil {
@@ -288,7 +281,12 @@ func TestMultiProcessSchemaInit_DoltVerify(t *testing.T) {
 			defer db.Close()
 			db.SetMaxOpenConns(2)
 			<-ready
-			_, err = initSchemaOnDB(egCtx, db)
+			// initSchemaOnDBWithRetry, not the raw initSchemaOnDB: real bd
+			// processes racing for the migration lock go through this same
+			// retry wrapper (store.go's initSchema), which exists precisely so
+			// contended GET_LOCK attempts converge instead of one unlucky
+			// waiter failing outright.
+			_, err = initSchemaOnDBWithRetry(egCtx, db)
 			return err
 		})
 	}
