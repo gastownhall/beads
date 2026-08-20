@@ -149,10 +149,9 @@ func runNoteProxiedServer(ctx context.Context, id, noteText string) error {
 // issueops.Reader.Get supplies the issue the template guard needs — the roles
 // have no opinion about templates, and the direct route refuses one — and the
 // role takes an exact id by contract, which Get's issue-then-wisp lookup is.
-func runTagProxiedServer(ctx context.Context, args []string) error {
-	id := args[0]
-	label := args[1]
-
+// The label arrives already normalized: tag.go does that before choosing a
+// route, so this path and the direct one cannot disagree about what was stored.
+func runTagProxiedServer(ctx context.Context, id, label string) error {
 	reader, err := openIssueReader()
 	if err != nil {
 		return HandleErrorRespectJSON("tag %s: %v", id, err)

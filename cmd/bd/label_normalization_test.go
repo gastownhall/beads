@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -103,6 +104,48 @@ func TestGatherUpdateInputNormalizesLabels(t *testing.T) {
 		t.Fatal("expected --set-labels to be captured")
 	}
 	assertLabels(t, *in.setLabels, []string{"theme:d"})
+}
+
+// `bd tag` calls itself "Shorthand for 'bd update <id> --add-label <label>'",
+// so it must normalize identically. It took the positional verbatim, which made
+// it the one CLI label write that could still store an unfilterable label.
+//
+// normalizeLabelForTag is called before the direct/proxied route split, so one
+// test covers both routes.
+func TestNormalizeLabelForTag(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"leading space trimmed", " theme:a", "theme:a"},
+		{"surrounding whitespace trimmed", "  theme:a\t", "theme:a"},
+		{"already clean is untouched", "theme:a", "theme:a"},
+		// A label containing a space is legitimate and is stored as asked;
+		// warnLabelsContainingWhitespace is what flags it.
+		{"internal space preserved", "good first issue", "good first issue"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizeLabelForTag(tt.raw)
+			if err != nil {
+				t.Fatalf("normalizeLabelForTag(%q): %v", tt.raw, err)
+			}
+			if got != tt.want {
+				t.Fatalf("normalizeLabelForTag(%q) = %q, want %q", tt.raw, got, tt.want)
+			}
+		})
+	}
+
+	// The plural flags can drop an empty element and still honor the rest of
+	// the request. `bd tag` has one label to add, so dropping it would report
+	// success having written nothing.
+	for _, raw := range []string{"", "   ", "\t"} {
+		t.Run("rejects empty "+fmt.Sprintf("%q", raw), func(t *testing.T) {
+			if _, err := normalizeLabelForTag(raw); err == nil {
+				t.Fatalf("normalizeLabelForTag(%q) = nil error, want a refusal", raw)
+			}
+		})
+	}
 }
 
 func assertLabels(t *testing.T, got, want []string) {

@@ -23,6 +23,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   payload is unchanged. Under `--quiet` the audit now skips its queries
   entirely rather than running them to discard the output.
 
+### Fixed
+
+- **Every CLI label write now normalizes its input, as every label filter
+  already did** ([#5813](https://github.com/gastownhall/beads/pull/5813),
+  fixes [#5812](https://github.com/gastownhall/beads/issues/5812)).
+  `utils.NormalizeLabels` (trim, drop empty, dedupe) was applied to `list`,
+  `search`, `ready`, `orphans`, `count` and workapi — and to no write path at
+  all. The filter trimmed its input and the store did not, so a label could not
+  match its own filter: `bd create --labels 'theme:a, theme:b'` stored
+  `theme:b` with pflag's leading space intact, and `bd list --label theme:b`
+  then returned nothing. The failure is silent in the worst way — a filtered
+  list quietly short of rows is indistinguishable from a complete one. One real
+  database had 150 such rows across 111 issues, found months later only because
+  theme-by-theme counts refused to reconcile. `create`, `quick`, `update`
+  (`--add-label`, `--remove-label`, `--set-labels`) and `tag` now normalize on
+  the way in. `--remove-label` matters as much as the additive flags: an
+  untrimmed `' theme:a'` silently removed nothing.
+
+  **`bd tag` is included deliberately.** Its help calls it "Shorthand for
+  `bd update <id> --add-label <label>`", and it was the last CLI door still
+  storing a positional verbatim. Normalization happens before the direct/proxied
+  route split, so the two routes cannot disagree. A label that is only
+  whitespace is now refused rather than dropped: the plural flags can discard an
+  empty element and still honor the rest of the request, but `bd tag` has one
+  label to add, so dropping it would report success having written nothing.
+
+  **Import and batch ingest are deliberately excluded** and keep round-trip
+  fidelity: what was exported is what is restored.
+
+### Added
+
+- **`bd` warns when it stores a label containing a space**
+  ([#5813](https://github.com/gastownhall/beads/pull/5813)). Such a label is a
+  legitimate thing to ask for — `-l 'good first issue'` — and bd stores it as
+  asked rather than re-splitting a boundary the shell already decided. But it is
+  also exactly what a missed comma looks like, and that case cannot be told
+  apart from the deliberate one at the point of writing. A line on stderr
+  catches it at the keystroke instead of months later: `⚠ Stored "auth backend"
+  as ONE label — it contains a space.` It is advice, not an error; stdout is
+  untouched, so `--silent` still prints just the ID, and `--quiet` silences it.
+  Not emitted for `--remove-label`, since removing such a label is how the
+  damage gets repaired.
+
+- **`bd doctor` gains a `Label Whitespace` check** for finding damage already in
+  a database ([#5813](https://github.com/gastownhall/beads/pull/5813)). It
+  reports labels that contain whitespace or differ from their trimmed form, and
+  `bd doctor --fix` repairs them. The check is warn-only: a database with legacy
+  damage still exits 0. As with the rest of bare `bd doctor`, it does not yet
+  run in embedded mode (GH#3794).
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now

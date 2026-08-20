@@ -85,8 +85,20 @@ label containing a space:
 ```
 
 The warning is advice, not an error — the label is stored as asked. Silence it
-with `--quiet`. To find labels already stored this way in an existing database,
-run `bd doctor` and look at the `Label Whitespace` check.
+with `--quiet`.
+
+To find labels already stored this way in an existing database, run `bd doctor`
+and look at the `Label Whitespace` check. It reports and never fails the run, so
+a database with legacy damage still exits 0. Note that `bd doctor` is not yet
+supported in embedded mode (GH#3794 enables embedded checks one at a time), so
+this check currently reaches classic and server-mode databases only.
+
+**Import and batch ingest are deliberately left alone.** They do not normalize,
+do not warn, and this is intended rather than an oversight: an import must round
+trip — what was exported is what is restored — and quietly rewriting a label on
+the way in would make a JSONL file and the database it came from disagree.
+Repair is a separate, deliberate act, which is what the `bd doctor` check above
+is for.
 
 Note that an *unquoted* space is not a label separator either — it ends the
 flag's value, so `-l auth backend` leaves `backend` as a stray positional
