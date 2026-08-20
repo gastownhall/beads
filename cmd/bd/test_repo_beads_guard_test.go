@@ -49,6 +49,7 @@ type testRunner interface {
 }
 
 func runTestsAndSweep(m testRunner) int {
+	stdioChk("pre-m.Run")
 	code := m.Run()
 	doltserver.SweepOrphanedTestServers(testTempRoot)
 	return code
@@ -63,6 +64,7 @@ func TestMain(m *testing.M) {
 
 func testMainInner(m *testing.M) int {
 	origWD, _ := os.Getwd()
+	stdioChk("entry")
 
 	// Isolate config discovery from the repo's tracked `.beads/config.yaml`.
 	// Many tests expect default config values; running from within this repo would
@@ -105,7 +107,9 @@ func testMainInner(m *testing.M) int {
 	// (~/.docker/config.json); resolve it into DOCKER_HOST now or every
 	// container-gated test skips "Docker not available" on context-routed
 	// daemons like OrbStack (bd-84kos).
+	stdioChk("pre-docker-pin")
 	testutil.PinDockerHostFromContext()
+	stdioChk("post-docker-pin")
 
 	_ = os.Setenv("HOME", tmp)
 	_ = os.Setenv("USERPROFILE", tmp) // Windows compatibility
@@ -192,8 +196,10 @@ func testMainInner(m *testing.M) int {
 
 	// Start shared test Dolt server if the hook is registered (CGO builds).
 	// This must happen after HOME is changed so dolt config goes to the temp dir.
+	stdioChk("pre-beforeTestsHook")
 	if beforeTestsHook != nil {
 		cleanup := beforeTestsHook()
+		stdioChk("post-beforeTestsHook")
 		defer cleanup()
 	}
 
