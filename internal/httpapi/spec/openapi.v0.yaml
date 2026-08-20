@@ -7092,9 +7092,22 @@ components:
         credentials — as are the database bind host/port (advertising them
         invites clients to bypass this API and dial the database directly) and
         the loopback/non-loopback bind mode.
+
+
+        TWO MEMBERS ARE OPTIONAL, and they are the only two that describe the
+        SERVER's filesystem rather than the workspace's logical identity:
+        `beads_dir` and `repo_root`. A client must be able to read them as
+        absent. Everything a remote caller identifies a workspace by is
+        elsewhere and stays required — `project_id`, `database`, `backend`,
+        `dolt_mode` — and an absolute host path is not something a remote
+        caller can act on in any case: it cannot open it. `bd serve` publishes
+        both, so a client reading a `bd serve` today sees no change; what the
+        relaxation buys is that a deployment which does not want to disclose
+        its filesystem layout can withhold them and still serve a body that
+        conforms to this document.
       required:
         [api_version, bd_version, schema_version, backend, dolt_mode, database,
-         beads_dir, repo_root, project_id, capabilities]
+         project_id, capabilities]
       properties:
         api_version:
           type: string
@@ -7123,13 +7136,25 @@ components:
         beads_dir:
           type: string
           description: >-
-            Absolute path of the served workspace's `.beads` directory. A host
-            path, kept because it is the single-workspace server's only
-            workspace-identity handshake; disclosing it to network peers is
-            part of what an operator accepts when binding beyond loopback.
+            Absolute path of the served workspace's `.beads` directory, when
+            the server discloses it. A host path: `bd serve` publishes it
+            because it is a single-workspace server's most legible
+            workspace-identity handshake for the operator reading it, and
+            disclosing it to network peers is part of what that operator
+            accepts when binding beyond loopback.
+
+
+            OPTIONAL, and absent means only that this server does not disclose
+            its filesystem layout — never that it has no workspace. A client
+            MUST NOT require it, MUST NOT treat absence as an error, and has no
+            use for the value beyond display: it is a path on the SERVER's
+            filesystem, which the client cannot open. Identify the workspace by
+            `project_id` and `database`, which are required.
         repo_root:
           type: string
-          description: Absolute path of the served repository root. See `beads_dir`.
+          description: >-
+            Absolute path of the served repository root, when the server
+            discloses it. OPTIONAL on the same terms as `beads_dir`; see it.
         project_id:
           type: string
           description: Logical project identifier.
@@ -9493,7 +9518,14 @@ components:
             A run of `.`, `_` or `-` matches any other such run, so `agent-a`,
             `agent_a` and `agent.a` are one holder — that is deliberate, so a
             caller naming the holder under a different layer's spelling is a
-            match rather than a mismatch. NOTHING ELSE IS FORGIVEN: the value
+            match rather than a mismatch. THE ONE EXCEPTION IS AN EXACT `--`
+            RUN: that is gascity's session-name encoding of a rig-qualified
+            agent's `/`, so it decodes to `/` instead of collapsing. `a--b`
+            matches `a/b`, and no longer matches `a__b` or `a-b`. Those name
+            different identities — `a--b` is the agent `b` on rig `a`, `a__b`
+            is the dotted alias `a.b` — so treating them as one holder was a
+            widening, and removing it is the point of the exception. Longer or
+            mixed runs, `__` included, still collapse. NOTHING ELSE IS FORGIVEN: the value
             is not trimmed and not case-folded, so `" agent-a"` and `Agent-a`
             are both refusals. The server trims only far enough to tell a blank
             expectation from a real one and never sends the trimmed form on, so

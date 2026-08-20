@@ -37,6 +37,10 @@ func TestRigIssueIsPersistentButHiddenFromReady(t *testing.T) {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
+	if err := store.SetConfig(ctx, "types.custom", "rig"); err != nil {
+		t.Fatalf("SetConfig types.custom: %v", err)
+	}
+
 	rig := &types.Issue{
 		ID:        "rw-rig-durable",
 		Title:     "Rig identity",

@@ -649,6 +649,22 @@ const (
 	// resolved (GH#3545): the user asserted a remote host, so bd fills in
 	// the default port rather than dialing :0 or allocating locally.
 	PortSourceExternalHostDefault PortSource = "external_host_default"
+	// PortSourceCallerExplicit is an already-nonzero Config.ServerPort set by
+	// the caller before applyConfigDefaults runs (e.g. `bd init
+	// --server-port`, or initGlobalDatabaseConfig's copy-forward of it) —
+	// a direct user/tooling assertion, outranking the
+	// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT env vars (be-wf9a.1).
+	PortSourceCallerExplicit PortSource = "caller_explicit"
+	// PortSourceSharedServerDefault is DefaultSharedServerPort (3308), filled
+	// in when shared-server mode is on and no other source resolved a port.
+	// NOT authoritative: bd picked it on the user's behalf, exactly like the
+	// port file. It exists so DefaultConfig never returns a nonzero Port with
+	// PortSourceUnset — without it, a bd-chosen shared default is
+	// indistinguishable from a caller assertion and applyConfigDefaults
+	// stamps it PortSourceCallerExplicit, which silently disables the
+	// BEADS_DOLT_SERVER_PORT override and turns a benign auto-start port
+	// change into a hard failure (GH#4052, be-9tju).
+	PortSourceSharedServerDefault PortSource = "shared_server_default"
 )
 
 // IsAuthoritative reports whether this source represents a user (or
@@ -658,7 +674,7 @@ const (
 // authoritative one (GH#4052).
 func (s PortSource) IsAuthoritative() bool {
 	switch s {
-	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON:
+	case PortSourceEnv, PortSourceDoltConfigYaml, PortSourceConfigYaml, PortSourceMetadataJSON, PortSourceCallerExplicit:
 		return true
 	default:
 		return false
@@ -789,6 +805,7 @@ func DefaultConfig(beadsDir string) *Config {
 	// ephemeral port from the OS (GH#2098, GH#2372).
 	if cfg.Port == 0 && IsSharedServerMode() {
 		cfg.Port = DefaultSharedServerPort // 3308 - avoids orchestrator conflict on 3307
+		cfg.PortSource = PortSourceSharedServerDefault
 		cfg.PortSharedServer = true
 	}
 

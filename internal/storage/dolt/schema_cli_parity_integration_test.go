@@ -62,9 +62,10 @@ func TestCLIBundleMatchesRuntimeCommittedSchema(t *testing.T) {
 func cliCommittedSchemaSnapshot(t *testing.T, dir string) []string {
 	t.Helper()
 
+	queries := committedSchemaSnapshotQueries()
 	var snapshot []string
-	for name, query := range committedSchemaSnapshotQueries() {
-		for _, row := range queryCSV(t, dir, query) {
+	for _, name := range sortedSnapshotQueryNames(queries) {
+		for _, row := range queryCSV(t, dir, queries[name]) {
 			snapshot = append(snapshot, name+"|"+row["line"])
 		}
 	}
@@ -78,8 +79,10 @@ func runtimeCommittedSchemaSnapshot(t *testing.T, db *sql.DB) []string {
 	ctx, cancel := testContext(t)
 	defer cancel()
 
+	queries := committedSchemaSnapshotQueries()
 	var snapshot []string
-	for name, query := range committedSchemaSnapshotQueries() {
+	for _, name := range sortedSnapshotQueryNames(queries) {
+		query := queries[name]
 		rows, err := db.QueryContext(ctx, query)
 		if err != nil {
 			t.Fatalf("query runtime %s snapshot: %v", name, err)
@@ -102,10 +105,29 @@ func runtimeCommittedSchemaSnapshot(t *testing.T, db *sql.DB) []string {
 	return snapshot
 }
 
+// sortedSnapshotQueryNames returns the query names in sorted order so both
+// snapshot helpers issue queries in a fixed sequence. The runtime side reads
+// through a session whose root only advances once a query has succeeded
+// (be-itm5); ranging over the map directly let a different category run
+// first on every invocation and made whichever one drew that slot read as
+// spuriously empty.
+func sortedSnapshotQueryNames(queries map[string]string) []string {
+	names := make([]string, 0, len(queries))
+	for name := range queries {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func committedSchemaSnapshotQueries() map[string]string {
-	// Wisp tables are owned by the ignored-migration stream and are intentionally
-	// excluded from the committed-schema parity oracle. CLI substitutions that
-	// touch wisps still have focused coverage in internal/storage/schema tests.
+	// The ignored-migration stream owns objects at two levels: whole tables
+	// (wisps, excluded below by name/prefix) and individual columns bolted
+	// onto an otherwise main-stream table (leases.granted_node, added by
+	// migrations/ignored/0016_add_lease_granted_node.up.sql). Both levels are
+	// intentionally excluded from the committed-schema parity oracle, which
+	// compares the main migration stream only. CLI substitutions that touch
+	// wisps still have focused coverage in internal/storage/schema tests.
 	return map[string]string{
 		"tables": `
 SELECT CONCAT('table|', t.table_name, '|', t.table_type) AS line
@@ -125,7 +147,8 @@ JOIN information_schema.tables t
 WHERE c.table_schema = DATABASE()
   AND t.table_name NOT IN ('ignored_schema_migrations', 'local_metadata', 'repo_mtimes', 'wisps')
   AND LEFT(t.table_name, 5) <> 'wisp_'
-  AND LEFT(t.table_name, 5) <> 'dolt_'`,
+  AND LEFT(t.table_name, 5) <> 'dolt_'
+  AND NOT (c.table_name = 'leases' AND c.column_name = 'granted_node')`,
 		"indexes": `
 SELECT CONCAT('index|', s.table_name, '|', s.index_name, '|', LPAD(s.seq_in_index, 3, '0'), '|',
   s.column_name, '|', s.non_unique, '|', COALESCE(s.sub_part, ''), '|',
