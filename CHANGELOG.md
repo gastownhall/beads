@@ -7,22 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **`bd reclaim` summarizes the leases its replica guard declined instead of
-  naming every one, every run** (wy-sp2l4). A lease granted by another replica
-  is by construction never reclaimed here, so the audit was not a one-off: it
-  repeated identically on every run, one stderr line per stranded remote lease.
-  A supervisor on a 1-minute timer against a federated store with 47 of them
-  printed 47 lines a minute, indefinitely. The default is now ONE line —
-  `reclaim: skipped 47 stale leases granted by other replicas — "mini" (30),
-  "mini2" (17), not this node ("laptop")…` — naming at most three replicas and
-  collapsing the rest into a count, with the exact total preserved. `bd -v`
-  (or `BD_DEBUG=1`) expands it to the per-lease lines, itself capped at 20 with
-  a collapsed tail. Still stderr-only: `bd reclaim --json` owns stdout and its
-  payload is unchanged. Under `--quiet` the audit now skips its queries
-  entirely rather than running them to discard the output.
-
 ### Added
 
 - **`bd stale` and `bd blocked` gain `--label`, `--label-any` and
@@ -38,7 +22,126 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   concept, themes are labels here, and `--label theme:x` is the native way to
   say it.
 
+### Changed
+
+- **`bd show` labels `created_by` as `Created by:`, not `Owner:`** (be-ss66).
+  The text view rendered `created_by` under a label naming a different
+  concept. `owner` is a separate field holding a separate value — the git
+  author email kept for CV attribution — exposed as `owner` in `--json` and
+  never rendered in the text view at all. Two identities, one label, and the
+  label named the one that was not on screen. This is a correctness fix and
+  not polish: a reader asking "whose bead is this" reasonably reaches for
+  what the label promises, and two defect analyses were filed off exactly
+  that mistake in one evening, both measuring provenance from the wrong
+  column and both retracted after another agent disproved them. `bd show`
+  now prints `Created by: <identity>`. The `--json` payload is unchanged, and
+  a repo-wide audit found no in-tree parser of the old `Owner: ` text — the
+  only other producer, `bd github`'s repo-config display, names an actual
+  repository owner and keeps its label.
+
+- **`beads_dir` and `repo_root` are now OPTIONAL members of `ContextResponse`
+  on `GET /v0/beads/context`.** They are the only two members of the identity
+  handshake that describe the SERVER's filesystem rather than the workspace's
+  logical identity, and an absolute host path is not something a remote client
+  can act on — it cannot open it. The document already called publishing them
+  a cost "an operator accepts when binding beyond loopback"; while they were
+  required, accepting it was the only conforming option. A deployment that
+  does not want to disclose its filesystem layout can now withhold them and
+  still serve a conforming body.
+
+  **No body changes.** `bd serve` publishes both, always, exactly as before —
+  the relaxation is a promise to clients, not a switch on the server. What
+  changes is what a client may assume: it MUST tolerate their absence, and
+  MUST identify a workspace by `project_id`, `database` and `backend`, which
+  stay required. In Go, `apigen.ContextResponse.BeadsDir` and `.RepoRoot`
+  become `*string`.
+
+- **An explicitly configured Dolt server port now outranks the ambient
+  `BEADS_DOLT_SERVER_PORT`/`BEADS_DOLT_PORT` environment variables**
+  (be-wf9a.1, be-9tju, GH#4052). `ServerPort` resolution now carries a
+  *source* — which step of the chain produced the port — and the env read only
+  applies when that source is not an assertion by the user or by tooling acting
+  for them. Two deliberate behavior changes follow. **First**, a port set by the
+  caller before the store opens (a library caller filling in `Config.ServerPort`,
+  or `bd init --server-port`) is no longer silently replaced by whatever the
+  surrounding shell exported; previously the env var won unconditionally.
+  **Second**, the *legacy* `BEADS_DOLT_PORT` spelling no longer overrides a port
+  resolved from `.beads/config.yaml` (`dolt.port`), Dolt's own `config.yaml`
+  (`listener.port`), or `metadata.json` (`dolt_server_port`). The current
+  `BEADS_DOLT_SERVER_PORT` spelling is unaffected — it sits first in the
+  resolution chain and still wins over all of them.
+
+  **Compatibility:** a workspace that relied on exporting `BEADS_DOLT_PORT` to
+  redirect away from a port pinned in config now connects to the pinned port
+  instead. Switch to `BEADS_DOLT_SERVER_PORT`, or change the pinned value. Ports
+  that bd resolved for *itself* — the gitignored `.beads/dolt-server.port`, and
+  the shared-server default 3308 — stay non-authoritative and remain overridable
+  by either spelling, which is the case that kept working throughout.
+
+  A related failure goes away with it: because bd's own bookkeeping is no longer
+  mislabeled as user configuration, a stale `.beads/dolt-server.port` left by a
+  crashed server no longer makes auto-start refuse to start with *"bd will not
+  silently use a different port than the one you configured"* when nothing was
+  configured. Auto-start warns and retargets, as it did before. Shared-server
+  mode still fails closed there — a repo-local auto-start is a different
+  database, not a port refresh — but now says so in its own words.
+
+- **`bd reclaim` summarizes the leases its replica guard declined instead of
+  naming every one, every run** (wy-sp2l4). A lease granted by another replica
+  is by construction never reclaimed here, so the audit was not a one-off: it
+  repeated identically on every run, one stderr line per stranded remote lease.
+  A supervisor on a 1-minute timer against a federated store with 47 of them
+  printed 47 lines a minute, indefinitely. The default is now ONE line —
+  `reclaim: skipped 47 stale leases granted by other replicas — "mini" (30),
+  "mini2" (17), not this node ("laptop")…` — naming at most three replicas and
+  collapsing the rest into a count, with the exact total preserved. `bd -v`
+  (or `BD_DEBUG=1`) expands it to the per-lease lines, itself capped at 20 with
+  a collapsed tail. Still stderr-only: `bd reclaim --json` owns stdout and its
+  payload is unchanged. Under `--quiet` the audit now skips its queries
+  entirely rather than running them to discard the output.
+
+- **Actor matching decodes an exact `--` run to `/` instead of collapsing it to
+  a generic separator** (be-p7dzx, bundled be-vc51). Identity comparison — used
+  by `ExpectedAssignee` on release and update, and by claim/close/unclaim
+  authorization — canonicalizes a run of `.`, `_` or `-` to one separator so the
+  same identity spelled under different layers' conventions compares equal. An
+  exact two-byte `--` run is now excluded from that collapse: it is gascity's
+  session-name encoding of a rig-qualified agent's `/`, so it decodes to `/`.
+  **Compatibility:** `gastown--mayor` now matches `gastown/mayor`, and stops
+  matching `gastown__mayor` and `gastown-mayor`. That is the intended fix rather
+  than a side effect — `gastown--mayor` is the agent `mayor` on rig `gastown`
+  while `gastown__mayor` is the dotted alias `gastown.mayor`, so matching them
+  was a widening — but any stored `--` spelling that is NOT a gascity slash
+  encoding changes equivalence class silently, with no error to notice. Longer
+  or mixed runs, `__` and `---` included, are unaffected and still collapse.
+
 ### Fixed
+
+- **Disabling telemetry no longer strands the queued eventsData backlog
+  forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics
+  *before* its prune step, and the spawn gate refused to schedule the child at
+  all when disabled — so the one machine whose queue can never again drain by
+  upload (the one that just opted out) kept every queued batch and orphaned
+  emitter temp indefinitely (2M+ files / 15.8GB observed on one control VM).
+  With metrics disabled, bd now still spawns the detached child under the same
+  marker-first throttle, and the child prunes by the normal TTL/cap policy and
+  exits without POSTing anything. Until that pre-existing backlog ages out, a
+  host that just opted out while its queue still holds batches younger than the
+  7-day TTL (and under the file/size caps) keeps forking the throttled,
+  detached, network-free prune child every flush interval — reclaiming nothing
+  until those batches age past the TTL — so new prune-only `bd send-metrics`
+  processes on a freshly disabled host are expected during that bounded window
+  and never POST. Once the backlog has decayed empty, spawns stop entirely; a
+  machine that never enabled telemetry has no queue directory and never forks.
+
+- **Explicit commits now sweep the entire working set and report no-ops
+  honestly.** In server mode, `bd vc commit` and `bd dolt commit` previously
+  routed through the config-excluding automatic-commit path, so out-of-band
+  config changes could remain dirty even though the command exited
+  successfully. Both commands now include config while continuing to exclude
+  ignored wisp tables. A clean or otherwise non-committable working set reports
+  `Nothing to commit` (`committed: false` in JSON) instead of attributing an
+  unchanged HEAD to a new commit.
 
 - **`bd blocked` silently ignored the label filters it already accepted**
   ([#5822](https://github.com/gastownhall/beads/pull/5822)).
@@ -536,6 +639,18 @@ never reused, per the v1.1.1 precedent.)
   now gone from the create path.
 
 ### Fixed
+
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **FreeBSD builds compile again** (#5661). The dbproxy process-identity arc
   (procid, unverified-process) shipped linux/darwin/windows implementations
@@ -2368,18 +2483,6 @@ remote-migrate gate from a blunt block into a state-aware one.
   ([#4516](https://github.com/gastownhall/beads/issues/4516)).
 
 ### Fixed
-
-- **`--label-any` is no longer silently dropped by `bd ready` and
-  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
-  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
-  filter was ignored on the ready/claim path (with or without `--parent`) on
-  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
-  this was dangerous rather than merely wrong: a worker fencing itself to its
-  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
-  happily claim another lane's issue and believe it was fenced. `--label-any`
-  now emits an OR-set membership clause that AND-combines with `--label`,
-  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
-  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **A failed v53 migration no longer traps the database, and the v53 repair
   now covers `wisp_dependencies` split-column drift.** rc.2 repaired the

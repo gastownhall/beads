@@ -1112,6 +1112,23 @@ func (m migrationSource) atLatest(ctx context.Context, db DBConn) bool {
 }
 
 func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, error) {
+	// Probe existence with a query that always SUCCEEDS before ever issuing one
+	// that can fail. A Dolt session that issues a failing statement stays
+	// pinned to its pre-statement catalog snapshot, so a bare SELECT against a
+	// not-yet-created cursor table poisons the pooled connection: tables
+	// created afterwards on other connections stay invisible to this one for
+	// the rest of its life in the pool (be-bv7x).
+	var cursorExists int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		m.cursorTable,
+	).Scan(&cursorExists); err != nil {
+		return 0, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
+	}
+	if cursorExists == 0 {
+		return 0, nil
+	}
+
 	var current int
 	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
 	if err != nil && err != sql.ErrNoRows {

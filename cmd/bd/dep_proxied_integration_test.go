@@ -861,3 +861,77 @@ func TestProxiedServerDepConcurrent(t *testing.T) {
 		}
 	}
 }
+
+// TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge is the
+// proxied-server counterpart to TestEmbeddedDepListSingleIDWarnsOnDroppedExternalEdge
+// (dep_list_cross_db_test.go): the regression guard for bd-mtla on the
+// runDepListProxiedServer path (cmd/bd/dep_proxied_server.go), which gastown's
+// live-dolt-server deployment actually runs.
+//
+// `bd link` correctly writes an edge to an `external:` target (no row in any
+// database this session can see), but the single-id `bd dep list <id>` a
+// caller runs right after used to show nothing for it — indistinguishable
+// from no dependency existing at all. Verifies the fix: stdout/--json stay
+// exactly what they were before the fix (no schema change), stderr now names
+// the dropped edge, and batch mode (the already-correct path) is unaffected.
+func TestProxiedServerDepListSingleIDWarnsOnDroppedExternalEdge(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+
+	p := newSharedProxiedProject(t, bd, "dlw1")
+	local := bdProxiedCreate(t, bd, p.dir, "local target", "--type", "task")
+	source := bdProxiedCreate(t, bd, p.dir, "source issue", "--type", "task")
+
+	bdProxiedDep(t, bd, p.dir, "add", source.ID, local.ID, "--type", "blocks")
+
+	linkCmd := exec.Command(bd, "link", source.ID, "external:other:capability", "--type", "related")
+	linkCmd.Dir = p.dir
+	linkCmd.Env = bdProxiedEnv(p.dir)
+	if out, err := linkCmd.CombinedOutput(); err != nil {
+		t.Fatalf("bd link (external): %v\n%s", err, out)
+	}
+
+	cmd := exec.Command(bd, "dep", "list", source.ID)
+	cmd.Dir = p.dir
+	cmd.Env = bdProxiedEnv(p.dir)
+	stdout, stderr, err := runCommandBuffers(t, cmd)
+	if err != nil {
+		t.Fatalf("bd dep list: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), local.ID) {
+		t.Errorf("stdout missing local dep %s:\n%s", local.ID, stdout.String())
+	}
+	if strings.Contains(stdout.String(), "external:other:capability") {
+		t.Errorf("stdout unexpectedly contains the external target (shape must stay unchanged):\n%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "external:other:capability via related") {
+		t.Errorf("stderr should warn about the dropped external target with its type, got:\n%s", stderr.String())
+	}
+
+	jsonCmd := exec.Command(bd, "dep", "list", source.ID, "--json")
+	jsonCmd.Dir = p.dir
+	jsonCmd.Env = bdProxiedEnv(p.dir)
+	jsonStdout, _, err := runCommandBuffers(t, jsonCmd)
+	if err != nil {
+		t.Fatalf("bd dep list --json: %v", err)
+	}
+	if strings.Contains(jsonStdout.String(), "external:other:capability") {
+		t.Errorf("--json output unexpectedly contains the external target:\n%s", jsonStdout.String())
+	}
+	if !strings.Contains(jsonStdout.String(), local.ID) {
+		t.Errorf("--json output missing local dep %s:\n%s", local.ID, jsonStdout.String())
+	}
+
+	batchCmd := exec.Command(bd, "dep", "list", source.ID, source.ID)
+	batchCmd.Dir = p.dir
+	batchCmd.Env = bdProxiedEnv(p.dir)
+	batchStdout, _, err := runCommandBuffers(t, batchCmd)
+	if err != nil {
+		t.Fatalf("bd dep list (batch): %v", err)
+	}
+	if !strings.Contains(batchStdout.String(), "external:other:capability") || !strings.Contains(batchStdout.String(), local.ID) {
+		t.Errorf("batch mode should show both deps, got:\n%s", batchStdout.String())
+	}
+}
