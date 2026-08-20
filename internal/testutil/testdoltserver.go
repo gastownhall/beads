@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
+	"github.com/moby/moby/api/types/container"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
 )
@@ -28,15 +30,16 @@ const serverStartTimeout = 60 * time.Second
 
 // Module-level singleton state.
 var (
-	doltServerOnce    sync.Once
-	doltServerErr     error
-	doltTestPort      string
-	doltSingletonSrv  *doltServer
-	doltTerminateOnce sync.Once
-	dockerOnce        sync.Once
-	dockerAvail       bool
-	doltCheckOnce     sync.Once
-	doltCached        doltReadiness
+	doltServerOnce        sync.Once
+	doltServerErr         error
+	doltTestPort          string
+	doltSingletonSrv      *doltServer
+	doltTerminateOnce     sync.Once
+	dockerOnce            sync.Once
+	dockerAvail           bool
+	doltCheckOnce         sync.Once
+	doltCached            doltReadiness
+	doltGitRemoteMountDir string
 )
 
 // doltReadiness describes why Dolt integration tests can or cannot run.
@@ -138,6 +141,19 @@ func startDoltContainer() error {
 	ctx, cancel := context.WithTimeout(context.Background(), serverStartTimeout)
 	defer cancel()
 
+	// Bind-mount a dedicated host directory into the container at the
+	// identical path. dolt-sql-server (in the container) and the test
+	// process (on the host) can then both reach files under this path by
+	// the same string — e.g. a git remote one side provisions and the
+	// other side clones/pushes to via CLI. Mounting a distinctly-named
+	// leaf dir, rather than the tmp root itself, means this can never
+	// shadow whatever the container's own /tmp is used for internally.
+	mountDir := filepath.Join(os.TempDir(), "beads-dolt-git-remote-mount")
+	if err := os.MkdirAll(mountDir, 0o755); err != nil {
+		return fmt.Errorf("creating git-remote mount dir: %w", err)
+	}
+	doltGitRemoteMountDir = mountDir
+
 	ctr, err := dolt.Run(ctx, DoltDockerImage,
 		dolt.WithDatabase("beads_test"),
 		// Docker port-forwarding makes connections appear as non-localhost
@@ -145,6 +161,18 @@ func startDoltContainer() error {
 		// "localhost", so root@localhost won't match external connections.
 		// Set to "%" so root can connect from any host.
 		testcontainers.WithEnv(map[string]string{"DOLT_ROOT_HOST": "%"}),
+		// testcontainers.WithMounts+BindMount is not used here: this
+		// version's mapToDockerMounts() only logs a warning and drops
+		// BindOptions for bind-type sources, so there is no way to carry
+		// an SELinux relabel through that typed path. Under rootless
+		// Podman with SELinux enforcing (as on this rig), the container
+		// gets "permission denied" on an otherwise-0755, correctly-owned
+		// bind-mounted host dir unless the mount is relabeled — hence the
+		// raw HostConfig.Binds entry with the classic ":Z" (private
+		// relabel) suffix, verified by manual `podman run -v ...:Z` repro.
+		testcontainers.WithHostConfigModifier(func(hc *container.HostConfig) {
+			hc.Binds = append(hc.Binds, mountDir+":"+mountDir+":Z")
+		}),
 	)
 	if err != nil {
 		return fmt.Errorf("starting Dolt container: %w", err)
@@ -269,6 +297,27 @@ func DoltContainerPort() string {
 func DoltContainerPortInt() int {
 	p, _ := strconv.Atoi(doltTestPort)
 	return p
+}
+
+// DoltContainerHandle returns the shared Dolt container so tests can Exec
+// commands inside it — e.g. to provision a bare git remote that the
+// dolt-sql-server process (not the test process) must be able to reach.
+// Callers must call RequireDoltContainer(t) first, same as the other
+// DoltContainer* accessors.
+func DoltContainerHandle() testcontainers.Container {
+	return doltSingletonSrv.container
+}
+
+// DoltContainerGitRemoteMountDir returns a host directory that is
+// bind-mounted into the shared Dolt container at the identical path, so
+// files created under it are visible to both the test process (host) and
+// the dolt-sql-server process (container) by the same path string. Use
+// this — not an arbitrary container-only or host-only tmp dir — for any
+// fixture (like a git remote) that both sides must independently reach.
+// Callers must call RequireDoltContainer(t) first, same as the other
+// DoltContainer* accessors.
+func DoltContainerGitRemoteMountDir() string {
+	return doltGitRemoteMountDir
 }
 
 // TerminateDoltContainer stops and removes the shared Dolt container.

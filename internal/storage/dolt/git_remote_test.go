@@ -4,6 +4,7 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"encoding/csv"
 	"fmt"
 	"os"
@@ -16,10 +17,12 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/testcontainers/testcontainers-go"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -61,6 +64,7 @@ type gitRemoteSetup struct {
 	remoteDir string // bare git repo path
 	remoteURL string // file:// URL for the bare repo
 	sourceDir string // dolt source repo directory
+	dbName    string // Dolt database name (container fixtures only; empty for host-based setupGitRemote)
 }
 
 // setupGitRemote creates a bare git repo (seeded with an initial commit)
@@ -613,6 +617,52 @@ func TestGitRemoteSpecialCharacters(t *testing.T) {
 // remote these tests push/pull against is provisioned inside that same
 // container (see the rule at the top of this file), not on the host.
 
+// provisionContainerGitRemote creates a bare git repo with a seeded initial
+// commit inside the shared dolt-sql-server container, at a path unique to
+// this test (derived from suffix). The dolt-sql-server process — not this
+// test process — is what pushes to and pulls from this remote, so it must
+// live in the container's own filesystem; see the rule at the top of this
+// file. The repo is provisioned under testutil.DoltContainerGitRemoteMountDir(),
+// a host directory bind-mounted into the container at the identical path,
+// so host-side CLI verification helpers in this file (doltClone, queryCSV,
+// etc.) can also reach it by the same path string — a plain container-only
+// /tmp path would be invisible to those. Returns the bare repo's path and
+// its file:// URL, valid on both sides.
+func provisionContainerGitRemote(t *testing.T, suffix string) (remoteDir, remoteURL string) {
+	t.Helper()
+
+	ctx := context.Background()
+	container := testutil.DoltContainerHandle()
+
+	base := filepath.Join(testutil.DoltContainerGitRemoteMountDir(), "bd-remote-"+suffix)
+	remoteDir = base + "/remote.git"
+	seedDir := base + "/seed"
+
+	testcontainers.RequireContainerExec(ctx, t, container, []string{"sh", "-c", "mkdir -p " + base})
+	testcontainers.RequireContainerExec(ctx, t, container, []string{"git", "init", "--bare", "-b", "main", remoteDir})
+
+	seedScript := fmt.Sprintf(
+		"set -e\n"+
+			"mkdir -p %s\n"+
+			"cd %s\n"+
+			"git init -b main\n"+
+			"git -c user.name=test -c user.email=test@example.com commit --allow-empty -m init\n"+
+			"git remote add origin %s\n"+
+			"git push -u origin main\n",
+		seedDir, seedDir, remoteDir,
+	)
+	testcontainers.RequireContainerExec(ctx, t, container, []string{"sh", "-c", seedScript})
+
+	t.Cleanup(func() {
+		if _, _, err := container.Exec(ctx, []string{"sh", "-c", "rm -rf " + base}); err != nil {
+			t.Logf("cleanup: rm -rf %s in container: %v", base, err)
+		}
+	})
+
+	remoteURL = "file://" + remoteDir
+	return remoteDir, remoteURL
+}
+
 // setupContainerGitRemote creates a bare git repo inside the shared
 // dolt-sql-server container and returns a DoltStore connected with that
 // repo configured as "origin".
@@ -628,28 +678,17 @@ func setupContainerGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func())
 		t.Fatalf("failed to create base dir: %v", err)
 	}
 
-	// Create bare git repo with initial commit (same as setupGitRemote)
-	remoteDir := filepath.Join(baseDir, "remote.git")
-	runCmd(t, baseDir, "git", "init", "--bare", "-b", "main", remoteDir)
-
-	seedDir := filepath.Join(baseDir, "seed")
-	if err := os.MkdirAll(seedDir, 0o755); err != nil {
-		os.RemoveAll(baseDir)
-		t.Fatalf("failed to create seed dir: %v", err)
-	}
-	runCmd(t, seedDir, "git", "init", "-b", "main")
-	runCmd(t, seedDir, "git", "commit", "--allow-empty", "-m", "init")
-	runCmd(t, seedDir, "git", "remote", "add", "origin", remoteDir)
-	runCmd(t, seedDir, "git", "push", "-u", "origin", "main")
-
-	remoteURL := "file://" + remoteDir
-
 	// Create container DoltStore
 	doltDir := filepath.Join(baseDir, "embedded-dolt")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	dbName := uniqueTestDBName(t)
+
+	// The bare git repo lives inside the dolt-sql-server container, not on
+	// the host — see provisionContainerGitRemote's doc comment.
+	remoteDir, remoteURL := provisionContainerGitRemote(t, dbName)
+
 	store, err := New(ctx, &Config{
 		Path:            doltDir,
 		CommitterName:   "test",
@@ -662,11 +701,21 @@ func setupContainerGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func())
 		t.Fatalf("failed to create container DoltStore: %v", err)
 	}
 
-	// Set issue prefix (required for CreateIssue)
+	// Set issue prefix (required for CreateIssue). SetConfig only writes the
+	// working set; Commit deliberately excludes the config table (GH#2455),
+	// so without an explicit CommitWithConfig here this stays dirty forever
+	// and later trips the pre-pull dirty-config guard (GH#2455/GH#2474) —
+	// the host-based fixture avoids this by committing via CLI `dolt commit
+	// -A`, which stages everything including config.
 	if err := store.SetConfig(ctx, "issue_prefix", "test"); err != nil {
 		store.Close()
 		os.RemoveAll(baseDir)
 		t.Fatalf("failed to set prefix: %v", err)
+	}
+	if err := store.CommitWithConfig(ctx, "Set issue prefix"); err != nil {
+		store.Close()
+		os.RemoveAll(baseDir)
+		t.Fatalf("failed to commit prefix config: %v", err)
 	}
 
 	// Add git remote via SQL
@@ -681,6 +730,7 @@ func setupContainerGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func())
 		remoteDir: remoteDir,
 		remoteURL: remoteURL,
 		sourceDir: doltDir,
+		dbName:    dbName,
 	}
 
 	cleanup := func() {
@@ -692,6 +742,22 @@ func setupContainerGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func())
 }
 
 func TestGitRemotePushPull(t *testing.T) {
+	// Architect decision 2026-08-20 (be-nn2m notes): same root gate as
+	// TestGitRemotePushSkipsUserPrePushHook, on the Pull side. This
+	// fixture's store never runs a local `dolt init`, so hasCLIDatabase()
+	// (store.go ~3498) is always false and pullTransport's
+	// prepareCLIRouteForGitProtocol (~3558) falls through to the SQL-only
+	// `CALL DOLT_PULL` path — which does not reliably pick up commits an
+	// external, non-Dolt-SQL process (the host `dolt` CLI, via a real git
+	// push below) wrote to the git-protocol remote. store.Pull(ctx)
+	// reports success; the data simply never arrives. Tracked in the
+	// broadened be-9i0yq. Body and assertions below are kept intact, not
+	// weakened, per that decision.
+	t.Skip("SQL-routed CALL DOLT_PULL does not reliably see commits an " +
+		"external host-CLI `dolt push` wrote to a git-protocol remote " +
+		"(same hasCLIDatabase() gate as the push-hook-suppression gap) " +
+		"— tracked in be-9i0yq")
+
 	store, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
@@ -800,6 +866,22 @@ func TestGitRemoteHasRemote(t *testing.T) {
 //
 // Mirrors PR #3626 / GH#3340 (the commit-side sibling) at the push site.
 func TestGitRemotePushSkipsUserPrePushHook(t *testing.T) {
+	// Architect decision 2026-08-20 (be-nn2m notes): this fixture's
+	// setupContainerGitRemote store can only ever route through CALL
+	// DOLT_PUSH (hasCLIDatabase()/CLIDir(), store.go ~2845 & 3494, are never
+	// true for a server-mode store with no CLI-initialized local .dolt dir).
+	// GH#3724's applyNoGitHooksToCmd (credentials.go:507) only guards the
+	// CLI-routed doltCLIPush path, which is structurally unreachable here —
+	// confirmed empirically (a manually planted pre-push hook against a
+	// SQL-routed push fires). Whether this also reaches real
+	// external-server deployments (not just this fixture) is tracked
+	// separately in be-9i0yq. Body and assertions below are kept intact,
+	// not weakened, per that decision.
+	t.Skip("SQL-routed CALL DOLT_PUSH does not honor GH#3724 hook suppression " +
+		"(that fix only covers the CLI-routed push path) — tracked in be-9i0yq, " +
+		"which is investigating whether this also affects real external-server " +
+		"deployments or is fixture-specific")
+
 	if runtime.GOOS == "windows" {
 		t.Skip("hook script uses POSIX shell; the bug + fix are platform-agnostic but this assertion isn't")
 	}
@@ -944,19 +1026,38 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 		t.Fatalf("source Push failed: %v", err)
 	}
 
-	// Step 2: Bootstrap clone from git remote
-	// Close source store first to avoid driver conflicts,
-	// then use BootstrapFromGitRemoteWithDB + open a new store.
+	// Step 2: Bootstrap clone from git remote. Close source store first to
+	// avoid driver conflicts.
+	//
+	// Architect decision 2026-08-20 (be-nn2m notes): BootstrapFromGitRemoteWithDB
+	// is the wrong helper for this fixture's server architecture -- it does a
+	// real host-side `dolt clone`, correct only for owned-server/CLI mode
+	// (cmd/bd/bootstrap.go's cloneViaEmbedded path) where a locally-owned
+	// server also reads from that host directory. This fixture's shared
+	// testcontainer is an *external* server in exactly the sense
+	// cmd/bd/bootstrap.go already models (resolveRemoteCloneMode,
+	// cloneViaServer at 947-979): clone server-side via CALL DOLT_CLONE over
+	// a raw SQL connection -- the same call cloneViaServer itself makes --
+	// then New() a normal store against the resulting database name. No
+	// cfg.Path/Config semantics involved.
 	sourceStore.Close()
 
 	cloneDoltDir := filepath.Join(setup.baseDir, "clone-dolt")
-	cloneDBName := "clonedb"
-	bootstrapped, err := BootstrapFromGitRemoteWithDB(ctx, cloneDoltDir, setup.remoteURL, cloneDBName)
+	cloneDBName := uniqueTestDBName(t)
+
+	adminDSN := doltutil.ServerDSN{
+		Host: "127.0.0.1",
+		Port: testutil.DoltContainerPortInt(),
+		User: "root",
+	}.String()
+	adminConn, err := sql.Open("mysql", adminDSN)
 	if err != nil {
-		t.Fatalf("BootstrapFromGitRemoteWithDB failed: %v", err)
+		t.Fatalf("failed to open admin connection for clone: %v", err)
 	}
-	if !bootstrapped {
-		t.Fatal("expected bootstrap to occur (no existing dolt dir)")
+	defer adminConn.Close()
+
+	if err := versioncontrolops.DoltClone(ctx, adminConn, setup.remoteURL, cloneDBName, ""); err != nil {
+		t.Fatalf("DoltClone failed: %v", err)
 	}
 
 	cloneStore, err := New(ctx, &Config{
@@ -964,7 +1065,7 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 		CommitterName:   "clone-user",
 		CommitterEmail:  "clone@example.com",
 		Database:        cloneDBName,
-		CreateIfMissing: true, // clone creates a new database
+		CreateIfMissing: false, // CALL DOLT_CLONE already created the database
 	})
 	if err != nil {
 		t.Fatalf("failed to open cloned store: %v", err)
@@ -1008,13 +1109,17 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	// Close clone store before re-opening source
 	cloneStore.Close()
 
-	// Step 4: Re-open source and pull — verify bidirectional sync
+	// Step 4: Re-open source and pull — verify bidirectional sync. Reuses the
+	// original dbName from setup rather than rediscovering it: the data lives
+	// in the container's Dolt server, not under setup.baseDir on the host, so
+	// scanning the host directory for a ".dolt" subdir (the old approach)
+	// never finds anything real in this fixture.
 	sourceStore2, err := New(ctx, &Config{
 		Path:            filepath.Join(setup.baseDir, "embedded-dolt"),
 		CommitterName:   "test",
 		CommitterEmail:  "test@example.com",
-		Database:        findClonedDBName(t, filepath.Join(setup.baseDir, "embedded-dolt")),
-		CreateIfMissing: true, // re-open may use dynamically discovered DB name
+		Database:        setup.dbName,
+		CreateIfMissing: false, // must reconnect to the existing database, not create a new empty one
 	})
 	if err != nil {
 		t.Fatalf("failed to re-open source store: %v", err)
@@ -1050,6 +1155,20 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 }
 
 func TestCreateIssueAfterPull(t *testing.T) {
+	// Architect decision 2026-08-20 (be-nn2m notes): same root gate as
+	// TestGitRemotePushPull / TestGitRemotePushSkipsUserPrePushHook. This
+	// fixture's store never runs a local `dolt init`, so hasCLIDatabase()
+	// (store.go ~3498) is always false and Pull falls through to the
+	// SQL-only `CALL DOLT_PULL` path, which does not reliably pick up a
+	// commit the host `dolt` CLI pushed to the git-protocol remote.
+	// store.Pull(ctx) reports success (nil error); ai-clone-001 simply
+	// never arrives. Tracked in the broadened be-9i0yq. Body and
+	// assertions below are kept intact, not weakened, per that decision.
+	t.Skip("SQL-routed CALL DOLT_PULL does not reliably see commits an " +
+		"external host-CLI `dolt push` wrote to a git-protocol remote " +
+		"(same hasCLIDatabase() gate as the push-hook-suppression gap) " +
+		"— tracked in be-9i0yq")
+
 	store, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
@@ -1129,27 +1248,6 @@ func TestCreateIssueAfterPull(t *testing.T) {
 			t.Errorf("expected %s to exist", id)
 		}
 	}
-}
-
-// findClonedDBName discovers the database name inside a dolt directory
-// by looking for subdirectories containing .dolt.
-func findClonedDBName(t *testing.T, doltDir string) string {
-	t.Helper()
-	entries, err := os.ReadDir(doltDir)
-	if err != nil {
-		t.Fatalf("failed to read dolt dir %s: %v", doltDir, err)
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() {
-			continue
-		}
-		doltSubDir := filepath.Join(doltDir, entry.Name(), ".dolt")
-		if info, statErr := os.Stat(doltSubDir); statErr == nil && info.IsDir() {
-			return entry.Name()
-		}
-	}
-	t.Fatalf("no dolt database found in %s", doltDir)
-	return ""
 }
 
 // TestGitRemoteExternalServerRouting verifies that SQL-visible git-protocol

@@ -976,7 +976,11 @@ func (s *DoltStore) doltSpanAttrs() []attribute.KeyValue {
 		s.spanAttrsCache = []attribute.KeyValue{
 			attribute.String("db.system", "dolt"),
 			attribute.Bool("db.readonly", s.readOnly),
-			attribute.Bool("db.server_mode", true), // TODO: update when embedded mode returns
+			// DoltStore (this package) is always server-mode. The split from
+			// embedded mode is permanent, not pending; see
+			// internal/storage/embeddeddolt for the separate embedded-mode
+			// implementation used by solo/standalone deployments.
+			attribute.Bool("db.server_mode", true),
 		}
 	})
 	return s.spanAttrsCache
