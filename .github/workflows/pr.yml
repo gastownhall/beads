@@ -631,6 +631,43 @@ jobs:
           go-version-file: 'go.mod'
           cache: false
 
+      # The module fetch is the only part of this job that talks to the network,
+      # and setup-go above runs with cache: false, so every run pulls the whole
+      # module graph from the proxy. Doing it here, retried, means a proxy blip
+      # costs seconds instead of failing a required check.
+      #
+      # Deliberately NOT wrapped around the build: `make ci-pr-policy` runs a
+      # `go build ./cmd/bd` (scripts/ci/pr-policy.sh, build_docs_binary), and a
+      # compile error is not transient. Retrying it would make a genuinely broken
+      # build take three attempts to report and look like a slow one. The fetch
+      # has a legitimate transient failure mode; the build does not.
+      #
+      # 3 attempts x 120s + 2 backoffs x 10s = 380s worst case. 8m leaves ~100s
+      # of headroom, matching the bounded apt-get steps in migration-test.yml.
+      - name: Download modules
+        timeout-minutes: 8
+        run: |
+          downloaded=""
+          for attempt in 1 2 3; do
+            if timeout 120 go mod download; then
+              downloaded=yes
+              break
+            fi
+            echo "::warning::go mod download attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Unlike the best-effort apt-get retries elsewhere in this repo, this
+          # one is load-bearing: nothing downstream can build without the
+          # modules. Fail here, naming the fetch, so a module outage is not
+          # reported as a build failure.
+          if [ -z "$downloaded" ]; then
+            echo "::error::go mod download failed after 3 attempts - module fetch failure, not a build failure"
+            exit 1
+          fi
+
       - name: Run PR policy wrapper
         run: make ci-pr-policy
 
