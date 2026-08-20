@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -57,7 +58,41 @@ func testMainInner(m *testing.M) int {
 	// sql-server (testcontainer or external port). The new database-name
 	// firewall in dolt.New refuses test-named DBs unless this opt-in is set.
 	os.Setenv("BEADS_TEST_SERVER", "1")
-	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
+
+	// Escape hatch for long-running benches: when
+	// BEADS_TEST_EXTERNAL_DOLT_PORT is set, skip the shared testcontainer
+	// and assume an already-running `dolt sql-server` is reachable on that
+	// port. Docker testcontainers get saturated at 10K-scale write benches
+	// (be-nu4.4.1 / be-s54: i/o timeouts after ~3 samples of seeding 10K
+	// rows + 30 DOLT_COMMITs). A persistent subprocess with full host
+	// resources handles the sustained load that an isolated container
+	// cannot. See docs/plans/be-eei-d4v2-composite-build.md for the
+	// justification mail thread.
+	if extPortStr := os.Getenv("BEADS_TEST_EXTERNAL_DOLT_PORT"); extPortStr != "" {
+		port, err := strconv.Atoi(extPortStr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: invalid BEADS_TEST_EXTERNAL_DOLT_PORT %q: %v\n", extPortStr, err)
+			return 1
+		}
+		testServerPort = port
+		if err := os.Setenv("BEADS_DOLT_PORT", extPortStr); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: set BEADS_DOLT_PORT: %v\n", err)
+			return 1
+		}
+		testSharedDB = "dolt_pkg_shared"
+		db, err := testutil.SetupSharedTestDB(testServerPort, testSharedDB)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: shared DB setup failed (external dolt on port %d): %v\n", port, err)
+			return 1
+		}
+		testSharedConn = db
+		defer db.Close()
+
+		if err := initSharedSchema(testServerPort); err != nil {
+			fmt.Fprintf(os.Stderr, "FATAL: shared schema init failed: %v\n", err)
+			return 1
+		}
+	} else if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
 		defer testutil.TerminateDoltContainer()
