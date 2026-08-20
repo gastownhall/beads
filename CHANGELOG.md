@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd show` labels `created_by` as `Created by:`, not `Owner:`** (be-ss66).
+  The text view rendered `created_by` under a label naming a different
+  concept. `owner` is a separate field holding a separate value — the git
+  author email kept for CV attribution — exposed as `owner` in `--json` and
+  never rendered in the text view at all. Two identities, one label, and the
+  label named the one that was not on screen. This is a correctness fix and
+  not polish: a reader asking "whose bead is this" reasonably reaches for
+  what the label promises, and two defect analyses were filed off exactly
+  that mistake in one evening, both measuring provenance from the wrong
+  column and both retracted after another agent disproved them. `bd show`
+  now prints `Created by: <identity>`. The `--json` payload is unchanged, and
+  a repo-wide audit found no in-tree parser of the old `Owner: ` text — the
+  only other producer, `bd github`'s repo-config display, names an actual
+  repository owner and keeps its label.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it
