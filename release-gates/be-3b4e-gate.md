@@ -191,3 +191,23 @@ maintain it — `origin` remote push is disabled,
 `DISABLED-upstream-is-fetch-only-push-to-fork-and-PR`). Deployer's job ends
 at the opened PR; no `release-gate/deploy-clearance` status posted, no
 merge-request routed to mayor. Upstream maintainers own the merge.
+
+## Post-gate history
+
+The criteria walk above examined
+`0929476954e3bec6516d12d1e8e792bd9375209a`. Commits landed on
+`deploy/be-3b4e-gate` after that SHA, in order:
+
+| Commit | What |
+|---|---|
+| `f0e8b8f7d` | This gate document. |
+| `5f5767c71` | `docs(changelog): record the created_by label change under [Unreleased]` — the one blocking ask from the PR #5800 review. |
+| `fd6286ec0` | Merge `origin/main`. The new CHANGELOG entry collided with two entries main had prepended to the same `[Unreleased]` / `### Changed` list; resolved by keeping all three. Without it the PR was no longer cleanly mergeable. |
+| this commit | This annotation. |
+
+None of them touches production code, so the criteria walk still describes
+the shipped diff (`cmd/bd/show_format.go` plus
+`cmd/bd/show_format_metadata_test.go`) exactly, and the **PASS** stands for
+the SHA it examined. This section exists so the "exactly the two reviewed
+commits over `origin/main`" line in the branch-integrity section above is
+not read as a claim about the current head.
