@@ -428,4 +428,44 @@ func TestEmbeddedStaleLabelFilters(t *testing.T) {
 			t.Errorf("the single result should be a theme:alpha issue, got %v", ids)
 		}
 	})
+
+	// These clauses match a label EXACTLY, so an untrimmed flag value returns
+	// nothing and looks exactly like "no stale issues carry that label". Every
+	// sibling filter (list, search, ready, orphans) normalizes its input; these
+	// pin that --label means the same thing here.
+	t.Run("leading_space_is_trimmed_like_every_other_label_filter", func(t *testing.T) {
+		// The everyday form: pflag's CSV split leaves the space on the second
+		// value, so `--label 'theme:beta, theme:alpha'` arrives as
+		// {"theme:beta", " theme:alpha"}.
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", " theme:alpha"))
+		if !ids[alpha.ID] || !ids[alphaUrgent.ID] {
+			t.Errorf("expected ' theme:alpha' to match theme:alpha, got %v", ids)
+		}
+		if ids[beta.ID] || ids[bare.ID] {
+			t.Errorf("' theme:alpha' matched issues outside the theme: %v", ids)
+		}
+	})
+
+	t.Run("empty_element_does_not_annihilate_the_filter", func(t *testing.T) {
+		// A doubled comma used to AND in a `label = ''` clause, which no row
+		// can satisfy, turning a valid filter into a silent empty result.
+		ids := idSet(bdStaleJSON(t, bd, dir, "--label", "theme:alpha,,urgent"))
+		if !ids[alphaUrgent.ID] {
+			t.Errorf("expected %s to survive an empty label element, got %v", alphaUrgent.ID, ids)
+		}
+	})
+
+	t.Run("normalization_applies_to_label_any_and_exclude_label", func(t *testing.T) {
+		anyIDs := idSet(bdStaleJSON(t, bd, dir, "--label-any", " theme:beta"))
+		if !anyIDs[beta.ID] {
+			t.Errorf("expected ' theme:beta' to match via --label-any, got %v", anyIDs)
+		}
+		excludeIDs := idSet(bdStaleJSON(t, bd, dir, "--exclude-label", " theme:alpha"))
+		if excludeIDs[alpha.ID] || excludeIDs[alphaUrgent.ID] {
+			t.Errorf("' theme:alpha' failed to exclude the alpha issues: %v", excludeIDs)
+		}
+		if !excludeIDs[beta.ID] {
+			t.Errorf("exclusion dropped issues it should have kept: %v", excludeIDs)
+		}
+	})
 }

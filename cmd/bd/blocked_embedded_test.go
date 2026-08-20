@@ -233,4 +233,38 @@ func TestEmbeddedBlockedLabelFilters(t *testing.T) {
 			}
 		}
 	})
+
+	// blockedFilterFromFlags normalizes, as every sibling label filter does.
+	// Without it an untrimmed value returns nothing and is indistinguishable
+	// from "nothing blocked carries that label".
+	t.Run("leading_space_is_trimmed_like_every_other_label_filter", func(t *testing.T) {
+		ids := idSet(bdBlockedJSON(t, bd, dir, "--label", " theme:alpha"))
+		if !ids[alpha.ID] || !ids[alphaUrgent.ID] {
+			t.Errorf("expected ' theme:alpha' to match theme:alpha, got %v", ids)
+		}
+		if ids[beta.ID] {
+			t.Errorf("' theme:alpha' leaked %s: %v", beta.ID, ids)
+		}
+	})
+
+	t.Run("empty_element_does_not_annihilate_the_filter", func(t *testing.T) {
+		ids := idSet(bdBlockedJSON(t, bd, dir, "--label", "theme:alpha,,urgent"))
+		if !ids[alphaUrgent.ID] {
+			t.Errorf("expected %s to survive an empty label element, got %v", alphaUrgent.ID, ids)
+		}
+	})
+
+	t.Run("normalization_applies_to_label_any_and_exclude_label", func(t *testing.T) {
+		anyIDs := idSet(bdBlockedJSON(t, bd, dir, "--label-any", " theme:beta"))
+		if !anyIDs[beta.ID] {
+			t.Errorf("expected ' theme:beta' to match via --label-any, got %v", anyIDs)
+		}
+		excludeIDs := idSet(bdBlockedJSON(t, bd, dir, "--exclude-label", " theme:alpha"))
+		if excludeIDs[alpha.ID] || excludeIDs[alphaUrgent.ID] {
+			t.Errorf("' theme:alpha' failed to exclude the alpha issues: %v", excludeIDs)
+		}
+		if !excludeIDs[beta.ID] {
+			t.Errorf("exclusion dropped %s, which it should have kept: %v", beta.ID, excludeIDs)
+		}
+	})
 }

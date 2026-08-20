@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var staleCmd = &cobra.Command{
@@ -32,9 +33,15 @@ This helps identify:
 		days, _ := cmd.Flags().GetInt("days")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
-		labels, _ := cmd.Flags().GetStringSlice("label")
-		labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
-		excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+		// Normalized for the reason blockedFilterFromFlags gives: these are
+		// exact-match clauses, and every sibling label filter trims its input
+		// before building them.
+		rawLabels, _ := cmd.Flags().GetStringSlice("label")
+		rawLabelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+		labels := utils.NormalizeLabels(rawLabels)
+		labelsAny := utils.NormalizeLabels(rawLabelsAny)
+		excludeLabels := utils.NormalizeLabels(rawExcludeLabels)
 		if days < 1 {
 			return HandleErrorRespectJSON("--days must be at least 1")
 		}

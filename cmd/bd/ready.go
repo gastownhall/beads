@@ -291,9 +291,20 @@ func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
 	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
 		filter.ParentID = &parentID
 	}
-	filter.Labels, _ = cmd.Flags().GetStringSlice("label")
-	filter.LabelsAny, _ = cmd.Flags().GetStringSlice("label-any")
-	filter.ExcludeLabels, _ = cmd.Flags().GetStringSlice("exclude-label")
+	// Normalize as every other label filter does (list_input.go:293-295,
+	// search.go:106, orphans.go:56, workapi/ready.go:56-58). These clauses
+	// match a label EXACTLY, so an untrimmed value silently under-reports:
+	// pflag's CSV split leaves the leading space in the everyday
+	// `--label 'a, b'` form, and `--label 'a,,b'` would AND in a `label = ''`
+	// clause that matches nothing at all. Without this, `--label` would not
+	// mean the same thing here as on the commands next to it -- which is the
+	// promise LabelSetClauses is documented to keep.
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	filter.Labels = utils.NormalizeLabels(labels)
+	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
+	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
 	return filter
 }
 
