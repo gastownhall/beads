@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -237,11 +238,56 @@ func (f *fakeStateHashStore) SearchIssues(_ context.Context, _ string, _ types.I
 type fakeHeadOnlyStore struct {
 	storage.DoltStorage
 	currentCommitCalls int
+	issues             []*types.Issue
 }
 
 func (f *fakeHeadOnlyStore) GetCurrentCommit(_ context.Context) (string, error) {
 	f.currentCommitCalls++
 	return "head-commit-hash", nil
+}
+
+func (f *fakeHeadOnlyStore) GetInfraTypes(_ context.Context) map[string]bool { return nil }
+
+// GetConfig lets buildOwnerExcludeSet's database fallback lookup (for
+// export.exclude_owners / export.exclude_owner) run without panicking; this
+// fake has no config store, so every key is unset.
+func (f *fakeHeadOnlyStore) GetConfig(_ context.Context, _ string) (string, error) {
+	return "", nil
+}
+
+func (f *fakeHeadOnlyStore) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) ([]*types.Issue, error) {
+	return f.issues, nil
+}
+
+// spyDiffStore wraps a real DoltStorage and counts ChangedIssueIDs calls,
+// while delegating every method — including the optional StateHasher/
+// DiffStore capability interfaces — to the wrapped store. It does NOT
+// implement storage.Unwrapper, so storage.UnwrapStore returns the spy
+// itself unchanged: maybeAutoExport's internal
+// storage.UnwrapStore(store).(storage.DiffStore) / .(storage.StateHasher)
+// type-assertions land on the spy's own overrides below, letting a test
+// observe whether the real dolt_diff-backed incremental path actually ran,
+// end-to-end through maybeAutoExport, against a real dolt server.
+type spyDiffStore struct {
+	storage.DoltStorage
+	changedIssueIDsCalls int
+}
+
+func (s *spyDiffStore) ChangedIssueIDs(ctx context.Context, fromCommit, toCommit string) (storage.ChangedIssueIDs, error) {
+	s.changedIssueIDsCalls++
+	ds, ok := storage.UnwrapStore(s.DoltStorage).(storage.DiffStore)
+	if !ok {
+		return storage.ChangedIssueIDs{}, fmt.Errorf("spyDiffStore: wrapped store does not implement DiffStore")
+	}
+	return ds.ChangedIssueIDs(ctx, fromCommit, toCommit)
+}
+
+func (s *spyDiffStore) GetStateHash(ctx context.Context) (string, error) {
+	sh, ok := storage.UnwrapStore(s.DoltStorage).(storage.StateHasher)
+	if !ok {
+		return s.DoltStorage.GetCurrentCommit(ctx)
+	}
+	return sh.GetStateHash(ctx)
 }
 
 func autoExportTestDir(t *testing.T) string {
@@ -1325,7 +1371,7 @@ func TestOrderedIssueLines_PreservesInsertionOrderAndReplacesInPlace(t *testing.
 	}
 }
 
-func TestLoadExistingIssueLines_ParsesIssuesSkipsMemories(t *testing.T) {
+func TestLoadExistingIssueLines_ParsesIssuesPreservesMemories(t *testing.T) {
 	tmp := t.TempDir()
 	path := filepath.Join(tmp, "issues.jsonl")
 	content := strings.Join([]string{
@@ -1359,12 +1405,22 @@ func TestLoadExistingIssueLines_ParsesIssuesSkipsMemories(t *testing.T) {
 		}
 	}
 
-	// Memories must be dropped so writeMemoryRecords owns them exclusively.
+	// Memories must NOT be mixed into the issue-line ordering (a memory record
+	// has no issue "id" to key on), but they also must not be silently
+	// dropped: an incremental rewrite that never regenerates memories from
+	// live config depends on loadExistingIssueLines carrying pre-existing
+	// memory lines forward verbatim via memoryLines.
 	lines.each(func(_ string, line []byte) {
 		if strings.Contains(string(line), `"_type":"memory"`) {
 			t.Errorf("memory record leaked into issue lines: %s", line)
 		}
 	})
+	if len(lines.memoryLines) != 1 {
+		t.Fatalf("got %d preserved memory lines, want 1: %v", len(lines.memoryLines), lines.memoryLines)
+	}
+	if !strings.Contains(string(lines.memoryLines[0]), `"key":"k"`) {
+		t.Errorf("preserved memory line = %s, want the original memory record verbatim", lines.memoryLines[0])
+	}
 
 	// Comment records have an "id" field too — confirm we grabbed the
 	// OUTER id (which the json.Unmarshal probe does correctly because
@@ -1606,7 +1662,7 @@ func TestTryIncrementalExport_PatchesChangedIssuesAndDropsRemoved(t *testing.T) 
 	}
 	c2 := h.mustCommit(t, ctx, "mutate")
 
-	issueCount, memoryCount, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2)
+	issueCount, memoryCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport returned error: %v", err)
 	}
@@ -1662,7 +1718,7 @@ func TestTryIncrementalExport_DropsIssueWhenFlippedToTemplate(t *testing.T) {
 	}
 	c2 := h.mustCommit(t, ctx, "promote to template")
 
-	_, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
 	if err != nil {
 		t.Fatalf("tryIncrementalExport: %v", err)
 	}
@@ -1690,7 +1746,7 @@ func TestTryIncrementalExport_FallsBackWhenFileMissing(t *testing.T) {
 	// No existing file → must return didIncremental=false and leave the
 	// disk untouched so the caller falls back to the full-export path.
 	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
-	issueCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2)
+	issueCount, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1730,7 +1786,7 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	h.mustCreateBatch(t, ctx, incrementalExportThreshold+1, "thr-")
 	c2 := h.mustCommit(t, ctx, "flood")
 
-	_, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2)
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1745,6 +1801,383 @@ func TestTryIncrementalExport_ThresholdExceededFallsBack(t *testing.T) {
 	}
 	if len(sizeBefore) != len(sizeAfter) {
 		t.Errorf("file was touched on fallback (size %d → %d)", len(sizeBefore), len(sizeAfter))
+	}
+}
+
+// TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode is the be-shbed
+// regression test for bee-ghosttrack's PR #5806 review finding: the root
+// cause was DOLT_HASHOF_DB() (a working-set root hash) being fed straight
+// into dolt_diff(), which only accepts real commits or the literal
+// 'WORKING' — so dolt_diff always errored and every "incremental" export
+// silently fell back to a full rewrite. This test proves the fix by driving
+// maybeAutoExport itself (not tryIncrementalExport directly) end-to-end
+// against the real dolt test server, and observing that the DiffStore path
+// actually executes.
+func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1ms")
+
+	spy := &spyDiffStore{DoltStorage: h.store}
+	store = spy
+
+	h.mustCreate(t, ctx, "e2e-a", "Alpha")
+	h.mustCreate(t, ctx, "e2e-b", "Beta")
+	h.mustCreate(t, ctx, "e2e-c", "Gamma")
+	h.mustCommit(t, ctx, "baseline")
+
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("first maybeAutoExport: %v", err)
+	}
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	if got := countIssueLines(t, exportPath); got != 3 {
+		t.Fatalf("after first export, %d issue lines, want 3", got)
+	}
+
+	// Mutate: rename e2e-a, delete e2e-b, leave e2e-c untouched. Committed
+	// (not just working-set-dirty) so the state hash unambiguously moves and
+	// a second export is triggered.
+	if err := h.store.UpdateIssue(ctx, "e2e-a", map[string]interface{}{"title": "Alpha renamed"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	if err := h.store.DeleteIssue(ctx, "e2e-b"); err != nil {
+		t.Fatalf("DeleteIssue: %v", err)
+	}
+	h.mustCommit(t, ctx, "mutate")
+
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("second maybeAutoExport: %v", err)
+	}
+
+	if spy.changedIssueIDsCalls < 1 {
+		t.Error("ChangedIssueIDs was never called — incremental export never actually reached the dolt_diff-backed DiffStore path (root-cause regression: WORKING-set hash fed to dolt_diff, silently falling back to full export every time)")
+	}
+
+	titles := loadIssueTitles(t, exportPath)
+	if _, stillThere := titles["e2e-b"]; stillThere {
+		t.Error("e2e-b should have been dropped from export")
+	}
+	if titles["e2e-a"] != "Alpha renamed" {
+		t.Errorf("e2e-a title = %q, want %q", titles["e2e-a"], "Alpha renamed")
+	}
+	if _, ok := titles["e2e-c"]; !ok {
+		t.Error("untouched issue e2e-c missing from export")
+	}
+
+	// Content-equivalence control: the incrementally-patched file must
+	// describe the same issue set as a fresh full export of the same final
+	// state (field-for-field, not byte-for-byte — line order and formatting
+	// are allowed to differ).
+	controlPath := filepath.Join(t.TempDir(), "control.jsonl")
+	if _, _, err := exportToFile(ctx, controlPath, false); err != nil {
+		t.Fatalf("control exportToFile: %v", err)
+	}
+	got := jsonlRecordsByID(t, exportPath)
+	want := jsonlRecordsByID(t, controlPath)
+	if len(got) != len(want) {
+		t.Fatalf("incremental export has %d records, control full export has %d", len(got), len(want))
+	}
+	for id, wantRec := range want {
+		gotRec, ok := got[id]
+		if !ok {
+			t.Errorf("record %s present in control export, missing from incremental export", id)
+			continue
+		}
+		if !reflect.DeepEqual(gotRec, wantRec) {
+			t.Errorf("record %s differs between incremental and full export:\n  incremental: %v\n  full:        %v", id, gotRec, wantRec)
+		}
+	}
+}
+
+// TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly documents and
+// locks in embedded mode's contract: EmbeddedDoltStore implements neither
+// StateHasher nor DiffStore, so it can never take the incremental path —
+// but per the fix (be-shbed / PR #5806 review item 3) it must still fall
+// back to a full export cleanly, rather than silently producing nothing.
+// This is deliberately a fake-store unit test, not a real embedded-mode
+// integration test: exercising a genuine EmbeddedDoltStore end-to-end is
+// out of scope (the bead explicitly excludes implementing DiffStore/
+// StateHasher on it), and fakeHeadOnlyStore already models exactly the
+// capability gap that matters here — no StateHasher, no DiffStore.
+func TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly(t *testing.T) {
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+
+	saveAndRestoreGlobals(t)
+	fake := &fakeHeadOnlyStore{
+		issues: []*types.Issue{
+			{ID: "emb-a", Title: "Embedded Alpha", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask},
+		},
+	}
+	store = fake
+
+	dir := autoExportTestDir(t)
+	saveExportAutoState(filepath.Join(dir, ".beads"), &exportAutoState{
+		LastDoltCommit: "stale-hash",
+		Timestamp:      time.Time{}, // zero: throttle window open
+	})
+
+	if err := maybeAutoExport(context.Background(), false); err != nil {
+		t.Fatalf("maybeAutoExport: %v", err)
+	}
+
+	exportPath := filepath.Join(dir, ".beads", "issues.jsonl")
+	titles := loadIssueTitles(t, exportPath)
+	if titles["emb-a"] != "Embedded Alpha" {
+		t.Errorf("emb-a title = %q, want %q (embedded mode must still produce a full export, not silently no-op)", titles["emb-a"], "Embedded Alpha")
+	}
+
+	state := loadExportAutoState(filepath.Join(dir, ".beads"))
+	if state.LastDoltCommit != "head-commit-hash" {
+		t.Errorf("state LastDoltCommit = %q, want %q (anchor must advance on a successful fallback export)", state.LastDoltCommit, "head-commit-hash")
+	}
+}
+
+func TestTryIncrementalExport_NeverLeaksMemoriesIntoAutoExport(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+
+	h.mustCreate(t, ctx, "mem-a", "Alpha")
+	c1 := h.mustCommit(t, ctx, "baseline")
+
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	// Baseline matches real auto-export usage: includeMemories=false.
+	if _, memCount, err := exportToFile(ctx, exportPath, false); err != nil {
+		t.Fatalf("exportToFile: %v", err)
+	} else if memCount != 0 {
+		t.Fatalf("baseline memoryCount = %d, want 0", memCount)
+	}
+
+	// User remembers something AFTER the baseline auto-export.
+	if err := h.store.SetConfig(ctx, kvPrefix+memoryPrefix+"secret-key", "private context"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+
+	// An unrelated issue mutation triggers the next auto-export cycle.
+	if err := h.store.UpdateIssue(ctx, "mem-a", map[string]interface{}{"title": "Alpha updated"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	c2 := h.mustCommit(t, ctx, "mutate")
+
+	_, memCount, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	if err != nil {
+		t.Fatalf("tryIncrementalExport: %v", err)
+	}
+	if !didIncremental {
+		t.Fatal("expected incremental path to run")
+	}
+	if memCount != 0 {
+		t.Errorf("incremental memoryCount = %d, want 0 (auto-export must never include memories)", memCount)
+	}
+
+	got := readFile(t, exportPath)
+	if strings.Contains(got, "private context") {
+		t.Error("incremental auto-export leaked a memory record that was written after the baseline export — auto-export must never regenerate memories from live config")
+	}
+
+	// Control: an explicit full export with memories included stays clean —
+	// i.e. this isn't a case where the memory was never written at all.
+	fullPath := filepath.Join(t.TempDir(), "full-control.jsonl")
+	if _, memCount, err := exportToFile(ctx, fullPath, true); err != nil {
+		t.Fatalf("exportToFile control: %v", err)
+	} else if memCount != 1 {
+		t.Fatalf("control export memoryCount = %d, want 1 (sanity: the memory really was written)", memCount)
+	}
+}
+
+func TestTryIncrementalExport_PreservesPreExistingMemoryAcrossPatch(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+
+	h.mustCreate(t, ctx, "mem-b", "Beta")
+	c1 := h.mustCommit(t, ctx, "baseline")
+
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	if err := h.store.SetConfig(ctx, kvPrefix+memoryPrefix+"kept-key", "kept context"); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	// A memory already exists in the file BEFORE any incremental patching —
+	// e.g. from an explicit `bd export --include-memories` the user ran by
+	// hand. Auto-export's incremental path must not destroy it.
+	if _, memCount, err := exportToFile(ctx, exportPath, true); err != nil {
+		t.Fatalf("exportToFile: %v", err)
+	} else if memCount != 1 {
+		t.Fatalf("baseline memoryCount = %d, want 1", memCount)
+	}
+
+	if err := h.store.UpdateIssue(ctx, "mem-b", map[string]interface{}{"title": "Beta updated"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	c2 := h.mustCommit(t, ctx, "mutate")
+
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	if err != nil {
+		t.Fatalf("tryIncrementalExport: %v", err)
+	}
+	if !didIncremental {
+		t.Fatal("expected incremental path to run")
+	}
+
+	got := readFile(t, exportPath)
+	if !strings.Contains(got, "kept context") {
+		t.Error("incremental patch destroyed a pre-existing memory record instead of preserving it")
+	}
+}
+
+// TestMaybeAutoExport_WorkingSetRevertIsCorrected is the be-shbed regression
+// test for PR #5806 review item 4 (LastDirtyIDs): in server mode, dolt
+// auto-commit is off, so uncommitted edits live only in the working set.
+// dolt_diff(anchorCommit, 'WORKING') only reports rows that differ from the
+// anchor COMMIT — if an issue is dirtied in export cycle N and then reverted
+// back to its committed value before cycle N+1, the working set once again
+// matches the anchor commit for that row, so dolt_diff reports no change —
+// even though the file on disk still shows the stale dirty value from cycle
+// N. Carrying forward the previous cycle's dirty IDs and re-patching them
+// unconditionally is what corrects this.
+func TestMaybeAutoExport_WorkingSetRevertIsCorrected(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1ms")
+
+	h.mustCreate(t, ctx, "revert-a", "Original title")
+	h.mustCommit(t, ctx, "baseline")
+
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("baseline maybeAutoExport: %v", err)
+	}
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	if got := loadIssueTitles(t, exportPath)["revert-a"]; got != "Original title" {
+		t.Fatalf("baseline title = %q, want %q", got, "Original title")
+	}
+
+	// Dirty the issue in the working set only (no commit) — matches server
+	// mode with dolt auto-commit off.
+	if err := h.store.UpdateIssue(ctx, "revert-a", map[string]interface{}{"title": "Dirty title"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue (dirty): %v", err)
+	}
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("dirty maybeAutoExport: %v", err)
+	}
+	if got := loadIssueTitles(t, exportPath)["revert-a"]; got != "Dirty title" {
+		t.Fatalf("dirty title = %q, want %q", got, "Dirty title")
+	}
+
+	// Revert to the committed value, again without committing. dolt_diff
+	// between the anchor commit and 'WORKING' now reports NO change for
+	// revert-a — without carrying it forward as a dirty ID from the
+	// previous cycle, the file would incorrectly keep showing "Dirty title".
+	if err := h.store.UpdateIssue(ctx, "revert-a", map[string]interface{}{"title": "Original title"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue (revert): %v", err)
+	}
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("revert maybeAutoExport: %v", err)
+	}
+	if got := loadIssueTitles(t, exportPath)["revert-a"]; got != "Original title" {
+		t.Errorf("after working-set revert, title = %q, want %q (LastDirtyIDs must carry revert-a forward so it gets re-patched even though dolt_diff(anchor, WORKING) reports no change for it)", got, "Original title")
+	}
+}
+
+func TestTryIncrementalExport_ExcludesConfiguredOwnerFromPatchedIssues(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+	initConfigForTest(t)
+	config.Set("export.exclude_owners", "bot-user")
+
+	h.mustCreate(t, ctx, "own-a", "Kept")
+	if err := h.store.CreateIssue(ctx, &types.Issue{
+		ID: "own-b", Title: "Original", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask,
+		CreatedBy: "bot-user",
+	}, "bot-user"); err != nil {
+		t.Fatalf("CreateIssue own-b: %v", err)
+	}
+	c1 := h.mustCommit(t, ctx, "baseline")
+
+	// Baseline full export: exportToFile already applies owner-exclusion, so
+	// own-b is correctly absent from the start — this test is about the
+	// INCREMENTAL patch path, not the baseline.
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+		t.Fatalf("exportToFile: %v", err)
+	}
+	if _, ok := loadIssueTitles(t, exportPath)["own-b"]; ok {
+		t.Fatal("sanity check: baseline full export should already exclude own-b")
+	}
+
+	// Mutate the excluded-owner issue. If tryIncrementalExport patches
+	// changed issues into the file without re-applying owner-exclusion,
+	// own-b would leak in here even though it never should have appeared.
+	if err := h.store.UpdateIssue(ctx, "own-b", map[string]interface{}{"title": "Mutated"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue own-b: %v", err)
+	}
+	c2 := h.mustCommit(t, ctx, "mutate")
+
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	if err != nil {
+		t.Fatalf("tryIncrementalExport: %v", err)
+	}
+	if !didIncremental {
+		t.Fatal("expected incremental path to run")
+	}
+
+	titles := loadIssueTitles(t, exportPath)
+	if _, leaked := titles["own-b"]; leaked {
+		t.Error("own-b belongs to an excluded owner but was patched into the export by the incremental path")
+	}
+	if _, ok := titles["own-a"]; !ok {
+		t.Error("own-a (kept owner, untouched) missing from export")
+	}
+}
+
+func TestTryIncrementalExport_PatchedLinesIncludeTypeField(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+
+	h.mustCreate(t, ctx, "typ-a", "Alpha")
+	c1 := h.mustCommit(t, ctx, "baseline")
+
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+	if _, _, err := exportToFile(ctx, exportPath, true); err != nil {
+		t.Fatalf("exportToFile: %v", err)
+	}
+
+	if err := h.store.UpdateIssue(ctx, "typ-a", map[string]interface{}{"title": "Alpha renamed"}, "tester"); err != nil {
+		t.Fatalf("UpdateIssue: %v", err)
+	}
+	c2 := h.mustCommit(t, ctx, "mutate")
+
+	_, _, _, didIncremental, err := tryIncrementalExport(ctx, exportPath, c1, c2, nil)
+	if err != nil {
+		t.Fatalf("tryIncrementalExport: %v", err)
+	}
+	if !didIncremental {
+		t.Fatal("expected incremental path to run")
+	}
+
+	data, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var rec struct {
+			ID   string `json:"id"`
+			Type string `json:"_type"`
+		}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal line %q: %v", line, err)
+		}
+		if rec.ID != "typ-a" {
+			continue
+		}
+		found = true
+		if rec.Type != "issue" {
+			t.Errorf(`patched line for typ-a has _type=%q, want "issue" — every issue record, including incrementally-patched ones, must carry a _type field so readers (and the auto-export shrink guard's own classifyExistingAutoExportRecord) can distinguish it from a memory or unknown record`, rec.Type)
+		}
+	}
+	if !found {
+		t.Fatal("typ-a not found in export after incremental patch")
 	}
 }
 
@@ -1844,6 +2277,48 @@ func loadIssueTitles(t *testing.T, path string) map[string]string {
 		if iss.ID != "" {
 			out[iss.ID] = iss.Title
 		}
+	}
+	return out
+}
+
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	return string(data)
+}
+
+// jsonlRecordsByID parses every issue record in an export file (skipping
+// memory records) into a generic map, keyed by "id". Used for
+// content-equivalence comparisons between an incrementally-patched export
+// and a fresh full export of the same state, where line order and byte
+// layout are allowed to differ but the field content must match exactly.
+func jsonlRecordsByID(t *testing.T, path string) map[string]map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", path, err)
+	}
+	out := make(map[string]map[string]interface{})
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.Contains(line, `"_type":"memory"`) {
+			continue
+		}
+		var rec map[string]interface{}
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal line %q: %v", line, err)
+		}
+		id, _ := rec["id"].(string)
+		if id == "" {
+			continue
+		}
+		out[id] = rec
 	}
 	return out
 }
