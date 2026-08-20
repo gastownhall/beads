@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -179,6 +180,8 @@ var createCmd = &cobra.Command{
 		if len(labelAlias) > 0 {
 			labels = append(labels, labelAlias...)
 		}
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")

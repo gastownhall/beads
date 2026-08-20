@@ -45,7 +45,7 @@
     },
     "envelope/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
-      "sha256": "f79e391ae3a508ae0ee6a7f63bd3708ac2140a8bcd9e6394a38992105c1c58de"
+      "sha256": "17d5eafb5a0147e81dca583ea572191a705ba793f5619c27d597705c299dcddd"
     },
     "envelope/list": {
       "cmd": "bd list --all --json",
@@ -113,7 +113,7 @@
     },
     "flat/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
-      "sha256": "29b5ecbc5404159e3a1e6a195aea7f2b444ba25b006108eb3c3d86e84e9eb531"
+      "sha256": "7d31206f17d193611086a67460f751f323b93ae4d8297861e680a2d4b444e116"
     },
     "flat/list": {
       "cmd": "bd list --all --json",

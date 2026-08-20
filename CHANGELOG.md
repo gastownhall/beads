@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd` warns when it stores a label containing a space**
+  ([#5813](https://github.com/gastownhall/beads/pull/5813)). Such a label is a
+  legitimate thing to ask for — `-l 'good first issue'` — and bd stores it as
+  asked rather than re-splitting a boundary the shell already decided. But it is
+  also exactly what a missed comma looks like, and that case cannot be told
+  apart from the deliberate one at the point of writing. A line on stderr
+  catches it at the keystroke instead of months later: `⚠ Stored "auth backend"
+  as ONE label — it contains a space.` It is advice, not an error; stdout is
+  untouched, so `--silent` still prints just the ID, and `--quiet` silences it.
+  Not emitted for `--remove-label`, since removing such a label is how the
+  damage gets repaired.
+
+- **`bd doctor` gains a `Label Whitespace` check** for finding damage already in
+  a database ([#5813](https://github.com/gastownhall/beads/pull/5813)). It
+  reports labels that contain whitespace or differ from their trimmed form, and
+  `bd doctor --fix` repairs them. The check is warn-only: a database with legacy
+  damage still exits 0. As with the rest of bare `bd doctor`, it does not yet
+  run in embedded mode (GH#3794).
+
 - **`bd stale` and `bd blocked` gain `--label`, `--label-any` and
   `--exclude-label`** ([#5822](https://github.com/gastownhall/beads/pull/5822)),
   with the same meanings and the same flag names they already have on `bd list`
@@ -134,6 +153,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and never POST. Once the backlog has decayed empty, spawns stop entirely; a
   machine that never enabled telemetry has no queue directory and never forks.
 
+- **`bd show` on a deleted or purged issue no longer prints text identical to
+  an ID that never existed** (ga-m6inyb). `bd delete` and wisp `purge` both
+  remove a row (and its `events`) from the live tables with no trace left
+  behind, so "not found" was collapsing two states that call for opposite
+  responses — archived (success) and never-existed (possibly lost data) —
+  into one observable. This had a real cost: a gate-reviewer session showed
+  a legitimate issue successfully, hit an unrelated mysql i/o timeout on a
+  retry moments later, got the identical "not found" text for the same ID,
+  and reasonably concluded data had been lost — when the issue had simply
+  been archived in between. `bd show` on a missing ID now adds a second
+  line — `Hint: this ID may have never existed, or may reference a
+  deleted/purged record with no trace left in the live database — try 'bd
+  history <id>'` — pointing at the existing, opt-in `bd history <id>` for
+  anyone who wants to check further on a non-wisp issue (wisps are never
+  committed to history, purged or not, so there is no signal left to
+  recover for them). JSON output gains an additive `hint` field; the
+  existing `error` text is unchanged. **Direct-mode text output changes for
+  one path**: the single-ID not-found branch's first line changes from
+  `Error fetching <id>: no issue found matching "<id>"` to `Issue <id> not
+  found`, matching the wording the multi-ID and proxied-mode paths already
+  used (those two are unchanged aside from gaining the new second `Hint:`
+  line).
+
 - **Explicit commits now sweep the entire working set and report no-ops
   honestly.** In server mode, `bd vc commit` and `bd dolt commit` previously
   routed through the config-excluding automatic-commit path, so out-of-band
@@ -142,6 +184,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ignored wisp tables. A clean or otherwise non-committable working set reports
   `Nothing to commit` (`committed: false` in JSON) instead of attributing an
   unchanged HEAD to a new commit.
+
+- **Every CLI label write now normalizes its input, as every label filter
+  already did** ([#5813](https://github.com/gastownhall/beads/pull/5813),
+  fixes [#5812](https://github.com/gastownhall/beads/issues/5812)).
+  `utils.NormalizeLabels` (trim, drop empty, dedupe) was applied to `list`,
+  `search`, `ready`, `orphans`, `count` and workapi — and to no write path at
+  all. The filter trimmed its input and the store did not, so a label could not
+  match its own filter: `bd create --labels 'theme:a, theme:b'` stored
+  `theme:b` with pflag's leading space intact, and `bd list --label theme:b`
+  then returned nothing. The failure is silent in the worst way — a filtered
+  list quietly short of rows is indistinguishable from a complete one. One real
+  database had 150 such rows across 111 issues, found months later only because
+  theme-by-theme counts refused to reconcile. `create`, `quick`, `update`
+  (`--add-label`, `--remove-label`, `--set-labels`) and `tag` now normalize on
+  the way in. `--remove-label` matters as much as the additive flags: an
+  untrimmed `' theme:a'` silently removed nothing.
+
+  **`bd tag` is included deliberately.** Its help calls it "Shorthand for
+  `bd update <id> --add-label <label>`", and it was the last CLI door still
+  storing a positional verbatim. Normalization happens before the direct/proxied
+  route split, so the two routes cannot disagree. A label that is only
+  whitespace is now refused rather than dropped: the plural flags can discard an
+  empty element and still honor the rest of the request, but `bd tag` has one
+  label to add, so dropping it would report success having written nothing.
+
+  **Import and batch ingest are deliberately excluded** and keep round-trip
+  fidelity: what was exported is what is restored.
+
+- **`bd show` no longer corrupts shell globs and other quoted wildcards in a
+  description or notes**
+  ([#5799](https://github.com/gastownhall/beads/pull/5799)). CommonMark lets a
+  `*` or `_` run act as both an opener and a closer when the characters
+  flanking it fall in the same class, and a quoted glob is exactly that shape —
+  the `*` in `'*.captured'` sits between `'` and `.`. Two such runs therefore
+  paired, including across lines, since goldmark joins a paragraph's lines
+  before parsing. Everything between them rendered as emphasis: with color the
+  asterisks were consumed and **silently vanished** from the command, leaving a
+  still-plausible but different one on screen; without color, glamour's notty
+  style wrote a literal `**` into the middle of the text. Storage was never
+  affected — `bd show --json` always returned the body byte-for-byte — but the
+  rendered text is what a reader acts on, and what an agent reads when it takes
+  its instructions from a bead. Runs that can act as both opener and closer are
+  now hidden from the parser and restored afterwards, so `bd show` prints what
+  was stored.
+
+  **The known trade**, in two narrow shapes, both pinned by test: an authored
+  closer that is itself both-flanking no longer pairs, so `see *"quoted"*,
+  next` renders literally rather than italicized (color path only — notty
+  already printed it literally); and a backslash escape reaching for a
+  both-flanking delimiter keeps its backslash, so `\*.captured` renders as
+  `\*.captured`. An escape whose delimiter is not both-flanking, such as
+  `a \*literal\* b`, is unchanged. Both are shapes CommonMark itself treats as
+  ambiguous, and for a bead body — stored plain text, not authored markdown —
+  showing the stored characters is the better of the two failures. Ordinary
+  emphasis (`**bold**`, `*italic*`), `SELECT * FROM t`, code spans and fenced
+  blocks all render exactly as before.
 
 - **`bd blocked` silently ignored the label filters it already accepted**
   ([#5822](https://github.com/gastownhall/beads/pull/5822)).
