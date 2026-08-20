@@ -9,7 +9,7 @@
 **Base:** `origin/main` @ `7505e173f` ("chore(release): forward-port v1.2.2 to main (#5782)")
 **Merge-base:** `7505e173f` — identical to origin/main tip; clean fast-forward, 0 self-rebase needed
 **Merge-tree simulation:** `git merge-tree --write-tree origin/main 2dbcbd7f2` → tree `f102e1300`, exit 0, **zero conflicts**
-**PR:** https://github.com/gastownhall/beads/pull/5835 (`quad341/beads-sec003-contrib:deploy/be-gd3v-gate` → `gastownhall:main`), state OPEN, `headRefOid` = `2dbcbd7f2a8782527fe4b496d497970f21f414be` (matches gated SHA exactly, no drift), `mergeable: MERGEABLE`
+**PR:** https://github.com/gastownhall/beads/pull/5835 (`quad341/beads-sec003-contrib:deploy/be-gd3v-gate` → `gastownhall:main`), state OPEN, `headRefOid` = `2dbcbd7f2a8782527fe4b496d497970f21f414be` (matched the gated SHA exactly, no drift) **as of this gate run** — see *Post-gate history* below, `mergeable: MERGEABLE`
 
 ## Verdict: PASS — all 7 criteria clear
 
@@ -30,3 +30,20 @@
 
 - **PR opened, not merged.** `gastownhall/beads` is a contributor-only repo (no push/merge rights); the deployer's job ends at the open PR regardless of gate outcome — no merge-request routed, no waiting on mayor.
 - Gate is a clean PASS with no waivers, no substitutes, and no open blockers — unlike the sibling `be-vc1m` deploy currently parked on this rig, this diff's criterion 3 has a real, fresh, fully-green test result.
+
+## Post-gate history
+
+This gate's verdict describes `2dbcbd7f2` and nothing after it. The branch head
+has advanced since, so the `headRefOid` line above is a snapshot rather than a
+standing claim — the commit that added *this file* was itself the first to move
+the head past the gated SHA, which makes the unqualified "no drift" reading
+self-contradictory. Recorded rather than silently corrected, since the PASS is
+still accurate about what it examined:
+
+| After the gate | What it is |
+|---|---|
+| `b15b80077` | `docs(release-gates)`: added this gate document. Docs only; no code in the gated diff changed. |
+| round-3 review response | Addresses PR #5835's `CHANGES_REQUESTED` review: `PortSource` propagation at four previously unthreaded `dolt.Config` sites, the CHANGELOG entry criterion 2's non-blocking observation foreshadowed, and this note. Code changes here are **not** covered by the criteria walk above. |
+
+Re-gating is the deployer's call, not the investigator's; this section exists so
+that call is made against an accurate record.
