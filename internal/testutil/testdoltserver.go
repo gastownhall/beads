@@ -319,11 +319,26 @@ func ensureSharedContainer() {
 // Sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
 func EnsureDoltContainerForTestMain() error {
 	if state := checkDolt(); state != doltReady {
+		neutralizeAmbientDoltPort()
 		return fmt.Errorf("%s", state)
 	}
 
 	ensureSharedContainer()
+	if doltServerErr != nil {
+		neutralizeAmbientDoltPort()
+	}
 	return doltServerErr
+}
+
+// neutralizeAmbientDoltPort clears the inherited connection-port variables so
+// that a TestMain which warns-and-continues without a container cannot resolve
+// a store onto whatever server the ambient environment names -- in a gc-managed
+// city, the production one (gm-2g3g5r). With no port resolvable,
+// applyConfigDefaults' BEADS_TEST_MODE guard forces port 1 and stores fail
+// closed instead of silently creating testdb_* on production.
+func neutralizeAmbientDoltPort() {
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_PORT")
 }
 
 // RequireDoltContainer ensures a shared Dolt container is running. Skips the
