@@ -136,6 +136,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Incremental auto-export now actually takes the incremental path**
+  ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection
+  compared `GetStateHash()` values — a hash of the entire database plus
+  working set (`DOLT_HASHOF_DB()`), not a commit — but `ChangedIssueIDs` feeds
+  both endpoints straight into `dolt_diff()`, which only accepts real commit
+  hashes or the literal `WORKING`. Every incremental attempt therefore failed
+  to resolve a diff and silently fell back to a full export: correct output,
+  but the incremental short-circuit this feature exists for never actually
+  ran. The "to" endpoint is now `WORKING` (dolt_diff's own literal for the
+  live working set) paired with the previous export's real commit hash as
+  "from", so the incremental path resolves and fires as designed.
+
+  Three format/scope regressions surfaced alongside the dead code path, since
+  nothing had ever exercised it end-to-end: the incremental patch could leak
+  **memories** into the auto-export output (full export filters them; the
+  patch path did not), could include the configured **owner**'s own issues
+  where full export excludes them, and omitted the `_type` discriminator field
+  full export always writes. All three now match full-export behavior exactly,
+  pinned by tests that diff a patched run's output against a from-scratch full
+  export of the same state. The patch write is also now atomic (write-temp +
+  rename), matching the full-export path's existing guarantee.
+
 - **Disabling telemetry no longer strands the queued eventsData backlog
   forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics
   *before* its prune step, and the spawn gate refused to schedule the child at

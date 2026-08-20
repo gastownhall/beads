@@ -132,12 +132,17 @@ func (s *DoltStore) ChangedIssueIDs(ctx context.Context, fromCommit, toCommit st
 		if err := rows.Scan(&id, &removed); err != nil {
 			return out, fmt.Errorf("scan dolt_diff row: %w", err)
 		}
-		// An issue row that was removed in 'issues' and then re-added in a
-		// later commit in the same range shows up once here with
-		// is_removed=1 for the removal and 0 for the re-add; MAX collapses
-		// to 1. That's a corner case we accept — a removed-then-readded
-		// issue simply gets re-exported as removed and the next export
-		// cycle will pick up the new row.
+		// MAX(is_removed) resolves an id that surfaces from more than one of
+		// the four unioned sub-selects (e.g. its own row is untouched but a
+		// comment on it changed) — only the 'issues' sub-select ever
+		// contributes is_removed=1, so MAX just lets that value win over the
+		// label/dependency/comment sub-selects' hardcoded 0. It is not
+		// resolving a remove-then-readd within the range: dolt_diff(from,
+		// to, table) diffs exactly those two snapshots rather than walking
+		// intermediate commits, so a single call can never emit both a 0 and
+		// a 1 row for the same id. An issue present at toCommit — even if it
+		// was deleted and re-added somewhere between fromCommit and
+		// toCommit — always reports is_removed=0 here.
 		if removed == 1 {
 			out.Removed = append(out.Removed, id)
 		} else {

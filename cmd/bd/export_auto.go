@@ -6,7 +6,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,6 +28,12 @@ import (
 // being cheaper than one `SearchIssues(Limit:0)` sweep.
 const incrementalExportThreshold = 5000
 
+// doltWorkingRef is the literal dolt_diff() accepts as an endpoint meaning
+// "the current working set", including uncommitted writes. Passing this
+// instead of a state/root hash is what lets incremental auto-export see
+// changes in server mode, where auto-commit is off and HEAD never moves.
+const doltWorkingRef = "WORKING"
+
 // slowExportWarnThreshold is the duration over which an auto-export is
 // considered slow enough to warn the user. Any single auto-export that
 // exceeds this prints a one-line stderr tip pointing at the fix levers.
@@ -40,6 +45,18 @@ type exportAutoState struct {
 	Timestamp      time.Time `json:"timestamp"`
 	Issues         int       `json:"issues"`
 	Memories       int       `json:"memories"`
+
+	// LastDiffAnchor is the real commit hash (never a working-set/state
+	// hash) used as tryIncrementalExport's fromCommit on the next cycle.
+	// dolt_diff() rejects non-commit values, so this must never be set from
+	// storeStateHash — only from store.GetCurrentCommit.
+	LastDiffAnchor string `json:"last_diff_anchor"`
+	// LastDirtyIDs carries the previous cycle's raw changed.Upserted ids
+	// forward so a working-set value that reverts between two cycles (diff
+	// against the anchor sees no net change) still gets re-patched against
+	// the live row instead of going stale. Self-healing: a cycle that finds
+	// nothing new for a carried id drops it, so this never grows unbounded.
+	LastDirtyIDs []string `json:"last_dirty_ids,omitempty"`
 }
 
 const exportAutoStateFile = "export-state.json"
@@ -136,9 +153,22 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// export range); fall back to a full export when the store doesn't support
 	// diffing, the commit range isn't diffable (e.g. state-hash values in server
 	// mode where auto-commit is off), or the change set exceeds the threshold.
+	//
+	// The diff anchor is always a real commit (never the working-set/state
+	// hash used for change detection above) — dolt_diff() rejects anything
+	// else — and the diff's "to" endpoint is always the literal "WORKING",
+	// which dolt_diff accepts and which captures uncommitted writes in
+	// server mode (where auto-commit is off and HEAD does not advance).
+	// Resolved after every early-return guard above so tests whose scenario
+	// is fully handled by those guards see no extra GetCurrentCommit call.
 	exportStart := time.Now()
-	issueCount, memoryCount, didIncremental, err := tryIncrementalExport(
-		ctx, fullPath, state.LastDoltCommit, currentCommit,
+	anchorCommit, anchorErr := store.GetCurrentCommit(ctx)
+	if anchorErr != nil {
+		debug.Logf("auto-export: failed to resolve diff anchor (%v); preserving previous anchor\n", anchorErr)
+		anchorCommit = state.LastDiffAnchor
+	}
+	issueCount, memoryCount, dirtyIDs, didIncremental, err := tryIncrementalExport(
+		ctx, fullPath, state.LastDiffAnchor, doltWorkingRef, state.LastDirtyIDs,
 	)
 	if err != nil {
 		debug.Logf("auto-export: incremental failed (%v); falling back to full\n", err)
@@ -149,6 +179,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export failed: %v\n", err)
 			return nil
 		}
+		dirtyIDs = nil
 	}
 
 	if dur := time.Since(exportStart); dur > slowExportWarnThreshold && !didIncremental {
@@ -179,6 +210,8 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		_ = os.Remove(fullPath)
 		saveExportAutoState(beadsDir, &exportAutoState{
 			LastDoltCommit: currentCommit,
+			LastDiffAnchor: anchorCommit,
+			LastDirtyIDs:   dirtyIDs,
 			Timestamp:      time.Now(),
 			Issues:         0,
 			Memories:       0,
@@ -198,6 +231,8 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 	// Save state
 	newState := exportAutoState{
 		LastDoltCommit: currentCommit,
+		LastDiffAnchor: anchorCommit,
+		LastDirtyIDs:   dirtyIDs,
 		Timestamp:      time.Now(),
 		Issues:         issueCount,
 		Memories:       memoryCount,
@@ -915,63 +950,80 @@ func pathInsideDir(path, dir string) bool {
 
 // tryIncrementalExport attempts to update an existing export file in place
 // by re-encoding only the issues that changed between fromCommit and
-// toCommit (per dolt_diff). Returns didIncremental=false when any
-// precondition fails so the caller can fall back to a full export.
-func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit string) (issueCount, memoryCount int, didIncremental bool, err error) {
+// toCommit (per dolt_diff), plus any ids carried over from the previous
+// cycle via carryIDs (exportAutoState.LastDirtyIDs). Returns
+// didIncremental=false when any precondition fails so the caller can fall
+// back to a full export.
+//
+// dirtyIDs returns the RAW diff's upserted ids (never carryIDs) for the
+// caller to persist as next cycle's carryIDs. Carrying only the
+// freshly-diffed ids — not the ones merely carried-in — makes a stable
+// no-op cycle self-heal: a carried id that produces no new diff simply
+// drops out instead of accumulating forever.
+func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit string, carryIDs []string) (issueCount, memoryCount int, dirtyIDs []string, didIncremental bool, err error) {
 	if fromCommit == "" {
 		debug.Logf("auto-export: incremental skipped — no prior commit hash recorded\n")
-		return 0, 0, false, nil
-	}
-	if fromCommit == toCommit {
-		debug.Logf("auto-export: incremental skipped — commit hash unchanged (%s)\n", fromCommit)
-		return 0, 0, false, nil
+		return 0, 0, nil, false, nil
 	}
 	// Existing file is a hard requirement — without it we have nothing to
 	// patch, and a full export is the right answer anyway.
 	if _, statErr := os.Stat(fullPath); statErr != nil {
 		debug.Logf("auto-export: incremental skipped — existing file not found: %v\n", statErr)
-		return 0, 0, false, nil
+		return 0, 0, nil, false, nil
 	}
 	ds, ok := storage.UnwrapStore(store).(storage.DiffStore)
 	if !ok {
 		debug.Logf("auto-export: incremental skipped — store does not implement DiffStore\n")
-		return 0, 0, false, nil
+		return 0, 0, nil, false, nil
 	}
 	changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, toCommit)
 	if diffErr != nil {
 		// Commits may be unreachable (history rewritten), in which case we
 		// cannot trust the diff. Fall back silently.
-		return 0, 0, false, diffErr
+		return 0, 0, nil, false, diffErr
 	}
-	debug.Logf("auto-export: diff %s..%s → upserted=%d removed=%d\n",
-		fromCommit, toCommit, len(changed.Upserted), len(changed.Removed))
-	total := len(changed.Upserted) + len(changed.Removed)
+	debug.Logf("auto-export: diff %s..%s → upserted=%d removed=%d carried=%d\n",
+		fromCommit, toCommit, len(changed.Upserted), len(changed.Removed), len(carryIDs))
+
+	// carryIDs must be folded in BEFORE the total==0 fast-path: a cycle
+	// whose raw diff is empty can still owe a re-patch for an id carried
+	// from last cycle (e.g. a working-set value that reverted between two
+	// diff anchors nets to "no change" against the anchor, but the live row
+	// still needs re-fetching to correct a stale patch from last cycle).
+	upsertIDs := unionStrings(changed.Upserted, carryIDs)
+	total := len(upsertIDs) + len(changed.Removed)
 	if total == 0 {
-		// The commit hash changed but no relevant tables did. Still a
-		// valid "incremental" outcome: no issues to rewrite, just refresh
-		// the file's memory section so nothing regresses.
-		issueCount, memoryCount, err = rewriteExportFile(ctx, fullPath, nil, nil, nil)
+		// Nothing changed and nothing carried over. Still a valid
+		// "incremental" outcome: no issues to rewrite, just refresh the
+		// file in place so nothing regresses.
+		issueCount, memoryCount, err = rewriteExportFile(fullPath, nil, nil, nil)
 		if err != nil {
-			return 0, 0, false, err
+			return 0, 0, nil, false, err
 		}
-		return issueCount, memoryCount, true, nil
+		return issueCount, memoryCount, changed.Upserted, true, nil
 	}
 	if total > incrementalExportThreshold {
 		debug.Logf("auto-export: %d changes exceeds threshold %d; full export\n",
 			total, incrementalExportThreshold)
-		return 0, 0, false, nil
+		return 0, 0, nil, false, nil
 	}
 
-	// Fetch fresh data for upserted IDs and apply the same
-	// template/infra filter the full export uses.
+	// Fetch fresh data for upserted IDs (including anything carried over
+	// from last cycle) and apply the same template/infra/owner filters the
+	// full export uses.
 	var records map[string][]byte
 	droppedByFilter := make(map[string]bool)
-	if len(changed.Upserted) > 0 {
-		issues, fetchErr := store.GetIssuesByIDs(ctx, changed.Upserted)
+	if len(upsertIDs) > 0 {
+		issues, fetchErr := store.GetIssuesByIDs(ctx, upsertIDs)
 		if fetchErr != nil {
-			return 0, 0, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)
+			return 0, 0, nil, false, fmt.Errorf("GetIssuesByIDs: %w", fetchErr)
 		}
 		infraSet := store.GetInfraTypes(ctx)
+		// Owner-exclusion safety net, mirroring exportToFile's: without
+		// this, a config-excluded owner's issue that changes would leak
+		// into the git-committed JSONL via the incremental path even
+		// though the full-export path always excludes it (be-shbed).
+		ownerExcludes := buildOwnerExcludeSet(ctx, storeExportSource{}, nil)
 		filtered := make([]*types.Issue, 0, len(issues))
 		for _, iss := range issues {
 			// Record IDs that GetIssuesByIDs returned but we deliberately
@@ -986,11 +1038,15 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 				droppedByFilter[iss.ID] = true
 				continue
 			}
+			if _, excluded := ownerExcludes[iss.CreatedBy]; excluded {
+				droppedByFilter[iss.ID] = true
+				continue
+			}
 			filtered = append(filtered, iss)
 		}
 		records, err = encodeIssueRecords(ctx, filtered)
 		if err != nil {
-			return 0, 0, false, err
+			return 0, 0, nil, false, err
 		}
 		// NOTE: upserted IDs absent from GetIssuesByIDs's result are
 		// intentionally NOT dropped. We used to flag them as "removed",
@@ -1008,18 +1064,41 @@ func tryIncrementalExport(ctx context.Context, fullPath, fromCommit, toCommit st
 		removed[id] = true
 	}
 
-	issueCount, memoryCount, err = rewriteExportFile(ctx, fullPath, records, removed, changed.Upserted)
+	issueCount, memoryCount, err = rewriteExportFile(fullPath, records, removed, upsertIDs)
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, nil, false, err
 	}
-	return issueCount, memoryCount, true, nil
+	return issueCount, memoryCount, changed.Upserted, true, nil
+}
+
+// unionStrings returns the deduplicated union of a and b, preserving a's
+// element order followed by any of b's elements not already present in a.
+func unionStrings(a, b []string) []string {
+	if len(b) == 0 {
+		return a
+	}
+	seen := make(map[string]bool, len(a)+len(b))
+	out := make([]string, 0, len(a)+len(b))
+	for _, s := range a {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // rewriteExportFile applies a set of upserts and removals to an existing
 // JSONL export and writes the result atomically. upsertOrder preserves
 // append order for brand-new issue IDs; previously-present IDs keep their
 // original file position even when their bodies are replaced.
-func rewriteExportFile(ctx context.Context, path string, upserts map[string][]byte, removed map[string]bool, upsertOrder []string) (issueCount, memoryCount int, err error) {
+func rewriteExportFile(path string, upserts map[string][]byte, removed map[string]bool, upsertOrder []string) (issueCount, memoryCount int, err error) {
 	lines, err := loadExistingIssueLines(path)
 	if err != nil {
 		return 0, 0, fmt.Errorf("read existing export: %w", err)
@@ -1040,56 +1119,52 @@ func rewriteExportFile(ctx context.Context, path string, upserts map[string][]by
 		lines.remove(id)
 	}
 
-	tmpPath := path + ".tmp"
-	f, err := os.Create(tmpPath) //nolint:gosec // user-configured output path
+	w, err := atomicfile.Create(path, 0o644)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, fmt.Errorf("failed to create export file: %w", err)
 	}
-	bw := bufio.NewWriter(f)
-
-	abort := func(e error) (int, int, error) {
-		_ = bw.Flush()
-		_ = f.Close()
-		_ = os.Remove(tmpPath)
-		return 0, 0, e
-	}
+	defer func() {
+		if err != nil {
+			_ = w.Abort()
+		}
+	}()
 
 	lines.each(func(id string, line []byte) {
 		if err != nil {
 			return
 		}
-		if _, werr := bw.Write(line); werr != nil {
+		if _, werr := w.Write(line); werr != nil {
 			err = werr
 			return
 		}
-		if werr := bw.WriteByte('\n'); werr != nil {
+		if _, werr := w.Write([]byte{'\n'}); werr != nil {
 			err = werr
 			return
 		}
 		issueCount++
 	})
 	if err != nil {
-		return abort(err)
+		return 0, 0, fmt.Errorf("failed to write issue line: %w", err)
 	}
 
-	memoryCount, err = writeMemoryRecords(ctx, bw)
-	if err != nil {
-		return abort(fmt.Errorf("write memories: %w", err))
+	// Re-emit whatever memory lines were already in the file, verbatim and
+	// unchanged — auto-export never reads live config for memories (that
+	// would leak private agent context into git history, GH#3650). A file
+	// with no prior memory section (the auto-export-only common case) stays
+	// that way; a file seeded by a manual `bd export --include-memories`
+	// keeps its memories across every subsequent incremental patch.
+	for _, memLine := range lines.memoryLines {
+		if _, werr := w.Write(memLine); werr != nil {
+			return 0, 0, fmt.Errorf("failed to write memory line: %w", werr)
+		}
+		if _, werr := w.Write([]byte{'\n'}); werr != nil {
+			return 0, 0, fmt.Errorf("failed to write newline: %w", werr)
+		}
+		memoryCount++
 	}
 
-	if err := bw.Flush(); err != nil {
-		return abort(fmt.Errorf("flush: %w", err))
-	}
-	if err := f.Sync(); err != nil {
-		return abort(fmt.Errorf("sync: %w", err))
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmpPath)
-		return 0, 0, fmt.Errorf("close: %w", err)
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		_ = os.Remove(tmpPath)
-		return 0, 0, fmt.Errorf("rename: %w", err)
+	if err := w.Close(); err != nil {
+		return 0, 0, fmt.Errorf("failed to finalize export: %w", err)
 	}
 	return issueCount, memoryCount, nil
 }
@@ -1098,9 +1173,16 @@ func rewriteExportFile(ctx context.Context, path string, upserts map[string][]by
 // line (without trailing newline). Removal is O(1) via the map; the order
 // slice may contain IDs that have since been removed, which the iterator
 // skips.
+//
+// memoryLines carries forward any pre-existing memory records verbatim.
+// Auto-export never regenerates memories from live config (GH#3650 — that
+// would leak private agent context into git history), so a file seeded by a
+// manual `bd export --include-memories` must have its memory lines preserved
+// byte-for-byte across every subsequent incremental patch.
 type orderedIssueLines struct {
-	order []string
-	lines map[string][]byte
+	order       []string
+	lines       map[string][]byte
+	memoryLines [][]byte
 }
 
 func newOrderedIssueLines() *orderedIssueLines {
@@ -1127,10 +1209,10 @@ func (o *orderedIssueLines) each(fn func(id string, line []byte)) {
 }
 
 // loadExistingIssueLines parses a JSONL export file and returns an
-// orderedIssueLines containing only the issue records (memory records are
-// skipped — the caller re-emits them from the current config). Missing
-// file returns an empty set so first-incremental callers behave like a
-// fresh write.
+// orderedIssueLines with issue records keyed by id and any memory records
+// captured verbatim into memoryLines (see the type doc — they are carried
+// forward, never regenerated). Missing file returns an empty set so
+// first-incremental callers behave like a fresh write.
 func loadExistingIssueLines(path string) (*orderedIssueLines, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is the user-configured export path
 	if err != nil {
@@ -1145,22 +1227,28 @@ func loadExistingIssueLines(path string) (*orderedIssueLines, error) {
 		if len(raw) == 0 {
 			continue
 		}
-		if bytes.Contains(raw, []byte(`"_type":"memory"`)) {
-			continue
-		}
+		// Struct-decode _type (mirroring classifyExistingAutoExportRecord)
+		// rather than substring-matching: robust to key order/spacing and
+		// unaffected by nested "id"/"_type" keys inside comments etc., since
+		// Go's decoder only ever populates the outer struct's fields.
 		var probe struct {
-			ID string `json:"id"`
+			Type string `json:"_type"`
+			ID   string `json:"id"`
 		}
 		if err := json.Unmarshal(raw, &probe); err != nil {
-			continue
-		}
-		if probe.ID == "" {
 			continue
 		}
 		// bytes.Split shares the backing buffer; copy so later appends
 		// can't silently overwrite our captured line.
 		cpy := make([]byte, len(raw))
 		copy(cpy, raw)
+		if probe.Type == "memory" {
+			out.memoryLines = append(out.memoryLines, cpy)
+			continue
+		}
+		if probe.ID == "" {
+			continue
+		}
 		out.set(probe.ID, cpy)
 	}
 	return out, nil
@@ -1193,11 +1281,14 @@ func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string]
 			counts = &types.DependencyCounts{}
 		}
 		sanitizeZeroTime(iss)
-		rec := &types.IssueWithCounts{
-			Issue:           iss,
-			DependencyCount: counts.DependencyCount,
-			DependentCount:  counts.DependentCount,
-			CommentCount:    commentCounts[iss.ID],
+		rec := &exportIssueRecord{
+			RecordType: "issue",
+			IssueWithCounts: &types.IssueWithCounts{
+				Issue:           iss,
+				DependencyCount: counts.DependencyCount,
+				DependentCount:  counts.DependentCount,
+				CommentCount:    commentCounts[iss.ID],
+			},
 		}
 		data, err := json.Marshal(rec)
 		if err != nil {
@@ -1206,39 +1297,4 @@ func encodeIssueRecords(ctx context.Context, issues []*types.Issue) (map[string]
 		out[iss.ID] = data
 	}
 	return out, nil
-}
-
-// writeMemoryRecords emits memory records (kv.memory.* config entries) to
-// w in the same format the full export uses. Errors from GetAllConfig are
-// swallowed to match the full-export path's behavior.
-func writeMemoryRecords(ctx context.Context, w io.Writer) (int, error) {
-	allConfig, err := store.GetAllConfig(ctx)
-	if err != nil {
-		return 0, nil //nolint:nilerr // match full-export tolerance
-	}
-	fullPrefix := kvPrefix + memoryPrefix
-	count := 0
-	for k, v := range allConfig {
-		if !strings.HasPrefix(k, fullPrefix) {
-			continue
-		}
-		userKey := strings.TrimPrefix(k, fullPrefix)
-		record := map[string]string{
-			"_type": "memory",
-			"key":   userKey,
-			"value": v,
-		}
-		data, err := json.Marshal(record)
-		if err != nil {
-			continue
-		}
-		if _, err := w.Write(data); err != nil {
-			return count, err
-		}
-		if _, err := w.Write([]byte{'\n'}); err != nil {
-			return count, err
-		}
-		count++
-	}
-	return count, nil
 }

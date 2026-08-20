@@ -259,6 +259,30 @@ func (f *fakeHeadOnlyStore) SearchIssues(_ context.Context, _ string, _ types.Is
 	return f.issues, nil
 }
 
+// The four bulk-relation loaders below let exportToFile's full-export path
+// (maybeAutoExport's fallback when incremental isn't available) run to
+// completion against this fake: it unconditionally calls all of them
+// whenever SearchIssues returns at least one issue.
+func (f *fakeHeadOnlyStore) GetLabelsForIssues(_ context.Context, _ []string) (map[string][]string, error) {
+	return nil, nil
+}
+
+func (f *fakeHeadOnlyStore) GetDependencyRecordsForIssues(_ context.Context, _ []string) (map[string][]*types.Dependency, error) {
+	return nil, nil
+}
+
+func (f *fakeHeadOnlyStore) GetCommentsForIssues(_ context.Context, _ []string) (map[string][]*types.Comment, error) {
+	return nil, nil
+}
+
+func (f *fakeHeadOnlyStore) GetCommentCounts(_ context.Context, _ []string) (map[string]int, error) {
+	return nil, nil
+}
+
+func (f *fakeHeadOnlyStore) GetDependencyCounts(_ context.Context, _ []string) (map[string]*types.DependencyCounts, error) {
+	return nil, nil
+}
+
 // spyDiffStore wraps a real DoltStorage and counts ChangedIssueIDs calls,
 // while delegating every method — including the optional StateHasher/
 // DiffStore capability interfaces — to the wrapped store. It does NOT
