@@ -228,6 +228,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   emphasis (`**bold**`, `*italic*`), `SELECT * FROM t`, code spans and fenced
   blocks all render exactly as before.
 
+- **`bd mol bond <A> <B>` ignored prefix routing** — operand resolution now uses
+  the same routing fallback as `bd show`/`bd update`/`bd close`, so a bead that
+  lives in a routed store (a prefix-routed rig via `routes.jsonl`, or the
+  contributor planning store) resolves instead of failing with `'<id>' not found
+  as issue or formula`. Previously `bd mol bond` resolved operands
+  against the local store only, so `gt sling <bead> <rig>` — which cooks the
+  default formula and bonds it to a rig-routed bead — died at `bd mol bond` even
+  though `bd show <bead>` resolved the same ID. Resolution is write-intent: a
+  prefix-routed target opens writable and the bond commits where the bead lives,
+  while a bond pinned to the contributor auto-routed store — which always opens
+  read-only because it hydrates a foreign project — fails fast with a clear
+  message before any mutation is attempted. Two operands that live in the same
+  routed rig share one store handle and bond normally; only a bond whose
+  operands resolve to genuinely different databases is rejected rather than
+  written to the wrong one. As part of this change, maintainer/default
+  auto-routed stores now open writable for any validated write-intent resolver
+  (`bd update`/`bd close` target resolution included, not just `mol bond`);
+  contributor auto-routes remain read-only and mutation-forbidden. Same
+  routing-parity fix as
+  [#3608](https://github.com/gastownhall/beads/issues/3608) for `bd close`.
+  Fixes [#4714](https://github.com/gastownhall/beads/issues/4714).
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now

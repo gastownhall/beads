@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
@@ -109,51 +110,89 @@ func runMolBond(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("no database connection")
 	}
 
+	discA, err := discoverMolBondOperand(ctx, store, in.argA, in.vars)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer discA.Close()
+	discB, err := discoverMolBondOperand(ctx, store, in.argB, in.vars)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	defer discB.Close()
+
+	targetID, targetStoreKey, err := validateMolBondHomes(store, discA, discB)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+
+	// Dry-run uses the exact same read-only discovery and store-policy
+	// validation as execution. It stops before writable reopen or formula cook.
 	if in.dryRun {
-		issueA, formulaA, err := resolveOrDescribe(ctx, store, in.argA, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		issueB, formulaB, err := resolveOrDescribe(ctx, store, in.argB, in.vars)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		renderMolBondDryRun(in, issueA, formulaA, issueB, formulaB)
+		renderMolBondDryRun(in, discA.issue, discA.formula, discB.issue, discB.formula)
 		return nil
 	}
 
-	subgraphA, cookedA, err := resolveOrCookToSubgraph(ctx, store, in.argA, in.vars)
+	// Close foreign read handles before opening the one accepted target home
+	// writable. Rejected cross-store bonds therefore never writable-open a
+	// foreign rig (and cannot trigger its open-time migrations).
+	discA.Close()
+	discB.Close()
+
+	activeStore := store
+	closeActiveStore := func() {}
+	if targetID != "" && targetStoreKey != dependencyStoreKey(store) {
+		rr, routeErr := resolveAndGetIssueForMutation(ctx, store, targetID)
+		if routeErr != nil {
+			return HandleErrorRespectJSON("%v", routeErr)
+		}
+		if routeErr := verifyMolBondWritableHome(rr, targetStoreKey); routeErr != nil {
+			rr.Close()
+			return HandleErrorRespectJSON("%v", routeErr)
+		}
+		activeStore = wireStorageDecorators(rr.Store, hookRunner, config.GetBool("no-hooks"))
+		closeActiveStore = rr.Close
+	}
+	defer closeActiveStore()
+
+	opA, err := materializeMolBondOperand(ctx, activeStore, discA, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	subgraphB, cookedB, err := resolveOrCookToSubgraph(ctx, store, in.argB, in.vars)
+	opB, err := materializeMolBondOperand(ctx, activeStore, discB, in.vars)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
+	subgraphA, cookedA := opA.subgraph, opA.cooked
+	subgraphB, cookedB := opB.subgraph, opB.cooked
 	issueA := subgraphA.Root
 	issueB := subgraphB.Root
 	aIsProto := issueA.IsTemplate || cookedA
 	bIsProto := issueB.IsTemplate || cookedB
 
+	// Dispatch based on operand types
+	// All operations use activeStore; phase flags determine ephemeral vs persistent.
 	var result *BondResult
 	switch {
 	case aIsProto && bIsProto:
-		result, err = bondProtoProto(ctx, store, issueA, issueB, in.bondType, in.customTitle, actor)
+		// Compound protos are templates - always persistent
+		// Note: Proto+proto bonding from formulas is a DB operation, not in-memory
+		result, err = bondProtoProto(ctx, activeStore, issueA, issueB, in.bondType, in.customTitle, actor)
 	case aIsProto && !bIsProto:
 		if cookedA {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, activeStore, subgraphA, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
 		} else {
-			result, err = bondProtoMol(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMol(ctx, activeStore, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
 		}
 	case !aIsProto && bIsProto:
 		if cookedB {
-			result, err = bondProtoMolWithSubgraph(ctx, store, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondProtoMolWithSubgraph(ctx, activeStore, subgraphB, issueB, issueA, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
 		} else {
-			result, err = bondMolProto(ctx, store, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
+			result, err = bondMolProto(ctx, activeStore, issueA, issueB, in.bondType, in.vars, in.childRef, actor, in.ephemeral, in.pour)
 		}
 	default:
-		result, err = bondMolMol(ctx, store, issueA, issueB, in.bondType, actor)
+		result, err = bondMolMol(ctx, activeStore, issueA, issueB, in.bondType, actor)
 	}
 	if err != nil {
 		return HandleErrorRespectJSON("bonding: %v", err)
@@ -604,11 +643,162 @@ func minPriority(a, b int) int {
 	return b
 }
 
+type molBondOperand struct {
+	subgraph *TemplateSubgraph
+	cooked   bool
+}
+
+// molBondDiscovery is the read-only phase of operand resolution. Existing
+// issues retain their logical store home; formulas remain storeless.
+type molBondDiscovery struct {
+	operand           string
+	issue             *types.Issue
+	formula           string
+	store             storage.DoltStorage
+	storeKey          string
+	mutationForbidden bool
+	closeFn           func()
+}
+
+func (d *molBondDiscovery) Close() {
+	if d != nil && d.closeFn != nil {
+		d.closeFn()
+		d.closeFn = nil
+	}
+}
+
+// discoverMolBondOperand resolves issue-first through read-only routing. This
+// lets store-policy validation finish before any foreign database is opened
+// writable. Formula fallback remains unconditional: the parser decides whether
+// an operand names a formula (#3874).
+func discoverMolBondOperand(ctx context.Context, localStore storage.DoltStorage, operand string, vars map[string]string) (*molBondDiscovery, error) {
+	rr, err := resolveAndGetIssueWithRouting(ctx, localStore, operand)
+	if err == nil {
+		return &molBondDiscovery{
+			operand:           operand,
+			issue:             rr.Issue,
+			store:             rr.Store,
+			storeKey:          dependencyStoreKey(rr.Store),
+			mutationForbidden: rr.MutationForbidden,
+			closeFn:           rr.Close,
+		}, nil
+	}
+	parser := formula.NewParser()
+	f, loadErr := parser.LoadByName(operand)
+	if loadErr == nil {
+		// Discovery must fail the same way materialization would: an
+		// enum/pattern/provided-empty violation in --var values fails the
+		// cook, so surfacing it here makes --dry-run and execution reject
+		// the bond identically, before any writable reopen (#5253).
+		if err := formula.ValidateProvidedVars(f, vars); err != nil {
+			return nil, err
+		}
+		return &molBondDiscovery{operand: operand, formula: f.Formula}, nil
+	}
+	if !isNotFoundErr(err) {
+		return nil, err
+	}
+	return nil, fmt.Errorf("'%s' not found as issue or formula: %w", operand, loadErr)
+}
+
+// validateMolBondHomes returns the issue and logical store that pin the
+// mutation. Formula-only bonds stay local. All checks use read-only handles.
+func validateMolBondHomes(localStore storage.DoltStorage, discoveries ...*molBondDiscovery) (string, string, error) {
+	var targetID, targetKey string
+	var targetStore storage.DoltStorage
+	for _, d := range discoveries {
+		if d == nil || d.issue == nil {
+			continue
+		}
+		if d.mutationForbidden {
+			return "", "", fmt.Errorf("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", d.issue.ID)
+		}
+		if targetStore == nil {
+			targetID, targetKey, targetStore = d.issue.ID, d.storeKey, d.store
+			continue
+		}
+		if !sameBondStore(targetStore, d.store) {
+			return "", "", fmt.Errorf("cannot bond %s and %s: they live in different stores/rigs; run the bond from the rig that owns them", targetID, d.issue.ID)
+		}
+	}
+	if targetStore == nil {
+		return "", dependencyStoreKey(localStore), nil
+	}
+	return targetID, targetKey, nil
+}
+
+// verifyMolBondWritableHome closes the TOCTOU gap between read-only discovery
+// and writable reopen. Routing or local contents may change between phases; a
+// bond must never mutate a logical store that was not the validated home.
+func verifyMolBondWritableHome(rr *RoutedResult, expectedStoreKey string) error {
+	if rr == nil || rr.Store == nil {
+		return fmt.Errorf("routed bond target reopened without a store")
+	}
+	if rr.MutationForbidden {
+		return fmt.Errorf("cannot bond issue %s: contributor auto-routing forbids mutation; run the bond from the project that owns the issue", rr.ResolvedID)
+	}
+	if actual := dependencyStoreKey(rr.Store); actual != expectedStoreKey {
+		return fmt.Errorf("routed bond target changed between discovery and writable reopen (expected %s, got %s); retry the command", expectedStoreKey, actual)
+	}
+	return nil
+}
+
+// sameBondStore reports whether two store handles refer to the same underlying
+// database. dependencyStoreKey unwraps decorators before consulting
+// StoreLocator, so a HookFiringStore and a separately opened raw route handle
+// onto the same database compare equal.
+func sameBondStore(a, b storage.DoltStorage) bool {
+	if a == b {
+		return true
+	}
+	return dependencyStoreKey(a) == dependencyStoreKey(b)
+}
+
+// materializeMolBondOperand is the writable phase. After validation selects one
+// store home, existing issues are re-read there and formulas are cooked in
+// memory for the bond operation.
+func materializeMolBondOperand(ctx context.Context, activeStore storage.DoltStorage, d *molBondDiscovery, vars map[string]string) (*molBondOperand, error) {
+	if d == nil {
+		return nil, fmt.Errorf("missing mol bond operand")
+	}
+	if d.issue == nil {
+		subgraph, err := resolveAndCookFormulaWithVars(d.operand, nil, vars)
+		if err != nil {
+			if errors.Is(err, formula.ErrVarValidation) {
+				// Don't double-wrap: the operand IS a formula, and the --var
+				// values it was given fail enum/pattern/required-empty
+				// constraints, which is a distinct condition from "not found".
+				return nil, err
+			}
+			return nil, fmt.Errorf("'%s' not found as issue or formula: %w", d.operand, err)
+		}
+		return &molBondOperand{subgraph: subgraph, cooked: true}, nil
+	}
+
+	rr, err := resolveAndGetFromStore(ctx, activeStore, d.issue.ID, false)
+	if err != nil {
+		return nil, err
+	}
+	issue := rr.Issue
+	if isProto(issue) {
+		subgraph, err := loadTemplateSubgraph(ctx, activeStore, issue.ID)
+		if err != nil {
+			return nil, fmt.Errorf("loading proto subgraph '%s': %w", issue.ID, err)
+		}
+		return &molBondOperand{subgraph: subgraph}, nil
+	}
+	return &molBondOperand{
+		subgraph: &TemplateSubgraph{
+			Root:     issue,
+			Issues:   []*types.Issue{issue},
+			IssueMap: map[string]*types.Issue{issue.ID: issue},
+		},
+	}, nil
+}
+
 // resolveOrDescribe checks if an operand is an issue or formula without cooking.
-// Used for dry-run mode. Returns (issue, formulaName, error).
-// If it's an issue, issue is set. If it's a formula, formulaName is set.
+// Used by proxied-server dry-run mode. Returns (issue, formulaName, error).
 func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars map[string]string) (*types.Issue, string, error) {
-	// First, try to resolve as an existing issue
 	id, err := utils.ResolvePartialID(ctx, s, operand)
 	if err == nil {
 		issue, err := s.GetIssue(ctx, id)
@@ -617,10 +807,6 @@ func resolveOrDescribe(ctx context.Context, s molReader, operand string, vars ma
 		}
 	}
 
-	// Not found as issue — fall through to the formula registry. parser.LoadByName
-	// returns "formula %q not found in search paths" for genuinely unknown names,
-	// which is the right error. This matches the resolution behavior of
-	// bd formula show / bd mol seed / bd mol pour / bd cook.
 	parser := formula.NewParser()
 	f, err := parser.LoadByName(operand)
 	if err != nil {
