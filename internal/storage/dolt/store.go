@@ -2937,12 +2937,15 @@ func (s *DoltStore) Commit(ctx context.Context, message string) error {
 // configConflictsAreMemoryConvergent) — so widening the commit screen to the
 // whole kv. namespace cannot auto-resolve a genuine kv.* conflict; it only stops
 // generic `bd kv set` writes from wedging the pull. Config is staged explicitly
-// (via DOLT_ADD in commitWorkingSet) rather than through CommitWithConfig's
-// DOLT_COMMIT('-Am'), which was observed not to stage config reliably under the
-// server-mode stored-procedure path. Committing this clone's own kv.* rows as the
-// merge basis is the same explicit, user-initiated action CommitPending ('bd dolt
-// commit') already performs, so it does not widen the concurrent-writer race
-// GH#2455 guards against.
+// (via DOLT_ADD in commitWorkingSet) because this path must screen dirty config
+// rows before staging and admit only user kv.* data. GH#4412 also recorded an
+// older live server-mode case where DOLT_COMMIT('-Am') did not stage config;
+// CommitAll's pinned-server container test now proves that '-Am' stages config
+// on the supported path. The explicit loop remains necessary for this path's
+// narrower kv.* policy, not because CommitAll lacks server-mode coverage.
+// Committing this clone's own kv.* rows as the merge basis is the same explicit,
+// user-initiated action CommitPending ('bd dolt commit') already performs, so it
+// does not widen the concurrent-writer race GH#2455 guards against.
 func (s *DoltStore) commitBeforePull(ctx context.Context, message string) error {
 	return s.commitWorkingSet(ctx, message, configIncludeUserKVOnly)
 }

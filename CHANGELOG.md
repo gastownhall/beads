@@ -74,6 +74,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and never POST. Once the backlog has decayed empty, spawns stop entirely; a
   machine that never enabled telemetry has no queue directory and never forks.
 
+- **Explicit commits now sweep the entire working set and report no-ops
+  honestly.** In server mode, `bd vc commit` and `bd dolt commit` previously
+  routed through the config-excluding automatic-commit path, so out-of-band
+  config changes could remain dirty even though the command exited
+  successfully. Both commands now include config while continuing to exclude
+  ignored wisp tables. A clean or otherwise non-committable working set reports
+  `Nothing to commit` (`committed: false` in JSON) instead of attributing an
+  unchanged HEAD to a new commit.
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
