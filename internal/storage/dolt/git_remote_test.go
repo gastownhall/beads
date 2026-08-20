@@ -42,6 +42,18 @@ import (
 //
 // Run:
 //   go test -tags='cgo integration' -run TestGitRemote ./internal/storage/dolt/
+//
+// A fixture in this package (//go:build integration) may never assume the
+// dolt-sql-server process shares a filesystem or a loopback network
+// namespace with the test process. If a fixture needs an auxiliary resource
+// (a git remote, a second server, any external endpoint) that the *server*
+// must reach, provision that resource inside the server's own container via
+// Exec/CopyToContainer first. Reach for a bind-mount only with a written
+// justification for why in-container provisioning doesn't work. Do not
+// assume bare network reachability (127.0.0.1, host.docker.internal, or
+// otherwise) without verifying it directly against the container runtime
+// actually in use (this repo currently runs rootless Podman) — verify,
+// don't infer from a Docker-Desktop mental model.
 
 // gitRemoteSetup holds resources for a git-remote test scenario.
 type gitRemoteSetup struct {
@@ -588,16 +600,23 @@ func TestGitRemoteSpecialCharacters(t *testing.T) {
 	}
 }
 
-// --- Embedded driver git remote tests ---
+// --- DoltStore git remote tests ---
 //
 // These tests verify that Dolt's git remote support works through the
 // SQL driver, not just the CLI. This is the critical question for the
 // Dolt-in-Git spike: can we use store.Push() and store.Pull() with a
 // bare git repo as the remote?
+//
+// The DoltStore under test here always talks to the shared dolt-sql-server
+// test container over TCP (see testmain_test.go) — there is no in-process
+// "embedded" engine in this package to contrast it with. The bare git
+// remote these tests push/pull against is provisioned inside that same
+// container (see the rule at the top of this file), not on the host.
 
-// setupEmbeddedGitRemote creates a bare git repo and returns a DoltStore
-// connected with the bare repo configured as "origin".
-func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) {
+// setupContainerGitRemote creates a bare git repo inside the shared
+// dolt-sql-server container and returns a DoltStore connected with that
+// repo configured as "origin".
+func setupContainerGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) {
 	t.Helper()
 	skipIfNoDolt(t)
 	skipIfNoGit(t)
@@ -625,7 +644,7 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 
 	remoteURL := "file://" + remoteDir
 
-	// Create embedded DoltStore
+	// Create container DoltStore
 	doltDir := filepath.Join(baseDir, "embedded-dolt")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -640,7 +659,7 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 	})
 	if err != nil {
 		os.RemoveAll(baseDir)
-		t.Fatalf("failed to create embedded DoltStore: %v", err)
+		t.Fatalf("failed to create container DoltStore: %v", err)
 	}
 
 	// Set issue prefix (required for CreateIssue)
@@ -650,7 +669,7 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 		t.Fatalf("failed to set prefix: %v", err)
 	}
 
-	// Add git remote via embedded SQL
+	// Add git remote via SQL
 	if err := store.AddRemote(ctx, "origin", remoteURL); err != nil {
 		store.Close()
 		os.RemoveAll(baseDir)
@@ -672,14 +691,14 @@ func setupEmbeddedGitRemote(t *testing.T) (*DoltStore, *gitRemoteSetup, func()) 
 	return store, setup, cleanup
 }
 
-func TestGitRemoteEmbeddedPushPull(t *testing.T) {
-	store, setup, cleanup := setupEmbeddedGitRemote(t)
+func TestGitRemotePushPull(t *testing.T) {
+	store, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Create test data via embedded store
+	// Create test data via the store
 	issue := &types.Issue{
 		ID:        "emb-git-001",
 		Title:     "Embedded git remote test",
@@ -696,7 +715,7 @@ func TestGitRemoteEmbeddedPushPull(t *testing.T) {
 		t.Fatalf("Commit failed: %v", err)
 	}
 
-	// Push via embedded driver — this is the key verification
+	// Push via the store — this is the key verification
 	if err := store.Push(ctx); err != nil {
 		t.Fatalf("Push failed: %v", err)
 	}
@@ -713,11 +732,11 @@ func TestGitRemoteEmbeddedPushPull(t *testing.T) {
 		t.Errorf("clone: title = %q, want %q", rows[0]["title"], "Embedded git remote test")
 	}
 
-	// Now test Pull: add data in the clone, push via CLI, pull into embedded store
+	// Now test Pull: add data in the clone, push via CLI, pull into the store
 	sourceInsertIssue(t, cloneDir, "emb-git-002", "Added in clone")
 	sourceCommitAndPush(t, cloneDir, "Add emb-git-002 from clone")
 
-	// Pull via embedded driver
+	// Pull via the store
 	if err := store.Pull(ctx); err != nil {
 		t.Fatalf("Pull failed: %v", err)
 	}
@@ -732,11 +751,11 @@ func TestGitRemoteEmbeddedPushPull(t *testing.T) {
 		t.Errorf("pull: title = %q, want %q", title, "Added in clone")
 	}
 
-	t.Log("Embedded driver git remote push/pull verified successfully")
+	t.Log("git remote push/pull verified successfully")
 }
 
-func TestGitRemoteEmbeddedHasRemote(t *testing.T) {
-	store, _, cleanup := setupEmbeddedGitRemote(t)
+func TestGitRemoteHasRemote(t *testing.T) {
+	store, _, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -785,7 +804,7 @@ func TestGitRemotePushSkipsUserPrePushHook(t *testing.T) {
 		t.Skip("hook script uses POSIX shell; the bug + fix are platform-agnostic but this assertion isn't")
 	}
 
-	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	store, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -896,9 +915,9 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	// 2. Clone bootstraps from git remote (BootstrapFromGitRemote path)
 	// 3. Clone adds issues, commits, pushes
 	// 4. Source pulls — verifies bidirectional sync
-	// All via embedded DoltStore methods.
+	// All via DoltStore methods.
 
-	sourceStore, setup, cleanup := setupEmbeddedGitRemote(t)
+	sourceStore, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
@@ -926,8 +945,8 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 	}
 
 	// Step 2: Bootstrap clone from git remote
-	// Close source store first to avoid embedded driver conflicts,
-	// then use BootstrapFromGitRemoteWithDB + open a new embedded store.
+	// Close source store first to avoid driver conflicts,
+	// then use BootstrapFromGitRemoteWithDB + open a new store.
 	sourceStore.Close()
 
 	cloneDoltDir := filepath.Join(setup.baseDir, "clone-dolt")
@@ -1031,7 +1050,7 @@ func TestGitRemoteSyncRoundTrip(t *testing.T) {
 }
 
 func TestCreateIssueAfterPull(t *testing.T) {
-	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	store, setup, cleanup := setupContainerGitRemote(t)
 	defer cleanup()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
