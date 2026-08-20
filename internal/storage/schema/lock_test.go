@@ -628,6 +628,105 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 	}
 }
 
+// TestMigrateUpWithLockFreshBootstrapHealRetriesAbortedReset covers the reset
+// the server aborts rather than refuses. The capability is consumed before the
+// first attempt and cannot be re-armed, so treating that abort as final would
+// strand the interrupted bootstrap on DirtyTablesError for good; the heal has
+// to finish on a later attempt of the same authorized reset.
+func TestMigrateUpWithLockFreshBootstrapHealRetriesAbortedReset(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectDirtyGuardRefusal(t, mock)
+	expectFreshBootstrapIdentityMatch(mock)
+	// The abort Dolt actually produces: a server-side Error 1105 raised about a
+	// millisecond in, on a session that is fine before and after it.
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnError(errors.New("Error 1105 (HY000): context canceled"))
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	expectOnePendingMigration(t, mock)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	capability := testFreshBootstrapHealCapability()
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb",
+		WithFreshBootstrapHeal(capability, testBootstrapEndpoint))
+	if err != nil {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the retried reset to heal", err)
+	}
+	if applied != 1 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 1", applied)
+	}
+	if !capability.consumed.Load() {
+		t.Fatal("heal ran without consuming the capability")
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal pins the other
+// half: retrying is bounded, and a reset the server keeps refusing still fails
+// the migration with both the original refusal and the reset error. sqlmock's
+// ordered expectations fail the test on a fourth attempt.
+func TestMigrateUpWithLockFreshBootstrapHealResetFailureStaysFatal(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	expectDirtyGuardRefusal(t, mock)
+	expectFreshBootstrapIdentityMatch(mock)
+	for range freshBootstrapResetAttempts {
+		mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_RESET('--hard')")).
+			WillReturnError(errors.New("reset refused"))
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
+
+	_, err = MigrateUpWithLock(ctx, conn, "testdb",
+		WithFreshBootstrapHeal(testFreshBootstrapHealCapability(), testBootstrapEndpoint))
+	var dirtyErr *DirtyTablesError
+	if !errors.As(err, &dirtyErr) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the original *DirtyTablesError joined in", err)
+	}
+	if !strings.Contains(err.Error(), "reset refused") {
+		t.Fatalf("MigrateUpWithLock() error = %v, want the reset failure reported", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
 // expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
 // currentVersion issues to confirm a non-zero ignored cursor against the
 // schema it claims (gh 5033). They fire only for a non-zero cursor, in

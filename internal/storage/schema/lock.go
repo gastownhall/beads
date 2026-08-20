@@ -19,6 +19,14 @@ const (
 	// lock wait can time out and still leave room for a real retry.
 	migrationLockAcquireTimeoutSeconds = 5
 	migrationLockCleanupTimeout        = 5 * time.Second
+	// freshBootstrapResetAttempts bounds the heal path's DOLT_RESET retries.
+	// Small on purpose: this is a last-chance recovery, not a general retry
+	// budget, and a reset that is genuinely refused must still fail fast.
+	freshBootstrapResetAttempts = 3
+	// freshBootstrapResetRetryDelay spaces those attempts. The aborts this
+	// absorbs land within a millisecond, so the delay only has to let the
+	// session settle, not to wait out load.
+	freshBootstrapResetRetryDelay = 50 * time.Millisecond
 )
 
 var (
@@ -227,15 +235,61 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 		// second reset in the caller's outer retry loop.
 		fmt.Fprintf(stderr, "Discarding interrupted-bootstrap working set (%s) and re-running migrations…\n",
 			strings.Join(dirtyErr.Tables, ", "))
-		// Drained, not Exec'd: the very next thing this path does is re-run the
-		// whole MigrateUp pass on this same pinned connection, so an
-		// undrained proc result set here would poison every statement of it.
-		if resetErr := DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); resetErr != nil {
+		if resetErr := drainFreshBootstrapReset(ctx, conn); resetErr != nil {
 			return applied, errors.Join(err, fmt.Errorf("schema: fresh-bootstrap reset: %w", resetErr))
 		}
 		applied, err = MigrateUp(ctx, conn)
 	}
 	return applied, err
+}
+
+// drainFreshBootstrapReset discards an interrupted bootstrap's working set,
+// retrying an attempt that the server refused for a reason that is not the
+// caller's own cancellation.
+//
+// Retrying matters here specifically because the capability is already spent.
+// consumeIfCurrentIncarnation consumes it before the first attempt so that no
+// later pass can re-arm a second destructive reset, which also means whatever
+// this call returns is final for the database: a reset that fails leaves the
+// interrupted bootstrap refusing every future migration with DirtyTablesError,
+// and the only way back is a human running 'bd dolt commit'. Treating a single
+// refusal as final spends that one chance on a failure the next attempt would
+// not have hit.
+//
+// Dolt does abort a statement that way. On a healthy pinned session, with no
+// other session on the server and the statements either side of it succeeding,
+// CALL DOLT_RESET can come back as Error 1105 "context canceled" about a
+// millisecond after the server logs it starting — an abort from inside the
+// server, not a cancellation from this process (gastownhall/beads#5836 lane,
+// TestFreshBootstrapHealIncarnation).
+//
+// Retrying is safe: DOLT_RESET('--hard') is idempotent, and this stays inside
+// one authorized heal — same locked session, same incarnation, one consumed
+// capability. ctx.Err() is what separates the server aborting us from us being
+// canceled; the latter is not transient and must not spend the attempts left.
+func drainFreshBootstrapReset(ctx context.Context, conn *sql.Conn) error {
+	var err error
+	for attempt := range freshBootstrapResetAttempts {
+		if attempt > 0 {
+			fmt.Fprintf(stderr, "Bootstrap reset attempt %d/%d failed (%v); retrying…\n",
+				attempt, freshBootstrapResetAttempts, err)
+			select {
+			case <-ctx.Done():
+				return err
+			case <-time.After(freshBootstrapResetRetryDelay):
+			}
+		}
+		// Drained, not Exec'd: the very next thing this path does is re-run the
+		// whole MigrateUp pass on this same pinned connection, so an
+		// undrained proc result set here would poison every statement of it.
+		if err = DrainCall(ctx, conn, "CALL DOLT_RESET('--hard')"); err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return err
+		}
+	}
+	return err
 }
 
 // consumeIfCurrentIncarnation validates and atomically consumes c. All probes

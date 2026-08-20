@@ -134,6 +134,14 @@ func requireCleanTables(ctx context.Context, t *testing.T, store *DoltStore, tab
 //
 // Automatically marks the test as safe for parallel execution since each test
 // gets its own Dolt connection checked out to a unique branch.
+//
+// Build the test's context AFTER this call, not before. t.Parallel() below
+// parks the calling goroutine until the package's sequential phase finishes,
+// and acquireTestSlot() parks it again behind testSem. A deadline started
+// above this call is spent waiting to be resumed rather than on the test's
+// own work: on a full-suite shard that pause reaches minutes, so the context
+// arrives already expired and the first query fails with "context deadline
+// exceeded" after a few hundred milliseconds of measured test time.
 func setupTestStore(t *testing.T) (*DoltStore, func()) {
 	t.Helper()
 	skipIfNoDolt(t)

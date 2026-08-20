@@ -141,11 +141,11 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 func TestFederationVersionControlAPIs(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// setupTestStore already checked this store out to its own isolated
 	// branch (testutil.StartTestBranch), not the shared database's literal
@@ -255,11 +255,11 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 func TestFederationRemoteConfiguration(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// Add a remote (configuration only - won't actually connect)
 	// Production would use: dolthub://org/repo, s3://bucket/path, etc.
@@ -284,11 +284,11 @@ func TestFederationRemoteConfiguration(t *testing.T) {
 func TestFederationHistoryQueries(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// Create issue
 	issue := &types.Issue{
@@ -352,11 +352,11 @@ func TestFederationHistoryQueries(t *testing.T) {
 func TestFederationListRemotes(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// Initially no remotes (except possibly origin if Dolt adds one by default)
 	remotes, err := store.ListRemotes(ctx)
@@ -388,11 +388,11 @@ func TestFederationListRemotes(t *testing.T) {
 func TestFederationSyncStatus(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// Get status for a nonexistent peer (should not error, just return partial data)
 	status, err := store.SyncStatus(ctx, "nonexistent-peer")
@@ -415,11 +415,11 @@ func TestFederationSyncStatus(t *testing.T) {
 func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	peer := &storage.FederationPeer{
 		Name:        "peer-metadata-sync",
@@ -480,11 +480,11 @@ func federationStatusHasTable(t *testing.T, ctx context.Context, store *DoltStor
 func TestFederationPushPullMethods(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
 
 	// These should fail gracefully since no remote exists
 	err := store.PushTo(ctx, "nonexistent")
