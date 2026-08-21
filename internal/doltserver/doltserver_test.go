@@ -1743,6 +1743,39 @@ func TestResolveServerMode_EmbeddedMode(t *testing.T) {
 	}
 }
 
+func TestResolveServerMode_EnvPortImpliesExternal(t *testing.T) {
+	// A port arriving via env var (BEADS_DOLT_SERVER_PORT or the legacy
+	// BEADS_DOLT_PORT) is the orchestrator's signal that the server address
+	// is externally managed — GetDoltServerPort() already treats both as
+	// first-class port signals ("orchestrator sets this"). ResolveServerMode
+	// must agree, or a deployment whose port arrives via env var resolves
+	// owned even though bd never launched the server and ensureDoltInit
+	// never ran for it (be-9i0yq.1).
+	tests := []struct {
+		name   string
+		envVar string
+	}{
+		{"BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_SERVER_PORT"},
+		{"BEADS_DOLT_PORT", "BEADS_DOLT_PORT"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+			t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+			t.Setenv("BEADS_DOLT_PORT", "")
+			t.Setenv(tc.envVar, "13307")
+			config.ResetForTesting()
+
+			dir := t.TempDir()
+			mode := ResolveServerMode(dir)
+			if mode != ServerModeExternal {
+				t.Errorf("expected ServerModeExternal with %s set and no metadata.json, got %v", tc.envVar, mode)
+			}
+		})
+	}
+}
+
 func TestServerMode_String(t *testing.T) {
 	tests := []struct {
 		mode ServerMode
@@ -1853,6 +1886,37 @@ func TestResolveServerMode_EmbeddedHonoredWithoutServerEnv(t *testing.T) {
 	got := ResolveServerMode(beadsDir)
 	if got != ServerModeEmbedded {
 		t.Errorf("ResolveServerMode with no server env = %v, want ServerModeEmbedded", got)
+	}
+}
+
+func TestResolveServerMode_EnvPortOverridesStaleEmbedded(t *testing.T) {
+	// GH#2949 precedent applied to the port env var: a runtime
+	// BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT must beat stale
+	// dolt_mode=embedded metadata, same as the shared-server, explicit
+	// server-mode, and host env vars above (be-9i0yq.1).
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0750); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &configfile.Config{
+		Database: "dolt",
+		Backend:  "dolt",
+		DoltMode: configfile.DoltModeEmbedded,
+	}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "13307")
+	t.Setenv("BEADS_DOLT_PORT", "")
+	config.ResetForTesting()
+
+	got := ResolveServerMode(beadsDir)
+	if got != ServerModeExternal {
+		t.Errorf("ResolveServerMode with env port + stale embedded = %v, want ServerModeExternal", got)
 	}
 }
 
