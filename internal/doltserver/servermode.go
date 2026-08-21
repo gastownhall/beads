@@ -61,6 +61,32 @@ func (m ServerMode) String() string {
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
 func ResolveServerMode(beadsDir string) ServerMode {
+	return resolveServerMode(beadsDir, true)
+}
+
+// resolveServerModeIgnoringPortEnv is ResolveServerMode with check 2c
+// (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) skipped.
+//
+// Those env vars are also set ambiently on multi-agent rigs purely to route
+// bd's own client connections to a shared coordination server; setting them
+// does not disclaim beads' ownership of beadsDir's own local dolt server
+// process the way checks 1/2/2b (and metadata.json check 4) genuinely do.
+// Callers asking "should I auto-start a server" or "which server should I
+// talk to" want the full ResolveServerMode — an ambient port var correctly
+// means "route there instead of spawning a redundant one". Callers asking
+// "am I allowed to manage/kill OS processes for this directory's server
+// lifecycle" — currently only killStaleServersForDir's orphan-cleanup guard
+// (GH#2430) — must use this instead, or the ambient routing var falsely
+// disables cleanup for a directory beads still owns.
+func resolveServerModeIgnoringPortEnv(beadsDir string) ServerMode {
+	return resolveServerMode(beadsDir, false)
+}
+
+// resolveServerMode is the shared implementation behind ResolveServerMode
+// and resolveServerModeIgnoringPortEnv. honorPortEnv controls whether check
+// 2c (BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT) participates; see
+// resolveServerModeIgnoringPortEnv for why a caller would want it excluded.
+func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 	// 1. BEADS_DOLT_SERVER_MODE=1 env var -> external (explicit server mode)
 	if os.Getenv("BEADS_DOLT_SERVER_MODE") == "1" {
 		return ServerModeExternal
@@ -106,7 +132,9 @@ func ResolveServerMode(beadsDir string) ServerMode {
 	// port-only deployment to owned (ensureDoltInit would never run for
 	// it). Runs before the metadata.json checks for the same GH#2949
 	// reason as 1/2/2b: a runtime env var beats stale persisted metadata.
-	if doltServerPortFromEnv() > 0 {
+	//
+	// Skipped when honorPortEnv is false — see resolveServerModeIgnoringPortEnv.
+	if honorPortEnv && doltServerPortFromEnv() > 0 {
 		return ServerModeExternal
 	}
 

@@ -1749,7 +1749,8 @@ func LockPath(beadsDir string) string {
 // eligible for cleanup. Externally-managed servers are never killed.
 //
 // A process is considered "external" (never kill) when any of:
-//   - ResolveServerMode() returns ServerModeExternal (explicit port, shared server, etc.)
+//   - resolveServerModeIgnoringPortEnv() returns ServerModeExternal (explicit
+//     port/shared server declaration, embedded, etc.)
 //   - No PID file exists (beads has no record of starting a server)
 func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, string) bool, kill func(int) error) ([]int, error) {
 	if len(allPIDs) == 0 {
@@ -1759,9 +1760,19 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	// If auto-start is disabled the server is externally managed (e.g., by
 	// systemd or a manual bd dolt start), so we must not kill any processes.
 	// IsAutoStartDisabled covers the BEADS_DOLT_AUTO_START env var and
-	// dolt.auto-start config; ResolveServerMode covers explicit port/shared
-	// server/embedded configurations. Both indicate "not our server" (GH#2641).
-	if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
+	// dolt.auto-start config; resolveServerModeIgnoringPortEnv covers explicit
+	// port/shared server/embedded configurations. Both indicate "not our
+	// server" (GH#2641).
+	//
+	// This deliberately uses resolveServerModeIgnoringPortEnv, not the public
+	// ResolveServerMode: BEADS_DOLT_SERVER_PORT/BEADS_DOLT_PORT are also set
+	// ambiently on multi-agent rigs purely to route bd's own client
+	// connections to a shared coordination server, which says nothing about
+	// who owns beadsDir's own local server lifecycle. Honoring that env var
+	// here would make this guard skip orphan cleanup for a directory beads
+	// still owns, defeating the GH#2430 protection below for every process
+	// on such a rig.
+	if IsAutoStartDisabled() || resolveServerModeIgnoringPortEnv(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 
