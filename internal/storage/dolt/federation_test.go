@@ -43,11 +43,30 @@ import (
 //
 // See HOP docs: architecture/FEDERATION.md for full federation spec.
 
+// federationIsolationTimeout bounds TestFederationDatabaseIsolation's alpha/beta
+// store setup. It replaces a fixed 2*time.Minute context.WithTimeout that
+// reproducibly failed under ambient multi-agent host contention on this shared
+// rig (be-8zggi round 2: 6/6 failures, ~120s "context deadline exceeded"
+// creating the alpha store, at load average up to 143.96 with 30 concurrent
+// dolt sql-server processes) even though the same setup completes in well
+// under 10s in isolation (round 2's probe measured ~6.1s concurrent; round 3's
+// baseline measured 7.78s end-to-end). Round 2's base-ref comparison ruled out
+// migration-cost growth as the cause -- the pre-fix code failed identically
+// under the same conditions -- so this is sized for contention headroom, not
+// a bigger cold-init budget. In-package precedent: concurrent_test.go's
+// concurrentTestTimeout (60s, "longer than regular tests to allow for
+// contention") and initschema_idempotent_test.go's 3*time.Minute budget for a
+// single cold schema-init. This test pays that same per-town cold-init cost
+// twice, concurrently, so 5 minutes keeps comfortable headroom above both the
+// single-init precedent and the >=4-minute floor
+// TestFederationIsolationTimeoutHasContentionHeadroom enforces.
+const federationIsolationTimeout = 5 * time.Minute
+
 // TestFederationDatabaseIsolation verifies that two DoltStores have isolated databases
 func TestFederationDatabaseIsolation(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), federationIsolationTimeout)
 	defer cancel()
 
 	baseDir, err := os.MkdirTemp("", "federation-isolation-*")
