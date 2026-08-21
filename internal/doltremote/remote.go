@@ -1,6 +1,9 @@
 package doltremote
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // NativeSchemes are URL schemes that Dolt understands natively and should not
 // be converted through FromGitURL.
@@ -9,6 +12,7 @@ var NativeSchemes = []string{
 	"file://",
 	"aws://",
 	"gs://",
+	"s3://",
 	"git+https://",
 	"git+ssh://",
 	"git+http://",
@@ -62,31 +66,21 @@ func FromGitURL(url string) string {
 	return "git+" + url
 }
 
+var scpStyleGitURLPattern = regexp.MustCompile(`^(?:[a-zA-Z0-9._-]+@[a-zA-Z0-9][a-zA-Z0-9._-]*|[a-zA-Z0-9][a-zA-Z0-9._-]*\.[a-zA-Z0-9._-]*):[^\x00-\x1f\x7f]+$`)
+
 // isSCPStyleGitURL reports whether url looks like an SCP-style git remote:
-// either the classic user form (git@host:path) or the user-less form
-// (host:path). The user-less form is only recognized when the pre-colon
-// token looks like a hostname (contains a ".") so that dotless tokens such
-// as a Windows drive letter ("C:foo") are not mistaken for a host.
+// user@host:path, or host:path when the pre-colon token contains a "." so a
+// Windows drive letter ("C:foo") is not mistaken for a host. Anything that
+// carries a "://" scheme is never SCP-style, whatever else it contains, so a
+// query or path with "@" in it cannot turn an s3:// URL into a git remote.
 //
-// Known limitation: git itself also accepts dotless SSH config aliases in
-// this position (e.g. "github:org/repo.git", "localhost:repo.git"), which
-// the "." check above rejects. Those origins pass through unconverted and
-// won't canonically match an equivalent git+ssh://alias/... or
-// user@alias:path Dolt remote. This is a deliberate trade-off to keep
-// isWindowsDrivePath's single-letter-drive check from being the only guard
-// against misreading "C:foo" as a host; widening the rule (e.g. following
-// git's own convention of treating anything host:path as SCP-style unless
-// the pre-colon token is a single-letter drive) is tracked as a follow-up
-// rather than fixed here.
+// Known limitations: git also accepts dotless SSH config aliases
+// ("github:org/repo.git"); those pass through unconverted and will not
+// canonically match an equivalent git+ssh:// form. User and host are limited
+// to [a-zA-Z0-9._-], so non-ASCII userinfo and IDN hosts are not recognized
+// either.
 func isSCPStyleGitURL(url string) bool {
-	idx := strings.Index(url, ":")
-	if idx <= 0 || strings.Contains(url[:idx], "/") {
-		return false
-	}
-	if strings.Contains(url, "@") {
-		return true
-	}
-	return strings.Contains(url[:idx], ".")
+	return !strings.Contains(url, "://") && scpStyleGitURLPattern.MatchString(url)
 }
 
 // CanonicalForComparison returns a form of url suitable for equality checks
