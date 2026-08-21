@@ -174,6 +174,68 @@ func TestGetReadyWork_StatusFilter(t *testing.T) {
 	}
 }
 
+// TestGetReadyWork_CustomActiveCategory pins GH#5831: `bd ready` pins
+// StatusOpen, and that pin is the active category — built-in open plus any
+// custom status whose category is active. WIP/done/frozen/unspecified
+// customs stay out; in_progress stays out.
+func TestGetReadyWork_CustomActiveCategory(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	if err := store.SetConfig(ctx, "status.custom", "triaged:active,polishing:wip,shipped:done,parked:frozen,legacy"); err != nil {
+		t.Fatalf("SetConfig status.custom: %v", err)
+	}
+
+	mk := func(id string, status types.Status) {
+		t.Helper()
+		iss := &types.Issue{
+			ID:        id,
+			Title:     id,
+			Status:    types.StatusOpen,
+			Priority:  2,
+			IssueType: types.TypeTask,
+		}
+		if err := store.CreateIssue(ctx, iss, "tester"); err != nil {
+			t.Fatalf("CreateIssue %s: %v", id, err)
+		}
+		if status != types.StatusOpen {
+			if err := store.UpdateIssue(ctx, id, map[string]interface{}{"status": string(status)}, "tester"); err != nil {
+				t.Fatalf("UpdateIssue %s -> %s: %v", id, status, err)
+			}
+		}
+	}
+	mk("rw-ca-open", types.StatusOpen)
+	mk("rw-ca-active", types.Status("triaged"))
+	mk("rw-ca-wip", types.Status("polishing"))
+	mk("rw-ca-done", types.Status("shipped"))
+	mk("rw-ca-frozen", types.Status("parked"))
+	mk("rw-ca-legacy", types.Status("legacy"))
+	mk("rw-ca-inprog", types.StatusInProgress)
+
+	work, err := store.GetReadyWork(ctx, types.WorkFilter{Status: types.StatusOpen})
+	if err != nil {
+		t.Fatalf("GetReadyWork: %v", err)
+	}
+	got := map[string]bool{}
+	for _, w := range work {
+		got[w.ID] = true
+	}
+	if !got["rw-ca-open"] {
+		t.Errorf("built-in open missing from ready set: %v", issueIDs(work))
+	}
+	if !got["rw-ca-active"] {
+		t.Errorf("custom active-category status missing from ready set: %v", issueIDs(work))
+	}
+	for _, id := range []string{"rw-ca-wip", "rw-ca-done", "rw-ca-frozen", "rw-ca-legacy", "rw-ca-inprog"} {
+		if got[id] {
+			t.Errorf("%s should not appear in the StatusOpen ready set: %v", id, issueIDs(work))
+		}
+	}
+}
+
 func TestGetReadyWork_PriorityFilter(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()

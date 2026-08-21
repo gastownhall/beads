@@ -396,9 +396,23 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 		{
 			name:            "SingularStatusWinsOverStatuses",
 			filter:          types.WorkFilter{Status: "open", Statuses: []types.Status{"blocked", "pinned"}},
-			wantClause:      "status = ?",
+			wantClause:      "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))",
 			rejectClause:    "status IN (?",
 			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "OpenIncludesCustomActiveCategory",
+			filter:          types.WorkFilter{Status: types.StatusOpen},
+			wantClause:      "status IN (SELECT name FROM custom_statuses WHERE category = 'active')",
+			rejectClause:    "status IN ('open', 'in_progress')",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "NonOpenSingularStatusStaysExact",
+			filter:          types.WorkFilter{Status: types.StatusInProgress},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"in_progress"},
 		},
 		{
 			name:         "EmptyFilterLegacyDefault",
