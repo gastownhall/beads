@@ -1151,7 +1151,7 @@
     }
   },
   {
-    "name": "ready_flag_overrides_status",
+    "name": "ready_flag_honors_status",
     "params": {
       "ReadyFlag": true,
       "Status": "closed",
@@ -1159,7 +1159,7 @@
     },
     "config": {},
     "filter": {
-      "Status": "open",
+      "Status": "closed",
       "Statuses": null,
       "Priority": null,
       "IssueType": null,

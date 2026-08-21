@@ -224,7 +224,12 @@ func BuildListFilter(in issueops.ListRequest, cfg ListConfig) (types.IssueFilter
 	statusParts := splitStatusSelector(in.Status)
 	statusAll := len(statusParts) == 1 && statusParts[0] == "all"
 
-	if in.ReadyFlag {
+	// --ready defaults to open (the blocker-aware query's historical pin),
+	// but an explicit --status is an intersection, not an override. Dropping
+	// the selector used to answer `bd list --status X --ready` with the
+	// unfiltered ready set (GH#5832). `--status all` is the no-filter
+	// spelling, so the open default still applies there.
+	if in.ReadyFlag && (len(statusParts) == 0 || statusAll) {
 		s := types.StatusOpen
 		filter.Status = &s
 	} else if len(statusParts) > 0 && !statusAll {
