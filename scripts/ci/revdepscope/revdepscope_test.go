@@ -43,9 +43,13 @@ func TestScope(t *testing.T) {
 			allPackages:     []string{"schema", "dolt", "embeddeddolt", "uow", "unrelated"},
 			changedPackages: []string{"schema"},
 			deps: map[string][]string{
+				// go list -test -deps already returns each package's full
+				// transitive closure, so uow (which reaches schema via dolt)
+				// carries schema directly here too — the fixture mirrors that,
+				// not a one-hop import graph.
 				"dolt":         {"schema"},
 				"embeddeddolt": {"schema"},
-				"uow":          {"dolt"},
+				"uow":          {"dolt", "schema"},
 				"unrelated":    {"fmt"},
 			},
 			threshold:     0.9,
@@ -100,11 +104,15 @@ func TestScope(t *testing.T) {
 			wantPackages:  []string{"a", "b", "c", "d"},
 		},
 		{
-			name:            "caller reaching a changed package only through the supplied test-aware deps is scoped in",
-			allPackages:     []string{"schema", "domain_db"},
+			name: "caller reaching a changed package only through the supplied test-aware deps is scoped in",
+			allPackages: []string{
+				"schema", "domain_db",
+				"other1", "other2", "other3", "other4", "other5", "other6", "other7", "other8",
+			},
 			changedPackages: []string{"schema"},
 			deps: map[string][]string{
 				"domain_db": {"schema"},
+				"other1":    {"fmt"},
 			},
 			threshold:     0.9,
 			wantFullSuite: false,
