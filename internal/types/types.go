@@ -189,6 +189,34 @@ type Issue struct {
 	IsLitePartial bool `json:"-"`
 }
 
+// IssueSummary is a read-only narrow projection of Issue for list-shaped
+// rendering paths that don't dereference TEXT/JSON columns. Populated by
+// storage.SearchIssueSummaries, which SELECTs only the columns listed here.
+// Shape ratified by be-nu4.3.1 addendum: Pinned IS included, Metadata is NOT
+// — adding Metadata would re-introduce the JSON parse cost D3 exists to
+// eliminate.
+//
+// IssueSummary is read-only. No write methods accept it.
+//
+// The JSON tags mirror the same-named fields on Issue exactly (name, casing,
+// and omitempty), because this type backs list-shaped rendering and `bd list
+// --json` is one of that command's primary modes: a summary-backed list must
+// serialize to the same wire shape a full-Issue-backed one does, or every
+// consumer parsing bd output breaks silently. Keep them in sync with Issue.
+type IssueSummary struct {
+	ID        string     `json:"id"`
+	Title     string     `json:"title"`
+	Status    Status     `json:"status,omitempty"`
+	Priority  int        `json:"priority"` // No omitempty: 0 is valid (P0/critical)
+	IssueType IssueType  `json:"issue_type,omitempty"`
+	Assignee  string     `json:"assignee,omitempty"`
+	Pinned    bool       `json:"pinned,omitempty"`
+	Labels    []string   `json:"labels,omitempty"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
+	ClosedAt  *time.Time `json:"closed_at,omitempty"`
+}
+
 // ComputeContentHash creates a deterministic hash of the issue's content.
 // Uses all substantive fields (excluding ID, timestamps, and compaction metadata)
 // to ensure that identical content produces identical hashes across all clones.
@@ -1978,7 +2006,12 @@ type IssueFilter struct {
 	SkipWisps  bool // Q2: skip wisps table merge entirely (for callers that never return ephemeral results)
 	NoIDShrink bool // Q3: force Pattern A (full 47-col scan) even when Limit > 0
 
-	Offset   int
+	Offset int
+	// SortBy and SortDesc are honored by SearchIssues, SearchIssueIDs, and
+	// SearchIssueSummaries alike. All three sort implementations (SQL ORDER BY
+	// and the Go-side merge comparators) must order identically for a given
+	// SortBy value, or a post-merge limit cut can keep a different row set
+	// than SQL selected.
 	SortBy   string
 	SortDesc bool
 

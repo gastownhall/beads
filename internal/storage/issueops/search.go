@@ -31,6 +31,15 @@ func SearchIssueIDsInTx(ctx context.Context, tx DBTX, query string, filter types
 	return searchInTx(ctx, tx, query, filter, idProjection)
 }
 
+// SearchIssueSummariesInTx is the narrow-projection variant of
+// SearchIssuesInTx for list-shaped rendering paths: applies the same WHERE
+// clauses, wisp-merge semantics, and sort order as SearchIssuesInTx, but
+// projects only the columns in IssueSummaryColumns (plus a separate label
+// hydration pass) and returns []*types.IssueSummary instead of full issues.
+func SearchIssueSummariesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) ([]*types.IssueSummary, error) {
+	return searchInTx(ctx, tx, query, filter, summaryProjection)
+}
+
 // searchProjection describes how to project, scan, and dedup search results.
 // Adding a narrow-projection variant means adding a new projection literal —
 // not a parallel top-level function or wisp-merge wrapper, which is how the
@@ -119,6 +128,21 @@ var idProjection = searchProjection[string]{
 	},
 }
 
+// summaryProjection is the narrow list-rendering variant: reads
+// IssueSummaryColumns instead of the wide or lite column sets, scans with
+// ScanIssueSummaryFrom, and hydrates only labels (hydrateSummaryLabels) since
+// types.IssueSummary carries no Dependencies field to hydrate. idShrink stays
+// false (the zero value) — IssueSummaryColumns is already narrower than
+// IssueSelectColumnsLite, so Pattern B's extra id-scan round-trip isn't a
+// clear win here the way it is for the wide issueProjection.
+var summaryProjection = searchProjection[*types.IssueSummary]{
+	columns: func(_ FilterTables) string { return IssueSummaryColumns },
+	scan:    func(rows *sql.Rows) (*types.IssueSummary, error) { return ScanIssueSummaryFrom(rows) },
+	id:      func(s *types.IssueSummary) string { return s.ID },
+	hydrate: hydrateSummaryLabels,
+	less:    sqlbuild.LessSummary,
+}
+
 // hydrateIssueLabelsAndDeps bulk-loads labels (and optionally dependencies)
 // for the given issues. searchTableInTxT runs against exactly one of the
 // issues/wisps tables, so every ID here belongs to tables.Labels — we use
@@ -150,6 +174,29 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 			if deps, ok := depMap[issue.ID]; ok {
 				issue.Dependencies = deps
 			}
+		}
+	}
+	return nil
+}
+
+// hydrateSummaryLabels bulk-loads labels for the given summaries. Mirrors the
+// label half of hydrateIssueLabelsAndDeps; types.IssueSummary has no
+// Dependencies field, so there is no dependency-hydration half to mirror.
+func hydrateSummaryLabels(ctx context.Context, tx DBTX, tables FilterTables, summaries []*types.IssueSummary, filter types.IssueFilter) error {
+	if filter.SkipLabels {
+		return nil
+	}
+	ids := make([]string, len(summaries))
+	for i, s := range summaries {
+		ids[i] = s.ID
+	}
+	labelMap, err := GetLabelsForIssuesFromTableInTx(ctx, tx, tables.Labels, ids)
+	if err != nil {
+		return fmt.Errorf("hydrate summary labels: %w", err)
+	}
+	for _, s := range summaries {
+		if labels, ok := labelMap[s.ID]; ok {
+			s.Labels = labels
 		}
 	}
 	return nil
