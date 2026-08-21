@@ -222,6 +222,161 @@ func TestMatchesRemotePattern(t *testing.T) {
 	}
 }
 
+func TestMatchesRemotePatternWithQuery(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		pattern string
+		want    bool
+	}{
+		{
+			"query candidate rejects queryless pattern",
+			"s3://approved/db?endpoint=https://unapproved.example",
+			"s3://approved/db",
+			false,
+		},
+		{
+			"query candidate rejects queryless wildcard pattern",
+			"s3://approved/db?region=auto",
+			"s3://approved/*",
+			false,
+		},
+		{
+			"query keys are order independent",
+			"s3://approved/db?region=auto&path-style=true&endpoint=https://approved.example",
+			"s3://approved/db?endpoint=https://approved.example&path-style=true&region=auto",
+			true,
+		},
+		{
+			"endpoint does not glob unless requested",
+			"s3://approved/db?endpoint=https://unapproved.example",
+			"s3://approved/db?endpoint=https://approved.example",
+			false,
+		},
+		{
+			"endpoint glob matches when requested",
+			"s3://approved/db?endpoint=https://unapproved.example",
+			"s3://approved/db?endpoint=https://*.example",
+			true,
+		},
+		{
+			"region matches exactly",
+			"s3://approved/db?endpoint=https://approved.example&region=other",
+			"s3://approved/db?endpoint=https://approved.example&region=auto",
+			false,
+		},
+		{
+			"path style matches exactly",
+			"s3://approved/db?endpoint=https://approved.example&path-style=false",
+			"s3://approved/db?endpoint=https://approved.example&path-style=true",
+			false,
+		},
+		{
+			"unlisted query key is rejected",
+			"s3://approved/db?endpoint=https://approved.example&region=auto&extra=true",
+			"s3://approved/db?endpoint=https://approved.example&region=auto",
+			false,
+		},
+		{
+			"outer userinfo is rejected",
+			"s3://user@approved/db?endpoint=https://approved.example",
+			"s3://*/*?endpoint=https://approved.example",
+			false,
+		},
+		{
+			"endpoint userinfo is rejected",
+			"s3://approved/db?endpoint=https://user@approved.example",
+			"s3://approved/db?endpoint=https://*@approved.example",
+			false,
+		},
+		{
+			"malformed endpoint is rejected",
+			"s3://approved/db?endpoint=not-a-url",
+			"s3://approved/db?endpoint=*",
+			false,
+		},
+		{
+			"non HTTP endpoint is rejected",
+			"s3://approved/db?endpoint=ftp://approved.example",
+			"s3://approved/db?endpoint=*",
+			false,
+		},
+		{
+			"queryless exact match is unchanged",
+			"s3://approved/db",
+			"s3://approved/db",
+			true,
+		},
+		{
+			"queryless wildcard match is unchanged",
+			"s3://approved/db",
+			"s3://approved/*",
+			true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MatchesRemotePattern(tt.url, tt.pattern); got != tt.want {
+				t.Errorf("MatchesRemotePattern(%q, %q) = %t, want %t", tt.url, tt.pattern, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMatchesRemotePatternLegacyAndEdgeCases(t *testing.T) {
+	// Queryless-vs-queryless rows pin the legacy path.Match behaviour for the
+	// forms ValidateRemoteURL accepts without url.Parse (SCP-style, bracketed
+	// aws). The query-bearing rows pin the boundaries of the query-aware mode:
+	// raw pre-query location, strict query parsing, fragment rejection,
+	// decoded-key comparison and the endpoint key casing rule.
+	tests := []struct {
+		name    string
+		url     string
+		pattern string
+		want    bool
+	}{
+		{"scp literal unchanged", "git@github.com:myorg/myrepo", "git@github.com:myorg/myrepo", true},
+		{"scp wildcard unchanged", "git@github.com:myorg/myrepo", "git@github.com:myorg/*", true},
+		{"scp candidate vs url pattern", "git@github.com:myorg/myrepo", "dolthub://myorg/*", false},
+		{"scp candidate with a query fails closed", "git@github.com:myorg/myrepo?endpoint=https://evil.example", "git@github.com:myorg/*", false},
+		{"bracketed aws wildcard unchanged", "aws://[dynamo:bucket]/db", "aws://*/db", true},
+		{"bracketed aws literal does not match its own unescaped brackets (as on main)", "aws://[dynamo:bucket]/db", "aws://[dynamo:bucket]/db", false},
+		{"pattern question mark is a query, not a glob", "dolthub://myorg/repoX", "dolthub://myorg/repo?", false},
+		{"force-query candidate rejects queryless pattern", "s3://approved/db?", "s3://approved/db", false},
+		{"fragment with a question mark rejects against queryless pattern", "s3://approved/db#frag?endpoint=https://evil.example", "s3://approved/*", false},
+		{"fragment rejected in query-aware mode", "s3://approved/db?endpoint=https://ok.example#frag", "s3://approved/db?endpoint=https://ok.example", false},
+		{"encoded question mark is path, not query", "s3://approved/db%3Fendpoint%3Dhttps%3A%2F%2Fevil.example", "s3://approved/*", true},
+		{"encoded slash is not normalised for the location", "s3://approved/db%2Fchild?endpoint=https://ok.example", "s3://approved/db/child?endpoint=https://ok.example", false},
+		{"scheme case is not normalised for the location", "S3://approved/db?endpoint=https://ok.example", "s3://approved/db?endpoint=https://ok.example", false},
+		{"malformed query rejects", "s3://approved/db?endpoint=https://ok.example&bad=%zz", "s3://approved/db?endpoint=https://ok.example&bad=*", false},
+		{"semicolon query rejects", "s3://approved/db?endpoint=https://ok.example;region=auto", "s3://approved/db?endpoint=https://ok.example&region=auto", false},
+		{"endpoint key casing rejects", "s3://approved/db?Endpoint=https://evil.example", "s3://approved/db?Endpoint=*", false},
+		{"bare star never matches an http endpoint (slash)", "s3://approved/db?endpoint=https://ok.example", "s3://approved/db?endpoint=*", false},
+		{"any-endpoint pattern is *://*", "s3://approved/db?endpoint=https://ok.example", "s3://approved/db?endpoint=*://*", true},
+		{"repeated endpoint key rejects against a single-valued pattern", "s3://approved/db?endpoint=https://ok.example&endpoint=https://evil.example", "s3://approved/db?endpoint=https://ok.example", false},
+		{"query keys are exact, never globbed", "s3://approved/db?endpoint=https://evil.example", "s3://approved/db?*=*", false},
+		{"second question mark stays in the query and is an unknown key", "s3://bucket/a?b?endpoint=https://x.example", "s3://bucket/*?endpoint=*://*", false},
+		{"force-query candidate matches force-query pattern", "s3://approved/db?", "s3://approved/db?", true},
+		{"pattern fragment rejected in query-aware mode", "s3://approved/db?endpoint=https://ok.example", "s3://approved/db?endpoint=https://ok.example#frag", false},
+		{"query-bearing bracketed aws fails closed", "aws://[dynamo:bucket]/db?region=auto", "aws://*/db?region=auto", false},
+		{"percent-encoded lowercase endpoint key is endpoint", "s3://approved/db?endpo%69nt=https://ok.example", "s3://approved/db?endpoint=https://ok.example", true},
+		{"percent-encoded uppercase endpoint casing rejects", "s3://approved/db?%45ndpoint=https://evil.example", "s3://approved/db?%45ndpoint=*", false},
+		{"decoded NUL in a query key rejects", "s3://approved/db?endpoint%00=https://ok.example", "s3://approved/db?endpoint%00=*://*", false},
+		{"repeated endpoint values match as a multiset", "s3://approved/db?endpoint=https://b.example&endpoint=https://a.example", "s3://approved/db?endpoint=https://a.example&endpoint=https://b.example", true},
+		{"pattern host character class needs no url.Parse", "s3://bucket1/db?endpoint=https://ok.example", "s3://bucket[0-9]/db?endpoint=https://ok.example", true},
+		{"pattern userinfo rejected by the raw scan", "s3://approved/db?endpoint=https://ok.example", "s3://*@approved/db?endpoint=*://*", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := MatchesRemotePattern(tt.url, tt.pattern); got != tt.want {
+				t.Errorf("MatchesRemotePattern(%q, %q) = %t, want %t", tt.url, tt.pattern, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateRemoteURLWithPatterns(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -234,6 +389,7 @@ func TestValidateRemoteURLWithPatterns(t *testing.T) {
 		{"empty patterns allows any", "dolthub://org/repo", []string{}, false, ""},
 		{"matches one pattern", "dolthub://myorg/repo", []string{"dolthub://myorg/*"}, false, ""},
 		{"matches second pattern", "az://acct.blob.core.windows.net/c/p", []string{"dolthub://myorg/*", "az://acct.blob.core.windows.net/*/*"}, false, ""},
+		{"scp-style remote matches scp-style wildcard", "git@github.com:myorg/myrepo", []string{"git@github.com:myorg/*"}, false, ""},
 		{"no pattern match", "https://evil.com/data", []string{"dolthub://myorg/*"}, true, "does not match"},
 		{"invalid URL fails before pattern check", "dolthub://\x00evil", []string{"dolthub://*"}, true, "control character"},
 	}
@@ -253,6 +409,16 @@ func TestValidateRemoteURLWithPatterns(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestValidateRemoteURLWithPatternsRejectsQueryCandidateForQuerylessPattern(t *testing.T) {
+	err := ValidateRemoteURLWithPatterns(
+		"s3://approved/db?region=auto",
+		[]string{"s3://approved/*"},
+	)
+	if err == nil {
+		t.Fatal("ValidateRemoteURLWithPatterns() = nil, want query-bearing URL to be rejected")
 	}
 }
 

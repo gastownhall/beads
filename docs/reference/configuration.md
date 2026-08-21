@@ -140,7 +140,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `external_projects` | — | — | `{}` | Map project names → paths for cross-project deps |
 | `federation.remote` | — | `BD_FEDERATION_REMOTE` | (none) | Dolt remote URL (`dolthub://`, `gs://`, `s3://`, `az://`, `file://`) |
 | `federation.sovereignty` | — | `BD_FEDERATION_SOVEREIGNTY` | (none) | Sovereignty tier: `T1`, `T2`, `T3`, `T4` (see [below](#sync-and-federation)) |
-| `federation.allowed-remote-patterns` | — | — | `[]` | Glob patterns restricting allowed remote URLs |
+| `federation.allowed-remote-patterns` | — | — | `[]` | Allowlist patterns for remote URLs; `path.Match` globs, query-aware (see [Sync and Federation](#sync-and-federation)) |
 | `federation.exclude_types` | — | — | `[wisp]` | Issue types excluded from federation push |
 | `sync.require_confirmation_on_mass_delete` | — | — | `false` | Prompt before pushing when a merge deletes most issues |
 | `output.title-length` | — | — | `255` | Title display in feedback (`0` hides); see routing note below |
@@ -374,6 +374,8 @@ federation:
   - `T4`: No restrictions — data can be anywhere
 
 `bd config validate` checks the remote URL format, the sovereignty tier, `federation.allowed-remote-patterns`, and `routing.mode`.
+
+`federation.allowed-remote-patterns` entries are `path.Match` globs over the whole URL for remotes without a query string. A remote that carries a `?` (for example an `s3://` remote's `?endpoint=…&region=…`) only matches a pattern that also carries a `?`: the part before the `?` is globbed as written, the query must parse cleanly, the query keys must be the same set, values match exactly unless the pattern uses a glob, lowercase `endpoint=` values must be `http(s)` URLs with a host, and userinfo, fragments and differently cased `endpoint` keys are rejected. Keys are compared exactly, after percent-decoding, the way Dolt reads them. A `?` in a pattern therefore starts its query and is not a single-character wildcard. Because `*` does not match `/`, the value `endpoint=*` allows no `http(s)` endpoint at all; write `endpoint=https://*.example` or, to allow any endpoint host, `endpoint=*://*` (an endpoint with a path needs one `*` per segment). `bd config validate` is the only place these patterns are checked today (#6233).
 
 ## Integration Configuration
 
