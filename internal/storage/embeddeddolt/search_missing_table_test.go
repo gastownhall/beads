@@ -89,6 +89,13 @@ func TestSearchWithMissingWispPlaneTables(t *testing.T) {
 
 	// The second control: wisp_dependencies is genuinely optional and its
 	// absence must stay invisible to a plain search.
+	//
+	// It does not pin the tolerance set, and it is not meant to: a search that
+	// does not ask for dependencies never reads the table, so this stays green
+	// whatever missingOptionalWispTable is tightened to. What pins the
+	// wisp_dependencies entry is the sqlmock control in
+	// issueops/search_missing_table_test.go, which drives the failure through
+	// the guard directly. This one proves the end-to-end query still answers.
 	t.Run("missing_wisp_dependencies_is_invisible", func(t *testing.T) {
 		te := newTestEnv(t, "wd2")
 		seed(t, te, "wd2")
