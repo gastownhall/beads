@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,46 +23,58 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// t.TempDir() is absolute and already cleaned on every platform.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
+	// TODO(#6227): az:// is a valid Dolt backup/remote scheme, but this PR only fixes the s3:// stack. Do not add a green row for today's az:// local-file fallback here.
 	tests := []struct {
-		name      string
-		input     string
-		wantPfx   string // expected prefix
-		wantExact string // exact match (empty = use prefix check)
+		name  string
+		input string
+		want  string
+		// wantRel asserts structure instead of an exact value: cwd can move under a parallel test.
+		wantRel bool
 	}{
 		{
-			name:      "https URL passes through",
-			input:     "https://doltremoteapi.dolthub.com/user/repo",
-			wantExact: "https://doltremoteapi.dolthub.com/user/repo",
+			name:  "https URL passes through",
+			input: "https://doltremoteapi.dolthub.com/user/repo?region=auto",
+			want:  "https://doltremoteapi.dolthub.com/user/repo?region=auto",
 		},
 		{
-			name:      "http URL passes through",
-			input:     "http://localhost:50051/repo",
-			wantExact: "http://localhost:50051/repo",
+			name:  "http URL passes through",
+			input: "http://localhost:50051/repo?endpoint=local",
+			want:  "http://localhost:50051/repo?endpoint=local",
 		},
 		{
-			name:      "file:// URL passes through",
-			input:     "file:///tmp/backup",
-			wantExact: "file:///tmp/backup",
+			name:  "file URL passes through",
+			input: "file:///tmp/backup?version=1",
+			want:  "file:///tmp/backup?version=1",
 		},
 		{
-			name:      "aws:// URL passes through",
-			input:     "aws://[key:secret@]bucket/path",
-			wantExact: "aws://[key:secret@]bucket/path",
+			name:  "aws URL passes through",
+			input: "aws://key:secret@bucket/path?region=auto",
+			want:  "aws://key:secret@bucket/path?region=auto",
 		},
 		{
-			name:      "gs:// URL passes through",
-			input:     "gs://bucket/path",
-			wantExact: "gs://bucket/path",
+			name:  "bracketed aws URL passes through",
+			input: "aws://[key:secret@]bucket/path",
+			want:  "aws://[key:secret@]bucket/path",
 		},
 		{
-			name:      "absolute path gets file:// prefix",
-			input:     absBackup,
-			wantExact: "file://" + absBackup,
+			name:  "gs URL passes through",
+			input: "gs://bucket/path?endpoint=storage.example",
+			want:  "gs://bucket/path?endpoint=storage.example",
+		},
+		{
+			name:  "s3 URL passes through",
+			input: "s3://bucket/path?endpoint=https://minio.example&region=auto&path-style=true",
+			want:  "s3://bucket/path?endpoint=https://minio.example&region=auto&path-style=true",
+		},
+		{
+			name:  "absolute path gets file prefix",
+			input: absBackup,
+			want:  "file://" + absBackup,
 		},
 		{
 			name:    "relative path gets resolved and prefixed",
 			input:   "my-backup",
-			wantPfx: "file://",
+			wantRel: true,
 		},
 	}
 
@@ -69,14 +82,17 @@ func TestResolveDoltBackupURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			got := resolveDoltBackupURL(tt.input)
-			if tt.wantExact != "" {
-				if got != tt.wantExact {
-					t.Errorf("resolveDoltBackupURL(%q) = %q, want %q", tt.input, got, tt.wantExact)
+			if tt.wantRel {
+				wantSuffix := string(filepath.Separator) + "my-backup"
+				if !strings.HasPrefix(got, "file://") ||
+					!filepath.IsAbs(strings.TrimPrefix(got, "file://")) ||
+					!strings.HasSuffix(got, wantSuffix) {
+					t.Errorf("resolveDoltBackupURL(%q) = %q, want file:// plus an absolute path ending in %q", tt.input, got, wantSuffix)
 				}
-			} else if tt.wantPfx != "" {
-				if len(got) < len(tt.wantPfx) || got[:len(tt.wantPfx)] != tt.wantPfx {
-					t.Errorf("resolveDoltBackupURL(%q) = %q, want prefix %q", tt.input, got, tt.wantPfx)
-				}
+				return
+			}
+			if got != tt.want {
+				t.Errorf("resolveDoltBackupURL(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
