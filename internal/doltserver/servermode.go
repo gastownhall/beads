@@ -3,6 +3,7 @@ package doltserver
 import (
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -48,13 +49,14 @@ func (m ServerMode) String() string {
 //  1. BEADS_DOLT_SERVER_MODE=1 env var             -> ServerModeExternal
 //  2. BEADS_DOLT_SHARED_SERVER env var is set       -> ServerModeExternal
 //     2b. host-based inference (HostImpliesServerMode) -> ServerModeExternal
+//     2c. BEADS_DOLT_SERVER_PORT / BEADS_DOLT_PORT env var -> ServerModeExternal
 //  3. metadata.json dolt_mode == "embedded"         -> ServerModeEmbedded
 //  4. metadata.json has explicit dolt_server_port   -> ServerModeExternal
 //  5. default                                       -> ServerModeOwned
 //
-// Runtime env vars (1, 2) take precedence over persisted metadata.json
+// Runtime env vars (1, 2, 2c) take precedence over persisted metadata.json
 // to prevent stale dolt_mode=embedded from silently overriding an active
-// shared-server or server-mode configuration (GH#2949).
+// shared-server, server-mode, or env-supplied-port configuration (GH#2949).
 //
 // The function loads metadata.json only if the file exists, to avoid
 // triggering the legacy config.json -> metadata.json migration side effect.
@@ -96,6 +98,18 @@ func ResolveServerMode(beadsDir string) ServerMode {
 		return ServerModeExternal
 	}
 
+	// 2c. Explicit server port via env var (BEADS_DOLT_SERVER_PORT, then
+	// the legacy BEADS_DOLT_PORT) -> external. Mirrors the deprecated
+	// GetDoltServerPort()'s own env precedence: the orchestrator sets
+	// these to signal a server address it manages, port included, so
+	// ResolveServerMode must agree instead of defaulting a
+	// port-only deployment to owned (ensureDoltInit would never run for
+	// it). Runs before the metadata.json checks for the same GH#2949
+	// reason as 1/2/2b: a runtime env var beats stale persisted metadata.
+	if doltServerPortFromEnv() > 0 {
+		return ServerModeExternal
+	}
+
 	// 3. Explicit embedded mode in metadata.json
 	if fileCfg != nil && strings.ToLower(fileCfg.DoltMode) == configfile.DoltModeEmbedded &&
 		fileCfg.DoltMode != "" { // empty defaults to embedded in GetDoltMode, but we treat empty as "unset"
@@ -109,4 +123,22 @@ func ResolveServerMode(beadsDir string) ServerMode {
 
 	// 5. Default: beads owns the server
 	return ServerModeOwned
+}
+
+// doltServerPortFromEnv returns the server port from BEADS_DOLT_SERVER_PORT
+// or BEADS_DOLT_PORT (in that order), or 0 if neither is set to a valid
+// positive integer. Mirrors configfile.Config.GetDoltServerPort()'s env-var
+// precedence without requiring a loaded Config.
+func doltServerPortFromEnv() int {
+	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	return 0
 }
