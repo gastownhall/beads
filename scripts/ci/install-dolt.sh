@@ -44,12 +44,19 @@ workdir="$(mktemp -d)"
 trap 'rm -rf "$workdir"' EXIT
 
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-  if curl -fsSL -o "$workdir/$asset" "$url"; then
+  # Capture curl's status directly. `status=$?` after an `if curl ...; then
+  # break; fi` reads the status of the *if compound*, which is 0 when the
+  # condition fails and there is no else branch -- so a download that never
+  # succeeded exited 0 and the job carried on with whatever dolt was already
+  # on PATH, which is exactly the unpinned binary this script exists to
+  # prevent.
+  status=0
+  curl -fsSL -o "$workdir/$asset" "$url" || status=$?
+  if ((status == 0)); then
     break
   fi
-  status=$?
   if ((attempt == max_attempts)); then
-    printf 'Failed to download %s after %d attempts.\n' "$url" "$max_attempts" >&2
+    printf 'Failed to download %s after %d attempts (curl exit %d).\n' "$url" "$max_attempts" "$status" >&2
     exit "$status"
   fi
   printf 'Failed to download %s (attempt %d/%d); retrying in %d seconds.\n' \
