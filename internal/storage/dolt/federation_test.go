@@ -171,6 +171,26 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 	t.Logf("✓ Beta sees beta-001: %q", betaCheck.Title)
 }
 
+// TestFederationIsolationTimeoutHasContentionHeadroom guards
+// federationIsolationTimeout against being reflexively shrunk back toward the
+// fixed 2*time.Minute deadline it replaced in TestFederationDatabaseIsolation.
+// That fixed deadline reproducibly failed under ambient multi-agent host
+// contention on this shared rig (be-8zggi round 2: 6/6 failures, ~120s
+// "context deadline exceeded" creating the alpha store, at load average up to
+// 143.96 with 30 concurrent dolt sql-server processes) even though the same
+// setup completes in well under 10s in isolation -- round 2's own base-ref
+// comparison proved this was contention, not cost growth (the pre-fix code
+// failed identically under the same conditions). The replacement must keep
+// real headroom for contention recurring, not just re-fit whatever load
+// happens to exist right now, so the floor is 2x the deadline it replaced.
+func TestFederationIsolationTimeoutHasContentionHeadroom(t *testing.T) {
+	const replacedDeadline = 2 * time.Minute
+	if federationIsolationTimeout < 2*replacedDeadline {
+		t.Fatalf("federationIsolationTimeout = %s, want >= %s (2x the fixed %s context.WithTimeout deadline it replaced in TestFederationDatabaseIsolation, so the budget has real headroom for ambient host contention instead of just re-fitting current load — see be-8zggi round 2)",
+			federationIsolationTimeout, 2*replacedDeadline, replacedDeadline)
+	}
+}
+
 // TestFederationVersionControlAPIs tests the Dolt version control operations
 // needed for federation (branch, commit, merge)
 func TestFederationVersionControlAPIs(t *testing.T) {
