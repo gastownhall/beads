@@ -58,7 +58,7 @@ Examples:
 		}
 
 		if versionUpgradeDetected {
-			fmt.Printf("✨ bd upgraded from v%s to v%s\n", previousVersion, Version)
+			fmt.Printf("✨ bd upgraded from %s to %s\n", displayVersion(previousVersion), displayVersion(Version))
 			newVersions := getVersionsSince(previousVersion)
 			if len(newVersions) > 0 {
 				fmt.Printf("   %d version%s with changes available\n",
@@ -68,9 +68,9 @@ Examples:
 				fmt.Println("Run 'bd upgrade review' to see what changed")
 			}
 		} else if previousVersion == "" {
-			fmt.Printf("bd version: v%s (first run or version tracking just enabled)\n", Version)
+			fmt.Printf("bd version: %s (first run or version tracking just enabled)\n", displayVersion(Version))
 		} else {
-			fmt.Printf("bd version: v%s (no upgrade detected)\n", Version)
+			fmt.Printf("bd version: %s (no upgrade detected)\n", displayVersion(Version))
 		}
 		return nil
 	},
@@ -109,7 +109,7 @@ Examples:
 		}
 
 		if !versionUpgradeDetected {
-			fmt.Printf("You're already on v%s (no upgrade detected)\n", Version)
+			fmt.Printf("You're already on %s (no upgrade detected)\n", displayVersion(Version))
 			fmt.Println("Run 'bd info --whats-new' to see recent changes")
 			return nil
 		}
@@ -124,12 +124,12 @@ Examples:
 			})
 		}
 
-		fmt.Printf("\n🔄 Upgraded from v%s to v%s\n", lastVersion, Version)
+		fmt.Printf("\n🔄 Upgraded from %s to %s\n", displayVersion(lastVersion), displayVersion(Version))
 		fmt.Println(strings.Repeat("=", 60))
 		fmt.Println()
 
 		if len(newVersions) == 0 {
-			fmt.Printf("v%s is newer than v%s but not in changelog\n", Version, lastVersion)
+			fmt.Printf("%s is newer than %s but not in changelog\n", displayVersion(Version), displayVersion(lastVersion))
 			fmt.Println("Run 'bd info --whats-new' to see recent documented changes")
 			return nil
 		}

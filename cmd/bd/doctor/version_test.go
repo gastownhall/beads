@@ -191,6 +191,30 @@ func TestCheckMetadataVersionTracking_EmptyFile(t *testing.T) {
 	}
 }
 
+// TestCheckMetadataVersionTracking_BrewHeadStamp verifies that the version
+// stamp a Homebrew --HEAD install writes is reported as healthy rather than
+// permanently warning as an invalid format the user cannot fix.
+func TestCheckMetadataVersionTracking_BrewHeadStamp(t *testing.T) {
+	for _, stamp := range []string{"HEAD-f925f3f", "HEAD", "HEAD-f925f3f_1"} {
+		t.Run(stamp, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(stamp+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			check := CheckMetadataVersionTracking(tmpDir, "HEAD-aaaaaaa")
+
+			if check.Status != StatusOK {
+				t.Errorf("Status = %q, want %q (message: %q)", check.Status, StatusOK, check.Message)
+			}
+		})
+	}
+}
+
 // TestCheckMetadataVersionTracking_InvalidVersion verifies handling of
 // malformed version strings in .local_version.
 func TestCheckMetadataVersionTracking_InvalidVersion(t *testing.T) {

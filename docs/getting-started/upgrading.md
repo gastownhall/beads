@@ -256,7 +256,7 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 |---|---|
 | Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
 | Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
-| Explicit server metadata plus `.beads/dolt/` and a valid witness whose major version is 1 or newer | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a current-era witness: an `x.y.z` whose major version is 1 or newer, or a Homebrew `--HEAD` stamp | Normal current server-mode upgrade |
 | Explicit server metadata plus `.beads/dolt/` and a missing, malformed, or pre-v1 witness | Explicit legacy Dolt export/import |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
 | `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
@@ -313,9 +313,11 @@ sealed-copy helper below does not start or manage a Dolt SQL server.
 
 Explicit server metadata with a v0.55.4–v0.62.0 witness is always refused,
 including when there is no local `.beads/dolt/` root. When that root does exist,
-the guard admits explicit server mode only with a syntactically valid witness
-whose major version is 1 or newer; a missing, malformed, or pre-v1 witness fails
-closed. Without the local root, a missing, malformed, or non-historical witness
+the guard admits explicit server mode only with a current-era witness: an
+`x.y.z` whose major version is 1 or newer, with any pre-release or build
+suffix such as `1.1.0-rc.1` tolerated, or the `HEAD-<shortsha>` stamp a
+Homebrew `--HEAD` install records. A missing or otherwise malformed witness
+fails closed. Without the local root, a missing, malformed, or non-historical witness
 is admitted only as a compatibility layout.
 
 The configured shared-server compatibility path applies only when persisted

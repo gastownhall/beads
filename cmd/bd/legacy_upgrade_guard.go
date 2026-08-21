@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/steveyegge/beads/cmd/bd/doctor"
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -251,27 +252,57 @@ func legacyServerVersion(version string) bool {
 	return ok && minor >= 55 && minor <= 62
 }
 
-// currentVersionWitness identifies a syntactically valid post-1.0 version
-// marker. A local Dolt root in server mode is ambiguous without it, so that
-// shape must be refused rather than opened as a historical schema.
+// currentVersionWitness identifies a version marker only a post-1.0 binary
+// could have written: an x.y.z with major >= 1 (pre-release and build-metadata
+// suffixes tolerated, see versionCore), or a Homebrew --HEAD stamp. A local
+// Dolt root in server mode is ambiguous without it, so that shape must be
+// refused rather than opened as a historical schema.
 func currentVersionWitness(version string) bool {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+	if isBrewHeadVersion(version) {
+		return true
+	}
+	parts := strings.Split(versionCore(version), ".")
 	if len(parts) != 3 {
 		return false
 	}
-	values := make([]int, len(parts))
-	for i, part := range parts {
-		value, err := strconv.Atoi(part)
-		if err != nil || value < 0 {
+	major, err := strconv.Atoi(parts[0])
+	if err != nil || major < 1 {
+		return false
+	}
+	for _, part := range parts[1:] {
+		if _, err := strconv.Atoi(part); err != nil {
 			return false
 		}
-		values[i] = value
 	}
-	return values[0] >= 1
+	return true
+}
+
+// versionCore reduces a version stamp to its bare x.y.z core: it drops the
+// optional leading "v" and any pre-release or build-metadata suffix. Every
+// classifier in this file shares it so that a suffixed stamp cannot land
+// outside both the current-era and legacy-era buckets, which on the
+// shared-server path would admit a legacy workspace.
+func versionCore(version string) string {
+	core := strings.TrimPrefix(version, "v")
+	if cut := strings.IndexAny(core, "-+"); cut >= 0 {
+		core = core[:cut]
+	}
+	return core
+}
+
+// isBrewHeadVersion reports whether a stamp is the version Homebrew writes
+// into --HEAD installs of the core beads formula; doctor.IsBrewHeadVersion is
+// the canonical definition. The guard may treat such a witness as current-era
+// because no legacy-era channel could produce the shape: the archived legacy
+// tap formula was GoReleaser-generated with no head spec at all (it only
+// unpacked a prebuilt tarball), the Makefile stamps main.Build and never
+// main.Version, and the release workflow passes an x.y.z to -X main.Version.
+func isBrewHeadVersion(version string) bool {
+	return doctor.IsBrewHeadVersion(version)
 }
 
 func legacyVersionMinor(version string) (int, bool) {
-	parts := strings.Split(strings.TrimPrefix(version, "v"), ".")
+	parts := strings.Split(versionCore(version), ".")
 	if len(parts) != 3 || parts[0] != "0" {
 		return 0, false
 	}

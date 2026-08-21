@@ -16,6 +16,17 @@ var latestGitHubReleaseFetcher = fetchLatestGitHubRelease
 // CheckCLIVersion checks if the CLI version is up to date.
 // Takes cliVersion parameter since it can't access the Version variable from main package.
 func CheckCLIVersion(cliVersion string) DoctorCheck {
+	// A Homebrew --HEAD build carries no orderable version — CompareVersions
+	// would read it as 0.0.0 and warn "update available" forever, and the
+	// suggested upgrade would actually move the user off HEAD.
+	if IsBrewHeadVersion(cliVersion) {
+		return DoctorCheck{
+			Name:    "CLI Version",
+			Status:  StatusOK,
+			Message: fmt.Sprintf("%s (Homebrew --HEAD build; release comparison skipped)", cliVersion),
+		}
+	}
+
 	latestVersion, err := latestGitHubReleaseFetcher()
 	if err != nil {
 		// Network error or API issue - don't fail, just warn
@@ -151,6 +162,18 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 	}
 
+	trackingActive := DoctorCheck{
+		Name:    "Version Tracking",
+		Status:  StatusOK,
+		Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
+	}
+
+	// A Homebrew --HEAD stamp carries no ordering, so the staleness heuristic
+	// below cannot apply — but it is a healthy marker, not a malformed one.
+	if IsBrewHeadVersion(lastVersion) {
+		return trackingActive
+	}
+
 	// Validate that version is a valid semver-like string
 	if !IsValidSemver(lastVersion) {
 		return DoctorCheck{
@@ -171,11 +194,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 
 		// Guard against short version strings (e.g., "5" → [5] has no [1])
 		if len(currentParts) < 2 || len(lastParts) < 2 {
-			return DoctorCheck{
-				Name:    "Version Tracking",
-				Status:  StatusOK,
-				Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-			}
+			return trackingActive
 		}
 
 		// Simple heuristic: warn if minor version is 10+ behind or major version differs by 1+
@@ -193,11 +212,7 @@ func CheckMetadataVersionTracking(path string, currentVersion string) DoctorChec
 		}
 
 		// Version is behind but not too old - this is normal after upgrade
-		return DoctorCheck{
-			Name:    "Version Tracking",
-			Status:  StatusOK,
-			Message: fmt.Sprintf("Version tracking active (last: %s, current: %s)", lastVersion, currentVersion),
-		}
+		return trackingActive
 	}
 
 	// Version is current or ahead
@@ -287,6 +302,48 @@ func CompareVersions(v1, v2 string) int {
 	}
 
 	return 0
+}
+
+// IsBrewHeadVersion recognizes the version Homebrew stamps into --HEAD
+// installs of the core beads formula: HEAD-<shortsha>, a bare HEAD when the
+// head spec resolves no commit, and either shape carrying Homebrew's
+// _<revision> suffix. Such a stamp is a healthy current-era version marker,
+// not a malformed one — the binary rewrites it identically on every run, so
+// nothing the user does can "fix" it into semver.
+//
+// This is the canonical definition; cmd/bd's legacy upgrade guard delegates
+// here so the two ends cannot drift.
+func IsBrewHeadVersion(version string) bool {
+	rest, ok := strings.CutPrefix(version, "HEAD")
+	if !ok {
+		return false
+	}
+	// Homebrew's pkg_version appends _<revision> once the formula carries a
+	// revision, so a revision bump must not read as malformed. The revision is
+	// an unsigned decimal; a digits-only check keeps Atoi's tolerance of
+	// signed forms ("+1", "-0") from admitting shapes brew never emits.
+	if cut := strings.IndexByte(rest, '_'); cut >= 0 {
+		revision := rest[cut+1:]
+		if revision == "" || strings.Trim(revision, "0123456789") != "" {
+			return false
+		}
+		rest = rest[:cut]
+	}
+	// Homebrew leaves the version as a bare "HEAD" whenever the head spec
+	// cannot resolve a commit.
+	if rest == "" {
+		return true
+	}
+	sha, ok := strings.CutPrefix(rest, "-")
+	if !ok {
+		return false
+	}
+	// Bound the tail to a plausible git abbreviation so that arbitrary hex
+	// cannot stand in for a commit; git never abbreviates below 7 characters.
+	if len(sha) < 7 || len(sha) > 40 {
+		return false
+	}
+	return strings.Trim(sha, "0123456789abcdefABCDEF") == ""
 }
 
 // IsValidSemver checks if a version string is valid semver-like format (X.Y.Z)
