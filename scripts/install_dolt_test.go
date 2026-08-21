@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -69,6 +70,18 @@ func TestInstallDoltPropagatesDownloadFailure(t *testing.T) {
 			wantExtracts:    1,
 			wantInstalls:    1,
 		},
+		{
+			// A substring drift guard would wave this through: "12.2.0"
+			// contains "2.2.0".
+			name:            "installed version merely contains the pin",
+			curlFailures:    0,
+			reportedVersion: "12.2.0",
+			wantExit:        1,
+			wantCurls:       1,
+			wantSleeps:      0,
+			wantExtracts:    1,
+			wantInstalls:    1,
+		},
 	}
 
 	for _, test := range tests {
@@ -92,6 +105,23 @@ func TestInstallDoltPropagatesDownloadFailure(t *testing.T) {
 			for _, call := range run.sleepCalls {
 				if call != "5" {
 					t.Fatalf("sleep call = %q, want 5", call)
+				}
+			}
+			// Counts alone would let the script drift back to a
+			// releases/latest URL or install somewhere other than the PATH
+			// entry CI uses, so pin what each call actually asked for. uname
+			// is stubbed to Linux/x86_64, which makes the asset name fixed.
+			wantURL := "https://github.com/dolthub/dolt/releases/download/v" +
+				pinnedDoltCLIVersion + "/dolt-linux-amd64.tar.gz"
+			for _, call := range run.curlCalls {
+				if !strings.HasPrefix(call, "-fsSL -o ") || !strings.HasSuffix(call, " "+wantURL) {
+					t.Fatalf("curl call = %q, want -fsSL -o <workdir>/... %s", call, wantURL)
+				}
+			}
+			const wantInstallSuffix = "/dolt-linux-amd64/bin/dolt /usr/local/bin/dolt"
+			for _, call := range run.sudoCalls {
+				if !strings.HasPrefix(call, "install -m 0755 ") || !strings.HasSuffix(call, wantInstallSuffix) {
+					t.Fatalf("sudo call = %q, want install -m 0755 <workdir>%s", call, wantInstallSuffix)
 				}
 			}
 		})

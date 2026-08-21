@@ -70,9 +70,12 @@ sudo install -m 0755 "$workdir/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 # Fail loudly if PATH resolves to some other dolt: a stale runner-image copy
 # earlier on PATH would silently put the suite back on an unpinned binary.
 # No `| head` here: pipefail turns dolt's SIGPIPE into a failed install.
+# Compare the version token exactly rather than as a substring: `*"2.2.0"*`
+# also matches 12.2.0 and 2.2.0-rc1, so a substring test would wave through
+# releases the pin exists to keep out.
 installed="$(dolt version)"
 installed="${installed%%$'\n'*}"
-if [[ "$installed" != *"$version"* ]]; then
+if [[ "${installed##* }" != "$version" ]]; then
   printf 'dolt on PATH reports "%s", want version %s (which dolt: %s)\n' \
     "$installed" "$version" "$(command -v dolt)" >&2
   exit 1
