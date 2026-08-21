@@ -521,12 +521,16 @@ func TestReadyWorkIncludesMoleculeSteps(t *testing.T) {
 	s := newTestStore(t, testDB)
 	ctx := context.Background()
 
-	// Simulate a poured molecule: root epic + 3 child tasks
+	// Simulate a poured molecule: root molecule + 3 child tasks
 	// brainstorm has no blockers (should be ready)
 	// specify is blocked by brainstorm
 	// hydrate is blocked by specify
+	//
+	// The root is types.TypeMolecule because that is what cook/pour build: the
+	// root was TypeEpic when this test was written, until 7226e2c10 (2026-04-03)
+	// switched formula roots to the "molecule" type that exists for the purpose.
 	molIssues := []*types.Issue{
-		{ID: "test-mol-root", Title: "feature-workflow", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeEpic, CreatedAt: time.Now()},
+		{ID: "test-mol-root", Title: "feature-workflow", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeMolecule, CreatedAt: time.Now()},
 		{ID: "test-mol-brainstorm", Title: "Brainstorm feature", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
 		{ID: "test-mol-specify", Title: "Update specifications", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
 		{ID: "test-mol-hydrate", Title: "Hydrate planning", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, CreatedAt: time.Now()},
@@ -571,12 +575,18 @@ func TestReadyWorkIncludesMoleculeSteps(t *testing.T) {
 		readyIDs[issue.ID] = true
 	}
 
-	// Root epic and brainstorm should be ready (no active blockers)
-	if !readyIDs["test-mol-root"] {
-		t.Error("Molecule root epic (test-mol-root) should appear in ready work")
-	}
+	// The unblocked step is the claimable unit, and it is what GH#1359 was
+	// filed about: bd ready printed nothing at all for a poured molecule.
 	if !readyIDs["test-mol-brainstorm"] {
 		t.Error("Unblocked molecule step (test-mol-brainstorm) should appear in ready work")
+	}
+
+	// The root is a container, not a unit of work, so it stays out of ready
+	// work while its steps surface on their own (GH#5583). "molecule" has been
+	// in the default exclusions since long before that, so this holds for any
+	// poured root regardless of the epic exclusion added for GH#5583.
+	if readyIDs["test-mol-root"] {
+		t.Error("Molecule root (test-mol-root) should NOT appear in ready work; its steps carry the work")
 	}
 
 	// specify and hydrate should be blocked
