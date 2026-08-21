@@ -240,7 +240,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 	}
 
 	if in.watchMode {
-		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit); err != nil {
+		if err := watchIssues(ctx, activeStore, filter, in.ReadyFlag, in.ParentID, in.SortBy, in.Reverse, in.effectiveLimit, in.Status); err != nil {
 			if capErr := handleMaxRowsError(err); capErr != nil {
 				return capErr
 			}
@@ -315,7 +315,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 				return HandleError("loading dependencies for --deps: %v", depErr)
 			}
 			// Hierarchical --parent walks use an unlimited per-level query, so the tree is never page-truncated.
-			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag)
+			displayPrettyListWithDepsMode(treeIssues, false, allDeps, in.depsMode, false, in.ReadyFlag, in.Status)
 			printSkipLabelsFooter(in.SkipLabels)
 			return nil
 		}
@@ -324,7 +324,7 @@ func runListCore(cmd *cobra.Command, _ []string) error {
 		if depErr != nil && in.depsMode != "" {
 			return HandleError("loading dependencies for --deps: %v", depErr)
 		}
-		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag)
+		displayPrettyListWithDepsMode(issues, false, allDeps, in.depsMode, truncated, in.ReadyFlag, in.Status)
 		printTruncationHint(truncated, in.effectiveLimit)
 		printSkipLabelsFooter(in.SkipLabels)
 		return nil
