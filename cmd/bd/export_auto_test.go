@@ -1639,8 +1639,8 @@ func TestChangedIssueIDs_DetectsUpsertsAndRemovals(t *testing.T) {
 		t.Fatalf("ChangedIssueIDs: %v", err)
 	}
 
-	gotUpserted := idSet(changed.Upserted)
-	gotRemoved := idSet(changed.Removed)
+	gotUpserted := idSetFromIDs(changed.Upserted)
+	gotRemoved := idSetFromIDs(changed.Removed)
 
 	for _, id := range []string{"cid-a", "cid-b"} {
 		if !gotUpserted[id] {
@@ -2250,7 +2250,7 @@ func TestNewTestStoreWithReadTimeout_AppliesConfiguredTimeout(t *testing.T) {
 // Helpers
 // ---------------------------------------------------------------------------
 
-func idSet(ids []string) map[string]bool {
+func idSetFromIDs(ids []string) map[string]bool {
 	out := make(map[string]bool, len(ids))
 	for _, id := range ids {
 		out[id] = true

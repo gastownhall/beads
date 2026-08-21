@@ -138,7 +138,7 @@ func maybeAutoExport(ctx context.Context, allowEmptyOverwrite bool) error {
 		}
 	}
 	if !allowEmptyOverwrite {
-		if missingIDs, err := missingJSONLIssueIDsInStore(ctx, fullPath); err != nil {
+		if missingIDs, err := missingJSONLIssueIDsInStore(ctx, fullPath, state.LastDiffAnchor); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: auto-export skipped: failed to compare existing JSONL against local store: %v\n", err)
 			return nil
 		} else if len(missingIDs) > 0 {
@@ -290,7 +290,7 @@ func countIssueRecordsInJSONL(path string) (int, error) {
 	return len(ids), nil
 }
 
-func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, error) {
+func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) ([]string, error) {
 	// GH#4988: only refuse when *in-scope* JSONL issue records are absent from
 	// the store. Ephemeral wisps, templates, and infra types are outside
 	// auto-export scope (buildAutoExportFilter / GH#3649). Compaction can
@@ -320,16 +320,47 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path string) ([]string, er
 		localIDs[issue.ID] = struct{}{}
 	}
 
-	missing := make([]string, 0)
+	candidates := make([]string, 0)
 	for _, rec := range existing {
 		if rec.Ephemeral || rec.IsTemplate || infraTypeSet[string(rec.IssueType)] {
 			continue
 		}
 		if _, ok := localIDs[rec.ID]; !ok {
-			missing = append(missing, rec.ID)
+			candidates = append(candidates, rec.ID)
 		}
 	}
-	return missing, nil
+	if len(candidates) == 0 {
+		return nil, nil
+	}
+
+	// Before treating a JSONL-only id as an orphan/corruption, ask dolt_diff
+	// whether the deletion is real and already recorded — a normal `bd
+	// delete` since the last export's diff anchor, not data loss. Without an
+	// anchor (cold start / no successful export yet) there is nothing to
+	// diff against, so every candidate falls through to the conservative
+	// "missing" verdict below, same as before this check existed.
+	if fromCommit != "" {
+		if ds, ok := storage.UnwrapStore(store).(storage.DiffStore); ok {
+			if changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, doltWorkingRef); diffErr == nil {
+				removed := make(map[string]struct{}, len(changed.Removed))
+				for _, id := range changed.Removed {
+					removed[id] = struct{}{}
+				}
+				proven := candidates[:0]
+				for _, id := range candidates {
+					if _, ok := removed[id]; !ok {
+						proven = append(proven, id)
+					}
+				}
+				candidates = proven
+			}
+			// A diff error (e.g. anchor unreachable after history rewrite)
+			// leaves candidates untouched — we can't prove the deletion, so
+			// fall back to refusing, exactly as before this check existed.
+		}
+	}
+
+	return candidates, nil
 }
 
 // jsonlIssueRecord is a lightweight issue line from issues.jsonl used by
