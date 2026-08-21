@@ -1554,6 +1554,8 @@ func TestDefaultConfig_SharedModeBeadsDir(t *testing.T) {
 func TestResolveServerMode_Default(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1726,6 +1728,8 @@ func TestResolveServerMode_ServerModeEnv(t *testing.T) {
 func TestResolveServerMode_EmbeddedMode(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	dir := t.TempDir()
@@ -1881,6 +1885,8 @@ func TestResolveServerMode_EmbeddedHonoredWithoutServerEnv(t *testing.T) {
 
 	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_PORT", "")
 	config.ResetForTesting()
 
 	got := ResolveServerMode(beadsDir)
