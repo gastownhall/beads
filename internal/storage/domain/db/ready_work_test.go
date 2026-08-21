@@ -119,6 +119,12 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	message.IssueType = types.TypeMessage
 	s.Require().NoError(r.Insert(s.Ctx(), message, "tester", domain.InsertIssueOpts{}))
 
+	// GH#5583: an epic is a container whose work lives in its children, so it
+	// must not be offered as claimable work beside them.
+	epic := newTestIssue("bd-rdy-dt-epic", "epic")
+	epic.IssueType = types.TypeEpic
+	s.Require().NoError(r.Insert(s.Ctx(), epic, "tester", domain.InsertIssueOpts{}))
+
 	task := newTestIssue("bd-rdy-dt-task", "task")
 	s.Require().NoError(r.Insert(s.Ctx(), task, "tester", domain.InsertIssueOpts{}))
 
@@ -130,6 +136,13 @@ func (s *testSuite) readyExcludesDefaultTypes() {
 	s.NotContains(got, "bd-rdy-dt-gate")
 	s.NotContains(got, "bd-rdy-dt-rig")
 	s.NotContains(got, "bd-rdy-dt-message")
+	s.NotContains(got, "bd-rdy-dt-epic")
+
+	// --type is the opt-in escape hatch: it skips the default exclusions
+	// entirely, so asking for epics by name still returns them.
+	out, err = r.GetReadyWork(s.Ctx(), types.WorkFilter{Type: string(types.TypeEpic)})
+	s.Require().NoError(err)
+	s.Contains(issueIDsFrom(out), "bd-rdy-dt-epic")
 }
 
 func (s *testSuite) readyFilterByPriority() {
