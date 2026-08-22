@@ -80,68 +80,10 @@ func TestPushPullLogSQLRouteForFileRemote(t *testing.T) {
 	}
 }
 
-// TestPushPullLogCLIRouteForGitProtocolRemote is the RED companion for the
-// other side of item 2: a git-protocol-scheme remote must make Push/Pull log
-// the CLI route, distinguishable from the file:// SQL route proven above.
-//
-// The remote points at a local path that does not exist. git+file:// keeps
-// the whole exchange on the local filesystem, so the dolt subprocess fails
-// fast instead of risking a DNS/network hang -- appropriate here because this
-// test is about the route DECISION, which is logged before the subprocess
-// ever runs, not about a successful transfer. Push/Pull are expected to
-// return an error; only the log line is under test.
-func TestPushPullLogCLIRouteForGitProtocolRemote(t *testing.T) {
-	skipIfNoDolt(t)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	tmpDir := t.TempDir()
-	dbName := uniqueTestDBName(t)
-
-	store, err := New(ctx, &Config{
-		Path:            tmpDir,
-		CommitterName:   "test",
-		CommitterEmail:  "test@example.com",
-		Database:        dbName,
-		CreateIfMissing: true,
-	})
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
-	defer store.Close()
-
-	if store.CLIDir() == "" || !store.hasCLIDatabase() {
-		t.Skip("this store has no local CLI database to route through (external-server client?); CLI routing cannot be constructed")
-	}
-
-	remoteURL := "git+file://" + filepath.Join(tmpDir, "nonexistent-git-remote")
-	if _, err := store.db.ExecContext(ctx, "CALL DOLT_REMOTE('add', 'origin', ?)", remoteURL); err != nil {
-		t.Fatalf("add remote: %v", err)
-	}
-	store.remote = "origin"
-	store.branch = "main"
-
-	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(prevOutput)
-
-	if err := store.Push(ctx); err == nil {
-		t.Fatalf("Push against a nonexistent git+file:// target should fail (route logging is under test, not transfer success)")
-	}
-	if err := store.Pull(ctx); err == nil {
-		t.Fatalf("Pull against a nonexistent git+file:// target should fail (route logging is under test, not transfer success)")
-	}
-
-	logged := logBuf.String()
-	if !strings.Contains(logged, "dolt push route: CLI") {
-		t.Fatalf("Push over a git+file:// (git-protocol) remote did not log taking the CLI route; got log:\n%s", logged)
-	}
-	if !strings.Contains(logged, "dolt pull route: CLI") {
-		t.Fatalf("Pull over a git+file:// (git-protocol) remote did not log taking the CLI route; got log:\n%s", logged)
-	}
-	if strings.Contains(logged, "route: SQL") {
-		t.Fatalf("a git-protocol remote should never take the SQL route, but the log claims it did:\n%s", logged)
-	}
-}
+// TestPushPullLogCLIRouteForGitProtocolRemote, the RED companion for the
+// other side of item 2, lives in route_logging_integration_test.go (build
+// tag "integration"): a git-protocol remote needs a store with its own local
+// CLI-accessible .dolt directory, which the plain New() this file uses
+// cannot construct (it resolves to a client of the suite's shared,
+// containerized test server instead). See that file for the full test and
+// why it needs startLocalDoltServer.
