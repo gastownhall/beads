@@ -148,7 +148,7 @@ func hasQueuedEvents(dir string, now time.Time) bool {
 // stamps it, so it can make a post-throttle window prune-only and delay (worst
 // case, if disabled traffic dominates, starve) the enabled stream's uploads.
 // This is design-tolerated latency, not a data-safety issue: enabled and
-// disabled children run the identical PruneQueue(dir, now), so a disabled prune
+// disabled children run the identical PruneQueue(ctx, dir, now), so a disabled prune
 // deletes exactly what an enabled one would; only upload cadence is affected,
 // which the 7d TTL / 5-min batching budget already absorbs.
 func touchFlushMarker(dir string) {
