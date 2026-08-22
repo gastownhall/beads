@@ -866,14 +866,30 @@ jobs:
         run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
 
   # Gap from gastownhall/beads#4860: pr-core's beads_test_env_enter sets
-  # BEADS_TEST_SKIP=dolt, so RequireDoltBinary doctor/fix tests skipped on
-  # every PR despite other jobs installing Dolt. This job is the dedicated
-  # PR path that runs them with Dolt available and the skip flag off,
-  # deliberately excluded from ci-gate's needs/CI_GATE_REQUIRED and marked
-  # continue-on-error since the suite surfaces two pre-existing failures
-  # (gastownhall/beads#5133); promote to required once those are fixed.
+  # BEADS_TEST_SKIP=dolt, so every PR skips the Dolt-backed cmd/bd/doctor
+  # suites. cmd/bd/doctor/fix is now covered by the required "Test (storage
+  # domain + uow)" job; the PARENT cmd/bd/doctor package still is not, and
+  # this job is the dedicated PR path for it.
+  #
+  # Deliberately excluded from ci-gate's needs/CI_GATE_REQUIRED and marked
+  # continue-on-error, because with a live Dolt server present four tests
+  # in that package fail on assumptions about the environment rather than
+  # on product behavior (measured on 0a031457d):
+  #   - TestRunDoltHealthChecks_DoltBackendNoServer and
+  #     TestCheckFreshClone_ServerModeUnreachable assert the "no reachable
+  #     server" wording, but the server IS reachable here, so they read
+  #     "Connected successfully" / "Database exists on server";
+  #   - TestCheckTestPollution_NoTestIssues_EmptyDB wants "N/A (query
+  #     failed)" and gets a successful query;
+  #   - TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD wants a verified
+  #     fingerprint and gets "N/A (no database)".
+  # The first one also reports tables in the shared doctor_pkg_shared
+  # database, i.e. cross-test leakage inside the package.
+  #
+  # Promote to required once those tests are made server-agnostic; until
+  # then this job is a visible, non-blocking record of the gap.
   test-doctor-dolt:
-    name: Test (doctor Dolt + fix)
+    name: Test (doctor Dolt)
     runs-on: ubuntu-latest
     needs: build-artifacts
     continue-on-error: true
