@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -552,10 +553,15 @@ func getChildrenOfDeferredParentsInTx(ctx context.Context, tx DBTX) ([]string, e
 				  AND parent.defer_until > UTC_TIMESTAMP()
 			`, depTable, issueTable, targetCol))
 			if err != nil {
-				if depTable == "wisp_dependencies" && isTableNotExistError(err) {
+				// This FROM names two tables at once, so the gate has to key on
+				// which one the driver reports missing. The wisp plane is the
+				// only half a database may legitimately lack; keyed on the error
+				// class alone, the tolerance written for it also excused a
+				// missing dependencies or issues on the same leg.
+				if optionalBlockedTable(depTable) && dberrors.IsMissingTable(err, depTable) {
 					break
 				}
-				if issueTable == "wisps" && isTableNotExistError(err) {
+				if optionalBlockedTable(issueTable) && dberrors.IsMissingTable(err, issueTable) {
 					continue
 				}
 				return nil, fmt.Errorf("deferred parents: get deferred children from %s/%s: %w", depTable, issueTable, err)
