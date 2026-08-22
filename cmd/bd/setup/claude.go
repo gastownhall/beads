@@ -83,7 +83,7 @@ func marshalSettings(settings map[string]interface{}) ([]byte, error) {
 }
 
 // writeSettingsIfChanged writes data to path only when it differs from what is
-// already on disk. GH#5693: bd init / bd setup claude marshalled and wrote
+// already on disk. GH#5693: bd init / bd setup claude marshaled and wrote
 // settings.json on every run, so a no-op run still churned the file's mtime
 // and — because MarshalIndent emits no trailing newline — silently stripped it.
 func writeSettingsIfChanged(env claudeEnv, path string, data []byte) error {

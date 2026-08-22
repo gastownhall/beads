@@ -1793,7 +1793,7 @@ func TestClaudeLegacySettingsWritesEndWithNewline(t *testing.T) {
 	// migrated the hooks away, so the block is skipped outright. That guard is
 	// also why the skip inside writeSettingsIfChanged is unreachable on this
 	// call site — whenever the guard passes, removeHookCommand strips a hook
-	// that hasBeadsHooks just matched, so the marshalled bytes always differ.
+	// that hasBeadsHooks just matched, so the marshaled bytes always differ.
 	// What this subtest pins is therefore the user-visible property (a repeat
 	// bd setup claude leaves settings.local.json alone) plus the newline, not
 	// the no-op-skip helper.
