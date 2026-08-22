@@ -161,15 +161,20 @@ func (s *harnessSuite) runNullSelfCheck(plane planeConfig) {
 		t.Fatalf("null self-check found diffs between two runs of the same shape (%s plane): %v", plane.name, diffs)
 	}
 
-	results, err := bench.RunAlternating(3, []bench.Shape{shapeA, shapeB}, func(shape bench.Shape, round int) (time.Duration, error) {
+	// 8 alternating rounds matches the scale the PR #5339 review used to
+	// trust its own measurement (see be-qm6fb).
+	results, err := bench.RunAlternating(8, []bench.Shape{shapeA, shapeB}, func(shape bench.Shape, round int) (time.Duration, error) {
 		start := time.Now()
 		s.runShape(ctx, plane, shape, whereSQL, hyd)
 		return time.Since(start), nil
 	})
 	s.Require().NoError(err)
+	for _, rr := range results {
+		t.Logf("%s plane, shape %s, round %d: %v", plane.name, rr.Shape, rr.Round, rr.Duration)
+	}
 	stats := bench.Summarize(results)
 	for _, st := range stats {
-		t.Logf("%s plane, shape %s: n=%d min=%v max=%v mean=%v spread=%v", plane.name, st.Shape, st.N, st.Min, st.Max, st.Mean, st.Spread)
+		t.Logf("%s plane, shape %s summary: n=%d min=%v max=%v mean=%v spread=%v", plane.name, st.Shape, st.N, st.Min, st.Max, st.Mean, st.Spread)
 	}
 }
 

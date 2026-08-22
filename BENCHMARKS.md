@@ -101,6 +101,30 @@ and committing synthetic fixture rows into that workspace.
 pass `--keep-indexes` only when intentionally leaving the final index set
 installed.
 
+## SQL Shape A/B Harness (SearchCountsSQL)
+
+`internal/storage/sqlbuild/bench` is an in-tree harness for A/B-ing candidate
+SQL shapes for `sqlbuild.SearchCountsSQL` against a seeded corpus (~5k rows,
+~20k labels per plane, a ~50-row narrow filter) before proposing a change to
+that query. It exists because PR #5339 changed `SearchCountsSQL`'s predicate
+form, was approved on result-equivalence reasoning alone, and then measured
+~3x slower after merge (EXPLAIN showed the driver filter inlined at 8
+references vs. main's 1). The harness asserts row-set identity between shapes
+before reporting any timing, and reports per-round timings, spread, and
+EXPLAIN driver-filter reference counts, not just a mean.
+
+**Run this before proposing any `SearchCountsSQL` shape change, and paste the
+printed per-round timings, spread, and EXPLAIN reference counts into the PR
+description:**
+
+```bash
+go test -run TestSearchCountsHarness -v ./internal/storage/sqlbuild/bench/...
+```
+
+Requires the pinned Dolt image (`dolthub/dolt-sql-server:2.2.0`) reachable via
+Docker/testcontainers; skips cleanly (not a failure) when it isn't, and never
+runs under a plain `go test ./...`.
+
 ## Performance Targets
 
 ### Typical Results (M2 Pro)
