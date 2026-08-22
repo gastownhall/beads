@@ -198,9 +198,9 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 }
 
 // AuthorizeNotesOverwrite protects existing non-empty notes from an unforced
-// replacement. It refuses when the patch sets Notes, before.Notes is
-// non-empty, the new value differs from before.Notes, and
-// request.ForceNotesOverwrite is false.
+// replacement. It refuses when the patch sets Notes to a
+// publicops.NotesReplacement of before.Notes (which exempts an explicit
+// clear) and request.ForceNotesOverwrite is false.
 //
 // It applies REGARDLESS of request.ExpectedAssignee, deliberately: unlike the
 // assignee fence, there is no compare-and-set that authorizes a notes
@@ -217,7 +217,7 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 // overwrite there is a sighted edit rather than the blind clobber this fence
 // exists to stop.
 func AuthorizeNotesOverwrite(before *types.Issue, request publicops.UpdateRequest) error {
-	if !request.Patch.Notes.Set || before.Notes == "" || request.Patch.Notes.Value == before.Notes || request.ForceNotesOverwrite {
+	if !request.Patch.Notes.Set || !publicops.NotesReplacement(before.Notes, request.Patch.Notes.Value) || request.ForceNotesOverwrite {
 		return nil
 	}
 	return fmt.Errorf("%w: issue %s", storage.ErrNotesOverwrite, before.ID)

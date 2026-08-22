@@ -50,6 +50,13 @@ func TestAuthorizeNotesOverwrite(t *testing.T) {
 			request: notesPatch(func(r *publicops.UpdateRequest) { r.Patch.Notes.Value = "original" }),
 		},
 		{
+			// An explicit clear passes unfenced, like every sibling text
+			// field's clear; the fence targets non-empty replacement content.
+			name:    "explicit clear",
+			before:  withNotes("original"),
+			request: notesPatch(func(r *publicops.UpdateRequest) { r.Patch.Notes.Value = "" }),
+		},
+		{
 			name:    "forced overwrite",
 			before:  withNotes("original"),
 			request: notesPatch(func(r *publicops.UpdateRequest) { r.ForceNotesOverwrite = true }),

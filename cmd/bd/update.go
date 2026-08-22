@@ -820,9 +820,11 @@ func parseSetMetadataFlags(flags []string) (map[string]json.RawMessage, error) {
 	return set, nil
 }
 
+// replacesExistingNotes adapts the map-based update fields onto the
+// contract's shared fence predicate.
 func replacesExistingNotes(existing string, fields map[string]any) bool {
 	newNotes, replacing := fields["notes"].(string)
-	return replacing && existing != "" && newNotes != existing
+	return replacing && issueops.NotesReplacement(existing, newNotes)
 }
 
 // errNotesOverwriteRefusal is the user-facing advice both `bd update` routes

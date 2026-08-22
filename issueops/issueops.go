@@ -247,9 +247,10 @@ type UpdateRequest struct {
 	// therefore maps that flag to both fields, conditioning this one on an
 	// assignee edit.
 	ForceAssigneeTransfer bool
-	// ForceNotesOverwrite bypasses only the refusal on a Patch.Notes that would
-	// replace existing non-empty notes with a different value. The zero value
-	// enforces the fence. It has no effect without such a Patch.Notes edit, and
+	// ForceNotesOverwrite bypasses only the refusal on a Patch.Notes that is a
+	// NotesReplacement of the existing notes — replacing non-empty notes with
+	// different non-empty content; an explicit clear is not fenced. The zero
+	// value enforces the fence. It has no effect without such a Patch.Notes edit, and
 	// a request that sets it with no Patch.Notes is invalid. It is independent
 	// of ForceAssigneeTransfer and ForceClosePolicy — neither bypasses this, nor
 	// does this bypass either of them — and, deliberately, of ExpectedAssignee

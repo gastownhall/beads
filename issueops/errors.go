@@ -62,14 +62,26 @@ type ErrUnsupported = beadserrors.ErrUnsupported
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
 // ErrNotesOverwrite is returned when an update's Patch.Notes would replace
-// existing non-empty notes with a different value and UpdateRequest.
-// ForceNotesOverwrite is false. It is independent of the assignee fence —
+// existing non-empty notes with different non-empty content (see
+// NotesReplacement) and UpdateRequest.ForceNotesOverwrite is false. It is
+// independent of the assignee fence —
 // unlike ErrAlreadyClaimed it applies regardless of ExpectedAssignee — because
 // there is no compare-and-set that authorizes a notes overwrite the way a
 // matching ExpectedAssignee authorizes an assignee transfer. Bypass with
 // ForceNotesOverwrite (`bd update --force`); preserve history instead with
 // --append-notes.
 var ErrNotesOverwrite = errors.New("update would replace existing notes")
+
+// NotesReplacement reports whether proposed would replace existing non-empty
+// notes with different non-empty content — the one condition the
+// notes-overwrite fence refuses without ForceNotesOverwrite. An explicit
+// clear (proposed "") is not a replacement: every sibling text field clears
+// the same way, the blind-clobber pattern the fence exists to stop is an
+// agent writing its own non-empty content over someone else's, and the
+// refusal's advice (force, or append) is meaningless for a clear.
+func NotesReplacement(existing, proposed string) bool {
+	return existing != "" && proposed != "" && proposed != existing
+}
 
 // ErrNotOwner is returned when an actor tries to release a claim that a
 // different actor holds. Releasing another actor's claim requires the force

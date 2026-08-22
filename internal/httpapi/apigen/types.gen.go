@@ -674,7 +674,7 @@ type ApplyPatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with a different value is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes    *string `json:"notes,omitempty"`
 	Owner    *string `json:"owner,omitempty"`
 	Priority *int    `json:"priority,omitempty"`
@@ -713,7 +713,7 @@ type ApplyUpdateItem struct {
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
 
-	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with a different value. It requires `patch.notes` — an item setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — an item setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
 	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 
 	// Patch The fields an `update` item writes. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
@@ -1379,7 +1379,7 @@ type IssuePatchBody struct {
 	// `replace` replaces the whole document. Present holding `null`, `{}` or an empty value CLEARS metadata — and clearing STORES THE EMPTY JSON DOCUMENT rather than SQL null, so "created with no metadata" and "given metadata and then cleared" are the same stored value; a reader must treat absent, empty and `{}` as one value on the way out. `merge` must be a nonempty JSON OBJECT and is merged into the current document.
 	Metadata *ApplyMetadataPatch `json:"metadata,omitempty"`
 
-	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with a different value is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set.
+	// Notes Replaces the notes. Mutually exclusive with `append_notes`; sending both is a `400`. Replacing EXISTING non-empty notes with different non-empty content is refused with `409 notes_overwrite_refused` unless `force_notes_overwrite` is set; an explicit clear (empty string) is not fenced.
 	Notes *string `json:"notes,omitempty"`
 
 	// ParentId Replaces the issue's parents atomically: a nonempty value makes THAT issue the only parent, and an EMPTY STRING removes every parent-child edge the issue has. Labels are not inherited — that is a create-time choice (`CreateIssueRequest.inherit_labels_from_parent`) and a reparent does not re-run it.
@@ -1923,7 +1923,7 @@ type UpdateIssueRequest struct {
 	// ForceClosePolicy Bypasses ONLY close policy — the open-children refusal and the live blocker refusal — for a `patch.status` that crosses into the workspace's done category. It has no effect without such a status change, and it never bypasses validation, the preconditions above, or the assignee fence.
 	ForceClosePolicy *bool `json:"force_close_policy,omitempty"`
 
-	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with a different value. It requires `patch.notes` — a request setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
+	// ForceNotesOverwrite Bypasses ONLY the refusal on a `patch.notes` that would replace existing non-empty notes with different non-empty content (an explicit clear is not fenced). It requires `patch.notes` — a request setting it without one is a `400` — and, UNLIKE `force_assignee_transfer`, it has no `expected_assignee` exemption: there is no compare-and-set that authorizes a notes overwrite, so combining the two is legal and each answers its own question.
 	ForceNotesOverwrite *bool `json:"force_notes_overwrite,omitempty"`
 
 	// Patch The fields to write. Every member is optional and PRESENCE is the signal: a member present is written, a member absent is untouched. An empty object is a `400` — a write that writes nothing is a client bug.
