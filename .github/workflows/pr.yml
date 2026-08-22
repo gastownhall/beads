@@ -886,7 +886,7 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -900,7 +900,7 @@ jobs:
 
       - name: Pull Dolt sql-server image
         # Keep tag in sync with internal/testutil/testdoltcommon.go:DoltDockerImage.
-        run: docker pull dolthub/dolt-sql-server:2.2.0
+        run: ./scripts/ci/pull-dolt-image.sh
 
       - name: Download build artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -915,21 +915,20 @@ jobs:
           sha256sum -c SHA256SUMS
           chmod +x bd-linux-gms-pure
 
-      - name: Test doctor + doctor/fix with Dolt
+      # Runs the PARENT cmd/bd/doctor package. cmd/bd/doctor/fix is already
+      # covered by the required "Test (storage domain + uow)" job's
+      # hard-require-container step, so it is deliberately not repeated here.
+      # Invoked exactly like that step — plain `go test`, no
+      # beads_test_env_enter wrapper: the hermetic wrapper's isolated
+      # HOME/gitconfig makes these Dolt suites fail for environment reasons
+      # rather than product reasons (proven on 185c2632f, where the same
+      # ./cmd/bd/doctor/fix package passed in the required job and failed
+      # under the wrapper here).
+      - name: Test doctor with Dolt
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
-          # Opt out of beads_test_env_enter's default BEADS_TEST_SKIP=dolt
-          # (scripts/ci/lib/test-env.sh). Without this, RequireDoltBinary skips.
-          BEADS_TEST_ENV_RUN_DOLT: "1"
-          # Clear any inherited skip so doctor Dolt suites actually run.
-          BEADS_TEST_SKIP: ""
-        run: |
-          set -euo pipefail
-          # shellcheck source=scripts/ci/lib/test-env.sh
-          source scripts/ci/lib/test-env.sh
-          beads_test_env_enter
-          go test -tags gms_pure_go -race -count=1 -timeout=25m \
-            ./cmd/bd/doctor/ ./cmd/bd/doctor/fix/
+          BEADS_FIX_REQUIRE_DOLT: "1"
+        run: go test -tags gms_pure_go -race -count=1 -timeout 25m -v ./cmd/bd/doctor/
 
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's
