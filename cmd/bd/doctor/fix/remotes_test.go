@@ -158,6 +158,7 @@ func TestDestructiveFix_AbortsOnProjectIdentityMismatch(t *testing.T) {
 		"CrossTableDuplicates":    func(p string) error { return CrossTableDuplicates(p, false) },
 		"OrphanedDependencies":    func(p string) error { return OrphanedDependencies(p, false) },
 		"ChildParentDependencies": func(p string) error { return ChildParentDependencies(p, false) },
+		"OrphanedChildCounters":   func(p string) error { return OrphanedChildCounters(p, false) },
 		"RecomputeBlocked":        RecomputeBlocked,
 	} {
 		t.Run(name, func(t *testing.T) {

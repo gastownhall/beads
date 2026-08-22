@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -166,18 +167,23 @@ func TestFixFunctions_RequireBeadsDir(t *testing.T) {
 //
 // Unlike the sibling TestDependencyKeys_RekeysAndRemovesLeftovers
 // (dep_keys_test.go), which uses requireFixDoltContainer and connects to
-// the shared BEADS_DOLT_PORT container, this test clears BEADS_DOLT_PORT
-// and has dolt.New auto-start its own local `dolt sql-server` subprocess
-// via the local `dolt` binary (internal/doltserver) — the same mechanism
-// `bd init` uses in production — no Docker required.
+// the shared BEADS_DOLT_PORT container, this test clears the ambient Dolt
+// endpoint settings and has dolt.New auto-start its own local
+// `dolt sql-server` subprocess via the local `dolt` binary
+// (internal/doltserver) — the same mechanism `bd init` uses in production —
+// no Docker required.
 func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
 	// TestMain sets BEADS_DOLT_PORT process-wide when Docker is available,
 	// which suppresses the .beads/dolt-server.port file openFixDB needs to
-	// reach this test's auto-started server. Clear it, as the dolt package's
-	// own tests do.
-	t.Setenv("BEADS_DOLT_PORT", "")
+	// reach this test's auto-started server. Clearing that one name is not
+	// enough: BEADS_DOLT_SERVER_PORT outranks it, and host/socket/mode/
+	// shared-server/auto-start can redirect dolt.New just as effectively.
+	// Since this package's TestMain sets BEADS_TEST_SERVER=1, an ambient
+	// endpoint would receive this test's CreateIfMissing and its schema and
+	// data writes, so clear the whole set.
+	testutil.ClearAmbientDoltEnv(t)
 
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
@@ -281,7 +287,7 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	// openDoltDB → configfile.Load, which is server-mode only (remotes.go's
 	// openFixDB always dials MySQL). seedCfg above already points that config
 	// at the same local server/database this test just seeded — with the
-	// ambient BEADS_DOLT_PORT cleared above, the port comes from the
+	// ambient endpoint settings cleared above, the port comes from the
 	// .beads/dolt-server.port file the auto-start wrote.
 	if err := OrphanedChildCounters(dir, false); err != nil {
 		t.Fatalf("OrphanedChildCounters: %v", err)
@@ -338,6 +344,93 @@ func TestOrphanedChildCounters_FixDeletesOnlyOrphans(t *testing.T) {
 	}
 	if got := countRows(t, "SELECT COUNT(*) FROM wisp_child_counters"); got != 1 {
 		t.Errorf("wisp_child_counters after no-op re-run = %d, want 1", got)
+	}
+}
+
+// TestOrphanedChildCounters_AbortsOnProjectIdentityMismatch is the regression
+// test for the guardFixTarget call OrphanedChildCounters gained in #4539.
+// TestOrphanedChildCounters_FixDeletesOnlyOrphans above seeds a *matching*
+// project_id, so it stays green if that guard is deleted; only a mismatched
+// target proves the guard is still wired up.
+//
+// TestDestructiveFix_AbortsOnProjectIdentityMismatch (remotes_test.go) makes
+// the same assertion for every destructive entry point, but its store needs
+// the Dolt test container, so it skips wherever Docker is absent. This one
+// uses the same Docker-free local auto-start path as its sibling above, so
+// the guard stays covered even when that suite is dark.
+func TestOrphanedChildCounters_AbortsOnProjectIdentityMismatch(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+	testutil.ClearAmbientDoltEnv(t)
+
+	dir := t.TempDir()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatalf("create .beads: %v", err)
+	}
+
+	h := sha256.Sum256([]byte(t.Name() + fmt.Sprintf("%d", time.Now().UnixNano())))
+	dbName := "fixorphanccmm_" + hex.EncodeToString(h[:6])
+
+	projectID := configfile.GenerateProjectID()
+	seedCfg := &configfile.Config{Database: "dolt", DoltDatabase: dbName, ProjectID: projectID}
+	if err := seedCfg.Save(beadsDir); err != nil {
+		t.Fatalf("save initial config: %v", err)
+	}
+
+	ctx := context.Background()
+	store, err := dolt.New(ctx, &dolt.Config{
+		Path:            filepath.Join(beadsDir, "dolt"),
+		BeadsDir:        beadsDir,
+		Database:        dbName,
+		CreateIfMissing: true,
+		MaxOpenConns:    1,
+		AutoStart:       true,
+	})
+	if err != nil {
+		t.Fatalf("dolt.New with local auto-start: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	if err := store.SetConfig(ctx, "issue_prefix", "tst"); err != nil {
+		t.Fatalf("SetConfig(issue_prefix): %v", err)
+	}
+
+	// The database belongs to a different project than the metadata.json the
+	// fix was diagnosed against — the stale-port scenario mybd-2qegi models.
+	if err := store.SetMetadata(ctx, "_project_id", "wrong-project-"+configfile.GenerateProjectID()); err != nil {
+		t.Fatalf("failed to force a project_id mismatch: %v", err)
+	}
+
+	// A real orphan the fix would delete if it were allowed to proceed.
+	const orphanParent = "tst-missing-parent"
+	db := store.UnderlyingDB()
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO child_counters (parent_id, last_child) VALUES (?, 3)", orphanParent); err != nil {
+		t.Fatalf("insert orphaned child_counters row: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		t.Fatal(err)
+	}
+
+	fixErr := OrphanedChildCounters(dir, false)
+	if fixErr == nil {
+		t.Fatal("OrphanedChildCounters should have aborted on project identity mismatch, got nil error")
+	}
+	if !strings.Contains(fixErr.Error(), "PROJECT IDENTITY MISMATCH") {
+		t.Errorf("expected a PROJECT IDENTITY MISMATCH error, got: %v", fixErr)
+	}
+
+	// The orphan must survive the aborted fix — no DELETE against the wrong
+	// project's database.
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM child_counters WHERE parent_id = ?", orphanParent).Scan(&count); err != nil {
+		t.Fatalf("count orphaned child_counters row: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("expected the orphaned row to survive the aborted fix, found %d matching rows", count)
 	}
 }
 
