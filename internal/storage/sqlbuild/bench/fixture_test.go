@@ -10,6 +10,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/storage/depid"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 )
 
@@ -108,10 +109,14 @@ func insertMainRows(ctx context.Context, t *testing.T, db *sql.DB, plane planeCo
 			if i >= narrowStart {
 				assignee = seedNarrowAssignee
 			}
-			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?)")
+			placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
 			args = append(args,
 				ids[i],          // id
 				"bench "+ids[i], // title
+				"",              // description
+				"",              // design
+				"",              // acceptance_criteria
+				"",              // notes
 				"open",          // status
 				2,               // priority
 				"task",          // issue_type
@@ -121,7 +126,7 @@ func insertMainRows(ctx context.Context, t *testing.T, db *sql.DB, plane planeCo
 			)
 		}
 		query := fmt.Sprintf(
-			"INSERT INTO %s (id, title, status, priority, issue_type, assignee, created_at, updated_at) VALUES %s "+
+			"INSERT INTO %s (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, assignee, created_at, updated_at) VALUES %s "+
 				"ON DUPLICATE KEY UPDATE title = VALUES(title)",
 			plane.tables.Main, strings.Join(placeholders, ","),
 		)
@@ -172,14 +177,14 @@ func insertDependencyRows(ctx context.Context, t *testing.T, db *sql.DB, plane p
 	narrow := narrowIDs(ids)
 
 	placeholders := make([]string, 0, len(narrow))
-	args := make([]any, 0, len(narrow)*6)
+	args := make([]any, 0, len(narrow)*7)
 	for i, id := range narrow {
 		target := background[i%len(background)]
-		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?)")
-		args = append(args, id, target, "blocks", "bench", seedBaseline, "{}")
+		placeholders = append(placeholders, "(?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, depid.New(id, target), id, target, "blocks", "bench", seedBaseline, "{}")
 	}
 	query := fmt.Sprintf(
-		"INSERT INTO %s (issue_id, %s, type, created_by, created_at, metadata) VALUES %s",
+		"INSERT INTO %s (id, issue_id, %s, type, created_by, created_at, metadata) VALUES %s",
 		plane.tables.Dependencies, plane.depTargetColumn, strings.Join(placeholders, ","),
 	)
 	_, err := db.ExecContext(ctx, query, args...)

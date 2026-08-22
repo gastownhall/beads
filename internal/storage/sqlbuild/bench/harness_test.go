@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,7 +189,13 @@ func (s *harnessSuite) TestExplainReferenceCount_Reported() {
 	whereSQL := fmt.Sprintf("WHERE i.assignee = %s", quoteLiteral(seedNarrowAssignee))
 	sqlText, args := bench.MainShape().Render(issuesPlane.tables, nil, whereSQL, "", "", true, sqlbuild.CountsHydration{Lite: true})
 
-	rows, err := s.db.QueryContext(ctx, "EXPLAIN "+sqlText, args...)
+	// FORMAT=TREE (not the classic tabular EXPLAIN): the tabular form's
+	// numeric "rows" estimate column comes back from this server as the
+	// literal text "NULL" for this query shape, rather than a real SQL NULL,
+	// which the driver's row decoder rejects (strconv.ParseUint) before
+	// Scan ever runs. TREE format returns a single text "plan" column, no
+	// numeric columns at all, sidestepping that decode failure entirely.
+	rows, err := s.db.QueryContext(ctx, "EXPLAIN FORMAT=TREE "+sqlText, args...)
 	s.Require().NoError(err, "EXPLAIN main shape")
 	defer rows.Close()
 
@@ -287,8 +294,14 @@ func asInt64(v any) int64 {
 	}
 }
 
+// quoteLiteral renders s as a single-quoted SQL string literal for embedding
+// directly into whereSQL text (see ShapeFunc — whereSQL must be real SQL, not
+// a placeholder, so EXPLAIN has something to plan against). It is for
+// trusted, in-test literals only: doubling embedded single quotes is
+// sufficient to keep the literal well-formed, but this is not a general
+// escaping routine and must never be used with untrusted input.
 func quoteLiteral(s string) string {
-	return "'" + s + "'"
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
 }
 
 // TestQuoteLiteral guards quoteLiteral's SQL-literal escaping. quoteLiteral
