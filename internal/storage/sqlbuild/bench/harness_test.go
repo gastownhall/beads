@@ -291,6 +291,21 @@ func quoteLiteral(s string) string {
 	return "'" + s + "'"
 }
 
+// TestQuoteLiteral guards quoteLiteral's SQL-literal escaping. quoteLiteral
+// embeds its argument directly into whereSQL text passed to ShapeFunc.Render
+// (required so EXPLAIN gets real SQL, not a placeholder) rather than binding
+// it as a driver arg, so an unescaped embedded quote would corrupt the
+// rendered statement. Both call sites currently pass the fixed constant
+// seedNarrowAssignee, which contains no quote character, so this is not
+// exploitable today — this test guards against that changing silently.
+func TestQuoteLiteral(t *testing.T) {
+	got := quoteLiteral("bench's-target")
+	want := "'bench''s-target'"
+	if got != want {
+		t.Errorf("quoteLiteral(%q) = %q, want %q (embedded single quotes must be doubled per SQL literal-escaping convention)", "bench's-target", got, want)
+	}
+}
+
 var suffixLetters = []rune("abcdefghijklmnopqrstuvwxyz")
 
 func randomSuffix(n int) string {
