@@ -2340,7 +2340,7 @@ paths:
             scheduling cycle, every time.
           x-bd-codes:
             [already_claimed, dependency_cycle, dependency_exists,
-             not_closable, precondition_failed]
+             not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -3945,7 +3945,7 @@ paths:
             a malformed request.
           x-bd-codes:
             [already_claimed, already_exists, dependency_cycle,
-             dependency_exists, not_closable, precondition_failed]
+             dependency_exists, not_closable, notes_overwrite_refused, precondition_failed]
           content:
             application/problem+json:
               schema:
@@ -9002,6 +9002,17 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with a different value. It requires
+            `patch.notes` — an item setting it without one is a `400` — and,
+            UNLIKE `force_assignee_transfer`, it has no `expected_assignee`
+            exemption: there is no compare-and-set that authorizes a notes
+            overwrite, so combining the two is legal and each answers its own
+            question.
 
     ApplyPatchBody:
       type: object
@@ -9053,7 +9064,9 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with a
+            different value is refused with `409 notes_overwrite_refused`
+            unless `force_notes_overwrite` is set.
         append_notes:
           type: string
           description: >-
@@ -10285,6 +10298,17 @@ components:
             idempotent and needs no force. It requires `patch.assignee` — a
             request setting it without one is a `400` — and it must be false
             when `expected_assignee` is sent.
+        force_notes_overwrite:
+          type: boolean
+          default: false
+          description: >-
+            Bypasses ONLY the refusal on a `patch.notes` that would replace
+            existing non-empty notes with a different value. It requires
+            `patch.notes` — a request setting it without one is a `400` —
+            and, UNLIKE `force_assignee_transfer`, it has no
+            `expected_assignee` exemption: there is no compare-and-set that
+            authorizes a notes overwrite, so combining the two is legal and
+            each answers its own question.
 
     IssuePatchBody:
       type: object
@@ -10325,7 +10349,9 @@ components:
           type: string
           description: >-
             Replaces the notes. Mutually exclusive with `append_notes`; sending
-            both is a `400`.
+            both is a `400`. Replacing EXISTING non-empty notes with a
+            different value is refused with `409 notes_overwrite_refused`
+            unless `force_notes_overwrite` is set.
         append_notes:
           type: string
           description: >-

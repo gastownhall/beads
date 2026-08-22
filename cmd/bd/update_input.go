@@ -35,8 +35,9 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
-	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
-	// exclusive with --if-assignee at the flag-group level).
+	// bd-98s5c: --force bypasses the live-claim reassign fence only when no
+	// --if-assignee guard rides the command; it also opts into the notes
+	// overwrite and close-policy bypasses (runCommandUpdateMutation).
 	force bool
 }
 

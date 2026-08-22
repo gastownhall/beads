@@ -61,6 +61,16 @@ type ErrUnsupported = beadserrors.ErrUnsupported
 // UpdateRequest.ExpectedAssignee.
 var ErrAssigneeMismatch = errors.New("assignee mismatch")
 
+// ErrNotesOverwrite is returned when an update's Patch.Notes would replace
+// existing non-empty notes with a different value and UpdateRequest.
+// ForceNotesOverwrite is false. It is independent of the assignee fence —
+// unlike ErrAlreadyClaimed it applies regardless of ExpectedAssignee — because
+// there is no compare-and-set that authorizes a notes overwrite the way a
+// matching ExpectedAssignee authorizes an assignee transfer. Bypass with
+// ForceNotesOverwrite (`bd update --force`); preserve history instead with
+// --append-notes.
+var ErrNotesOverwrite = errors.New("update would replace existing notes")
+
 // ErrNotOwner is returned when an actor tries to release a claim that a
 // different actor holds. Releasing another actor's claim requires the force
 // escape hatch (ReleaseRequest.Force, `bd unclaim --force`), reserved for

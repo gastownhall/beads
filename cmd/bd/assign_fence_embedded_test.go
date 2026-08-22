@@ -163,8 +163,8 @@ func TestReassignFenceCLI(t *testing.T) {
 
 	t.Run("if_assignee_transfer_needs_no_force", func(t *testing.T) {
 		// The holder-aware CAS (bd-wsqvw park transition) names the holder
-		// explicitly — nothing silent — and --force/--if-assignee are
-		// mutually exclusive, so the fence must not fire under the guard.
+		// explicitly — nothing silent — so the fence must not fire under the
+		// guard, with or without --force.
 		issue := claimAs(t, "holder")
 		bdUpdate(t, bd, dir, issue.ID, "--actor", "supervisor", "--if-assignee", "holder", "--assignee", "parked")
 		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "parked" {
@@ -172,11 +172,19 @@ func TestReassignFenceCLI(t *testing.T) {
 		}
 	})
 
-	t.Run("force_and_if_assignee_mutually_exclusive", func(t *testing.T) {
+	t.Run("force_and_if_assignee_combine_via_the_cas", func(t *testing.T) {
+		// --force and --if-assignee are no longer mutually exclusive at the
+		// flag level: a caller pairing --notes with --if-assignee needs
+		// --force to opt into overwriting existing notes, and cobra can no
+		// longer refuse the combination outright. An assignee edit riding the
+		// same command still transfers ONLY through the --if-assignee CAS,
+		// never through --force: runCommandUpdateMutation never asserts
+		// ForceAssigneeTransfer when ExpectedAssignee is set, so this is the
+		// SAME guarded park as the case above, --force along for the ride.
 		issue := claimAs(t, "holder")
-		out, _ := bdUpdateFailCode(t, bd, dir, issue.ID, "--force", "--if-assignee", "holder", "--assignee", "x")
-		if !strings.Contains(out, "force") || !strings.Contains(out, "if-assignee") {
-			t.Errorf("expected flag-exclusion error naming both flags, got:\n%s", out)
+		bdUpdate(t, bd, dir, issue.ID, "--actor", "supervisor", "--force", "--if-assignee", "holder", "--assignee", "parked")
+		if got := bdShow(t, bd, dir, issue.ID); got.Assignee != "parked" {
+			t.Errorf("guarded park should pass with --force along for the ride: assignee=%q, want parked", got.Assignee)
 		}
 	})
 

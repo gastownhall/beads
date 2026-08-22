@@ -83,7 +83,7 @@ bd dep add implementation setup  # ✓ CORRECT
 When Claude's context gets compacted, conversation history is lost but bd state survives. Write notes as if explaining to a future Claude with zero context:
 
 ```bash
-bd update issue-123 --notes "COMPLETED: JWT auth with RS256
+bd update issue-123 --append-notes "COMPLETED: JWT auth with RS256
 KEY DECISION: RS256 over HS256 for key rotation
 IN PROGRESS: Password reset flow
 NEXT: Implement rate limiting"

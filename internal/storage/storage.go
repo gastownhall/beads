@@ -36,6 +36,7 @@ var (
 	ErrAlreadyIdentified = issueops.ErrAlreadyIdentified
 	ErrVersionMismatch   = issueops.ErrVersionMismatch
 	ErrStatusMismatch    = issueops.ErrStatusMismatch
+	ErrNotesOverwrite    = issueops.ErrNotesOverwrite
 )
 
 // CloseOpenChildrenError reports the issue and open-child count that refused a

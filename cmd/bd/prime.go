@@ -940,7 +940,7 @@ git status                  # Check changed files
 - ` + "`bd unclaim <id>`" + ` - Release stuck issue (agent crashed)
 - ` + "`bd update <id> --assignee=username`" + ` - Assign to someone
 - ` + "`bd update <id> --if-assignee=<expected> --assignee=<new>`" + ` - Atomic reassign: applies only if the assignee still matches (--if-status=<expected> guards status; --if-assignee='' requires unassigned). Mismatch exits non-zero with nothing written — never retry blindly
-- ` + "`bd update <id> --title/--description/--notes/--design`" + ` - Update fields inline
+- ` + "`bd update <id> --title/--description/--design`" + ` - Update fields inline (` + "`--notes`" + ` replaces existing notes and requires ` + "`--force`" + ` once set; prefer ` + "`--append-notes`" + `)
 - ` + "`bd close <id>`" + ` - Mark complete
 - ` + "`bd close <id1> <id2> ...`" + ` - Close multiple issues at once (more efficient)
 - ` + "`bd close <id> --reason=\"explanation\"`" + ` - Close with reason
