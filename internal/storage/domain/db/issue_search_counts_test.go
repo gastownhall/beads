@@ -19,6 +19,7 @@ func (s *testSuite) TestIssueSearchAcrossIssuesAndWispsWithCounts() {
 	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.searchCountsCollision)
 	s.Run("PredicateFormIDPrefixMatchesIDList", s.searchCountsPredicateIDFilterParity)
 	s.Run("PredicateFormIDPrefixMatchesIDListOnWispPlane", s.searchCountsWispPredicateIDFilterParity)
+	s.Run("ByIDsFormMatchesPredicateForm", s.searchCountsByIDsFormMatchesPredicateForm)
 }
 
 func (s *testSuite) searchCountsDepAndRDep() {
@@ -342,6 +343,91 @@ func (s *testSuite) searchCountsWispPredicateIDFilterParity() {
 	s.Equal(i.DependencyCount, p.DependencyCount, "dependency_count parity")
 	s.Equal(i.DependentCount, p.DependentCount, "dependent_count parity")
 	s.Equal(i.CommentCount, p.CommentCount, "comment_count parity")
+}
+
+// searchCountsByIDsFormMatchesPredicateForm is the cross-form parity test the
+// two subtests above are not. SearchCountsSQL renders two shapes, and which one
+// a read gets is decided by the dispatch in
+// searchAcrossIssuesAndWispsWithCounts — never by the filter's id fields:
+//
+//   - SkipWisps, Ephemeral-only, or an empty/missing wisps plane each take one
+//     plane through runFilterSearchQuery, which renders the PREDICATE form
+//     (ids nil, whereSQL bounding a derived driver subquery).
+//   - anything else unions the two planes and hydrates the resulting page
+//     through fetchCountsByIDs, which renders the BY-IDS form (whereSQL empty,
+//     an id predicate at the outer level).
+//
+// So reaching the by-IDs form takes a search that spans both planes against a
+// populated wisps plane — no id filter selects it. This drives one issue both
+// ways and asserts the two shapes project identical counts and JSON, which is
+// the equivalence a change to either shape has to preserve.
+func (s *testSuite) searchCountsByIDsFormMatchesPredicateForm() {
+	r := s.issueRepo()
+	dep := s.depRepo()
+	labelRepo := NewLabelSQLRepository(s.Runner())
+
+	parent := newTestIssue("bd-srxc-xform-parent", "parent")
+	s.Require().NoError(r.Insert(s.Ctx(), parent, "tester", domain.InsertIssueOpts{}))
+	mid := newTestIssue("bd-srxc-xform-mid", "mid")
+	s.Require().NoError(r.Insert(s.Ctx(), mid, "tester", domain.InsertIssueOpts{}))
+	a := newTestIssue("bd-srxc-xform-a", "a")
+	s.Require().NoError(r.Insert(s.Ctx(), a, "tester", domain.InsertIssueOpts{}))
+	b := newTestIssue("bd-srxc-xform-b", "b")
+	s.Require().NoError(r.Insert(s.Ctx(), b, "tester", domain.InsertIssueOpts{}))
+
+	// wispsTableEmptyOrMissing short-circuits an empty wisp plane back to the
+	// single-plane predicate form, which would quietly turn this into a third
+	// predicate-vs-predicate test. Seed a wisp so the union leg is really
+	// taken. It must NOT match the search prefix: the point is to compare one
+	// row across two forms, not to merge two rows.
+	w := newTestIssue("bd-srxc-xformwisp-1", "wisp")
+	w.Ephemeral = true
+	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
+
+	// Same edge shape, and same reason, as searchCountsPredicateIDFilterParity:
+	// mid -> a plus a -> mid is a 2-cycle Insert rejects, and a blocker that is
+	// the issue's ancestor trips ValidateBlockingHierarchy, so the incoming
+	// edge needs its own issue b.
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-xform-mid", "bd-srxc-xform-a", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-xform-b", "bd-srxc-xform-mid", types.DepBlocks), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(dep.Insert(s.Ctx(), newDep("bd-srxc-xform-mid", "bd-srxc-xform-parent", types.DepParentChild), "tester", domain.DepInsertOpts{}))
+	s.Require().NoError(labelRepo.Insert(s.Ctx(), "bd-srxc-xform-mid", "alpha", "tester", domain.LabelOpts{}))
+	_, err := s.Runner().ExecContext(s.Ctx(),
+		"INSERT INTO comments (id, issue_id, author, text) VALUES (UUID(), ?, ?, ?)",
+		"bd-srxc-xform-mid", "tester", "comment")
+	s.Require().NoError(err)
+
+	// Neither SkipWisps nor Ephemeral: the read spans both planes, so the page
+	// is hydrated through fetchCountsByIDs — the by-IDs form.
+	byIDsForm, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDPrefix: "bd-srxc-xform-mid"})
+	s.Require().NoError(err)
+	s.Require().Len(byIDsForm.Items, 1)
+
+	// SkipWisps on the otherwise-identical filter drops to the predicate form.
+	byPredicateForm, err := r.SearchAcrossIssuesAndWispsWithCounts(s.Ctx(), "",
+		types.IssueFilter{IDPrefix: "bd-srxc-xform-mid", SkipWisps: true})
+	s.Require().NoError(err)
+	s.Require().Len(byPredicateForm.Items, 1)
+
+	i, p := byIDsForm.Items[0], byPredicateForm.Items[0]
+	// The predicate form is the reference side, so guard ITS premise: two forms
+	// that both return nothing agree perfectly. Guarding the reference and then
+	// comparing the by-IDs form against it is what makes a bound that is wrong
+	// in only one form fail on the parity line rather than on a guard.
+	s.Require().NotZero(p.DependencyCount, "fixture must give the reference side an outgoing dep")
+	s.Require().NotZero(p.DependentCount, "fixture must give the reference side an incoming dep")
+	s.Require().NotZero(p.CommentCount, "fixture must give the reference side a comment")
+	s.Require().NotEmpty(p.Issue.Labels, "fixture must give the reference side a label")
+	s.Require().NotEmpty(p.Issue.Dependencies, "fixture must give the reference side deps_json rows")
+	s.Equal(p.DependencyCount, i.DependencyCount, "dependency_count parity across forms")
+	s.Equal(p.DependentCount, i.DependentCount, "dependent_count parity across forms")
+	s.Equal(p.CommentCount, i.CommentCount, "comment_count parity across forms")
+	s.Require().NotNil(p.Parent)
+	s.Require().NotNil(i.Parent)
+	s.Equal(*p.Parent, *i.Parent, "parent parity across forms")
+	s.ElementsMatch(p.Issue.Labels, i.Issue.Labels, "labels parity across forms")
+	s.Require().Len(i.Issue.Dependencies, len(p.Issue.Dependencies), "deps_json length parity across forms")
 }
 
 func iwcIDs(page domain.SearchCountsPage) []string {
