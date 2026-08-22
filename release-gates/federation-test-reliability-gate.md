@@ -9,7 +9,7 @@
 **Base:** `origin/main` @ `b7175be22e` ("test(storage/db): split out the search-counts behavioral coverage and add the cross-form parity test it was missing (#5938)")
 **Merge-base:** `1617f3a85c` — 3 commits behind origin/main tip; those 3 commits touch unrelated files, confirmed via clean `git merge-tree` below; 0 self-rebase needed
 **Merge-tree simulation:** `git merge-tree --write-tree origin/main 9c2776933` → tree `7d208ee32`, exit 0, **zero conflicts**
-**PR:** (opening now — see bead be-mp5ag notes for the URL once routed)
+**PR:** https://github.com/gastownhall/beads/pull/5941
 
 ## Verdict: PASS — all 7 criteria clear
 
