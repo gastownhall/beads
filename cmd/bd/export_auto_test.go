@@ -1931,6 +1931,61 @@ func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) 
 	}
 }
 
+// TestMaybeAutoExport_HistoryRewindDoesNotProveDeletion is the PR #5806
+// round-5 regression test for review ask 2: "removed since anchor" is not the
+// same claim as "deleted by `bd delete`". dolt_diff(anchor, WORKING) reports a
+// row as removed whenever it is absent at WORKING, which is equally true after
+// the history is rewound out from under the anchor. Without an ancestry
+// precondition the orphan guard accepted that as proof of deletion and let the
+// export silently drop a live record from issues.jsonl — the exact #4988
+// corruption class the guard exists to prevent.
+func TestMaybeAutoExport_HistoryRewindDoesNotProveDeletion(t *testing.T) {
+	h, ctx := setupIncrementalExportTest(t)
+	initConfigForTest(t)
+	config.Set("export.auto", true)
+	config.Set("export.interval", "1ms")
+
+	h.mustCreate(t, ctx, "rw-a", "Alpha")
+	c1 := h.mustCommit(t, ctx, "baseline")
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("first maybeAutoExport: %v", err)
+	}
+	exportPath := filepath.Join(h.beadsDir, "issues.jsonl")
+
+	// Second cycle: rw-x lands in both the store and issues.jsonl, and the
+	// diff anchor advances past c1 to the commit that added it.
+	h.mustCreate(t, ctx, "rw-x", "Rewound")
+	h.mustCommit(t, ctx, "add rw-x")
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("second maybeAutoExport: %v", err)
+	}
+	if titles := loadIssueTitles(t, exportPath); titles["rw-x"] != "Rewound" {
+		t.Fatalf("setup: rw-x must be exported before the rewind, got %v", titles)
+	}
+
+	// Rewind the data dir underneath the anchor. rw-x is now absent from the
+	// store but still present in issues.jsonl — indistinguishable from a real
+	// `bd delete` if you only consult dolt_diff(anchor, WORKING).
+	raw, ok := storage.UnwrapStore(h.store).(storage.RawDBAccessor)
+	if !ok {
+		t.Skip("store does not expose raw DB access")
+	}
+	if _, err := raw.DB().ExecContext(ctx, "CALL DOLT_RESET('--hard', ?)", c1); err != nil {
+		t.Fatalf("CALL DOLT_RESET('--hard', %s): %v", c1, err)
+	}
+
+	// The guard must refuse rather than honor the bogus "removed" verdict:
+	// the anchor is no longer reachable from HEAD, so nothing is proven.
+	// maybeAutoExport returns nil either way (a refusal is a warn + skip), so
+	// the file content is the oracle.
+	if err := maybeAutoExport(ctx, false); err != nil {
+		t.Fatalf("third maybeAutoExport: %v", err)
+	}
+	if _, stillThere := loadIssueTitles(t, exportPath)["rw-x"]; !stillThere {
+		t.Error("rw-x was silently dropped from issues.jsonl after a history rewind: the orphan guard treated a rewound-away row as a proven deletion instead of refusing to overwrite")
+	}
+}
+
 // TestMaybeAutoExport_EmbeddedModeFallsBackToFullExportCleanly documents and
 // locks in embedded mode's contract: EmbeddedDoltStore implements neither
 // StateHasher nor DiffStore, so it can never take the incremental path —

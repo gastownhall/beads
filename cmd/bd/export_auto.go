@@ -339,7 +339,25 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 	// anchor (cold start / no successful export yet) there is nothing to
 	// diff against, so every candidate falls through to the conservative
 	// "missing" verdict below, same as before this check existed.
-	if fromCommit != "" {
+	//
+	// The anchor must still be on the CURRENT HEAD's history for that proof
+	// to mean anything. dolt_diff(anchor, WORKING) reports a row as "removed"
+	// whenever it is absent at WORKING — which is equally true when the
+	// history moved out from under the anchor rather than when anyone deleted
+	// anything: a `CALL DOLT_RESET('--hard', <earlier>)`, a branch checkout,
+	// or any other data-dir rewind on a shared server. Honoring the diff
+	// there would silently drop a live record from issues.jsonl, which is
+	// exactly #4988's corruption class this guard exists to prevent. So the
+	// deletion proof is accepted only when the anchor is reachable from HEAD
+	// (CommitExists queries dolt_log, i.e. HEAD's forward history); otherwise
+	// we keep refusing, which is the conservative pre-existing behavior.
+	//
+	// Residual, deliberately not fixed here (tracked by #5896): an anchor
+	// that has become unresolvable — after a history squash or GC — combined
+	// with a pending delete is a permanent wedge. The guard refuses, so the
+	// export skips, so state is never saved, so the anchor never refreshes.
+	// Recovery is `bd init --from-jsonl` or moving issues.jsonl aside.
+	if fromCommit != "" && diffAnchorOnCurrentHistory(ctx, fromCommit) {
 		if ds, ok := storage.UnwrapStore(store).(storage.DiffStore); ok {
 			if changed, diffErr := ds.ChangedIssueIDs(ctx, fromCommit, doltWorkingRef); diffErr == nil {
 				removed := make(map[string]struct{}, len(changed.Removed))
@@ -361,6 +379,36 @@ func missingJSONLIssueIDsInStore(ctx context.Context, path, fromCommit string) (
 	}
 
 	return candidates, nil
+}
+
+// commitHistoryChecker is the narrow slice of storage.VersionControl that
+// missingJSONLIssueIDsInStore needs. It is declared locally and asserted
+// separately from storage.DiffStore so a store implementing one but not the
+// other still degrades to the conservative verdict instead of panicking.
+type commitHistoryChecker interface {
+	CommitExists(ctx context.Context, commitHash string) (bool, error)
+}
+
+// diffAnchorOnCurrentHistory reports whether anchor is still reachable from
+// the current HEAD. It is the ancestry precondition on trusting a dolt_diff
+// "removed" verdict as proof of a real `bd delete` rather than a history
+// rewind — see missingJSONLIssueIDsInStore. Fails closed: a store that
+// cannot answer, or an error while asking, yields false so the caller keeps
+// refusing to overwrite.
+func diffAnchorOnCurrentHistory(ctx context.Context, anchor string) bool {
+	ch, ok := storage.UnwrapStore(store).(commitHistoryChecker)
+	if !ok {
+		return false
+	}
+	onHistory, err := ch.CommitExists(ctx, anchor)
+	if err != nil {
+		debug.Logf("auto-export: cannot verify diff anchor %s against HEAD history (%v); treating JSONL-only ids as unproven\n", anchor, err)
+		return false
+	}
+	if !onHistory {
+		debug.Logf("auto-export: diff anchor %s is not on HEAD's history (rewind/checkout?); treating JSONL-only ids as unproven\n", anchor)
+	}
+	return onHistory
 }
 
 // jsonlIssueRecord is a lightweight issue line from issues.jsonl used by
