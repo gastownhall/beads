@@ -342,6 +342,11 @@ Examples:
 		}
 
 		gate := buildGateIssue(in, targetIssue.ID)
+		metadata, metaErr := repoMetadataForGate(in.gateType, targetIssue)
+		if metaErr != nil {
+			return HandleErrorRespectJSON("invalid GitHub repository metadata on %s: %v", targetIssue.ID, metaErr)
+		}
+		gate.Metadata = metadata
 
 		if err := store.CreateIssue(ctx, gate, actor); err != nil {
 			return HandleErrorRespectJSON("creating gate: %v", err)
@@ -810,6 +815,17 @@ type ghPRStatus struct {
 	Title string `json:"title"`
 }
 
+type ghCommandRunner func(args ...string) (stdout, stderr []byte, err error)
+
+func runGHCommand(args ...string) (stdout, stderr []byte, err error) {
+	cmd := exec.Command("gh", args...) // #nosec G204 -- callers pass validated values as an argument vector, without a shell
+	var stdoutBuffer, stderrBuffer bytes.Buffer
+	cmd.Stdout = &stdoutBuffer
+	cmd.Stderr = &stderrBuffer
+	err = cmd.Run()
+	return stdoutBuffer.Bytes(), stderrBuffer.Bytes(), err
+}
+
 var (
 	discoverRunIDByWorkflowNameFunc = discoverRunIDByWorkflowName
 	updateGateAwaitIDFunc           = updateGateAwaitID
@@ -829,25 +845,123 @@ func isNumericID(s string) bool {
 	return true
 }
 
+// githubRepoFromIssue returns a validated [HOST/]OWNER/REPO value from metadata.repo.
+// A missing repo key, or metadata without a repo key at all, means the current
+// Git repository should be used. An explicit `"repo":null` or a non-string
+// repo value is rejected as malformed rather than silently falling back to
+// the current repository - the docs promise malformed values are rejected,
+// and a silent fallback here is the dangerous direction (it can point a
+// cross-repo check at the wrong repository instead of failing loudly).
+func githubRepoFromIssue(issue *types.Issue) (string, error) {
+	if issue == nil || len(issue.Metadata) == 0 || string(issue.Metadata) == "null" {
+		return "", nil
+	}
+
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(issue.Metadata, &raw); err != nil {
+		return "", fmt.Errorf("metadata must be a JSON object: %w", err)
+	}
+	repoRaw, hasRepo := raw["repo"]
+	if !hasRepo {
+		return "", nil
+	}
+
+	var repoValue interface{}
+	if err := json.Unmarshal(repoRaw, &repoValue); err != nil {
+		return "", fmt.Errorf("metadata.repo: %w", err)
+	}
+	if repoValue == nil {
+		return "", fmt.Errorf("metadata.repo must not be null")
+	}
+	repo, ok := repoValue.(string)
+	if !ok {
+		return "", fmt.Errorf("metadata.repo must be a string, got %T", repoValue)
+	}
+	if repo == "" {
+		return "", nil
+	}
+
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 && len(parts) != 3 {
+		return "", fmt.Errorf("repo %q must use OWNER/REPO or HOST/OWNER/REPO", repo)
+	}
+	for _, part := range parts {
+		if part == "" {
+			return "", fmt.Errorf("repo %q contains an empty path component", repo)
+		}
+		for _, char := range part {
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-' || char == '_' || char == '.' {
+				continue
+			}
+			return "", fmt.Errorf("repo %q contains invalid character %q", repo, char)
+		}
+	}
+
+	return repo, nil
+}
+
+// isGitHubGateType returns true for gate types whose condition is checked
+// against a GitHub repository (gh:run, gh:pr, and any future gh:* type).
+func isGitHubGateType(gateType string) bool {
+	return strings.HasPrefix(gateType, "gh:")
+}
+
+// repoMetadataForGate computes the metadata to store on a new ad-hoc gate,
+// inheriting a validated GitHub repo selector from the blocked issue.
+//
+// This is restricted to gh:* gate types (SF4): "repo" is legal, unrelated
+// metadata on any issue (the metadata contract allows arbitrary JSON), so
+// running GitHub-repo validation for human/timer gates would fail ordinary
+// gate creation whenever the blocked issue happened to carry a non-GitHub-
+// shaped "repo" key. Only gh:run/gh:pr gates need the value at check time,
+// so only they inherit and validate it here.
+func repoMetadataForGate(gateType string, targetIssue *types.Issue) (json.RawMessage, error) {
+	if !isGitHubGateType(gateType) {
+		return nil, nil
+	}
+	repo, err := githubRepoFromIssue(targetIssue)
+	if err != nil {
+		return nil, err
+	}
+	if repo == "" {
+		return nil, nil
+	}
+	metadata, err := json.Marshal(map[string]string{"repo": repo})
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
 // queryGitHubRunsForWorkflow queries recent runs for a specific workflow using gh CLI.
 // Returns runs sorted newest-first (GitHub API default).
 func queryGitHubRunsForWorkflow(workflow string, limit int) ([]GHWorkflowRun, error) {
+	return queryGitHubRunsForWorkflowInRepo(workflow, limit, "")
+}
+
+func queryGitHubRunsForWorkflowInRepo(workflow string, limit int, repo string) ([]GHWorkflowRun, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil, fmt.Errorf("gh CLI not found: install from https://cli.github.com")
 	}
+	return queryGitHubRunsForWorkflowInRepoWithRunner(workflow, limit, repo, runGHCommand)
+}
 
+func queryGitHubRunsForWorkflowInRepoWithRunner(workflow string, limit int, repo string, runGH ghCommandRunner) ([]GHWorkflowRun, error) {
 	args := []string{
 		"run", "list",
 		"--workflow", workflow,
 		"--json", "databaseId,name,status,conclusion,createdAt,workflowName",
 		"--limit", fmt.Sprintf("%d", limit),
 	}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
 
-	cmd := exec.Command("gh", args...)
-	output, err := cmd.Output()
+	output, stderr, err := runGH(args...)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("gh run list --workflow=%s failed: %s", workflow, string(exitErr.Stderr))
+		if len(stderr) > 0 {
+			return nil, fmt.Errorf("gh run list --workflow=%s failed: %s", workflow, string(stderr))
 		}
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
@@ -863,8 +977,22 @@ func queryGitHubRunsForWorkflow(workflow string, limit int) ([]GHWorkflowRun, er
 // discoverRunIDByWorkflowName queries GitHub for the most recent run of a workflow.
 // Returns (runID, error). This is ZFC-compliant: "most recent run" is deterministic.
 func discoverRunIDByWorkflowName(workflowHint string) (string, error) {
+	return discoverRunIDByWorkflowNameInRepo(workflowHint, "")
+}
+
+func discoverRunIDByWorkflowNameInRepo(workflowHint, repo string) (string, error) {
+	return discoverRunIDByWorkflowNameInRepoWithRunner(workflowHint, repo, runGHCommand)
+}
+
+// discoverRunIDByWorkflowNameInRepoWithRunner is the runner-injectable form of
+// discoverRunIDByWorkflowNameInRepo. checkGHRunWithRunner's cross-repo branch
+// must call this (not discoverRunIDByWorkflowNameInRepo directly) so the same
+// injected ghCommandRunner seam used everywhere else in the gh:run/gh:pr
+// checks also covers cross-repo discovery, keeping that path unit-testable
+// without a live `gh` CLI (standards note on the SF1 review).
+func discoverRunIDByWorkflowNameInRepoWithRunner(workflowHint, repo string, runGH ghCommandRunner) (string, error) {
 	// Query GitHub directly for this workflow (efficient, avoids limit issues)
-	runs, err := queryGitHubRunsForWorkflow(workflowHint, 5)
+	runs, err := queryGitHubRunsForWorkflowInRepoWithRunner(workflowHint, 5, repo, runGH)
 	if err != nil {
 		return "", fmt.Errorf("failed to query workflow runs: %w", err)
 	}
@@ -878,16 +1006,32 @@ func discoverRunIDByWorkflowName(workflowHint string) (string, error) {
 	return fmt.Sprintf("%d", runs[0].DatabaseID), nil
 }
 
+// checkGHRun checks a GitHub Actions workflow run gate.
+// When persistAwaitID is nil, workflow-name discovery stays in-memory only.
 func checkGHRun(gate *types.Issue, persistAwaitID func(gateID, runID string) error) (resolved, escalated bool, reason string, err error) {
+	return checkGHRunWithRunner(gate, persistAwaitID, runGHCommand)
+}
+
+func checkGHRunWithRunner(gate *types.Issue, persistAwaitID func(gateID, runID string) error, runGH ghCommandRunner) (resolved, escalated bool, reason string, err error) {
 	if gate.AwaitID == "" {
 		return false, false, "no run ID specified - set await_id or use workflow name hint", nil
 	}
 
 	runID := gate.AwaitID
+	repo, repoErr := githubRepoFromIssue(gate)
+	if repoErr != nil {
+		return false, false, "", repoErr
+	}
 
 	// If await_id is a workflow name hint (non-numeric), auto-discover the run ID
 	if !isNumericID(gate.AwaitID) {
-		discoveredID, discoverErr := discoverRunIDByWorkflowNameFunc(gate.AwaitID)
+		var discoveredID string
+		var discoverErr error
+		if repo == "" {
+			discoveredID, discoverErr = discoverRunIDByWorkflowNameFunc(gate.AwaitID)
+		} else {
+			discoveredID, discoverErr = discoverRunIDByWorkflowNameInRepoWithRunner(gate.AwaitID, repo, runGH)
+		}
 		if discoverErr != nil {
 			return false, false, fmt.Sprintf("workflow hint '%s': %v", gate.AwaitID, discoverErr), nil
 		}
@@ -902,31 +1046,42 @@ func checkGHRun(gate *types.Issue, persistAwaitID func(gateID, runID string) err
 		runID = discoveredID
 	}
 
-	return checkGHRunStatusFunc(runID)
+	if repo == "" {
+		return checkGHRunStatusFunc(runID)
+	}
+	return checkGHRunStatusInRepoWithRunner(runID, repo, runGH)
 }
 
 func checkGHRunStatus(runID string) (resolved, escalated bool, reason string, err error) {
-	// Run: gh run view <id> --json status,conclusion,name
-	cmd := exec.Command("gh", "run", "view", runID, "--json", "status,conclusion,name") // #nosec G204 -- runID is a validated GitHub run ID
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	return checkGHRunStatusInRepo(runID, "")
+}
 
-	if runErr := cmd.Run(); runErr != nil {
+func checkGHRunStatusInRepo(runID, repo string) (resolved, escalated bool, reason string, err error) {
+	return checkGHRunStatusInRepoWithRunner(runID, repo, runGHCommand)
+}
+
+func checkGHRunStatusInRepoWithRunner(runID, repo string, runGH ghCommandRunner) (resolved, escalated bool, reason string, err error) {
+	// Run: gh run view <id> --json status,conclusion,name
+	args := []string{"run", "view", runID, "--json", "status,conclusion,name"}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	stdout, stderr, runErr := runGH(args...)
+	if runErr != nil {
 		// Check if gh CLI is not found
-		if strings.Contains(stderr.String(), "command not found") ||
+		if strings.Contains(string(stderr), "command not found") ||
 			strings.Contains(runErr.Error(), "executable file not found") {
 			return false, false, "", fmt.Errorf("gh CLI not installed")
 		}
 		// Check if run not found
-		if strings.Contains(stderr.String(), "not found") {
+		if strings.Contains(string(stderr), "not found") {
 			return false, true, "workflow run not found", nil
 		}
-		return false, false, "", fmt.Errorf("gh run view failed: %s", stderr.String())
+		return false, false, "", fmt.Errorf("gh run view failed: %s", string(stderr))
 	}
 
 	var status ghRunStatus
-	if parseErr := json.Unmarshal(stdout.Bytes(), &status); parseErr != nil {
+	if parseErr := json.Unmarshal(stdout, &status); parseErr != nil {
 		return false, false, "", fmt.Errorf("failed to parse gh output: %w", parseErr)
 	}
 
@@ -954,31 +1109,40 @@ func checkGHRunStatus(runID string) (resolved, escalated bool, reason string, er
 
 // checkGHPR checks a GitHub pull request gate
 func checkGHPR(gate *types.Issue) (resolved, escalated bool, reason string, err error) {
+	return checkGHPRWithRunner(gate, runGHCommand)
+}
+
+func checkGHPRWithRunner(gate *types.Issue, runGH ghCommandRunner) (resolved, escalated bool, reason string, err error) {
 	if gate.AwaitID == "" {
 		return false, false, "no PR number specified", nil
 	}
 
-	// Run: gh pr view <id> --json state,title
-	cmd := exec.Command("gh", "pr", "view", gate.AwaitID, "--json", "state,title") // #nosec G204 -- gate.AwaitID is a validated GitHub PR number
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	repo, repoErr := githubRepoFromIssue(gate)
+	if repoErr != nil {
+		return false, false, "", repoErr
+	}
 
-	if runErr := cmd.Run(); runErr != nil {
+	// Run: gh pr view <id> --json state,title [--repo <repo>]
+	args := []string{"pr", "view", gate.AwaitID, "--json", "state,title"}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	stdout, stderr, runErr := runGH(args...)
+	if runErr != nil {
 		// Check if gh CLI is not found
-		if strings.Contains(stderr.String(), "command not found") ||
+		if strings.Contains(string(stderr), "command not found") ||
 			strings.Contains(runErr.Error(), "executable file not found") {
 			return false, false, "", fmt.Errorf("gh CLI not installed")
 		}
 		// Check if PR not found
-		if strings.Contains(stderr.String(), "not found") || strings.Contains(stderr.String(), "Could not resolve") {
+		if strings.Contains(string(stderr), "not found") || strings.Contains(string(stderr), "Could not resolve") {
 			return false, true, "pull request not found", nil
 		}
-		return false, false, "", fmt.Errorf("gh pr view failed: %s", stderr.String())
+		return false, false, "", fmt.Errorf("gh pr view failed: %s", string(stderr))
 	}
 
 	var status ghPRStatus
-	if parseErr := json.Unmarshal(stdout.Bytes(), &status); parseErr != nil {
+	if parseErr := json.Unmarshal(stdout, &status); parseErr != nil {
 		return false, false, "", fmt.Errorf("failed to parse gh output: %w", parseErr)
 	}
 

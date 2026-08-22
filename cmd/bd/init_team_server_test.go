@@ -7,27 +7,27 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/steveyegge/beads/issueops"
 )
 
+// fakeIdentityReader stands in for issueops.InitVerifier, which is what
+// adoptTeamServerIdentity now reads the bts-provisioned identity through.
+//
+// It answers with the PAIR and one error, because that is the shape of the role:
+// the two markers are read in one snapshot, so there is no longer a state where
+// the prefix read succeeded and the project-id read did not.
 type fakeIdentityReader struct {
-	prefix       string
-	prefixErr    error
-	projectID    string
-	projectIDErr error
+	prefix    string
+	projectID string
+	readErr   error
 }
 
-func (f *fakeIdentityReader) GetConfig(_ context.Context, key string) (string, error) {
-	if key != "issue_prefix" {
-		return "", errors.New("unexpected config key: " + key)
+func (f *fakeIdentityReader) VerifyIdentity(_ context.Context, _ issueops.VerifyIdentityRequest) (issueops.VerifyIdentityResult, error) {
+	if f.readErr != nil {
+		return issueops.VerifyIdentityResult{}, f.readErr
 	}
-	return f.prefix, f.prefixErr
-}
-
-func (f *fakeIdentityReader) GetMetadata(_ context.Context, key string) (string, error) {
-	if key != "_project_id" {
-		return "", errors.New("unexpected metadata key: " + key)
-	}
-	return f.projectID, f.projectIDErr
+	return issueops.VerifyIdentityResult{Prefix: f.prefix, ProjectID: f.projectID}, nil
 }
 
 func TestAdoptTeamServerIdentity(t *testing.T) {
@@ -79,16 +79,12 @@ func TestAdoptTeamServerIdentity(t *testing.T) {
 		assert.Contains(t, err.Error(), "_project_id")
 	})
 
-	t.Run("prefix read error surfaces as transient, not unprovisioned", func(t *testing.T) {
-		reader := &fakeIdentityReader{prefixErr: errors.New("connection reset")}
-		_, _, err := adoptTeamServerIdentity(ctx, reader, "beads_gc", "gc", false, "local-id")
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "connection reset")
-		assert.NotContains(t, err.Error(), "bts init")
-	})
-
-	t.Run("project id read error surfaces as transient, not unprovisioned", func(t *testing.T) {
-		reader := &fakeIdentityReader{prefix: "gc", projectIDErr: errors.New("connection reset")}
+	// The distinction this pins is issueops.InitVerifier's whole reason for
+	// existing: an ABSENT identity means "unprovisioned, run bts init" and an
+	// UNREADABLE one means "the connection failed". Reporting the second as the
+	// first is how a flaky link gets a shared database re-provisioned.
+	t.Run("read error surfaces as transient, not unprovisioned", func(t *testing.T) {
+		reader := &fakeIdentityReader{readErr: errors.New("connection reset")}
 		_, _, err := adoptTeamServerIdentity(ctx, reader, "beads_gc", "gc", false, "local-id")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "connection reset")

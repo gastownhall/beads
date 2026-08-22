@@ -62,7 +62,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 			issue := result.Issue
 
 			if issue.Status == types.StatusOpen {
-				fmt.Fprintf(os.Stderr, "%s is already open\n", fullID)
+				fmt.Fprintln(os.Stderr, reopenNoOpMessage(fullID, types.StatusOpen))
 				result.Close()
 				continue
 			}
@@ -93,7 +93,7 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 				// reopen. Anything else was never closed, so there is nothing to
 				// report as reopened, nothing to commit, and no hook to fire —
 				// the same "nothing to do" shape as the already-open skip above.
-				fmt.Fprintf(os.Stderr, "%s is not closed (status: %s); nothing to do\n", fullID, reopenStatusOf(reopened.Issue, issue))
+				fmt.Fprintln(os.Stderr, reopenNoOpMessage(fullID, reopenStatusOf(reopened.Issue, issue)))
 				result.Close()
 				continue
 			}
@@ -142,6 +142,18 @@ This is more explicit than 'bd update --status open' and emits a Reopened event.
 		}
 		return nil
 	},
+}
+
+// reopenNoOpMessage is what either route says when the role reported no change.
+// Both lines live here so the two front doors cannot drift apart on the way a
+// reopen that did nothing reads: the proxied route has no pre-read to
+// short-circuit on, so it reaches the already-open case through the same result
+// the direct route reaches the non-done case through.
+func reopenNoOpMessage(id string, status types.Status) string {
+	if status == types.StatusOpen {
+		return fmt.Sprintf("%s is already open", id)
+	}
+	return fmt.Sprintf("%s is not closed (status: %s); nothing to do", id, status)
 }
 
 // reopenStatusOf reports the status a no-op reopen left in place, preferring

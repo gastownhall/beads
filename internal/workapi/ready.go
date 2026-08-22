@@ -42,9 +42,14 @@ func LimitOr(limit *int, fallback int) int {
 func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 	filter := types.WorkFilter{
 		// Open only, not in_progress - the same set `bd list --ready` shows.
-		Status:           types.StatusOpen,
-		Type:             utils.NormalizeIssueType(in.IssueType),
-		Limit:            LimitOr(in.Limit, DefaultReadyLimit),
+		Status: types.StatusOpen,
+		Type:   utils.NormalizeIssueType(in.IssueType),
+		Limit:  LimitOr(in.Limit, DefaultReadyLimit),
+		// Carried for the callers that consume this filter as a VALUE and run
+		// their own query (cmd/bd's proxied `bd ready`), where the seam beneath
+		// them renders it. Both implementations of issueops.Reader take it back
+		// off and skip in the shared page epilogue; see BuildListFilter and
+		// FinishPageAt.
 		Offset:           in.Offset,
 		Unassigned:       in.Unassigned,
 		SortPolicy:       types.SortPolicy(in.Sort),
@@ -57,6 +62,7 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		IncludeEphemeral: in.IncludeEphemeral,
 		ExcludeTypes:     normalizeExcludeTypes(in.ExcludeTypes),
 		HasMetadataKey:   in.HasMetadataKey,
+		Lite:             in.Brief,
 	}
 
 	if in.Priority != nil {
@@ -94,6 +100,41 @@ func BuildReadyFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
 		return filter, fmt.Errorf("invalid sort policy '%s'. Valid values: hybrid, priority, oldest%.0w", in.Sort, issueops.ErrValidation)
 	}
 	return filter, nil
+}
+
+// BuildReadyCountFilter turns a ready request into the storage-level filter a
+// COUNT of the ready set runs against: BuildReadyFilter's filter with the page
+// removed, and the single definition of what `bd ready`'s published total means.
+//
+// It refuses a request carrying a page. issueops.ReadyCounter.CountReady
+// promises its answer equals len(Reader.Ready(r with Limit=0).Items), and a
+// Limit would make that "how many of the first N" while an Offset would
+// subtract the rows it skipped from the size of a set that still holds them.
+//
+// The zeroed limit is set on a LOCAL copy: a nil Limit means the shared ready
+// default at BuildReadyFilter, so an unlimited count has to say so explicitly.
+func BuildReadyCountFilter(in issueops.ReadyRequest) (types.WorkFilter, error) {
+	if in.Limit != nil {
+		return types.WorkFilter{}, fmt.Errorf("%w: a ready count does not take a limit", issueops.ErrValidation)
+	}
+	if in.Offset != 0 {
+		return types.WorkFilter{}, fmt.Errorf("%w: a ready count does not take an offset", issueops.ErrValidation)
+	}
+	unlimited := 0
+	counted := in
+	counted.Limit = &unlimited
+	// Brief is CARRIED, not refused and not cleared, which is the opposite of
+	// what ClaimNext does with it. A count reads no field of any row, so the
+	// projection cannot make the number wrong; and the count is not always
+	// cheap enough for that to be the end of it. The unit-of-work seam has no
+	// COUNT(*) over the ready predicate and sizes the set by running the
+	// unbounded page and taking its length (uow/ready_counter.go), so clearing
+	// the field here would hydrate every heavy column of the whole ready set to
+	// answer `bd ready --brief`, which is the cost the projection exists to
+	// avoid and larger than the page it was asked for. Carrying it also keeps
+	// the count filter what this builder says it is: the listing's filter with
+	// the PAGE removed, and nothing else removed.
+	return BuildReadyFilter(counted)
 }
 
 // normalizeExcludeTypes splits comma-separated exclusions and expands type

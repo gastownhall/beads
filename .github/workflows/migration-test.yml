@@ -1,80 +1,142 @@
 name: Migration Test Harness
 
 on:
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
+      - 'website/**'
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      versions:
-        description: 'Specific versions to test (space-separated), or empty for all eras'
-        required: false
-        default: ''
-      mode:
-        description: 'Test mode'
-        required: false
-        default: 'all'
-        type: choice
-        options:
-          - all
-          - direct-only
-          - stepping-only
+
+permissions:
+  contents: read
 
 env:
   BD_DISABLE_METRICS: "1"
   BD_DISABLE_EVENT_FLUSH: "1"
+  DOLT_TEST_RUNTIME_VERSION: v2.1.8
+  DOLT_TEST_RUNTIME_SHA256: f66318f08ed66e409fc39363ae0fff8ce6fbf6dba9f5bac632b91527b9632a74
 
 jobs:
-  migration-test:
-    name: Migration fidelity
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+  historical-upgrades:
+    name: Historical ${{ matrix.version }} → candidate
+    # v0.55.4 is dynamically linked against the ICU version shipped here.
+    # Pin the image so a runner alias update cannot invalidate the fixture.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - version: v0.9.1
+            cache-identity: v0.9.1-source-e3c8554fa2c3e4b9caf7e296e9c8abbe24211a72-go1.25.0-cgo1
+          - version: v0.17.0
+            cache-identity: v0.17.0-d4d08617a324c85b45c9628bc519d659a9ff9c7c37da67aa48727e0af7f19a75
+          - version: v0.49.6
+            cache-identity: v0.49.6-8546dc9a47e11dc31ac2bc9a0224a9c690975e91850932cbb62623053fbb7db8
+          - version: v0.50.3
+            cache-identity: v0.50.3-e94b09e0b6a9324bbc0e81ea36bccaaa42172a926bfedfb389e9a26dedb63184
+          - version: v0.55.4
+            cache-identity: v0.55.4-e0fa25456dd82890230eef17653448a0bf995104c78864be91c5ed84426a5f49
+          - version: v0.56.1
+            cache-identity: v0.56.1-4f9f6cc44465a11613ff529009901eaaf841c6b1f91c15e002b0ecda2015a15c
+          - version: v0.57.0
+            cache-identity: v0.57.0-f8629d5627bed7d25f06f92334addc171d679f9aed9d08c5d42a9684205dc04b
+          - version: v0.62.0
+            cache-identity: v0.62.0-4cca7265b22e5c3ca8d62ab0b9752bec31f68b7f5fa636282a4c7e5454c35535
+          - version: v0.63.3
+            cache-identity: v0.63.3-5f4efd2e010209b3f381dbcd783b2a3a652f50ea72f40ef04c8ba434d408bf9e
+          - version: v1.0.0
+            cache-identity: v1.0.0-7057db1e92428fcf5c08d5dc6b07ead57e588b262cba78b9a26893d55bd29fdb
+          - version: v1.0.1
+            cache-identity: v1.0.1-1d2364d5d7083a4634a9e734ca87822fb79c2b6625988f9f791e3376313b1b77
+          - version: v1.1.0
+            cache-identity: v1.1.0-b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34
+          - version: v1.1.2
+            cache-identity: v1.1.2-a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-        with:
-          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Go
         uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: 'go.mod'
 
-      - name: Install dependencies
+      - name: Install test dependencies
+        # Backstop for a hang that escapes the inner `timeout` calls, so it has
+        # to sit ABOVE what those calls can legitimately consume: 3 update
+        # attempts x 120s + 2 backoffs x 10s + 180s install = 560s worst case.
+        # 11m leaves ~100s of headroom and stays under the job's 15m budget, so
+        # a stuck step fails as a step instead of cancelling the whole job.
+        timeout-minutes: 11
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq sqlite3
+          updated=""
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get \
+                 -o Acquire::Retries=3 \
+                 -o Acquire::http::Timeout=30 \
+                 -o Acquire::https::Timeout=30 \
+                 update; then
+              updated=yes
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Deliberate best-effort: a stale index still installs these packages
+          # from the runner image cache far more often than not, and failing the
+          # job here would turn a transient mirror outage into a red build. The
+          # warning is what makes the degraded path visible in the job log.
+          if [ -z "$updated" ]; then
+            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
+          fi
+          sudo timeout 180 apt-get install -y jq libicu74
 
-      - name: Install Dolt
+      - name: Install Dolt test runtime
+        if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0"]'), matrix.version)
         run: |
-          curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
-          dolt version
+          archive="$RUNNER_TEMP/dolt-linux-amd64.tar.gz"
+          runtime="$RUNNER_TEMP/dolt-runtime"
+          install_root="$GITHUB_WORKSPACE/.tools/dolt"
+          curl -fsSL --retry 3 --retry-all-errors --retry-delay 2 \
+            "https://github.com/dolthub/dolt/releases/download/${DOLT_TEST_RUNTIME_VERSION}/dolt-linux-amd64.tar.gz" \
+            -o "$archive"
+          echo "${DOLT_TEST_RUNTIME_SHA256}  $archive" | sha256sum -c -
+          mkdir -p "$runtime" "$install_root/bin"
+          tar -xzf "$archive" -C "$runtime"
+          install -m 0755 "$runtime/dolt-linux-amd64/bin/dolt" "$install_root/bin/dolt"
+          "$install_root/bin/dolt" version
 
       - name: Configure Git
         run: |
           git config --global user.name "CI Bot"
           git config --global user.email "ci@beads.test"
 
-      - name: Cache old binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v5
+      - name: Cache pinned historical release
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/beads-regression
-          key: migration-test-${{ runner.os }}-${{ runner.arch }}
+          key: historical-dolt-${{ matrix.cache-identity }}-${{ runner.os }}-${{ runner.arch }}
 
       - name: Build candidate
-        run: go build -tags gms_pure_go -o bd ./cmd/bd
+        run: make build
 
-      - name: Run migration test harness
+      - name: Set up Go 1.25 for v0.9.1 source build
+        if: matrix.version == 'v0.9.1'
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.25.0'
+
+      - name: Verify explicit historical upgrade
         env:
           CANDIDATE_BIN: ./bd
           GIT_CONFIG_NOSYSTEM: "1"
+          DOLT_BIN: ${{ github.workspace }}/.tools/dolt/bin/dolt
+          HISTORICAL_VERSION: ${{ matrix.version }}
         run: |
-          ARGS=""
-          if [ "${{ github.event.inputs.mode }}" = "direct-only" ]; then
-            ARGS="--direct-only"
-          elif [ "${{ github.event.inputs.mode }}" = "stepping-only" ]; then
-            ARGS="--stepping-only"
-          fi
-          if [ -n "${{ github.event.inputs.versions }}" ]; then
-            ./scripts/migration-test/run.sh ${{ github.event.inputs.versions }}
-          else
-            ./scripts/migration-test/run.sh $ARGS
-          fi
+          ./scripts/migration-test/run.sh --version "$HISTORICAL_VERSION"

@@ -9,6 +9,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 
 	"github.com/steveyegge/beads/internal/storage"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -56,11 +57,18 @@ func claimedBy(actor string) claimPostcondition {
 
 // claimedAs is claimedBy for a claim whose request overrides the assignee or
 // status the bare claim would have written.
+//
+// The assignee check is identity-equivalence (storageissueops.ActorMatches),
+// not byte equality: the claim CAS treats a reclaim under a different
+// spelling of the actor it already holds as idempotent and authorizes it
+// without rewriting the stored spelling (ClaimIssueInTx's idempotent-reclaim
+// branch), so verify must recognize that same identity or it fails loudly on
+// a write the CAS legitimately authorized (be-vc51, ga-2vy9p2).
 func claimedAs(assignee string, status types.Status) claimPostcondition {
 	return claimPostcondition{
 		op: "claim",
 		want: func(gotAssignee string, gotStatus types.Status) bool {
-			return gotAssignee == assignee && gotStatus == status
+			return storageissueops.ActorMatches(gotAssignee, assignee) && gotStatus == status
 		},
 		desc: fmt.Sprintf("assignee=%q status=%q", assignee, status),
 	}
@@ -112,7 +120,11 @@ func guardedUpdatePostcondition(opts storage.UpdateIssueOptions, updates map[str
 	return claimPostcondition{
 		op: "guarded-update",
 		want: func(assignee string, status types.Status) bool {
-			if setsAssignee && assignee != newAssignee {
+			// Identity-equivalence, not byte equality — same reason as
+			// claimedAs above: a coordination write that sets assignee to a
+			// respelling of an identity must verify against that identity,
+			// not the exact spelling requested (be-vc51, ga-2vy9p2).
+			if setsAssignee && !storageissueops.ActorMatches(assignee, newAssignee) {
 				return false
 			}
 			if setsStatus && status != types.Status(newStatus) {

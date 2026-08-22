@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -71,20 +72,16 @@ var createCmd = &cobra.Command{
 		graphFile, _ := cmd.Flags().GetString("graph")
 
 		if file != "" {
-			if graphFile != "" {
-				return HandleError("cannot specify both --file and --graph")
-			}
-			if len(args) > 0 {
-				return HandleError("cannot specify both title and --file flag")
-			}
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			if dryRun {
-				return HandleError("--dry-run is not supported with --file flag")
-			}
-			if err := rejectSingleIssueFlagsForMarkdown(cmd); err != nil {
+			// gatherCreateInput repeats the --file argument checks and applies
+			// the plan-wide flags this route used to accept and ignore
+			// (--ephemeral, --no-history, --mol-type, --validate). It is the
+			// same input the proxied route reads, which is what lets both build
+			// one issueops.CreateBatchRequest.
+			in, err := gatherCreateInput(cmd, args)
+			if err != nil {
 				return err
 			}
-			return createIssuesFromMarkdown(cmd, file)
+			return createIssuesFromMarkdown(rootCtx, in)
 		}
 
 		if graphFile != "" {
@@ -183,6 +180,8 @@ var createCmd = &cobra.Command{
 		if len(labelAlias) > 0 {
 			labels = append(labels, labelAlias...)
 		}
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")
@@ -260,7 +259,7 @@ var createCmd = &cobra.Command{
 			// Warn if defer date is in the past (user probably meant future)
 			if t.Before(time.Now()) && !silent && !debug.IsQuiet() {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+					ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 			}
 			deferUntil = &t
@@ -417,7 +416,12 @@ var createCmd = &cobra.Command{
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+				// Auto-routed paths (routing.mode: auto, routing.default)
+				// come from config, not caller input, so they're always
+				// allowed to auto-vivify as before; only an explicit --repo
+				// flag value can be ambiguous.
+				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, allowCreate); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
@@ -591,6 +595,7 @@ var createCmd = &cobra.Command{
 			Dependencies:  createDependencyRequests(depSpecs),
 			WaitsFor:      waitsForRequest(waitsForSpec),
 			ForceIDPrefix: forceCreate,
+			IDPrefix:      createIDPrefixOverride(),
 		})
 		if err != nil {
 			// RULING R1: an occupied --id is a refusal, not a silent full-row
@@ -786,6 +791,22 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 	return merged
 }
 
+// createIDPrefixOverride is the prefix an explicit --id must match, when the
+// WORKSPACE knows better than the database does.
+//
+// config.yaml's `issue-prefix` wins over the database's, except under --global
+// where the shared database is authoritative (GH#4957, selectCreateIDPrefix).
+// Only a front door can read config.yaml — a shared server's database knows
+// only its own prefix — so both routes resolve it here and hand it to the role
+// as CreateRequest.IDPrefix. Empty means "the substrate's prefix is right",
+// which is the ordinary case.
+func createIDPrefixOverride() string {
+	if globalFlag {
+		return ""
+	}
+	return overlayYAMLPrefix("")
+}
+
 func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
 	if global {
 		return storePrefix
@@ -940,10 +961,23 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	return store, nil
 }
 
+// isAmbiguousRepoTarget reports whether an explicit --repo value is a
+// bare/relative filesystem path (not absolute, not "~/"-prefixed). Such a
+// value silently resolves against the current working directory (see
+// routing.ExpandPath) rather than failing, so a misresolved value (e.g. a
+// typo) previously wrote a bead into a brand-new, disconnected database
+// instead of erroring (bd-8d3f).
+func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
+	return repoFlagChanged && !filepath.IsAbs(repoOverride) && !strings.HasPrefix(repoOverride, "~/")
+}
+
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
+//
+// When allowCreate is false, a target with no existing workspace is refused
+// instead of fabricated — see isAmbiguousRepoTarget.
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage, allowCreate bool) error {
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -951,6 +985,10 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	// metadata.json is the canonical marker for an initialized beads dir.
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
+	}
+
+	if !allowCreate {
+		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", targetPath)
 	}
 
 	// Create .beads directory

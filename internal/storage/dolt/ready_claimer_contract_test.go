@@ -7,10 +7,10 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 )
 
-func TestReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T) {
+func TestReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcrej")
 	defer cleanup()
-	conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t, ctx, fixture)
+	conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t, ctx, fixture)
 }
 
 func TestReadyClaimerEmptyFrontIsNormal(t *testing.T) {
@@ -41,6 +41,18 @@ func TestReadyClaimerLeasesADurableWinButNotAnEphemeralOne(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rclease")
 	defer cleanup()
 	conformance.RunReadyClaimerLeasesADurableWinButNotAnEphemeralOne(t, ctx, fixture)
+}
+
+func TestReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rcfence")
+	defer cleanup()
+	conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t, ctx, fixture)
+}
+
+func TestReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReadyClaimerFixture(t, "rccount")
+	defer cleanup()
+	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, ctx, fixture)
 }
 
 func TestReadyClaimerAnswersTheQuestionReaderReadyLists(t *testing.T) {

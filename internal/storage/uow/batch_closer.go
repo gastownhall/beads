@@ -96,6 +96,12 @@ func closeBatchItem(ctx context.Context, uw UnitOfWork, request publicops.CloseB
 
 	params := domain.CloseIssueParams{Reason: item.Reason, Session: request.Session}
 	var closed domain.CloseIssueResult
+	// The close verbs announce every success, re-close included, because a
+	// SINGLE close must. A batch item must not: a teardown replayed against an
+	// already-closed convoy would run the workspace's on_close script once per
+	// item on every pass (ga-2yaqp.1). The mark is taken here rather than at the
+	// top of the function so it covers the close and nothing else.
+	mark := markBatchNotifications(uw)
 	if isWisp {
 		closed, err = uw.IssueUseCase().CloseWispChecked(ctx, item.IssueID, params, request.Actor, request.Force)
 	} else {
@@ -103,6 +109,9 @@ func closeBatchItem(ctx context.Context, uw UnitOfWork, request publicops.CloseB
 	}
 	if err != nil {
 		return publicops.CloseOutcome{IssueID: item.IssueID, Err: err}
+	}
+	if !closed.Closed {
+		rewindBatchNotifications(uw, mark)
 	}
 	if closed.Issue != nil {
 		current = closed.Issue

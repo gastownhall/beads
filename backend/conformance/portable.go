@@ -14,8 +14,8 @@ import (
 )
 
 // This file holds the behavior contract for the portable, non-version-control methods
-// that SQLite implements through shared issueops helpers: molecule rollups, repo-mtime
-// cache, event/dependency streams, dependent
+// the shared issueops helpers implement: molecule rollups, repo-mtime cache,
+// event/dependency streams, dependent
 // counts, wisp cascade discovery, comment/audit writes, id rekey, source-repo purge, and
 // batch create. Each case is validated against the embedded-Dolt reference (the oracle)
 // and, once a method is wired into a backend, must match it there too.
@@ -23,8 +23,10 @@ import (
 // Ordering that the implementations leave unspecified (map iteration, same-second event
 // ties, tie-broken "current step") is asserted as a set, never positionally.
 
-// RunPortableMethods runs the portable-method behavior contract. The Dolt reference runs
-// it via RunAll; SQLite runs it for the methods supplied by the shared layer.
+// RunPortableMethods runs the portable-method behavior contract. RunAll composes it, so
+// every backend driving the full suite runs it with no extra wiring; a backend whose
+// allowlist refuses some of these subjects composes its own supported-subset entry point
+// instead, on the RunDeferredReads precedent.
 func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("MoleculeProgress", func(t *testing.T) { testGetMoleculeProgress(t, factory) })
@@ -44,6 +46,7 @@ func RunPortableMethods(t *testing.T, factory Factory) {
 	t.Run("DeleteIssuesBySourceRepo", func(t *testing.T) { testDeleteIssuesBySourceRepo(t, factory) })
 	t.Run("CreateIssuesWithFullOptions", func(t *testing.T) { testCreateIssuesWithFullOptions(t, factory) })
 	t.Run("ReconcileHierarchicalChildIDs", func(t *testing.T) { testReconcileHierarchicalChildIDs(t, factory) })
+	t.Run("ReconcileSkipsMissingParentCounter", func(t *testing.T) { testReconcileSkipsMissingParentCounter(t, factory) })
 	t.Run("Slots", func(t *testing.T) { testSlots(t, factory) })
 }
 
@@ -647,7 +650,7 @@ func testCreateIssuesWithFullOptions(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-a", Title: "A"}),
 		withDefaults(&types.Issue{ID: "test-b", Title: "B"}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 	if _, err := s.GetIssue(c, "test-a"); err != nil {
 		t.Fatalf("batch issue test-a missing: %v", err)
 	}
@@ -657,7 +660,7 @@ func testCreateIssuesWithFullOptions(t *testing.T, f Factory) {
 		withDefaults(&types.Issue{ID: "test-x", Title: "X"}),
 		withDefaults(&types.Issue{ID: "test-y", Title: "Y", Dependencies: []*types.Dependency{{IssueID: "test-y", DependsOnID: "test-x", Type: types.DepBlocks}}}),
 		withDefaults(&types.Issue{ID: "test-z", Title: "Z", Dependencies: []*types.Dependency{{IssueID: "test-z", DependsOnID: "test-absent", Type: types.DepBlocks}}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 	recs, _ := s.GetAllDependencyRecords(c)
 	if got := depTargets(recs["test-y"]); !slices.Equal(got, []string{"test-x"}) {
 		t.Errorf("in-batch edge test-y = %v, want [test-x]", got)
@@ -669,7 +672,7 @@ func testCreateIssuesWithFullOptions(t *testing.T, f Factory) {
 	// ConflictSkip leaves an existing row untouched.
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-keep", Title: "Original"}), "a"))
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{withDefaults(&types.Issue{ID: "test-keep", Title: "Replacement"})},
-		"a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true, ConflictSkip: true}))
+		"a", storage.BatchCreateOptions{SkipPrefixValidation: true, ConflictSkip: true}))
 	if got, _ := s.GetIssue(c, "test-keep"); got.Title != "Original" {
 		t.Errorf("ConflictSkip overwrote title to %q, want Original", got.Title)
 	}
@@ -677,9 +680,9 @@ func testCreateIssuesWithFullOptions(t *testing.T, f Factory) {
 
 // Batch-creating dotted hierarchical child IDs runs ReconcileChildCounters, which
 // emits `... ON DUPLICATE KEY UPDATE last_child = GREATEST(last_child, ?)` in the
-// child-counter upsert (issueops/create.go). That GREATEST path is reachable only
-// from batch create — the single-issue path never reconciles counters — so it was
-// dead in the rest of the suite, which is how a missing SQLite GREATEST translation
+// child-counter upsert (issueops/create.go). Both the batch and single-issue create
+// paths reach that GREATEST upsert (GH#4750), but this suite historically only
+// exercised it via batch create, which is how a missing SQLite GREATEST translation
 // (child creation aborted with "no such function: GREATEST") shipped green. This
 // scenario mints x-1, x-1.1, x-1.2 through the batch path and asserts every backend
 // both creates the children and reconciles the counter to the max direct child.
@@ -694,7 +697,7 @@ func testReconcileHierarchicalChildIDs(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "x-1.1", Title: "child one"}),
 		withDefaults(&types.Issue{ID: "x-1.2", Title: "child two"}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	for _, id := range []string{"x-1.1", "x-1.2"} {
 		if _, err := s.GetIssue(c, id); err != nil {
@@ -706,7 +709,7 @@ func testReconcileHierarchicalChildIDs(t *testing.T, f Factory) {
 	// one level deeper — and, being a grandchild, must not advance the x-1 counter.
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "x-1.2.1", Title: "grandchild"}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	// GetNextChildID reserves-and-advances, so call it once per parent. x-1 was
 	// reconciled to its max direct child (2, grandchild excluded) → next is x-1.3;
@@ -716,6 +719,61 @@ func testReconcileHierarchicalChildIDs(t *testing.T, f Factory) {
 	}
 	if next, err := s.GetNextChildID(c, "x-1.2"); err != nil || next != "x-1.2.2" {
 		t.Errorf("GetNextChildID(x-1.2) = (%q,%v), want (x-1.2.2,nil) — grandchild counter reconciled", next, err)
+	}
+}
+
+// The other half of the same upsert: a dotted id whose PARENT ROW DOES NOT EXIST is
+// accepted, and no counter is minted for the absent parent. ReconcileChildCounters
+// probes the parent table first and `continue`s on sql.ErrNoRows (issueops/create.go),
+// because orphaned dotted ids are ordinary import input — the parent was deleted
+// before the export — and both counter tables carry a parent foreign key, so minting
+// the row anyway fails the whole create rather than merely leaving a stray counter.
+//
+// The skip's only real-backend exerciser was testAuditCreateOrphanHandling, deleted
+// with the orphan-handling modes in #5497. What survived is an sqlmock unit test
+// (issueops.TestReconcileChildCountersSkipsMissingParent), which asserts against a
+// mock and so cannot see how a real engine answers the parent lookup.
+//
+// HOW THE ABSENCE IS OBSERVED. No storage method reads child_counters, and
+// GetNextChildID — the one method whose answer depends on it — SELF-HEALS from the
+// issue rows, taking max(counter, highest existing direct child). So while the orphan
+// y-1.1 is still stored, a skipped counter and a wrongly minted one BOTH answer y-1.2
+// and the bug hides; and with the parent still absent the method cannot be called at
+// all, because its own counter upsert trips the same foreign key. Each arm therefore
+// deletes the orphan (removing the self-heal signal) and then creates the parent
+// (making the upsert legal), leaving the counter row as the only thing that could
+// still advance the answer: parent.1 means nothing was minted, parent.2 means it was.
+//
+// That self-heal is also why the skip costs nothing: a later child of a
+// resurrected parent steps past the surviving orphan instead of colliding with it.
+//
+// Both create paths are covered because they reach the shared body from different
+// call sites — the batch path once over the whole slice, the singular path per issue.
+func testReconcileSkipsMissingParentCounter(t *testing.T, f Factory) {
+	s := f(t)
+	c := ctx()
+
+	// Neither y-1 nor z-1 exists at this point: these ARE the orphan creates.
+	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
+		withDefaults(&types.Issue{ID: "y-1.1", Title: "batch orphan"}),
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}); err != nil {
+		t.Fatalf("batch create of orphan y-1.1 = %v, want nil — the missing-parent skip is what keeps the counter foreign key from failing the create", err)
+	}
+	if err := s.CreateIssue(c, withDefaults(&types.Issue{ID: "z-1.1", Title: "singular orphan"}), "a"); err != nil {
+		t.Fatalf("singular create of orphan z-1.1 = %v, want nil — same skip, per-issue call site", err)
+	}
+
+	for _, parent := range []string{"y-1", "z-1"} {
+		child := parent + ".1"
+		if _, err := s.GetIssue(c, child); err != nil {
+			t.Fatalf("orphan hierarchical child %s not created: %v", child, err)
+		}
+		must(t, s.DeleteIssue(c, child))
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: parent, Title: "late parent"}), "a"))
+		if next, err := s.GetNextChildID(c, parent); err != nil || next != child {
+			t.Errorf("GetNextChildID(%s) = (%q,%v), want (%s,nil) — a counter row was minted for %s while it did not exist",
+				parent, next, err, child, parent)
+		}
 	}
 }
 

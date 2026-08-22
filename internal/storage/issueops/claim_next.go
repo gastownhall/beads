@@ -31,6 +31,16 @@ func ValidateClaimNextRequest(request publicops.ClaimNextRequest) error {
 	if request.Filter.Offset != 0 {
 		return fmt.Errorf("%w: claim next does not take an offset", storage.ErrValidation)
 	}
+	// Brief is refused for the reason Limit and Offset are, and the reason is
+	// sharper here: a claim does not read its row through the page's query at
+	// all. ExecuteClaimNext refetches the winning row whole (GetIssueInTx) and
+	// hydrates its counts itself, so the projection has nothing to apply to,
+	// and a claim that accepted the field would answer a MUTATING request with
+	// a fully-hydrated row carrying IsLitePartial=false — the caller's only
+	// signal that it did not get what it asked for, saying it did.
+	if request.Filter.Brief {
+		return fmt.Errorf("%w: claim next does not take a projection", storage.ErrValidation)
+	}
 	return nil
 }
 

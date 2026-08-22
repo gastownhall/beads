@@ -57,6 +57,36 @@ func TestUnclaimIfAssigneeCLI(t *testing.T) {
 	_ = bdUnclaimFail(t, bd, dir, issue.ID, "--if-assignee", "alice")
 }
 
+// TestUnclaimIfAssigneeCLIDifferentSpelling drives `bd unclaim --if-assignee`
+// with an expectation that names the current holder under a different Gas
+// Town identity spelling than the stored assignee (dot vs underscore
+// separator — ga-5ksp5). This must count as a match, not a stale-expectation
+// refusal: both the Go-side actorMatches precheck and the row_lock CAS that
+// replaced the old verbatim `assignee = ?` SQL predicate need to agree it is
+// the same identity, or the release silently affects zero rows even though
+// the precheck said the CAS should succeed.
+func TestUnclaimIfAssigneeCLIDifferentSpelling(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "uw")
+
+	issue := bdCreate(t, bd, dir, "Conditional release, spelling variant", "--type", "task")
+	bdUpdate(t, bd, dir, issue.ID, "--assignee", "gastown.mayor", "--status", "in_progress")
+
+	bdUnclaim(t, bd, dir, issue.ID, "--if-assignee", "gastown_mayor")
+	got := bdShow(t, bd, dir, issue.ID)
+	if got.Assignee != "" {
+		t.Errorf("after same-identity --if-assignee: assignee = %q, want empty", got.Assignee)
+	}
+	if got.Status != types.StatusOpen {
+		t.Errorf("after same-identity --if-assignee: status = %q, want open", got.Status)
+	}
+}
+
 // TestUnclaimIfAssigneeFlagValidation drives the CLI guards that keep the
 // conditional-release contract unambiguous. A conditional unclaim is selected by
 // the *presence* of --if-assignee, so an explicitly empty --if-assignee "" (an

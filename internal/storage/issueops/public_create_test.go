@@ -60,6 +60,10 @@ func TestPublicCreateIssueFieldClassificationIsComplete(t *testing.T) {
 		"ContentHash": true, "LeaseExpiresAt": true, "HeartbeatAt": true, "LeaseGrantedNode": true, "RowVersion": true,
 		"CompactionLevel": true, "CompactedAt": true, "CompactedAtCommit": true, "OriginalSize": true,
 		"IDPrefix": true, "PrefixOverride": true, "IsLitePartial": true,
+		// IsBlocked is the persisted readiness projection, computed from the
+		// dependency graph. A caller cannot declare it; it is populated only
+		// where it is read back (journal snapshots).
+		"IsBlocked": true,
 		// WispPlaneOverride is import-plumbing (the export stream's explicit
 		// plane marker, bd-r9uce); a public create routes by the flags it
 		// accepts (Ephemeral/NoHistory), so the override is dropped here.
@@ -314,5 +318,49 @@ func TestClassifyPublicCreateErrorPreservesDeterministicIdentities(t *testing.T)
 	classified := ClassifyPublicCreateError(sqlStateError("23505"))
 	if !errors.Is(classified, storage.ErrAlreadyExists) || !errors.Is(classified, sqlStateError("23505")) {
 		t.Fatalf("ClassifyPublicCreateError(23505) = %v, want ErrAlreadyExists and SQLSTATE", classified)
+	}
+}
+
+// TestPreparePublicCreateRequestHonorsTheCallerSuppliedIDPrefix pins
+// CreateRequest.IDPrefix: the caller's prefix overrides the substrate's, and an
+// empty one leaves the substrate's in force.
+//
+// The override exists because config.yaml's `issue-prefix` beats the
+// database's and no implementation can see config.yaml. Without it the two
+// `bd create` routes disagreed about which ids a workspace may mint: the
+// direct route refused `bd-123` in a workspace configured for `app`, while the
+// proxied route checked only the server database's prefix and created it.
+func TestPreparePublicCreateRequestHonorsTheCallerSuppliedIDPrefix(t *testing.T) {
+	newRequest := func(id, prefix string) publicops.CreateRequest {
+		return publicops.CreateRequest{
+			Actor:    "actor",
+			Issue:    &publicops.Issue{ID: id, Title: "title", Priority: 2, IssueType: "task"},
+			IDPrefix: prefix,
+		}
+	}
+	// The substrate says "bd"; the caller says the workspace is "app".
+	context := PublicCreateContext{IssuePrefix: "bd"}
+
+	if _, err := PreparePublicCreateRequest(newRequest("app-1", "app"), context); err != nil {
+		t.Errorf("an id matching the CALLER's prefix was refused: %v", err)
+	}
+	if _, err := PreparePublicCreateRequest(newRequest("bd-1", "app"), context); err == nil {
+		t.Error("an id matching only the SUBSTRATE's prefix was accepted; the caller's prefix must win")
+	}
+
+	// Empty override: the substrate's prefix is the whole rule, which is the
+	// ordinary case and must not regress.
+	if _, err := PreparePublicCreateRequest(newRequest("bd-1", ""), context); err != nil {
+		t.Errorf("an id matching the substrate's prefix was refused with no override: %v", err)
+	}
+	if _, err := PreparePublicCreateRequest(newRequest("app-1", ""), context); err == nil {
+		t.Error("an id outside the substrate's prefix was accepted with no override")
+	}
+
+	// ForceIDPrefix still outranks both, which is what --force means.
+	forced := newRequest("zz-1", "app")
+	forced.ForceIDPrefix = true
+	if _, err := PreparePublicCreateRequest(forced, context); err != nil {
+		t.Errorf("ForceIDPrefix did not bypass the caller-supplied prefix: %v", err)
 	}
 }

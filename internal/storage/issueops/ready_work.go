@@ -179,7 +179,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 		wispFilter.Limit = 0
 		wisps, err := searchTableInTxT(ctx, tx, "", wispFilter, WispsFilterTables, issueProjection)
 		if err != nil {
-			if isTableNotExistError(err) {
+			if missingOptionalWispTable(err) {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)
@@ -193,7 +193,7 @@ func getReadyWispsInTx(ctx context.Context, tx DBTX, filter types.WorkFilter, de
 	for offset := 0; len(ready) < filter.Limit; offset += pageSize {
 		pageIDs, err := queryReadyWispIssueIDPage(ctx, tx, wispFilter, !filter.IncludeDeferred, orderBy, pageSize, offset)
 		if err != nil {
-			if isTableNotExistError(err) {
+			if missingOptionalWispTable(err) {
 				return nil, nil
 			}
 			return nil, fmt.Errorf("search wisps (ready work): %w", err)

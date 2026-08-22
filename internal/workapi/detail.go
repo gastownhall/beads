@@ -14,9 +14,13 @@ import (
 // DetailOptions selects the two expensive halves of the detail view. Both
 // default to off: the detail response carries counts only (be-ijck6q), and a
 // caller that wants the rows asks for them.
+//
+// BriefDeps is opt-in for the opposite reason: dependencies are populated by
+// default and stay that way, so no existing caller loses a field it reads.
 type DetailOptions struct {
 	IncludeDependents bool
 	IncludeComments   bool
+	BriefDeps         bool
 }
 
 // DetailSource is the read seam issue-detail assembly runs on. It is the
@@ -110,7 +114,7 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 		return nil, errors.New("build issue details: issue must not be nil")
 	}
 	id := issue.ID
-	details := &types.IssueDetails{Issue: *issue}
+	details := types.NewIssueDetails(*issue)
 
 	details.Labels, _ = src.Labels(ctx, id, isWisp)
 	details.Dependencies, _ = src.Dependencies(ctx, id, isWisp)
@@ -153,7 +157,36 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 			break
 		}
 	}
+
+	// After the Parent scan, which reads DependencyType and ID off the full rows.
+	// Builds a new slice: the source owns the one it returned and may cache it.
+	if opts.BriefDeps && details.Dependencies != nil {
+		brief := make([]*types.IssueWithDependencyMetadata, 0, len(details.Dependencies))
+		for _, dep := range details.Dependencies {
+			if dep == nil {
+				brief = append(brief, nil)
+				continue
+			}
+			brief = append(brief, shallowDep(dep))
+		}
+		details.Dependencies = brief
+	}
 	return details, nil
+}
+
+// shallowDep keeps the identity-and-shape fields callers consume and drops the
+// free-form text, which is the shape collectDependents settled on in be-4d36f2.
+func shallowDep(item *types.IssueWithDependencyMetadata) *types.IssueWithDependencyMetadata {
+	return &types.IssueWithDependencyMetadata{
+		Issue: types.Issue{
+			ID:        item.Issue.ID,
+			Status:    item.Issue.Status,
+			IssueType: item.Issue.IssueType,
+			Priority:  item.Issue.Priority,
+			Title:     item.Issue.Title,
+		},
+		DependencyType: item.DependencyType,
+	}
 }
 
 // collectDependents streams the dependents and keeps only the
@@ -177,16 +210,7 @@ func collectDependents(ctx context.Context, src DetailSource, id string, isWisp 
 		if item == nil {
 			continue
 		}
-		out = append(out, &types.IssueWithDependencyMetadata{
-			Issue: types.Issue{
-				ID:        item.Issue.ID,
-				Status:    item.Issue.Status,
-				IssueType: item.Issue.IssueType,
-				Priority:  item.Issue.Priority,
-				Title:     item.Issue.Title,
-			},
-			DependencyType: item.DependencyType,
-		})
+		out = append(out, shallowDep(item))
 	}
 	if err := iter.Err(); err != nil {
 		return nil, fmt.Errorf("iter dependents %s: %w", id, err)

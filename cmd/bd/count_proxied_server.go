@@ -1,33 +1,24 @@
 package main
 
 import (
-	"context"
+	"errors"
+	"fmt"
 
-	"github.com/spf13/cobra"
-	"github.com/steveyegge/beads/internal/workapi"
+	"github.com/steveyegge/beads/internal/storage/uow"
+	"github.com/steveyegge/beads/issueops"
 )
 
-func runCountProxiedServer(cmd *cobra.Command, ctx context.Context) error {
-	filter, groupBy, issueType, includeInfra, err := parseCountFilter(cmd)
-	if err != nil {
-		return err
+// proxiedCounter hands back the guarded issue-count surface for the
+// proxied-server provider, through the provider's OWN capability accessor —
+// the same two-step proxiedCommenter performs, and for the same reason: the
+// accessor is where each layer is added.
+func proxiedCounter() (issueops.Counter, error) {
+	if uowProvider == nil {
+		return nil, errors.New("proxied-server UOW provider not initialized")
 	}
-
-	uw, err := openProxiedListUOW(ctx)
-	if err != nil {
-		return HandleError("%v", err)
+	src, ok := uowProvider.(uow.CounterSource)
+	if !ok {
+		return nil, fmt.Errorf("proxied-server provider %T does not offer the issue-count surface", uowProvider)
 	}
-	defer uw.Close(ctx)
-
-	if includeInfra {
-		cfg, err := workapi.LoadUOWListConfig(ctx, uw)
-		if err != nil {
-			return HandleError("%v", err)
-		}
-		applyCountIncludeInfra(&filter, issueType, cfg)
-	} else {
-		filter.SkipWisps = true
-	}
-
-	return executeCount(ctx, uw.IssueUseCase(), filter, groupBy)
+	return src.Counter()
 }

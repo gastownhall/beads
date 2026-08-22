@@ -5,13 +5,11 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/audit"
-	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -153,16 +151,8 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	for _, after := range applied.updated {
-		if err := fireProxiedUpdateHook(ctx, after); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", after.ID, err)
-		}
-	}
 	for _, c := range applied.closed {
 		audit.LogFieldChange(c.after.ID, "status", c.oldStatus, "closed", actor, c.reason)
-		if err := fireProxiedCloseHooks(ctx, c.before, c.after); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", c.after.ID, err)
-		}
 	}
 	if len(applied.closed) > 0 || len(applied.updated) > 0 {
 		commandDidWrite.Store(true)
@@ -181,23 +171,6 @@ func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			return applied.closeErrs[gate.ID]
 		})
 	return printGateCheckSummary(len(results), resolved, escalated, errCount, dryRun)
-}
-
-func fireProxiedUpdateHook(ctx context.Context, after *types.Issue) error {
-	if after == nil {
-		return nil
-	}
-	runner, err := proxiedHookRunner(ctx)
-	if err != nil {
-		return fmt.Errorf("hook runner: %w", err)
-	}
-	if runner == nil {
-		return nil
-	}
-	if err := runner.RunSync(hooks.EventUpdate, after); err != nil {
-		return fmt.Errorf("on_update hook: %w", err)
-	}
-	return nil
 }
 
 // gateProxiedNotFound reports whether an issue lookup failed because the row
@@ -310,9 +283,6 @@ func runGateAddWaiterProxiedServer(_ *cobra.Command, ctx context.Context, args [
 		return nil
 	}
 
-	if err := fireProxiedUpdateHook(ctx, applied.after); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %s: %v\n", gateID, err)
-	}
 	commandDidWrite.Store(true)
 
 	renderGateWaiterAdded(gateID, waiter)
@@ -357,7 +327,14 @@ func runGateCreateProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 			return out, "", fmt.Errorf("issue not found: %s", in.blocksID)
 		}
 
-		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: buildGateIssue(in, target.ID)}, actor)
+		gate := buildGateIssue(in, target.ID)
+		metadata, metaErr := repoMetadataForGate(in.gateType, target)
+		if metaErr != nil {
+			return out, "", fmt.Errorf("invalid GitHub repository metadata on %s: %v", target.ID, metaErr)
+		}
+		gate.Metadata = metadata
+
+		res, err := uw.IssueUseCase().CreateIssue(ctx, domain.CreateIssueParams{Issue: gate}, actor)
 		if err != nil {
 			return out, "", fmt.Errorf("creating gate: %w", err)
 		}
@@ -445,16 +422,11 @@ func runGateResolveProxiedServer(cmd *cobra.Command, ctx context.Context, args [
 		return HandleError("%v", err)
 	}
 
-	// Audit + hooks only when this invocation actually closed the gate —
-	// a double-resolve must not re-fire them (same guard as the o.closed
-	// check in close_proxied_server.go).
-	if applied.closed {
-		if applied.after != nil {
-			audit.LogFieldChange(applied.after.ID, "status", applied.oldStatus, "closed", actor, reason)
-		}
-		if err := fireProxiedCloseHooks(ctx, applied.before, applied.after); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: %s: %v\n", gateID, err)
-		}
+	// Audit only when this invocation actually closed the gate — a
+	// double-resolve must not re-log it (same guard as the o.closed check in
+	// close_proxied_server.go).
+	if applied.closed && applied.after != nil {
+		audit.LogFieldChange(applied.after.ID, "status", applied.oldStatus, "closed", actor, reason)
 	}
 	commandDidWrite.Store(true)
 

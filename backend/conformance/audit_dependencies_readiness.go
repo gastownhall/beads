@@ -15,10 +15,40 @@ import (
 // issueops reference (validated against the embedded-Dolt oracle). Every case here
 // is deliberately absent from conformance.go/portable.go: self-dep and cycle
 // rejection, the hierarchy blocking-deadlock guard, idempotency vs type-conflict,
-// external targets, the blocks-only vs all-types count split, ready-work type/pinned/
-// deferred exclusions, hybrid sort ordering, transitive ParentID descendants,
-// inherited parent blocking, typed blocker descriptions, and hypothetical
-// unblock-by-close. Ordering that the SQL leaves unspecified is asserted as a set.
+// the blocks-only vs all-types count split, ready-work type/pinned exclusions,
+// hybrid sort ordering, transitive ParentID descendants, inherited parent
+// blocking, typed blocker descriptions, and hypothetical unblock-by-close.
+// Ordering that the SQL leaves unspecified is asserted as a set.
+//
+// FOUR CASES WERE RETIRED against dependency_editor_contract.go and
+// reader_contract.go, which reach the same bodies and read them at a stronger
+// plane on three legs instead of two:
+//
+//	a ghost endpoint refuses     RunDependencyEditorRefusesAGhostSource /
+//	                             RefusesAMissingLocalTarget (typed
+//	                             *DependencyEndpointNotFoundError, and raw
+//	                             no-edge rollback in BOTH planes)
+//	an external: target lands     RunDependencyEditorAcceptsAnExternalTarget +
+//	                             WritesTheTargetIntoItsTypedColumn (the typed
+//	                             COLUMN, where this file read the COALESCE
+//	                             expression back)
+//	removing an absent edge is    RunDependencyEditorRemoveIsIdempotent
+//	a no-op, removing the real
+//	one unblocks                  RunDependencyEditorRemoveUnmarksItsSourceAndDescendants
+//	                             (raw is_blocked with a falsifiability
+//	                             pre-check, where this file asked GetReadyWork
+//	                             and IsBlocked — the role-answer anti-pattern
+//	                             ADDING_AN_ISSUEOPS_ROLE.md names)
+//	defer_until hides a row       RunReaderReadyDeferredAndEphemeralGates (same
+//	                             sqlbuild.BuildReadyWorkWhere clause, plus the
+//	                             cross-gate independence with IncludeEphemeral)
+//
+// testAuditSelfDependencyRejected stayed: its guard is a DIFFERENT body. The
+// role refuses a self-edge in issueops.ValidateAddDependenciesRequest before the
+// transaction opens; the raw verb reaches the guard inside
+// CheckDependencyCycleInTx, which is the one that fires ahead of the
+// scheduling-edge early return and so refuses a relates-to self-edge too.
+// Deleting that guard leaves the whole editor contract green.
 
 // RunAudit_dependencies_readiness runs the dependencies-readiness audit cases.
 func RunAudit_dependencies_readiness(t *testing.T, f Factory) {
@@ -28,14 +58,10 @@ func RunAudit_dependencies_readiness(t *testing.T, f Factory) {
 	t.Run("CycleScopeByDependencyType", func(t *testing.T) { testAuditCycleScopeByDependencyType(t, f) })
 	t.Run("IdempotencyVsTypeConflict", func(t *testing.T) { testAuditIdempotencyVsTypeConflict(t, f) })
 	t.Run("CrossTypeEpicTaskBlocking", func(t *testing.T) { testAuditCrossTypeEpicTaskBlocking(t, f) })
-	t.Run("MissingSourceTarget", func(t *testing.T) { testAuditMissingSourceTarget(t, f) })
-	t.Run("ExternalTarget", func(t *testing.T) { testAuditExternalTarget(t, f) })
-	t.Run("RemoveMissingAndUnblock", func(t *testing.T) { testAuditRemoveMissingAndUnblock(t, f) })
 	t.Run("DependencyCountsBlocksOnly", func(t *testing.T) { testAuditDependencyCountsBlocksOnly(t, f) })
 	t.Run("DetectCyclesBlocksOnly", func(t *testing.T) { testAuditDetectCyclesBlocksOnly(t, f) })
 	t.Run("DependencyTree", func(t *testing.T) { testAuditDependencyTree(t, f) })
 	t.Run("ReadyTypeAndPinnedExclusions", func(t *testing.T) { testAuditReadyTypeAndPinnedExclusions(t, f) })
-	t.Run("ReadyDeferredExclusion", func(t *testing.T) { testAuditReadyDeferredExclusion(t, f) })
 	t.Run("ReadyMultiStatusFilter", func(t *testing.T) { testAuditReadyMultiStatusFilter(t, f) })
 	t.Run("ReadyHybridSortAndOldest", func(t *testing.T) { testAuditReadyHybridSortAndOldest(t, f) })
 	t.Run("ReadyParentTransitiveDescendants", func(t *testing.T) { testAuditReadyParentTransitiveDescendants(t, f) })
@@ -229,65 +255,6 @@ func testAuditCrossTypeEpicTaskBlocking(t *testing.T, f Factory) {
 	}
 }
 
-func testAuditMissingSourceTarget(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "me", Title: "Me"}), "a"))
-
-	errTarget := s.AddDependency(ctx(), &types.Dependency{IssueID: "me", DependsOnID: "ghost", Type: types.DepBlocks}, "a")
-	if errTarget == nil || !strings.Contains(errTarget.Error(), "ghost") || !strings.Contains(errTarget.Error(), "not found") {
-		t.Errorf("missing-target err = %v, want to mention 'ghost' and 'not found'", errTarget)
-	}
-	errSource := s.AddDependency(ctx(), &types.Dependency{IssueID: "ghost", DependsOnID: "me", Type: types.DepBlocks}, "a")
-	if errSource == nil || !strings.Contains(errSource.Error(), "ghost") || !strings.Contains(errSource.Error(), "not found") {
-		t.Errorf("missing-source err = %v, want to mention 'ghost' and 'not found'", errSource)
-	}
-	deps, _ := s.GetDependencies(ctx(), "me")
-	if len(deps) != 0 {
-		t.Errorf("GetDependencies(me) = %v, want empty", issueIDs(deps))
-	}
-}
-
-func testAuditExternalTarget(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "ex1", Title: "Ext"}), "a"))
-
-	// An external: target skips existence validation and is written to depends_on_external.
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "ex1", DependsOnID: "external:PROJ-9", Type: types.DepBlocks}, "a"))
-
-	// GetDependencies hydrates issues/wisps only, so the external target is dropped.
-	deps, _ := s.GetDependencies(ctx(), "ex1")
-	if len(deps) != 0 {
-		t.Errorf("GetDependencies(ex1) = %v, want empty (external target is not an issue)", issueIDs(deps))
-	}
-	// GetDependencyRecords surfaces the raw edge via the COALESCE target expression.
-	recs, _ := s.GetDependencyRecords(ctx(), "ex1")
-	if got := depTargets(recs); !slices.Equal(got, []string{"external:PROJ-9"}) {
-		t.Errorf("GetDependencyRecords(ex1) targets = %v, want [external:PROJ-9]", got)
-	}
-}
-
-func testAuditRemoveMissingAndUnblock(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rb1", Title: "Blocker", Status: types.StatusOpen}), "a"))
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rb2", Title: "Blocked", Status: types.StatusOpen}), "a"))
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "rb2", DependsOnID: "rb1", Type: types.DepBlocks}, "a"))
-
-	// Removing a non-existent edge is a silent no-op.
-	must(t, s.RemoveDependency(ctx(), "rb2", "nope", "a"))
-	// Removing the real sole blocks edge recomputes is_blocked; rb2 becomes ready.
-	must(t, s.RemoveDependency(ctx(), "rb2", "rb1", "a"))
-
-	ready, _ := s.GetReadyWork(ctx(), types.WorkFilter{})
-	if !contains(issueIDs(ready), "rb2") {
-		t.Errorf("ready after remove = %v, want to contain rb2", issueIDs(ready))
-	}
-	blocked, _, err := s.IsBlocked(ctx(), "rb2")
-	must(t, err)
-	if blocked {
-		t.Error("IsBlocked(rb2) = true after removing sole blocker, want false")
-	}
-}
-
 func testAuditDependencyCountsBlocksOnly(t *testing.T, f Factory) {
 	s := f(t)
 	for _, id := range []string{"t", "c", "r", "b"} {
@@ -339,6 +306,13 @@ func testAuditDetectCyclesBlocksOnly(t *testing.T, f Factory) {
 	}
 }
 
+// testAuditDependencyTree survives a retirement pass despite tree_walker_contract.go
+// pinning the same GetDependencyTreeInTx body harder (Depth/ParentID/EdgeFromParent,
+// title hydration, `related` included as well as relates-to excluded). It is the
+// only call to DoltStorage.GetDependencyTree anywhere in RunAll, and RunAll is
+// what an out-of-tree backend proves itself with — the role contracts are wired
+// per-backend and are not part of that gate. Deleting this leaves the method
+// uncalled by the suite that exists to call it.
 func testAuditDependencyTree(t *testing.T, f Factory) {
 	s := f(t)
 	for _, id := range []string{"g1", "g2", "g3", "g4"} {
@@ -405,27 +379,34 @@ func testAuditReadyTypeAndPinnedExclusions(t *testing.T, f Factory) {
 	}
 }
 
-func testAuditReadyDeferredExclusion(t *testing.T, f Factory) {
-	s := f(t)
-	future := time.Now().UTC().Add(24 * time.Hour).Truncate(time.Second)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "df1", Title: "deferred", Status: types.StatusOpen, DeferUntil: &future}), "a"))
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "df2", Title: "ready", Status: types.StatusOpen}), "a"))
-
-	ready, _ := s.GetReadyWork(ctx(), types.WorkFilter{})
-	if got := issueIDs(ready); !slices.Equal(got, []string{"df2"}) {
-		t.Errorf("ready = %v, want [df2] (df1 deferred out)", got)
-	}
-	withDeferred, _ := s.GetReadyWork(ctx(), types.WorkFilter{IncludeDeferred: true})
-	if got := issueIDs(withDeferred); !slices.Equal(got, []string{"df1", "df2"}) {
-		t.Errorf("ready(IncludeDeferred) = %v, want [df1 df2]", got)
-	}
-}
-
 // testAuditReadyMultiStatusFilter pins WorkFilter.Statuses at the result level
 // through the full ready-work stack, with real issues and wisps: OR semantics
 // across the given statuses in one call, singular-Status precedence over
 // Statuses, the legacy open/in_progress default when both are empty, and a
 // custom (non-built-in) status flowing through the same IN clause.
+//
+// THIS IS THE ONLY OBSERVER OF THE OR-SET ARM, AND IT COVERS EVERY SEAM THE ARM
+// IS REACHABLE FROM. No role can ask for it — publicops.ReadyRequest carries no
+// status field of any kind, which RunReadyCounterCountsOnlyTheOpenRowsItsListingLists
+// says from the other side — and no in-tree caller sets it either. Every builder
+// that renders a ready query sends the SINGULAR status: workapi.BuildReadyFilter
+// and BuildReadyCountFilter send StatusOpen, and ReadyFilterFromIssueFilter sends
+// StatusOpen while dropping IssueFilter.Statuses, which BuildListFilter has
+// already resolved to open under --ready (issueops/reader_ready_scope.go states
+// that override and why the projection has nothing to drop). What is left is the
+// storage seam this file runs against, which backend.DoltStorage publishes to
+// out-of-tree backends — so Statuses is a public filter field whose only reachable
+// consumer class is exactly the one RunAll is the proof obligation for.
+//
+// The unit-of-work provider's ready union renders this arm from the same shared
+// builder (sqlbuild.BuildReadyWorkWhere), applied to the wisps table as well as
+// issues where the classic stack projects the wisp plane onto a types.IssueFilter
+// instead. Its copy is deliberately unpinned rather than overlooked: that provider
+// is not a storage.DoltStorage, so no external caller reaches it, and no in-tree
+// caller sets Statuses at all. Promoting a status set onto ReadyRequest is what
+// would make it reachable, and would move this case to reader_contract.go beside
+// RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions, where all three
+// wirings would vote on it.
 func testAuditReadyMultiStatusFilter(t *testing.T, f Factory) {
 	s := f(t)
 	c := ctx()
@@ -442,7 +423,7 @@ func testAuditReadyMultiStatusFilter(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "msf-w-block", Title: "wisp blocked", Status: types.StatusBlocked, Ephemeral: true}),
 		withDefaults(&types.Issue{ID: "msf-w-prog", Title: "wisp in progress", Status: types.StatusInProgress, Ephemeral: true}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	// Statuses ORs across issues and wisps in a single call.
 	multi, err := s.GetReadyWork(c, types.WorkFilter{Statuses: []types.Status{types.StatusOpen, types.StatusBlocked}, IncludeEphemeral: true})

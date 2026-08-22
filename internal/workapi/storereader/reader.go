@@ -8,7 +8,7 @@
 // store.IssueReader() from any front door — and one that silently skips the
 // telemetry decorator's reader-level spans, because a decorator adds its layer
 // in its own accessor. Down here the only importers are the two Dolt store
-// packages, and the cmd-bd-reader-constructor depguard rule in .golangci.yml
+// packages, and the cmd-bd-role-constructors depguard rule in .golangci.yml
 // makes a front door importing it a lint failure rather than a review comment.
 //
 // The accessor is the door. This is the thing behind it.
@@ -32,17 +32,16 @@ import (
 // execute" ritual: it has no way to reach the pieces.
 //
 // THE BOUNDARY, stated once here because this is where the constructor lives:
-// today the store-backed role answers `bd show --json` on the direct route,
-// and the HTTP surface and the proxied `bd show --json` reach the uow-backed
-// one. `bd ready` and `bd list` still call the workapi builders directly —
-// they consume the FILTER for the max-rows cap, --claim, --watch, the
-// hierarchical --parent tree and the text renderings — so Ready and List below
-// are reached only by tests until a front door moves. They are covered by
-// reader_test.go for exactly that reason, and their page epilogue is
-// workapi.FinishPage, which `bd list` DOES run in every mode but the
-// hierarchical --parent tree, so the untravelled path here is the query and
-// not the tail. See issueops.Reader's doc comment for why routing only those
-// commands' JSON paths through the role would be worse.
+// the store-backed role answers `bd show --json` and `bd list` on the DIRECT
+// route, and the HTTP surface and both commands' proxied routes reach the
+// uow-backed one. List below is therefore a traveled path on the most-run
+// command in the tree, which it was not before: `bd list` used to build the
+// filter and run this body's steps longhand.
+//
+// Ready below is still reached only by tests and by the HTTP surface. `bd
+// ready` calls the workapi builders directly because it consumes the FILTER
+// for --claim, --gated, --explain and --mol; see issueops.Reader's doc comment
+// for why routing only its JSON path through the role would be worse.
 func New(store storage.DoltStorage) (issueops.Reader, error) {
 	if store == nil {
 		return nil, &issueops.ErrUnsupported{Op: "storereader.New", Backend: "nil"}
@@ -54,37 +53,27 @@ type storeReader struct{ store storage.DoltStorage }
 
 var _ issueops.Reader = (*storeReader)(nil)
 
-// offsetBackend names the backend an Offset refusal comes from. One name for
-// both engines on purpose: the server-backed and embedded stores hand back
-// THIS body, and it is the body — not the engine underneath it — that cannot
-// page by offset.
-const offsetBackend = "dolt-store"
-
-// refuseOffset is the shared refusal. The store seam renders LIMIT without
-// OFFSET (internal/storage/issueops/ready_work.go, search_counts.go), so a
-// request carrying one used to come back as the unpaged first page with no
-// error on it — a caller paging with Offset saw the same rows forever. The
-// field is not dead: `bd ready/list/query --offset` are real flags, and their
-// direct routes already reject a non-zero offset before reaching any of this
-// (cmd/bd/ready.go, list.go, query.go). This is the same refusal one layer
-// down, for the callers that are not the CLI.
-func refuseOffset(op string) error {
-	return &issueops.ErrUnsupported{Op: op, Backend: offsetBackend}
-}
+// OFFSET IS PAGED HERE, NOT IN THE QUERY. The store seam renders LIMIT without
+// OFFSET (internal/storage/issueops/ready_work.go, search_counts.go), so this
+// body reaches past the skipped rows and drops them after the display order —
+// workapi.WithRowsBeforeThePage onto the filter, workapi.FinishPageAt at the
+// end. Its unit-of-work sibling does exactly the same thing, and FinishPageAt
+// says why it does it there too rather than pushing a skip its seam could
+// render: the rows have to be dropped in the caller's order, and a MaxRows cap
+// has to count them.
 
 func (r *storeReader) Ready(ctx context.Context, req issueops.ReadyRequest) (issueops.IssuePage, error) {
-	if req.Offset != 0 {
-		return issueops.IssuePage{}, refuseOffset("Reader.Ready(Offset)")
-	}
 	filter, err := workapi.BuildReadyFilter(req)
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}
 	limit := filter.Limit
-	if limit > 0 {
-		// The store seam has no HasMore of its own, so ask for one row past
-		// the page and let its presence be the answer.
-		filter.Limit = limit + 1
+	filter = workapi.WithReadyRowsBeforeThePage(filter, req.Offset)
+	if filter.Limit > 0 {
+		// The store seam has no HasMore of its own, so ask for one row past the
+		// page — which the line above has already widened to cover the rows the
+		// epilogue skips — and let the extra row's presence be the answer.
+		filter.Limit++
 	}
 	items, err := r.store.GetReadyWorkWithCounts(ctx, filter)
 	if err != nil {
@@ -92,16 +81,23 @@ func (r *storeReader) Ready(ctx context.Context, req issueops.ReadyRequest) (iss
 	}
 	// Ready has no display order to apply — the ordering is the sort POLICY
 	// the query ran under — so the epilogue's sort is a no-op here and only
-	// its trim and its verdict do any work. It is still the shared one: a
-	// second trim written out longhand is how the two arms of List came apart.
-	items, hasMore := workapi.FinishPage(items, "", false, limit, false)
+	// its skip, its trim and its verdict do any work. It is still the shared
+	// one: a second trim written out longhand is how the two arms of List came
+	// apart.
+	items, hasMore := workapi.FinishPageAt(items, "", false, req.Offset, limit, false)
 	return issueops.IssuePage{Items: items, HasMore: hasMore}, nil
 }
 
+// List answers one issue listing.
+//
+// The two knobs this body and its unit-of-work sibling once answered opposite
+// ways are both honored here now, and neither is honored by anything written
+// below. MaxRows rides on the filter the shared builder produces and the search
+// path enforces it after the scan (internal/storage/issueops,
+// EnforceMaxRowsCap), so the answer is *ErrTooManyRows instead of a page.
+// Offset rides on the two workapi calls this method already made for the
+// has-more probe row — one widens the bound, the other cuts the page.
 func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issueops.IssuePage, error) {
-	if req.Offset != 0 {
-		return issueops.IssuePage{}, refuseOffset("Reader.List(Offset)")
-	}
 	cfg, err := workapi.LoadStoreListConfig(ctx, r.store)
 	if err != nil {
 		return issueops.IssuePage{}, err
@@ -110,24 +106,27 @@ func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issue
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}
+	// Reach past the rows the epilogue skips before the probe row is sized, so
+	// the cap the seam enforces counts every row the query matched.
+	filter = workapi.WithFetchOneExtra(workapi.WithRowsBeforeThePage(filter, req.Offset))
 
 	var items []*types.IssueWithCounts
 	if req.ReadyFlag {
-		items, err = r.store.GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(workapi.WithFetchOneExtra(filter)))
+		items, err = r.store.GetReadyWorkWithCounts(ctx, workapi.ReadyFilterFromIssueFilter(filter))
 	} else {
-		items, err = r.store.SearchIssuesWithCounts(ctx, "", workapi.WithFetchOneExtra(filter))
+		items, err = r.store.SearchIssuesWithCounts(ctx, "", filter)
 	}
 	if err != nil {
 		return issueops.IssuePage{}, err
 	}
 
-	// The sort, the trim and the HasMore verdict are workapi.FinishPage's, not
-	// this implementation's: `bd list` on both its routes and the uow-backed
-	// sibling of this method call the same function, so the only thing left
-	// that can differ between a CLI listing and an HTTP one is presentation.
-	// This seam reports no HasMore of its own, so the over-fetched row above
-	// is what speaks.
-	items, hasMore := workapi.FinishPage(items, req.SortBy, req.Reverse, workapi.PageLimit(req), false)
+	// The sort, the skip, the trim and the HasMore verdict are
+	// workapi.FinishPageAt's, not this implementation's: `bd list` on both its
+	// routes and the uow-backed sibling of this method call the same function,
+	// so the only thing left that can differ between a CLI listing and an HTTP
+	// one is presentation. This seam reports no HasMore of its own, so the
+	// over-fetched row above is what speaks.
+	items, hasMore := workapi.FinishPageAt(items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), false)
 	return issueops.IssuePage{Items: items, HasMore: hasMore}, nil
 }
 
@@ -140,5 +139,6 @@ func (r *storeReader) Get(ctx context.Context, req issueops.GetRequest) (*issueo
 	return workapi.BuildIssueDetails(ctx, src, issue, isWisp, workapi.DetailOptions{
 		IncludeDependents: req.IncludeDependents,
 		IncludeComments:   req.IncludeComments,
+		BriefDeps:         req.BriefDeps,
 	})
 }

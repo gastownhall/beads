@@ -4,7 +4,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func TestPrintHumanStats(t *testing.T) {
@@ -100,10 +102,142 @@ func TestHumanCmdSubcommands(t *testing.T) {
 	}
 }
 
-func TestHumanRespondRequiresResponseFlag(t *testing.T) {
+// TestHumanRespondDismissArgs pins the Args policy for respond and dismiss:
+// an issue ID is required and trailing args are free text, not extra IDs
+// (MinimumNArgs(1), not ExactArgs(1)). End-to-end coverage lives in the
+// embedded tests, which are env-gated — this always-run check guards the
+// declaration itself.
+func TestHumanRespondDismissArgs(t *testing.T) {
+	for _, cmd := range []*cobra.Command{humanRespondCmd, humanDismissCmd} {
+		if err := cmd.Args(cmd, []string{"bd-123", "free", "text"}); err != nil {
+			t.Errorf("%s should accept positional free text after the ID: %v", cmd.Name(), err)
+		}
+		if err := cmd.Args(cmd, []string{}); err == nil {
+			t.Errorf("%s should still require an issue ID", cmd.Name())
+		}
+	}
+}
+
+func TestHumanListFilter(t *testing.T) {
+	cfg := workapi.ListConfig{
+		CustomStatuses: []types.CustomStatus{
+			{Name: "archived", Category: types.CategoryDone},
+			{Name: "review", Category: types.CategoryActive},
+		},
+	}
+
+	t.Run("default hides the canonical done/frozen statuses", func(t *testing.T) {
+		filter, err := humanListFilter("", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		excluded := make(map[types.Status]bool)
+		for _, s := range filter.ExcludeStatus {
+			excluded[s] = true
+		}
+		for _, want := range []types.Status{types.StatusClosed, types.StatusPinned, "archived"} {
+			if !excluded[want] {
+				t.Errorf("default filter should exclude %q, got ExcludeStatus=%v", want, filter.ExcludeStatus)
+			}
+		}
+		if excluded["review"] {
+			t.Errorf("active-category custom status should not be excluded, got %v", filter.ExcludeStatus)
+		}
+		if filter.Status != nil {
+			t.Errorf("default filter should not pin a status, got %v", *filter.Status)
+		}
+	})
+
+	t.Run("default hides pinned beads but no bead types", func(t *testing.T) {
+		filter, err := humanListFilter("", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if filter.Pinned == nil || *filter.Pinned {
+			t.Errorf("default filter should hide boolean-pinned beads, got Pinned=%v", filter.Pinned)
+		}
+		if filter.Limit != 0 {
+			t.Errorf("human list should stay unlimited, got Limit=%d", filter.Limit)
+		}
+	})
+
+	t.Run("no bead type is ever hidden", func(t *testing.T) {
+		for _, status := range []string{"", "open", "all"} {
+			filter, err := humanListFilter(status, cfg)
+			if err != nil {
+				t.Fatalf("unexpected error for status %q: %v", status, err)
+			}
+			if len(filter.ExcludeTypes) != 0 {
+				t.Errorf("status %q: human list must not exclude bead types (gates, infra), got %v", status, filter.ExcludeTypes)
+			}
+			if filter.SkipWisps {
+				t.Errorf("status %q: human list must show human-labeled wisps", status)
+			}
+			if filter.IsTemplate != nil {
+				t.Errorf("status %q: human list must not hide templates, got IsTemplate=%v", status, *filter.IsTemplate)
+			}
+		}
+	})
+
+	t.Run("explicit status overrides default", func(t *testing.T) {
+		filter, err := humanListFilter("closed", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if filter.Status == nil || *filter.Status != types.StatusClosed {
+			t.Errorf("expected Status=closed, got %v", filter.Status)
+		}
+		if len(filter.ExcludeStatus) != 0 {
+			t.Errorf("explicit status should drop the default exclusions, got %v", filter.ExcludeStatus)
+		}
+	})
+
+	t.Run("all shows every status", func(t *testing.T) {
+		filter, err := humanListFilter("all", cfg)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if filter.Status != nil || len(filter.Statuses) != 0 || len(filter.ExcludeStatus) != 0 {
+			t.Errorf("--status=all should not constrain status, got Status=%v Statuses=%v ExcludeStatus=%v",
+				filter.Status, filter.Statuses, filter.ExcludeStatus)
+		}
+	})
+
+	t.Run("invalid status is refused", func(t *testing.T) {
+		if _, err := humanListFilter("nonesuch", cfg); err == nil {
+			t.Error("expected an error for an unknown status")
+		}
+	})
+
+	t.Run("always filters on human label", func(t *testing.T) {
+		for _, status := range []string{"", "open", "all"} {
+			filter, err := humanListFilter(status, cfg)
+			if err != nil {
+				t.Fatalf("unexpected error for status %q: %v", status, err)
+			}
+			if len(filter.Labels) != 1 || filter.Labels[0] != "human" {
+				t.Errorf("expected Labels=[human] for status %q, got %v", status, filter.Labels)
+			}
+		}
+	})
+}
+
+func TestHumanRespondTextSourceFlags(t *testing.T) {
+	for _, name := range []string{"file", "stdin"} {
+		if humanRespondCmd.Flags().Lookup(name) == nil {
+			t.Errorf("respond command should have --%s flag", name)
+		}
+	}
+
+	// --response must not be marked required: the response can also come from
+	// --file, --stdin, or positional args, and cobra rejects those invocations
+	// before RunE if the flag carries the required annotation.
 	flag := humanRespondCmd.Flags().Lookup("response")
 	if flag == nil {
 		t.Fatal("respond command should have --response flag")
+	}
+	if len(flag.Annotations[cobra.BashCompOneRequiredFlag]) > 0 {
+		t.Error("--response must not be hard-required; --file/--stdin/positional text are valid sources")
 	}
 }
 

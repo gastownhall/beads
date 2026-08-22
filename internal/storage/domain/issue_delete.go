@@ -114,15 +114,11 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 		return DeleteIssuesResult{}, fmt.Errorf("delete: partition: %w", err)
 	}
 
-	depIssue, err := u.depRepo.CountAllForIDs(ctx, regularIDs, DepCountsOpts{})
+	depCount, err := u.countDeletedDependencies(ctx, allIDs)
 	if err != nil {
-		return DeleteIssuesResult{}, fmt.Errorf("delete: count deps: %w", err)
+		return DeleteIssuesResult{}, err
 	}
-	depWisp, err := u.depRepo.CountAllForIDs(ctx, wispIDs, DepCountsOpts{UseWispsTable: true})
-	if err != nil {
-		return DeleteIssuesResult{}, fmt.Errorf("delete: count wisp deps: %w", err)
-	}
-	result.DependenciesCount = depIssue + depWisp
+	result.DependenciesCount = depCount
 
 	labelIssue, err := u.labelRepo.CountAllForIDs(ctx, regularIDs, LabelOpts{})
 	if err != nil {
@@ -172,6 +168,17 @@ func (u *issueUseCaseImpl) deleteMany(ctx context.Context, params DeleteIssuesPa
 	}
 	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{UseWispsTable: true}); err != nil {
 		return result, fmt.Errorf("delete: drop wisp deps: %w", err)
+	}
+	// The SYNC-PLANE edges pointing at a deleted wisp, which are not the same
+	// rows as the line above and are not reached by a foreign key: there is no
+	// FK from dependencies to wisps, so `dependencies.depends_on_wisp_id` rows
+	// survive their target unless they are deleted explicitly. Without this a
+	// forced delete of a wisp left its durable dependent holding an edge into
+	// a row that no longer exists — dangling, not orphaned, which is not what
+	// issueops.DeleteRequest.Force promises. The store body has always done
+	// this (issueops.deleteIssueRowInTx -> DeleteWispFromDependenciesInTx).
+	if _, err := u.depRepo.DeleteAllForIDs(ctx, wispIDs, DepInsertOpts{}); err != nil {
+		return result, fmt.Errorf("delete: drop sync-plane edges into deleted wisps: %w", err)
 	}
 	if _, err := u.labelRepo.DeleteAllForIDs(ctx, regularIDs, LabelOpts{}); err != nil {
 		return result, fmt.Errorf("delete: drop labels: %w", err)
@@ -433,4 +440,57 @@ func (u *issueUseCaseImpl) rewriteTextReferences(
 		}
 	}
 	return len(touched), nil
+}
+
+// countDeletedDependencies counts every dependency row this deletion removes,
+// exactly once, across BOTH planes and BOTH ends of each edge.
+//
+// It replaces a pair of CountAllForIDs calls that paired each plane's ids with
+// that plane's table only. Two shapes escaped them:
+//
+//   - a durable row depending on a deleted WISP lives in `dependencies` with
+//     the wisp as the target, and the wisp was only ever checked against
+//     wisp_dependencies;
+//   - a surviving wisp depending on a deleted DURABLE row is the mirror.
+//
+// Both edges really are removed — one by the explicit cross-plane delete
+// below, the other by an ON DELETE CASCADE — so the count under-reported real
+// removals, and the two CLI routes printed different numbers for the same
+// delete.
+//
+// The old predicate also DOUBLE-counted: `issue_id IN (batch) OR target IN
+// (batch)` was run per 50-id batch, so an edge whose two ends fell in
+// different batches matched twice. Keying by the edge itself removes that
+// hazard rather than trading it for another: a row is counted once whether it
+// is reached as somebody's outbound edge, somebody's inbound edge, or both.
+func (u *issueUseCaseImpl) countDeletedDependencies(ctx context.Context, allIDs []string) (int, error) {
+	if len(allIDs) == 0 {
+		return 0, nil
+	}
+	seen := make(map[string]bool)
+	for _, useWisps := range []bool{false, true} {
+		edges, err := u.depRepo.ListByIssueIDs(ctx, allIDs, DepListOpts{
+			Direction:     DepDirectionBoth,
+			UseWispsTable: useWisps,
+		})
+		if err != nil {
+			if useWisps && dberrors.IsTableNotExist(err) {
+				continue
+			}
+			return 0, fmt.Errorf("delete: count deps: %w", err)
+		}
+		for _, side := range []map[string][]*types.Dependency{edges.Outgoing, edges.Incoming} {
+			for _, list := range side {
+				for _, dep := range list {
+					if dep == nil {
+						continue
+					}
+					// (source, target) is unique per table: the writer refuses a
+					// second edge for a pair, retyping included.
+					seen[fmt.Sprintf("%t\x00%s\x00%s", useWisps, dep.IssueID, dep.DependsOnID)] = true
+				}
+			}
+		}
+	}
+	return len(seen), nil
 }

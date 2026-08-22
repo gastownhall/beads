@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 
+	sqlmock "github.com/DATA-DOG/go-sqlmock"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -25,7 +26,7 @@ func TestStageAndCommitAfterSQLCommitResponseLossIsIndeterminateAndNotReplayed(t
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			responseLoss := errors.New(tc.name + " response lost after SQL commit")
-			conn := &postSQLCommitFailureConn{failCall: tc.failCall, err: responseLoss}
+			conn := &postSQLCommitFailureConn{failCall: tc.failCall, err: responseLoss, status: newDoltStatusStub(t)}
 
 			err := stageAndCommitAfterSQLCommit(t.Context(), conn,
 				map[string]bool{"issues": true}, "bd: commit derived state", "tester <tester@example.com>")
@@ -45,10 +46,30 @@ func TestStageAndCommitAfterSQLCommitResponseLossIsIndeterminateAndNotReplayed(t
 	}
 }
 
+// newDoltStatusStub returns a *sql.DB whose dolt_status queries each yield a
+// single-row count of 1, standing in for the pending/staged empty-commit guard
+// reads (GH#4288 re-port) that StageAndCommit issues around its Exec calls.
+// The version-control call counting below deliberately tracks only Exec calls,
+// so the guard reads stay invisible to the assertions.
+func newDoltStatusStub(t *testing.T) *sql.DB {
+	t.Helper()
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
+	if err != nil {
+		t.Fatalf("sqlmock.New: %v", err)
+	}
+	for i := 0; i < 4; i++ {
+		mock.ExpectQuery(`FROM dolt_status`).
+			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return db
+}
+
 type postSQLCommitFailureConn struct {
 	failCall int
 	err      error
 	calls    []string
+	status   *sql.DB
 }
 
 func (c *postSQLCommitFailureConn) ExecContext(_ context.Context, query string, _ ...any) (sql.Result, error) {
@@ -63,6 +84,6 @@ func (*postSQLCommitFailureConn) QueryContext(context.Context, string, ...any) (
 	return nil, errors.New("unexpected QueryContext")
 }
 
-func (*postSQLCommitFailureConn) QueryRowContext(context.Context, string, ...any) *sql.Row {
-	return nil
+func (c *postSQLCommitFailureConn) QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row {
+	return c.status.QueryRowContext(ctx, query, args...)
 }

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -11,9 +10,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestBuildCreateIssueFromInput_PopulatesAllFields(t *testing.T) {
@@ -427,28 +425,28 @@ func TestBuildDomainGraphPlanCoversEdgeFields(t *testing.T) {
 	assertCopied(dep, reflect.ValueOf(got.Nodes[0].Deps[0]))
 }
 
-func TestParseMarkdownDepSpecs(t *testing.T) {
+func TestParseMarkdownDependencies(t *testing.T) {
 	tests := []struct {
 		name    string
 		in      []string
-		want    []domain.DependencySpec
+		want    []issueops.CreateDependency
 		wantErr bool
 	}{
 		{"empty", nil, nil, false},
 		{"whitespace skipped", []string{"  ", ""}, nil, false},
 		{"bare id → blocks edge", []string{"bd-1"},
-			[]domain.DependencySpec{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-1"}}, false},
 		{"type:id preserved verbatim (no alias)", []string{"depends-on:bd-2"},
-			[]domain.DependencySpec{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
+			[]issueops.CreateDependency{{Type: types.DependencyType("depends-on"), TargetID: "bd-2"}}, false},
 		{"discovered-from preserved", []string{"discovered-from:bd-3"},
-			[]domain.DependencySpec{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepDiscoveredFrom, TargetID: "bd-3"}}, false},
 		{"whitespace trimmed", []string{"  blocks : bd-4 "},
-			[]domain.DependencySpec{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
+			[]issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-4"}}, false},
 		{"empty type rejected", []string{":bd-1"}, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := parseMarkdownDepSpecs(tt.in, "Test Title")
+			got, err := parseMarkdownDependencies(tt.in, "Test Title")
 			if tt.wantErr {
 				if err == nil {
 					t.Fatalf("expected error, got %v", got)
@@ -465,12 +463,12 @@ func TestParseMarkdownDepSpecs(t *testing.T) {
 	}
 }
 
-func TestParseMarkdownDepSpecs_DoesNotSwapBlocks(t *testing.T) {
-	got, err := parseMarkdownDepSpecs([]string{"blocks:bd-5"}, "T")
+func TestParseMarkdownDependencies_DoesNotSwapBlocks(t *testing.T) {
+	got, err := parseMarkdownDependencies([]string{"blocks:bd-5"}, "T")
 	if err != nil {
 		t.Fatalf("error: %v", err)
 	}
-	want := []domain.DependencySpec{{Type: types.DepBlocks, TargetID: "bd-5"}}
+	want := []issueops.CreateDependency{{Type: types.DepBlocks, TargetID: "bd-5"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %#v, want %#v (no swap-direction)", got, want)
 	}
@@ -526,110 +524,4 @@ func withTestYAMLCustomTypes(t *testing.T, customCSV string) func() {
 		t.Fatalf("config.Initialize: %v", err)
 	}
 	return func() { config.ResetForTesting() }
-}
-
-// --- fakes for the proxied single-create routing tests ---
-
-type fakeCreateConfigUC struct {
-	domain.ConfigUseCase // unimplemented methods panic; the create path must not call them
-	cctx                 domain.CreateContext
-}
-
-func (f *fakeCreateConfigUC) LoadCreateContext(ctx context.Context) (domain.CreateContext, error) {
-	return f.cctx, nil
-}
-
-type fakeCreateIssueUC struct {
-	domain.IssueUseCase // unimplemented methods panic; the create path must not call them
-	wispCalls           int
-	issueCalls          int
-	lastIssue           *types.Issue
-}
-
-func (f *fakeCreateIssueUC) CreateWisp(ctx context.Context, params domain.CreateIssueParams, actor string) (domain.CreateIssueResult, error) {
-	f.wispCalls++
-	f.lastIssue = params.Issue
-	return domain.CreateIssueResult{Issue: params.Issue}, nil
-}
-
-func (f *fakeCreateIssueUC) CreateIssue(ctx context.Context, params domain.CreateIssueParams, actor string) (domain.CreateIssueResult, error) {
-	f.issueCalls++
-	f.lastIssue = params.Issue
-	return domain.CreateIssueResult{Issue: params.Issue}, nil
-}
-
-type fakeCreateUOW struct {
-	uow.UnitOfWork // unimplemented methods panic
-	configUC       domain.ConfigUseCase
-	issueUC        domain.IssueUseCase
-}
-
-func (f *fakeCreateUOW) Close(ctx context.Context)                        {}
-func (f *fakeCreateUOW) Commit(ctx context.Context, message string) error { return nil }
-func (f *fakeCreateUOW) ConfigUseCase() domain.ConfigUseCase              { return f.configUC }
-func (f *fakeCreateUOW) IssueUseCase() domain.IssueUseCase                { return f.issueUC }
-
-type fakeCreateUOWProvider struct {
-	configUC domain.ConfigUseCase
-	issueUC  domain.IssueUseCase
-}
-
-func (p *fakeCreateUOWProvider) NewUOW(ctx context.Context) (uow.UnitOfWork, error) {
-	return &fakeCreateUOW{configUC: p.configUC, issueUC: p.issueUC}, nil
-}
-
-func (p *fakeCreateUOWProvider) Close(ctx context.Context) error { return nil }
-
-// TestRunCreateProxiedSingleInfraTypeRoutesToCreateWisp pins the proxied
-// single-create table routing against the configured infra-type set, the same
-// routing the embedded path applies (cmd/bd/create_atomic.go,
-// DoltStore.CreateIssue) and the uow facade applies. The proxied path used to
-// route on the --ephemeral/--no-history flags alone, so `bd create -t message`
-// landed in issues against a server and in wisps embedded (ga-2kkue).
-func TestRunCreateProxiedSingleInfraTypeRoutesToCreateWisp(t *testing.T) {
-	run := func(t *testing.T, in createInput) *fakeCreateIssueUC {
-		t.Helper()
-		issueUC := &fakeCreateIssueUC{}
-		oldProvider := uowProvider
-		uowProvider = &fakeCreateUOWProvider{
-			configUC: &fakeCreateConfigUC{cctx: domain.CreateContext{
-				IssuePrefix: "bd",
-				InfraTypes:  map[string]bool{"message": true},
-			}},
-			issueUC: issueUC,
-		}
-		t.Cleanup(func() { uowProvider = oldProvider })
-
-		captureStdout(t, func() error {
-			return runCreateProxiedSingle(nil, context.Background(), in)
-		})
-		return issueUC
-	}
-
-	t.Run("infra type routes to wisps", func(t *testing.T) {
-		got := run(t, createInput{title: "Infra message", issueType: "message", priority: 2, silent: true})
-		if got.wispCalls != 1 || got.issueCalls != 0 {
-			t.Errorf("CreateWisp/CreateIssue calls = %d/%d, want 1/0", got.wispCalls, got.issueCalls)
-		}
-		if got.lastIssue == nil || !got.lastIssue.Ephemeral {
-			t.Errorf("Ephemeral = %v, want true so ID minting and table routing agree", got.lastIssue)
-		}
-	})
-
-	t.Run("non-infra type stays durable", func(t *testing.T) {
-		got := run(t, createInput{title: "Plain task", issueType: "task", priority: 2, silent: true})
-		if got.issueCalls != 1 || got.wispCalls != 0 {
-			t.Errorf("CreateIssue/CreateWisp calls = %d/%d, want 1/0", got.issueCalls, got.wispCalls)
-		}
-	})
-
-	t.Run("no-history infra type keeps its retention mode", func(t *testing.T) {
-		got := run(t, createInput{title: "Infra message", issueType: "message", priority: 2, noHistory: true, silent: true})
-		if got.wispCalls != 1 || got.issueCalls != 0 {
-			t.Errorf("CreateWisp/CreateIssue calls = %d/%d, want 1/0", got.wispCalls, got.issueCalls)
-		}
-		if got.lastIssue == nil || got.lastIssue.Ephemeral {
-			t.Errorf("Ephemeral = %v, want false — --no-history keeps its own retention mode", got.lastIssue)
-		}
-	})
 }

@@ -33,7 +33,6 @@ func RunAudit_molecule_wisp_batch_iter(t *testing.T, f Factory) {
 	t.Run("CreateRejectStaleUpserts", func(t *testing.T) { testAuditCreateRejectStaleUpserts(t, f) })
 	t.Run("CreateAllWispsFastPath", func(t *testing.T) { testAuditCreateAllWispsFastPath(t, f) })
 	t.Run("CreateAllWispsInlineDependencies", func(t *testing.T) { testAuditCreateAllWispsInlineDependencies(t, f) })
-	t.Run("CreateOrphanHandling", func(t *testing.T) { testAuditCreateOrphanHandling(t, f) })
 	t.Run("CreateCrossBucketDependency", func(t *testing.T) { testAuditCreateCrossBucketDependency(t, f) })
 	t.Run("CreateInBatchCycle", func(t *testing.T) { testAuditCreateInBatchCycle(t, f) })
 	t.Run("ListWisps", func(t *testing.T) { testAuditListWisps(t, f) })
@@ -387,7 +386,7 @@ func testAuditCreateRejectStaleUpserts(t *testing.T, f Factory) {
 	y2020 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
 	y2021 := time.Date(2021, 1, 1, 0, 0, 0, 0, time.UTC)
 	y2022 := time.Date(2022, 1, 1, 0, 0, 0, 0, time.UTC)
-	opts := storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true, RejectStaleUpserts: true}
+	opts := storage.BatchCreateOptions{SkipPrefixValidation: true, RejectStaleUpserts: true}
 
 	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-r", Title: "Orig", CreatedAt: y2021, UpdatedAt: y2021}), "a"))
 
@@ -424,7 +423,7 @@ func testAuditCreateAllWispsFastPath(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-w1", Title: "W1", Ephemeral: true}),
 		withDefaults(&types.Issue{ID: "test-w2", Title: "W2", Ephemeral: true, Labels: []string{"x"}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true}))
 
 	for _, id := range []string{"test-w1", "test-w2"} {
 		got, err := s.GetIssue(c, id)
@@ -457,7 +456,6 @@ func testAuditCreateAllWispsInlineDependencies(t *testing.T, f Factory) {
 
 	var skipped [][2]string
 	opts := storage.BatchCreateOptions{
-		OrphanHandling:                 storage.OrphanAllow,
 		SkipPrefixValidation:           true,
 		SkipDependencyValidationErrors: true,
 		OnSkippedDependency: func(issueID, dependsOnID, _ string) {
@@ -503,33 +501,6 @@ func testAuditCreateAllWispsInlineDependencies(t *testing.T, f Factory) {
 	}
 }
 
-// OrphanStrict rejects an issue whose hierarchical parent is missing
-// (create.go:490-515), inserting nothing. OrphanSkip accepts the batch but
-// inserts neither the orphan nor an ownerless child-counter row: counter
-// reconciliation now verifies that the routed parent exists before touching
-// its auxiliary counter table.
-func testAuditCreateOrphanHandling(t *testing.T, f Factory) {
-	s := f(t)
-	c := ctx()
-	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
-		withDefaults(&types.Issue{ID: "test-p.2", Title: "Orphan2"}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanStrict, SkipPrefixValidation: true}); err == nil {
-		t.Error("OrphanStrict: want error, got nil")
-	}
-	if _, err := s.GetIssue(c, "test-p.2"); !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("OrphanStrict inserted the orphan: %v", err)
-	}
-
-	if err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
-		withDefaults(&types.Issue{ID: "test-p.3", Title: "Orphan3"}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanSkip, SkipPrefixValidation: true}); err != nil {
-		t.Errorf("OrphanSkip: unexpected error: %v", err)
-	}
-	if _, err := s.GetIssue(c, "test-p.3"); !errors.Is(err, storage.ErrNotFound) {
-		t.Errorf("OrphanSkip inserted the orphan: %v", err)
-	}
-}
-
 // A mixed regular+wisp batch with a cross-bucket edge is rejected before insert;
 // with SkipDependencyValidationErrors the edge is dropped and both issues persist
 // (create.go:288-361).
@@ -541,7 +512,7 @@ func testAuditCreateCrossBucketDependency(t *testing.T, f Factory) {
 	err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-a", Title: "A"}),
 		withDefaults(&types.Issue{ID: "test-b", Title: "B", Ephemeral: true, Dependencies: []*types.Dependency{{IssueID: "test-b", DependsOnID: "test-a", Type: types.DepBlocks}}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true})
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err == nil {
 		t.Fatal("(a) cross-bucket batch: want error, got nil")
 	}
@@ -553,7 +524,7 @@ func testAuditCreateCrossBucketDependency(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-c", Title: "C"}),
 		withDefaults(&types.Issue{ID: "test-d", Title: "D", Ephemeral: true, Dependencies: []*types.Dependency{{IssueID: "test-d", DependsOnID: "test-c", Type: types.DepBlocks}}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true, SkipDependencyValidationErrors: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true, SkipDependencyValidationErrors: true}))
 	if _, err := s.GetIssue(c, "test-c"); err != nil {
 		t.Errorf("(b) test-c missing: %v", err)
 	}
@@ -576,7 +547,7 @@ func testAuditCreateInBatchCycle(t *testing.T, f Factory) {
 	err := s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-a", Title: "A", Dependencies: []*types.Dependency{{IssueID: "test-a", DependsOnID: "test-b", Type: types.DepBlocks}}}),
 		withDefaults(&types.Issue{ID: "test-b", Title: "B", Dependencies: []*types.Dependency{{IssueID: "test-b", DependsOnID: "test-a", Type: types.DepBlocks}}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true})
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err == nil {
 		t.Fatal("(a) cyclic batch: want error, got nil")
 	}
@@ -589,7 +560,7 @@ func testAuditCreateInBatchCycle(t *testing.T, f Factory) {
 	must(t, s.CreateIssuesWithFullOptions(c, []*types.Issue{
 		withDefaults(&types.Issue{ID: "test-c", Title: "C", Dependencies: []*types.Dependency{{IssueID: "test-c", DependsOnID: "test-d", Type: types.DepBlocks}}}),
 		withDefaults(&types.Issue{ID: "test-d", Title: "D", Dependencies: []*types.Dependency{{IssueID: "test-d", DependsOnID: "test-c", Type: types.DepBlocks}}}),
-	}, "a", storage.BatchCreateOptions{OrphanHandling: storage.OrphanAllow, SkipPrefixValidation: true, SkipDependencyValidationErrors: true}))
+	}, "a", storage.BatchCreateOptions{SkipPrefixValidation: true, SkipDependencyValidationErrors: true}))
 	if _, err := s.GetIssue(c, "test-c"); err != nil {
 		t.Errorf("(b) test-c missing: %v", err)
 	}

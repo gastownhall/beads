@@ -171,6 +171,78 @@ func TestEmbeddedDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t *
 	conformance.RunDependencyEditorRecordsOneHistoryEntryForAMixedPlaneRequest(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "mixhist"))
 }
 
+func TestEmbeddedDependencyEditorWritesTheTargetIntoItsTypedColumn(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorWritesTheTargetIntoItsTypedColumn(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "tcol"))
+}
+
+func TestEmbeddedDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesBlockingEdgeAcrossAWispHierarchy(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "whier"))
+}
+
+func TestEmbeddedDependencyEditorRefusesACycleThroughAParentChildHop(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesACycleThroughAParentChildHop(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "pchop"))
+}
+
+func TestEmbeddedDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRefusesASamePlaneEdgeClosingACrossPlaneCycle(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "splane"))
+}
+
+func TestEmbeddedDependencyEditorAddMarksItsSourceInTheSameVerb(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAddMarksItsSourceInTheSameVerb(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsadd"))
+}
+
+func TestEmbeddedDependencyEditorRemoveUnmarksItsSourceAndDescendants(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRemoveUnmarksItsSourceAndDescendants(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsrm"))
+}
+
+func TestEmbeddedDependencyEditorMaintainsBlockedStateAcrossPlanes(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorMaintainsBlockedStateAcrossPlanes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsxp"))
+}
+
+func TestEmbeddedDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorClosedChildAddSatisfiesAnAnyChildrenGate(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsgate"))
+}
+
+func TestEmbeddedDependencyEditorRelatesToAddLeavesItsSourceUnblocked(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorRelatesToAddLeavesItsSourceUnblocked(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "bsrel"))
+}
+
+func TestEmbeddedDependencyEditorAcceptsADiamond(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAcceptsADiamond(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "diamond"))
+}
+
+func TestEmbeddedDependencyEditorGateScopeFollowsTheEdgeType(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorGateScopeFollowsTheEdgeType(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "gscope"))
+}
+
+func TestEmbeddedDependencyEditorAcceptsBlockingAcrossIssueTypes(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunDependencyEditorAcceptsBlockingAcrossIssueTypes(t, ctx, newEmbeddedDependencyEditorFixture(t, ctx, "xtype"))
+}
+
 // newEmbeddedDependencyEditorFixture composes the backend's role fixture kit
 // with the accessor under test. Every hook but the accessor comes from the kit,
 // so the seeding and scalar-query plumbing stays identical to the other roles'.
@@ -183,11 +255,12 @@ func newEmbeddedDependencyEditorFixture(t *testing.T, ctx context.Context, prefi
 	}
 	kit := newEmbeddedRoleFixtureKit(te, prefix)
 	return conformance.DependencyEditorFixture{
-		IssuePrefix:  kit.IssuePrefix,
-		Editor:       editor,
-		CreateIssue:  kit.CreateIssue,
-		CreateWisp:   kit.CreateWisp,
-		QueryScalar:  kit.QueryScalar,
-		CountHistory: kit.CountHistory,
+		IssuePrefix:   kit.IssuePrefix,
+		Editor:        editor,
+		CreateIssue:   kit.CreateIssue,
+		CreateWisp:    kit.CreateWisp,
+		AddDependency: kit.AddDependency,
+		QueryScalar:   kit.QueryScalar,
+		CountHistory:  kit.CountHistory,
 	}
 }

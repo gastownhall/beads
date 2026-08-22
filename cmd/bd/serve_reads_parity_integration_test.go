@@ -27,21 +27,21 @@ import (
 
 // readsParityAllowlist is the complete set of documented per-field differences
 // between the two surfaces' bodies. An entry here is a permanent, reviewed
-// divergence — not a place to record a surprise. Both surfaces otherwise
-// marshal the same canonical Go structs (the wire schemas are x-go-type-pinned
-// to them), so the field-level answer is identical except for the one entry
-// below.
+// divergence — not a place to record a surprise. Both surfaces marshal the same
+// canonical Go structs (the wire schemas are x-go-type-pinned to them), so the
+// field-level answer is identical and the map is EMPTY.
 //
-//   - `revision`: the guarded-write optimistic-concurrency token (the issues
-//     row_lock cell) is a CLI-only detail projection. `bd show --json` renames
-//     it to the storage-neutral `revision` for guarded clients
-//     (projectShowJSONDetails in show_unit_helpers.go); GET
-//     /v0/beads/issues/{id} serializes the raw IssueDetails, whose RowVersion
-//     is json:"-", so the field is absent over HTTP by design. The v0 HTTP
-//     object schema is apigen-frozen and the token is only meaningful to the
-//     CLI's guarded-write path, so this asymmetry is intentional, not drift. If
-//     the token is ever needed over HTTP, extend that surface and delete this
-//     entry.
+// It was not always. `revision` — the guarded-write optimistic-concurrency
+// token — used to live here, because `bd show --json` projected it through a
+// CLI-only wrapper while GET /v0/beads/issues/{id} serialized a raw
+// IssueDetails whose RowVersion is json:"-". That entry ended with "if the
+// token is ever needed over HTTP, extend that surface and delete this entry",
+// and the read-token slice did exactly that: the projection moved onto
+// types.IssueDetails behind types.NewIssueDetails, both front doors read it
+// from the one detail seam, and the divergence stopped existing rather than
+// being waived. The map stays declared, and empty, because an empty allowlist
+// is a stronger statement than no allowlist: the next divergence has to be
+// written down here to pass.
 //
 // Three further differences exist but are structural rather than per-field, so
 // every comparison below states its terms explicitly instead of waving them
@@ -61,12 +61,7 @@ import (
 //     TestListLimitPolicyIsResolvedBeforeTheRequest pins that policy branch by
 //     branch; every comparison here passes an EXPLICIT limit on both sides so
 //     it is comparing the operation and not that policy.
-var readsParityAllowlist = map[string]string{
-	"revision": "CLI-only guarded-write token: `bd show --json` projects the " +
-		"row_lock optimistic-concurrency cell as `revision` (projectShowJSONDetails); " +
-		"the apigen-frozen v0 HTTP object keeps RowVersion json:\"-\", so the " +
-		"field is absent over GET /v0/beads/issues/{id} by design.",
-}
+var readsParityAllowlist = map[string]string{}
 
 // getJSONArray fetches a page endpoint and returns its decoded items.
 func (sp *serveProcess) items(t *testing.T, path string) []map[string]any {

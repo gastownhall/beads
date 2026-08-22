@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -197,6 +198,12 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if len(labelAlias) > 0 {
 		in.labels = append(in.labels, labelAlias...)
 	}
+	// Normalize after merging the alias so dedupe spans both flags. Read paths
+	// (list, search, ready, orphans) already do this; without it here, `--labels
+	// 'a, b'` stores " b" with pflag's leading space and can never match its own
+	// filter.
+	in.labels = utils.NormalizeLabels(in.labels)
+	warnLabelsContainingWhitespace(in.labels)
 	in.deps, _ = cmd.Flags().GetStringSlice("deps")
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")
@@ -240,7 +247,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 		}
 		if t.Before(time.Now()) && !in.silent && !debug.IsQuiet() {
 			fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-				ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+				ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 			fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 		}
 		in.deferUntil = &t

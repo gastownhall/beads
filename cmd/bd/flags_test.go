@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -482,4 +483,86 @@ func TestGetDesignFlag(t *testing.T) {
 			t.Fatal("expected --design-file flag to be registered")
 		}
 	})
+}
+
+func TestTextFromSources(t *testing.T) {
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte("file text\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	crlfFile := filepath.Join(t.TempDir(), "crlf.md")
+	if err := os.WriteFile(crlfFile, []byte("Approved\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name       string
+		useStdin   bool
+		stdin      string
+		filePath   string
+		flagText   string
+		positional []string
+		want       string
+		wantErr    bool
+	}{
+		{name: "flag text", flagText: "flag text", want: "flag text"},
+		{name: "positional joined", positional: []string{"Use", "OAuth2"}, want: "Use OAuth2"},
+		{name: "file content is verbatim", filePath: bodyFile, want: "file text\n"},
+		{name: "file content keeps CRLF", filePath: crlfFile, want: "Approved\r\n"},
+		{name: "stdin trims CRLF", useStdin: true, stdin: "Approved\r\n", want: "Approved"},
+		{name: "stdin conflicts with file and flag", useStdin: true, stdin: "stdin text\n", filePath: bodyFile, flagText: "flag", wantErr: true},
+		{name: "file conflicts with flag", filePath: bodyFile, flagText: "flag", wantErr: true},
+		{name: "no source is empty", want: ""},
+		{name: "positional conflicts with stdin", useStdin: true, stdin: "x", positional: []string{"pos"}, wantErr: true},
+		{name: "positional conflicts with file", filePath: bodyFile, positional: []string{"pos"}, wantErr: true},
+		{name: "positional conflicts with flag", flagText: "flag", positional: []string{"pos"}, wantErr: true},
+		{name: "blank positional does not conflict with file", filePath: bodyFile, positional: []string{""}, want: "file text\n"},
+		{name: "blank positional does not conflict with stdin", useStdin: true, stdin: "stdin text\n", positional: []string{" "}, want: "stdin text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdin io.Reader
+			if tt.useStdin {
+				stdin = strings.NewReader(tt.stdin)
+			}
+			got, _, err := textFromSources(textSources{stdin: stdin, filePath: tt.filePath, flagText: tt.flagText, flagName: "--response", positional: tt.positional})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected conflict error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+
+	if _, _, err := textFromSources(textSources{filePath: filepath.Join(t.TempDir(), "missing.md")}); err == nil {
+		t.Error("expected error for unreadable file")
+	}
+}
+
+func TestRequireTextFromSources(t *testing.T) {
+	if _, err := requireTextFromSources("response text", "use positional args or --response",
+		textSources{}); err == nil || !strings.Contains(err.Error(), "no response text provided (use positional args or --response)") {
+		t.Errorf("expected no-source error listing the hint, got %v", err)
+	}
+	if _, err := requireTextFromSources("response text", "hint",
+		textSources{positional: []string{"   "}}); err == nil || !strings.Contains(err.Error(), "response text cannot be empty") {
+		t.Errorf("expected cannot-be-empty error for blank positional text, got %v", err)
+	}
+	if _, err := requireTextFromSources("note text", "hint",
+		textSources{stdin: strings.NewReader("\n")}); err == nil || !strings.Contains(err.Error(), "note text cannot be empty") {
+		t.Errorf("expected cannot-be-empty error for blank stdin, got %v", err)
+	}
+	got, err := requireTextFromSources("response text", "hint",
+		textSources{flagText: "flag text", flagName: "--response"})
+	if err != nil || got != "flag text" {
+		t.Errorf("got %q, %v; want \"flag text\", nil", got, err)
+	}
 }

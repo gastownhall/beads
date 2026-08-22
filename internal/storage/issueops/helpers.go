@@ -403,28 +403,6 @@ func GetCustomStatusesTx(ctx context.Context, tx DBTX) ([]string, error) {
 	return types.CustomStatusNames(detailed), nil
 }
 
-// GetCustomTypesTx reads custom types from config within a transaction.
-func GetCustomTypesTx(ctx context.Context, tx *sql.Tx) ([]string, error) {
-	var raw string
-	err := tx.QueryRowContext(ctx, "SELECT value FROM config WHERE `key` = ?", "types.custom").Scan(&raw)
-	if err == sql.ErrNoRows || raw == "" {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("failed to read custom_types config: %w", err)
-	}
-	var customTypes []string
-	if err := json.Unmarshal([]byte(raw), &customTypes); err != nil {
-		for _, s := range strings.Split(raw, ",") {
-			s = strings.TrimSpace(s)
-			if s != "" {
-				customTypes = append(customTypes, s)
-			}
-		}
-	}
-	return customTypes, nil
-}
-
 // ValidateMetadataIfConfigured checks metadata against the schema from config.
 func ValidateMetadataIfConfigured(metadata json.RawMessage) error {
 	mode := config.MetadataValidationMode()

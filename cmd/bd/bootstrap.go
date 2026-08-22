@@ -47,6 +47,10 @@ type bootstrapServerDBCheck struct {
 	Err       error
 }
 
+// bootstrapRetryDelay is the sleep function used between server-DB-not-found
+// retries. Injectable for testing.
+var bootstrapRetryDelay = func(d time.Duration) { time.Sleep(d) }
+
 var checkBootstrapServerDB = func(probeCfg bootstrapServerProbeConfig) bootstrapServerDBCheck {
 	host := probeCfg.host
 	port := probeCfg.port
@@ -182,6 +186,10 @@ Examples:
 			fmt.Fprintf(os.Stderr, "Hint: %s\n", diagHint())
 			fmt.Fprintf(os.Stderr, "Bootstrap is for existing projects that need database setup.\n")
 			return HandleError("%s", activeWorkspaceNotFoundMessage())
+		}
+
+		if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+			return HandleError("%v", err)
 		}
 
 		// Load config from .beads/metadata.json. When the beadsDir was
@@ -337,6 +345,15 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
 	syncRemote := resolveSyncRemote()
 	if syncRemote != "" {
+		if isGitCodeRepoURL(syncRemote) {
+			// Cloning from a git code-repo URL via DOLT_CLONE spins dolt to
+			// 1000% CPU and requires manual SIGKILL. Reject and
+			// surface the misconfiguration rather than attempting the clone.
+			fmt.Fprintf(os.Stderr, "error: sync.remote %q looks like a git code-repository URL, not a Dolt remote — skipping clone\n", syncRemote)
+			plan.Action = "none"
+			plan.Reason = fmt.Sprintf("sync.remote %q rejected: git code-repository URL (not a Dolt remote)", syncRemote)
+			return plan
+		}
 		// User-provided sync.remote — trust the URL format as-is.
 		// normalizeRemoteURL would convert http:// to git+http://,
 		// breaking Dolt remotesapi endpoints (GH#3339).
@@ -419,7 +436,24 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 			database: cfg.GetDoltDatabase(),
 			tls:      cfg.GetDoltServerTLS(),
 		}
-		result := checkBootstrapServerDB(probeCfg)
+		// When the server is reachable but the DB appears absent, retry with
+		// exponential backoff before concluding the DB is genuinely missing.
+		// A managed Dolt restart completes in <30 s; three retries over 70 s
+		// cover all observed restart windows.
+		retryDelays := []time.Duration{10 * time.Second, 20 * time.Second, 40 * time.Second}
+		var result bootstrapServerDBCheck
+		for attempt := 0; ; attempt++ {
+			result = checkBootstrapServerDB(probeCfg)
+			if result.Err != nil || result.Exists || !result.Reachable {
+				break
+			}
+			if attempt >= len(retryDelays) {
+				break
+			}
+			fmt.Fprintf(os.Stderr, "Database %s not found on reachable server (attempt %d/%d), retrying in %v (possible transient restart)\n",
+				cfg.GetDoltDatabase(), attempt+1, len(retryDelays), retryDelays[attempt])
+			bootstrapRetryDelay(retryDelays[attempt])
+		}
 		if result.Err != nil {
 			plan.Action = "none"
 			plan.Reason = fmt.Sprintf("Could not verify existing server database %s: %v", cfg.GetDoltDatabase(), result.Err)
@@ -1019,11 +1053,14 @@ func findParentConfig(beadsDir string) (*configfile.Config, error) {
 
 	for dir := start; dir != "/" && dir != "."; {
 		candidate := filepath.Join(dir, ".beads")
-		cfg, err := configfile.Load(candidate)
+		cfg, err := configfile.LoadForDiscovery(candidate)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", configfile.ConfigPath(candidate), err)
 		}
 		if cfg != nil {
+			if err := guardLegacyUpgradeWorkspace(candidate); err != nil {
+				return nil, err
+			}
 			return cfg, nil
 		}
 
@@ -1046,4 +1083,59 @@ func init() {
 	bootstrapCmd.Flags().BoolP("yes", "y", false, "Skip confirmation prompts (for CI/automation)")
 	bootstrapCmd.Flags().Bool("non-interactive", false, "Alias for --yes")
 	rootCmd.AddCommand(bootstrapCmd)
+}
+
+// isGitCodeRepoURL reports whether rawURL looks like a git code-repository
+// remote rather than a Dolt data remote. Used to block accidental DOLT_CLONE
+// against forges like github.com.
+//
+// Rules (in priority order):
+//   - Dolt-native schemes (dolthub, s3, gs, az, file) → always false
+//   - .git suffix → always true (Dolt DBs never carry a .git suffix)
+//   - Well-known code forges / their subdomains → true
+//   - Everything else → false (git+ssh:// to self-hosted Dolt remotes is valid)
+func isGitCodeRepoURL(rawURL string) bool {
+	// Dolt-native schemes are never code repos.
+	for _, prefix := range []string{"dolthub://", "s3://", "gs://", "az://", "file://"} {
+		if strings.HasPrefix(rawURL, prefix) {
+			return false
+		}
+	}
+	// .git suffix is a universal code-repo signal; Dolt DBs never use it.
+	if strings.HasSuffix(strings.ToLower(rawURL), ".git") {
+		return true
+	}
+	// Well-known code-hosting forges.
+	host := urlHostname(rawURL)
+	switch host {
+	case "github.com", "gitlab.com", "bitbucket.org", "codeberg.org":
+		return true
+	}
+	return strings.HasSuffix(host, ".github.com") || strings.HasSuffix(host, ".gitlab.com")
+}
+
+// urlHostname extracts the lowercase hostname from a URL without importing
+// net/url. Handles scheme://[user@]host[:port]/path and SCP git@host:path.
+func urlHostname(rawURL string) string {
+	if sep := strings.Index(rawURL, "://"); sep >= 0 {
+		rest := rawURL[sep+3:]
+		if at := strings.Index(rest, "@"); at >= 0 {
+			rest = rest[at+1:]
+		}
+		if slash := strings.Index(rest, "/"); slash >= 0 {
+			rest = rest[:slash]
+		}
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			rest = rest[:colon]
+		}
+		return strings.ToLower(rest)
+	}
+	// SCP-style: git@github.com:org/repo
+	if at := strings.Index(rawURL, "@"); at >= 0 {
+		rest := rawURL[at+1:]
+		if colon := strings.Index(rest, ":"); colon >= 0 {
+			return strings.ToLower(rest[:colon])
+		}
+	}
+	return ""
 }

@@ -90,6 +90,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.NoAssignee, _ = cmd.Flags().GetBool("no-assignee")
 	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
+	in.Brief, _ = cmd.Flags().GetBool("brief")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
 		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
@@ -229,6 +230,34 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.noPager, _ = cmd.Flags().GetBool("no-pager")
 	in.ReadyFlag, _ = cmd.Flags().GetBool("ready")
 
+	// REFUSED WHERE IT CANNOT BE HONORED OR CANNOT BE SEEN. The page routes,
+	// direct and proxied, JSON and text, all hand this request to
+	// issueops.Reader.List, whose query reads types.IssueFilter.Lite; the three
+	// below leave that query.
+	//
+	//   --watch re-queries on a ticker through loadWatchedIssues, whose --ready
+	//   arm calls the bare GetReadyWork and whose --parent arm walks the tree;
+	//   neither reads Lite.
+	//
+	//   --parent with --pretty is that same tree walk, an unlimited per-level
+	//   query rather than a page.
+	//
+	//   --format hands the whole issue to a caller-written template, so
+	//   `--brief --format '{{.Issue.Description}}'` would print an empty string
+	//   with nothing to say it had been dropped. The long format prints one
+	//   omitted field and says so; a template can print any of the six and
+	//   cannot be annotated.
+	if in.Brief {
+		switch {
+		case in.watchMode:
+			return in, HandleError("--watch cannot be combined with --brief")
+		case in.formatStr != "":
+			return in, HandleError("--format cannot be combined with --brief; a template can print a field --brief omits, with nothing to mark it")
+		case in.ParentID != "" && in.prettyFormat:
+			return in, HandleError("--parent with --pretty cannot be combined with --brief; the hierarchical walk is a different query")
+		}
+	}
+
 	in.depsMode, _ = cmd.Flags().GetString("deps")
 	if in.depsMode != "" {
 		if in.depsMode != "scheduling" && in.depsMode != "all" {
@@ -306,6 +335,19 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 		}
 		in.Offset = offset
 	}
+
+	// The defensive cap is part of the REQUEST, not something stamped onto the
+	// filter after the builder has produced it (issueops.ListRequest.MaxRows).
+	//
+	// Resolving it HERE also means it is resolved exactly once per invocation.
+	// resolveMaxRowsEnvOnly warns on a malformed BEADS_MAX_ROWS every time it
+	// runs, so a second resolve downstream would warn twice.
+	maxRows, maxRowsSource, err := resolveMaxRows(cmd)
+	if err != nil {
+		return in, err
+	}
+	in.MaxRows = maxRows
+	in.MaxRowsSource = maxRowsSource
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")
 	in.repoOverrideSet = cmd.Flags().Changed("repo")

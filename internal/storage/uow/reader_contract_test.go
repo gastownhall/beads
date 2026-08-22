@@ -35,8 +35,26 @@ func TestReaderContract(t *testing.T) {
 	t.Run("ReadyLimitBoundary", func(t *testing.T) {
 		conformance.RunReaderReadyLimitBoundary(t, ctx, fixture)
 	})
-	t.Run("OffsetIsHonoredOrRefused", func(t *testing.T) {
-		conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
+	t.Run("OffsetSkipsTheRowsBeforeThePage", func(t *testing.T) {
+		conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, fixture)
+	})
+	// This wiring used to be the REFUSING arm of MaxRows, and the mirror image
+	// of the Offset wiring above: this body honored Offset and refused the cap,
+	// the store-backed one did the opposite. Both fields are served on both
+	// bodies now, so both cases run the same assertion here as there.
+	t.Run("ListMaxRowsIsHonored", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
+	})
+	// The same cap, driven along the OFFSET axis. This body hands its seam the
+	// widened limit and lets internal/storage/domain/db size the bound and the
+	// cap from it, where the store-backed body sizes both above the seam — two
+	// compositions of one boundary, which is exactly where they can disagree
+	// by a row.
+	t.Run("ListMaxRowsBoundaryIsLimitPlusOffset", func(t *testing.T) {
+		conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
+	})
+	t.Run("ListSkipCountsDropsTheCardinalitiesAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 	})
 	t.Run("ReadySortPoliciesOrderTheSameRows", func(t *testing.T) {
 		conformance.RunReaderReadySortPoliciesOrderTheSameRows(t, ctx, fixture)
@@ -80,11 +98,69 @@ func TestReaderContract(t *testing.T) {
 	t.Run("GetOptionalRowListsAreOffByDefault", func(t *testing.T) {
 		conformance.RunReaderGetOptionalRowListsAreOffByDefault(t, ctx, fixture)
 	})
+	t.Run("GetBriefDepsProjectsTheDependencyRows", func(t *testing.T) {
+		conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
+	})
 	t.Run("GetDetailShapeMatchesTheSeededIssue", func(t *testing.T) {
 		conformance.RunReaderGetDetailShapeMatchesTheSeededIssue(t, ctx, fixture)
 	})
 	t.Run("DoesNotMutateTheCallerRequest", func(t *testing.T) {
 		conformance.RunReaderDoesNotMutateTheCallerRequest(t, ctx, fixture)
+	})
+	// The ready-counts family. This body resolves an id page from its own
+	// UNION over both planes and hydrates the cardinalities by id in every
+	// case, where the store-backed one switches between a by-ids hydration and
+	// a predicate-form mega-query at the bound — so "the page is the prefix" is
+	// a claim about two differently shaped mechanisms agreeing, and this is the
+	// leg that has never voted on it.
+	t.Run("ReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded", func(t *testing.T) {
+		conformance.RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t, ctx, fixture)
+	})
+	t.Run("ReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary", func(t *testing.T) {
+		conformance.RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t, ctx, fixture)
+	})
+	t.Run("ReadyPageWiderThanTheHydrationBatchIsStillThatPrefix", func(t *testing.T) {
+		conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, fixture)
+	})
+	// The two count vocabularies are two bodies here rather than two store
+	// methods: the page's numbers come out of this backend's own by-ids counts
+	// query, the detail view's out of the dependency use case's CountByIssueID
+	// with a direction and no type filter.
+	t.Run("ListCountsAreBlocksOnlyWhereGetCountsEveryEdge", func(t *testing.T) {
+		conformance.RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t, ctx, fixture)
+	})
+	// The descendant walk behind ParentID is this repository's own
+	// getDescendantIDs, not the shared issueops one.
+	t.Run("ReadyParentScopesToItsTransitiveDescendants", func(t *testing.T) {
+		conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
+	})
+	t.Run("ListParentReachesEveryDescendantAndOnlyItsOwn", func(t *testing.T) {
+		conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
+	})
+	// The keyset predicate is one shared builder, but the page around it is
+	// not: this seam trims a natively bounded window where the store-backed one
+	// drops an over-fetched probe row, and a walk is where those two
+	// arrangements can start handing out different next positions.
+	t.Run("ListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing", func(t *testing.T) {
+		conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
+	})
+	t.Run("ListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates", func(t *testing.T) {
+		conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, ctx, fixture)
+	})
+	// The other merge arrangement: one UNION ALL ordered in SQL, where the
+	// store-backed seam merge-sorts two legs in Go. The bounded and cursored
+	// arms are where the two can start answering differently.
+	t.Run("ListIncludeEphemeralMergesThePlanesIntoOneOrder", func(t *testing.T) {
+		conformance.RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t, ctx, fixture)
+	})
+	t.Run("ListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt", func(t *testing.T) {
+		conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
+	})
+	t.Run("ListBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
+	})
+	t.Run("ReadyBriefDropsTheFreeFormTextAndNothingElse", func(t *testing.T) {
+		conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 	})
 	// Last on purpose: the backend-failure half runs a request on a dead
 	// context, and this backend's provider is shared by every case above it.

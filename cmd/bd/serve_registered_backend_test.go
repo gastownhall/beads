@@ -16,6 +16,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/git"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/backends"
 	"github.com/steveyegge/beads/internal/storage/embeddeddolt"
@@ -223,6 +224,15 @@ func TestServeRefusesAnEmbeddedWorkspaceEndToEnd(t *testing.T) {
 	setRootContext(ctx, cancel)
 	t.Chdir(dir)
 	t.Setenv("BEADS_DIR", beadsDir)
+	// Same cached-workspace hazard as startServeInProcess: runServe resolves
+	// the workspace through GetRepoContext, which caches a prior test's
+	// verdict — including its error — for the whole process.
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
 
 	// runServe surfaces the refusal through HandleError, which writes the
 	// message to stderr and returns an opaque exit error, so the message is
@@ -314,6 +324,19 @@ func startServeInProcess(t *testing.T, dir, beadsDir string) (string, <-chan err
 	t.Setenv("BD_DISABLE_METRICS", "1")
 	t.Setenv("BD_DISABLE_EVENT_FLUSH", "1")
 
+	// GetRepoContext caches per process — the context AND the error. A prior
+	// in-process test that resolved (or failed to resolve) a workspace leaves
+	// that verdict cached, and this command would serve it instead of the
+	// tempdir above ("no .beads directory found", deterministic in Main's
+	// cmd/bd shard 8 ordering). Reset on the way out too, so this test's
+	// soon-to-be-deleted tempdir isn't the next test's cached workspace.
+	beads.ResetCaches()
+	git.ResetCaches()
+	t.Cleanup(func() {
+		beads.ResetCaches()
+		git.ResetCaches()
+	})
+
 	lines, stopCapture := captureStdoutLines(t)
 	done := make(chan error, 1)
 	go func() {
@@ -381,10 +404,10 @@ func TestServeRefusesStrictReadonlyOnARegisteredBackend(t *testing.T) {
 		// is what sends the root command down OpenReadOnly, and that is the
 		// posture under test.
 		Open: func(context.Context, string) (storage.DoltStorage, error) {
-			return &serveIdentityStore{id: "read-write"}, nil
+			return &serveIdentityDoltStore{serveIdentityStore: &serveIdentityStore{id: "read-write"}}, nil
 		},
 		OpenReadOnly: func(context.Context, string) (storage.DoltStorage, error) {
-			return &serveIdentityStore{id: "read-only"}, nil
+			return &serveIdentityDoltStore{serveIdentityStore: &serveIdentityStore{id: "read-only"}}, nil
 		},
 		WorkspaceIsBeadsDir: true,
 	})

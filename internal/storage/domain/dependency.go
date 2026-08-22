@@ -17,8 +17,10 @@ import (
 // values, so every domain.ErrX reference and every errors.Is site keeps
 // matching the identical error.
 var (
-	ErrSelfDependency  = issueops.ErrSelfDependency
-	ErrDependencyCycle = issueops.ErrDependencyCycle
+	ErrSelfDependency           = issueops.ErrSelfDependency
+	ErrDependencyCycle          = issueops.ErrDependencyCycle
+	ErrDependencySourceNotFound = issueops.ErrDependencySourceNotFound
+	ErrDependencyTargetNotFound = issueops.ErrDependencyTargetNotFound
 )
 
 // cycleError carries a fully-formatted cycle-rejection message while unwrapping
@@ -58,6 +60,11 @@ type DependencyTypeConflictError = issueops.DependencyTypeConflictError
 // blocking hierarchy impossible to complete. See
 // issueops.DependencyHierarchyConflictError.
 type DependencyHierarchyConflictError = issueops.DependencyHierarchyConflictError
+
+// DependencyEndpointNotFoundError reports which endpoint of a refused edge this
+// database could see the absence of. See
+// issueops.DependencyEndpointNotFoundError.
+type DependencyEndpointNotFoundError = issueops.DependencyEndpointNotFoundError
 
 type DepDirection int
 
@@ -148,8 +155,23 @@ type DependencySQLRepository interface {
 	DeleteAllForIDs(ctx context.Context, ids []string, opts DepInsertOpts) (int, error)
 	CountAllForIDs(ctx context.Context, ids []string, opts DepCountsOpts) (int, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
+	// DetectCycleReport answers the same walk in the shape issueops.CycleDetector
+	// publishes: canonically ordered, and carrying every member of a cycle
+	// whether or not this database can describe it. DetectCycles above is the
+	// lossy legacy shape.
+	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
+	// WalkDependencyTree answers the tree walk in the shape issueops.TreeWalker
+	// publishes: validated, rooted, pruned by status and capped, with both
+	// directions of a `both` request inside ONE transaction. GetTree above is the
+	// unvalidated shape.
+	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
+	// CountEdges answers the batched edge count in the shape
+	// issueops.GraphCounter publishes: validated, per-anchor, spanning both
+	// dependency planes, with the existence probe and the tally in ONE
+	// transaction. CountByIssueID above is the single-anchor, unprobed shape.
+	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 	GetWispDependencyRecordsForIDs(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
@@ -178,8 +200,17 @@ type DependencyUseCase interface {
 	IsBlocked(ctx context.Context, issueID string) (bool, []string, error)
 	GetForIssueIDs(ctx context.Context, ids []string) (map[string][]*types.Dependency, error)
 	DetectCycles(ctx context.Context) ([][]*types.Issue, error)
+	// DetectCycleReport is the shape issueops.CycleDetector publishes; see the
+	// repository method of the same name.
+	DetectCycleReport(ctx context.Context) (issueops.CycleReport, error)
 
 	GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error)
+	// WalkDependencyTree is the shape issueops.TreeWalker publishes; see the
+	// repository method of the same name.
+	WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error)
+	// CountEdges is the shape issueops.GraphCounter publishes; see the
+	// repository method of the same name.
+	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
 	// AddDependencies asserts a batch of edges, each landing in the plane its
 	// own SOURCE lives in. There is deliberately no plane-pinned variant:
 	// `bd dep add` takes whatever ids the caller names and one request may
@@ -188,6 +219,22 @@ type DependencyUseCase interface {
 	// pass per plane: the parent-child-first ordering and the whole-graph
 	// cycle gate both have to see the request as a single graph.
 	AddDependencies(ctx context.Context, deps []*types.Dependency, actor string, opts BulkAddDepsOpts) (BulkAddDepsResult, error)
+	// ValidateBlockingHierarchy and CycleThroughEdges are the two halves of the
+	// whole-graph gate AddDependencies runs at the end of its own batch,
+	// published so a caller that writes edges INTERLEAVED with other mutations
+	// can run the same gate over the graph its whole request produced.
+	//
+	// issueops.BatchApplier is that caller and the reason these are here: it
+	// applies items in the caller's declaration order and never reorders, so a
+	// blocking edge can be written before the parent-child edge that makes it a
+	// conflict, and the per-edge probe that ran at the time saw a hierarchy
+	// that had not been built yet. Both must be re-run at the end, against the
+	// same repository methods the per-edge path uses, or the two backends
+	// answer different refusals to the same request.
+	ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error
+	// CycleThroughEdges reports the path of a scheduling cycle any of edges
+	// closes, or "" when none does. Each pair is (source, target).
+	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
 
 	GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
@@ -244,7 +291,7 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 		return fmt.Errorf("add dep: hierarchy check: %w", err)
 	}
 
-	if isSchedulingDep(dep.Type) {
+	if types.IsSchedulingEdge(dep.Type) {
 		cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 		if err != nil {
 			return fmt.Errorf("add dep: cycle check: %w", err)
@@ -260,13 +307,18 @@ func (u *dependencyUseCaseImpl) add(ctx context.Context, dep *types.Dependency, 
 	if err := u.depRepo.Insert(ctx, dep, actor, DepInsertOpts{UseWispsTable: useWisp, HierarchyValidated: true, CycleValidated: true, EmitEvent: true}); err != nil {
 		// The retype conflict is a user-facing error whose message already
 		// matches embedded verbatim; pass it through unwrapped so the CLI does
-		// not prepend "add dep: insert:" (#4547 F-1).
+		// not prepend "add dep: insert:" (#4547 F-1). The endpoint-existence
+		// refusals are here for the same reason.
 		var conflict *DependencyTypeConflictError
 		if errors.As(err, &conflict) {
 			return err
 		}
 		var hierarchyConflict *DependencyHierarchyConflictError
 		if errors.As(err, &hierarchyConflict) {
+			return err
+		}
+		var missingEndpoint *DependencyEndpointNotFoundError
+		if errors.As(err, &missingEndpoint) {
 			return err
 		}
 		return fmt.Errorf("add dep: insert: %w", err)
@@ -559,14 +611,6 @@ func (u *dependencyUseCaseImpl) GetBlockingInfo(ctx context.Context, issueIDs []
 	return out, nil
 }
 
-func isBlockingDep(t types.DependencyType) bool {
-	return t == types.DepBlocks || t == types.DepConditionalBlocks
-}
-
-func isSchedulingDep(t types.DependencyType) bool {
-	return isBlockingDep(t) || t == types.DepParentChild
-}
-
 func (u *dependencyUseCaseImpl) IsBlocked(ctx context.Context, issueID string) (bool, []string, error) {
 	return u.isBlocked(ctx, issueID, false)
 }
@@ -592,6 +636,30 @@ func (u *dependencyUseCaseImpl) DetectCycles(ctx context.Context) ([][]*types.Is
 		return nil, fmt.Errorf("DetectCycles: %w", err)
 	}
 	return out, nil
+}
+
+func (u *dependencyUseCaseImpl) DetectCycleReport(ctx context.Context) (issueops.CycleReport, error) {
+	out, err := u.depRepo.DetectCycleReport(ctx)
+	if err != nil {
+		return issueops.CycleReport{}, fmt.Errorf("DetectCycleReport: %w", err)
+	}
+	return out, nil
+}
+
+// WalkDependencyTree passes the request straight through.
+//
+// No pre-check and no error wrapping, unlike GetDependencyTree below: the
+// request's whole vocabulary is validated inside the shared body, and its
+// refusals are typed sentinels both front doors classify.
+func (u *dependencyUseCaseImpl) WalkDependencyTree(ctx context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
+	return u.depRepo.WalkDependencyTree(ctx, req)
+}
+
+// CountEdges passes the request straight through, for WalkDependencyTree's
+// reason: the request's whole vocabulary is validated inside the shared body,
+// and its refusals are typed sentinels both front doors classify.
+func (u *dependencyUseCaseImpl) CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error) {
+	return u.depRepo.CountEdges(ctx, req)
 }
 
 func (u *dependencyUseCaseImpl) GetDependencyTree(ctx context.Context, rootID string, opts DepTreeOpts) ([]*types.TreeNode, error) {
@@ -661,7 +729,7 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 				}
 				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: hierarchy check: %w", i, err)
 			}
-			if !opts.SkipPerEdgeCycleCheck && isSchedulingDep(dep.Type) {
+			if !opts.SkipPerEdgeCycleCheck && types.IsSchedulingEdge(dep.Type) {
 				cycle, err := u.depRepo.HasCycle(ctx, dep.IssueID, dep.DependsOnID)
 				if err != nil {
 					return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: cycle check: %w", i, err)
@@ -687,13 +755,17 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 				if errors.As(err, &hierarchyConflict) {
 					return BulkAddDepsResult{}, err
 				}
+				var missingEndpoint *DependencyEndpointNotFoundError
+				if errors.As(err, &missingEndpoint) {
+					return BulkAddDepsResult{}, err
+				}
 				return BulkAddDepsResult{}, fmt.Errorf("add deps[%d]: insert: %w", i, err)
 			}
 		}
 	}
 	var pairs [][2]string
 	for _, dep := range deps {
-		if !isSchedulingDep(dep.Type) {
+		if !types.IsSchedulingEdge(dep.Type) {
 			continue
 		}
 		pairs = append(pairs, [2]string{dep.IssueID, dep.DependsOnID})
@@ -708,6 +780,25 @@ func (u *dependencyUseCaseImpl) AddDependencies(ctx context.Context, deps []*typ
 		}
 	}
 	return BulkAddDepsResult{Added: deps}, nil
+}
+
+// ValidateBlockingHierarchy passes the edge straight to the repository check
+// AddDependencies runs per edge, so a caller re-running the gate at the end of
+// a mixed request raises the identical *DependencyHierarchyConflictError rather
+// than a second opinion about the same graph.
+func (u *dependencyUseCaseImpl) ValidateBlockingHierarchy(ctx context.Context, dep *types.Dependency) error {
+	return u.depRepo.ValidateBlockingHierarchy(ctx, dep)
+}
+
+// CycleThroughEdges passes the pairs straight to the repository walk
+// AddDependencies runs as its own final gate. The caller composes the refusal,
+// because the two callers word it differently and both spellings are already
+// pinned.
+func (u *dependencyUseCaseImpl) CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error) {
+	if len(edges) == 0 {
+		return "", nil
+	}
+	return u.depRepo.CycleThroughEdges(ctx, edges)
 }
 
 func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error) {

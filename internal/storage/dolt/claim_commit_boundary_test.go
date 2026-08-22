@@ -125,6 +125,10 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 		return &claimCommitBoundaryRows{columns: []string{"name", "category"}}, nil
 	case strings.Contains(query, "SELECT value FROM config"):
 		return &claimCommitBoundaryRows{columns: []string{"value"}}, nil
+	case strings.Contains(query, "FROM dolt_status"):
+		// Empty-commit guard (GH#4288 re-port): report one staged row so the
+		// commit paths under test still reach DOLT_COMMIT.
+		return &claimCommitBoundaryRows{columns: []string{"count"}, values: [][]driver.Value{{int64(1)}}}, nil
 	case strings.Contains(query, "CALL DOLT_ADD"):
 		c.driver.stageCalls++
 		if c.driver.stageErr != nil {

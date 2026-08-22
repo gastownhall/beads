@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/storage/dolt"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -613,11 +614,11 @@ func TestOutputMermaidTree(t *testing.T) {
 			old := os.Stdout
 			r, w, _ := os.Pipe()
 			os.Stdout = w
+			defer func() { os.Stdout = old }()
 
 			outputMermaidTree(tt.tree, tt.rootID)
 
 			w.Close()
-			os.Stdout = old
 
 			var buf bytes.Buffer
 			io.Copy(&buf, r)
@@ -673,11 +674,11 @@ func TestOutputMermaidTree_Siblings(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	outputMermaidTree(tree, "BD-1")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -742,92 +743,6 @@ func TestDepTreeStatusFlag(t *testing.T) {
 	if flag.DefValue != "" {
 		t.Errorf("Expected default status='', got %q", flag.DefValue)
 	}
-}
-
-func TestFilterTreeByStatus(t *testing.T) {
-	tree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "BD-1", Title: "Parent", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "BD-2", Title: "Open Child", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "BD-1",
-		},
-		{
-			Issue:    types.Issue{ID: "BD-3", Title: "Closed Child", Status: types.StatusClosed},
-			Depth:    1,
-			ParentID: "BD-1",
-		},
-		{
-			Issue:    types.Issue{ID: "BD-4", Title: "Open Grandchild", Status: types.StatusOpen},
-			Depth:    2,
-			ParentID: "BD-3",
-		},
-	}
-
-	t.Run("filter to open only", func(t *testing.T) {
-		filtered := filterTreeByStatus(tree, types.StatusOpen)
-
-		// Should include BD-1, BD-2, and BD-4 (matching)
-		// Plus BD-3 as ancestor of BD-4
-		ids := make(map[string]bool)
-		for _, node := range filtered {
-			ids[node.ID] = true
-		}
-
-		if !ids["BD-1"] {
-			t.Error("Expected BD-1 (root open) in filtered tree")
-		}
-		if !ids["BD-2"] {
-			t.Error("Expected BD-2 (open child) in filtered tree")
-		}
-		if !ids["BD-3"] {
-			t.Error("Expected BD-3 (ancestor of open node) in filtered tree")
-		}
-		if !ids["BD-4"] {
-			t.Error("Expected BD-4 (open grandchild) in filtered tree")
-		}
-	})
-
-	t.Run("filter to closed only", func(t *testing.T) {
-		filtered := filterTreeByStatus(tree, types.StatusClosed)
-
-		ids := make(map[string]bool)
-		for _, node := range filtered {
-			ids[node.ID] = true
-		}
-
-		// Should include BD-3 (matching) and BD-1 (ancestor)
-		if !ids["BD-1"] {
-			t.Error("Expected BD-1 (ancestor) in filtered tree")
-		}
-		if !ids["BD-3"] {
-			t.Error("Expected BD-3 (closed) in filtered tree")
-		}
-		if ids["BD-2"] {
-			t.Error("BD-2 should not be in closed-filtered tree")
-		}
-		if ids["BD-4"] {
-			t.Error("BD-4 should not be in closed-filtered tree")
-		}
-	})
-
-	t.Run("filter to non-existent status", func(t *testing.T) {
-		filtered := filterTreeByStatus(tree, types.StatusBlocked)
-		if len(filtered) != 0 {
-			t.Errorf("Expected empty tree when filtering to non-matching status, got %d nodes", len(filtered))
-		}
-	})
-
-	t.Run("filter empty tree", func(t *testing.T) {
-		filtered := filterTreeByStatus([]*types.TreeNode{}, types.StatusOpen)
-		if len(filtered) != 0 {
-			t.Errorf("Expected empty tree, got %d nodes", len(filtered))
-		}
-	})
 }
 
 func TestFormatTreeNode(t *testing.T) {
@@ -998,11 +913,11 @@ func TestRenderTreeOutput(t *testing.T) {
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 50, "down")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -1048,16 +963,16 @@ func TestRenderTreeOutputShowsDependencyTypeLabelsInMixedGraph(t *testing.T) {
 			EdgeFromParent: types.DepBlocks,
 		},
 	}
-	tree := mergeBidirectionalTrees(downTree, upTree, "BD-root")
+	tree := storageissueops.MergeBidirectionalTree(downTree, upTree, "BD-root")
 
 	old := os.Stdout
 	r, w, _ := os.Pipe()
 	os.Stdout = w
+	defer func() { os.Stdout = old }()
 
 	renderTree(tree, 3, "both")
 
 	w.Close()
-	os.Stdout = old
 
 	var buf bytes.Buffer
 	io.Copy(&buf, r)
@@ -1085,263 +1000,6 @@ func TestTreeNodeJSONIncludesEdgeFromParent(t *testing.T) {
 
 	if !strings.Contains(string(got), `"edge_from_parent":"parent-child"`) {
 		t.Fatalf("TreeNode JSON missing edge_from_parent: %s", got)
-	}
-}
-
-func TestMergeBidirectionalTrees_Empty(t *testing.T) {
-	// Test merging empty trees
-	downTree := []*types.TreeNode{}
-	upTree := []*types.TreeNode{}
-	rootID := "test-root"
-
-	result := mergeBidirectionalTrees(downTree, upTree, rootID)
-
-	if len(result) != 0 {
-		t.Errorf("Expected empty result for empty trees, got %d nodes", len(result))
-	}
-}
-
-func TestMergeBidirectionalTrees_OnlyDown(t *testing.T) {
-	// Test with only down tree (dependencies)
-	downTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-1", Title: "Dependency 1", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "test-root",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-2", Title: "Dependency 2", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "test-root",
-		},
-	}
-	upTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-	}
-
-	result := mergeBidirectionalTrees(downTree, upTree, "test-root")
-
-	// Should have all nodes from down tree
-	if len(result) != 3 {
-		t.Errorf("Expected 3 nodes, got %d", len(result))
-	}
-
-	// Verify downTree nodes are present
-	hasRoot := false
-	hasDep1 := false
-	hasDep2 := false
-	for _, node := range result {
-		if node.ID == "test-root" {
-			hasRoot = true
-		}
-		if node.ID == "dep-1" {
-			hasDep1 = true
-		}
-		if node.ID == "dep-2" {
-			hasDep2 = true
-		}
-	}
-	if !hasRoot || !hasDep1 || !hasDep2 {
-		t.Error("Expected all down tree nodes in result")
-	}
-}
-
-func TestMergeBidirectionalTrees_WithDependents(t *testing.T) {
-	// Test with both dependencies and dependents
-	downTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-1", Title: "Dependency 1", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "test-root",
-		},
-	}
-	upTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "test-root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "test-root",
-		},
-	}
-
-	result := mergeBidirectionalTrees(downTree, upTree, "test-root")
-
-	// Should have dependent first, then down tree nodes (3 total, root appears once)
-	// Pattern: dependent node(s), then root + dependencies
-	if len(result) < 3 {
-		t.Errorf("Expected at least 3 nodes, got %d", len(result))
-	}
-
-	// Find dependent-1 and dep-1 in result
-	foundDependentID := false
-	foundDepID := false
-	for _, node := range result {
-		if node.ID == "dependent-1" {
-			foundDependentID = true
-		}
-		if node.ID == "dep-1" {
-			foundDepID = true
-		}
-	}
-
-	if !foundDependentID {
-		t.Error("Expected dependent-1 in merged result")
-	}
-	if !foundDepID {
-		t.Error("Expected dep-1 in merged result")
-	}
-}
-
-func TestMergeBidirectionalTrees_MultipleDepth(t *testing.T) {
-	// Test with multi-level hierarchies
-	downTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-1", Title: "Dep 1", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "root",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-1-1", Title: "Dep 1.1", Status: types.StatusOpen},
-			Depth:    2,
-			ParentID: "dep-1",
-		},
-	}
-	upTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
-			Depth:    1,
-			ParentID: "root",
-		},
-		{
-			Issue:    types.Issue{ID: "dependent-1-1", Title: "Dependent 1.1", Status: types.StatusOpen},
-			Depth:    2,
-			ParentID: "dependent-1",
-		},
-	}
-
-	result := mergeBidirectionalTrees(downTree, upTree, "root")
-
-	// Should include all nodes from both trees (minus duplicate root)
-	if len(result) < 5 {
-		t.Errorf("Expected at least 5 nodes, got %d", len(result))
-	}
-
-	// Verify all IDs are present (except we might have root twice from both trees)
-	expectedIDs := map[string]bool{
-		"root":          false,
-		"dep-1":         false,
-		"dep-1-1":       false,
-		"dependent-1":   false,
-		"dependent-1-1": false,
-	}
-
-	for _, node := range result {
-		if _, exists := expectedIDs[node.ID]; exists {
-			expectedIDs[node.ID] = true
-		}
-	}
-
-	for id, found := range expectedIDs {
-		if !found {
-			t.Errorf("Expected ID %s in merged result", id)
-		}
-	}
-}
-
-func TestMergeBidirectionalTrees_ExcludesRootFromUp(t *testing.T) {
-	// Test that root is excluded from upTree
-	downTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-	}
-	upTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-	}
-
-	result := mergeBidirectionalTrees(downTree, upTree, "root")
-
-	// Should have exactly 1 node (root)
-	if len(result) != 1 {
-		t.Errorf("Expected 1 node (root only), got %d", len(result))
-	}
-
-	if result[0].ID != "root" {
-		t.Errorf("Expected root node, got %s", result[0].ID)
-	}
-}
-
-func TestMergeBidirectionalTrees_PreservesDepth(t *testing.T) {
-	// Test that depth values are preserved from original trees
-	downTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dep-1", Title: "Dep 1", Status: types.StatusOpen},
-			Depth:    5, // Non-standard depth to verify preservation
-			ParentID: "root",
-		},
-	}
-	upTree := []*types.TreeNode{
-		{
-			Issue:    types.Issue{ID: "root", Title: "Root", Status: types.StatusOpen},
-			Depth:    0,
-			ParentID: "",
-		},
-		{
-			Issue:    types.Issue{ID: "dependent-1", Title: "Dependent 1", Status: types.StatusOpen},
-			Depth:    3, // Different depth
-			ParentID: "root",
-		},
-	}
-
-	result := mergeBidirectionalTrees(downTree, upTree, "root")
-
-	// Find nodes and verify their depths are preserved
-	for _, node := range result {
-		if node.ID == "dep-1" && node.Depth != 5 {
-			t.Errorf("Expected dep-1 depth=5, got %d", node.Depth)
-		}
-		if node.ID == "dependent-1" && node.Depth != 3 {
-			t.Errorf("Expected dependent-1 depth=3, got %d", node.Depth)
-		}
 	}
 }
 

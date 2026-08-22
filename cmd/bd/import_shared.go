@@ -54,7 +54,6 @@ type ImportOptions struct {
 	Strict                     bool
 	RenameOnImport             bool
 	ClearDuplicateExternalRefs bool
-	OrphanHandling             string
 	DeletionIDs                []string
 	SkipPrefixValidation       bool
 	ProtectLocalExportIDs      map[string]time.Time
@@ -149,7 +148,6 @@ func importIssuesCore(ctx context.Context, _ string, store storage.DoltStorage, 
 	staleRejectedSet := make(map[string]struct{})
 	actor := getActorWithGit()
 	batchOpts := storage.BatchCreateOptions{
-		OrphanHandling:                 storage.OrphanAllow,
 		SkipPrefixValidation:           opts.SkipPrefixValidation,
 		ConflictSkip:                   opts.ConflictSkip,
 		RejectStaleUpserts:             !opts.AllowStale,

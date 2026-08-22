@@ -2,9 +2,14 @@ package uow
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/domain/db"
+	"github.com/steveyegge/beads/internal/types"
 )
 
 // TestCommenterContract runs the Commenter contract against the unit-of-work
@@ -26,6 +31,12 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("ResultMirrorsTheStoredRow", func(t *testing.T) {
 		conformance.RunCommenterResultMirrorsTheStoredRow(t, ctx, fixture)
 	})
+	t.Run("AdvancesALiveStampPastTheThreadsNewestComment", func(t *testing.T) {
+		conformance.RunCommenterAdvancesALiveStampPastTheThreadsNewestComment(t, ctx, fixture)
+	})
+	t.Run("TakesTheClockWhenTheThreadIsBehindIt", func(t *testing.T) {
+		conformance.RunCommenterTakesTheClockWhenTheThreadIsBehindIt(t, ctx, fixture)
+	})
 	t.Run("CommentOnAWispLandsOnTheWispThread", func(t *testing.T) {
 		conformance.RunCommenterCommentOnAWispLandsOnTheWispThread(t, ctx, fixture)
 	})
@@ -38,8 +49,8 @@ func TestCommenterContract(t *testing.T) {
 	t.Run("DoesNotResolvePrefixes", func(t *testing.T) {
 		conformance.RunCommenterDoesNotResolvePrefixes(t, ctx, fixture)
 	})
-	t.Run("RecordsAtMostOneHistoryEntry", func(t *testing.T) {
-		conformance.RunCommenterRecordsAtMostOneHistoryEntry(t, ctx, fixture)
+	t.Run("RecordsExactlyOneHistoryEntry", func(t *testing.T) {
+		conformance.RunCommenterRecordsExactlyOneHistoryEntry(t, ctx, fixture)
 	})
 	t.Run("LeavesTheAnchorIssueUntouched", func(t *testing.T) {
 		conformance.RunCommenterLeavesTheAnchorIssueUntouched(t, ctx, fixture)
@@ -77,5 +88,29 @@ func newUOWCommenterFixture(t *testing.T, ctx context.Context, prefix string) co
 		CreateWisp:   kit.CreateWisp,
 		QueryScalar:  kit.QueryScalar,
 		CountHistory: kit.CountHistory,
+		// Not on the kit; see the same note in the server-backed wiring. This
+		// backend's import shape is CommentSQLRepository.InsertRecord — the
+		// twin of the Insert the role runs, minus the stamp advance, which is
+		// what "honors the supplied CreatedAt verbatim" means here. No domain
+		// use-case exposes it for a thread that already exists
+		// (CreateIssueParams.Comments is the only route and it runs at create
+		// time), so the seed reaches the repository through the transaction's
+		// own runner rather than through a use-case that does not have the
+		// verb.
+		SeedCommentAt: func(ctx context.Context, issueID, author, text string, at time.Time) error {
+			return RunTx(ctx, provider, func(ctx context.Context, uw UnitOfWork) (string, error) {
+				base, ok := uw.(*baseUOW)
+				if !ok {
+					return "", fmt.Errorf("seed comment: unit of work %T does not expose the runner InsertRecord needs", uw)
+				}
+				_, err := db.NewCommentSQLRepository(base.tx.Runner()).InsertRecord(ctx, &types.Comment{
+					IssueID:   issueID,
+					Author:    author,
+					Text:      text,
+					CreatedAt: at,
+				}, domain.CommentOpts{})
+				return "seed comment on " + issueID, err
+			})
+		},
 	}
 }

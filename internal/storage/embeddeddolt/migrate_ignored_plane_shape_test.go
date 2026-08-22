@@ -59,19 +59,27 @@ func TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape(t *testing.T) {
 	for _, table := range []string{
 		"wisp_dependencies", "wisp_events", "wisp_comments", "wisp_labels",
 		"wisp_child_counters", "wisps", "events", "leases", "repo_mtimes",
-		"local_metadata", "ignored_schema_migrations",
+		"local_metadata", "bd_events_journal", "bd_events_seq",
+		"ignored_schema_migrations",
 	} {
 		execFrozenGuard(t, ctx, cloneConn, "DROP TABLE IF EXISTS "+table)
 	}
 	// Harness artifact, not part of the simulation: seedMainSchemaAt's
 	// DOLT_ADD('-A') baseline commit runs before MigrateUp seeds the static
-	// dolt_ignore pattern for leases, so on THIS path leases lands in
-	// committed history and its drop above shows up as a tracked deletion,
-	// which the ignored-source dirty-table guard would refuse. A real clone
-	// never has leases at HEAD. The pattern row must go before the deletion
-	// can be staged (DOLT_ADD skips ignored tables even for deletions);
-	// MigrateUp's seedDoltIgnorePatterns re-asserts it immediately after.
-	execFrozenGuard(t, ctx, cloneConn, "DELETE FROM dolt_ignore WHERE pattern = 'leases'")
+	// dolt_ignore patterns, so on THIS path the statically-seeded clone-local
+	// tables land in committed history and their drops above show up as tracked
+	// deletions, which the ignored-source dirty-table guard would refuse. A real
+	// clone never has them at HEAD. The pattern rows must go before the
+	// deletions can be staged (DOLT_ADD skips ignored tables even for
+	// deletions); MigrateUp's seedDoltIgnorePatterns re-asserts them
+	// immediately after.
+	//
+	// All three static patterns, not just leases: bd_events_journal and
+	// bd_events_seq are seeded the same way (schema.doltIgnorePatterns), so
+	// clearing only leases left the journal tables' deletions unstageable and
+	// the guard refused the pass.
+	execFrozenGuard(t, ctx, cloneConn,
+		"DELETE FROM dolt_ignore WHERE pattern IN ('leases', 'bd_events_journal', 'bd_events_seq')")
 	mustDrain(t, ctx, cloneConn, "CALL DOLT_ADD('-A')")
 	mustDrain(t, ctx, cloneConn, "CALL DOLT_COMMIT('-m', 'test: remove clone-local state from history', '--skip-empty')")
 	if _, err := schema.MigrateUp(ctx, cloneConn); err != nil {
@@ -81,7 +89,7 @@ func TestEmbeddedIgnoredSeriesConvergesWithFreshInitShape(t *testing.T) {
 	for _, table := range []string{
 		"wisps", "wisp_labels", "wisp_dependencies", "wisp_events",
 		"wisp_comments", "wisp_child_counters", "events", "leases",
-		"repo_mtimes", "local_metadata",
+		"repo_mtimes", "local_metadata", "bd_events_journal", "bd_events_seq",
 	} {
 		initShape := clonePlaneTableShape(t, ctx, initConn, table)
 		cloneShape := clonePlaneTableShape(t, ctx, cloneConn, table)

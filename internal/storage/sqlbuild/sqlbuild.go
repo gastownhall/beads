@@ -27,6 +27,14 @@ var (
 	WispsFilterTables  = FilterTables{Main: "wisps", Labels: "wisp_labels", Dependencies: "wisp_dependencies", Comments: "wisp_comments"}
 )
 
+// OptionalWispTable reports whether name is a wisp-plane table a database may
+// legitimately not have, which is the set a wisp query may treat as "no wisps"
+// rather than a failure. Both stacks read it so the two cannot disagree about
+// what a missing table means.
+func OptionalWispTable(name string) bool {
+	return strings.EqualFold(name, "wisps") || strings.EqualFold(name, "wisp_dependencies")
+}
+
 // DepTargetExpr resolves a dependency row's target across the three
 // mutually-exclusive target columns.
 const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
@@ -46,6 +54,24 @@ const IssueBaseColumns = `id, content_hash, title, description, design, acceptan
 	       due_at, defer_until,
 	       work_type, source_system, metadata, row_lock, storage_class`
 
+// IssueBaseColumnsLite is IssueBaseColumns minus the heavy TEXT columns
+// (issueops.HeavyDropList). It lives here rather than beside its scan function
+// for the same reason IssueBaseColumns does: the counts mega-query aliases the
+// main table and has to qualify the row columns without mangling the leases.*
+// references, and that query is rendered in this package. issueops re-exports
+// the full list as IssueSelectColumnsLite and pins it against IssueBaseColumns
+// with the schema-parity test.
+const IssueBaseColumnsLite = `id, content_hash, title,
+	       status, priority, issue_type, assignee, estimated_minutes,
+	       created_at, created_by, owner, updated_at, started_at, closed_at, external_ref, spec_id,
+	       compaction_level, compacted_at, compacted_at_commit, original_size, source_repo, close_reason, closed_by_session,
+	       sender, ephemeral, no_history, wisp_type, pinned, is_template,
+	       await_type, await_id, timeout_ns,
+	       mol_type,
+	       event_kind, actor, target,
+	       due_at, defer_until,
+	       work_type, source_system, metadata, row_lock, storage_class`
+
 // LeaseSelectColumns is the lease overlay for full issue hydration. Leases
 // live in the ephemeral leases table (bd-lrgn1), not on the issues row, so
 // every query selecting these must also add LeaseJoin to its FROM clause —
@@ -58,6 +84,12 @@ const LeaseSelectColumns = `leases.lease_expires_at, leases.heartbeat_at, leases
 // issueops.ScanIssueFrom, which scans positionally and must stay in
 // column-for-column agreement with this list.
 const IssueSelectColumns = IssueBaseColumns + `,
+	       ` + LeaseSelectColumns
+
+// IssueSelectColumnsLite is the lite counterpart of IssueSelectColumns. The
+// scan side is issueops.ScanIssueLiteFrom and the same LeaseJoin requirement
+// applies.
+const IssueSelectColumnsLite = IssueBaseColumnsLite + `,
 	       ` + LeaseSelectColumns
 
 // LeaseJoin returns the FROM-clause fragment that overlays the ephemeral

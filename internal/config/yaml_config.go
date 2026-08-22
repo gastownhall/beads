@@ -24,6 +24,14 @@ var YamlOnlyKeys = map[string]bool{
 	// Bootstrap flags (affect how bd starts)
 	"no-db": true,
 	"json":  true,
+	// Events journal: read through viper during root pre-run, before the store
+	// is open, so a DB-backed write would be silently unread — the GH#536 class
+	// this map exists to prevent. Without these four entries
+	// `bd config set events-journal true` reports success and changes nothing.
+	"events-journal":             true,
+	"events-journal-retain-days": true,
+	"events-journal-retain-rows": true,
+	"events-journal-auto-prune":  true,
 
 	// Database and identity
 	"db":       true,
@@ -107,7 +115,7 @@ func IsYamlOnlyKey(key string) bool {
 	}
 
 	// Check prefix matches for nested keys
-	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit.", "storage-class."}
+	prefixes := []string{"routing.", "sync.", "git.", "directory.", "repos.", "external_projects.", "validation.", "lint.", "hierarchy.", "ai.", "backup.", "export.", "dolt.", "federation.", "metrics.", "list.", "audit.", "storage-class."}
 	for _, prefix := range prefixes {
 		if strings.HasPrefix(key, prefix) {
 			return true
@@ -117,16 +125,53 @@ func IsYamlOnlyKey(key string) bool {
 	return false
 }
 
-// secretKeyPatterns are substrings that identify a yaml-only key as containing
-// sensitive material that should not be written to git-tracked files.
-var secretKeyPatterns = []string{"api_key", "api-key", "secret", "token", "password"}
+// secretKeyPatterns are substrings that identify a key as carrying sensitive
+// material. Matched anywhere in the key, so they must be long enough that a
+// substring hit is never an accident.
+var secretKeyPatterns = []string{
+	"api_key", "api-key", "apikey", "secret", "token", "password", "passwd",
+	"credential", "private_key", "privatekey", "privkey",
+}
 
-// IsSecretKey returns true if the given config key holds sensitive material
-// (API keys, tokens, passwords) that should not be committed to git.
+// secretKeySegments are whole segments — split on `.`, `_` and `-` — that mark
+// a key as sensitive.
+//
+// They are matched as SEGMENTS rather than as substrings because every one of
+// them is a prefix of an ordinary word: as a substring, "pat" would redact
+// `issue.path` and `export.pattern`, "auth" would redact `commit.author`, and
+// "key" would redact `sort.keyword`. As a segment, `github.pat` and
+// `commit.author` are told apart correctly.
+var secretKeySegments = map[string]bool{
+	"key": true, "keys": true, "apikey": true, "pwd": true, "pat": true,
+	"auth": true, "bearer": true, "cert": true, "credential": true,
+	"credentials": true, "secret": true, "token": true, "password": true,
+}
+
+// IsSecretKey reports whether a config key holds sensitive material.
+//
+// IT IS A SECURITY CONTROL, not only a lint. Two callers depend on it: the
+// `bd config set` guard that refuses to write a credential into a git-tracked
+// file, and — since the settings surface went on the wire — the redaction in
+// internal/httpapi that decides whether GET /v0/beads/config publishes a
+// value. Redaction is the whole control there: a `bd serve` bearer is optional
+// and, where configured, shared and surface-wide, so it cannot withhold one
+// value from one caller — and there is no TLS either. A spelling missing from
+// this predicate is a credential served in cleartext.
+//
+// It errs toward over-redacting for that reason: a key wrongly withheld is an
+// operator asking why, and a key wrongly published cannot be recalled. The
+// decision is about the KEY alone; no value is ever inspected.
 func IsSecretKey(key string) bool {
 	lower := strings.ToLower(key)
 	for _, pattern := range secretKeyPatterns {
 		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	for _, segment := range strings.FieldsFunc(lower, func(r rune) bool {
+		return r == '.' || r == '_' || r == '-'
+	}) {
+		if secretKeySegments[segment] {
 			return true
 		}
 	}
@@ -296,8 +341,31 @@ func IsUserGlobalKey(key string) bool {
 // never re-enable metrics for a user who opted out, nor redirect where metrics
 // are sent. See MetricsDisabledByUserConfig / UserMetricsEndpoint.
 func readUserGlobalYamlValue(key string) (string, bool) {
-	path := UserConfigYamlPath()
-	data, err := os.ReadFile(path) //nolint:gosec // path is the user-global config path from UserConfigYamlPath
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return "", false
+	}
+	return readYamlValueAtPath(configPath, key)
+}
+
+// WorkspaceYamlValue reads a single dotted key out of ONE workspace's
+// config.yaml, named by its .beads directory, returning ("", false) when the
+// file or the key is absent.
+//
+// It exists for the cross-workspace opens — routed creates, remote-cache
+// hydration, `bd serve` against another workspace — where the process-wide
+// merged config answers for the directory bd was LAUNCHED from, not for the
+// workspace about to be written. A setting that governs what gets recorded in a
+// target workspace has to be read from that target.
+func WorkspaceYamlValue(beadsDir, key string) (string, bool) {
+	if beadsDir == "" {
+		return "", false
+	}
+	return readYamlValueAtPath(filepath.Join(beadsDir, "config.yaml"), key)
+}
+
+func readYamlValueAtPath(path, key string) (string, bool) {
+	data, err := os.ReadFile(path) //nolint:gosec // path is a resolved config.yaml path, not user input
 	if err != nil {
 		return "", false
 	}
@@ -389,10 +457,13 @@ func MetricsNoticeShownByUserConfig() bool {
 }
 
 func UnsetUserYamlConfig(key string) error {
-	configPath := UserConfigYamlPath()
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return err
+	}
 	normalizedKey := normalizeYamlKey(key)
 
-	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from UserConfigYamlPath
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
@@ -416,7 +487,10 @@ func SetUserYamlConfig(key, value string) error {
 	if err := validateYamlConfigValue(key, value); err != nil {
 		return err
 	}
-	configPath := UserConfigYamlPath()
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create user config directory: %w", err)
 	}
@@ -543,32 +617,6 @@ func projectConfigPathFromLoadedState() string {
 		return ""
 	}
 	return configPath
-}
-
-// UserConfigYamlPath returns the platform-appropriate path for the
-// user-level config.yaml file. On Linux this is typically
-// ~/.config/bd/config.yaml; on macOS it checks ~/.config/bd/ first
-// (the documented cross-platform path) and falls back to
-// ~/Library/Application Support/bd/.
-func UserConfigYamlPath() string {
-	// Prefer ~/.config/bd/config.yaml — it's the documented path and
-	// works on all platforms after GH#3532.
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		xdgPath := filepath.Join(homeDir, ".config", "bd", "config.yaml")
-		if _, err := os.Stat(xdgPath); err == nil {
-			return xdgPath
-		}
-		// If it doesn't exist yet, still prefer it as the recommendation
-		// unless the os.UserConfigDir() path already has a file.
-		if configDir, err := os.UserConfigDir(); err == nil {
-			osPath := filepath.Join(configDir, "bd", "config.yaml")
-			if _, err := os.Stat(osPath); err == nil {
-				return osPath
-			}
-		}
-		return xdgPath // recommend the cross-platform path
-	}
-	return "~/.config/bd/config.yaml" // fallback display string
 }
 
 func findProjectBeadsDir() string {

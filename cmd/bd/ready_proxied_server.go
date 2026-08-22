@@ -45,6 +45,12 @@ func runReadyProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 		return runReadyProxiedClaim(ctx, in)
 	}
 
+	// Wake expired dated defers before the read below. The unit of work this
+	// route opens is read-only-by-ending (Close rolls back), so the sweep runs
+	// in a committing UOW of its own first; the claim route above gets the
+	// same sweep from its role (uow.readyClaimer.ClaimNext).
+	uow.WakeExpiredDefersAdvisory(ctx, uowProvider)
+
 	uw, err := uowProvider.NewUOW(ctx)
 	if err != nil {
 		return HandleErrorRespectJSON("open unit of work: %v", err)
@@ -73,10 +79,7 @@ func runBlockedProxiedServer(cmd *cobra.Command, ctx context.Context) error {
 	}
 	defer uw.Close(ctx)
 
-	var filter types.WorkFilter
-	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
-		filter.ParentID = &parentID
-	}
+	filter := blockedFilterFromFlags(cmd)
 
 	blocked, err := uw.IssueUseCase().GetBlockedIssues(ctx, filter)
 	if err != nil {
@@ -123,14 +126,23 @@ func runReadyProxiedList(ctx context.Context, uw uow.UnitOfWork, in readyInput) 
 		results, truncated := workapi.FinishPage(page.Items, "", false, in.filter.Limit, page.HasMore)
 		truncated = truncated && in.filter.Limit > 0
 		// Parity with the direct route: the pagination key is emitted only
-		// when truncated. Total is unavailable from this backend's domain
-		// page (no cheap COUNT(*) equivalent on the proxied path), so it is
-		// left unset (0) unlike the direct route's fully-populated meta.
+		// when truncated, and it now carries the same Total, from the same
+		// role. This route published no total at all until ReadyCounter
+		// existed, so a script that read `pagination.total` got one number
+		// under a direct-mode workspace and no key at all under a proxied one.
+		//
+		// The guard is the direct route's guard: the two queries are not one
+		// snapshot (issueops.ReadyCounter.CountReady), so a close landing
+		// between them must not publish a total smaller than the page beside
+		// it.
 		var pag *PaginationMeta
 		if truncated {
 			pag = &PaginationMeta{
 				Returned:  len(results),
 				Truncated: true,
+			}
+			if n, countErr := proxiedReadyTotal(ctx, in); countErr == nil && n > len(results) {
+				pag.Total = n
 			}
 		}
 		_ = outputJSONWithPagination(results, pag)
@@ -225,6 +237,32 @@ func runReadyProxiedClaim(ctx context.Context, in readyInput) error {
 		fmt.Printf("%s Claimed issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(res.Claimed.ID, res.Claimed.Title))
 	}
 	return nil
+}
+
+// proxiedReadyTotal sizes the whole ready set through the provider's own
+// ReadyCounter accessor — the same role the direct route reaches through the
+// store's accessor, over the request both build in readyRoleRequest.
+//
+// It opens NO unit of work of its own: the role's request IS the transaction,
+// so the count runs in its own read-only unit of work rather than the one the
+// page came from, which is why the two are not one snapshot.
+func proxiedReadyTotal(ctx context.Context, in readyInput) (int, error) {
+	if uowProvider == nil {
+		return 0, errors.New("proxied-server UOW provider not initialized")
+	}
+	src, ok := uowProvider.(uow.ReadyCounterSource)
+	if !ok {
+		return 0, fmt.Errorf("proxied-server provider %T does not offer the ready-count surface", uowProvider)
+	}
+	counter, err := src.ReadyCounter()
+	if err != nil {
+		return 0, err
+	}
+	result, err := counter.CountReady(ctx, readyRoleRequest(in))
+	if err != nil {
+		return 0, err
+	}
+	return int(result.Total), nil
 }
 
 // proxiedReadyClaimer hands back the guarded claim surface for the

@@ -2,18 +2,115 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
-	"os/exec"
+	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/doltversion"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/uow"
 )
+
+// doltVersionWarnOnce ensures the dolt-version advisory (old/unverifiable
+// version) is printed at most once per process, even though
+// resolveAndProbeDolt can run repeatedly against the same resolved binary
+// (retries, multiple UOW providers opened in one command, or bd init
+// --proxied-server's own preflight followed by the UOW provider it opens a
+// few lines later). Repeating the same advisory on every call would just be
+// noise once the operator has seen it. Cross-process dedup (each bd
+// invocation is a new process) is handled separately by the probe cache's
+// warn stamp — see doltversion.ProbeWithPolicyCached / MarkWarned.
+var doltVersionWarnOnce sync.Once
+
+// doltProbeCachePath is where the cross-process dolt probe cache lives: the
+// binary being probed is machine-scoped, so the cache is too (user cache
+// dir, not the workspace). Empty on any error, which makes the cached probe
+// fall back to uncached behavior — never a reason to fail a command.
+func doltProbeCachePath() string {
+	dir, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "beads", "dolt-probe.json")
+}
+
+// resolveAndProbeDolt resolves the external dolt binary (env override >
+// sidecar > PATH) and hardened-probes it, printing the version-recommendation
+// advisory (if any) at most once per process via doltVersionWarnOnce.
+//
+// quiet suppresses the advisory (errors still return). It is a parameter
+// rather than a read of the global quietFlag because bd init defines its own
+// local --quiet flag that shadows the persistent one: during
+// `bd init --proxied-server -q` the global quietFlag is false while the
+// user very much asked for quiet.
+//
+// bd init --proxied-server's own preflight (init_proxied_server.go) and
+// newManagedProxiedServerUOWProvider both need exactly this
+// resolve+probe+warn sequence. A single non-quiet `bd init --proxied-server`
+// invocation runs the preflight and then opens a UOW provider a few lines
+// later, so before this was shared, an old/unverifiable dolt printed the
+// identical advisory twice and forked `dolt version` twice. errPrefix is
+// used to keep call-site-specific error context (e.g. "bd init
+// --proxied-server" vs "newProxiedServerUOWProvider") in the wrapped error.
+// The probed identity is deliberately not returned: its only consumer (the
+// auto_gc_behavior.archive_level gate) was removed upstream from
+// proxied-server mode, and PR-2's revalidation consumer will re-widen the
+// signature when it lands.
+func resolveAndProbeDolt(ctx context.Context, errPrefix string, quiet bool) (doltBin string, err error) {
+	doltBin, doltSrc, err := doltversion.Resolve(doltversion.ResolveOptions{
+		EnvValue: doltversion.ReadEnvOverride(),
+		// SidecarValue is a hook point only in this PR — the clone-local
+		// sidecar setting itself lands in PR-2.
+		SidecarValue: "",
+	})
+	if err != nil {
+		return "", fmt.Errorf(
+			"%s: resolving dolt binary (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
+			errPrefix, doltSrc, err,
+		)
+	}
+	// Cached: a fingerprint hit (same real path, size, mtime as the last
+	// successful probe) replays the result for the cost of a stat instead of
+	// forking `dolt version` on every command — this call sits on the
+	// store-open hot path of essentially every bd command in managed
+	// proxied-server mode.
+	cachePath := doltProbeCachePath()
+	res, err := doltversion.ProbeWithPolicyCached(ctx, doltBin, cachePath, time.Now())
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			// The probe was killed because OUR context was canceled (user
+			// hit Ctrl-C, outer operation gave up) — dolt itself was never
+			// shown to be broken, so the install hint would mislead.
+			return doltBin, fmt.Errorf(
+				"%s: probing dolt binary %q (source: %s): %w",
+				errPrefix, doltBin, doltSrc, err,
+			)
+		}
+		return doltBin, fmt.Errorf(
+			"%s: probing dolt binary %q (source: %s): %w; install from https://docs.dolthub.com/introduction/installation",
+			errPrefix, doltBin, doltSrc, err,
+		)
+	}
+	// Gated on both quietFlag and jsonOutput, matching this package's
+	// convention of keeping JSON-mode stdout/stderr free of advisory chatter
+	// (see e.g. tips.go, metrics.go). WarnDue adds the cross-process gate:
+	// the advisory repeats at most once per day (per the probe cache's
+	// stamp), not on every bd invocation.
+	if res.Warning != nil && !quiet && !jsonOutput && res.WarnDue {
+		doltVersionWarnOnce.Do(func() {
+			fmt.Fprintf(os.Stderr, "Warning: %s\n", res.Warning.Message())
+			doltversion.MarkWarned(cachePath, time.Now())
+		})
+	}
+	return doltBin, nil
+}
 
 // sqlServerUOWTopology is everything the two unit-of-work providers need that
 // differs between workspaces: which database, whose schema, where the proxy
@@ -95,6 +192,12 @@ func openProxiedServerUOWProvider(ctx context.Context, beadsDir, databaseOverrid
 	return newSQLServerUOWProvider(ctx, beadsDir, topology, opts...)
 }
 
+// newSQLServerUOWProvider is the single funnel every unit-of-work provider bd
+// builds passes through — the proxied CLI path AND `bd serve`'s own provider
+// for server-mode workspaces. Activation is applied by the two constructors it
+// dispatches to, each alongside its own open; doing it at the CALL SITES
+// instead is what left `bd serve` writing mutations into an empty journal while
+// reporting success. See the note at the top of events_journal.go.
 func newSQLServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
 	if topology.external != nil {
 		return newExternalProxiedServerUOWProvider(ctx, beadsDir, topology, opts...)
@@ -323,7 +426,8 @@ func resolveServerModeUOWTopologyWithTransportResolver(ctx context.Context, bead
 // the workspace mode: since bd-emv a server-mode workspace lands here too, and
 // the paths it resolves (root, log) are the same ones proxied mode uses because
 // both modes root their server at the same directory.
-func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
+func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("newExternalProxiedServerUOWProvider: resolve root path: %w", err)
@@ -362,10 +466,23 @@ func newExternalProxiedServerUOWProvider(ctx context.Context, beadsDir string, t
 	)
 }
 
-func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (uow.UnitOfWorkProvider, error) {
-	doltBin, err := exec.LookPath("dolt")
+func newManagedProxiedServerUOWProvider(ctx context.Context, beadsDir string, topology sqlServerUOWTopology, opts ...uow.ProviderOption) (p uow.UnitOfWorkProvider, err error) {
+	defer func() { p, err = activateEventsJournalProvider(ctx, beadsDir, p, err) }()
+	// Resolve and hardened-probe the external dolt binary before spawning
+	// it: an env/sidecar override that is explicitly named but broken
+	// should fail loudly here rather than surface as a confusing spawn
+	// failure downstream. See internal/doltversion for the resolution
+	// precedence (env > sidecar > PATH) and probe hardening (timeout,
+	// output cap, pre-exec validation).
+	//
+	// The error label names this function rather than the proxied-server
+	// entry point: since upstream's server-mode path (bd serve ->
+	// newSQLServerUOWProvider) also lands here, a hardcoded
+	// "newProxiedServerUOWProvider" would mislabel a `bd serve` failure as a
+	// proxied-server one.
+	doltBin, err := resolveAndProbeDolt(ctx, "newManagedProxiedServerUOWProvider", quietFlag)
 	if err != nil {
-		return nil, fmt.Errorf("newProxiedServerUOWProvider: dolt is not installed (not found in PATH); install from https://docs.dolthub.com/introduction/installation: %w", err)
+		return nil, err
 	}
 
 	rootPath, err := resolveProxiedServerRootPath(beadsDir)

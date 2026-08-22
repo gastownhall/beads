@@ -50,10 +50,17 @@ func TestProxiedServerMemory(t *testing.T) {
 		}
 
 		// Memories land under kv.memory.<key> in the config table — the
-		// namespace `bd export --all` sweeps — visible via bd config get.
+		// namespace `bd export --all` sweeps — but the settings plane does not
+		// serve them. A point read answers exactly as an unset key does, so a
+		// caller cannot tell a refusal from an absence. This is the proxied
+		// leg of the same firewall the role contract pins; recall below is the
+		// route that still reads the content.
 		out = bdProxiedMem(t, bd, p.dir, "config", "get", "kv.memory.dolt-phantoms")
-		if strings.TrimSpace(out) != content {
-			t.Errorf("expected memory at kv.memory.dolt-phantoms, got: %q", out)
+		if !strings.Contains(out, "(not set)") {
+			t.Errorf("expected kv.memory.dolt-phantoms to read as unset through config get, got: %q", out)
+		}
+		if strings.Contains(out, content) {
+			t.Errorf("config get leaked memory content: %q", out)
 		}
 
 		// List all.
@@ -148,6 +155,22 @@ func TestProxiedServerMemory(t *testing.T) {
 		out = bdProxiedMemFail(t, bd, p.dir, "remember", "list")
 		if !strings.Contains(out, "looks like a command") {
 			t.Errorf("expected command-word guard, got: %s", out)
+		}
+
+		// The two refusals either side of the desire path fire the same way
+		// here as on the direct route — one branch, one derivation, both
+		// routes. DeriveKey("") is "", so an insight nothing derives from
+		// would satisfy the bare-slug test and be READ instead of refused if
+		// the branch did not exclude the empty key.
+		for _, tc := range []struct{ insight, want string }{
+			{"", "memory content cannot be empty"},
+			{"   ", "memory content cannot be empty"},
+			{"!!!", "could not generate key from content"},
+		} {
+			out = bdProxiedMemFail(t, bd, p.dir, "remember", tc.insight)
+			if !strings.Contains(out, tc.want) {
+				t.Errorf("bd remember %q: expected %q, got: %s", tc.insight, tc.want, out)
+			}
 		}
 	})
 

@@ -32,10 +32,32 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	}
 	result := PersistenceMoveResult{Changed: true, ChangedTables: map[string]bool{}}
 	if sourceWisp == targetWisp {
-		if _, err := tx.ExecContext(ctx, `UPDATE wisps SET ephemeral = ?, no_history = ?, storage_class = ?, row_lock = ? WHERE id = ?`, ephemeral, noHistory, storageClass.Normalize(), FreshRowLock(), current.ID); err != nil {
+		// THE TABLE IS THE ROW'S OWN PLANE, not `wisps`. This branch runs when
+		// no move is needed but the flags still disagree with the row, and that
+		// state is reachable in the ISSUES plane: a durable row carrying
+		// ephemeral = 1 is exactly what the pre-role proxied update produced,
+		// and `bd update --persistent` is the command an operator reaches for
+		// to repair it. Hardcoding `wisps` sent that repair at the wrong table,
+		// where it matched nothing and still reported success.
+		table := persistenceIssueTable(sourceWisp)
+		//nolint:gosec // G201: table comes from persistenceIssueTable, not from input.
+		res, err := tx.ExecContext(ctx, `UPDATE `+table+` SET ephemeral = ?, no_history = ?, storage_class = ?, row_lock = ? WHERE id = ?`, ephemeral, noHistory, storageClass.Normalize(), FreshRowLock(), current.ID)
+		if err != nil {
 			return PersistenceMoveResult{}, fmt.Errorf("normalize local issue persistence: %w", err)
 		}
-		result.ChangedTables["wisps"] = true
+		// Changed: true is a claim about the database, so check it rather than
+		// assert it. A zero-row update here means the row is not where the
+		// plane probe said it was, and reporting success would hand the caller
+		// a repair that did not happen.
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return PersistenceMoveResult{}, fmt.Errorf("normalize local issue persistence: %s names no row in %s", current.ID, table)
+		}
+		result.ChangedTables[table] = true
+		// The flags are part of the bead snapshot, so a normalize journals as
+		// an update. The no-change early return above emits nothing.
+		if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID); err != nil {
+			return PersistenceMoveResult{}, err
+		}
 		return result, nil
 	}
 	if !sourceWisp && targetWisp {
@@ -100,6 +122,12 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 	}
 	result.ChangedTables[persistenceIssueTable(sourceWisp)] = true
 	result.ChangedTables[persistenceIssueTable(targetWisp)] = true
+	// The bead keeps its ID across a plane move; only where it is stored
+	// changes. Journal one update carrying the moved snapshot, after derived
+	// blocked-state maintenance has settled.
+	if err := RecordEventInTx(ctx, tx, EventUpdate, current.ID); err != nil {
+		return PersistenceMoveResult{}, err
+	}
 	return result, nil
 }
 

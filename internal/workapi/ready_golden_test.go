@@ -47,6 +47,14 @@ func loadReadyFilterGolden(t *testing.T) []readyFilterGoldenCase {
 // running both of them before either was deleted, so a green run here is the
 // proof that collapsing them into this package changed nothing.
 //
+// EVERY RECORDED FILTER CARRIES "Lite": false, which the old builders could
+// not have produced because types.WorkFilter had no such field. The record is
+// of what each REQUEST resolves to, and false is what a request that did not
+// ask for the projection resolves that field to, so writing it in keeps the
+// replay exact rather than weakening it — the same absorption
+// types.IssueFilter's MaxRows and SkipCounts had on the listing golden. A case
+// that MEANT to set it would fail here, which is the property being kept.
+//
 // It replays the gatherReadyInput column: that is the builder both CLI paths
 // now share, and it is the one whose output a filter can be built from for
 // every case (the direct column stops at --max-rows, which stays in cmd/bd).

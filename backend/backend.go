@@ -3,7 +3,7 @@
 // implement (the engine interface storage.DoltStorage and every type its
 // method signatures reach), the process-init registry that plugs an
 // implementation into bd, and — via the backend/conformance subpackage — the
-// suite that proves an implementation behaves like the Dolt reference.
+// tests that prove an implementation behaves like the Dolt reference.
 //
 // Every name here is an alias or thin wrapper over the in-tree definition, so
 // an external implementation and the in-tree consumers see IDENTICAL types:
@@ -27,13 +27,26 @@
 //	    })
 //	}
 //
-// and proves itself with the conformance suite:
+// and proves itself with the conformance package:
 //
 //	func TestConformance(t *testing.T) {
+//	    // What the backend declares it does not do.
+//	    conformance.RunUnsupportedContract(t, &Store{}, unsupported)
+//	    // What it does: the portable raw surface.
 //	    conformance.RunAll(t, func(t *testing.T) backend.DoltStorage {
 //	        return newTestStore(t)
 //	    })
 //	}
+//
+// The two halves are not interchangeable. RunAll covers the portable raw
+// surface — roughly half of core Storage plus five capability sub-interfaces —
+// and calls NO method of VersionControl, HistoryViewer, RemoteStore, SyncStore,
+// FederationStore, CompactionStore or FastStatisticsStore. Those seven are
+// proved only by the allowlist: a backend that answers them with a typed
+// ErrUnsupported and runs RunUnsupportedContract has satisfied everything the
+// suite asks of them. The conformance package doc measures the split, and the
+// role contracts in that package are the third piece, covering the issueops
+// roles the accessors on Storage return.
 //
 // Registration is init-time wiring only; see Register. bd init / bd bootstrap
 // do not provision registered backends — an external backend supplies its own
@@ -59,8 +72,11 @@ import (
 // DoltStorage is the full engine interface an external backend implements:
 // the core Storage interface plus every capability sub-interface. The name is
 // historical — the Dolt stores were its first implementations — but the
-// contract is backend-agnostic; the conformance suite exercises exactly this
-// surface.
+// contract is backend-agnostic.
+//
+// Implementing it is not the same as being exercised by the conformance suite,
+// which reaches roughly half of it; the rest is declared through the unsupported
+// allowlist. See the conformance package doc for which half is which.
 type DoltStorage = storage.DoltStorage
 
 // The engine interface decomposes into the core Storage interface plus these
@@ -108,7 +124,6 @@ type (
 	HistoryEntry            = storage.HistoryEntry
 	MergeSlotResult         = storage.MergeSlotResult
 	MergeSlotStatus         = storage.MergeSlotStatus
-	OrphanHandling          = storage.OrphanHandling
 	RemoteInfo              = storage.RemoteInfo
 	StatusEntry             = storage.StatusEntry
 	SyncResult              = storage.SyncResult
@@ -120,14 +135,6 @@ type (
 // VCStatus here — matching the root beads package — because Status is the
 // issue-status enum from the domain types.
 type VCStatus = storage.Status
-
-// OrphanHandling values for BatchCreateOptions.
-const (
-	OrphanAllow     = storage.OrphanAllow
-	OrphanResurrect = storage.OrphanResurrect
-	OrphanSkip      = storage.OrphanSkip
-	OrphanStrict    = storage.OrphanStrict
-)
 
 // Backend describes a registered storage backend: how to open its workspace
 // store. See the field docs on the aliased struct.

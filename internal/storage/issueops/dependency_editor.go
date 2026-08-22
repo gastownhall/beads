@@ -214,7 +214,7 @@ func addDependencyEdgeInTx(ctx context.Context, tx *sql.Tx, request publicops.Ad
 func checkAddedEdgesForCycles(ctx context.Context, tx *sql.Tx, edges []publicops.DependencyEdge) error {
 	var pairs [][2]string
 	for _, edge := range edges {
-		if !isSchedulingEdge(edge.Type) {
+		if !types.IsSchedulingEdge(edge.Type) {
 			continue
 		}
 		pairs = append(pairs, [2]string{edge.IssueID, edge.DependsOnID})

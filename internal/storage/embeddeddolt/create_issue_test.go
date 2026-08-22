@@ -1008,7 +1008,6 @@ func TestCreateIssues(t *testing.T) {
 		var skipped []string
 
 		err := te.store.CreateIssuesWithFullOptions(ctx, []*types.Issue{regular, wisp}, "tester", storage.BatchCreateOptions{
-			OrphanHandling:                 storage.OrphanAllow,
 			SkipPrefixValidation:           true,
 			SkipDependencyValidationErrors: true,
 			OnSkippedDependency: func(issueID, dependsOnID, reason string) {

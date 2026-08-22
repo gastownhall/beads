@@ -144,20 +144,60 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 
 // displayPrettyList displays issues in pretty tree format (GH#654)
 // Uses buildIssueTree which only supports dotted ID hierarchy
+// There is no --ready arm behind this one: it is the plain tree, so the
+// summary keeps its status breakdown.
 func displayPrettyList(issues []*types.Issue, showHeader bool) {
-	displayPrettyListWithDeps(issues, showHeader, nil)
+	displayPrettyListWithDeps(issues, showHeader, nil, false, false)
 }
 
 // displayPrettyListWithDeps displays issues in tree format using dependency data.
-func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency) {
-	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "")
+// readyFiltered must be threaded from the caller's --ready state rather than
+// defaulted here: the watch paths reach the summary through this wrapper, and a
+// hardcoded false silently restores the vacuous "(N open, 0 in progress)" that
+// listFooterLine exists to suppress.
+func displayPrettyListWithDeps(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, truncated, readyFiltered bool) {
+	displayPrettyListWithDepsMode(issues, showHeader, allDeps, "", truncated, readyFiltered)
+}
+
+// listFooterLine renders the one-line summary under a text listing.
+//
+// The status breakdown is only meaningful when the query could have returned
+// more than one status. Under --ready it cannot: BuildListFilter pins
+// filter.Status to open (internal/workapi/list.go), so every row is open by
+// construction and the breakdown degenerates to a tautology — "(N open, 0 in
+// progress)" is what it prints for ANY database, including one with a thousand
+// in-progress issues matching the same label.
+//
+// Printed next to a real count that number reads as a finding rather than an
+// artifact of the flag: "0 in progress" answers the question "is anything in
+// progress here?" with a confident no, while the rows that would have said
+// otherwise were removed before counting. So when a status filter is in force by
+// construction, say what was excluded instead of asserting a count for it. This
+// is the same principle as the truncation arm below, which refuses to label a
+// cut-off page "Total" (GH#5362): a count is only honest alongside its scope.
+func listFooterLine(total, open, inProgress int, truncated, readyFiltered bool) string {
+	if readyFiltered {
+		// No status breakdown: --ready makes it vacuous. Name the scope instead.
+		if truncated {
+			return fmt.Sprintf("Showing %d ready issues (open only — --ready excludes in_progress); more match (truncated by --limit). Use --limit 0 for all.", total)
+		}
+		return fmt.Sprintf("Ready: %d issues with no active blockers (open only — --ready excludes in_progress)", total)
+	}
+	if truncated {
+		return fmt.Sprintf("Showing %d issues (%d open, %d in progress); more match (truncated by --limit). Use --limit 0 for all.",
+			total, open, inProgress)
+	}
+	return fmt.Sprintf("Total: %d issues (%d open, %d in progress)", total, open, inProgress)
 }
 
 // displayPrettyListWithDepsMode displays issues in tree format. When depsMode is
 // "scheduling" or "all", the tree also annotates each node's dependency edges and
 // orders siblings by their scheduling dependencies (see orderSiblingsByDeps). An
-// empty depsMode is the plain parent-child tree.
-func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string) {
+// empty depsMode is the plain parent-child tree. truncated means the page was cut
+// by --limit; the summary then says "Showing N" instead of "Total: N" (GH#5362).
+// readyFiltered means --ready was in force, which pins the query to open issues —
+// see listFooterLine for why the summary must say so.
+func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDeps map[string][]*types.Dependency, depsMode string, truncated, readyFiltered bool) {
 	if showHeader {
 		// Clear screen and show header
 		fmt.Print("\033[2J\033[H")
@@ -190,7 +230,7 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 		printPrettyTree(childrenMap, issue.ID, "", dr)
 	}
 
-	// Summary
+	// Summary — counts describe the shown page; never label a truncated page "Total".
 	fmt.Println()
 	fmt.Println(strings.Repeat("-", 80))
 	openCount := 0
@@ -203,9 +243,10 @@ func displayPrettyListWithDepsMode(issues []*types.Issue, showHeader bool, allDe
 			inProgressCount++
 		}
 	}
-	fmt.Printf("Total: %d issues (%d open, %d in progress)\n", len(issues), openCount, inProgressCount)
+	fmt.Println(listFooterLine(len(issues), openCount, inProgressCount, truncated, readyFiltered))
 	fmt.Println()
 	fmt.Println("Status: ○ open  ◐ in_progress  ● blocked  ✓ closed  ❄ deferred")
+	fmt.Println("Priority: P0–P4 (label only; not a status icon)")
 	if dr != nil {
 		fmt.Printf("Deps:   %s = depends-on / relationship (points to target); siblings ordered so dependencies come first; ↗ = target outside current view\n", depGlyph)
 	}

@@ -110,9 +110,10 @@ func newClaimServer(t *testing.T, issues *fakeIssues) (*testServer, *fakeProvide
 
 const claimPath = "/v0/beads/issues/bd-1:claim"
 
-// claimRequest posts a body with an explicit media type, because the media type
-// is part of what this endpoint checks.
-func (ts *testServer) claimRequest(t *testing.T, path, contentType, body string) *http.Response {
+// postBody posts a body with an explicit media type, because the media type is
+// part of what every body-carrying endpoint checks. Shared by the operations
+// that take one; the claim's own wrapper below fills in the ordinary type.
+func (ts *testServer) postBody(t *testing.T, path, contentType, body string) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, ts.base+path, strings.NewReader(body))
 	if err != nil {
@@ -131,7 +132,7 @@ func (ts *testServer) claimRequest(t *testing.T, path, contentType, body string)
 
 func (ts *testServer) claim(t *testing.T, path, body string) *http.Response {
 	t.Helper()
-	return ts.claimRequest(t, path, "application/json", body)
+	return ts.postBody(t, path, "application/json", body)
 }
 
 // TestClaimWritesOnceAndAnswersWithTheRowItWrote is the happy path and the two
@@ -585,7 +586,7 @@ func TestClaimRejectsMalformedRequests(t *testing.T) {
 			if path == "" {
 				path = claimPath
 			}
-			resp := ts.claimRequest(t, path, tc.contentType, tc.body)
+			resp := ts.postBody(t, path, tc.contentType, tc.body)
 			if resp.StatusCode != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400: %s", resp.StatusCode, readAll(t, resp))
 			}
@@ -611,10 +612,10 @@ func TestClaimRejectsMalformedRequests(t *testing.T) {
 // rather than over a socket: a megabyte in flight makes the assertion about
 // timing instead of about the rule.
 func TestClaimBodyCapIsEnforcedWhileReading(t *testing.T) {
-	oversized := `{"actor":"` + strings.Repeat("x", maxClaimBodyBytes) + `"}`
+	oversized := `{"actor":"` + strings.Repeat("x", maxJSONBodyBytes) + `"}`
 	r := httptest.NewRequest(http.MethodPost, claimPath, strings.NewReader(oversized))
 
-	members, res := decodeClaimBody(httptest.NewRecorder(), r)
+	members, res := decodeJSONObjectBody(httptest.NewRecorder(), r)
 	if res == nil {
 		t.Fatalf("a %d-byte body was accepted (%d members)", len(oversized), len(members))
 	}
@@ -629,18 +630,38 @@ func TestClaimBodyCapIsEnforcedWhileReading(t *testing.T) {
 	}
 }
 
-// TestClaimNarrowsThePOSTSurface. ServeMux wildcards match a whole segment, so
-// the claim route's pattern is POST /v0/beads/issues/{idop} and every POST under
-// that prefix reaches this handler. The issue-detail path is documented
-// GET-only, and a POST to it must NOT be read as a claim of the issue named
-// there: it is an unrouted path, and it gets the unrouted path's answer.
-func TestClaimNarrowsThePOSTSurface(t *testing.T) {
+// TestCustomMethodsNarrowThePOSTSurface. ServeMux wildcards match a whole
+// segment, so the single-resource custom methods share one pattern —
+// POST /v0/beads/issues/{idop} — and every POST under that prefix reaches the
+// dispatcher. The issue-detail path is documented GET-only, and a POST to it
+// must NOT be read as an operation on the issue named there: it is an unrouted
+// path, and it gets the unrouted path's answer.
+//
+// The generalization from the claim's own version is the point. A dispatcher
+// that fell back to its first row for an unrecognized suffix would turn every
+// probe of this prefix into a claim, and the suite would stay green because the
+// claim's happy path still worked.
+func TestCustomMethodsNarrowThePOSTSurface(t *testing.T) {
 	for _, path := range []string{
 		"/v0/beads/issues/bd-1",           // the GET-only detail path
-		"/v0/beads/issues/:claim",         // the custom method with no id
+		"/v0/beads/issues/:claim",         // a custom method with no id
+		"/v0/beads/issues/:close",         // the same, on the newer verb
 		"/v0/beads/issues/bd-1:CLAIM",     // the custom method is not a spelling
+		"/v0/beads/issues/bd-1:Close",     // nor is this one
 		"/v0/beads/issues/bd-1:claim-not", // a suffix that merely starts the same
+		"/v0/beads/issues/bd-1:close-not",
+		// `unclaim` is the CLI's spelling of the release and is deliberately not
+		// a second name for it here: one verb per operation, and a client that
+		// guessed from the command name gets the same 404 any other unrouted
+		// suffix gets.
 		"/v0/beads/issues/bd-1:unclaim",
+		"/v0/beads/issues/:release",
+		"/v0/beads/issues/bd-1:Release",
+		"/v0/beads/issues/bd-1:released",
+		"/v0/beads/issues/:reopen",
+		"/v0/beads/issues/bd-1:Reopen",
+		"/v0/beads/issues/bd-1:reopened",
+		"/v0/beads/issues/bd-1:delete", // a verb this build does not serve
 	} {
 		t.Run(path, func(t *testing.T) {
 			issues := &fakeIssues{issue: seededIssue("bd-1", "alice", types.StatusInProgress)}
@@ -693,9 +714,10 @@ func TestClaimRetriesOnWriteContention(t *testing.T) {
 	}
 }
 
-// TestClaimTakesADatabaseSlot: the one write on this surface is not exempt from
-// the in-flight limit. An exempt write would keep opening connections while
-// every reader is already queued — the saturation case the semaphore exists for.
+// TestClaimTakesADatabaseSlot: the claim is not exempt from the in-flight
+// limit. An exempt write would keep opening connections while every reader is
+// already queued — the saturation case the semaphore exists for. Each later
+// write carries the same assertion against its own row.
 func TestClaimTakesADatabaseSlot(t *testing.T) {
 	for _, rt := range routeTable {
 		if rt.op != OpClaimIssue {
@@ -742,8 +764,8 @@ func TestClaimNeverReachesTheWispPlane(t *testing.T) {
 // tempting edit: `p.inner.IssueClaimer()` — "add the layer by recursion, like
 // every other decorator". This decorator's layer is on NewUOW, which only a
 // claimer holding THIS wrapper can reach, so recursion hands back a claimer
-// bound to the untimed provider. It compiles, and the one write on this
-// surface reports uow_ms=0.000 forever.
+// bound to the untimed provider. It compiles, and every claim reports
+// uow_ms=0.000 forever.
 func TestAClaimTimesTheUnitsOfWorkItsClaimerOpens(t *testing.T) {
 	issues := &fakeIssues{issue: seededIssue("bd-1", "alice", types.StatusInProgress)}
 	provider := &fakeProvider{issues: issues, delay: 5 * time.Millisecond}

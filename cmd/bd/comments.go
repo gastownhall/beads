@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -190,32 +189,23 @@ Examples:
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runCommentsAddProxiedServer(cmd, rootCtx, args)
-		}
-
 		issueID := args[0]
 
-		commentText, _ := cmd.Flags().GetString("file")
-		if commentText != "" {
-			data, err := os.ReadFile(commentText) // #nosec G304 - user-provided file path is intentional
-			if err != nil {
-				return HandleErrorRespectJSON("reading file: %v", err)
-			}
-			commentText = string(data)
-		} else if len(args) < 2 {
-			return HandleErrorRespectJSON("comment text required (use -f to read from file)")
-		} else {
-			commentText = strings.Join(args[1:], " ")
-		}
-
-		if strings.TrimSpace(commentText) == "" {
-			return HandleErrorRespectJSON("comment text cannot be empty")
+		commentText, err := requireTextFromSources("comment text", "use positional args or -f to read from file",
+			cmdTextSources(cmd, args[1:]))
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
 		author, _ := cmd.Flags().GetString("author")
 		if author == "" {
 			author = getActorWithGit()
+		}
+
+		// Dispatched after the text is resolved so both backends read the
+		// same sources and report the same conflicts.
+		if usesProxiedServer() {
+			return runCommentsAddProxiedServer(rootCtx, issueID, author, commentText)
 		}
 
 		if err := ensureStoreActive(); err != nil {

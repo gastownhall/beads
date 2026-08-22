@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +113,45 @@ func TestProxiedServerImport(t *testing.T) {
 			},
 		}
 	}
+
+	// A workspace WITH hooks is the case that broke: proxied mode wraps its
+	// provider so writes fire the workspace's hook scripts, and the import role
+	// asks the unit of work for its raw statement runner (importer.go) — an
+	// assertion on the concrete type, which the wrapper is not. Every import in
+	// a hooks-enabled proxied workspace failed on it.
+	//
+	// The import itself still fires no hook, on either plumbing: both run the
+	// shared batch-upsert engine rather than the per-issue verbs.
+	t.Run("import_runs_in_a_workspace_with_hooks", func(t *testing.T) {
+		t.Parallel()
+		if runtime.GOOS == "windows" {
+			t.Skip("hook script form is POSIX shell")
+		}
+		marker := filepath.Join(t.TempDir(), "any_hook_marker")
+		script := "#!/bin/sh\nprintf '%s\\n' \"$1\" >> " + shellQuote(marker) + "\n"
+		p := newSharedProxiedProjectWithHooks(t, bd, "imph", map[string]string{
+			"on_create": script,
+			"on_update": script,
+			"on_close":  script,
+		})
+		db := openProxiedDB(t, p)
+
+		path := filepath.Join(p.dir, "hooked.jsonl")
+		if err := os.WriteFile(path, []byte(importFixtureJSONL(t, fixtureIssues("imph"))), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		report := bdProxiedImport(t, bd, p.dir, path)
+		if !strings.Contains(report, "Imported 3 issues") {
+			t.Errorf("import report = %q, want 'Imported 3 issues'", report)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'imph-r%'"); got != 3 {
+			t.Errorf("issue rows = %d, want 3", got)
+		}
+		if data, err := os.ReadFile(marker); err == nil {
+			t.Errorf("import fired hooks: %q", string(data))
+		}
+	})
 
 	t.Run("roundtrip_one_commit_with_content", func(t *testing.T) {
 		t.Parallel()

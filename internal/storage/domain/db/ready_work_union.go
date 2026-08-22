@@ -51,17 +51,17 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	}
 
 	sortOrder := buildReadyWorkOrder(filter.SortPolicy)
-	// limitOffsetSQL keeps the +1 overfetch for hasMore AND honors Offset
-	// when Limit is 0 (the hand-rolled guard here used to drop the offset
-	// entirely in that case, bd-6dnrw.44 P3).
-	outerLimit := limitOffsetSQL(filter.Limit, filter.Offset)
+	// The window keeps the +1 overfetch for hasMore, honors Offset when Limit
+	// is 0 (the hand-rolled guard here used to drop the offset entirely in that
+	// case, bd-6dnrw.44 P3) and carries the defensive cap.
+	window := readyWindowForFilter(filter)
 
 	//nolint:gosec // G201: subqueries built from hardcoded fragments and ? placeholders.
 	unionSQL := fmt.Sprintf(
 		"SELECT id, src FROM (%s) merged %s %s",
 		strings.Join(subqueries, " UNION ALL "),
 		sortOrder.SQL,
-		outerLimit,
+		window.sql,
 	)
 	allArgs = append(allArgs, sortOrder.Args...)
 
@@ -69,11 +69,14 @@ func (r *issueSQLRepositoryImpl) getReadyWorkIDPage(ctx context.Context, filter 
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: query: %w", err)
 	}
-	page, err := scanIDSrcPage(rows, true)
+	page, err := scanIDSrcPage(rows)
 	if err != nil {
 		return idSrcPage{}, false, fmt.Errorf("ready work union: %w", err)
 	}
-	hasMore := page.trimToLimit(filter.Limit)
+	hasMore, err := page.finishWindow(window)
+	if err != nil {
+		return idSrcPage{}, false, err
+	}
 	return page, hasMore, nil
 }
 
@@ -115,13 +118,13 @@ func (r *issueSQLRepositoryImpl) getReadyWorkWithCountsUnion(ctx context.Context
 		return domain.SearchCountsPage{Items: nil, HasMore: hasMore}, nil
 	}
 
-	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, false)
+	issuesByID, err := r.fetchCountsByIDs(ctx, page.issueIDs, issuesFilterTables, wispDepsExist, readyHydrationFor(filter))
 	if err != nil {
 		return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate issues: %w", err)
 	}
 	var wispsByID map[string]*types.IssueWithCounts
 	if len(page.wispIDs) > 0 {
-		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, false)
+		wispsByID, err = r.fetchCountsByIDs(ctx, page.wispIDs, wispsFilterTables, true, readyHydrationFor(filter))
 		if err != nil && !dberrors.IsTableNotExist(err) {
 			return domain.SearchCountsPage{}, fmt.Errorf("ready work union with counts: hydrate wisps: %w", err)
 		}

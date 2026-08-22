@@ -49,13 +49,47 @@ func StageAndCommit(ctx context.Context, conn DBConn, dirtyTables map[string]boo
 		return nil
 	}
 
+	// dirtyTables tracks tables touched by a write statement, but a statement
+	// can succeed without changing any rows (e.g. an idempotent
+	// "INSERT ... ON DUPLICATE KEY UPDATE value = VALUES(value)" re-writing the
+	// same value, an INSERT IGNORE that hit a duplicate, or an UPDATE whose WHERE
+	// matched nothing). Staging + committing in that case is a no-op that Dolt
+	// rejects with a "nothing to commit" warning logged server-side on every call
+	// — at high-frequency callers (config/metadata heartbeats, reconcile counters,
+	// idempotent label/dependency writes) this floods the Dolt log.
+	//
+	// Cheap fast-path: if NOTHING is pending in the whole working set (excluding
+	// dolt-ignored tables, which cannot be staged), skip without touching Dolt's
+	// staging machinery. Note: callers like Update/Close also write an events row,
+	// so a zero-rows main-table write can still be a real change — dolt_status
+	// captures that correctly where a rows-affected check would not.
+	pending, err := issueops.HasPendingChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("check pending changes before commit: %w", err)
+	}
+	if !pending {
+		return nil
+	}
+
 	for table := range dirtyTables {
 		if _, err := conn.ExecContext(ctx, "CALL DOLT_ADD(?)", table); err != nil {
 			return fmt.Errorf("dolt add %s: %w", table, err)
 		}
 	}
 
-	var err error
+	// Precise guard: HasPendingChanges above is global, but we only DOLT_ADD the
+	// dirty-tracked tables. When those specific tables turn out clean (idempotent
+	// no-op) while some UNRELATED table is concurrently dirty, the fast-path does
+	// not fire yet staging stages nothing — so DOLT_COMMIT('-m') would still emit
+	// the "nothing to commit" warning. Check the STAGED set (exactly what '-m'
+	// will commit) and skip the empty commit.
+	staged, err := issueops.HasStagedChanges(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("check staged changes before commit: %w", err)
+	}
+	if !staged {
+		return nil
+	}
 	if author == "" {
 		_, err = conn.ExecContext(ctx, "CALL DOLT_COMMIT('-m', ?)", commitMsg)
 	} else {

@@ -14,7 +14,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/issueops"
@@ -141,38 +140,6 @@ func isDisallowedHierarchicalDependency(fromID, toID string, depType types.Depen
 		return false
 	}
 	return depType != types.DepParentChild || toID != immediateParent
-}
-
-// warnIfCyclesExist checks for dependency cycles and prints a warning if found.
-func warnIfCyclesExist(s storage.DoltStorage) {
-	if s == nil {
-		return // Skip cycle check if store is not available
-	}
-	cycles, err := s.DetectCycles(rootCtx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
-		return
-	}
-	if len(cycles) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
-	fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
-	fmt.Fprintf(os.Stderr, "Cycle path:\n")
-	for _, cycle := range cycles {
-		for j, issue := range cycle {
-			if j == 0 {
-				fmt.Fprintf(os.Stderr, "  %s", issue.ID)
-			} else {
-				fmt.Fprintf(os.Stderr, " → %s", issue.ID)
-			}
-		}
-		if len(cycle) > 0 {
-			fmt.Fprintf(os.Stderr, " → %s", cycle[0].ID)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
-	}
-	fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
 }
 
 var depCmd = &cobra.Command{
@@ -461,8 +428,8 @@ Examples:
 			})
 		}
 
-		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
+		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
 		return nil
 	},
 }
@@ -720,6 +687,143 @@ func dependencyStoreKey(s storage.DoltStorage) string {
 	return fmt.Sprintf("instance:%p", s)
 }
 
+// depListAnchor is one resolved `bd dep list` argument: the canonical id, the
+// store that actually holds it, and the routing handle that has to be closed.
+type depListAnchor struct {
+	fullID string
+	store  storage.DoltStorage
+	result *RoutedResult
+}
+
+// readDepListEdges asks each anchor's OWN store for its stored edges and
+// reassembles the answers into the order the arguments named.
+//
+// The grouping is what keeps the answer on ONE shape: a failure is a failure, a
+// split batch is N role calls merged back into one answer, and the caller's
+// argument count picks the shape (see batchMode at the call site). `bd dep list
+// a b c --json` documents an array of dependency records, not of issues.
+func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter string) ([]issueops.AnchorEdges, error) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+
+	// Grouped by store IDENTITY, not by the store's workspace path: two handles
+	// onto the same database are still two connections, and asking one of them
+	// for the other's ids would answer that every one of them is missing.
+	byStore := map[storage.DoltStorage][]string{}
+	var order []storage.DoltStorage
+	for _, anchor := range anchors {
+		if _, seen := byStore[anchor.store]; !seen {
+			order = append(order, anchor.store)
+		}
+		byStore[anchor.store] = append(byStore[anchor.store], anchor.fullID)
+	}
+
+	answered := make(map[string]issueops.AnchorEdges, len(anchors))
+	for _, st := range order {
+		reader, err := st.EdgeReader()
+		if err != nil {
+			return nil, err
+		}
+		result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: byStore[st], Types: depTypes})
+		if err != nil {
+			return nil, err
+		}
+		for _, anchor := range result.Anchors {
+			answered[anchor.ID] = anchor
+		}
+	}
+
+	out := make([]issueops.AnchorEdges, 0, len(anchors))
+	seen := make(map[string]struct{}, len(anchors))
+	for _, anchor := range anchors {
+		if _, dup := seen[anchor.fullID]; dup {
+			continue
+		}
+		seen[anchor.fullID] = struct{}{}
+		out = append(out, answered[anchor.fullID])
+	}
+	return out, nil
+}
+
+// printDepListEdges renders the role's per-anchor answer, and is shared by both
+// routes so the two cannot drift apart in what they print.
+//
+// A GHOST ANCHOR goes to stderr in both modes. Keeping it off stdout is what
+// leaves `--json` a flat array of dependency records, which is the shape the
+// command documents.
+func printDepListEdges(anchors []issueops.AnchorEdges) error {
+	for _, anchor := range anchors {
+		if anchor.Missing {
+			fmt.Fprintf(os.Stderr, "warning: no issue found: %s (skipped)\n", anchor.ID)
+		}
+	}
+	if jsonOutput {
+		out := []*types.Dependency{}
+		for _, anchor := range anchors {
+			out = append(out, anchor.Edges...)
+		}
+		return outputJSON(out)
+	}
+	for _, anchor := range anchors {
+		if anchor.Missing {
+			continue
+		}
+		if len(anchor.Edges) == 0 {
+			fmt.Printf("\n%s has no dependencies\n", anchor.ID)
+			continue
+		}
+		fmt.Printf("\n%s Dependencies of %s:\n\n", ui.RenderAccent("📋"), anchor.ID)
+		for _, dep := range anchor.Edges {
+			fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// warnDroppedDepEdges prints a stderr-only notice for every stored "down"
+// dependency edge of anchorID that shown (the Relations role's answer) left
+// out because its target has no row in this database — i.e. a cross-repo or
+// `external:` target (bd-mtla: `bd link` across databases reports success
+// and writes the row, but the single-id `bd dep list <id>` a caller runs
+// right after has no way to tell that from no dependency existing at all).
+//
+// It never writes to stdout, so the documented `bd dep list <id>` and
+// `--json` shapes for the common (fully-local) case are unchanged; a script
+// parsing stdout sees nothing new. A best-effort read: an error here is
+// swallowed rather than surfaced, since the command's actual answer was
+// already produced successfully by the Relations role above.
+func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{anchorID}, Types: depTypes})
+	if err != nil || len(result.Anchors) != 1 {
+		return
+	}
+	known := make(map[string]struct{}, len(shown))
+	for _, iss := range shown {
+		known[iss.ID] = struct{}{}
+	}
+	var dropped []*types.Dependency
+	for _, dep := range result.Anchors[0].Edges {
+		if _, ok := known[dep.DependsOnID]; !ok {
+			dropped = append(dropped, dep)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", anchorID, len(dropped))
+	for _, dep := range dropped {
+		fmt.Fprintf(os.Stderr, "  %s via %s\n", dep.DependsOnID, dep.Type)
+	}
+	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", anchorID, anchorID)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -761,12 +865,7 @@ Examples:
 			direction = "down"
 		}
 
-		type resolvedID struct {
-			fullID string
-			store  storage.DoltStorage
-			result *RoutedResult
-		}
-		var resolved []resolvedID
+		var resolved []depListAnchor
 		batchMode := len(args) > 1
 		for _, arg := range args {
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
@@ -788,7 +887,7 @@ Examples:
 			if routedResult.Routed && routedResult.Store != nil {
 				depStore = routedResult.Store
 			}
-			resolved = append(resolved, resolvedID{
+			resolved = append(resolved, depListAnchor{
 				fullID: routedResult.ResolvedID,
 				store:  depStore,
 				result: routedResult,
@@ -809,60 +908,26 @@ Examples:
 			}
 		}()
 
-		// The multi-id edge listing is a different question with a different
-		// answer shape — raw edge records keyed by source, printed per source —
-		// and no role describes it: Relations is anchored on ONE issue and
-		// answers with the issues on the far end of its edges, not with the
-		// edges themselves. It keeps the batched records read, exactly as the
-		// proxied route keeps its own unit of work for the same question.
-		if len(resolved) > 1 && direction == "down" {
-			allSameStore := true
-			firstStore := resolved[0].store
-			for _, r := range resolved[1:] {
-				if r.store != firstStore {
-					allSameStore = false
-					break
-				}
+		// The multi-id edge listing is on the EdgeReader role, not Relations:
+		// Relations is anchored on ONE issue, answers with the issues on the far
+		// end of its edges rather than the edges themselves, and drops every
+		// edge whose target this database has no row for.
+		//
+		// The accessor is taken PER STORE rather than once for the command: a
+		// routed anchor answers from its own store, carrying its own decorator
+		// stack.
+		//
+		// The shape is chosen on batchMode — the count the CALLER TYPED — and
+		// not on len(resolved). Those differ exactly when an anchor did not
+		// resolve, and the help text promises the records shape "with --json
+		// ... across all requested issues", so a skipped anchor must not
+		// silently change what a script is parsing.
+		if batchMode && direction == "down" {
+			anchors, err := readDepListEdges(ctx, resolved, typeFilter)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
-			if allSameStore {
-				ids := make([]string, len(resolved))
-				for i, r := range resolved {
-					ids[i] = r.fullID
-				}
-				depMap, err := firstStore.GetDependencyRecordsForIssues(ctx, ids)
-				if err == nil {
-					var allDeps []*types.Dependency
-					for _, id := range ids {
-						for _, dep := range depMap[id] {
-							if typeFilter == "" || string(dep.Type) == typeFilter {
-								allDeps = append(allDeps, dep)
-							}
-						}
-					}
-					if jsonOutput {
-						if allDeps == nil {
-							allDeps = []*types.Dependency{}
-						}
-						return outputJSON(allDeps)
-					}
-					for _, id := range ids {
-						deps := depMap[id]
-						if len(deps) == 0 {
-							fmt.Printf("\n%s has no dependencies\n", id)
-							continue
-						}
-						fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), id)
-						for _, dep := range deps {
-							if typeFilter != "" && string(dep.Type) != typeFilter {
-								continue
-							}
-							fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
-						}
-					}
-					fmt.Println()
-					return nil
-				}
-			}
+			return printDepListEdges(anchors)
 		}
 
 		// The neighbor query is on the Relations role: one call per anchor, each
@@ -890,6 +955,22 @@ Examples:
 				return HandleErrorRespectJSON("%v", err)
 			}
 			allIssues = append(allIssues, issues...)
+		}
+
+		// Relations silently drops "down" edges whose target has no row in
+		// this database (the doc comment above the batch branch says so).
+		// EdgeReader doesn't have that gap, and batchMode&&"down" already
+		// used it above, so this is reached for "down" only when there is
+		// exactly one resolved anchor — warn on stderr (never stdout/--json,
+		// so the documented single-id shape and any script parsing it are
+		// untouched) naming any edge Relations left out, so a `bd link`
+		// across databases doesn't look indistinguishable from no link at
+		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
+		// role exists to detect it from here — tracked separately.
+		if direction == "down" && len(resolved) == 1 {
+			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+			}
 		}
 
 		if jsonOutput {
@@ -1039,7 +1120,7 @@ var depRemoveCmd = &cobra.Command{
 			})
 		}
 
-		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
+		fmt.Printf("%s Removed dependency: %s → %s\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
 		return nil
 	},
@@ -1061,9 +1142,14 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
+A node reached by two paths is shown ONCE, under the first path that got
+there, and a cycle simply ends the descent. --show-all-paths is a deprecated
+no-op; use 'bd dep cycles' to find circular dependencies.
+
 --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
 thread the cap through, so the full tree is always built first and the
-node count is checked afterward (post-hoc), not during the walk.`,
+node count is checked afterward (post-hoc), not during the walk. The cap is
+honored on the --proxied-server route too, which it was not before.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -1075,125 +1161,9 @@ node count is checked afterward (post-hoc), not during the walk.`,
 			}
 		}()
 
-		if usesProxiedServer() {
-			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-				return err
-			}
-			return runDepTreeProxiedServer(cmd, rootCtx, args)
-		}
-
-		ctx := rootCtx
-
-		fullID, treeStore, treeCleanup, err := resolveIDWithRouting(ctx, store, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		defer treeCleanup()
-
-		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
-		maxDepth, _ := cmd.Flags().GetInt("max-depth")
-		reverse, _ := cmd.Flags().GetBool("reverse")
-		direction, _ := cmd.Flags().GetString("direction")
-		statusFilter, _ := cmd.Flags().GetString("status")
-		formatStr, _ := cmd.Flags().GetString("format")
-		if strings.EqualFold(formatStr, "json") {
-			jsonOutput = true
-			formatStr = ""
-		}
-
-		if direction == "" && reverse {
-			direction = "up"
-		} else if direction == "" {
-			direction = "down"
-		}
-
-		if direction != "down" && direction != "up" && direction != "both" {
-			return HandleErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
-		}
-
-		if maxDepth < 1 {
-			return HandleErrorRespectJSON("--max-depth must be >= 1")
-		}
-
-		var tree []*types.TreeNode
-
-		if direction == "both" {
-			downTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, false)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-
-			upTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, true)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-
-			tree = mergeBidirectionalTrees(downTree, upTree, fullID)
-		} else {
-			tree, err = treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, direction == "up")
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-		}
-
-		if statusFilter != "" {
-			tree = filterTreeByStatus(tree, types.Status(statusFilter))
-		}
-
-		// Apply defensive row cap (be-x42v) on the final tree-node count.
-		// Tree walks have no IssueFilter to thread through, so the cap is
-		// enforced at the CLI layer instead of in storage.
-		treeMaxRows, treeMaxRowsSource, err := resolveMaxRows(cmd)
-		if err != nil {
-			return err
-		}
-		if treeMaxRows > 0 && len(tree) > treeMaxRows {
-			if capErr := handleMaxRowsError(&storageissueops.ErrTooManyRows{
-				Found:  len(tree),
-				Cap:    treeMaxRows,
-				Source: treeMaxRowsSource,
-			}); capErr != nil {
-				return capErr
-			}
-		}
-
-		// Handle format presets (json handled earlier, near flag read)
-		if formatStr == "mermaid" {
-			outputMermaidTree(tree, args[0])
-			return nil
-		}
-
-		if jsonOutput {
-			if tree == nil {
-				tree = []*types.TreeNode{}
-			}
-			return outputJSON(tree)
-		}
-
-		if len(tree) == 0 {
-			switch direction {
-			case "up":
-				fmt.Printf("\n%s has no dependents\n", fullID)
-			case "both":
-				fmt.Printf("\n%s has no dependencies or dependents\n", fullID)
-			default:
-				fmt.Printf("\n%s has no dependencies\n", fullID)
-			}
-			return nil
-		}
-
-		switch direction {
-		case "up":
-			fmt.Printf("\n%s Dependent tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		case "both":
-			fmt.Printf("\n%s Full dependency graph for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		default:
-			fmt.Printf("\n%s Dependency tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		}
-
-		renderTree(tree, maxDepth, direction)
-		fmt.Println()
-		return nil
+		// Both routes, one body: which accessor answers and how the root id is
+		// resolved are both inside resolveTreeTarget.
+		return runDepTree(cmd, rootCtx, args)
 	},
 }
 
@@ -1210,37 +1180,9 @@ var depCyclesCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runDepCyclesProxiedServer(cmd, rootCtx)
-		}
-
-		ctx := rootCtx
-		cycles, err := store.DetectCycles(ctx)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-
-		if jsonOutput {
-			if cycles == nil {
-				cycles = [][]*types.Issue{}
-			}
-			return outputJSON(cycles)
-		}
-
-		if len(cycles) == 0 {
-			fmt.Printf("\n%s No dependency cycles detected\n\n", ui.RenderPass("✓"))
-			return nil
-		}
-
-		fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(cycles))
-		for i, cycle := range cycles {
-			fmt.Printf("%d. Cycle involving:\n", i+1)
-			for _, issue := range cycle {
-				fmt.Printf("   - %s: %s\n", issue.ID, issue.Title)
-			}
-			fmt.Println()
-		}
-		return nil
+		// Both routes, one body: the only difference between them is which
+		// accessor answers, and that is inside openCycleDetector.
+		return runDepCycles()
 	},
 }
 
@@ -1469,103 +1411,6 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	return line
 }
 
-// filterTreeByStatus filters the tree to only include nodes with the given status
-// Note: keeps parent chain to maintain tree structure
-func filterTreeByStatus(tree []*types.TreeNode, status types.Status) []*types.TreeNode {
-	if len(tree) == 0 {
-		return tree
-	}
-
-	// First pass: identify which nodes match the status
-	matches := make(map[string]bool)
-	for _, node := range tree {
-		if node.Status == status {
-			matches[node.ID] = true
-		}
-	}
-
-	// If no matches, return empty
-	if len(matches) == 0 {
-		return []*types.TreeNode{}
-	}
-
-	// Second pass: keep matching nodes and their ancestors
-	// Build parent map
-	parentOf := make(map[string]string)
-	for _, node := range tree {
-		if node.ParentID != "" && node.ParentID != node.ID {
-			parentOf[node.ID] = node.ParentID
-		}
-	}
-
-	// Mark all ancestors of matching nodes
-	keep := make(map[string]bool)
-	for id := range matches {
-		keep[id] = true
-		// Walk up to root
-		current := id
-		for {
-			parent, ok := parentOf[current]
-			if !ok || parent == current {
-				break
-			}
-			keep[parent] = true
-			current = parent
-		}
-	}
-
-	// Filter the tree
-	var filtered []*types.TreeNode
-	for _, node := range tree {
-		if keep[node.ID] {
-			filtered = append(filtered, node)
-		}
-	}
-
-	return filtered
-}
-
-// mergeBidirectionalTrees merges up and down trees into a single visualization
-// The root appears once, with dependencies shown below and dependents shown above
-func mergeBidirectionalTrees(downTree, upTree []*types.TreeNode, rootID string) []*types.TreeNode {
-	// For bidirectional display, we show the down tree (dependencies) as the main tree
-	// and add a visual separator with the up tree (dependents)
-	//
-	// For simplicity, we'll just return the down tree for now
-	// A more sophisticated implementation would show both with visual separation
-
-	// Find root in each tree
-	var result []*types.TreeNode
-
-	// Add dependents section if any (excluding root)
-	hasUpNodes := false
-	for _, node := range upTree {
-		if node.ID != rootID {
-			hasUpNodes = true
-			break
-		}
-	}
-
-	if hasUpNodes {
-		// Add a header node for dependents section
-		// We'll mark these with negative depth for visual distinction
-		for _, node := range upTree {
-			if node.ID == rootID {
-				continue // Skip root, we'll add it once from down tree
-			}
-			// Clone node and mark it as "up" direction
-			upNode := *node
-			upNode.Depth = node.Depth // Keep original depth
-			result = append(result, &upNode)
-		}
-	}
-
-	// Add the down tree (dependencies)
-	result = append(result, downTree...)
-
-	return result
-}
-
 // validateExternalRef validates the format of an external dependency reference.
 // Valid format: external:<project>:<capability>
 func validateExternalRef(ref string) error {
@@ -1620,14 +1465,20 @@ func init() {
 	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
 	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
 
-	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
+	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
+	// so a diamond has always been rendered under one parent only. The role's
+	// contract states the first-visit rule as a promise
+	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
+	// no script breaks. Same story as TreeNode.Truncated.
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
-	// Defensive row cap (be-x42v): applied to TreeNode count after the tree is built.
-	addMaxRowsFlag(depTreeCmd)
+	// Defensive row cap (be-x42v): applied to the node count after the walk, by
+	// the role, on BOTH routes — hence the routed variant of the flag.
+	addRoutedMaxRowsFlag(depTreeCmd)
 	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 

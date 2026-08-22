@@ -317,13 +317,19 @@ func bondProtoProtoInto(ctx context.Context, w molWriter, protoA, protoB *types.
 		compoundTitle = customTitle
 	}
 
-	// Create compound root issue
+	// Create compound root issue. The molecule label travels IN the create
+	// rather than in a write of its own: a create decides which table the row
+	// goes to, and carrying the labels with it means one decision places both.
+	// The separate write this replaces was made through molWriter.AddLabel,
+	// whose two implementations each resolved the plane again by a different
+	// predicate, so the row and its label were free to disagree.
 	compound := &types.Issue{
 		Title:       compoundTitle,
 		Description: fmt.Sprintf("Compound proto bonding %s and %s", protoA.ID, protoB.ID),
 		Status:      types.StatusOpen,
 		Priority:    minPriority(protoA.Priority, protoB.Priority),
 		IssueType:   types.TypeEpic,
+		Labels:      []string{MoleculeLabel},
 		BondedFrom: []types.BondRef{
 			{SourceID: protoA.ID, BondType: bondType, BondPoint: ""},
 			{SourceID: protoB.ID, BondType: bondType, BondPoint: ""},
@@ -333,11 +339,6 @@ func bondProtoProtoInto(ctx context.Context, w molWriter, protoA, protoB *types.
 		return nil, fmt.Errorf("creating compound: %w", err)
 	}
 	compoundID := compound.ID
-
-	// Add template label (labels are stored separately, not in issue table)
-	if err := w.AddLabel(ctx, compoundID, MoleculeLabel, actorName); err != nil {
-		return nil, fmt.Errorf("adding template label: %w", err)
-	}
 
 	// Add parent-child dependencies from compound to both proto roots
 	depA := &types.Dependency{

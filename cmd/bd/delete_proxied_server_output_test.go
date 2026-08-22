@@ -8,6 +8,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 func TestOutputDeleteProxiedPreviewIsPayloadBlind(t *testing.T) {
@@ -36,7 +37,7 @@ func TestOutputDeleteProxiedPreviewIsPayloadBlind(t *testing.T) {
 				},
 			},
 		},
-		res: domain.DeleteIssuesResult{DeletedCount: 1, DependenciesCount: 2},
+		res: issueops.DeleteResult{Deleted: 1, Dependencies: 2},
 	}
 	markers := []string{titleMarker, descriptionMarker, notesMarker, payloadMarker}
 
@@ -81,7 +82,7 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 				"bd-alpha": {ID: "bd-alpha", Title: "Alpha"},
 			},
 		},
-		res: domain.DeleteIssuesResult{DeletedCount: 3, DependenciesCount: 4, LabelsCount: 2, EventsCount: 5},
+		res: issueops.DeleteResult{Deleted: 3, Dependencies: 4, Labels: 2, Events: 5},
 	}
 
 	t.Run("JSON includes the complete preview contract with sorted connections and takes precedence over quiet", func(t *testing.T) {
@@ -144,8 +145,13 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 
 	t.Run("refusal renders the blocking error instead of counts, JSON carries it as error", func(t *testing.T) {
 		blockedResult := result
-		blockedResult.res = domain.DeleteIssuesResult{OrphanedIssues: []string{"bd-dependent"}}
-		blockedResult.blocked = &domain.DeleteBlockedError{IssueID: "bd-target", Dependents: []string{"bd-dependent"}}
+		blockedResult.res = issueops.DeleteResult{Orphaned: []string{"bd-dependent"}}
+		// The ROLE's refusal, whose message is byte-identical to the domain's
+		// DeleteBlockedError this test was written against — the two were
+		// arrived at independently and say the same thing.
+		blockedResult.blocked = &issueops.DependentsOutsideRequestError{
+			IssueID: "bd-target", Dependents: []string{"bd-dependent"},
+		}
 
 		in := &deleteInput{ids: []string{"bd-target"}}
 		out := captureStdout(t, func() error { return outputDeleteProxiedPreview(in, blockedResult) })
@@ -172,7 +178,9 @@ func TestOutputDeleteProxiedPreviewExactContracts(t *testing.T) {
 }
 
 func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
-	res := domain.DeleteIssuesResult{DeletedCount: 3, DependenciesCount: 4, LabelsCount: 2, EventsCount: 5, ReferencesUpdated: 1}
+	// No orphans on the base result: the subtests below assert the WITHOUT-orphans
+	// contract, and the orphan case copies this and adds its own.
+	res := issueops.DeleteResult{Deleted: 3, Dependencies: 4, Labels: 2, Events: 5, ReferencesUpdated: 1}
 
 	t.Run("JSON includes the complete final aggregate", func(t *testing.T) {
 		in := &deleteInput{ids: []string{"bd-target", "bd-dependent"}, jsonOutput: true}
@@ -219,7 +227,7 @@ func TestRenderDeleteProxiedResultExactContracts(t *testing.T) {
 
 	t.Run("orphaned issues surface in JSON and prose (force without cascade)", func(t *testing.T) {
 		orphanRes := res
-		orphanRes.OrphanedIssues = []string{"bd-orphan-a", "bd-orphan-b"}
+		orphanRes.Orphaned = []string{"bd-orphan-a", "bd-orphan-b"}
 
 		in := &deleteInput{ids: []string{"bd-target"}, jsonOutput: true}
 		out := captureStdout(t, func() error {

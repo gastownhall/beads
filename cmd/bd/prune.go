@@ -4,6 +4,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/issueops"
 )
 
 var pruneCmd = &cobra.Command{
@@ -53,14 +54,17 @@ EXAMPLES:
 
 		ignoreRefs, _ := cmd.Flags().GetBool("ignore-references")
 		return runPurgeOrPrune(cmd, purgeScope{
-			cmdName:          "prune",
-			pastTense:        "pruned",
-			countKey:         "pruned_count",
-			dryRunCountKey:   "prune_count",
-			subjectNoun:      "closed bead",
-			ephemeralOnly:    false,
-			requireFilter:    true,
-			ignoreReferences: ignoreRefs,
+			cmdName:        "prune",
+			pastTense:      "pruned",
+			countKey:       "pruned_count",
+			dryRunCountKey: "prune_count",
+			subjectNoun:    "closed bead",
+			tier:           issueops.SweepDurable,
+			// The flag is the NEGATIVE of the request field: --ignore-references
+			// asks the role NOT to protect. The reporting is unconditional, so
+			// `--json` keeps publishing the keys with the flag set.
+			protectReferenced: !ignoreRefs,
+			reportsReferences: true,
 		})
 	},
 }

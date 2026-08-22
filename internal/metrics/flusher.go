@@ -17,14 +17,28 @@ const (
 )
 
 func RunSendMetrics() int {
-	if !Enabled() {
-		return 0
-	}
-
 	dir, err := DataDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "send-metrics: %v\n", err)
 		return 1
+	}
+
+	// Bound the queue before flushing: TTL out stale batches and orphaned
+	// emitter temps, cap the rest drop-oldest (bd-ulfod: an unbounded queue
+	// reached 149k files / 1.1GB when emission outran the throttled drain).
+	// Out-of-band by construction — this child is already detached.
+	if dropped, freed := PruneQueue(dir, time.Now()); dropped > 0 {
+		fmt.Fprintf(os.Stderr, "send-metrics: pruned %d queued event file(s), freed %.1f MB\n",
+			dropped, float64(freed)/(1<<20))
+	}
+
+	// With telemetry disabled this child exists only for the prune above:
+	// nothing may be POSTed, but the backlog an earlier enabled configuration
+	// queued still has to decay. The old ordering (enabled check first)
+	// stranded eventsData forever on exactly the machine that just opted out —
+	// 2M+ files / 15.8GB observed on one control VM (GH#5712).
+	if !Enabled() {
+		return 0
 	}
 
 	ga, err := ga4tx.New(ga4tx.Config{Endpoint: Endpoint()})

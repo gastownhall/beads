@@ -270,6 +270,7 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 					ID:      "{{legacy_id}}",
 					AwaitID: "{{pr}}",
 					Timeout: "{{timeout}}",
+					Repo:    "{{repo}}",
 				},
 			},
 		},
@@ -280,6 +281,7 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 		"legacy_id": "legacy-42",
 		"pr":        "https://github.com/org/repo/pull/123",
 		"timeout":   "1h",
+		"repo":      "srobroek/agentic-packages",
 	})
 
 	gate := f.Steps[0].Gate
@@ -294,6 +296,9 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 	}
 	if gate.Timeout != "1h" {
 		t.Errorf("Gate.Timeout = %q, want 1h", gate.Timeout)
+	}
+	if gate.Repo != "srobroek/agentic-packages" {
+		t.Errorf("Gate.Repo = %q, want srobroek/agentic-packages", gate.Repo)
 	}
 }
 
@@ -495,6 +500,80 @@ func TestCreateGateIssue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCreateGateIssue_Repo covers SF2: a formula gate's `repo` field must be
+// propagated onto the created gate issue's metadata, matching the
+// declarative `metadata.repo` selector documented for ad-hoc gates.
+func TestCreateGateIssue_Repo(t *testing.T) {
+	t.Run("propagates_repo_to_metadata", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "await-ci",
+			Title: "Wait for CI",
+			Gate: &formula.Gate{
+				Type: "gh:run",
+				ID:   "release.yml",
+				Repo: "srobroek/agentic-packages",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+
+		var metadata struct {
+			Repo string `json:"repo"`
+		}
+		if err := json.Unmarshal(gateIssue.Metadata, &metadata); err != nil {
+			t.Fatalf("gateIssue.Metadata = %s, not valid JSON: %v", gateIssue.Metadata, err)
+		}
+		if metadata.Repo != "srobroek/agentic-packages" {
+			t.Errorf("metadata.repo = %q, want %q", metadata.Repo, "srobroek/agentic-packages")
+		}
+	})
+
+	t.Run("no_repo_no_metadata", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "await-ci",
+			Title: "Wait for CI",
+			Gate: &formula.Gate{
+				Type: "gh:run",
+				ID:   "release.yml",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+		if len(gateIssue.Metadata) != 0 {
+			t.Errorf("gateIssue.Metadata = %s, want empty", gateIssue.Metadata)
+		}
+	})
+
+	// Non-gh:* gate types (SF4): `repo` on a human/timer/bead gate step is
+	// unrelated, ordinary metadata, not a GitHub repo selector - it must not
+	// be written to gateIssue.Metadata, matching repoMetadataForGate's
+	// isGitHubGateType restriction for ad-hoc gate creation.
+	t.Run("non_github_gate_type_ignores_repo", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "human-approval",
+			Title: "Wait for approval",
+			Gate: &formula.Gate{
+				Type: "human",
+				Repo: "srobroek/agentic-packages",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+		if len(gateIssue.Metadata) != 0 {
+			t.Errorf("gateIssue.Metadata = %s, want empty (non-gh:* gate type must not get metadata.repo)", gateIssue.Metadata)
+		}
+	})
 }
 
 // TestCreateGateIssue_NilGate tests that nil Gate returns nil
@@ -893,5 +972,68 @@ func TestCookFormulaToSubgraph_StepMetadata(t *testing.T) {
 	}
 	if got := decoded["origin"]; got != "repro" {
 		t.Errorf("Metadata[origin] = %v, want \"repro\"", got)
+	}
+}
+
+// TestProcessStepToIssueParentType verifies that a parent step's declared
+// type is honored; only a step with children and no declared type defaults
+// to epic (GH#5443).
+func TestProcessStepToIssueParentType(t *testing.T) {
+	tests := []struct {
+		name     string
+		stepType string
+		want     types.IssueType
+	}{
+		{"undeclared parent defaults to epic", "", types.TypeEpic},
+		{"declared built-in type kept on parent", "decision", types.TypeDecision},
+		{"declared custom type kept on parent", "duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &formula.Step{
+				ID:       "parent",
+				Title:    "parent step",
+				Type:     tt.stepType,
+				Children: []*formula.Step{{ID: "c", Title: "child step"}},
+			}
+			issue := processStepToIssue(step, "f")
+			if issue.IssueType != tt.want {
+				t.Errorf("IssueType = %q, want %q", issue.IssueType, tt.want)
+			}
+		})
+	}
+}
+
+func TestStepTypeToIssueType(t *testing.T) {
+	tests := []struct {
+		stepType string
+		want     types.IssueType
+	}{
+		// Core work types pass through.
+		{"task", types.TypeTask},
+		{"bug", types.TypeBug},
+		{"feature", types.TypeFeature},
+		{"epic", types.TypeEpic},
+		{"chore", types.TypeChore},
+		// Empty (or whitespace-only) defaults to task; surrounding
+		// whitespace is trimmed rather than becoming part of the type.
+		{"", types.TypeTask},
+		{"   ", types.TypeTask},
+		{" bug ", types.TypeBug},
+		// Other built-in types pass through instead of collapsing to task.
+		{"decision", types.TypeDecision},
+		{"spike", types.TypeSpike},
+		{"story", types.TypeStory},
+		// Aliases normalize to their canonical form.
+		{"enhancement", types.TypeFeature},
+		// Non-built-in types pass through; at pour/cook time,
+		// flattenUnregisteredIssueTypes degrades them to task unless they
+		// are already registered in types.custom.
+		{"duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
+			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
+		}
 	}
 }

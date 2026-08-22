@@ -40,8 +40,15 @@ func ExecuteClaim(ctx context.Context, tx *sql.Tx, request publicops.ClaimReques
 	// progress, and ClaimIssueInTx reports that as success. The pre-image is
 	// what tells the two apart, and staging nothing for the idempotent case is
 	// what keeps a polling caller from minting empty version-control commits.
+	// Judged under actorMatches, not verbatim (ga-v2k49): a caller re-claiming
+	// its own in-progress issue under a different layer's spelling of its own
+	// identity (ga-wzl83) is still a no-op — ClaimIssueInTx's own idempotency
+	// check already agrees under the same comparison, and this site would
+	// otherwise disagree with it and stage a phantom mutation for a request
+	// that wrote nothing (caught by TestExecuteClaimIdempotentReclaimAcross-
+	// SpellingStagesNothing during this fix, not cited by the original review).
 	tables := ChangedTables{}
-	changed := claimed.OldIssue.Status != types.StatusInProgress || claimed.OldIssue.Assignee != request.Actor
+	changed := claimed.OldIssue.Status != types.StatusInProgress || !actorMatches(claimed.OldIssue.Assignee, request.Actor)
 	if changed {
 		issueTable, _, eventTable, _ := WispTableRouting(claimed.IsWisp)
 		tables.Add(issueTable, eventTable)

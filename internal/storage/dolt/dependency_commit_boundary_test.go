@@ -68,6 +68,18 @@ func (c *dependencyCommitBoundaryConn) QueryContext(_ context.Context, query str
 		return &dependencyCommitBoundaryRows{columns: []string{"exists"}}, nil
 	case strings.Contains(query, "SELECT issue_type FROM wisps WHERE id = ?"):
 		return &dependencyCommitBoundaryRows{columns: []string{"issue_type"}, values: [][]driver.Value{{"task"}}}, nil
+	// The remove path reads the edge's metadata alongside its type: the events
+	// journal records the removed edge's full payload so a consumer can replay
+	// it (bd-opisf). The add path's existence probe still selects type alone.
+	case strings.Contains(query, "SELECT type, metadata FROM dependencies"),
+		strings.Contains(query, "SELECT type, metadata FROM wisp_dependencies"):
+		if c.driver.newEdge {
+			return &dependencyCommitBoundaryRows{columns: []string{"type", "metadata"}}, nil
+		}
+		return &dependencyCommitBoundaryRows{
+			columns: []string{"type", "metadata"},
+			values:  [][]driver.Value{{"related", "{}"}},
+		}, nil
 	case strings.Contains(query, "SELECT type FROM dependencies"),
 		strings.Contains(query, "SELECT type FROM wisp_dependencies"):
 		if c.driver.newEdge {

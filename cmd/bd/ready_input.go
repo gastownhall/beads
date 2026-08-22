@@ -21,6 +21,12 @@ type readyInput struct {
 
 	filter types.WorkFilter
 
+	// dirLabels is the directory-label default (GH#541) this listing applied,
+	// or nil when it did not apply one. It is the gatherer's DECISION rather
+	// than the configured value: the question is answerable only BEFORE the
+	// default has been written onto the filter. See readyRoleRequest.
+	dirLabels []string
+
 	claim        bool
 	gated        bool
 	molID        string
@@ -54,6 +60,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.gated, _ = cmd.Flags().GetBool("gated")
 	in.molID, _ = cmd.Flags().GetString("mol")
 	in.explain, _ = cmd.Flags().GetBool("explain")
+	in.Brief, _ = cmd.Flags().GetBool("brief")
 	in.prettyFormat, _ = cmd.Flags().GetBool("pretty")
 	in.plainFormat, _ = cmd.Flags().GetBool("plain")
 	in.jsonOut = jsonOutput
@@ -100,6 +107,9 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	}
 	if in.claim && in.explain {
 		return in, HandleErrorRespectJSON("--claim cannot be combined with --explain")
+	}
+	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
+		return in, err
 	}
 	if in.Offset > 0 && in.claim {
 		return in, HandleErrorRespectJSON("--offset cannot be combined with --claim")
@@ -194,6 +204,10 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	if len(filter.Labels) == 0 && len(filter.LabelsAny) == 0 {
 		if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
 			filter.LabelsAny = dirLabels
+			// Recorded rather than recomputed downstream: the line above has
+			// just made the filter's label sets non-empty, so re-running the
+			// emptiness test would read its own output.
+			in.dirLabels = dirLabels
 		}
 	}
 	in.filter = filter
@@ -201,35 +215,101 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	return in, nil
 }
 
-// claimNextRequest is `bd ready --claim`'s request to the ReadyClaimer role.
-// Both routes build it here, so the claim asks one question no matter which
-// door it came through — and it is the SAME issueops.ReadyRequest the listing
-// builds its filter from, so the claim's predicate cannot drift from the set
-// `bd ready` shows.
+// readyRoleRequest is the request `bd ready` hands the two roles that take a
+// whole ready question rather than a filter: ReadyClaimer, which claims one
+// row out of it, and ReadyCounter, which sizes it. Both routes of both
+// operations build it here, so a claim, a count and the listing beside them
+// ask ONE question no matter which door they came through.
 //
 // The two things the filter carries that the request does not:
 //
-//   - The --max-rows cap. It never applied to a claim in the first place:
-//     ClaimReadyIssueInTx clears MaxRows, MaxRowsSource and Limit before it
-//     scans, because a cap sized for bulk reads must not make a single-row
-//     claim report an empty front. Dropping it here is visible only in that
-//     the role has no field to ignore.
-//   - The directory-label default. The listing puts it on the built filter
-//     verbatim; here it goes on the request, where it is normalized along with
-//     every other label. That differs only for a directory.labels value
-//     carrying stray whitespace. The emptiness test is unchanged — read off
-//     the already-normalized filter, so `--label "  "` is no label at all and
-//     still does not suppress the default.
-func claimNextRequest(in readyInput) issueops.ClaimNextRequest {
+//   - The --max-rows cap. It never applied to either role. A claim consumes
+//     one row however large the pool it scanned (ClaimReadyIssueInTx clears
+//     MaxRows, MaxRowsSource and Limit before it scans, because a cap sized
+//     for bulk reads must not make a single-row claim report an empty front),
+//     and a count materializes no rows at all.
+//
+//   - The directory-label default (GH#541). The listing puts it on the built
+//     filter verbatim; here it goes on the request, where it is normalized
+//     along with every other label. That differs only for a directory.labels
+//     value carrying stray whitespace.
+//
+//     IT IS READ OFF readyInput.dirLabels, NEVER RECOMPUTED FROM in.filter.
+//     The gatherer has already written the default INTO that filter, so
+//     re-running its emptiness test here sees a non-empty label set and skips.
+//     That is what made `bd ready --claim` in a scoped directory claim from
+//     the WHOLE ready front while `bd ready` beside it listed only the
+//     configured scope — the one thing ReadyClaimer's contract says a claim
+//     must never do (issueops/readyclaimer.go:9-14).
+//
+// Limit and Offset are ErrValidation on BOTH roles, so they are cleared here
+// once. Neither was ever live for the claim; for the count they are exactly
+// what has to go — the page is the thing being sized.
+func readyRoleRequest(in readyInput) issueops.ReadyRequest {
 	req := in.ReadyRequest
-	// Limit and Offset are ErrValidation on a claim. Neither was ever live
-	// here: --offset with --claim is already a usage error above, and the
-	// claim scan zeroes the limit itself.
 	req.Limit, req.Offset = nil, 0
-	if len(in.filter.Labels) == 0 && len(in.filter.LabelsAny) == 0 {
-		if dirLabels := config.GetDirectoryLabels(); len(dirLabels) > 0 {
-			req.LabelsAny = dirLabels
-		}
+	if len(in.dirLabels) > 0 {
+		req.LabelsAny = in.dirLabels
 	}
-	return issueops.ClaimNextRequest{Actor: actor, Filter: req}
+	return req
+}
+
+// claimNextRequest is `bd ready --claim`'s request to the ReadyClaimer role:
+// the shared ready question above, plus the claimant.
+func claimNextRequest(in readyInput) issueops.ClaimNextRequest {
+	return issueops.ClaimNextRequest{Actor: actor, Filter: readyRoleRequest(in)}
+}
+
+// briefModeConflict reports the usage error for a --brief combination that no
+// route can honor, and nil when there is none.
+//
+// THE PROJECTION IS REFUSED WHEREVER IT CANNOT BE HONORED, rather than accepted
+// and dropped. types.WorkFilter.Lite reaches the driver through one query, the
+// counts mega-query behind GetReadyWorkWithCounts, and `bd ready` only runs
+// that query for --json. Everything else reaches a different one: the text
+// routes call the bare GetReadyWork, and --gated, --mol and --explain answer
+// with shapes of their own. A flag those routes take and ignore is exactly the
+// silent no-op this feature exists to close, so each combination says so.
+//
+// --claim is refused for a stronger reason than the rest: it cannot be served
+// on ANY route. ClaimNext refetches its winning row whole and returns
+// ErrValidation for a projected request (issueops.ValidateClaimNextRequest).
+// Refusing here keeps the message about the two flags the user typed, and
+// leaves readyRoleRequest free to carry Brief for the COUNT, which needs it.
+//
+// IT IS ONE BODY WITH TWO CALLERS, and that is the point. readyCmd's RunE
+// dispatches --gated, --mol and --explain before gathering, so a copy of these
+// checks written into each of those branches would guard the direct route only,
+// with nothing driving it: the gatherer's tests reach the proxied route alone,
+// and deleting one of the copies would re-open the silent no-op while every
+// test stayed green. RunE calls this once, above the dispatch, and the gatherer
+// calls it for every other arrival.
+func briefModeConflict(brief, claim, gated, explain bool, molID string, jsonOut bool) error {
+	if !brief {
+		return nil
+	}
+	switch {
+	case claim:
+		return HandleErrorRespectJSON("--claim cannot be combined with --brief")
+	case gated:
+		return HandleErrorRespectJSON("--gated cannot be combined with --brief")
+	case molID != "":
+		return HandleErrorRespectJSON("--mol cannot be combined with --brief")
+	case explain:
+		return HandleErrorRespectJSON("--explain cannot be combined with --brief")
+	case !jsonOut:
+		return HandleErrorRespectJSON("--brief requires --json; the text renderings print none of the fields it omits")
+	}
+	return nil
+}
+
+// briefModeConflictFromFlags is readyCmd's entry to the check above, reading the
+// mode flags off the command because it runs before gatherReadyInput has.
+func briefModeConflictFromFlags(cmd *cobra.Command) error {
+	brief, _ := cmd.Flags().GetBool("brief")
+	claim, _ := cmd.Flags().GetBool("claim")
+	gated, _ := cmd.Flags().GetBool("gated")
+	explain, _ := cmd.Flags().GetBool("explain")
+	molID, _ := cmd.Flags().GetString("mol")
+	return briefModeConflict(brief, claim, gated, explain, molID, jsonOutput)
 }

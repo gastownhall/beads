@@ -11,6 +11,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -20,6 +22,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
 // These tests are pure: no database, no cgo, no build tag. The whole request
@@ -76,6 +79,23 @@ type emptyDeps struct{ domain.DependencyUseCase }
 
 func (emptyDeps) GetIssueDependencyRecords(context.Context, []string) (map[string][]*types.Dependency, error) {
 	return nil, nil
+}
+
+// DetectCycleReport answers for a workspace with no cycles. Without it the
+// promoted method on the embedded nil interface panics, and the provider-backed
+// cycle route would 500 through the panic recovery rather than answering.
+func (emptyDeps) DetectCycleReport(context.Context) (issueops.CycleReport, error) {
+	return issueops.CycleReport{Cycles: []issueops.Cycle{}}, nil
+}
+
+// WalkDependencyTree answers a one-node tree, present for the same reason
+// DetectCycleReport is.
+//
+// A ONE-NODE tree rather than an empty one, because that is what the role
+// promises for a root with no edges, and a fake that answered nothing would let
+// a handler which dropped the root pass.
+func (emptyDeps) WalkDependencyTree(_ context.Context, req issueops.WalkTreeRequest) (issueops.TreeResult, error) {
+	return issueops.TreeResult{Nodes: []*types.TreeNode{{Issue: types.Issue{ID: req.RootID}}}}, nil
 }
 
 func (u *fakeUOW) Commit(_ context.Context, message string) error {
@@ -186,7 +206,12 @@ func (l *lockedBuffer) String() string {
 	return l.b.String()
 }
 
-func newTestServer(t *testing.T, cfg Config) *testServer {
+// newTestServer binds and serves one server for a case. The optional tune
+// functions run between Listen and the first accepted connection, which is
+// where the millisecond-scale knobs (semTimeout, writeStall, the stream
+// cadences and the stream cap) belong: they are fields rather than Config
+// members precisely because they are not deployment configuration.
+func newTestServer(t *testing.T, cfg Config, tune ...func(*Server)) *testServer {
 	t.Helper()
 	stdout := &bytes.Buffer{}
 	stderr := &lockedBuffer{}
@@ -196,7 +221,7 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 	// The default source, for the tests that care about something else. A
 	// config that already names a source — either one — keeps it: defaulting a
 	// provider onto a roles-backed config would serve the wrong one and pass.
-	if cfg.Provider == nil && cfg.Reader == nil && cfg.Claimer == nil {
+	if cfg.Provider == nil && cfg.Reader == nil && cfg.Claimer == nil && cfg.CycleDetector == nil {
 		cfg.Provider = &fakeProvider{}
 	}
 	cfg.Stdout = stdout
@@ -205,6 +230,9 @@ func newTestServer(t *testing.T, cfg Config) *testServer {
 	srv, err := Listen(cfg)
 	if err != nil {
 		t.Fatalf("Listen: %v", err)
+	}
+	for _, apply := range tune {
+		apply(srv)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -494,7 +522,7 @@ func TestHostPolicyPerBindAddress(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newHostPolicy(net.ParseIP(tc.bind))
+			p := newHostPolicy(net.ParseIP(tc.bind), nil)
 			for _, host := range tc.allow {
 				if !p.allows(host) {
 					t.Errorf("bind %s refuses Host %q, which is one of its own clients", tc.bind, host)
@@ -554,11 +582,32 @@ func TestUnroutedPathsKeepTheErrorShape(t *testing.T) {
 }
 
 // TestCapabilitiesAdvertiseEveryImplementedOperation: `capabilities` is how a
-// client checks for an operation — never the version string — so it has to be
-// derived from what this build actually serves. With the read endpoints landed
-// there are no 501 stubs left, which makes the whole v0 vocabulary the expected
-// answer; the derivation is what keeps it honest for the next operation, which
-// will arrive stubbed.
+// client checks for an operation — never the version string — so what this
+// asserts is that the WIRE carries what the route table implies, token for
+// token and in order.
+//
+// THE EXPECTATION IS DERIVED FROM routeTable, NOT SPELLED OUT, and the change
+// is worth the sentence it costs. A hand-written golden here was a THIRD copy
+// of one list — beside the route table and the document's own vocabulary
+// paragraph — and a third copy buys an oracle only if it has an independent
+// source. It did not: it was maintained by hand from the other two, so its only
+// real behavior was to fail whenever a new operation landed. That is a cost
+// pretending to be a check, and the cost fell on the wrong PR: the count slice
+// updated this copy, missed cmd/bd's identical one, and turned the proxied
+// shard red on a list nothing about the count had changed.
+//
+// CONTENT IS PINNED ELSEWHERE, AND INDEPENDENTLY.
+// TestSpecCapabilityVocabularyMatchesTheRouteTable compares the derived set
+// against the `capabilities` prose in openapi.v0.yaml in BOTH directions, and
+// that paragraph is written by hand from the operation the author is adding. So
+// a route row with a typo'd or invented capability still fails a test — that
+// one — and adding an operation still costs a deliberate edit, in the document
+// where a client reads the vocabulary rather than in two test files where
+// nobody does.
+//
+// What is left here is the half only this test can see: that the derivation
+// reaches the wire at all, through contextResponse, sorted, with the
+// `implemented` gate applied.
 func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	ts := newTestServer(t, Config{})
 
@@ -567,11 +616,56 @@ func TestCapabilitiesAdvertiseEveryImplementedOperation(t *testing.T) {
 	for _, c := range caps {
 		got = append(got, c.(string))
 	}
-	want := []string{"issues.claim", "issues.get", "issues.list", "ready.list"}
+
+	// Re-derived rather than compared against Capabilities(), which is what
+	// this handler already calls: `Capabilities() == Capabilities()` is green
+	// for every surface including an empty one. Walking the table here keeps the
+	// three things that function does — the `implemented` gate, the empty-token
+	// filter, and the sort — observable.
+	var want []string
+	for _, rt := range routeTable {
+		if rt.implemented && rt.capability != "" {
+			want = append(want, rt.capability)
+		}
+	}
+	if len(want) == 0 {
+		t.Fatal("the route table contributed no capabilities; this case would pass against a server that advertises nothing")
+	}
+	// The behavior tokens name no route, so the table walk above cannot reach
+	// them; project.enforce is advertised in the same list. It is spelled
+	// literally here to keep this an independent oracle rather than a second
+	// call to the code under test.
+	want = append(want, "project.enforce")
+	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Errorf("capabilities = %v, want %v", got, want)
 	}
+	// Sortedness is asserted on the WIRE rather than inferred from the equality
+	// above, because a client is told to treat this as a set it may search.
+	// Falsified: reversing Capabilities()' sort turns this red.
+	if !slices.IsSorted(got) {
+		t.Errorf("capabilities = %v, want them sorted", got)
+	}
 }
+
+// THE `implemented` GATE IS NOT PINNED HERE, and saying so is the point.
+//
+// A loop asserting that no unimplemented row is advertised was written, run
+// against two mutations, and deleted: it cannot fail. Capabilities() applies the
+// gate, and the expectation above re-applies it, so a stub is missing from both
+// sides and they agree. Dropping the gate from Capabilities() is unfalsifiable
+// for a second reason — there are no 501 rows in v0 at all, so removing a filter
+// that filters nothing changes nothing. A green case named for that promise
+// would be worse than no case: a reviewer greps for the gate, finds a test named
+// for it, and stops looking.
+//
+// What actually holds it is TestSpecStatusCodesMatchHandlerTable, which fails on
+// ANY row with implemented false — 501 is documented nowhere and `not_implemented`
+// is deliberately absent from the frozen vocabulary, so a stub cannot land
+// without an exemption block that says why. The probe that would upgrade this
+// case is a Capabilities() that takes its rows as an argument; that is
+// production surgery for a test, and it is not worth it while a stub cannot
+// reach main.
 
 // TestClaimPathReachesItsHandler drives the path the DOCUMENT spells, which is
 // the one thing route parity cannot check for the claim row: that row declares
@@ -596,20 +690,28 @@ func TestClaimPathReachesItsHandler(t *testing.T) {
 	}
 }
 
+// TestCapabilitiesListImplementedOperationsOnly: the advertised set is exactly
+// the implemented operation tokens UNION the server-wide behavior tokens, and
+// nothing else — a token here that backs neither an implemented handler nor a
+// declared behavior is a capability a client would check for and never find
+// anything behind.
 func TestCapabilitiesListImplementedOperationsOnly(t *testing.T) {
-	implemented := map[string]bool{}
+	advertised := map[string]bool{}
 	for _, rt := range routeTable {
 		if rt.implemented && rt.capability != "" {
-			implemented[rt.capability] = true
+			advertised[rt.capability] = true
 		}
+	}
+	for _, c := range behaviorCapabilities {
+		advertised[c] = true
 	}
 	for _, got := range Capabilities() {
-		if !implemented[got] {
-			t.Errorf("Capabilities() lists %q, whose handler is not implemented", got)
+		if !advertised[got] {
+			t.Errorf("Capabilities() lists %q, which is neither an implemented operation nor a behavior capability", got)
 		}
 	}
-	if len(Capabilities()) != len(implemented) {
-		t.Errorf("Capabilities() = %v, want exactly %v", Capabilities(), implemented)
+	if len(Capabilities()) != len(advertised) {
+		t.Errorf("Capabilities() = %v, want exactly %v", Capabilities(), advertised)
 	}
 }
 
@@ -656,9 +758,16 @@ func TestSemaphoreShedsLoadInsteadOfQueueingForever(t *testing.T) {
 		t.Error("a saturation 503 must carry Retry-After")
 	}
 
-	// A wait that eventually succeeds is still a saturation datapoint.
+	// A wait that eventually succeeds is still a saturation datapoint. This
+	// section widens the timeout so the assertion is about a release that
+	// beats a generous window, not a race against the tight one the shed
+	// check above needs to stay fast (be-qczn): a loaded CI runner can
+	// overshoot a 5ms sleep by more than the ~15ms margin a shared 20ms
+	// timeout left, which produced ErrBusy instead of a recorded saturation
+	// event.
+	s.semTimeout = 2 * time.Second
 	go func() {
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(25 * time.Millisecond)
 		held()
 	}()
 	slow := &reqInfo{id: "slow"}
@@ -1253,4 +1362,449 @@ func findLogLine(t *testing.T, log, needle string) string {
 	}
 	t.Fatalf("no log line containing %q in:\n%s", needle, log)
 	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Deployment hardening: bearer auth, the Host allowlist, and operator limits.
+//
+// All three land on one seam (Config), and the property that ties them
+// together is the default: a zero-valued Config is today's server, byte for
+// byte. Every test above this line is the proof of that half — none of them
+// passes a token, an allowed host or a limit, and all of them still pass.
+
+// authTokenFile writes a token file and returns a verifier over it.
+func authTokenFile(t *testing.T, tokens ...string) *TokenFileAuth {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "tokens")
+	if err := os.WriteFile(path, []byte(strings.Join(tokens, "\n")+"\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	auth, err := NewTokenFileAuth(path)
+	if err != nil {
+		t.Fatalf("NewTokenFileAuth: %v", err)
+	}
+	return auth
+}
+
+// do issues a request with caller-chosen headers, which every auth test needs
+// and ts.get cannot express.
+func (ts *testServer) do(t *testing.T, method, path string, header http.Header) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, ts.base+path, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	for k, vs := range header {
+		// net/http sends Request.Host and ignores a "Host" entry in the header
+		// map, so a test that set only the map would silently exercise the
+		// default Host and pass against no policy at all.
+		if http.CanonicalHeaderKey(k) == "Host" {
+			req.Host = vs[0]
+			continue
+		}
+		req.Header[k] = vs
+	}
+	resp, err := ts.client.Do(req)
+	if err != nil {
+		t.Fatalf("%s %s: %v", method, path, err)
+	}
+	t.Cleanup(func() { _ = resp.Body.Close() })
+	return resp
+}
+
+func bearer(token string) http.Header {
+	return http.Header{"Authorization": {"Bearer " + token}}
+}
+
+// authedOperations is every route the token guards — the whole table minus the
+// one exempt row. Derived rather than listed so a route added without a
+// decision about its exemption cannot slip past these tests.
+func authedOperations(t *testing.T) []route {
+	t.Helper()
+	var out []route
+	for _, rt := range routeTable {
+		if !rt.authExempt {
+			out = append(out, rt)
+		}
+	}
+	if len(out) == 0 {
+		t.Fatal("no authenticated routes in the table")
+	}
+	return out
+}
+
+// TestBearerAuthGuardsEveryOperationButLiveness is the security deliverable:
+// with a token configured, reachability alone is no longer read and claim
+// authority. Liveness is the single exemption — a probe must answer with no
+// credential — and GET /v0/beads/context is deliberately NOT one: it reveals
+// the repo root, the beads directory and the database name.
+func TestBearerAuthGuardsEveryOperationButLiveness(t *testing.T) {
+	ts := newTestServer(t, Config{Auth: authTokenFile(t, "primary-token", "secondary-token")})
+
+	if resp := ts.get(t, "/healthz"); resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /healthz with no credential = %d, want 200: a liveness probe carries none", resp.StatusCode)
+	}
+
+	for _, rt := range authedOperations(t) {
+		// The rows sharing the custom-method wildcard each answer on their own
+		// suffix, so the substitution has to be the ROW's, not the claim's:
+		// hard-coding ":claim" would drive every one of them down the claim's
+		// path and stop testing the others the moment a third row was added.
+		path := strings.NewReplacer(
+			"{id}", "bd-1",
+			"{"+customMethodPathValue+"}", "bd-1"+rt.customMethod,
+		).Replace(rt.pattern)
+		for _, tc := range []struct {
+			name   string
+			header http.Header
+		}{
+			{"no header", nil},
+			{"wrong scheme", http.Header{"Authorization": {"Basic cHc6cHc="}}},
+			{"scheme only", http.Header{"Authorization": {"Bearer"}}},
+			{"empty token", http.Header{"Authorization": {"Bearer   "}}},
+			{"unknown token", bearer("not-the-token")},
+			{"near miss", bearer("primary-toke")},
+		} {
+			t.Run(rt.op+"/"+tc.name, func(t *testing.T) {
+				resp := ts.do(t, rt.method, path, tc.header)
+				if resp.StatusCode != http.StatusUnauthorized {
+					t.Fatalf("%s %s = %d, want 401", rt.method, path, resp.StatusCode)
+				}
+				if got := resp.Header.Get("WWW-Authenticate"); got != "Bearer" {
+					t.Errorf("WWW-Authenticate = %q, want Bearer", got)
+				}
+				if ct := resp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/problem+json") {
+					t.Errorf("Content-Type = %q, want problem+json", ct)
+				}
+				body := decodeBody(t, resp)
+				if body["code"] != string(CodeUnauthenticated) {
+					t.Errorf("code = %v, want %s", body["code"], CodeUnauthenticated)
+				}
+				if id, _ := body["request_id"].(string); id == "" {
+					t.Error("a 401 carries no request_id, so it cannot be correlated to its log line")
+				}
+				if detail, _ := body["detail"].(string); detail != staticDetail[CodeUnauthenticated] {
+					t.Errorf("detail = %q, want the fixed string %q", detail, staticDetail[CodeUnauthenticated])
+				}
+			})
+		}
+	}
+
+	// Both tokens in the file are accepted: that is the rotation overlap, and
+	// it is the only mechanism this server has for it.
+	for _, tok := range []string{"primary-token", "secondary-token"} {
+		resp := ts.do(t, http.MethodGet, "/v0/beads/context", bearer(tok))
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET /v0/beads/context with token %q = %d, want 200", tok, resp.StatusCode)
+		}
+	}
+}
+
+// TestUnauthenticated401NeverEchoesTheCredential. A presented token is a
+// secret, and a 401 that quoted it would write it into every client log and
+// every proxy trace. The fixed `detail` is what makes that structural rather
+// than a rule to remember; the server log has the same duty.
+func TestUnauthenticated401NeverEchoesTheCredential(t *testing.T) {
+	const presented = "leaked-secret-value"
+	ts := newTestServer(t, Config{Auth: authTokenFile(t, "real-token")})
+
+	resp := ts.do(t, http.MethodGet, "/v0/beads/ready", bearer(presented))
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if strings.Contains(string(body), presented) {
+		t.Errorf("the 401 body echoes the presented credential:\n%s", body)
+	}
+	if log := ts.stderr.String(); strings.Contains(log, presented) {
+		t.Errorf("the server log records the presented credential:\n%s", log)
+	}
+
+	// The refusal is still attributable: a probe that leaves no server-side
+	// trace is a control nobody can investigate.
+	line := findLogLine(t, ts.stderr.String(), "event=auth_refused")
+	for _, field := range []string{"reason=unknown_token", "op=listReadyWork", "request_id="} {
+		if !strings.Contains(line, field) {
+			t.Errorf("auth_refused line is missing %q:\n%s", field, line)
+		}
+	}
+}
+
+// TestAuthRefusalNamesWhyItWasRefused separates the three client mistakes in
+// the log, because "no header" is a misconfigured client and "unknown token" is
+// either a rotation in progress or somebody trying tokens.
+func TestAuthRefusalNamesWhyItWasRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name, wantReason string
+		header           http.Header
+	}{
+		{"missing", "missing", nil},
+		{"malformed", "malformed", http.Header{"Authorization": {"Basic cHc6cHc="}}},
+		{"unknown", "unknown_token", bearer("nope")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ts := newTestServer(t, Config{Auth: authTokenFile(t, "real-token")})
+			ts.do(t, http.MethodGet, "/v0/beads/ready", tc.header)
+			line := findLogLine(t, ts.stderr.String(), "event=auth_refused")
+			if !strings.Contains(line, "reason="+tc.wantReason) {
+				t.Errorf("auth_refused reason is not %q:\n%s", tc.wantReason, line)
+			}
+		})
+	}
+}
+
+// TestAuthRefusalCostsNoDatabaseSlot. The check runs before acquire, so a 401
+// storm is one SHA-256 per request and can never occupy the slots — or the SQL
+// connections pinned to them — that authenticated clients are waiting for.
+// Answering 503 busy here would mean refused traffic could starve real traffic.
+func TestAuthRefusalCostsNoDatabaseSlot(t *testing.T) {
+	stderr := &lockedBuffer{}
+	s := &Server{
+		sem:        make(chan struct{}, 1),
+		semTimeout: 5 * time.Second,
+		log:        newTestLogger(stderr),
+		auth:       authTokenFile(t, "real-token"),
+	}
+
+	held, err := s.acquire(context.Background(), &reqInfo{id: "holder"})
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	t.Cleanup(held)
+
+	reached := false
+	guarded := route{op: "guarded", handler: func(*Server, http.ResponseWriter, *http.Request) { reached = true }}
+	h := s.withRequestContext(s.route(guarded))
+
+	rr := httptest.NewRecorder()
+	start := time.Now()
+	h.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/v0/beads/ready", nil))
+
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 — the refusal queued for a slot instead of answering", rr.Code)
+	}
+	if waited := time.Since(start); waited > time.Second {
+		t.Errorf("the refusal waited %v for a database slot", waited)
+	}
+	if reached {
+		t.Error("the handler ran for an unauthenticated request")
+	}
+	// The slot is still the holder's: the refusal neither took nor leaked one.
+	if len(s.sem) != 1 {
+		t.Errorf("semaphore holds %d slots, want the holder's 1", len(s.sem))
+	}
+}
+
+// TestUnroutedPathsStayUnauthenticated pins both halves of one rule: a path
+// this document does not define answers 404 with no credential — paths are
+// public spec, so refusing them first would disclose nothing and hide nothing —
+// while every path it DOES define is guarded.
+//
+// The custom-method wildcard is where the two meet. It matches every POST under
+// /v0/beads/issues/, and dispatchCustomMethod splits the suffix off BEFORE
+// s.route, so a segment ending in no registered suffix gets the catch-all's 404
+// and never reaches the credential check; a registered suffix reaches its row
+// and is refused. Neither half may be "fixed" into the other: 401 on the miss
+// would charge an unrouted path for a credential that cannot help it, and 404
+// on the hit would hide an operation behind a routing detail.
+func TestUnroutedPathsStayUnauthenticated(t *testing.T) {
+	ts := newTestServer(t, Config{Auth: authTokenFile(t, "real-token")})
+
+	for _, path := range []string{"/v0/nonsense", "/", "/v0/beads/issues/bd-1/extra"} {
+		if resp := ts.get(t, path); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("GET %s with no credential = %d, want 404: paths are public spec", path, resp.StatusCode)
+		}
+	}
+
+	// Inside the wildcard, a segment ending in no registered suffix is just as
+	// unrouted, and answers the same way.
+	for _, path := range []string{"/v0/beads/issues/bd-1", "/v0/beads/issues/bd-1:nosuchverb"} {
+		if resp := ts.do(t, http.MethodPost, path, nil); resp.StatusCode != http.StatusNotFound {
+			t.Errorf("POST %s with no credential = %d, want 404: the suffix is registered nowhere", path, resp.StatusCode)
+		}
+	}
+
+	// A registered suffix names an operation, and an operation is guarded.
+	for _, rt := range authedOperations(t) {
+		if rt.customMethod == "" {
+			continue
+		}
+		path := "/v0/beads/issues/bd-1" + rt.customMethod
+		if resp := ts.do(t, rt.method, path, nil); resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s %s with no credential = %d, want 401", rt.method, path, resp.StatusCode)
+		}
+	}
+}
+
+// TestListenRefusesAnUnservablePosture: the library enforces the same posture
+// rules the CLI does, so a second caller cannot assemble a Config that serves
+// the whole surface to a network with no credential.
+func TestListenRefusesAnUnservablePosture(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		cfg     Config
+		wantErr string
+	}{
+		{
+			name:    "non-loopback with no credential",
+			cfg:     Config{Addr: "0.0.0.0:0", AllowNonLoopback: true},
+			wantErr: "--auth-token-file",
+		},
+		{
+			name:    "waiver contradicts a token",
+			cfg:     Config{Addr: "0.0.0.0:0", AllowNonLoopback: true, InsecureNoAuth: true, Auth: authTokenFile(t, "tok")},
+			wantErr: "--insecure-no-auth",
+		},
+		{
+			name:    "malformed allowed host",
+			cfg:     Config{Addr: "127.0.0.1:0", AllowedHosts: []string{"svc.beads.svc:8080"}},
+			wantErr: "--allowed-host",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := tc.cfg
+			if cfg.Provider == nil {
+				cfg.Provider = &fakeProvider{}
+			}
+			cfg.Stdout, cfg.Stderr = &bytes.Buffer{}, &lockedBuffer{}
+			srv, err := Listen(cfg)
+			if err == nil {
+				_ = srv.http.Close()
+				t.Fatalf("Listen accepted %+v, want a refusal naming %s", tc.cfg, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("refusal %q does not name %s", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAllowedHostsAdmitInClusterNames is the blocker this slice exists to
+// clear: in a cluster the client dials a service DNS name, and the
+// loopback-only Host policy 400s every such request. Matching stays EXACT —
+// there is no wildcard or suffix syntax — so the allowlist is exactly what the
+// operator enumerated.
+func TestAllowedHostsAdmitInClusterNames(t *testing.T) {
+	const svc = "bd-proj.beads.svc.cluster.local"
+	ts := newTestServer(t, Config{AllowedHosts: []string{svc, "10.4.2.9"}})
+
+	for _, host := range []string{svc, svc + ":8080", strings.ToUpper(svc), "10.4.2.9", "10.4.2.9:80", "localhost"} {
+		resp := ts.do(t, http.MethodGet, "/healthz", http.Header{"Host": {host}})
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("Host %q = %d, want 200", host, resp.StatusCode)
+		}
+	}
+	for _, host := range []string{"beads.svc.cluster.local", "evil." + svc, svc + ".evil.example", "10.4.2.10"} {
+		resp := ts.do(t, http.MethodGet, "/healthz", http.Header{"Host": {host}})
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("Host %q = %d, want 400: the allowlist is exact", host, resp.StatusCode)
+		}
+	}
+
+	// The startup line states the whole effective policy, so an operator can
+	// read what the server answers to rather than deducing it.
+	startup := findLogLine(t, ts.stderr.String(), "event=startup")
+	if !strings.Contains(startup, svc) || !strings.Contains(startup, "10.4.2.9") {
+		t.Errorf("host_allowlist does not name the operator's additions:\n%s", startup)
+	}
+}
+
+// TestARunningServerAcceptsARotatedToken is the rotation property proved end
+// to end, over a real listener, against a real token file, under the REAL
+// one-second reload gate — no injected clock. This is the deployment
+// requirement stated as a test: rotating a credential must not be a restart,
+// and revoking a leaked one must not wait for the pod's next deploy.
+//
+// It costs a couple of real seconds, which is the point: the gate it is
+// waiting out is the one that ships.
+func TestARunningServerAcceptsARotatedToken(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tokens")
+	writeTokenFile(t, path, "original-token\n")
+	auth, err := NewTokenFileAuth(path)
+	if err != nil {
+		t.Fatalf("NewTokenFileAuth: %v", err)
+	}
+	ts := newTestServer(t, Config{Auth: auth})
+
+	status := func(token string) int {
+		t.Helper()
+		return ts.do(t, http.MethodGet, "/v0/beads/context", bearer(token)).StatusCode
+	}
+
+	if got := status("original-token"); got != http.StatusOK {
+		t.Fatalf("the starting token = %d, want 200", got)
+	}
+
+	// The overlap the operator writes: new alongside old, clients roll over
+	// one at a time, nothing restarts.
+	writeTokenFile(t, path, "rotated-token\noriginal-token\n")
+	time.Sleep(authReloadInterval + 200*time.Millisecond)
+	if got := status("rotated-token"); got != http.StatusOK {
+		t.Errorf("the rotated-in token = %d, want 200 — rotation would need a restart", got)
+	}
+	if got := status("original-token"); got != http.StatusOK {
+		t.Errorf("the outgoing token = %d during the overlap, want 200", got)
+	}
+
+	// And the removal, which is revocation: the old token stops working while
+	// the same process keeps serving the new one.
+	writeTokenFile(t, path, "rotated-token\n")
+	time.Sleep(authReloadInterval + 200*time.Millisecond)
+	if got := status("original-token"); got != http.StatusUnauthorized {
+		t.Errorf("the revoked token = %d, want 401 — a leaked token would outlive the process", got)
+	}
+	if got := status("rotated-token"); got != http.StatusOK {
+		t.Errorf("the live token = %d after revocation, want 200", got)
+	}
+}
+
+// TestValidateAllowedHost covers the entries an operator actually types,
+// including the ones copied verbatim out of a Host header.
+func TestValidateAllowedHost(t *testing.T) {
+	for _, tc := range []struct {
+		name, value, wantErr string
+	}{
+		{name: "service dns name", value: "bd-proj.beads.svc.cluster.local"},
+		{name: "short service name", value: "bd-proj.beads.svc"},
+		{name: "single label", value: "bd-proj"},
+		{name: "ipv4 literal", value: "10.4.2.9"},
+		{name: "ipv6 literal", value: "2001:db8::1"},
+		// A Host header spells an IPv6 address in brackets, so an operator
+		// reading one off the wire types it that way. hostOnly strips them
+		// before matching, so it works — and the validation must not refuse
+		// it with a message about a port it does not have.
+		{name: "bracketed ipv6 literal", value: "[2001:db8::1]"},
+
+		{name: "empty", value: "", wantErr: "empty"},
+		{name: "whitespace", value: "bd proj.svc", wantErr: "whitespace"},
+		{name: "url", value: "http://bd-proj.beads.svc", wantErr: "URL"},
+		{name: "path", value: "bd-proj.beads.svc/v0", wantErr: "URL"},
+		{name: "name with a port", value: "bd-proj.beads.svc:8080", wantErr: "port"},
+		{name: "bracketed ipv6 with a port", value: "[2001:db8::1]:8080", wantErr: "port"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAllowedHost(tc.value)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateAllowedHost(%q) = %v, want nil", tc.value, err)
+				}
+				// Accepting it is only half the promise; it has to reach the
+				// policy in a form that matches.
+				p := newHostPolicy(net.ParseIP("127.0.0.1"), []string{tc.value})
+				if !p.allows(tc.value) {
+					t.Errorf("%q validates but the policy does not answer to it", tc.value)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateAllowedHost(%q) = nil, want a refusal about %s", tc.value, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("refusal %q does not explain the problem (%s)", err, tc.wantErr)
+			}
+		})
+	}
 }

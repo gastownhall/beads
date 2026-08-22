@@ -1,10 +1,64 @@
 // Package conformance provides backend-agnostic tests for Storage
-// implementations: the suite every storage backend — in-tree or out-of-tree —
-// runs to prove it behaves like the embedded-Dolt reference.
+// implementations. It holds TWO tiers, and RunAll is one of them.
 //
-// Usage from a backend test file:
+// # What RunAll proves
+//
+// RunAll is the PORTABLE RAW-SURFACE suite. It drives the store's own methods —
+// issue CRUD, search and counts, dependencies and readiness, labels, comments,
+// config, metadata slots, statistics, staleness, iterators, transactions,
+// claim/lease/heartbeat/reclaim, promote and rekey, batch create — and for most
+// of that surface it is the ONLY conformance coverage there is: the role tier
+// reaches a store through a handful of fixture seed hooks and nothing else.
+//
+// Counting the methods invoked on the store a Factory returns (measured
+// 2026-08-09): 51 of core Storage's 98, plus 32 across five capability
+// sub-interfaces — BulkIssueStore (10/10), DependencyQueryStore,
+// ConfigMetadataStore, AnnotationStore and AdvancedQueryStore (6/6) — and
+// EventQueryStore through the Transaction that RunInTransaction yields. Most of
+// the untouched half of core Storage is the 23 role accessors, which the role
+// contracts cover instead.
+//
+// What RunAll does NOT do is exercise the version-control families its Factory
+// type names. This package makes no call to any method of VersionControl,
+// HistoryViewer, RemoteStore, SyncStore, FederationStore, CompactionStore or
+// FastStatisticsStore — not one, in either tier. Their positive behavior has no
+// conformance coverage anywhere. A backend DECLARES those families instead:
+// it answers a typed *storage.ErrUnsupported and proves that with
+// RunUnsupportedContract over its allowlist. A backend that stubs all seven
+// passes RunAll today, because the stubs are never reached.
+//
+// # Why Factory is storage.DoltStorage
+//
+// Because the registry door is (internal/storage/backends), not because this
+// suite needs the surface. For a backend the registry already admits, the type
+// asks nothing beyond registration. It is a wall only for a provider that is
+// not a store at all — the in-tree unit-of-work provider, which is why the
+// Claimer role is wired outside RunAll (see the note in RunAll's body).
+//
+// The name RunAll is historical and stays. The suite is not Dolt-specific, and
+// the name overstates only its coverage, not its portability.
+//
+// # The role tier
+//
+// The *_contract.go files hold the role contracts: the SEMANTIC obligation, one
+// contract per issueops role, driven through small per-fixture hooks rather
+// than through the store type — which is how a provider that could never enter
+// RunAll proves the same promises. Their portability class is "a store that can
+// answer single-row SQL over the canonical relational schema": QueryScalar is
+// required, while CountHistory, CountHistoryMatching, Exec and the seed hooks
+// are optional and degrade LOUDLY when nil (see history_matching.go).
+//
+// That tier is EXHAUSTIVE over the facade, and role_coverage_gate_test.go is
+// what makes it a fact rather than a wish: it censuses every method of every
+// interface issueops and memoryops declare, resolves which of them the contract
+// cases here actually call, and fails on any method nothing calls. A role
+// method with no contract is admissible only as a waiver naming its reason, and
+// that waiver list can only shrink.
+//
+// # Usage from a backend test file
 //
 //	func TestConformance(t *testing.T) {
+//	    conformance.RunUnsupportedContract(t, &Store{}, unsupported)
 //	    conformance.RunAll(t, func(t *testing.T) storage.DoltStorage {
 //	        return newTestStore(t)
 //	    })
@@ -14,8 +68,7 @@
 // its public alias, github.com/steveyegge/beads/backend.DoltStorage — the
 // identical type, so the factory literal satisfies Factory as-is. The whole
 // public contract an external backend implements (interface, signature types,
-// registry, sentinels) lives in that backend package; this package is its
-// proof obligation.
+// registry, sentinels) lives in that backend package.
 //
 // # Stability
 //
@@ -126,7 +179,6 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("GetNotFound", func(t *testing.T) { testGetNotFound(t, factory) })
 	t.Run("GetByExternalRef", func(t *testing.T) { testGetByExternalRef(t, factory) })
 	t.Run("GetByIDs", func(t *testing.T) { testGetByIDs(t, factory) })
-	t.Run("Update", func(t *testing.T) { testUpdate(t, factory) })
 	t.Run("UpdatePreservesCreatedAt", func(t *testing.T) { testUpdatePreservesCreatedAt(t, factory) })
 	t.Run("UpdateNotFound", func(t *testing.T) { testUpdateNotFound(t, factory) })
 	t.Run("UpdateIssueType", func(t *testing.T) { testUpdateIssueType(t, factory) })
@@ -140,13 +192,15 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("SearchStatusFilter", func(t *testing.T) { testSearchStatusFilter(t, factory) })
 	t.Run("SearchPriorityFilter", func(t *testing.T) { testSearchPriorityFilter(t, factory) })
 	t.Run("SearchLimit", func(t *testing.T) { testSearchLimit(t, factory) })
-	t.Run("CountIssues", func(t *testing.T) { testCountIssues(t, factory) })
-	t.Run("CountByGroup", func(t *testing.T) { testCountByGroup(t, factory) })
+	t.Run("SearchByIDsFilter", func(t *testing.T) { testSearchByIDsFilter(t, factory) })
+	t.Run("SearchIssueIDsProjection", func(t *testing.T) { testSearchIssueIDsProjection(t, factory) })
 	t.Run("CountByGroupIsBlockedFilter", func(t *testing.T) { testCountByGroupIsBlockedFilter(t, factory) })
+
+	// Keyset paging and the defensive row cap
+	t.Run("SearchPaging", func(t *testing.T) { RunSearchPaging(t, factory) })
 
 	// Dependencies
 	t.Run("AddAndGetDeps", func(t *testing.T) { testAddAndGetDeps(t, factory) })
-	t.Run("RemoveDep", func(t *testing.T) { testRemoveDep(t, factory) })
 	t.Run("DepCounts", func(t *testing.T) { testDepCounts(t, factory) })
 
 	// Ready/Blocked
@@ -161,11 +215,6 @@ func RunAll(t *testing.T, factory Factory) {
 
 	// Claim / lease (dead-worker recovery)
 	t.Run("Claim", func(t *testing.T) { testClaim(t, factory) })
-	t.Run("ClaimIdempotent", func(t *testing.T) { testClaimIdempotent(t, factory) })
-	t.Run("ClaimAlreadyClaimed", func(t *testing.T) { testClaimAlreadyClaimed(t, factory) })
-	t.Run("ClaimOpenForeignAssignee", func(t *testing.T) { testClaimOpenForeignAssignee(t, factory) })
-	t.Run("ClaimNotClaimable", func(t *testing.T) { testClaimNotClaimable(t, factory) })
-	t.Run("ClaimReadyIssue", func(t *testing.T) { testClaimReadyIssue(t, factory) })
 	t.Run("ClaimReadyIssueLabelFilters", func(t *testing.T) { testClaimReadyIssueLabelFilters(t, factory) })
 	t.Run("HeartbeatRenewsLease", func(t *testing.T) { testHeartbeatRenewsLease(t, factory) })
 	t.Run("HeartbeatWisp", func(t *testing.T) { testHeartbeatWisp(t, factory) })
@@ -174,6 +223,11 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("ReclaimScoped", func(t *testing.T) { testReclaimScoped(t, factory) })
 	t.Run("UnclaimIfAssigneeMatch", func(t *testing.T) { testUnclaimIfAssigneeMatch(t, factory) })
 	t.Run("UnclaimIfAssigneeStale", func(t *testing.T) { testUnclaimIfAssigneeStale(t, factory) })
+
+	// The Claimer role is NOT run here. Its contract lives in
+	// claimer_contract.go and is wired at all three legs through per-backend
+	// runners, because this suite's Factory is storage.DoltStorage and a
+	// unit-of-work provider is not one — the uow body could never reach it.
 
 	// Labels
 	t.Run("Labels", func(t *testing.T) { testLabels(t, factory) })
@@ -185,7 +239,6 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("CommentCount", func(t *testing.T) { testCommentCount(t, factory) })
 
 	// Config
-	t.Run("Config", func(t *testing.T) { testConfig(t, factory) })
 	t.Run("LocalMetadata", func(t *testing.T) { testLocalMetadata(t, factory) })
 
 	// Slots
@@ -212,12 +265,21 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("TransactionCallbackAtMostOnce", func(t *testing.T) { testTransactionCallbackAtMostOnce(t, factory) })
 	t.Run("TransactionSnapshotReads", func(t *testing.T) { testTransactionSnapshotReads(t, factory) })
 	t.Run("TransactionReadYourWrites", func(t *testing.T) { testTransactionReadYourWrites(t, factory) })
+	t.Run("TransactionUpdateRecordsHistory", func(t *testing.T) { testTransactionUpdateRecordsHistory(t, factory) })
+	t.Run("TransactionSearchIncludeDependencies", func(t *testing.T) { testTransactionSearchIncludeDependencies(t, factory) })
+	t.Run("TransactionSearchKeysetWalk", func(t *testing.T) { testTransactionSearchKeysetWalk(t, factory) })
+	t.Run("TransactionSearchFilterParity", func(t *testing.T) { testTransactionSearchFilterParity(t, factory) })
 }
 
-// RunDeferredReads runs the subset of the suite covering SQLite's shared
-// non-version-control reads: statistics, external-ref lookup, and staleness. RunAll
-// remains the full Dolt reference; SQLite runs this focused gate for methods supplied
-// by issueops while its Dolt-only methods fail loudly as unsupported.
+// RunDeferredReads runs a curated three-case subset — statistics, external-ref
+// lookup, staleness — for a backend whose unsupported allowlist refuses enough
+// of RunAll's subjects that the full suite is the wrong gate.
+//
+// It is the worked example the admission rule in RunSearchPaging cites. Its
+// original consumer, the in-tree SQLite backend, is gone (configfile now answers
+// that name with a RemovedBackendError), so this entry point has no caller
+// in-tree; it survives as the published precedent for composing a
+// supported-subset gate out of the per-block runners.
 func RunDeferredReads(t *testing.T, factory Factory) {
 	t.Helper()
 	t.Run("Statistics", func(t *testing.T) { testStatistics(t, factory) })
@@ -300,6 +362,18 @@ func testCreateAndGet(t *testing.T, f Factory) {
 	}
 }
 
+// testCreateDuplicate and RunLifecycleCreateRefusesAnOccupiedID
+// (issue_operations_contract.go) PIN OPPOSITE SEMANTICS OF THE SAME CORE, and
+// both are load-bearing. Do not retire either against the other.
+//
+// The raw CreateIssue verb is an UPSERT: a second write to an occupied ID
+// reconciles into the one row. The Operations role is CREATE-ONLY: the same
+// second write is refused with ErrAlreadyExists and the stored row must come
+// back byte-identical. This is a deliberate divergence, not drift — `bd create
+// --id <occupied>` used to reach the upsert through the proxied server and
+// silently overwrite a bead while the direct route refused, which is the
+// regression that contract case exists for. This case is the only observer of
+// the unguarded path, which is still what import and reconcile callers ride.
 func testCreateDuplicate(t *testing.T, f Factory) {
 	s := f(t)
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "d-1", Title: "First"}), "actor"))
@@ -357,18 +431,11 @@ func testGetByIDs(t *testing.T, f Factory) {
 	}
 }
 
-func testUpdate(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "u-1", Title: "Old", Priority: 1}), "a"))
-	must(t, s.UpdateIssue(ctx(), "u-1", map[string]interface{}{"title": "New", "priority": 3}, "a"))
-	got, _ := s.GetIssue(ctx(), "u-1")
-	if got.Title != "New" {
-		t.Errorf("Title = %q", got.Title)
-	}
-	if got.Priority != 3 {
-		t.Errorf("Priority = %d", got.Priority)
-	}
-}
+// The plain patch-and-read-back case that used to sit here is retired: the raw
+// map funnel and the Lifecycle role both land in issueops.UpdateIssueInTx, and
+// RunLifecycleUpdatePersistsThePatchAndHydratesTheResult patches seven members
+// and asserts the RESULT and the stored row where this one asserted two fields
+// through GetIssue. testUpdateNotFound below is NOT retired — see its comment.
 
 func testUpdatePreservesCreatedAt(t *testing.T, f Factory) {
 	s := f(t)
@@ -384,6 +451,18 @@ func testUpdatePreservesCreatedAt(t *testing.T, f Factory) {
 	}
 }
 
+// testUpdateNotFound survives the retirement pass, and the reason is not that
+// its assertion is strong — it is the weakest one in this file. It is that the
+// two seams REFUSE IN DIFFERENT PLACES. The Lifecycle role resolves the id
+// itself (issueops/execution.go ExecuteUpdate, ahead of any write) and never
+// reaches the raw funnel's own refusal, which lives in
+// issueops.updateIssueInTx's read-and-resolve step. Making that step swallow a
+// missing row leaves RunLifecycleUpdateRefusesUnknownIDsAndActorlessRequests
+// green and only this case red (measured with scripts/mutation-equivalence.sh).
+//
+// Worth strengthening in place rather than deleting: `err != nil` is also
+// satisfied by the foreign-key violation the event write raises on a row that
+// does not exist, so this case cannot today tell a refusal from a crash.
 func testUpdateNotFound(t *testing.T, f Factory) {
 	s := f(t)
 	err := s.UpdateIssue(ctx(), "missing", map[string]interface{}{"title": "x"}, "a")
@@ -493,29 +572,86 @@ func testSearchLimit(t *testing.T, f Factory) {
 	}
 }
 
-func testCountIssues(t *testing.T, f Factory) {
+// testSearchByIDsFilter pins the exact-id read the partial-id resolver takes as
+// its fast path: IssueFilter.IDs answers exactly the named row, and an id nobody
+// holds answers an EMPTY result with a NIL error.
+//
+// The nil-error half is the load-bearing one. internal/utils/id_parser.go
+// branches on `err == nil && len(results) > 0` (GH#942), so a backend that
+// reports a miss as an error silently pushes every user-typed `bd show`,
+// `bd update` and `bd close` argument onto the slow substring path. The pinned
+// testGetByIDs covers the different GetIssuesByIDs method; no case sends
+// IssueFilter.IDs to SearchIssues.
+//
+// Subject: SearchIssues with IssueFilter.IDs. A backend whose allowlist refuses
+// that filter does not run this case.
+func testSearchByIDsFilter(t *testing.T, f Factory) {
 	s := f(t)
-	seedStore(t, s)
-	count, err := s.CountIssues(ctx(), "", types.IssueFilter{})
-	if err != nil {
-		t.Fatalf("CountIssues: %v", err)
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-idf1", Title: "One"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-idf2", Title: "Two"}), "a"))
+
+	hit, err := s.SearchIssues(c, "", types.IssueFilter{IDs: []string{"test-idf1"}})
+	must(t, err)
+	if !slices.Equal(issueIDs(hit), []string{"test-idf1"}) {
+		t.Errorf("SearchIssues(IDs=[test-idf1]) = %v, want [test-idf1]", issueIDs(hit))
 	}
-	if count != 4 {
-		t.Errorf("count = %d, want 4", count)
+
+	miss, err := s.SearchIssues(c, "", types.IssueFilter{IDs: []string{"test-nobody"}})
+	if err != nil {
+		t.Fatalf("SearchIssues(IDs=[test-nobody]) = %v, want a nil error — the resolver's fast path branches on it", err)
+	}
+	if len(miss) != 0 {
+		t.Errorf("SearchIssues(IDs=[test-nobody]) = %v, want no rows", issueIDs(miss))
 	}
 }
 
-func testCountByGroup(t *testing.T, f Factory) {
+// testSearchIssueIDsProjection pins the narrow projection the partial-id
+// resolver walks when the exact-id fast path misses
+// (internal/utils/id_parser.go): SearchIssueIDs answers the bare ids of every
+// issue carrying the hash token, and its Ephemeral leg answers wisp ids so a
+// wisp stays resolvable by partial id.
+//
+// SearchIssueIDs appears nowhere else in this suite, and the id arm of the
+// query is unpinned: the audit's SearchTextIDBranchExternalRef covers the
+// adjacent SearchIssues text branch only. Assert ids, never issues — not
+// hydrating 45 columns to read one is the whole point of the method.
+//
+// Subject: SearchIssueIDs. A backend whose allowlist refuses it does not run
+// this case.
+func testSearchIssueIDsProjection(t *testing.T, f Factory) {
 	s := f(t)
-	seedStore(t, s)
-	counts, _ := s.CountIssuesByGroup(ctx(), types.IssueFilter{}, "status")
-	if counts["open"] != 2 {
-		t.Errorf("open = %d, want 2", counts["open"])
+	c := ctx()
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-a3f8e9", Title: "One"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-a3f8aa", Title: "Two"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-b111", Title: "Three"}), "a"))
+	must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: "test-wisp-b7c2", Title: "Wisp", Ephemeral: true}), "a"))
+
+	ids, err := s.SearchIssueIDs(c, "a3f8", types.IssueFilter{})
+	must(t, err)
+	sort.Strings(ids)
+	if !slices.Equal(ids, []string{"test-a3f8aa", "test-a3f8e9"}) {
+		t.Errorf("SearchIssueIDs(%q) = %v, want [test-a3f8aa test-a3f8e9]", "a3f8", ids)
 	}
-	if counts["closed"] != 1 {
-		t.Errorf("closed = %d, want 1", counts["closed"])
+
+	ephemeral := true
+	wispIDs, err := s.SearchIssueIDs(c, "b7c2", types.IssueFilter{Ephemeral: &ephemeral})
+	must(t, err)
+	if !slices.Equal(wispIDs, []string{"test-wisp-b7c2"}) {
+		t.Errorf("SearchIssueIDs(%q, Ephemeral=true) = %v, want [test-wisp-b7c2]", "b7c2", wispIDs)
 	}
 }
+
+// The bare scalar count and the bare group-by-status count are retired.
+// counter_contract.go rides the same store.CountIssues / CountIssuesByGroup
+// through internal/workapi/storecounter and asserts more of them:
+// RunCounterCountsClosedRows pins the unfiltered total over open, closed AND
+// in_progress (that third seed moved there from this case's fixture), and
+// RunCounterGroupsPartitionTheScalarSet compares the WHOLE bucket map — an
+// extra bucket fails — and ties the grouped total back to the scalar one.
+// The zero-predicate shape those contract cases cannot issue (they scope every
+// request with IDFilter because their fixtures share one database) is still
+// issued here by testAuditWispMergeSearchCount, on both verbs.
 
 // testCountByGroupIsBlockedFilter proves the additive IssueFilter.IsBlocked predicate honors the
 // denormalized is_blocked column in the grouped-count path on every backend: IsBlocked=&true returns
@@ -594,18 +730,18 @@ func testAddAndGetDeps(t *testing.T, f Factory) {
 	}
 }
 
-func testRemoveDep(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rd-a", Title: "A"}), "a"))
-	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "rd-b", Title: "B"}), "a"))
-	must(t, s.AddDependency(ctx(), &types.Dependency{IssueID: "rd-b", DependsOnID: "rd-a", Type: types.DepBlocks}, "a"))
-	must(t, s.RemoveDependency(ctx(), "rd-b", "rd-a", "a"))
-	deps, _ := s.GetDependencies(ctx(), "rd-b")
-	if len(deps) != 0 {
-		t.Errorf("after remove: len = %d", len(deps))
-	}
-}
-
+// The single-edge removal case is retired: the raw verb and the
+// DependencyEditor role share issueops.RemoveDependencyInTx, and
+// RunDependencyEditorRemovesOnlyTheNamedEdge seeds SEVERAL edges and asserts
+// that only the named one goes — where this case could not tell a targeted
+// delete from a delete-them-all. RemoveDependency keeps its seat in this suite
+// through testGetAllDependencyRecords.
+//
+// testDepCounts below is NOT retired even though reader_contract.go asserts the
+// same two numbers through the detail source: this suite is the ONLY caller of
+// CountDependencies anywhere in RunAll, and RunAll is what an out-of-tree
+// backend proves itself with (see this file's package doc). Deleting it would
+// leave that method uncalled by the gate.
 func testDepCounts(t *testing.T, f Factory) {
 	s := f(t)
 	must(t, s.CreateIssue(ctx(), withDefaults(&types.Issue{ID: "dc-a", Title: "A"}), "a"))
@@ -759,19 +895,13 @@ func testCommentCount(t *testing.T, f Factory) {
 
 // --- Config ---
 
-func testConfig(t *testing.T, f Factory) {
-	s := f(t)
-	must(t, s.SetConfig(ctx(), "key1", "val1"))
-	must(t, s.SetConfig(ctx(), "key2", "val2"))
-	v, _ := s.GetConfig(ctx(), "key1")
-	if v != "val1" {
-		t.Errorf("GetConfig = %q", v)
-	}
-	all, _ := s.GetAllConfig(ctx())
-	if len(all) < 2 {
-		t.Errorf("GetAllConfig len = %d", len(all))
-	}
-}
+// The set/get/list roundtrip is retired. The WorkspaceConfig role rides the same
+// store.SetConfig / GetConfig / GetAllConfig (internal/workapi/storeworkspaceconfig)
+// and pins them harder: RunWorkspaceConfigStoresAValueVerbatim writes a value
+// carrying surrounding space and an inner comma, and
+// RunWorkspaceConfigListsEveryStoredSetting compares the whole enumeration
+// against what it wrote instead of asserting a length floor. All three verbs stay
+// exercised in this suite by the audit-tier config cases.
 
 func testLocalMetadata(t *testing.T, f Factory) {
 	s := f(t)
@@ -809,6 +939,15 @@ func testMetadataSlots(t *testing.T, f Factory) {
 
 // --- Statistics ---
 
+// testStatistics is dominated on its own terms —
+// RunStatsReporterCountsEveryDurableRowByStatus rides the same
+// store.GetStatistics through internal/workapi/storestats, which passes the
+// struct through verbatim, and asserts per-bucket deltas over five statuses
+// where this asserts a total and a closed count. It stays anyway, because it is
+// one of the three arms of RunDeferredReads, a SECOND exported entry point with
+// no in-tree caller: retiring it would silently narrow a published gate to two
+// of the three reads its doc names, which is an API decision rather than a
+// cleanup. If that gate is ever blessed for shrinking, this case goes with it.
 func testStatistics(t *testing.T, f Factory) {
 	s := f(t)
 	seedStore(t, s)

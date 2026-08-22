@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/issueops"
+	"github.com/steveyegge/beads/memoryops"
 )
 
 func TestRegistered(t *testing.T) {
@@ -645,6 +646,9 @@ func (s *configStore) ReadyClaimer() (issueops.ReadyClaimer, error) {
 func (s *configStore) BatchCloser() (issueops.BatchCloser, error) {
 	return nil, &storage.ErrUnsupported{Op: "BatchCloser", Backend: "jira-config-stub"}
 }
+func (s *configStore) BatchCreator() (issueops.BatchCreator, error) {
+	return nil, &storage.ErrUnsupported{Op: "BatchCreator", Backend: "jira-config-stub"}
+}
 func (s *configStore) DependencyEditor() (issueops.DependencyEditor, error) {
 	return nil, &storage.ErrUnsupported{Op: "DependencyEditor", Backend: "jira-config-stub"}
 }
@@ -653,6 +657,77 @@ func (s *configStore) Commenter() (issueops.Commenter, error) {
 }
 func (s *configStore) IssueRelations() (issueops.Relations, error) {
 	return nil, &storage.ErrUnsupported{Op: "IssueRelations", Backend: "jira-config-stub"}
+}
+func (s *configStore) Counter() (issueops.Counter, error) {
+	return nil, &storage.ErrUnsupported{Op: "Counter", Backend: "jira-config-stub"}
+}
+func (s *configStore) WorkspaceConfig() (issueops.WorkspaceConfig, error) {
+	return nil, &storage.ErrUnsupported{Op: "WorkspaceConfig", Backend: "jira-config-stub"}
+}
+func (s *configStore) Memories() (memoryops.Memories, error) {
+	return nil, &storage.ErrUnsupported{Op: "Memories", Backend: "jira-config-stub"}
+}
+func (s *configStore) StatsReporter() (issueops.StatsReporter, error) {
+	return nil, &storage.ErrUnsupported{Op: "StatsReporter", Backend: "jira-config-stub"}
+}
+func (s *configStore) VersionReconciler() (issueops.VersionReconciler, error) {
+	return nil, &storage.ErrUnsupported{Op: "VersionReconciler", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Bootstrapper() (issueops.Bootstrapper, error) {
+	return nil, &storage.ErrUnsupported{Op: "Bootstrapper", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) InitVerifier() (issueops.InitVerifier, error) {
+	return nil, &storage.ErrUnsupported{Op: "InitVerifier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) CycleDetector() (issueops.CycleDetector, error) {
+	return nil, &storage.ErrUnsupported{Op: "CycleDetector", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) EdgeReader() (issueops.EdgeReader, error) {
+	return nil, &storage.ErrUnsupported{Op: "EdgeReader", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) BlockingAnnotator() (issueops.BlockingAnnotator, error) {
+	return nil, &storage.ErrUnsupported{Op: "BlockingAnnotator", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) TreeWalker() (issueops.TreeWalker, error) {
+	return nil, &storage.ErrUnsupported{Op: "TreeWalker", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) GraphCounter() (issueops.GraphCounter, error) {
+	return nil, &storage.ErrUnsupported{Op: "GraphCounter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) ReadyCounter() (issueops.ReadyCounter, error) {
+	return nil, &storage.ErrUnsupported{Op: "ReadyCounter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Querier() (issueops.Querier, error) {
+	return nil, &storage.ErrUnsupported{Op: "Querier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Deleter() (issueops.Deleter, error) {
+	return nil, &storage.ErrUnsupported{Op: "Deleter", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Sweeper() (issueops.Sweeper, error) {
+	return nil, &storage.ErrUnsupported{Op: "Sweeper", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) MetadataCAS() (issueops.MetadataCAS, error) {
+	return nil, &storage.ErrUnsupported{Op: "MetadataCAS", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) BatchApplier() (issueops.BatchApplier, error) {
+	return nil, &storage.ErrUnsupported{Op: "BatchApplier", Backend: "jira-config-stub"}
+}
+
+func (s *configStore) Releaser() (issueops.Releaser, error) {
+	return nil, &storage.ErrUnsupported{Op: "Releaser", Backend: "jira-config-stub"}
 }
 func (s *configStore) SetConfig(_ context.Context, _, _ string) error        { return nil }
 func (s *configStore) SetLocalMetadata(_ context.Context, _, _ string) error { return nil }
@@ -829,6 +904,16 @@ func (s *configStore) IterWisps(_ context.Context, _ types.WispFilter) (storage.
 }
 
 func (s *configStore) Close() error { return nil }
+
+func (s *configStore) RecordProvenanceEvent(_ context.Context, _ types.ProvenanceEvent) (string, bool, error) {
+	return "", false, nil
+}
+func (s *configStore) GetProvenanceEvents(_ context.Context, _, _ string) ([]types.ProvenanceEvent, error) {
+	return nil, nil
+}
+func (s *configStore) GetProvenanceByRef(_ context.Context, _ string) ([]types.ProvenanceEvent, error) {
+	return nil, nil
+}
 
 func TestFetchIssuesIncludesPullJQLInQuery(t *testing.T) {
 	var capturedJQL string

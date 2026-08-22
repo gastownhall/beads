@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
 	"github.com/steveyegge/beads/internal/storage/issueops"
+	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -35,7 +36,10 @@ type doltTransaction struct {
 	// role: it deliberately drops wisp_* tables because they are dolt-ignored.
 	wroteRegularDep bool
 	wroteWispDep    bool
-	lifecycle       bool
+	// journalPinned records that ignoredTx IS regularTx because the events
+	// journal collapsed the two planes into one transaction, so the finish path
+	// must not commit or roll it back a second time.
+	journalPinned bool
 }
 
 func (t *doltTransaction) txFor(table string) *sql.Tx {
@@ -120,7 +124,7 @@ func (s *DoltStore) runInIssueLifecycleTransaction(
 		var callbackErr error
 		err := run(ctx, func(sqlTx *sql.Tx) error {
 			invoked = true
-			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s, lifecycle: true}
+			tx := &doltTransaction{regularTx: sqlTx, ignoredTx: sqlTx, store: s}
 			if callbackErr = fn(tx); callbackErr != nil {
 				return callbackErr
 			}
@@ -192,27 +196,54 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 		return fmt.Errorf("failed to begin regular tx: %w", err)
 	}
 
-	ignoredDB, ignoredConn, ignoredTx, err := s.beginIgnoredTxOnBranch(ctx, currentBranch)
-	if err != nil {
-		_ = regularTx.Rollback()
-		return err
+	// The journal counter and rows must commit in the SAME SQL transaction as
+	// every mutation they describe. bd_events_journal and bd_events_seq are
+	// dolt_ignored, so on the default split-transaction shape they would land in
+	// the ignored transaction while the mutation lands in the regular one: a
+	// mixed durable+wisp callback would then make the two transactions contend
+	// with each other on the single bd_events_seq row, and the ignored commit
+	// can fail AFTER the regular side has already committed — a mutation with no
+	// journal record, which is exactly the state the same-transaction guarantee
+	// exists to make impossible. In journal mode both planes therefore share the
+	// pinned regular transaction. The default journal-off path keeps the
+	// established split transactions untouched.
+	journalEnabled := s.eventsJournalEnabled.Load()
+	ignoredTx := regularTx
+	if !journalEnabled {
+		// NOTE (GH#3140 metrics skew): the pool-wait bracket above measures only
+		// the FIRST acquisition (the regular conn). A borrow inside
+		// beginIgnoredTxOnBranch that has to wait increments the pool's global
+		// WaitCount, which the NEXT transaction's delta then misattributes. Rare
+		// given the InUse pre-check in borrowConnForIgnoredTx; not worth
+		// restructuring the metrics for.
+		var ignoredCleanup func()
+		ignoredCleanup, ignoredTx, err = s.beginIgnoredTxOnBranch(ctx, currentBranch)
+		if err != nil {
+			_ = regularTx.Rollback()
+			return err
+		}
+		defer ignoredCleanup()
 	}
-	defer ignoredDB.Close()
-	defer ignoredConn.Close()
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(regularTx, journalEnabled)
+	defer clearJournalScope()
 
-	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s}
+	tx := &doltTransaction{regularTx: regularTx, ignoredTx: ignoredTx, store: s, journalPinned: journalEnabled}
 
 	defer func() {
 		if r := recover(); r != nil {
 			_ = regularTx.Rollback()
-			_ = ignoredTx.Rollback()
+			if !journalEnabled {
+				_ = ignoredTx.Rollback()
+			}
 			panic(r)
 		}
 	}()
 
 	if err := fn(tx); err != nil {
 		_ = regularTx.Rollback()
-		_ = ignoredTx.Rollback()
+		if !journalEnabled {
+			_ = ignoredTx.Rollback()
+		}
 		return err
 	}
 
@@ -222,55 +253,166 @@ func (s *DoltStore) runDoltTransaction(ctx context.Context, commitMsg string, fn
 // finishDoltTransaction commits the regular SQL transaction, its associated
 // Dolt revision, and then the ignored-table transaction. Once the regular SQL
 // transaction succeeds, later failures have an indeterminate durable outcome.
+// When the journal pinned both planes into the regular transaction, that single
+// commit already carried the ignored tables and there is no second transaction
+// to roll back or commit.
 func (s *DoltStore) finishDoltTransaction(ctx context.Context, conn *sql.Conn, tx *doltTransaction, commitMsg string) error {
+	rollbackIgnored := func() {
+		if !tx.journalPinned {
+			_ = tx.ignoredTx.Rollback()
+		}
+	}
+
 	if err := tx.regularTx.Commit(); err != nil {
-		_ = tx.ignoredTx.Rollback()
+		rollbackIgnored()
 		return wrapSQLCommitError("sql commit (regular)", err)
 	}
 
 	if err := versioncontrolops.StageAndCommit(ctx, conn, tx.dirty.DirtyTables(), commitMsg, s.commitAuthorString()); err != nil {
-		_ = tx.ignoredTx.Rollback()
+		rollbackIgnored()
 		return fmt.Errorf("stage and commit after regular SQL commit: %w: %w", err, ErrCommitIndeterminate)
 	}
 
+	if tx.journalPinned {
+		return nil
+	}
 	if err := tx.ignoredTx.Commit(); err != nil {
 		return fmt.Errorf("sql commit (ignored, regular already committed): %w: %w", err, ErrCommitIndeterminate)
 	}
 	return nil
 }
 
-func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (*sql.DB, *sql.Conn, *sql.Tx, error) {
-	// Use an independent single-connection pool for ignored tables. Reusing the
-	// main pool can deadlock when MaxOpenConns=1, and each Dolt SQL session has
-	// its own active branch. This intentionally pays one extra connection setup
-	// for mixed regular/ignored writes so the ignored transaction can be checked
-	// out to the regular transaction's branch before writes.
+// ignoredTxBorrowTimeout bounds how long a borrow of a second warm connection
+// from the main pool may wait before falling back to a dedicated fresh dial. It
+// keeps the second acquisition from ever waiting unboundedly while the caller
+// already holds the first (regular-tx) connection, which is what makes deadlock
+// impossible by construction on the borrow path.
+const ignoredTxBorrowTimeout = 250 * time.Millisecond
+
+// beginIgnoredTxOnBranch starts the ignored-tables transaction, checked out to
+// the regular transaction's branch. It borrows a second warm connection from the
+// main pool when one is safely available — the hosted-gateway churn fix: once the
+// pool is warm this costs zero new MySQL handshakes and zero Dolt session-setup
+// round-trips per write. It falls back to a dedicated single-connection pool when
+// borrowing could deadlock (MaxOpenConns==1, the documented case that every
+// branch-isolated test exercises) or when the pool is exhausted or a borrowed
+// connection turns out to be stale.
+//
+// The returned cleanup closure releases whichever acquisition path was taken, so
+// the caller does not need to know which one ran.
+func (s *DoltStore) beginIgnoredTxOnBranch(ctx context.Context, branch string) (cleanup func(), tx *sql.Tx, err error) {
+	// Borrow fast path: reuse an already-open pooled connection. Unlike the
+	// fallback below, this path never switches the session's branch — see
+	// beginBorrowedTx for the pool invariant it preserves.
+	if conn := s.borrowConnForIgnoredTx(ctx); conn != nil {
+		tx, err := beginBorrowedTx(ctx, conn, branch)
+		if err == nil {
+			return func() { _ = conn.Close() }, tx, nil
+		}
+		// A stale pooled connection or a session on another branch: a fresh
+		// dial always worked before, so discard this one (its session state is
+		// untouched) and fall through to the fallback.
+		_ = conn.Close()
+	}
+
+	// Fallback: a dedicated single-connection pool, paying the fresh dial the
+	// borrow path exists to avoid.
+	doltMetrics.ignoredTxFreshPool.Add(ctx, 1)
 	db, err := sql.Open("mysql", s.connStr)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to open ignored tx connection: %w", err)
 	}
 	db.SetMaxOpenConns(1)
 
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to acquire ignored tx connection: %w", err)
+		return nil, nil, fmt.Errorf("failed to acquire ignored tx connection: %w", err)
 	}
 
-	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
-		_ = conn.Close()
-		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
-	}
-
-	tx, err := conn.BeginTx(ctx, nil)
+	tx, err = beginTxOnConn(ctx, conn, branch)
 	if err != nil {
 		_ = conn.Close()
 		_ = db.Close()
-		return nil, nil, nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+		return nil, nil, err
 	}
 
-	return db, conn, tx, nil
+	return func() { _ = conn.Close(); _ = db.Close() }, tx, nil
+}
+
+// borrowConnForIgnoredTx returns a second connection borrowed from the main pool
+// for the ignored-tables transaction, or nil if borrowing is unsafe or would
+// block. The caller falls back to a dedicated single-connection pool on nil.
+func (s *DoltStore) borrowConnForIgnoredTx(ctx context.Context) *sql.Conn {
+	st := s.db.Stats()
+	// MaxOpenConns==1: the caller already pinned the pool's only connection for
+	// the regular tx, so a borrow would deadlock. Preserve today's behavior.
+	if st.MaxOpenConnections == 1 {
+		return nil
+	}
+	// Exhausted pool: skip the wait and go straight to the fallback.
+	// MaxOpenConnections==0 means unlimited — always safe to grow.
+	if st.MaxOpenConnections > 0 && st.InUse >= st.MaxOpenConnections {
+		return nil
+	}
+
+	bctx, cancel := context.WithTimeout(ctx, ignoredTxBorrowTimeout)
+	defer cancel()
+	conn, err := s.db.Conn(bctx)
+	if err != nil {
+		// Lost a stats/Conn race, parent ctx canceled, or a slow dial exceeded
+		// the borrow timeout — fall back to a fresh dial.
+		return nil
+	}
+	return conn
+}
+
+// beginBorrowedTx begins the ignored-tables transaction on a connection
+// borrowed from the main pool, without ever changing that session's branch.
+//
+// Pool invariant: DOLT_CHECKOUT is session-level, and the borrow cleanup
+// returns the connection to the pool as-is — so switching its branch here
+// would leak a foreign branch into the pool for an unrelated later caller.
+// Every other production checkout site (federation staging, compact, flatten)
+// restores the branch before releasing the connection; the borrow path
+// preserves the same invariant by refusing instead of switching. Today no
+// shipped flow diverges a pool session's branch from the regular tx's branch
+// (DoltStore.Checkout has no non-test callers), so this is defense in depth
+// for future Checkout callers and for multi-connection tests.
+//
+// Instead of an unconditional checkout it verifies the session is already on
+// the requested branch — the overwhelmingly common case — and sends the
+// caller to the fresh-dial fallback otherwise. Same round-trip count as the
+// checkout it replaces (one statement), so the borrow fast path stays free.
+func beginBorrowedTx(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
+	var active string
+	if err := conn.QueryRowContext(ctx, "SELECT active_branch()").Scan(&active); err != nil {
+		return nil, fmt.Errorf("failed to read borrowed conn's active branch: %w", err)
+	}
+	if active != branch {
+		return nil, fmt.Errorf("borrowed conn is on branch %q, want %q: refusing to switch a pooled session's branch", active, branch)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+	}
+	return tx, nil
+}
+
+// beginTxOnConn checks a connection out to branch and begins a transaction on
+// it. Only the fallback path uses it: the fallback owns a dedicated
+// single-connection pool, so checking its session out is safe. Every Dolt SQL
+// session has its own active branch, so the explicit checkout is required on
+// a fresh dial.
+func beginTxOnConn(ctx context.Context, conn *sql.Conn, branch string) (*sql.Tx, error) {
+	if _, err := conn.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", branch); err != nil {
+		return nil, fmt.Errorf("failed to checkout ignored tx branch %s: %w", branch, err)
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin ignored tx: %w", err)
+	}
+	return tx, nil
 }
 
 // isDoltNothingToCommit returns true if the error indicates there were no
@@ -286,19 +428,22 @@ func (t *doltTransaction) CreateIssue(ctx context.Context, issue *types.Issue, a
 		return fmt.Errorf("issue must not be nil")
 	}
 
-	if issueops.IsWisp(issue) {
-		bc, err := issueops.NewBatchContext(ctx, t.ignoredTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
-		if err != nil {
-			return err
-		}
-		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
-		return err
-	}
-
+	// Build the validation context on regularTx for both tiers: wisp rows
+	// live on the ignored session, but the validation context (config,
+	// custom_types) lives in regular dolt-tracked tables — reading it
+	// through regularTx keeps types registered earlier in this transaction
+	// (tx.SetConfig("types.custom", ...)) visible. Both sessions are
+	// pinned to the same branch (GH#5443).
 	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{SkipPrefixValidation: true})
 	if err != nil {
 		return err
 	}
+
+	if issueops.IsWisp(issue) {
+		_, err = issueops.CreateIssueInTxWithResult(ctx, t.ignoredTx, bc, issue, actor)
+		return err
+	}
+
 	result, err := issueops.CreateIssueInTxWithResult(ctx, t.regularTx, bc, issue, actor)
 	if err != nil {
 		return err
@@ -331,11 +476,18 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 		}
 	}
 
+	// See CreateIssue: one validation context on regularTx serves both
+	// tiers, so in-transaction custom-type registration is visible to the
+	// wisp tier too (GH#5443).
+	bc, err := issueops.NewBatchContext(ctx, t.regularTx, storage.BatchCreateOptions{
+		SkipPrefixValidation: true,
+	})
+	if err != nil {
+		return err
+	}
+
 	if len(regularIssues) > 0 {
-		result, err := issueops.CreateIssuesInTxWithResult(ctx, t.regularTx, regularIssues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
-			SkipPrefixValidation: true,
-		})
+		result, err := issueops.CreateIssuesInTxWithContext(ctx, t.regularTx, bc, regularIssues, actor)
 		if err != nil {
 			return err
 		}
@@ -345,10 +497,7 @@ func (t *doltTransaction) CreateIssues(ctx context.Context, issues []*types.Issu
 	}
 
 	if len(wispIssues) > 0 {
-		if _, err := issueops.CreateIssuesInTxWithResult(ctx, t.ignoredTx, wispIssues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
-			SkipPrefixValidation: true,
-		}); err != nil {
+		if _, err := issueops.CreateIssuesInTxWithContext(ctx, t.ignoredTx, bc, wispIssues, actor); err != nil {
 			return err
 		}
 	}
@@ -371,6 +520,14 @@ func (t *doltTransaction) GetIssue(ctx context.Context, id string) (*types.Issue
 // regularTx/ignoredTx (see txFor). Not worth re-implementing: partial-ID
 // resolution calls the (fast) store path, never a transaction, so this is cold.
 func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	// The caller wants ids only, so opt out of the bulk label read SearchIssues
+	// would otherwise run and then project away. filter is a value copy, so this
+	// does not touch the caller's filter. SkipLabels gates only hydration: the
+	// label-driven WHERE predicates (LabelPattern, ExcludeLabels, LabelRegex,
+	// Labels/LabelsAny) are built from their own filter fields in
+	// BuildIssueFilterClauses and still select the same rows. Dependency
+	// hydration is already gated on IncludeDependencies, so it costs nothing here.
+	filter.SkipLabels = true
 	issues, err := t.SearchIssues(ctx, query, filter)
 	if err != nil {
 		return nil, err
@@ -383,328 +540,95 @@ func (t *doltTransaction) SearchIssueIDs(ctx context.Context, query string, filt
 }
 
 // SearchIssues searches for issues within the transaction.
-// Supports the same filter fields as DoltStore.SearchIssues (bd-v6v8).
+//
+// The WHERE clause, the ORDER BY, the row bound and the label/dependency
+// hydration all come from the SHARED implementation the store-level searches
+// use (sqlbuild.BuildIssueFilterClauses, sqlbuild.OrderBy,
+// issueops.EffectiveSearchLimit/EnforceMaxRowsCap,
+// issueops.GetLabelsForIssuesFromTableInTx). This used to be a second,
+// hand-rolled filter builder, and that was the whole defect: a field the second
+// builder did not implement was not refused, it was IGNORED, and the caller got
+// plausible wrong rows with no error (ga-v1nuj — Statuses, ExcludeLabels,
+// LabelPattern, LabelRegex, IsBlocked, StartedAfter/StartedBefore,
+// SortBy/SortDesc, MaxRows and the AfterID/AfterCreatedAt keyset cursor were all
+// accepted and dropped; labels were never hydrated at all). A new filter field
+// now reaches this path for free, which is the point of not having a second
+// builder.
+//
+// What still differs from the store-level search, deliberately and visibly:
+//
+//   - NO WISP MERGE. This runs ONE table — issues, or wisps when the filter
+//     routes there — because doltTransaction splits the two tiers across
+//     regularTx/ignoredTx (see txFor) and the shared searchInTx merges them over
+//     a single *sql.Tx. So a default (SkipWisps=false) search here answers what
+//     a SkipWisps=true search answers at the store level. That is a structural
+//     difference in the transaction, not a dropped filter field, and merging the
+//     tiers is its own change with its own blast radius.
+//   - filter.Lite and filter.NoIDShrink are not read. Both describe HOW to
+//     fetch, not WHICH rows: ignoring Lite returns fully populated rows with
+//     IsLitePartial left false, which is exactly what that flag promises a
+//     caller may receive, and this path is always id-shrunk anyway. Neither can
+//     produce a wrong answer, so neither is worth a refusal.
+//   - filter.Offset is not read — nor is it read by issueops, so the store-level
+//     search ignores it too. Refusing it HERE would invent a divergence rather
+//     than remove one.
 func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) {
-	table := "issues"
+	tables := issueops.IssuesFilterTables
 	if filter.Ephemeral != nil && *filter.Ephemeral {
-		table = "wisps"
+		tables = issueops.WispsFilterTables
 	}
 	// If searching by IDs that are all ephemeral, use wisps table (bd-w2w)
 	if len(filter.IDs) > 0 && allEphemeral(filter.IDs) {
-		table = "wisps"
+		tables = issueops.WispsFilterTables
 	}
 
-	// Derive related table names from the main table
-	depTable := "dependencies"
-	labelTable := "labels"
-	if table == "wisps" {
-		depTable = "wisp_dependencies"
-		labelTable = "wisp_labels"
+	whereClauses, args, err := issueops.BuildIssueFilterClauses(query, filter, tables)
+	if err != nil {
+		return nil, err
 	}
-
-	whereClauses := []string{}
-	args := []interface{}{}
-
-	// Text search — optimized to avoid full-table scans (hq-319).
-	if query != "" {
-		lowerQuery := strings.ToLower(query)
-		if looksLikeIssueID(query) {
-			whereClauses = append(whereClauses, "(id = ? OR id LIKE ? OR LOWER(title) LIKE ?)")
-			args = append(args, lowerQuery, lowerQuery+"%", "%"+lowerQuery+"%")
-		} else {
-			whereClauses = append(whereClauses, "(LOWER(title) LIKE ? OR id LIKE ?)")
-			pattern := "%" + lowerQuery + "%"
-			args = append(args, pattern, pattern)
-		}
-	}
-
-	if filter.TitleSearch != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleSearch)+"%")
-	}
-	if filter.TitleContains != "" {
-		whereClauses = append(whereClauses, "LOWER(title) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.TitleContains)+"%")
-	}
-	if filter.DescriptionContains != "" {
-		whereClauses = append(whereClauses, "LOWER(description) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.DescriptionContains)+"%")
-	}
-	if filter.NotesContains != "" {
-		whereClauses = append(whereClauses, "LOWER(notes) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.NotesContains)+"%")
-	}
-	if filter.ExternalRefContains != "" {
-		whereClauses = append(whereClauses, "LOWER(external_ref) LIKE ?")
-		args = append(args, "%"+strings.ToLower(filter.ExternalRefContains)+"%")
-	}
-	if filter.ExternalRef != nil {
-		whereClauses = append(whereClauses, "external_ref = ?")
-		args = append(args, *filter.ExternalRef)
-	}
-
-	// Status
-	if filter.Status != nil {
-		whereClauses = append(whereClauses, "status = ?")
-		args = append(args, *filter.Status)
-	}
-	if len(filter.ExcludeStatus) > 0 {
-		placeholders := make([]string, len(filter.ExcludeStatus))
-		for i, s := range filter.ExcludeStatus {
-			placeholders[i] = "?"
-			args = append(args, string(s))
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("status NOT IN (%s)", strings.Join(placeholders, ",")))
-	}
-
-	if len(filter.ExcludeTypes) > 0 {
-		placeholders := make([]string, len(filter.ExcludeTypes))
-		for i, tp := range filter.ExcludeTypes {
-			placeholders[i] = "?"
-			args = append(args, string(tp))
-		}
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type NOT IN (%s))", table, strings.Join(placeholders, ",")))
-	}
-
-	// Priority
-	if filter.Priority != nil {
-		whereClauses = append(whereClauses, "priority = ?")
-		args = append(args, *filter.Priority)
-	}
-	if filter.PriorityMin != nil {
-		whereClauses = append(whereClauses, "priority >= ?")
-		args = append(args, *filter.PriorityMin)
-	}
-	if filter.PriorityMax != nil {
-		whereClauses = append(whereClauses, "priority <= ?")
-		args = append(args, *filter.PriorityMax)
-	}
-
-	if filter.IssueType != nil {
-		//nolint:gosec // G201: table is hardcoded to "issues" or "wisps"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT id FROM %s WHERE issue_type = ?)", table))
-		args = append(args, *filter.IssueType)
-	}
-
-	// Assignee
-	if filter.Assignee != nil {
-		whereClauses = append(whereClauses, "assignee = ?")
-		args = append(args, *filter.Assignee)
-	}
-
-	// Date ranges
-	if filter.CreatedAfter != nil {
-		whereClauses = append(whereClauses, "created_at > ?")
-		args = append(args, filter.CreatedAfter.Format(time.RFC3339))
-	}
-	if filter.CreatedBefore != nil {
-		whereClauses = append(whereClauses, "created_at < ?")
-		args = append(args, filter.CreatedBefore.Format(time.RFC3339))
-	}
-	if filter.UpdatedAfter != nil {
-		whereClauses = append(whereClauses, "updated_at > ?")
-		args = append(args, filter.UpdatedAfter.Format(time.RFC3339))
-	}
-	if filter.UpdatedBefore != nil {
-		whereClauses = append(whereClauses, "updated_at < ?")
-		args = append(args, filter.UpdatedBefore.Format(time.RFC3339))
-	}
-	if filter.ClosedAfter != nil {
-		whereClauses = append(whereClauses, "closed_at > ?")
-		args = append(args, filter.ClosedAfter.Format(time.RFC3339))
-	}
-	if filter.ClosedBefore != nil {
-		whereClauses = append(whereClauses, "closed_at < ?")
-		args = append(args, filter.ClosedBefore.Format(time.RFC3339))
-	}
-	if filter.DeferAfter != nil {
-		whereClauses = append(whereClauses, "defer_until > ?")
-		args = append(args, filter.DeferAfter.Format(time.RFC3339))
-	}
-	if filter.DeferBefore != nil {
-		whereClauses = append(whereClauses, "defer_until < ?")
-		args = append(args, filter.DeferBefore.Format(time.RFC3339))
-	}
-	if filter.DueAfter != nil {
-		whereClauses = append(whereClauses, "due_at > ?")
-		args = append(args, filter.DueAfter.Format(time.RFC3339))
-	}
-	if filter.DueBefore != nil {
-		whereClauses = append(whereClauses, "due_at < ?")
-		args = append(args, filter.DueBefore.Format(time.RFC3339))
-	}
-
-	// Empty/null checks
-	if filter.EmptyDescription {
-		whereClauses = append(whereClauses, "(description IS NULL OR description = '')")
-	}
-	if filter.NoAssignee {
-		whereClauses = append(whereClauses, "(assignee IS NULL OR assignee = '')")
-	}
-	if filter.NoLabels {
-		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT DISTINCT issue_id FROM %s)", labelTable))
-	}
-
-	// Label filtering (AND)
-	if len(filter.Labels) > 0 {
-		for _, label := range filter.Labels {
-			//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-			whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label = ?)", labelTable))
-			args = append(args, label)
-		}
-	}
-
-	// Label filtering (OR)
-	if len(filter.LabelsAny) > 0 {
-		placeholders := make([]string, len(filter.LabelsAny))
-		for i, label := range filter.LabelsAny {
-			placeholders[i] = "?"
-			args = append(args, label)
-		}
-		//nolint:gosec // G201: labelTable is hardcoded to "labels" or "wisp_labels"
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label IN (%s))", labelTable, strings.Join(placeholders, ", ")))
-	}
-
-	// ID filtering
-	if len(filter.IDs) > 0 {
-		placeholders := make([]string, len(filter.IDs))
-		for i, id := range filter.IDs {
-			placeholders[i] = "?"
-			args = append(args, id)
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("id IN (%s)", strings.Join(placeholders, ", ")))
-	}
-
-	if filter.IDPrefix != "" {
-		whereClauses = append(whereClauses, "id LIKE ?")
-		args = append(args, filter.IDPrefix+"%")
-	}
-	if filter.SpecIDPrefix != "" {
-		whereClauses = append(whereClauses, "spec_id LIKE ?")
-		args = append(args, filter.SpecIDPrefix+"%")
-	}
-
-	// Source repo
-	if filter.SourceRepo != nil {
-		whereClauses = append(whereClauses, "source_repo = ?")
-		args = append(args, *filter.SourceRepo)
-	}
-
-	// Ephemeral filtering (when querying issues table with explicit ephemeral filter)
-	if filter.Ephemeral != nil {
-		if *filter.Ephemeral {
-			whereClauses = append(whereClauses, "ephemeral = 1")
-		} else {
-			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-		}
-	}
-
-	// Pinned filtering
-	if filter.Pinned != nil {
-		if *filter.Pinned {
-			whereClauses = append(whereClauses, "pinned = 1")
-		} else {
-			whereClauses = append(whereClauses, "(pinned = 0 OR pinned IS NULL)")
-		}
-	}
-
-	// Template filtering
-	if filter.IsTemplate != nil {
-		if *filter.IsTemplate {
-			whereClauses = append(whereClauses, "is_template = 1")
-		} else {
-			whereClauses = append(whereClauses, "(is_template = 0 OR is_template IS NULL)")
-		}
-	}
-
-	// Parent filtering
-	if filter.ParentID != nil {
-		parentID := *filter.ParentID
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		whereClauses = append(whereClauses, fmt.Sprintf("(id IN (SELECT issue_id FROM %s WHERE type = 'parent-child' AND %s = ?) OR (id LIKE CONCAT(?, '.%%') AND id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')))", depTable, issueops.DepTargetExpr, depTable))
-		args = append(args, parentID, parentID)
-	}
-
-	// No-parent filtering
-	if filter.NoParent {
-		//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
-		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE type = 'parent-child')", depTable))
-	}
-
-	// Molecule type filtering
-	if filter.MolType != nil {
-		whereClauses = append(whereClauses, "mol_type = ?")
-		args = append(args, string(*filter.MolType))
-	}
-
-	// Wisp type filtering
-	if filter.WispType != nil {
-		whereClauses = append(whereClauses, "wisp_type = ?")
-		args = append(args, string(*filter.WispType))
-	}
-
-	// Time-based scheduling filters
-	if filter.Deferred {
-		whereClauses = append(whereClauses, "(defer_until IS NOT NULL OR status = ?)")
-		args = append(args, types.StatusDeferred)
-	}
-	if filter.Overdue {
-		whereClauses = append(whereClauses, "due_at IS NOT NULL AND due_at < ? AND status != ?")
-		args = append(args, time.Now().UTC().Format(time.RFC3339), types.StatusClosed)
-	}
-
-	// Metadata existence check
-	if filter.HasMetadataKey != "" {
-		if err := storage.ValidateMetadataKey(filter.HasMetadataKey); err != nil {
-			return nil, err
-		}
-		whereClauses = append(whereClauses, "JSON_EXTRACT(metadata, ?) IS NOT NULL")
-		args = append(args, storage.JSONMetadataPath(filter.HasMetadataKey))
-	}
-
-	// Metadata field equality filters
-	if len(filter.MetadataFields) > 0 {
-		metaKeys := make([]string, 0, len(filter.MetadataFields))
-		for k := range filter.MetadataFields {
-			metaKeys = append(metaKeys, k)
-		}
-		sort.Strings(metaKeys)
-		for _, k := range metaKeys {
-			if err := storage.ValidateMetadataKey(k); err != nil {
-				return nil, err
-			}
-			whereClauses = append(whereClauses, "JSON_UNQUOTE(JSON_EXTRACT(metadata, ?)) = ?")
-			args = append(args, storage.JSONMetadataPath(k), filter.MetadataFields[k])
-		}
-	}
-
 	whereSQL := ""
 	if len(whereClauses) > 0 {
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
+	// A page bound is only pushed under an order the query can express (the rule
+	// issueops.searchTableInTxT states): a Go-side sort key renders no ORDER BY,
+	// and a LIMIT with no ORDER BY does not return the first n rows, it returns n
+	// rows. Under such a key the query scans the whole matching set and the bound
+	// is applied below, after the order exists.
+	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
+	eff := issueops.EffectiveSearchLimit(filter.Limit, filter.MaxRows)
 	limitSQL := ""
-	if filter.Limit > 0 {
-		limitSQL = fmt.Sprintf(" LIMIT %d", filter.Limit)
+	if eff > 0 && !goSideSort {
+		limitSQL = fmt.Sprintf(" LIMIT %d", eff)
 	}
 
-	//nolint:gosec // G201: table is hardcoded, whereSQL is parameterized
-	rows, err := t.txFor(table).QueryContext(ctx, fmt.Sprintf(`
-		SELECT id FROM %s %s ORDER BY priority ASC, created_at DESC %s
-	`, table, whereSQL, limitSQL), args...)
+	//nolint:gosec // G201: table name is a fixed constant, whereSQL is parameterized
+	rows, err := t.txFor(tables.Main).QueryContext(ctx, fmt.Sprintf(
+		`SELECT id FROM %s %s %s %s`,
+		tables.Main, whereSQL, sqlbuild.OrderBy(filter.SortBy, filter.SortDesc, ""), limitSQL), args...)
 	if err != nil {
 		return nil, wrapQueryError("search issues in tx", err)
 	}
 
 	var ids []string
+	seen := make(map[string]struct{})
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
 			return nil, wrapScanError("search issues in tx", err)
 		}
+		// Structural parity with issueops.searchTableInTxT, which dedups because
+		// it can drive from a joined label table where a row repeats (GH#3567).
+		// This tx query is JOIN-free — only id IN (<correlated subquery>)
+		// predicates from sqlbuild.BuildIssueFilterClauses — so a row cannot
+		// actually repeat on this path; the dedup mirrors the reference rather
+		// than guarding a live duplicate source here.
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
@@ -712,6 +636,13 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		return nil, wrapQueryError("search issues in tx: rows iteration", err)
 	}
 	_ = rows.Close()
+
+	if goSideSort {
+		sort.SliceStable(ids, func(i, j int) bool { return sqlbuild.LessID(ids[i], ids[j], filter.SortDesc) })
+		if eff > 0 && len(ids) > eff {
+			ids = ids[:eff]
+		}
+	}
 
 	var issues []*types.Issue
 	for _, id := range ids {
@@ -721,9 +652,82 @@ func (t *doltTransaction) SearchIssues(ctx context.Context, query string, filter
 		}
 		issues = append(issues, issue)
 	}
+	if err := t.hydrateSearchLabels(ctx, tables, filter, issues); err != nil {
+		return nil, err
+	}
+	if err := t.hydrateSearchDependencies(ctx, tables.Dependencies, filter, issues); err != nil {
+		return nil, err
+	}
+
+	// Trim to the caller's page before the cap check, exactly as
+	// issueops.searchInTx does: the cap is a statement about the rows actually
+	// handed back, and eff can exceed filter.Limit when MaxRows sized the bound.
+	if filter.Limit > 0 && len(issues) > filter.Limit {
+		issues = issues[:filter.Limit]
+	}
+	if err := issueops.EnforceMaxRowsCap(len(issues), filter.MaxRows, filter.MaxRowsSource); err != nil {
+		return nil, err
+	}
 	return issues, nil
 }
 
+// hydrateSearchLabels populates Issue.Labels from the tier the search ran
+// against, using the same bulk read issueops.searchInTx uses. SkipLabels is the
+// caller's opt-out; without this the transaction answered every search with
+// unlabeled issues while the store-level search labeled them (ga-v1nuj).
+func (t *doltTransaction) hydrateSearchLabels(ctx context.Context, tables issueops.FilterTables, filter types.IssueFilter, issues []*types.Issue) error {
+	if filter.SkipLabels || len(issues) == 0 {
+		return nil
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	labelsByID, err := issueops.GetLabelsForIssuesFromTableInTx(ctx, t.txFor(tables.Labels), tables.Labels, ids)
+	if err != nil {
+		return fmt.Errorf("search issues in tx: hydrate labels: %w", err)
+	}
+	for _, issue := range issues {
+		if labels, ok := labelsByID[issue.ID]; ok {
+			issue.Labels = labels
+		}
+	}
+	return nil
+}
+
+// hydrateSearchDependencies populates Issue.Dependencies when the filter asked
+// for it, using the same bulk read issueops.SearchIssuesInTx uses so the two
+// backends answer IncludeDependencies from one implementation. Issues with no
+// edges keep a nil slice; the map simply has no entry for them.
+func (t *doltTransaction) hydrateSearchDependencies(ctx context.Context, depTable string, filter types.IssueFilter, issues []*types.Issue) error {
+	if !filter.IncludeDependencies || len(issues) == 0 {
+		return nil
+	}
+	ids := make([]string, len(issues))
+	for i, issue := range issues {
+		ids[i] = issue.ID
+	}
+	depsByID, err := issueops.GetDependencyRecordsForIssuesFromTableInTx(ctx, t.txFor(depTable), depTable, ids)
+	if err != nil {
+		return fmt.Errorf("search issues in tx: hydrate dependencies: %w", err)
+	}
+	for _, issue := range issues {
+		if deps, ok := depsByID[issue.ID]; ok {
+			issue.Dependencies = deps
+		}
+	}
+	return nil
+}
+
+// UpdateIssue applies field updates and records the "updated" history event,
+// which is what the store-level DoltStore.UpdateIssue records for the same
+// change and what embeddedTransaction.UpdateIssue records here. Wrapping an
+// update in a transaction must not change its audit trail: a consumer cannot
+// see which backend or which call shape it got, so a transaction-only silence
+// shows up as a user's own edits missing from the history of their own issue.
+// The eventless variant exists for demotion (ephemeral_routing.go), which
+// copies the historical event stream and appends one demotion event of its
+// own; a generic update is not that case.
 func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error {
 	table := "issues"
 	if t.isActiveWisp(ctx, id) {
@@ -740,11 +744,7 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 		}
 	}
 
-	update := issueops.UpdateIssueWithoutEventInTx
-	if t.lifecycle {
-		update = issueops.UpdateIssueInTx
-	}
-	result, err := update(ctx, t.txFor(table), id, updates, actor)
+	result, err := issueops.UpdateIssueInTx(ctx, t.txFor(table), id, updates, actor)
 	if err != nil {
 		return wrapExecError("update issue in tx", err)
 	}
@@ -752,10 +752,8 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 		return nil
 	}
 	t.dirty.MarkDirty(table)
-	if t.lifecycle {
-		_, _, eventTable, _ := issueops.WispTableRouting(table == "wisps")
-		t.dirty.MarkDirty(eventTable)
-	}
+	_, _, eventTable, _ := issueops.WispTableRouting(table == "wisps")
+	t.dirty.MarkDirty(eventTable)
 	return nil
 }
 
@@ -868,7 +866,7 @@ func (t *doltTransaction) AddDependencyWithOptions(ctx context.Context, dep *typ
 	// own tx and hand the row to AddDependencyInTx.
 	crossTierTarget := kind != issueops.DepTargetExternal && t.txFor(targetTable) != t.txFor(table)
 	if crossTierTarget {
-		precheck, err := t.readDepTargetForPrecheck(ctx, targetTable, dep.DependsOnID)
+		precheck, err := t.readDepTargetForPrecheck(ctx, dep.IssueID, targetTable, dep.DependsOnID)
 		if err != nil {
 			return err
 		}
@@ -959,14 +957,14 @@ func (t *doltTransaction) addWispDepSuspendingIssueTargetFK(ctx context.Context,
 // readDepTargetForPrecheck validates a dependency target on the transaction
 // that owns its table and returns the row fields AddDependencyInTx needs when
 // it cannot read the target itself (cross-tier edges).
-func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, targetTable, id string) (*issueops.DepTargetPrecheck, error) {
+func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, sourceID, targetTable, id string) (*issueops.DepTargetPrecheck, error) {
 	var p issueops.DepTargetPrecheck
 	//nolint:gosec // G201: targetTable is "issues" or "wisps"
 	err := t.txFor(targetTable).QueryRowContext(ctx,
 		fmt.Sprintf(`SELECT issue_type, status FROM %s WHERE id = ?`, targetTable), id,
 	).Scan(&p.IssueType, &p.Status)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("issue %s not found", id)
+		return nil, issueops.MissingDependencyTarget(sourceID, id)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to check target issue existence: %w", err)
@@ -974,16 +972,17 @@ func (t *doltTransaction) readDepTargetForPrecheck(ctx context.Context, targetTa
 	return &p, nil
 }
 
-// checkCrossTierSchedulingCycle rejects a scheduling edge (blocks,
-// conditional-blocks, parent-child — the same set issueops.CheckDependencyCycleInTx
-// gates) that would close a cycle, using the merged view of both sessions'
-// dependency tables. The in-tx cycle check scans both tables on the write tx
-// and so misses edges added on the other session earlier in this logical
-// transaction.
+// checkCrossTierSchedulingCycle rejects a scheduling edge that would close a
+// cycle, using the merged view of both sessions' dependency tables. The in-tx
+// cycle check scans both tables on the write tx and so misses edges added on
+// the other session earlier in this logical transaction.
+//
+// The set is types.IsSchedulingEdge's, by call and not by restatement: an
+// inline copy that missed a fifth scheduling type would fall through to
+// "not a scheduling edge" and skip this gate entirely, which is silence rather
+// than a failure — the whole reason that predicate was consolidated (ga-2ltro.10).
 func (t *doltTransaction) checkCrossTierSchedulingCycle(ctx context.Context, dep *types.Dependency) error {
-	switch dep.Type {
-	case types.DepBlocks, types.DepConditionalBlocks, types.DepParentChild:
-	default:
+	if !types.IsSchedulingEdge(dep.Type) {
 		return nil
 	}
 	cycle, err := t.CycleThroughEdges(ctx, [][2]string{{dep.IssueID, dep.DependsOnID}})
@@ -1137,10 +1136,28 @@ func (t *doltTransaction) SetConfig(ctx context.Context, key, value string) erro
 		INSERT INTO config (`+"`key`"+`, value) VALUES (?, ?)
 		ON DUPLICATE KEY UPDATE value = VALUES(value)
 	`, key, value)
-	if err == nil {
-		t.dirty.MarkDirty("config")
+	if err != nil {
+		return wrapExecError("set config in tx", err)
 	}
-	return wrapExecError("set config in tx", err)
+	t.dirty.MarkDirty("config")
+
+	// ResolveCustomTypesInTx reads the normalized tables first, so without
+	// this sync a type registered in-transaction stays invisible to
+	// validation whenever the table already has rows.
+	table, err := issueops.SyncConfigTables(ctx, t.regularTx, key, value)
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		t.dirty.MarkDirty(table)
+	}
+
+	// Keep store-level caches (GetCustomTypes and friends) coherent with
+	// in-transaction config writes; see invalidateConfigCaches.
+	if t.store != nil {
+		t.store.invalidateConfigCaches(key)
+	}
+	return nil
 }
 
 // GetConfig gets a config value within the transaction
@@ -1213,6 +1230,14 @@ func (t *doltTransaction) ImportIssueComment(ctx context.Context, issueID, autho
 	if err != nil {
 		return nil, fmt.Errorf("failed to add comment: %w", err)
 	}
+	// This path writes the comment row directly rather than through
+	// issueops.ImportIssueCommentInTx, so it must journal the comment op itself
+	// — the create/comment entry points cover their own writes, not this one.
+	if err := issueops.RecordCommentEventInTx(ctx, t.txFor(table), issueID, &issueops.EventComment{
+		ID: id, Author: author, Text: text, CreatedAt: stored, Source: issueops.CommentSourceStructured,
+	}); err != nil {
+		return nil, wrapExecError("journal import comment in tx", err)
+	}
 	return &types.Comment{ID: id, IssueID: issueID, Author: author, Text: text, CreatedAt: stored}, nil
 }
 
@@ -1251,16 +1276,32 @@ func (t *doltTransaction) AddComment(ctx context.Context, issueID, actor, commen
 		table = "wisp_events"
 	}
 
-	err := issueops.InsertDerivedEvent(ctx, t.txFor(table), table, issueops.AuxEvent{
+	createdAt := issueops.NowAuxTime()
+	id, err := issueops.InsertDerivedEventReturningID(ctx, t.txFor(table), table, issueops.AuxEvent{
 		IssueID:   issueID,
 		EventType: types.EventCommented,
 		Actor:     actor,
 		Comment:   sql.NullString{String: comment, Valid: true},
+		CreatedAt: createdAt,
 	})
-	if err == nil {
-		t.dirty.MarkDirty(table)
+	if err != nil {
+		return wrapExecError("add comment in tx", err)
 	}
-	return wrapExecError("add comment in tx", err)
+	t.dirty.MarkDirty(table)
+	stored, err := issueops.ParseAuxTime(createdAt)
+	if err != nil {
+		return wrapExecError("add comment in tx", err)
+	}
+	// This path writes the audit comment row directly rather than through
+	// issueops.AddCommentEventInTx, so it must journal the comment op itself.
+	// The text is replayable content, so it carries the same payload as a
+	// structured comment, distinguished by Source.
+	if err := issueops.RecordCommentEventInTx(ctx, t.txFor(table), issueID, &issueops.EventComment{
+		ID: id, Author: actor, Text: comment, CreatedAt: stored, Source: issueops.CommentSourceAudit,
+	}); err != nil {
+		return wrapExecError("journal comment in tx", err)
+	}
+	return nil
 }
 
 // GetIssueCommentsPage returns one keyset page of an issue's comments within the

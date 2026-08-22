@@ -81,6 +81,19 @@ func withStubbedProxiedLookup(t *testing.T, hardErr error) {
 	})
 }
 
+// inProxiedRoute selects the proxied route for one call.
+//
+// The label commands no longer have a run…ProxiedServer entry point to call
+// directly: their route fork moved into resolveLabelTarget and the role
+// accessor, which is the point of the change, so the route has to be selected
+// the way a real invocation selects it.
+func inProxiedRoute(run func() error) error {
+	old := proxiedServerMode
+	proxiedServerMode = true
+	defer func() { proxiedServerMode = old }()
+	return run()
+}
+
 const (
 	stubMissingID    = "bd-missing"
 	stubRawNoRows    = "sql: no rows in result set"
@@ -93,16 +106,6 @@ const (
 func showViewCmd(view string) *cobra.Command {
 	cmd := &cobra.Command{}
 	cmd.Flags().Bool(view, true, "")
-	return cmd
-}
-
-// cmdWithStringFlag registers one string flag so the command under test does
-// not fall back to an environment lookup for it - `bd comment add` shells out
-// to git for the author when --author is empty, which has nothing to do with
-// what is being tested here.
-func cmdWithStringFlag(name, value string) *cobra.Command {
-	cmd := &cobra.Command{}
-	cmd.Flags().String(name, value, "")
 	return cmd
 }
 
@@ -161,7 +164,7 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "label list",
 		run: func(ctx context.Context) error {
-			return runLabelListProxiedServer(ctx, []string{stubMissingID})
+			return inProxiedRoute(func() error { return runLabelList(ctx, []string{stubMissingID}) })
 		},
 		wantNotFound: "Error: resolving bd-missing: not found",
 		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
@@ -169,7 +172,7 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "state",
 		run: func(ctx context.Context) error {
-			return runStateProxiedServer(ctx, stubMissingID, "phase")
+			return inProxiedRoute(func() error { return runState(ctx, stubMissingID, "phase") })
 		},
 		wantNotFound: "Error: resolving bd-missing: not found",
 		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
@@ -189,7 +192,10 @@ var proxiedLookupCommands = []struct {
 		},
 		// show reports per id and keeps going, so its line has no "Error: "
 		// prefix; the non-zero exit comes from the empty result at the end.
-		wantNotFound: "Issue bd-missing not found",
+		// The second line is the ga-m6inyb hint: reportIssueLookupFailure
+		// no longer implies an absent id definitely never existed, since a
+		// deleted/purged one is observationally identical.
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error fetching bd-missing: connection reset by peer",
 	},
 	{
@@ -197,7 +203,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runShowProxiedServer(showViewCmd("refs"), ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 		exitsZero:    true,
 	},
@@ -206,7 +212,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runShowProxiedServer(showViewCmd("children"), ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 		exitsZero:    true,
 	},
@@ -235,7 +241,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runReopenProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 	},
 	{
@@ -265,12 +271,27 @@ var proxiedLookupCommands = []struct {
 		exitsZero:    true,
 	},
 	{
+		// The two routes now share one body, so this reports the DIRECT route's
+		// resolution message. It lost the "label added: " prefix the proxied
+		// route used to add, because that prefix named a write this command
+		// never attempted: resolution now happens before the role is even
+		// asked for.
 		name: "label add",
 		run: func(ctx context.Context) error {
-			return runLabelAddProxiedServer(ctx, []string{stubMissingID, "urgent"})
+			return inProxiedRoute(func() error { return runLabelAdd(ctx, []string{stubMissingID, "urgent"}) })
 		},
-		wantNotFound: `Error: label added: resolving issue ID "bd-missing": not found`,
-		wantHardErr:  `Error: label added: resolving issue ID "bd-missing": connection reset by peer`,
+		wantNotFound: `Error: resolving issue ID "bd-missing": not found`,
+		wantHardErr:  `Error: resolving issue ID "bd-missing": connection reset by peer`,
+	},
+	{
+		// The remove half of the same body, which had no row here before
+		// because it had no separately-callable proxied entry point to name.
+		name: "label remove",
+		run: func(ctx context.Context) error {
+			return inProxiedRoute(func() error { return runLabelRemove(ctx, []string{stubMissingID, "urgent"}) })
+		},
+		wantNotFound: `Error: resolving issue ID "bd-missing": not found`,
+		wantHardErr:  `Error: resolving issue ID "bd-missing": connection reset by peer`,
 	},
 	{
 		name: "label propagate",
@@ -283,9 +304,14 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "set state",
 		run: func(ctx context.Context) error {
-			return runSetStateProxiedServer(ctx, stubMissingID, "phase", "done", "")
+			return inProxiedRoute(func() error { return runSetState(ctx, stubMissingID, "phase", "done", "") })
 		},
-		wantNotFound: "Error: issue bd-missing not found",
+		// Both routes now resolve through resolveLabelTarget, so this is the
+		// direct route's message rather than the retired proxied twin's
+		// "issue bd-missing not found" — the same alignment `bd label`'s
+		// migration made, and for the same reason: resolution happens before
+		// the role is asked for anything, so the failure is not about state.
+		wantNotFound: "Error: resolving bd-missing: not found",
 		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
 	},
 	{
@@ -308,10 +334,26 @@ var proxiedLookupCommands = []struct {
 	{
 		name: "comment add",
 		run: func(ctx context.Context) error {
-			return runCommentsAddProxiedServer(cmdWithStringFlag("author", "tester"), ctx, []string{stubMissingID, "hello"})
+			return runCommentsAddProxiedServer(ctx, stubMissingID, "tester", "hello")
 		},
 		wantNotFound: "Error: issue bd-missing not found",
 		wantHardErr:  "Error: resolving bd-missing: connection reset by peer",
+	},
+	{
+		name: "human respond",
+		run: func(ctx context.Context) error {
+			return runHumanRespondProxiedServer(ctx, stubMissingID, "Response: resp")
+		},
+		wantNotFound: "Error: issue not found: bd-missing",
+		wantHardErr:  "Error: resolving issue ID bd-missing: connection reset by peer",
+	},
+	{
+		name: "human dismiss",
+		run: func(ctx context.Context) error {
+			return runHumanDismissProxiedServer(ctx, stubMissingID, "Dismissed")
+		},
+		wantNotFound: "Error: issue not found: bd-missing",
+		wantHardErr:  "Error: resolving issue ID bd-missing: connection reset by peer",
 	},
 }
 
@@ -379,7 +421,8 @@ func TestReportIssueLookupFailure(t *testing.T) {
 	t.Run("absent id names the issue", func(t *testing.T) {
 		err := fmt.Errorf("%w: issue bd-gone", storage.ErrNotFound)
 		stderr := captureStderrDuring(t, func() { reportIssueLookupFailure("fetching", "bd-gone", err) })
-		if got, want := strings.TrimSpace(stderr), "Issue bd-gone not found"; got != want {
+		want := "Issue bd-gone not found\nHint: " + showNotFoundHint("bd-gone")
+		if got := strings.TrimSpace(stderr); got != want {
 			t.Errorf("stderr = %q, want %q", got, want)
 		}
 	})

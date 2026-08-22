@@ -97,6 +97,17 @@ func firstFreeDerivedID(table, digest string, taken map[string]bool) string {
 //
 //nolint:gosec // G201: table is a hardcoded routing constant at every call site.
 func InsertDerivedEvent(ctx context.Context, tx DBTX, table string, e AuxEvent) error {
+	_, err := InsertDerivedEventReturningID(ctx, tx, table, e)
+	return err
+}
+
+// InsertDerivedEventReturningID is InsertDerivedEvent for callers that need the
+// stored row's id — the events journal records it in a comment payload so a
+// consumer can replay the audit comment idempotently without re-deriving bd's
+// content digest.
+//
+//nolint:gosec // G201: table is a hardcoded routing constant at every call site.
+func InsertDerivedEventReturningID(ctx context.Context, tx DBTX, table string, e AuxEvent) (string, error) {
 	if e.CreatedAt == "" {
 		e.CreatedAt = NowAuxTime()
 	}
@@ -123,29 +134,30 @@ func InsertDerivedEvent(ctx context.Context, tx DBTX, table string, e AuxEvent) 
 		  AND created_at = ?`, table),
 		e.IssueID, string(e.EventType), e.Actor, e.OldValue, e.NewValue, e.Comment, e.CreatedAt)
 	if err != nil {
-		return fmt.Errorf("scan same-content events in %s: %w", table, err)
+		return "", fmt.Errorf("scan same-content events in %s: %w", table, err)
 	}
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			_ = rows.Close()
-			return fmt.Errorf("scan same-content events in %s: %w", table, err)
+			return "", fmt.Errorf("scan same-content events in %s: %w", table, err)
 		}
 		taken[id] = true
 	}
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("scan same-content events in %s: %w", table, err)
+		return "", fmt.Errorf("scan same-content events in %s: %w", table, err)
 	}
 
+	id := firstFreeDerivedID(table, digest, taken)
 	if _, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		INSERT INTO %s (id, issue_id, event_type, actor, old_value, new_value, comment, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, table),
-		firstFreeDerivedID(table, digest, taken),
+		id,
 		e.IssueID, string(e.EventType), e.Actor, e.OldValue, e.NewValue, e.Comment, e.CreatedAt); err != nil {
-		return fmt.Errorf("record event in %s: %w", table, err)
+		return "", fmt.Errorf("record event in %s: %w", table, err)
 	}
-	return nil
+	return id, nil
 }
 
 // NextLiveCommentTime returns the created_at to stamp on a comment being added

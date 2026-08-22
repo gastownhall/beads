@@ -91,6 +91,12 @@ type BatchCloserFixture struct {
 	// entry-per-call clause. Nil means this backend cannot observe history,
 	// and the two history cases then skip loudly rather than pass quietly.
 	CountHistory func(context.Context) (int, error)
+	// CountHistoryMatching is CountHistory narrowed to the entries whose
+	// message matches a SQL LIKE pattern ("" = every entry), which is how the
+	// wisp-naming case asks whether any entry NAMES an id. Nil means this
+	// backend cannot observe history by message, and that case skips loudly.
+	// See history_matching.go for the convention.
+	CountHistoryMatching func(context.Context, string) (int, error)
 }
 
 // RunBatchCloserOutcomesMirrorItemsIndexForIndex pins the index correspondence
@@ -711,6 +717,7 @@ func RunBatchCloserDurableHistoryNeverNamesAWisp(t *testing.T, ctx context.Conte
 	t.Helper()
 	requireBatchCloserWisps(t, fixture)
 	requireBatchCloserHistory(t, fixture)
+	requireBatchCloserHistoryMatching(t, fixture)
 	durable := fixture.IssuePrefix + "-wisphistory-durable"
 	wisp := fixture.IssuePrefix + "-wisphistory-wisp"
 	seedBatchCloserIssue(t, ctx, fixture, durable)
@@ -1158,6 +1165,64 @@ func assertBatchCloserCarriesNoPrecondition(t *testing.T) {
 	}
 }
 
+// RunBatchCloserSettlesTheDependersOfWhatItClosed pins the blocked-state
+// clause the leaf states for this role: what LANDS leaves its dependers
+// settled in the SAME transaction the batch commits.
+//
+// The existing claim case observes an unblocking from inside a batch only
+// THROUGH THE CLAIM — a row the batch unblocked turns up as the winner. That
+// is a role answer, and a role answer to "is this ready" can be computed from
+// the live edge set by a backend that never denormalized. This one reads the
+// raw column, which is the read that cannot be satisfied that way.
+//
+// The batch closes a blocker AND an unrelated item, so a body that collapsed
+// the batch to its first item is still visibly wrong; the control depender
+// hangs off a blocker the batch never names.
+func RunBatchCloserSettlesTheDependersOfWhatItClosed(t *testing.T, ctx context.Context, fixture BatchCloserFixture) {
+	t.Helper()
+	blocker := fixture.IssuePrefix + "-bsbatch-blocker"
+	other := fixture.IssuePrefix + "-bsbatch-other"
+	depender := fixture.IssuePrefix + "-bsbatch-depender"
+	child := fixture.IssuePrefix + "-bsbatch-child"
+	wispDepender := fixture.IssuePrefix + "-bsbatch-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsbatch-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsbatch-ctldepender"
+	for _, id := range []string{blocker, other, depender, child, controlBlocker, controlDepender} {
+		seedBatchCloserIssue(t, ctx, fixture, id)
+	}
+	seedBatchCloserWisp(t, ctx, fixture, wispDepender)
+	seedBatchCloserEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	seedBatchCloserEdge(t, ctx, fixture, child, depender, types.DepParentChild)
+	seedBatchCloserEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	seedBatchCloserEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the direct depender of a batch item")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispDepender), blockedIssue(blocker), "the cross-plane depender of a batch item")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child's block is inherited from the depender")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker), "the control's blocker is in no batch")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedIssue(child), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	result, err := fixture.Closer.CloseBatch(ctx, publicops.CloseBatchRequest{
+		Actor: "closer",
+		Items: []publicops.BatchCloseItem{{IssueID: blocker}, {IssueID: other}},
+	})
+	if err != nil {
+		t.Fatalf("CloseBatch: %v", err)
+	}
+	for i, outcome := range result.Outcomes {
+		if outcome.Err != nil || !outcome.Changed {
+			t.Fatalf("outcome[%d] = %#v, want a landed close: the postcondition only applies to what LANDED", i, outcome)
+		}
+	}
+
+	flip.requireFlippedTo(t, 0, "a batch settles the dependers of every item that landed, in the transaction the batch commits")
+}
+
 func seedBatchCloserIssue(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id string, labels ...string) {
 	t.Helper()
 	issue := &types.Issue{
@@ -1265,11 +1330,13 @@ func assertBatchCloserWispStatus(t *testing.T, ctx context.Context, fixture Batc
 // message mentions id anywhere. The contract asserts on the MESSAGE rather than
 // on a count alone because "an entry naming a wisp" is a claim about what
 // shipped, and only the message carries an id at all.
+//
+// The ids this is called with are the fixture's own seeded ones, which carry no
+// LIKE wildcard, so the surrounding %s are the only wildcards in the pattern.
 func batchCloserHistoryEntriesNaming(t *testing.T, ctx context.Context, fixture BatchCloserFixture, id string) int {
 	t.Helper()
-	var entries int
-	if err := fixture.QueryScalar(ctx,
-		"SELECT COUNT(*) FROM dolt_log WHERE message LIKE ?", []any{"%" + id + "%"}, &entries); err != nil {
+	entries, err := fixture.CountHistoryMatching(ctx, "%"+historyPatternForExactMessage(t, id)+"%")
+	if err != nil {
 		t.Fatalf("count history entries naming %s: %v", id, err)
 	}
 	return entries
@@ -1308,6 +1375,16 @@ func requireBatchCloserHistory(t *testing.T, fixture BatchCloserFixture) {
 	t.Helper()
 	if fixture.CountHistory == nil {
 		t.Skipf("fixture has no CountHistory: this backend cannot observe history, so batchcloser.go:119-122 is UNPINNED here")
+	}
+}
+
+// requireBatchCloserHistoryMatching is requireBatchCloserHistory for the
+// message-scoped count: a backend that can say how LONG its history is but not
+// what an entry READS leaves the wisp-naming clause unpinned, and says so.
+func requireBatchCloserHistoryMatching(t *testing.T, fixture BatchCloserFixture) {
+	t.Helper()
+	if fixture.CountHistoryMatching == nil {
+		t.Skipf("fixture has no CountHistoryMatching: this backend cannot observe history BY MESSAGE, so batchcloser.go:128-135 is UNPINNED here")
 	}
 }
 

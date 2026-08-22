@@ -13,28 +13,16 @@ func TestIssueOperationsCreateRoutesInfraTypesToWisps(t *testing.T) {
 	conformance.RunIssueOperationsCreateRoutesInfraTypesToWisps(t, ctx, fixture)
 }
 
-func TestIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T) {
+func TestIssueOperationsCreateUnderAParentMintsTheNextChildID(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
-	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, fixture)
+	conformance.RunIssueOperationsCreateUnderAParentMintsTheNextChildID(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, fixture)
-}
-
-func TestIssueOperationsUpdateClosePolicy(t *testing.T) {
-	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
-	defer cleanup()
-	conformance.RunIssueOperationsUpdateClosePolicy(t, ctx, fixture)
-}
-
-func TestIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
-	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
-	defer cleanup()
-	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, fixture)
 }
 
 func TestIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {
@@ -73,18 +61,6 @@ func TestIssueOperationsUpdateLabelPatchValueRules(t *testing.T) {
 	conformance.RunIssueOperationsUpdateLabelPatchValueRules(t, ctx, fixture)
 }
 
-func TestIssueOperationsUpdateParentIDReplacesTheParentEdge(t *testing.T) {
-	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
-	defer cleanup()
-	conformance.RunIssueOperationsUpdateParentIDReplacesTheParentEdge(t, ctx, fixture)
-}
-
-func TestIssueOperationsUpdateParentIDReplacesEveryParent(t *testing.T) {
-	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
-	defer cleanup()
-	conformance.RunIssueOperationsUpdateParentIDReplacesEveryParent(t, ctx, fixture)
-}
-
 func TestIssueOperationsUpdateMetadataReplaceClearsAndValidates(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
@@ -97,16 +73,58 @@ func TestIssueOperationsRequestValuesAreNotMutated(t *testing.T) {
 	conformance.RunIssueOperationsRequestValuesAreNotMutated(t, ctx, fixture)
 }
 
-func TestIssueOperationsUpdateProvenanceLabelsHistory(t *testing.T) {
+func TestIssueOperationsCreateClosedDerivesTheClosedStamp(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
-	conformance.RunIssueOperationsUpdateProvenanceLabelsHistory(t, ctx, fixture)
+	conformance.RunIssueOperationsCreateClosedDerivesTheClosedStamp(t, ctx, fixture)
 }
 
-func TestIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T) {
+func TestIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
 	defer cleanup()
-	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, fixture)
+	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, fixture)
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, fixture)
+}
+
+func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, fixture)
+}
+
+func TestIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	fixture, ctx, cleanup := newDoltIssueOperationsFixture(t)
+	defer cleanup()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, fixture)
 }
 
 func newDoltIssueOperationsFixture(t *testing.T) (conformance.IssueOperationsStagingFixture, context.Context, func()) {

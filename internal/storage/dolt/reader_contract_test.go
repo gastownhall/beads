@@ -32,10 +32,34 @@ func TestReaderReadyLimitBoundary(t *testing.T) {
 	conformance.RunReaderReadyLimitBoundary(t, ctx, fixture)
 }
 
-func TestReaderOffsetIsHonoredOrRefused(t *testing.T) {
+func TestReaderOffsetSkipsTheRowsBeforeThePage(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
-	conformance.RunReaderOffsetIsHonoredOrRefused(t, ctx, fixture)
+	conformance.RunReaderOffsetSkipsTheRowsBeforeThePage(t, ctx, fixture)
+}
+
+// The cap rides the filter the shared builder produces and the search path
+// enforces it after the scan. It used to be the only arm that did: the
+// unit-of-work wiring refused the field, and the case accepted either answer.
+func TestReaderListMaxRowsIsHonored(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListMaxRowsIsHonored(t, ctx, fixture)
+}
+
+// The cap's boundary along the OFFSET axis. It is the composition this body
+// reaches in two steps — widen the filter, then size the probe row — that the
+// case checks, and no request without an offset can see it go wrong.
+func TestReaderListMaxRowsBoundaryIsLimitPlusOffset(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListMaxRowsBoundaryIsLimitPlusOffset(t, ctx, fixture)
+}
+
+func TestReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListSkipCountsDropsTheCardinalitiesAndNothingElse(t, ctx, fixture)
 }
 
 func TestReaderReadySortPoliciesOrderTheSameRows(t *testing.T) {
@@ -128,6 +152,12 @@ func TestReaderGetOptionalRowListsAreOffByDefault(t *testing.T) {
 	conformance.RunReaderGetOptionalRowListsAreOffByDefault(t, ctx, fixture)
 }
 
+func TestReaderGetBriefDepsProjectsTheDependencyRows(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderGetBriefDepsProjectsTheDependencyRows(t, ctx, fixture)
+}
+
 func TestReaderGetDetailShapeMatchesTheSeededIssue(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
@@ -138,6 +168,94 @@ func TestReaderDoesNotMutateTheCallerRequest(t *testing.T) {
 	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
 	defer cleanup()
 	conformance.RunReaderDoesNotMutateTheCallerRequest(t, ctx, fixture)
+}
+
+// The bounded ready page and the unbounded one are two different queries on
+// this body — an id page plus a by-ids hydration against the predicate-form
+// mega-query (internal/storage/issueops/ready_work_counts.go) — so the identity
+// the case asserts is a claim about this wiring specifically, not a tautology.
+func TestReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyPageIsThePrefixOfTheUnboundedAnswerCountsIncluded(t, ctx, fixture)
+}
+
+// The plane union is a Go-side merge of two per-family query results here,
+// where the unit-of-work wiring orders one UNION ALL in SQL.
+func TestReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyEphemeralPageKeepsBothPlanesCountsAtItsBoundary(t, ctx, fixture)
+}
+
+func TestReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyPageWiderThanTheHydrationBatchIsStillThatPrefix(t, ctx, fixture)
+}
+
+// The two count vocabularies reach two different store methods here: the page
+// rides sqlbuild's mega-query and the detail view rides CountDependencies /
+// CountDependents, which count every edge type.
+func TestReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListCountsAreBlocksOnlyWhereGetCountsEveryEdge(t, ctx, fixture)
+}
+
+func TestReaderReadyParentScopesToItsTransitiveDescendants(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyParentScopesToItsTransitiveDescendants(t, ctx, fixture)
+}
+
+func TestReaderListParentReachesEveryDescendantAndOnlyItsOwn(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListParentReachesEveryDescendantAndOnlyItsOwn(t, ctx, fixture)
+}
+
+// The walk is where this body's probe-row over-fetch has to stay out of the
+// caller's way: the next position comes from the last DELIVERED row, and the
+// probe row is not one.
+func TestReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing(t, ctx, fixture)
+}
+
+func TestReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates(t, ctx, fixture)
+}
+
+// The merge arrangement this body actually uses: two independently ordered
+// legs, re-sorted in Go and then trimmed. The bounded arm is where that order
+// has to be applied BEFORE the trim, and the walk is where the probe-row
+// over-fetch has to stay off the next position on both planes at once.
+func TestReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder(t, ctx, fixture)
+}
+
+func TestReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt(t, ctx, fixture)
+}
+
+func TestReaderListBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderListBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
+}
+
+func TestReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t *testing.T) {
+	fixture, ctx, cleanup := newDoltReaderFixture(t, "rdr")
+	defer cleanup()
+	conformance.RunReaderReadyBriefDropsTheFreeFormTextAndNothingElse(t, ctx, fixture)
 }
 
 // newDoltReaderFixture composes the shared role kit with the reader accessor.

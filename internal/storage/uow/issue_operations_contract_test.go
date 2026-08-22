@@ -17,24 +17,14 @@ func TestIssueOperationsCreateRoutesInfraTypesToWisps(t *testing.T) {
 	conformance.RunIssueOperationsCreateRoutesInfraTypesToWisps(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
-func TestIssueOperationsCreateRejectsMissingDependencyTargets(t *testing.T) {
+func TestIssueOperationsCreateUnderAParentMintsTheNextChildID(t *testing.T) {
 	ctx := context.Background()
-	conformance.RunIssueOperationsCreateRejectsMissingDependencyTargets(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+	conformance.RunIssueOperationsCreateUnderAParentMintsTheNextChildID(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
 func TestIssueOperationsUpdateFoldsMetadataIntoOneEvent(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsUpdateFoldsMetadataIntoOneEvent(t, ctx, newUOWIssueOperationsFixture(t, ctx))
-}
-
-func TestIssueOperationsUpdateClosePolicy(t *testing.T) {
-	ctx := context.Background()
-	conformance.RunIssueOperationsUpdateClosePolicy(t, ctx, newUOWIssueOperationsFixture(t, ctx))
-}
-
-func TestIssueOperationsUpdateAssigneeTransferFence(t *testing.T) {
-	ctx := context.Background()
-	conformance.RunIssueOperationsUpdateAssigneeTransferFence(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
 func TestIssueOperationsUpdateClosedFieldsMatchClose(t *testing.T) {
@@ -67,16 +57,6 @@ func TestIssueOperationsUpdateLabelPatchValueRules(t *testing.T) {
 	conformance.RunIssueOperationsUpdateLabelPatchValueRules(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
-func TestIssueOperationsUpdateParentIDReplacesTheParentEdge(t *testing.T) {
-	ctx := context.Background()
-	conformance.RunIssueOperationsUpdateParentIDReplacesTheParentEdge(t, ctx, newUOWIssueOperationsFixture(t, ctx))
-}
-
-func TestIssueOperationsUpdateParentIDReplacesEveryParent(t *testing.T) {
-	ctx := context.Background()
-	conformance.RunIssueOperationsUpdateParentIDReplacesEveryParent(t, ctx, newUOWIssueOperationsFixture(t, ctx))
-}
-
 func TestIssueOperationsUpdateMetadataReplaceClearsAndValidates(t *testing.T) {
 	ctx := context.Background()
 	conformance.RunIssueOperationsUpdateMetadataReplaceClearsAndValidates(t, ctx, newUOWIssueOperationsFixture(t, ctx))
@@ -87,14 +67,49 @@ func TestIssueOperationsRequestValuesAreNotMutated(t *testing.T) {
 	conformance.RunIssueOperationsRequestValuesAreNotMutated(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
-func TestIssueOperationsUpdateProvenanceLabelsHistory(t *testing.T) {
+func TestIssueOperationsCreateClosedDerivesTheClosedStamp(t *testing.T) {
 	ctx := context.Background()
-	conformance.RunIssueOperationsUpdateProvenanceLabelsHistory(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+	conformance.RunIssueOperationsCreateClosedDerivesTheClosedStamp(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
-func TestIssueOperationsUpdatePersistentPreservesUnversionedClass(t *testing.T) {
+func TestIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T) {
 	ctx := context.Background()
-	conformance.RunIssueOperationsUpdatePersistentPreservesUnversionedClass(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+	conformance.RunIssueOperationsUpdateWritesEveryScalarPatchField(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateStampsStartedAtOnceOnTheFirstInProgress(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateRawMetadataTakesTheFunnelsValueShapes(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateRefusesATypeOutsideTheWorkspaceVocabulary(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesDependers(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesDependers(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsUpdateStatusCrossingSettlesAConditionalBlocksDepender(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsCreateWithDependenciesSettlesInTheCreatingTransaction(t, ctx, newUOWIssueOperationsFixture(t, ctx))
+}
+
+func TestIssueOperationsClaimLeavesBlockedStateAlone(t *testing.T) {
+	ctx := context.Background()
+	conformance.RunIssueOperationsClaimLeavesBlockedStateAlone(t, ctx, newUOWIssueOperationsFixture(t, ctx))
 }
 
 func newUOWIssueOperationsFixture(t *testing.T, ctx context.Context) conformance.IssueOperationsStagingFixture {

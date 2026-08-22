@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
@@ -25,8 +26,23 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseRefusalsCarryTheirTypesAndWriteNothing", func(t *testing.T) {
 		conformance.RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t, ctx, fixture)
 	})
+	t.Run("CloseAdmitsATransitivelyBlockedTarget", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t, ctx, fixture)
+	})
+	t.Run("CloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed", func(t *testing.T) {
+		conformance.RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t, ctx, fixture)
+	})
+	t.Run("CloseIsIdempotentOnAClosedRowThatStillLooksBlocked", func(t *testing.T) {
+		conformance.RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t, ctx, fixture)
+	})
+	t.Run("CloseCountsOpenChildrenInBothPlanes", func(t *testing.T) {
+		conformance.RunLifecycleCloseCountsOpenChildrenInBothPlanes(t, ctx, fixture)
+	})
 	t.Run("CloseIsIdempotentAndKeepsTheFirstClose", func(t *testing.T) {
 		conformance.RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t, ctx, fixture)
+	})
+	t.Run("CloseAndReopenKeepTheClaimHolder", func(t *testing.T) {
+		conformance.RunLifecycleCloseAndReopenKeepTheClaimHolder(t, ctx, fixture)
 	})
 	t.Run("ReopenLeavesNonDoneStatusesUnchanged", func(t *testing.T) {
 		conformance.RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t, ctx, fixture)
@@ -49,6 +65,18 @@ func TestLifecycleCloseReopenContract(t *testing.T) {
 	t.Run("CloseAndReopenRequireActorAndIssueID", func(t *testing.T) {
 		conformance.RunLifecycleCloseAndReopenRequireActorAndIssueID(t, ctx, fixture)
 	})
+	t.Run("CloseSettlesItsTransitiveAndCrossPlaneDependers", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t, ctx, fixture)
+	})
+	t.Run("CloseSettlesTheClosedRowItselfAndItsChild", func(t *testing.T) {
+		conformance.RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t, ctx, fixture)
+	})
+	t.Run("CloseOnASpawnersLastChildSatisfiesAWaitsForGate", func(t *testing.T) {
+		conformance.RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t, ctx, fixture)
+	})
+	t.Run("ReopenReblocksItsDependers", func(t *testing.T) {
+		conformance.RunLifecycleReopenReblocksItsDependers(t, ctx, fixture)
+	})
 }
 
 func newDoltLifecycleCloseReopenFixture(t *testing.T, prefix string) (conformance.LifecycleCloseReopenFixture, context.Context, func()) {
@@ -66,12 +94,31 @@ func newDoltLifecycleCloseReopenFixture(t *testing.T, prefix string) (conformanc
 	}
 	kit := newDoltRoleFixtureKit(store, prefix)
 	fixture := conformance.LifecycleCloseReopenFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		Lifecycle:     lifecycle,
-		CreateIssue:   kit.CreateIssue,
-		AddDependency: kit.AddDependency,
-		SetConfig:     kit.SetConfig,
-		QueryScalar:   kit.QueryScalar,
+		IssuePrefix:          kit.IssuePrefix,
+		Lifecycle:            lifecycle,
+		CreateIssue:          kit.CreateIssue,
+		CreateWisp:           kit.CreateWisp,
+		AddDependency:        kit.AddDependency,
+		SetConfig:            kit.SetConfig,
+		QueryScalar:          kit.QueryScalar,
+		CountHistoryMatching: kit.CountHistoryMatching,
+		// The frozen kit exposes reads only, so the raw writes the close-policy
+		// cases need are supplied here — over the same *sql.DB its QueryScalar
+		// reads through, on ONE PINNED CONNECTION so a multi-statement seed
+		// cannot be split across sessions.
+		Exec: func(ctx context.Context, statements []conformance.SQLStatement) error {
+			conn, err := store.db.Conn(ctx)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			for _, stmt := range statements {
+				if _, err := conn.ExecContext(ctx, stmt.Query, stmt.Args...); err != nil {
+					return fmt.Errorf("%s: %w", stmt.Query, err)
+				}
+			}
+			return nil
+		},
 	}
 	return fixture, ctx, func() {
 		cancel()

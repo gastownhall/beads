@@ -88,7 +88,6 @@ func (t *embeddedTransaction) CreateIssue(ctx context.Context, issue *types.Issu
 
 func (t *embeddedTransaction) CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error {
 	result, err := issueops.CreateIssuesInTxWithResult(ctx, t.tx, issues, actor, storage.BatchCreateOptions{
-		OrphanHandling:       storage.OrphanAllow,
 		SkipPrefixValidation: true,
 	})
 	if err != nil {
@@ -265,17 +264,12 @@ func (t *embeddedTransaction) SetConfig(ctx context.Context, key, value string) 
 		return err
 	}
 	// Sync normalized tables when config keys change
-	switch key {
-	case "status.custom":
-		t.dirty.MarkDirty("custom_statuses")
-		if err := issueops.SyncCustomStatusesTable(ctx, t.tx, value); err != nil {
-			return fmt.Errorf("syncing custom_statuses table: %w", err)
-		}
-	case "types.custom":
-		t.dirty.MarkDirty("custom_types")
-		if err := issueops.SyncCustomTypesTable(ctx, t.tx, value); err != nil {
-			return fmt.Errorf("syncing custom_types table: %w", err)
-		}
+	table, err := issueops.SyncConfigTables(ctx, t.tx, key, value)
+	if err != nil {
+		return err
+	}
+	if table != "" {
+		t.dirty.MarkDirty(table)
 	}
 	return nil
 }

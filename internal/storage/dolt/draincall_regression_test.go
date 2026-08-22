@@ -38,6 +38,8 @@ func TestDoltAddAndCommitDrainsCallResultSets(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
@@ -84,6 +86,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(testConnectionLoss)
@@ -97,6 +101,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(&mysql.MySQLError{Number: 1213, Message: "deadlock"})
@@ -110,6 +116,8 @@ func TestDoltAddAndCommitPostSQLFailuresAreIndeterminate(t *testing.T) {
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 					WithArgs("issues").
 					WillReturnRows(sqlmock.NewRows([]string{"status"}))
+				mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+					WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 				mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 					WithArgs("bd: test commit", " <>").
 					WillReturnError(&mysql.MySQLError{Number: 1205, Message: "lock wait timeout"})
@@ -199,6 +207,8 @@ func TestDoltAddAndCommitTreatsNothingToCommitAsSuccess(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 		WithArgs("issues").
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 		WithArgs("bd: test commit", " <>").
 		WillReturnError(errors.New("nothing to commit"))
@@ -407,6 +417,8 @@ func TestDoltAddAndCommitInTxClassifiesCommitResponses(t *testing.T) {
 			mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD(?)")).
 				WithArgs("issues").
 				WillReturnRows(sqlmock.NewRows([]string{"status"}))
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT COUNT(*) FROM dolt_status WHERE staged = 1")).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 			mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', ?, '--author', ?)")).
 				WithArgs("bd: test commit", " <>").
 				WillReturnError(tc.commitErr)

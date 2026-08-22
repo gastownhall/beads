@@ -8,10 +8,10 @@ import (
 	"github.com/steveyegge/beads/backend/conformance"
 )
 
-func TestEmbeddedReadyClaimerRejectsLimitOffsetAndEmptyActor(t *testing.T) {
+func TestEmbeddedReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
-	conformance.RunReadyClaimerRejectsLimitOffsetAndEmptyActor(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcrej"))
+	conformance.RunReadyClaimerRejectsLimitOffsetBriefAndEmptyActor(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcrej"))
 }
 
 func TestEmbeddedReadyClaimerEmptyFrontIsNormal(t *testing.T) {
@@ -54,6 +54,18 @@ func TestEmbeddedReadyClaimerSkipsIneligibleFrontRows(t *testing.T) {
 	skipUnlessEmbeddedDolt(t)
 	ctx := t.Context()
 	conformance.RunReadyClaimerSkipsIneligibleFrontRows(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcskip"))
+}
+
+func TestEmbeddedReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerFencesTheClaimByEveryLabelSetAndTheParentItWasGiven(t, ctx, newEmbeddedReadyClaimerFixture(t, "rcfence"))
+}
+
+func TestEmbeddedReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t *testing.T) {
+	skipUnlessEmbeddedDolt(t)
+	ctx := t.Context()
+	conformance.RunReadyClaimerHydratesOnlyItsBlocksEdgesIntoTheCardinalities(t, ctx, newEmbeddedReadyClaimerFixture(t, "rccount"))
 }
 
 func TestEmbeddedReadyClaimerRecordsOneHistoryEntryForAWin(t *testing.T) {

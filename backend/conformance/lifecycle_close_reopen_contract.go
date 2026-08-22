@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 	publicops "github.com/steveyegge/beads/issueops"
@@ -42,13 +43,44 @@ type LifecycleCloseReopenFixture struct {
 	// CreateIssue seeds a durable issue in the issues plane, including its
 	// labels.
 	CreateIssue func(context.Context, *types.Issue, string) error
+	// CreateWisp seeds an ephemeral issue in the wisps plane. Close policy
+	// counts children in BOTH planes, so a case that seeds only durable ones
+	// passes against an implementation that looks in one.
+	CreateWisp func(context.Context, *types.Issue, string) error
 	// AddDependency seeds ONE edge and records a dependency_added event, so
-	// every event assertion below is a DELTA around the verb under test.
+	// every event assertion below is a DELTA around the verb under test. The
+	// edge is routed to the plane its SOURCE lives in, which is how a wisp
+	// child's parent-child edge reaches wisp_dependencies.
 	AddDependency func(context.Context, *types.Dependency, string) error
 	// SetConfig installs the custom-status vocabulary the configured-done-
 	// category cases are read against.
 	SetConfig   func(context.Context, string, string) error
 	QueryScalar func(context.Context, string, []any, ...any) error
+	// CountHistoryMatching counts the history entries whose message matches a
+	// SQL LIKE pattern ("" = every entry). Only the provenance case needs it,
+	// and it needs the message rather than a bare count: the clause it pins is
+	// that the recorded entry READS as the caller's own string.
+	//
+	// A nil CountHistoryMatching means "this backend cannot observe history by
+	// message", and that case SKIPS loudly with that reason rather than
+	// passing quietly. See history_matching.go for the convention.
+	CountHistoryMatching func(context.Context, string) (int, error)
+	// Exec runs a raw seeding script as ONE session, out of band of the role.
+	//
+	// It exists because the close policy answers to states no supported verb
+	// can produce: a stale is_blocked column (every in-process close and every
+	// blocker close recomputes it), and one child edge resident in both
+	// dependency tables (a post-promotion or hand-resolved-merge artifact). It
+	// is DELIBERATELY not on the frozen role fixture kit — it is this role's
+	// out-of-band hook, built at each wiring site over a seam the backend
+	// already publishes, the way CycleDetectorFixture.Exec is.
+	//
+	// The script is a slice rather than a statement because a foreign_key_checks
+	// toggle and the insert it was for must land in one session.
+	//
+	// A nil Exec means "this backend cannot be given the state", and every case
+	// that needs one SKIPS loudly with that reason rather than passing quietly.
+	Exec func(ctx context.Context, statements []SQLStatement) error
 }
 
 // lifecycleCloseReopenCustomStatuses is the vocabulary the category cases
@@ -67,7 +99,7 @@ const (
 // the typed identity the leaf names, carrying the count a CLI renders — and
 // with the row and the event stream untouched.
 //
-// issueops/issueops.go:406-409 promises "An unforced close with open children
+// issueops/issueops.go:424-427 promises "An unforced close with open children
 // returns CloseOpenChildrenError without mutation" and that "Force bypasses
 // blocker and open-child policy"; errors.go:105-128 declares the sentinel pair
 // and the struct's IssueID/OpenChildren fields and its Unwrap to
@@ -133,10 +165,351 @@ func RunLifecycleCloseRefusalsCarryTheirTypesAndWriteNothing(t *testing.T, ctx c
 	}
 }
 
+// RunLifecycleCloseAdmitsATransitivelyBlockedTarget pins the adjective in the
+// blocker refusal. The leaf says a crossing "with a LIVE DIRECT blocker returns
+// ErrCloseBlocked" (issueops/issueops.go:415-416), and the shared store body
+// spells the predicate out — blocked && len(blockers) > 0, refusing only when
+// the denormalized is_blocked column is set AND at least one live direct
+// blocker exists (internal/storage/issueops/close.go:44-54).
+//
+// The case above seeds a DIRECT blocker, so it passes just as well against a
+// guard that refuses on the bare column. This one seeds the other half: a
+// parent-child child of a blocked parent carries is_blocked = 1 with no direct
+// blocker of its own, and closes unforced. That is the historical `bd close`
+// behavior, and the same seeding is what a stale is_blocked column looks like
+// after its blockers close — a guard reading the column instead of the live
+// list makes both unclosable without Force.
+//
+// The two raw-row preconditions are load-bearing. Without the is_blocked read
+// the case passes on a backend that never denormalizes transitively, and
+// without the direct-edge count it passes on one that seeded no block at all;
+// either way it would be asserting nothing. The control at the end is the third
+// leg: it fails if the refusal was deleted outright rather than narrowed.
+func RunLifecycleCloseAdmitsATransitivelyBlockedTarget(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-lcr-transitive-blocker"
+	parent := fixture.IssuePrefix + "-lcr-transitive-parent"
+	child := fixture.IssuePrefix + "-lcr-transitive-child"
+	for _, id := range []string{blocker, parent, child} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, parent, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, parent, types.DepParentChild)
+
+	if got := lifecycleCloseReopenIsBlocked(t, ctx, fixture, child); got != 1 {
+		t.Fatalf("%s is_blocked = %d, want 1: the case needs the transitive block the parent's blocker propagates", child, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, child); got != 0 {
+		t.Fatalf("%s carries %d direct blocks edges, want 0: the whole point is a blocked row with no blocker of its own", child, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, parent); got != 1 {
+		t.Fatalf("%s carries %d direct blocks edges, want the 1 this case seeded", parent, got)
+	}
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: child})
+	if err != nil {
+		t.Fatalf("unforced close of transitively blocked %s: err = %v, want it to close — the refusal answers to a LIVE DIRECT blocker", child, err)
+	}
+	if !closed.Changed || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("unforced close of %s = %#v, want a committed close", child, closed)
+	}
+	if row := lifecycleCloseReopenReadRow(t, ctx, fixture, child); types.Status(row.Status) != types.StatusClosed {
+		t.Errorf("stored status for %s = %q, want %q", child, row.Status, types.StatusClosed)
+	}
+
+	// The control: the parent DOES hold a live direct blocker, and its only
+	// child is now closed, so nothing else can be producing the refusal.
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent}); !errors.Is(err, publicops.ErrCloseBlocked) {
+		t.Fatalf("unforced close of directly blocked %s: err = %v, want ErrCloseBlocked — the refusal must still be armed", parent, err)
+	}
+}
+
+// RunLifecycleCloseCountsOpenChildrenInBothPlanes pins the SHAPE of the count
+// behind the open-child refusal. issueops/issueops.go:424-427 promises the
+// unforced refusal and that Force "reports OpenChildren", and CloseResult's own
+// doc calls it "the number of open children observed" — a number, not a
+// per-plane number, so an ephemeral child is one of them.
+//
+// The shared body counts twice and adds: once over `dependencies` joined to
+// `issues`, once over `wisp_dependencies` joined to `wisps`, with the second
+// query excluding any edge id the first table already holds
+// (internal/storage/issueops/close.go:193-231). Every existing case in this
+// file seeds durable children only, so BOTH of those halves are unpinned: an
+// implementation that dropped the wisp query would refuse and count 1 where the
+// promise is 2, and one that dropped the NOT EXISTS would count a
+// dual-plane-resident edge twice.
+//
+// The dual-resident arm needs Exec because no supported verb produces it: the
+// create-only guard spans both planes, so an ID cannot be made to hold a row in
+// each. It is what a promotion or a hand-resolved merge leaves behind, and it
+// is the state where a double count turns a legitimate close into a permanent
+// refusal naming a child that does not exist twice.
+func RunLifecycleCloseCountsOpenChildrenInBothPlanes(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	parent := fixture.IssuePrefix + "-lcr-planes-parent"
+	durableChild := fixture.IssuePrefix + "-lcr-planes-durable-child"
+	wispChild := fixture.IssuePrefix + "-lcr-planes-wisp-child"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, parent, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, durableChild, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wispChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, durableChild, parent, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, wispChild, parent, types.DepParentChild)
+
+	// The preconditions are load-bearing twice over: without them the case
+	// passes on a backend that filed both edges in one table (where counting
+	// one table would still reach 2), and it passes on one where the wisp seed
+	// silently landed in the issues plane.
+	if got := lifecycleCloseReopenChildEdges(t, ctx, fixture, "dependencies", parent); got != 1 {
+		t.Fatalf("%s carries %d durable parent-child edges, want the 1 this case seeded", parent, got)
+	}
+	if got := lifecycleCloseReopenChildEdges(t, ctx, fixture, "wisp_dependencies", parent); got != 1 {
+		t.Fatalf("%s carries %d ephemeral parent-child edges, want the 1 this case seeded: the count has to have a second plane to look in", parent, got)
+	}
+
+	var openChildren *publicops.CloseOpenChildrenError
+	_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent})
+	if !errors.As(err, &openChildren) {
+		t.Fatalf("unforced close of %s with a child in each plane: err = %v, want *CloseOpenChildrenError", parent, err)
+	}
+	if openChildren.OpenChildren != 2 {
+		t.Errorf("refusal reports %d open children, want 2 — one durable and one ephemeral", openChildren.OpenChildren)
+	}
+	forced, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: parent, Force: true})
+	if err != nil {
+		t.Fatalf("forced close of %s: %v", parent, err)
+	}
+	if !forced.Changed || forced.OpenChildren != 2 {
+		t.Errorf("forced close of %s = (Changed %t, OpenChildren %d), want (true, 2)", parent, forced.Changed, forced.OpenChildren)
+	}
+
+	// The other half: ONE edge resident in both dependency tables is one child.
+	if fixture.Exec == nil {
+		t.Skip("fixture cannot seed a dual-plane-resident child edge: Exec is nil, and no supported verb produces one")
+	}
+	dualParent := fixture.IssuePrefix + "-lcr-planes-dual-parent"
+	dualChild := fixture.IssuePrefix + "-lcr-planes-dual-child"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, dualParent, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, dualChild, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, dualChild, dualParent, types.DepParentChild)
+
+	// The SAME edge id in both tables is what the exclusion keys on, so it is
+	// read back rather than guessed: an id this case invented would leave the
+	// NOT EXISTS matching nothing and the case passing for the wrong reason.
+	var edgeID string
+	if err := fixture.QueryScalar(ctx,
+		"SELECT id FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = ?",
+		[]any{dualChild, dualParent, string(types.DepParentChild)}, &edgeID); err != nil {
+		t.Fatalf("read the durable edge id for %s: %v", dualChild, err)
+	}
+	if err := fixture.Exec(ctx, []SQLStatement{
+		{Query: "INSERT INTO wisps (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, ephemeral, no_history) " +
+			"VALUES (?, ?, '', '', '', '', ?, 2, ?, ?, ?)",
+			Args: []any{dualChild, "ephemeral twin of " + dualChild, string(types.StatusOpen), string(types.TypeTask), true, false}},
+		{Query: "INSERT INTO wisp_dependencies (id, issue_id, depends_on_issue_id, type, created_at, created_by) VALUES (?, ?, ?, ?, NOW(), 'seed')",
+			Args: []any{edgeID, dualChild, dualParent, string(types.DepParentChild)}},
+	}); err != nil {
+		t.Fatalf("seed the dual-plane-resident child edge: %v", err)
+	}
+
+	openChildren = nil
+	_, err = fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: dualParent})
+	if !errors.As(err, &openChildren) {
+		t.Fatalf("unforced close of %s with one dual-resident child: err = %v, want *CloseOpenChildrenError", dualParent, err)
+	}
+	if openChildren.OpenChildren != 1 {
+		t.Errorf("refusal reports %d open children for ONE child edge resident in both planes, want 1", openChildren.OpenChildren)
+	}
+}
+
+// RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed pins the LIVE
+// half of the blocker predicate. The shared body refuses on
+// `blocked && len(blockers) > 0`, and it builds that blocker list by dropping
+// every edge whose target is already closed or pinned
+// (internal/storage/issueops/dependency_queries.go:970-984). Reading the live
+// list rather than the denormalized column is what makes a stale is_blocked
+// SELF-HEALING instead of a permanent refusal: an issue whose only blocker
+// closed out of band would otherwise never close again without Force.
+//
+// RunLifecycleCloseAdmitsATransitivelyBlockedTarget is the neighboring case
+// and it does NOT cover this: its target carries no direct edge at all, so it
+// passes against an implementation whose blocker list is a plain edge list. The
+// discriminating state is a live EDGE pointing at a CLOSED row, and it needs
+// Exec — closing the blocker through any supported verb recomputes the
+// depender's column back to 0 and takes the whole premise with it.
+func RunLifecycleCloseAdmitsAStaleBlockFlagWhoseBlockersHaveClosed(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	if fixture.Exec == nil {
+		t.Skip("fixture cannot seed a stale is_blocked column: Exec is nil, and every supported close recomputes it")
+	}
+
+	blocker := fixture.IssuePrefix + "-lcr-stale-blocker"
+	target := fixture.IssuePrefix + "-lcr-stale-target"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, blocker, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, target, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, target, blocker, types.DepBlocks)
+
+	if got := lifecycleCloseReopenIsBlocked(t, ctx, fixture, target); got != 1 {
+		t.Fatalf("%s is_blocked = %d, want the 1 the seeded blocks edge sets", target, got)
+	}
+
+	// Close the blocker with a raw write, which is what leaves the column
+	// behind: the recompute every close runs is exactly what this case has to
+	// skip.
+	if err := fixture.Exec(ctx, []SQLStatement{
+		{Query: "UPDATE issues SET status = ? WHERE id = ?", Args: []any{string(types.StatusClosed), blocker}},
+	}); err != nil {
+		t.Fatalf("raw-close the blocker: %v", err)
+	}
+	if got := lifecycleCloseReopenIsBlocked(t, ctx, fixture, target); got != 1 {
+		t.Fatalf("%s is_blocked = %d after the raw blocker close, want it still reading a stale 1", target, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, target); got != 1 {
+		t.Fatalf("%s carries %d direct blocks edges, want the 1 this case seeded — the edge is what makes it different from a transitive block", target, got)
+	}
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: target})
+	if err != nil {
+		t.Fatalf("unforced close of %s whose only direct blocker is closed: err = %v, want it to close — the refusal answers to a LIVE blocker, not to the stored flag", target, err)
+	}
+	if !closed.Changed || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("unforced close of %s = %#v, want a committed close", target, closed)
+	}
+}
+
+// RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked pins the OPEN
+// half of the same predicate: the blocker refusal answers to a target that is
+// not already closed (internal/storage/issueops/close.go:153).
+//
+// The leaf states the rule from the other side. CloseRequest.Reason says "A
+// second Close of an already-closed issue is the no-op CloseResult.Changed
+// describes", and Close's own doc enumerates the two things that can still
+// refuse one — ExpectedVersion, "checked first, including for an idempotent
+// close", and open children (issueops/issueops.go:423-425). A blocker
+// is not on that list, so a re-close that met one would be a refusal the
+// contract does not permit.
+//
+// The state is reachable but NOT from a forced close alone, which is why the
+// body below restores the column by hand. A close settles the row it closes:
+// the closed row is in its own affected set and a closed row is never blocked,
+// so the flag comes down with the status
+// (RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild pins exactly that).
+// What leaves a CLOSED row reading blocked is the invariant's merge clause — a
+// pull that merges a forced close against a clone that still reads the row as
+// blocked — and re-running the guard there would make that row permanently
+// un-re-closable.
+//
+// RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose does not cover it: its row
+// has no blocker, so `blocked` is false and the guard cannot fire whether or
+// not it runs.
+func RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	if fixture.Exec == nil {
+		t.Skip("fixture cannot restore the is_blocked column a close clears: Exec is nil")
+	}
+
+	blocker := fixture.IssuePrefix + "-lcr-closedblocked-blocker"
+	target := fixture.IssuePrefix + "-lcr-closedblocked-target"
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, blocker, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, target, types.StatusOpen, nil)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, target, blocker, types.DepBlocks)
+
+	forced, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "writer", IssueID: target, Reason: "shipped anyway", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("forced close of blocked %s: %v", target, err)
+	}
+	if !forced.Changed {
+		t.Fatalf("forced close of %s reported Changed = false, want a committed close", target)
+	}
+
+	// The close cleared the column on its way out, so it is put back: the
+	// discriminating state is a CLOSED row that still reads blocked while its
+	// blocker is still open, which is what a cross-clone merge of the two
+	// writes leaves and what the guard would meet if it ran.
+	if err := fixture.Exec(ctx, []SQLStatement{
+		{Query: "UPDATE issues SET is_blocked = 1 WHERE id = ?", Args: []any{target}},
+	}); err != nil {
+		t.Fatalf("restore the is_blocked column on the closed row: %v", err)
+	}
+	if got := lifecycleCloseReopenIsBlocked(t, ctx, fixture, target); got != 1 {
+		t.Fatalf("%s is_blocked = %d, want the 1 this case restored", target, got)
+	}
+	if got := lifecycleCloseReopenDirectBlockerEdges(t, ctx, fixture, target); got != 1 {
+		t.Fatalf("%s carries %d direct blocks edges, want the 1 this case seeded", target, got)
+	}
+	var blockerStatus string
+	if err := fixture.QueryScalar(ctx, "SELECT status FROM issues WHERE id = ?", []any{blocker}, &blockerStatus); err != nil {
+		t.Fatalf("read the blocker's status: %v", err)
+	}
+	if types.Status(blockerStatus) != types.StatusOpen {
+		t.Fatalf("blocker %s status = %q, want it still open — a closed blocker would make the guard inert for the other reason", blocker, blockerStatus)
+	}
+
+	before := lifecycleCloseReopenReadRow(t, ctx, fixture, target)
+	events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, target)
+	again, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "writer", IssueID: target, Reason: "second pass",
+	})
+	if err != nil {
+		t.Fatalf("unforced re-close of closed-and-blocked %s: err = %v, want the promised no-op", target, err)
+	}
+	if again.Changed {
+		t.Errorf("re-close of %s reported Changed = true, want false", target)
+	}
+	lifecycleCloseReopenAssertRow(t, ctx, fixture, target, "after the re-close of a closed blocked row", before)
+	events.assertNoneAdded(t, "re-close of a closed blocked row")
+}
+
+// lifecycleCloseReopenChildEdges counts the parent-child edges naming id as the
+// parent in ONE dependency table, so a case can prove its seed reached the
+// plane it meant rather than assuming the routing.
+func lifecycleCloseReopenChildEdges(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, table, id string) int {
+	t.Helper()
+	var edges int
+	//nolint:gosec // G201: table is one of two literals chosen by the caller.
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM "+table+" WHERE depends_on_issue_id = ? AND type = ?",
+		[]any{id, string(types.DepParentChild)}, &edges); err != nil {
+		t.Fatalf("count %s parent-child edges into %s: %v", table, id, err)
+	}
+	return edges
+}
+
+// lifecycleCloseReopenIsBlocked reads the denormalized blocked column. It is
+// CAST to SIGNED because the three fixtures disagree on whether a TINYINT comes
+// back as a number, a byte slice or a bool.
+func lifecycleCloseReopenIsBlocked(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) int {
+	t.Helper()
+	var blocked int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT CAST(COALESCE(is_blocked, 0) AS SIGNED) FROM issues WHERE id = ?", []any{id}, &blocked); err != nil {
+		t.Fatalf("read is_blocked for %s: %v", id, err)
+	}
+	return blocked
+}
+
+// lifecycleCloseReopenDirectBlockerEdges counts the outgoing blocks edges that
+// make a target's block DIRECT rather than inherited.
+func lifecycleCloseReopenDirectBlockerEdges(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) int {
+	t.Helper()
+	var edges int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND type = ?",
+		[]any{id, string(types.DepBlocks)}, &edges); err != nil {
+		t.Fatalf("count direct blocker edges for %s: %v", id, err)
+	}
+	return edges
+}
+
 // RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose pins what a second Close
-// of an already-closed issue does. issueops/issueops.go:354-359 promises
+// of an already-closed issue does. issueops/issueops.go:372-377 promises
 // Changed "is false for an idempotent re-close" and that OpenChildren "is
-// reported even for an idempotent re-close"; :406-409 promises the unforced
+// reported even for an idempotent re-close"; :424-425 promises the unforced
 // open-child refusal without qualifying it to open targets, and the shared
 // store body reads the target's closed state precisely so a closed parent with
 // open children still refuses (internal/storage/issueops/close.go:70-73).
@@ -196,8 +569,16 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	lifecycleCloseReopenAssertRow(t, ctx, fixture, id, "after the idempotent re-close", closedRow)
 	events.assertNoneAdded(t, "idempotent re-close")
 
-	// A reopen clears the pair, the other half of the same clause: they
+	// A reopen clears the TRIPLE, the other half of the same clause: all three
 	// describe a closure that no longer holds.
+	//
+	// closed_at is the member with the longest reach and the one no case in
+	// this file used to read on the reopen side — every ClosedAt assertion here
+	// is close-side. A row left carrying a closed_at it no longer earns is an
+	// open bead that reports a completion date: `bd show` renders it, cycle-time
+	// and burn-down arithmetic sums it, and the second close then has a stamp
+	// from the first closure to inherit. audit_issue-lifecycle.go's reopen cases
+	// read the ROLE ANSWER'S ClosedAt pointer; this reads the column.
 	if _, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: id}); err != nil {
 		t.Fatalf("reopen %s: %v", id, err)
 	}
@@ -205,6 +586,14 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	if reopenedRow.CloseReason != "" || reopenedRow.ClosedBySession != "" {
 		t.Errorf("close attribution after reopening %s = (%q, %q), want both cleared",
 			id, reopenedRow.CloseReason, reopenedRow.ClosedBySession)
+	}
+	if reopenedRow.ClosedAt != "" {
+		t.Errorf("closed_at after reopening %s = %q, want it cleared — an open row has no completion date",
+			id, reopenedRow.ClosedAt)
+	}
+	if reopenedRow.Status == closedRow.Status {
+		t.Errorf("status after reopening %s = %q, want it off the closed status — the cleared columns above prove nothing about a row that never reopened",
+			id, reopenedRow.Status)
 	}
 
 	// A forced close of a parent with an open child reports the count, and so
@@ -242,10 +631,93 @@ func RunLifecycleCloseIsIdempotentAndKeepsTheFirstClose(t *testing.T, ctx contex
 	}
 }
 
+// RunLifecycleCloseAndReopenKeepTheClaimHolder pins the second half of the
+// agent loop against the state the first half leaves: an in_progress row a named
+// actor holds is CLOSEABLE, and the holder survives both the close and a later
+// reopen.
+//
+// Every other close target in this package — here, in claim.go, in the audit
+// files, in issue_operations_contract.go's close-policy seeds and in
+// batch_closer_contract.go — is seeded OPEN and unassigned, so nothing pins the
+// only close a working agent actually performs: the one on the row it is
+// currently holding. Two divergences pass the whole suite today. A backend whose
+// close admits open rows only refuses every claimed issue, so `bd claim` and
+// `bd close` stop composing. A backend that clears assignee as part of the
+// close — a defensible reading of "the work is over" — silently drops the
+// attribution `bd show` renders and `bd list --assignee` filters on, and the
+// reopen half loses it again for a caller handing the work back to the same
+// holder.
+//
+// The reopen leg asserts the holder for a second reason: Reopen already clears
+// the close attribution (CloseRequest.Reason "A Reopen clears both, because they
+// describe a closure that no longer holds"), and assignee is the neighboring
+// column that is NOT part of that closure record. An implementation sweeping the
+// closure fields is exactly the one likely to take assignee with them.
+func RunLifecycleCloseAndReopenKeepTheClaimHolder(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	const holder = "worker-1"
+	id := fixture.IssuePrefix + "-lcr-held"
+	lifecycleCloseReopenSeedClaimedIssue(t, ctx, fixture, id, holder)
+
+	seeded := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
+	if types.Status(seeded.Status) != types.StatusInProgress || seeded.Assignee != holder {
+		t.Fatalf("seeded %s as {status %q assignee %q}, want {%q %q} — the case has nothing to prove otherwise",
+			id, seeded.Status, seeded.Assignee, types.StatusInProgress, holder)
+	}
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: holder, IssueID: id, Reason: "work finished", Session: "session-held",
+	})
+	if err != nil {
+		t.Fatalf("close %s while %s holds it: %v — an in_progress row is the one an agent actually closes", id, holder, err)
+	}
+	if !closed.Changed {
+		t.Errorf("close of in_progress %s reported Changed = false, want a committed close", id)
+	}
+	if closed.Issue == nil {
+		t.Fatalf("close of %s answered a nil Issue, want a post-state snapshot", id)
+	}
+	if closed.Issue.Status != types.StatusClosed {
+		t.Errorf("CloseResult.Issue.Status = %q, want %q", closed.Issue.Status, types.StatusClosed)
+	}
+	if closed.Issue.Assignee != holder {
+		t.Errorf("CloseResult.Issue.Assignee = %q, want %q — closing the work does not un-assign it", closed.Issue.Assignee, holder)
+	}
+	closedRow := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
+	if types.Status(closedRow.Status) != types.StatusClosed || closedRow.Assignee != holder {
+		t.Errorf("stored row after the close = {status %q assignee %q}, want {%q %q}",
+			closedRow.Status, closedRow.Assignee, types.StatusClosed, holder)
+	}
+
+	reopened, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: holder, IssueID: id, Reason: "regressed"})
+	if err != nil {
+		t.Fatalf("reopen %s: %v", id, err)
+	}
+	if !reopened.Changed {
+		t.Errorf("reopen of closed %s reported Changed = false, want a committed reopen", id)
+	}
+	if reopened.Issue == nil {
+		t.Fatalf("reopen of %s answered a nil Issue, want a post-state snapshot", id)
+	}
+	if reopened.Issue.Assignee != holder {
+		t.Errorf("ReopenResult.Issue.Assignee = %q, want %q — the reopen clears the closure record, not the holder", reopened.Issue.Assignee, holder)
+	}
+	reopenedRow := lifecycleCloseReopenReadRow(t, ctx, fixture, id)
+	if types.Status(reopenedRow.Status) != types.StatusOpen || reopenedRow.Assignee != holder {
+		t.Errorf("stored row after the reopen = {status %q assignee %q}, want {%q %q}",
+			reopenedRow.Status, reopenedRow.Assignee, types.StatusOpen, holder)
+	}
+	if reopenedRow.CloseReason != "" || reopenedRow.ClosedBySession != "" {
+		t.Errorf("close attribution after reopening %s = (%q, %q), want both cleared — only the closure record goes",
+			id, reopenedRow.CloseReason, reopenedRow.ClosedBySession)
+	}
+}
+
 // RunLifecycleReopenLeavesNonDoneStatusesUnchanged pins the Reopen no-op.
-// issueops/issueops.go:411-413 promises Reopen "moves literal StatusClosed and
+// issueops/issueops.go:429-432 promises Reopen "moves literal StatusClosed and
 // configured done statuses to StatusOpen; non-done statuses unchanged", and
-// :368-370 promises Changed "is false when non-done statuses are unchanged".
+// :386-387 promises Changed "is false when non-done statuses are unchanged".
 //
 // "Non-done" is wider than "already open", and that is the whole point of the
 // case: a wip built-in and a configured ACTIVE custom status are both left
@@ -275,16 +747,25 @@ func RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T, ctx context.
 		t.Fatalf("installed status.custom = %q, want %q", installed, lifecycleCloseReopenCustomStatuses)
 	}
 
+	// The wip leg carries a HOLDER, because that is the state a live claim
+	// leaves and the one a no-op reopen must not sweep: the whole row is
+	// compared before and after, so an implementation that cleared assignee on
+	// the way through fails here rather than passing on an empty column.
 	cases := []struct {
-		name   string
-		id     string
-		status types.Status
+		name     string
+		id       string
+		status   types.Status
+		assignee string
 	}{
 		{name: "already open", id: fixture.IssuePrefix + "-lcr-noop-open", status: types.StatusOpen},
-		{name: "built-in wip", id: fixture.IssuePrefix + "-lcr-noop-wip", status: types.StatusInProgress},
+		{name: "built-in wip", id: fixture.IssuePrefix + "-lcr-noop-wip", status: types.StatusInProgress, assignee: "worker-noop"},
 		{name: "configured active", id: fixture.IssuePrefix + "-lcr-noop-custom", status: lifecycleCloseReopenActiveStatus},
 	}
 	for _, tc := range cases {
+		if tc.assignee != "" {
+			lifecycleCloseReopenSeedClaimedIssue(t, ctx, fixture, tc.id, tc.assignee)
+			continue
+		}
 		lifecycleCloseReopenSeedIssue(t, ctx, fixture, tc.id, tc.status, nil)
 	}
 	for _, tc := range cases {
@@ -295,7 +776,7 @@ func RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T, ctx context.
 			}
 			events := newLifecycleCloseReopenEventCounter(t, ctx, fixture, tc.id)
 			// A Reason rides along: a status the verb leaves alone records
-			// nothing, Reason or not (issueops.go:310-313).
+			// nothing, Reason or not (issueops.go:322-330).
 			result, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{
 				Actor: "writer", IssueID: tc.id, Reason: "ignored",
 			})
@@ -316,8 +797,8 @@ func RunLifecycleReopenLeavesNonDoneStatusesUnchanged(t *testing.T, ctx context.
 
 // RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory pins that both verbs
 // speak in terms of the configured done CATEGORY, not the literal closed
-// status. issueops/issueops.go:403-405 promises Close "moves the issue to
-// literal StatusClosed, including from a configured done status"; :370-372
+// status. issueops/issueops.go:422-423 promises Close "moves the issue to
+// literal StatusClosed, including from a configured done status"; :430-431
 // promises Reopen moves "literal StatusClosed and configured done statuses" to
 // StatusOpen. Both are a real move — a caller that treated a configured done
 // status as already-final would report Changed = false and leave the row on a
@@ -375,6 +856,15 @@ func RunLifecycleCloseAndReopenSpanTheConfiguredDoneCategory(t *testing.T, ctx c
 // version on the request that would have done nothing anyway. An implementation
 // that filters the no-op first answers a lost-update precondition with success,
 // and the caller's compare-and-set silently stops fencing.
+//
+// The case also pins the OTHER end of the same ordering, because the version
+// check is early but not first: both verbs RESOLVE THE ISSUE before they judge
+// the precondition, so a request naming an id that was never created reports
+// ErrNotFound and not ErrVersionMismatch. The two answers send a caller
+// somewhere different — a mismatch means "re-read and retry", a not-found means
+// "this id is wrong" — and a body that read the version first would report the
+// mismatch with every other case in this file still green, since nothing else
+// here names a missing id at all.
 func RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
 
@@ -439,6 +929,67 @@ func RunLifecycleExpectedVersionIsCheckedBeforeTheNoOps(t *testing.T, ctx contex
 	}
 	if noOp.Changed {
 		t.Errorf("reopen of open %s with the current version reported Changed = true, want false", openID)
+	}
+
+	// The lookup comes FIRST. An id that names no row is ErrNotFound whether or
+	// not the request carries a precondition, and it is never ErrVersionMismatch
+	// — a caller that matched the mismatch would re-read and retry forever
+	// against an id that will never exist.
+	//
+	// Both legs matter. Without a version the request reaches the plain resolve;
+	// with one it reaches the precondition, which is the arm where an
+	// implementation that reads row_lock before deciding the row exists reports
+	// the wrong sentinel. The version supplied is arbitrary: a row that is not
+	// there has no version for it to agree with.
+	missingID := fixture.IssuePrefix + "-lcr-version-missing"
+	arbitraryVersion := int64(1)
+	for _, tc := range []struct {
+		name    string
+		version *int64
+	}{
+		{name: "unguarded"},
+		{name: "guarded on a version", version: &arbitraryVersion},
+	} {
+		t.Run("missing id "+tc.name, func(t *testing.T) {
+			_, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+				Actor: "writer", IssueID: missingID, ExpectedVersion: tc.version,
+			})
+			assertLifecycleMissingIDRefusal(t, "close", missingID, err)
+
+			_, err = fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{
+				Actor: "writer", IssueID: missingID, ExpectedVersion: tc.version,
+			})
+			assertLifecycleMissingIDRefusal(t, "reopen", missingID, err)
+
+			// Neither refusal may have created the row it could not find.
+			for _, table := range []string{"issues", "wisps"} {
+				var rows int
+				//nolint:gosec // G201: table is one of this file's own literals
+				if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM "+table+" WHERE id = ?", []any{missingID}, &rows); err != nil {
+					t.Fatalf("count %s rows for %s: %v", table, missingID, err)
+				}
+				if rows != 0 {
+					t.Errorf("%s holds %d rows for the missing id %s, want none", table, rows, missingID)
+				}
+			}
+		})
+	}
+}
+
+// assertLifecycleMissingIDRefusal checks the sentinel a verb answers a missing
+// id with. It asserts the NEGATIVE too: matching ErrNotFound is not enough if
+// the error also matches ErrVersionMismatch, because a caller branching on the
+// mismatch would take the retry path.
+func assertLifecycleMissingIDRefusal(t *testing.T, verb, id string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("%s of the missing id %s: err = nil, want ErrNotFound", verb, id)
+	}
+	if !errors.Is(err, publicops.ErrNotFound) {
+		t.Errorf("%s of the missing id %s: err = %v, want ErrNotFound", verb, id, err)
+	}
+	if errors.Is(err, publicops.ErrVersionMismatch) {
+		t.Errorf("%s of the missing id %s: err = %v, want it NOT to match ErrVersionMismatch — the id is wrong, not stale", verb, id, err)
 	}
 }
 
@@ -507,8 +1058,8 @@ func RunLifecycleReopenRecordsItsReason(t *testing.T, ctx context.Context, fixtu
 
 // RunLifecycleResultsAreHydratedPostStateSnapshots pins the shape both results
 // promise: CloseResult.Issue and ReopenResult.Issue are "a detached post-state
-// snapshot with labels and dependency records" (issueops/issueops.go:348-353,
-// 362-367). A result that returned the bare row would leave a caller rendering
+// snapshot with labels and dependency records" (issueops/issueops.go:369-370,
+// 383-384). A result that returned the bare row would leave a caller rendering
 // an issue with no labels and no edges, and the two per-backend detachment
 // tests only prove the snapshot does not ALIAS store state — not that it
 // carries anything.
@@ -545,7 +1096,7 @@ func RunLifecycleResultsAreHydratedPostStateSnapshots(t *testing.T, ctx context.
 // validation floor both verbs sit on. The Lifecycle doc states "Deterministic
 // request validation failures match ErrValidation" and "Refusals and
 // deterministic validation failures leave persistent state unchanged"
-// (issueops/issueops.go:375-376, 385-386); the shared store body spells the
+// (issueops/issueops.go:393-394, 403-404); the shared store body spells the
 // same two fields at internal/storage/issueops/execution.go:255-258, 281-284.
 //
 // The empty-Actor legs are the ones with teeth: the id names a real row, so an
@@ -588,7 +1139,7 @@ func RunLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T, ctx context.
 }
 
 // RunLifecycleReopenProvenanceLabelsHistory pins both halves of
-// ReopenRequest.Provenance (issueops/issueops.go:317-326): a spelled label is
+// ReopenRequest.Provenance (issueops/issueops.go:335-344): a spelled label is
 // what the recorded entry reads, and the field "NEVER changes WHETHER history
 // is recorded — only how the entry reads".
 //
@@ -603,6 +1154,10 @@ func RunLifecycleCloseAndReopenRequireActorAndIssueID(t *testing.T, ctx context.
 // either would be asserting a promise the doc declines to make.
 func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
 	t.Helper()
+
+	if fixture.CountHistoryMatching == nil {
+		t.Skip("fixture has no CountHistoryMatching: this backend cannot observe history BY MESSAGE, so issueops.go:335-344 is UNPINNED here")
+	}
 
 	const label = "conformance: reopen provenance label"
 
@@ -639,6 +1194,338 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 	}
 }
 
+// SPEC-GAP bd-yby99.31: which PLANE a Reopen id resolves against. The verb is
+// documented entirely in terms of status (issueops/issueops.go:429-432) and
+// names no plane, while every neighboring role states its answer outright —
+// BatchCloser admits a wisp id "exactly as Lifecycle.Close resolves one"
+// (issueops/batchcloser.go:35-36) and Claimer refuses one (claimer.go:63). All
+// three implementations do resolve both planes today and both `bd reopen`
+// routes now depend on it, but no assertion is written here: the doc makes no
+// promise to assert against, and inventing one is what bd-yby99's policy
+// forbids. The case seeds through the fixture kit's CreateWisp hook the day the
+// clause exists.
+
+// RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers pins the
+// local-write clause of issueops.BlockedStateInvariant on Close, which the
+// existing cases in this file only ever read as a PRECONDITION.
+//
+// Close is where the affected set is widest, and the three subjects are the
+// three ways it widens: the direct depender, that depender's parent-child child
+// (which inherits and carries no blocker of its own), and a WISP depender whose
+// edge lives in the ephemeral dependency table. A body that settled only the
+// row the request named would pass a case watching the depender alone.
+//
+// Every subject's updated_at is asserted unchanged across the flip, which is
+// the non-perturbation clause and can only be observed on a row that actually
+// flipped: the mark and unmark templates never touch a row whose value stays
+// put.
+//
+// WHAT IT DOES NOT COVER is the row the request names. Every subject here is
+// downstream of the blocker and the blocker is itself unblocked, so the
+// crossing row's own seat in the affected set belongs to
+// RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild.
+//
+// UNLIKE the two-body cases on DependencyEditor and Deleter, all three legs
+// reach ONE body here (internal/storage/issueops.closeIssueInTx; the
+// unit-of-work leg through its domain issue repository). This case is a
+// wrapper and engine check, not a third vote, and blocked_state.go's header
+// says so.
+func RunLifecycleCloseSettlesItsTransitiveAndCrossPlaneDependers(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsclose-blocker"
+	depender := fixture.IssuePrefix + "-bsclose-depender"
+	child := fixture.IssuePrefix + "-bsclose-child"
+	wispDepender := fixture.IssuePrefix + "-bsclose-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsclose-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsclose-ctldepender"
+	for _, id := range []string{blocker, depender, child, controlBlocker, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wispDepender)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, depender, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requirePlaneResidency(t, blockedIssue(blocker))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the direct depender")
+	probe.requireBlockedByOpenBlocker(t, blockedWisp(wispDepender), blockedIssue(blocker), "the cross-plane depender")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child), "the child inherits its block and has none of its own")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker), "the control's blocker is not the one being closed")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedIssue(child), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: blocker})
+	if err != nil {
+		t.Fatalf("close the blocker %s: %v", blocker, err)
+	}
+	if !closed.Changed {
+		t.Fatalf("close of %s reported Changed = false, want a committed close", blocker)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"closing a blocker settles its dependers, their descendants and both planes before the close commits")
+}
+
+// RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild pins the clause of
+// issueops.BlockedStateInvariant that every other is_blocked case in this
+// package reads only from the far side: A ROW THAT IS CLOSED OR PINNED IS NEVER
+// BLOCKED.
+//
+// The sibling case above, the reopen case below and the Update crossing case
+// all arrange for the row whose status moves to be UNBLOCKED itself, and watch
+// something downstream of it. That leaves the crossing row's OWN seat in the
+// affected set unpinned — internal/storage/issueops/blocked_state.go's
+// AffectedByStatusChangeInTx seeds the set with the id whose status changed,
+// and deleting that seed leaves every one of those cases green. What it strands
+// is not a transient: a blocked row that keeps is_blocked = 1 after it closes
+// is an ORPHANED FLAG, because nothing downstream of a closed row will ever
+// change its blockedness again and no verb will recompute it. The merge clause
+// is the only place the invariant admits a stale column, and this is not a
+// merge.
+//
+// THE CHILD IS THE OTHER HALF OF THE SAME SEED. The affected set expands by
+// parent-child descendants FROM ITS SEEDS, and the depender load that reaches a
+// neighbor follows blocks and conditional-blocks edges only — never
+// parent-child. Drop the crossing row from the seed and its children go with
+// it, silently, because no other case in this file hangs a child off the row
+// being closed: the sibling's child hangs off the DEPENDER.
+//
+// WHY THE CLOSE IS FORCED. Both unforced refusals stand in the way here, and
+// for opposite reasons — the subject is blocked (ErrCloseBlocked) and it has an
+// open child (CloseOpenChildrenError). The child-shaped block that
+// RunLifecycleCloseAdmitsATransitivelyBlockedTarget uses clears the first and
+// not the second, and closing the child to clear the second would take the
+// second subject with it, since a closed row cannot be blocked and so has
+// nothing left to flip. Force waives close policy and nothing else —
+// CloseRequest.Force "bypasses only blocker and open-child close policy" and
+// "never bypasses validation, ExpectedVersion, or lifecycle rules"
+// (issueops/issueops.go:310-311) — so it is the shape that keeps both subjects
+// observable, and it is not exotic: it is the same forced close of a
+// blocked issue that RunLifecycleCloseIsIdempotentOnAClosedRowThatStillLooksBlocked
+// is built on.
+//
+// All three legs reach ONE body here (internal/storage/issueops.closeIssueInTx),
+// so this is a wrapper and engine check rather than a third vote, exactly as
+// blocked_state.go's header says of the whole Close family.
+func RunLifecycleCloseSettlesTheClosedRowItselfAndItsChild(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsself-blocker"
+	subject := fixture.IssuePrefix + "-bsself-subject"
+	child := fixture.IssuePrefix + "-bsself-child"
+	controlBlocker := fixture.IssuePrefix + "-bsself-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsself-ctldepender"
+	for _, id := range []string{blocker, subject, child, controlBlocker, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, subject, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, child, subject, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(subject), blockedIssue(blocker),
+		"the row whose status is about to cross is itself blocked, and by a live edge rather than a seeded column")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(child),
+		"the closed row's own child inherits the block and carries none of its own")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(controlDepender), blockedIssue(controlBlocker),
+		"the control is blocked for a reason this close never reaches")
+
+	// The subject is a flag SUBJECT and an updated_at exemption: the close
+	// writes that row on purpose. The child is neither, so the non-perturbation
+	// clause is observed on it.
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(subject), blockedIssue(child)},
+		[]blockedStateRow{blockedIssue(controlDepender)}).
+		alsoWrites(blockedIssue(subject))
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{
+		Actor: "writer", IssueID: subject, Reason: "shipped anyway", Force: true,
+	})
+	if err != nil {
+		t.Fatalf("forced close of blocked %s with an open child: %v", subject, err)
+	}
+	if !closed.Changed || closed.Issue.Status != types.StatusClosed {
+		t.Fatalf("forced close of %s = %#v, want a committed close", subject, closed)
+	}
+	// The count is read for the FIXTURE, not for the policy: a child that was
+	// already closed could not be blocked, and the second subject would be a row
+	// with nothing to flip.
+	if closed.OpenChildren != 1 {
+		t.Fatalf("forced close of %s reports %d open children, want the 1 this case hung off it", subject, closed.OpenChildren)
+	}
+	if got := probe.rawStatus(t, blockedIssue(subject)); got != string(types.StatusClosed) {
+		t.Fatalf("stored status for %s = %q, want %q: the rest of this case is about what a CLOSED status means for the flag",
+			subject, got, types.StatusClosed)
+	}
+	// The blocker is still open, which is what makes the two flips below
+	// attributable to the SUBJECT closing rather than to its cause going away —
+	// the mechanism the sibling case already covers.
+	if got := probe.rawStatus(t, blockedIssue(blocker)); got != string(types.StatusOpen) {
+		t.Fatalf("blocker %s status = %q, want it still open", blocker, got)
+	}
+
+	flip.requireFlippedTo(t, 0,
+		"a closed row is never blocked, and settling it settles its own parent-child child with it")
+}
+
+// RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate pins the third
+// arm of the blocking predicate — "a waits-for edge whose gate over the
+// spawner's children is not yet satisfied" — on the side of it that no case
+// reached.
+//
+// THE ARM, BY NAME. internal/storage/issueops/blocked_state.go's
+// AffectedByStatusChangeInTx builds the affected set from three loads, and one
+// of them, loadWaitersWhoseSpawnerIsParentOfInTx, exists for exactly this
+// shape: the row whose status moved is a CHILD, and the row that has to settle
+// is a waiter on that child's PARENT — a row the other two loads cannot reach,
+// because it holds no blocking edge onto the child (so the depender load misses
+// it) and it waits on the spawner rather than on the child (so the waiter load
+// misses it too). Delete that one call and this case is the only thing that
+// goes red. The DependencyEditor's gate case covers the ADD side of a gate; it
+// runs through AffectedByDepChangeInTx and never touches this load.
+//
+// WHAT THE FIXTURE MAKES OBSERVABLE, and it is the whole design: the spawner
+// has EXACTLY ONE open child, asserted before the close in both planes. A
+// spawner with a second open child leaves an all-children gate unsatisfied
+// after the close, so the subject could not flip and the case would pass
+// against a body that never recomputed it — an unfalsifiable case wearing a
+// correct assertion, which is the defect this program already shipped once.
+//
+// TWO CONTROLS, one on each side of the affected set. edgedWaiter waits on the
+// SAME spawner, so the same recompute visits it, and stays blocked because it
+// also holds a blocks edge onto a live row: it separates "the gate was
+// re-evaluated" from "the flag was cleared". otherWaiter is gated on a
+// different spawner whose own child nobody touched, so it separates a correct
+// affected set from a blanket pass over every waiter in the workspace.
+//
+// All three legs reach ONE body here (internal/storage/issueops.closeIssueInTx),
+// so this is a wrapper and engine check rather than a third vote, exactly as
+// blocked_state.go's header says of the whole Close family.
+func RunLifecycleCloseOnASpawnersLastChildSatisfiesAWaitsForGate(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	spawner := fixture.IssuePrefix + "-bswait-spawner"
+	lastChild := fixture.IssuePrefix + "-bswait-lastchild"
+	waiter := fixture.IssuePrefix + "-bswait-waiter"
+	edgedWaiter := fixture.IssuePrefix + "-bswait-edgedwaiter"
+	edgeBlocker := fixture.IssuePrefix + "-bswait-edgeblocker"
+	otherSpawner := fixture.IssuePrefix + "-bswait-otherspawner"
+	otherChild := fixture.IssuePrefix + "-bswait-otherchild"
+	otherWaiter := fixture.IssuePrefix + "-bswait-otherwaiter"
+	for _, id := range []string{spawner, lastChild, waiter, edgedWaiter, edgeBlocker, otherSpawner, otherChild, otherWaiter} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+
+	// The hierarchies land FIRST. A gate over a spawner with no children at all
+	// is already satisfied, so a waits-for edge seeded before its spawner had a
+	// child would leave the waiter unblocked and give this case nothing to flip.
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, lastChild, spawner, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, otherChild, otherSpawner, types.DepParentChild)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, edgedWaiter, edgeBlocker, types.DepBlocks)
+	for _, edge := range []struct{ waiter, spawner string }{
+		{waiter, spawner}, {edgedWaiter, spawner}, {otherWaiter, otherSpawner},
+	} {
+		lifecycleCloseReopenSeedWaitsForEdge(t, ctx, fixture, edge.waiter, edge.spawner, types.WaitsForAllChildren)
+	}
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	// The trap this case is built around: one open child, so closing it is the
+	// transition that satisfies the gate.
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, spawner, 1)
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, otherSpawner, 1)
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(waiter),
+		"the subject's block is the GATE — the flag with no blocking edge of its own is what says so")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(edgedWaiter), blockedIssue(edgeBlocker),
+		"the in-set control is blocked by a cause this close does not touch")
+	probe.requireBlockedWithNoDirectBlockerEdges(t, blockedIssue(otherWaiter),
+		"the out-of-set control is gated on a spawner whose child nobody closes")
+	probe.requireUnblocked(t, blockedIssue(lastChild), "the row being closed carries no block of its own to confuse the flip with")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(waiter)},
+		[]blockedStateRow{blockedIssue(edgedWaiter), blockedIssue(otherWaiter)})
+
+	closed, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: lastChild})
+	if err != nil {
+		t.Fatalf("close the spawner's last open child %s: %v", lastChild, err)
+	}
+	if !closed.Changed {
+		t.Fatalf("close of %s reported Changed = false, want a committed close", lastChild)
+	}
+	assertLifecycleCloseReopenOpenChildCount(t, ctx, fixture, spawner, 0)
+
+	flip.requireFlippedTo(t, 0,
+		"closing a spawner's LAST open child satisfies an all-children gate, and the closing transaction settles the waiter")
+
+	// The flip is attributable to the GATE and to nothing else: the spawner
+	// itself never moved, and the waits-for edge that gated the waiter is still
+	// there. A 0 read off a row whose edge had vanished would be a different
+	// fact wearing the same value.
+	if got := probe.rawStatus(t, blockedIssue(spawner)); got != string(types.StatusOpen) {
+		t.Fatalf("spawner %s status = %q, want it still open: the waiter's flip must come from the gate, not from its target closing", spawner, got)
+	}
+	assertLifecycleCloseReopenWaitsForEdgeCount(t, ctx, fixture, waiter, spawner, 1)
+}
+
+// RunLifecycleReopenReblocksItsDependers is the other direction, and it is what
+// makes the pair complete: the unmark template and the mark template are
+// separate SQL, so a case that only ever watches a flag fall exercises one of
+// them.
+//
+// The control is a depender whose blocker was CLOSED WHEN IT WAS SEEDED and
+// never reopened. It has the same shape as the subject and the same zero, so it
+// separates "reopening the blocker re-blocked this row" from "the verb re-marks
+// whatever it can reach".
+func RunLifecycleReopenReblocksItsDependers(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture) {
+	t.Helper()
+
+	blocker := fixture.IssuePrefix + "-bsreopen-blocker"
+	depender := fixture.IssuePrefix + "-bsreopen-depender"
+	wispDepender := fixture.IssuePrefix + "-bsreopen-wispdep"
+	controlBlocker := fixture.IssuePrefix + "-bsreopen-ctlblocker"
+	controlDepender := fixture.IssuePrefix + "-bsreopen-ctldepender"
+	for _, id := range []string{blocker, depender, controlDepender} {
+		lifecycleCloseReopenSeedIssue(t, ctx, fixture, id, types.StatusOpen, nil)
+	}
+	lifecycleCloseReopenSeedIssue(t, ctx, fixture, controlBlocker, types.StatusClosed, nil)
+	lifecycleCloseReopenSeedWisp(t, ctx, fixture, wispDepender)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, depender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, wispDepender, blocker, types.DepBlocks)
+	lifecycleCloseReopenSeedEdge(t, ctx, fixture, controlDepender, controlBlocker, types.DepBlocks)
+
+	probe := newBlockedStateProbe(ctx, fixture.QueryScalar)
+	probe.requirePlaneResidency(t, blockedWisp(wispDepender))
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the pre-close state this case unwinds and rewinds")
+	probe.requireUnblocked(t, blockedIssue(controlDepender), "the control's blocker was already closed when its edge landed")
+
+	if _, err := fixture.Lifecycle.Close(ctx, publicops.CloseRequest{Actor: "writer", IssueID: blocker}); err != nil {
+		t.Fatalf("close the blocker %s to reach the reopen precondition: %v", blocker, err)
+	}
+	probe.requireUnblocked(t, blockedIssue(depender), "the close is what put the subject at 0 — earned, never seeded")
+	probe.requireUnblocked(t, blockedWisp(wispDepender), "the cross-plane depender came down with it")
+
+	flip := probe.watchFlip(t,
+		[]blockedStateRow{blockedIssue(depender), blockedWisp(wispDepender)},
+		[]blockedStateRow{blockedIssue(controlDepender)})
+
+	reopened, err := fixture.Lifecycle.Reopen(ctx, publicops.ReopenRequest{Actor: "writer", IssueID: blocker})
+	if err != nil {
+		t.Fatalf("reopen the blocker %s: %v", blocker, err)
+	}
+	if !reopened.Changed {
+		t.Fatalf("reopen of closed %s reported Changed = false, want a committed reopen", blocker)
+	}
+
+	flip.requireFlippedTo(t, 1, "a reopened blocker blocks again, on both planes, before the reopen commits")
+	probe.requireBlockedByOpenBlocker(t, blockedIssue(depender), blockedIssue(blocker), "the postcondition is the flag AND the live blocker behind it")
+}
+
 // lifecycleCloseReopenCountHistory counts version-control entries carrying an
 // EXACT message, which is the only way to tell the caller's spelling from the
 // implementation's default. It is read as a delta by every caller: these
@@ -646,8 +1533,8 @@ func RunLifecycleReopenProvenanceLabelsHistory(t *testing.T, ctx context.Context
 // would carry their commits too.
 func lifecycleCloseReopenCountHistory(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, message string) int {
 	t.Helper()
-	var count int
-	if err := fixture.QueryScalar(ctx, "SELECT COUNT(*) FROM dolt_log WHERE message = ?", []any{message}, &count); err != nil {
+	count, err := fixture.CountHistoryMatching(ctx, historyPatternForExactMessage(t, message))
+	if err != nil {
 		t.Fatalf("count history entries reading %q: %v", message, err)
 	}
 	return count
@@ -656,8 +1543,15 @@ func lifecycleCloseReopenCountHistory(t *testing.T, ctx context.Context, fixture
 // lifecycleCloseReopenRow is the stored close-lifecycle state one assertion
 // compares before and after. row_lock is read as an int64 rather than a string
 // because the version cases hand it straight back as an ExpectedVersion.
+//
+// assignee is part of the row rather than a separate read because every refusal
+// and no-op leg in this file asserts against the whole struct: a close that
+// dropped the holder on a path that changed nothing else would otherwise be
+// invisible here, and `bd show` and `bd list --assignee` would lose the holder
+// after every replayed close.
 type lifecycleCloseReopenRow struct {
 	Status          string
+	Assignee        string
 	RowLock         int64
 	ClosedAt        string
 	CloseReason     string
@@ -668,8 +1562,8 @@ func lifecycleCloseReopenReadRow(t *testing.T, ctx context.Context, fixture Life
 	t.Helper()
 	var row lifecycleCloseReopenRow
 	if err := fixture.QueryScalar(ctx,
-		"SELECT status, row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
-		[]any{id}, &row.Status, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBySession); err != nil {
+		"SELECT status, COALESCE(assignee, ''), row_lock, COALESCE(CAST(closed_at AS CHAR), ''), COALESCE(close_reason, ''), COALESCE(closed_by_session, '') FROM issues WHERE id = ?",
+		[]any{id}, &row.Status, &row.Assignee, &row.RowLock, &row.ClosedAt, &row.CloseReason, &row.ClosedBySession); err != nil {
 		t.Fatalf("read close-lifecycle row for %s: %v", id, err)
 	}
 	return row
@@ -719,12 +1613,93 @@ func lifecycleCloseReopenSeedIssue(t *testing.T, ctx context.Context, fixture Li
 	}
 }
 
+// lifecycleCloseReopenSeedClaimedIssue seeds the state a won claim leaves
+// behind: an in_progress row a named actor holds. It seeds directly rather than
+// claiming through the role because the close/reopen assertions answer to the
+// STATE, and a fixture that had to reach it through a Claim would need the
+// claim seam this file otherwise does not use.
+func lifecycleCloseReopenSeedClaimedIssue(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id, assignee string) {
+	t.Helper()
+	started := time.Now().UTC()
+	if err := fixture.CreateIssue(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusInProgress, Priority: 2, IssueType: types.TypeTask,
+		Assignee: assignee, StartedAt: &started,
+	}, "seed"); err != nil {
+		t.Fatalf("seed %s as claimed by %s: %v", id, assignee, err)
+	}
+}
+
+func lifecycleCloseReopenSeedWisp(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, id string) {
+	t.Helper()
+	if fixture.CreateWisp == nil {
+		t.Fatalf("seed wisp %s: fixture has no CreateWisp hook", id)
+	}
+	if err := fixture.CreateWisp(ctx, &types.Issue{
+		ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Ephemeral: true,
+	}, "seed"); err != nil {
+		t.Fatalf("seed wisp %s: %v", id, err)
+	}
+}
+
 func lifecycleCloseReopenSeedEdge(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, from, to string, kind types.DependencyType) {
 	t.Helper()
 	if err := fixture.AddDependency(ctx, &types.Dependency{
 		IssueID: from, DependsOnID: to, Type: kind,
 	}, "seed"); err != nil {
 		t.Fatalf("seed %s %s -> %s: %v", kind, from, to, err)
+	}
+}
+
+// lifecycleCloseReopenSeedWaitsForEdge seeds a waits-for edge carrying its GATE.
+// It goes through the constructor rather than a literal because the gate lives
+// in edge metadata whose spelling the derivation engine reads, and a hand-built
+// JSON blob here would be this file's guess at that spelling.
+func lifecycleCloseReopenSeedWaitsForEdge(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, waiter, spawner, gate string) {
+	t.Helper()
+	edge, err := types.NewWaitsForDependency(waiter, spawner, gate)
+	if err != nil {
+		t.Fatalf("build the %s waits-for edge %s -> %s: %v", gate, waiter, spawner, err)
+	}
+	if err := fixture.AddDependency(ctx, edge, "seed"); err != nil {
+		t.Fatalf("seed the %s waits-for edge %s -> %s: %v", gate, waiter, spawner, err)
+	}
+}
+
+// assertLifecycleCloseReopenOpenChildCount counts a spawner's parent-child
+// children that are neither closed nor pinned, IN BOTH PLANES. The gate case
+// reads it as a fixture check on both sides of the close: a spawner with a
+// second open child would leave an all-children gate unsatisfied afterwards, so
+// the subject could not flip and the case could not fail.
+func assertLifecycleCloseReopenOpenChildCount(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, spawner string, want int) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx, `
+		SELECT (
+		    SELECT COUNT(*) FROM dependencies d JOIN issues c ON c.id = d.issue_id
+		    WHERE d.type = 'parent-child' AND d.depends_on_issue_id = ?
+		      AND c.status <> 'closed' AND c.status <> 'pinned'
+		  ) + (
+		    SELECT COUNT(*) FROM wisp_dependencies d JOIN wisps c ON c.id = d.issue_id
+		    WHERE d.type = 'parent-child' AND d.depends_on_issue_id = ?
+		      AND c.status <> 'closed' AND c.status <> 'pinned'
+		  )`, []any{spawner, spawner}, &got); err != nil {
+		t.Fatalf("count the open children of %s: %v", spawner, err)
+	}
+	if got != want {
+		t.Fatalf("%s has %d open children, want %d: an all-children gate case is about the LAST one closing", spawner, got, want)
+	}
+}
+
+func assertLifecycleCloseReopenWaitsForEdgeCount(t *testing.T, ctx context.Context, fixture LifecycleCloseReopenFixture, waiter, spawner string, want int) {
+	t.Helper()
+	var got int
+	if err := fixture.QueryScalar(ctx,
+		"SELECT COUNT(*) FROM dependencies WHERE issue_id = ? AND depends_on_issue_id = ? AND type = ?",
+		[]any{waiter, spawner, string(types.DepWaitsFor)}, &got); err != nil {
+		t.Fatalf("count waits-for edges %s -> %s: %v", waiter, spawner, err)
+	}
+	if got != want {
+		t.Errorf("waits-for edges %s -> %s = %d, want %d", waiter, spawner, got, want)
 	}
 }
 

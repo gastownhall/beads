@@ -30,6 +30,7 @@ var _ storage.GarbageCollector = (*EmbeddedDoltStore)(nil)
 var _ storage.Flattener = (*EmbeddedDoltStore)(nil)
 var _ storage.Compactor = (*EmbeddedDoltStore)(nil)
 var _ storage.SchemaMigrator = (*EmbeddedDoltStore)(nil)
+var _ storage.EventsJournalConfigurer = (*EmbeddedDoltStore)(nil)
 var _ storage.ExternalRefHistoryQuerier = (*EmbeddedDoltStore)(nil)
 
 // EmbeddedDoltStore implements storage.DoltStorage backed by the embedded Dolt engine.
@@ -47,6 +48,9 @@ type EmbeddedDoltStore struct {
 	branch        string
 	credentialKey []byte
 	closed        atomic.Bool
+	// eventsJournalEnabled activates the durable events journal for THIS store
+	// instance only (storage.EventsJournalConfigurer); never process-global.
+	eventsJournalEnabled atomic.Bool
 	// readOnly marks a store opened via OpenReadOnly or
 	// OpenForPreviewCommand: open-time mutations (CREATE DATABASE, schema
 	// migrations) were skipped and write transactions are refused
@@ -238,6 +242,8 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 		err = fmt.Errorf("embeddeddolt: begin tx: %w", err)
 		return
 	}
+	clearJournalScope := issueops.ScopeEventsJournalTransaction(tx, s.eventsJournalEnabled.Load())
+	defer clearJournalScope()
 
 	if fnErr := fn(tx); fnErr != nil {
 		err = errors.Join(fnErr, tx.Rollback())
@@ -255,6 +261,11 @@ func (s *EmbeddedDoltStore) withConn(ctx context.Context, commit bool, fn func(t
 	}
 	committed = true
 	return
+}
+
+// SetEventsJournalEnabled activates the journal for this store instance only.
+func (s *EmbeddedDoltStore) SetEventsJournalEnabled(enabled bool) {
+	s.eventsJournalEnabled.Store(enabled)
 }
 
 // commitEmbeddedTx classifies an unconfirmed SQL commit response as
@@ -617,6 +628,40 @@ func (s *EmbeddedDoltStore) EventsSince(ctx context.Context, cursor storage.Even
 	return result, err
 }
 
+// RecordProvenanceEvent appends a provenance event idempotently. inserted is
+// false when the deterministic id already existed. Append-only — no update path.
+func (s *EmbeddedDoltStore) RecordProvenanceEvent(ctx context.Context, ev types.ProvenanceEvent) (id string, inserted bool, err error) {
+	err = s.withConn(ctx, true, func(tx *sql.Tx) error {
+		var txErr error
+		id, inserted, txErr = issueops.RecordProvenanceEventInTx(ctx, tx, ev)
+		return txErr
+	})
+	if err != nil {
+		return "", false, err
+	}
+	return id, inserted, nil
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceEvents(ctx context.Context, issueID, kindFilter string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceEventsInTx(ctx, tx, issueID, kindFilter)
+		return err
+	})
+	return result, err
+}
+
+func (s *EmbeddedDoltStore) GetProvenanceByRef(ctx context.Context, ref string) ([]types.ProvenanceEvent, error) {
+	var result []types.ProvenanceEvent
+	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
+		var err error
+		result, err = issueops.GetProvenanceByRefInTx(ctx, tx, ref)
+		return err
+	})
+	return result, err
+}
+
 // RunInTransaction is implemented in transaction.go.
 
 // Close decrements the reference count if this store was opened via Open (the
@@ -722,7 +767,6 @@ func (s *EmbeddedDoltStore) ImportJSONLData(
 
 		// Create all issues in the same transaction
 		if err := issueops.CreateIssuesInTx(ctx, tx, issues, actor, storage.BatchCreateOptions{
-			OrphanHandling:       storage.OrphanAllow,
 			SkipPrefixValidation: true,
 			// Defense-in-depth (GH#3955): the embedded fast-path is the primary
 			// auto-import route for 1.0+ users and is gated by the in-transaction
