@@ -1874,8 +1874,25 @@ func TestMaybeAutoExport_SecondRunTakesIncrementalPath_ServerMode(t *testing.T) 
 		t.Fatalf("second maybeAutoExport: %v", err)
 	}
 
-	if spy.changedIssueIDsCalls < 1 {
-		t.Error("ChangedIssueIDs was never called — incremental export never actually reached the dolt_diff-backed DiffStore path (root-cause regression: WORKING-set hash fed to dolt_diff, silently falling back to full export every time)")
+	// Both ChangedIssueIDs call sites must have fired: the orphan guard's
+	// proof-of-deletion probe (missingJSONLIssueIDsInStore, which runs
+	// because deleting e2e-b leaves it JSONL-only) and tryIncrementalExport's
+	// own diff. A bare "called at least once" check is NOT sufficient and was
+	// the PR #5806 round-5 review finding: the guard's own call satisfies it
+	// even when tryIncrementalExport falls back to a full export, so the test
+	// would pass while proving nothing about the path it is named for.
+	if spy.changedIssueIDsCalls != 2 {
+		t.Errorf("ChangedIssueIDs called %d times, want 2 (orphan-guard deletion probe + incremental diff) — incremental export never actually reached the dolt_diff-backed DiffStore path (root-cause regression: WORKING-set hash fed to dolt_diff, silently falling back to full export every time)", spy.changedIssueIDsCalls)
+	}
+
+	// The load-bearing oracle for this test's name: dirtyIDs reaches
+	// LastDirtyIDs only from a successful incremental patch — maybeAutoExport
+	// explicitly nils it on the full-export fallback — so an exact {e2e-a}
+	// here proves the export WAS incremental, not merely that a diff was
+	// reached. e2e-a is the only upserted id: e2e-b was removed (not
+	// upserted) and e2e-c was untouched.
+	if got, want := loadExportAutoState(h.beadsDir).LastDirtyIDs, []string{"e2e-a"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("LastDirtyIDs = %v, want %v — a nil/empty value means the export fell back to a full rewrite instead of taking the incremental path", got, want)
 	}
 
 	titles := loadIssueTitles(t, exportPath)
