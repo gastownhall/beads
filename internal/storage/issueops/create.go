@@ -31,6 +31,9 @@ type BatchContext struct {
 	// issue for a result the caller discards. Singular creates leave this
 	// false so they keep reconciling immediately, per-issue.
 	SkipChildCounterReconcile bool
+	// SkipRowVersionReadback lets the batch entry point defer each issue's
+	// readback until all cross-issue dependencies have been persisted.
+	SkipRowVersionReadback bool
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -204,6 +207,11 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 			return result, err
 		}
 	}
+	if !bc.SkipRowVersionReadback {
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", issueTable), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return result, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
+		}
+	}
 	return result, nil
 }
 
@@ -288,6 +296,7 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// reconcile behavior.
 	batch := *bc
 	batch.SkipChildCounterReconcile = true
+	batch.SkipRowVersionReadback = true
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
@@ -331,6 +340,19 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	if recomputed.WispRowsChanged {
 		result.markChanged("wisps")
+	}
+	// Auxiliary aggregate writes (notably dependency creation) may remint the
+	// token after the row insert. Return the final in-transaction token on each
+	// caller-owned Issue so an immediate guarded mutation does not start stale.
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		table, _ := TableRouting(issue)
+		//nolint:gosec // G201: table comes from TableRouting.
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT row_lock FROM %s WHERE id = ?", table), issue.ID).Scan(&issue.RowVersion); err != nil {
+			return CreateIssuesResult{}, fmt.Errorf("read final row version for %s: %w", issue.ID, err)
+		}
 	}
 	return result, nil
 }

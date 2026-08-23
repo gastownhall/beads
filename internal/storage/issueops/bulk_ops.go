@@ -293,9 +293,9 @@ func updateIssueIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, iss
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE issues
-		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?
+		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?, row_lock = ?
 		WHERE id = ?
-	`, newID, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes, now, oldID)
+	`, newID, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes, now, freshRowLock(), oldID)
 	if err != nil {
 		return fmt.Errorf("update issue ID: %w", err)
 	}
@@ -326,9 +326,9 @@ func updateWispIDInTx(ctx context.Context, tx *sql.Tx, oldID, newID string, issu
 	now := time.Now().UTC()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE wisps
-		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?
+		SET id = ?, title = ?, description = ?, design = ?, acceptance_criteria = ?, notes = ?, updated_at = ?, row_lock = ?
 		WHERE id = ?
-	`, newID, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes, now, oldID)
+	`, newID, issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes, now, freshRowLock(), oldID)
 	if err != nil {
 		return fmt.Errorf("update wisp ID: %w", err)
 	}

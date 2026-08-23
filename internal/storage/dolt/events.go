@@ -33,7 +33,7 @@ func (s *DoltStore) AddComment(ctx context.Context, issueID, actor, comment stri
 		if isWisp {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"events"}, fmt.Sprintf("bd: comment %s", issueID))
+		return s.doltAddAndCommit(ctx, []string{"issues", "events"}, fmt.Sprintf("bd: comment %s", issueID))
 	})
 }
 
@@ -80,36 +80,38 @@ func (s *DoltStore) EventsSince(ctx context.Context, cursor storage.EventCursor,
 // comment so a burst of comments still reads back in the order it was written
 // (see issueops.NextLiveCommentTime).
 func (s *DoltStore) AddIssueComment(ctx context.Context, issueID, author, text string) (*types.Comment, error) {
-	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
-		return issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, bool, error) {
+		comment, err := issueops.AddIssueCommentInTx(ctx, tx, issueID, author, text)
+		return comment, err == nil, err
 	})
 }
 
 // ImportIssueComment adds a comment during import, preserving the original timestamp.
 // This prevents comment timestamp drift across import/export cycles.
 func (s *DoltStore) ImportIssueComment(ctx context.Context, issueID, author, text string, createdAt time.Time) (*types.Comment, error) {
-	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, error) {
-		return issueops.ImportIssueCommentInTx(ctx, tx, issueID, author, text, createdAt)
+	return s.addOrImportComment(ctx, issueID, func(tx *sql.Tx) (*types.Comment, bool, error) {
+		return issueops.ImportIssueCommentInTxWithResult(ctx, tx, issueID, author, text, createdAt)
 	})
 }
 
 // addOrImportComment is the shared wisp-routing / retry / dolt-commit tail
 // around either comment insert; insert does the write inside the transaction.
-func (s *DoltStore) addOrImportComment(ctx context.Context, issueID string, insert func(*sql.Tx) (*types.Comment, error)) (*types.Comment, error) {
+func (s *DoltStore) addOrImportComment(ctx context.Context, issueID string, insert func(*sql.Tx) (*types.Comment, bool, error)) (*types.Comment, error) {
 	var result *types.Comment
+	var changed bool
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		isWisp := s.isActiveWisp(ctx, issueID)
 		if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 			var err error
-			result, err = insert(tx)
+			result, changed, err = insert(tx)
 			return err
 		}); err != nil {
 			return err
 		}
-		if isWisp {
+		if isWisp || !changed {
 			return nil
 		}
-		return s.doltAddAndCommit(ctx, []string{"comments"}, fmt.Sprintf("bd: comment %s", issueID))
+		return s.doltAddAndCommit(ctx, []string{"issues", "comments"}, fmt.Sprintf("bd: comment %s", issueID))
 	})
 	if err != nil {
 		return nil, err

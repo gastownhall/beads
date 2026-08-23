@@ -21,13 +21,15 @@ func (s *EmbeddedDoltStore) GetLabels(ctx context.Context, issueID string) ([]st
 
 func (s *EmbeddedDoltStore) AddLabel(ctx context.Context, issueID, label, actor string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		_, err := issueops.AddLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		return err
 	})
 }
 
 // RemoveLabel removes a label from an issue.
 func (s *EmbeddedDoltStore) RemoveLabel(ctx context.Context, issueID, label, actor string) error {
 	return s.withConn(ctx, true, func(tx *sql.Tx) error {
-		return issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		_, err := issueops.RemoveLabelInTx(ctx, tx, "", "", issueID, label, actor)
+		return err
 	})
 }
