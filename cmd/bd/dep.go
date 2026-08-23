@@ -452,7 +452,7 @@ Examples:
 //
 // The warning is advisory and fires on the documented-default majority path,
 // so it is scoped to an interactive operator: it is emitted only when stderr
-// is a TTY, and it honours the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
+// is a TTY, and it honors the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
 // Scripted and agent callers — whose stderr is a pipe or a log file — never
 // see it, so it cannot train them to ignore stderr.
 func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
@@ -477,7 +477,7 @@ func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bo
 	if quiet {
 		return false
 	}
-	// Explicit opt-out for operators who have internalised the default,
+	// Explicit opt-out for operators who have internalized the default,
 	// following the BD_NO_EMOJI / BD_NO_COLOR precedent.
 	if noWarnEnv != "" {
 		return false
