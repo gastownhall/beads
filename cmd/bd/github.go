@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/config"
@@ -472,6 +473,20 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		}
 		linksPushed = pushGitHubDependencyLinks(ctx, gt, store, opts, githubSyncDryRun, out, warnLink)
 		result.Warnings = append(result.Warnings, linkWarnings...)
+
+		// Update last_sync after relationship push to account for timestamp
+		// changes GitHub makes when relationships are created. Without this,
+		// the next sync would see those issues as "changed" due to their
+		// updated_at being bumped, causing unnecessary churn.
+		if !githubSyncDryRun && linksPushed > 0 {
+			lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
+			key := gt.ConfigPrefix() + ".last_sync"
+			if err := store.SetLocalMetadata(ctx, key, lastSync); err != nil {
+				_, _ = fmt.Fprintf(os.Stderr, "Warning: Failed to update last_sync after relationship sync: %v\n", err)
+			} else {
+				result.LastSync = lastSync
+			}
+		}
 	}
 
 	// Output results

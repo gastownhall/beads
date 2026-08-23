@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/ado"
@@ -625,6 +626,16 @@ func runGitHubPush(cmd *cobra.Command, args []string) error {
 	linksPushed := pushGitHubDependencyLinks(ctx, gt, store, opts, dryRun, os.Stdout, warnLink)
 	if linksPushed > 0 && !jsonOutput {
 		fmt.Printf("✓ Synced %d relationship links\n", linksPushed)
+	}
+
+	// Update last_sync after relationship push to account for timestamp
+	// changes GitHub makes when relationships are created.
+	if !dryRun && linksPushed > 0 {
+		lastSync := time.Now().UTC().Truncate(time.Second).Add(time.Second).Format(time.RFC3339Nano)
+		key := gt.ConfigPrefix() + ".last_sync"
+		if err := store.SetLocalMetadata(ctx, key, lastSync); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to update last_sync after relationship sync: %v\n", err)
+		}
 	}
 
 	outputSyncResult(result, dryRun)
