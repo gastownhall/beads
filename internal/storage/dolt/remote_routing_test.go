@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -31,10 +32,9 @@ func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
 }
 
 func TestServerOwnedRemoteCredentialsDisableCLIRouting(t *testing.T) {
-	t.Setenv(serverOwnsRemoteCredentialsEnv, "1")
 	ctx := context.Background()
 	store := &DoltStore{serverMode: true}
-	creds := &remoteCredentials{username: "root"}
+	creds := &remoteCredentials{username: "root", serverOwned: true}
 
 	routes := []struct {
 		name string
@@ -44,10 +44,10 @@ func TestServerOwnedRemoteCredentialsDisableCLIRouting(t *testing.T) {
 			return store.prepareCLIRouteForCredentials(ctx, "origin", creds)
 		}},
 		{"cloud auth", func() (bool, error) {
-			return store.prepareCLIRouteForCloudAuth(ctx, "origin")
+			return store.prepareCLIRouteForCloudAuth(ctx, "origin", creds)
 		}},
 		{"local remote", func() (bool, error) {
-			return store.shouldUseCLIForLocalRemoteWithError(ctx, "origin")
+			return store.shouldUseCLIForLocalRemoteWithError(ctx, "origin", creds)
 		}},
 	}
 
@@ -61,6 +61,128 @@ func TestServerOwnedRemoteCredentialsDisableCLIRouting(t *testing.T) {
 				t.Fatal("expected SQL routing when the server owns remote credentials")
 			}
 		})
+	}
+}
+
+func TestServerOwnedRemoteCredentialsDerivedFromRemoteURL(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "permabot")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "stale-client-password")
+
+	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherEqual))
+	if err != nil {
+		t.Fatalf("sqlmock: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	mock.ExpectQuery("SELECT name, url FROM dolt_remotes").
+		WillReturnRows(sqlmock.NewRows([]string{"name", "url"}).
+			AddRow("origin", "https://root@dolt.permanet.io:32551/permanet_pod"))
+
+	store := &DoltStore{
+		db:                    db,
+		serverMode:            true,
+		dbPath:                t.TempDir(),
+		database:              "permanet_pod",
+		remote:                "origin",
+		serverOwnedRemoteBase: "https://root@dolt.permanet.io:32551",
+	}
+	if err := os.MkdirAll(store.CLIDir(), 0o755); err != nil {
+		t.Fatalf("create stale CLI database directory: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(store.CLIDir(), ".dolt"), 0o755); err != nil {
+		t.Fatalf("create stale CLI marker: %v", err)
+	}
+
+	creds, err := store.credentialsForRemote(context.Background(), "origin")
+	if err != nil {
+		t.Fatalf("credentialsForRemote: %v", err)
+	}
+	if creds == nil || creds.username != "root" {
+		t.Fatalf("derived credentials = %#v, want username root", creds)
+	}
+	if creds.password != "" {
+		t.Fatal("remote URL resolution must not synthesize a client-side password")
+	}
+	if !creds.ownedByServer() {
+		t.Fatal("username-only HTTP remote on an external server should be server-owned")
+	}
+
+	useCLI, err := store.prepareCLIRouteForCredentials(context.Background(), "origin", creds)
+	if err != nil {
+		t.Fatalf("prepareCLIRouteForCredentials: %v", err)
+	}
+	if useCLI {
+		t.Fatal("server-owned credentials must not route through the stale local Dolt CLI directory")
+	}
+	for name, route := range map[string]func() (bool, error){
+		"cloud auth": func() (bool, error) {
+			return store.prepareCLIRouteForCloudAuth(context.Background(), "origin", creds)
+		},
+		"local remote": func() (bool, error) {
+			return store.shouldUseCLIForLocalRemoteWithError(context.Background(), "origin", creds)
+		},
+	} {
+		useCLI, routeErr := route()
+		if routeErr != nil {
+			t.Fatalf("%s route: %v", name, routeErr)
+		}
+		if useCLI {
+			t.Fatalf("%s route must remain on SQL when the server owns credentials", name)
+		}
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("sql expectations: %v", err)
+	}
+}
+
+func TestServerOwnedRemoteUsername(t *testing.T) {
+	tests := []struct {
+		name      string
+		baseURL   string
+		remoteURL string
+		wantUser  string
+		wantErr   bool
+	}{
+		{name: "trusted authenticated remotes API", baseURL: "https://root@dolt.example:32551", remoteURL: "https://root@dolt.example:32551/database", wantUser: "root"},
+		{name: "different host cannot receive server password", baseURL: "https://root@dolt.example:32551", remoteURL: "https://root@evil.example:32551/database", wantErr: true},
+		{name: "different user is rejected", baseURL: "https://root@dolt.example:32551", remoteURL: "https://permabot@dolt.example:32551/database", wantErr: true},
+		{name: "password in remote is rejected", baseURL: "https://root@dolt.example:32551", remoteURL: "https://root:secret@dolt.example:32551/database", wantErr: true},
+		{name: "password in base is rejected", baseURL: "https://root:secret@dolt.example:32551", remoteURL: "https://root@dolt.example:32551/database", wantErr: true},
+		{name: "plain HTTP is rejected", baseURL: "https://root@dolt.example:32551", remoteURL: "http://root@dolt.example:32551/database", wantErr: true},
+		{name: "git transport is rejected", baseURL: "https://root@dolt.example:32551", remoteURL: "git+https://root@dolt.example:32551/database", wantErr: true},
+		{name: "missing database is rejected", baseURL: "https://root@dolt.example:32551", remoteURL: "https://root@dolt.example:32551", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotUser, err := serverOwnedRemoteUsername(tt.baseURL, tt.remoteURL)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("serverOwnedRemoteUsername(%q, %q) error = %v, wantErr %v", tt.baseURL, tt.remoteURL, err, tt.wantErr)
+			}
+			if gotUser != tt.wantUser {
+				t.Fatalf("serverOwnedRemoteUsername(%q, %q) user = %q, want %q", tt.baseURL, tt.remoteURL, gotUser, tt.wantUser)
+			}
+		})
+	}
+}
+
+func TestAuthenticatedFetchCall(t *testing.T) {
+	query, args := authenticatedFetchCall("root", "origin", "main")
+	if query != "CALL DOLT_FETCH('--user', ?, ?, ?)" {
+		t.Fatalf("authenticated query = %q", query)
+	}
+	wantArgs := []any{"root", "origin", "main"}
+	if len(args) != len(wantArgs) {
+		t.Fatalf("authenticated args = %#v, want %#v", args, wantArgs)
+	}
+	for i := range wantArgs {
+		if args[i] != wantArgs[i] {
+			t.Fatalf("authenticated args = %#v, want %#v", args, wantArgs)
+		}
+	}
+
+	query, args = authenticatedFetchCall("", "origin", "main")
+	if query != "CALL DOLT_FETCH(?, ?)" || len(args) != 2 {
+		t.Fatalf("anonymous fetch = %q %#v", query, args)
 	}
 }
 
@@ -94,7 +216,7 @@ func TestSQLCapableCLIRoutingFallsBackWhenCLIDirIsNotDoltRepo(t *testing.T) {
 		{
 			name: "local remote",
 			route: func(store *DoltStore) (bool, error) {
-				return store.shouldUseCLIForLocalRemoteWithError(ctx, "origin")
+				return store.shouldUseCLIForLocalRemoteWithError(ctx, "origin", nil)
 			},
 		},
 		{

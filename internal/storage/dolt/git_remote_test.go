@@ -1386,7 +1386,7 @@ func TestGitRemoteExternalServerRouting(t *testing.T) {
 		"git-protocol routing should create a matching client CLI remote",
 	)
 	require.True(t, store.shouldUseCLIForCredentials(ctx, store.remote, store.mainRemoteCredentials()), "credential route should reuse matching CLI remote")
-	useLocalCLI, err := store.shouldUseCLIForLocalRemoteWithError(ctx, store.remote)
+	useLocalCLI, err := store.shouldUseCLIForLocalRemoteWithError(ctx, store.remote, store.mainRemoteCredentials())
 	require.NoError(t, err)
 	require.True(t, useLocalCLI, "local remote guard should pass after materialization")
 }

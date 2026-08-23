@@ -127,8 +127,43 @@ func PullWithStrategy(ctx context.Context, db DBConn, remote, branch, user, stra
 		return fmt.Errorf("fetch from %s/%s: %w", remote, branch, err)
 	}
 	trackingRef := remote + "/" + branch
+	// Since events moved to the ignored plane in schema 0062, a healthy clone
+	// intentionally carries durable working-set-only rows. Dolt 2.3.1 refuses
+	// DOLT_MERGE with "cannot merge with uncommitted changes" even when the
+	// fetched tracking ref is already byte-for-byte HEAD. Avoid asking Dolt to
+	// perform a no-op merge in that case. This is also cheaper than invoking the
+	// full settlement path after every successful sync.
+	equal, err := HeadEqualsRef(ctx, db, trackingRef)
+	if err != nil {
+		return fmt.Errorf("compare HEAD with %s after fetch: %w", trackingRef, err)
+	}
+	if equal {
+		return nil
+	}
 	if err := MergeAndSettleWithStrategy(ctx, db, trackingRef, strategy); err != nil {
 		return fmt.Errorf("merge %s: %w", trackingRef, err)
 	}
 	return nil
+}
+
+// HeadEqualsRef reports whether the current branch head is exactly ref. It
+// compares commit hashes rather than working roots so ignored working-set
+// tables cannot make an already-synchronized branch look dirty or divergent.
+func HeadEqualsRef(ctx context.Context, db DBConn, ref string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "SELECT HASHOF('HEAD'), HASHOF(?)", ref)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return false, err
+		}
+		return false, fmt.Errorf("hash comparison returned no row")
+	}
+	var headHash, refHash string
+	if err := rows.Scan(&headHash, &refHash); err != nil {
+		return false, err
+	}
+	return headHash == refHash, nil
 }

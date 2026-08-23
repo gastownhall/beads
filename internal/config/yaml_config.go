@@ -2,14 +2,19 @@ package config
 
 import (
 	"bufio"
+	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/gofrs/flock"
+	"github.com/steveyegge/beads/internal/atomicfile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -88,11 +93,12 @@ var YamlOnlyKeys = map[string]bool{
 	"import.path": true,
 
 	// Dolt server settings
-	"dolt.shared-server":      true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
-	"dolt.max-conns":          true, // Connection pool size override (default 10, GH#3140)
-	"dolt.pool-read-timeout":  true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
-	"dolt.pool-write-timeout": true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
-	"dolt.debug":              true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
+	"dolt.shared-server":            true, // Shared Dolt server at ~/.beads/shared-server/ (GH#2377)
+	"dolt.server-owned-remote-base": true, // Per-machine trust boundary for server-owned remote secrets
+	"dolt.max-conns":                true, // Connection pool size override (default 10, GH#3140)
+	"dolt.pool-read-timeout":        true, // Pool per-I/O read deadline override (default 10s, bd-vz0y9)
+	"dolt.pool-write-timeout":       true, // Pool per-I/O write deadline override (default 10s, bd-vz0y9)
+	"dolt.debug":                    true, // Debug-mode dolt sql-server: --loglevel=debug + --prof cpu
 
 	// Secrets: tokens and API keys must NOT be stored in the Dolt database
 	// because that data is pushed to remotes, triggering secret-scanning
@@ -304,8 +310,9 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // userGlobalExactKeys are per-MACHINE settings that must never be written to
 // the project .beads/config.yaml, which is a git-TRACKED file (see
 // cmd/bd/doctor/gitignore.go: nothing in .beads/.gitignore excludes it). A
-// committed value propagates one machine's answer to every clone that pulls
-// it, which for these keys is worse than having no value at all.
+// committed value propagates one machine's identity or secret trust boundary
+// to every clone that pulls it, which for these keys is worse than having no
+// value at all.
 //
 // node_id is the exemplar: it names the beads STORE that grants leases here,
 // and the reclaim guard (issueops.ReclaimExpiredLeasesInTx) compares it
@@ -316,7 +323,10 @@ var userGlobalKeyPrefixes = []string{"metrics."}
 // happening while the operator believes they are protected. Routing the write
 // to ~/.config/bd/config.yaml keeps it per-machine; viper still merges that
 // file, so config.NodeID() reads it back.
-var userGlobalExactKeys = map[string]bool{"node_id": true}
+var userGlobalExactKeys = map[string]bool{
+	"node_id":                       true,
+	"dolt.server-owned-remote-base": true,
+}
 
 func IsUserGlobalKey(key string) bool {
 	if userGlobalExactKeys[key] {
@@ -461,26 +471,34 @@ func UnsetUserYamlConfig(key string) error {
 	if err != nil {
 		return err
 	}
-	normalizedKey := normalizeYamlKey(key)
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		return fmt.Errorf("failed to create user config directory: %w", err)
+	}
+	return withUserYamlConfigLock(configPath, func() error {
+		normalizedKey := normalizeYamlKey(key)
 
-	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil
+		content, err := os.ReadFile(configPath) //nolint:gosec // configPath is a validated absolute user config path
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to read user config.yaml: %w", err)
 		}
-		return fmt.Errorf("failed to read user config.yaml: %w", err)
-	}
 
-	newContent := commentOutYamlKey(string(content), normalizedKey)
+		newContent, err := unsetYamlKey(string(content), normalizedKey)
+		if err != nil {
+			return err
+		}
 
-	// Preserve the owner-private 0600 posture every other user-global writer
-	// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
-	// rewriting at 0644 would relax this shared user config to world-readable.
-	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is from UserConfigYamlPath
-		return fmt.Errorf("failed to write user config.yaml: %w", err)
-	}
+		// Preserve the owner-private 0600 posture every other user-global writer
+		// uses (SetUserYamlConfig, setYamlConfigAtPath, the metrics bootstrap);
+		// rewriting at 0644 would relax this shared user config to world-readable.
+		if err := atomicfile.WriteFile(configPath, []byte(newContent), 0o600); err != nil {
+			return fmt.Errorf("failed to write user config.yaml: %w", err)
+		}
 
-	return nil
+		return nil
+	})
 }
 
 func SetUserYamlConfig(key, value string) error {
@@ -494,14 +512,50 @@ func SetUserYamlConfig(key, value string) error {
 	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
 		return fmt.Errorf("failed to create user config directory: %w", err)
 	}
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
-		if err := os.WriteFile(configPath, []byte{}, 0o600); err != nil {
-			return fmt.Errorf("failed to create user config.yaml: %w", err)
+	return withUserYamlConfigLock(configPath, func() error {
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			if err := atomicfile.WriteFile(configPath, nil, 0o600); err != nil {
+				return fmt.Errorf("failed to create user config.yaml: %w", err)
+			}
+		} else if err != nil {
+			return fmt.Errorf("failed to stat user config.yaml: %w", err)
 		}
-	} else if err != nil {
-		return fmt.Errorf("failed to stat user config.yaml: %w", err)
+		return setUserYamlConfigAtPath(configPath, key, value)
+	})
+}
+
+// withUserYamlConfigLock serializes every user-global read-modify-write across
+// bd processes. The lock is a sibling rather than the config inode itself
+// because atomic replacement deliberately changes that inode.
+func withUserYamlConfigLock(configPath string, fn func() error) error {
+	configLock := flock.New(configPath + ".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	locked, err := configLock.TryLockContext(ctx, 25*time.Millisecond)
+	if err != nil {
+		return fmt.Errorf("lock user config.yaml: %w", err)
 	}
-	return setYamlConfigAtPath(configPath, key, value)
+	if !locked {
+		return fmt.Errorf("timed out locking user config.yaml")
+	}
+	defer func() { _ = configLock.Unlock() }()
+	return fn()
+}
+
+func setUserYamlConfigAtPath(configPath, key, value string) error {
+	normalizedKey := normalizeYamlKey(key)
+	content, err := os.ReadFile(configPath) //nolint:gosec // configPath is from UserConfigYamlPath
+	if err != nil {
+		return fmt.Errorf("failed to read user config.yaml: %w", err)
+	}
+	newContent, err := updateYamlKey(string(content), normalizedKey, value)
+	if err != nil {
+		return err
+	}
+	if err := atomicfile.WriteFile(configPath, []byte(newContent), 0o600); err != nil {
+		return fmt.Errorf("failed to write user config.yaml: %w", err)
+	}
+	return nil
 }
 
 func setYamlConfigAtPath(configPath, key, value string) error {
@@ -522,7 +576,7 @@ func setYamlConfigAtPath(configPath, key, value string) error {
 	}
 
 	// Write back
-	if err := os.WriteFile(configPath, []byte(newContent), 0600); err != nil { //nolint:gosec // configPath is validated
+	if err := os.WriteFile(configPath, []byte(newContent), 0o600); err != nil { //nolint:gosec // configPath is validated
 		return fmt.Errorf("failed to write config.yaml: %w", err)
 	}
 
@@ -821,6 +875,65 @@ func commentOutYamlKey(content, key string) string {
 	return strings.Join(result, "\n")
 }
 
+func unsetYamlKey(content, key string) (string, error) {
+	if strings.Contains(key, ".") {
+		if updated, ok, err := removeNestedYamlKey(content, key); err != nil {
+			return "", err
+		} else if ok {
+			return updated, nil
+		}
+	}
+	return commentOutYamlKey(content, key), nil
+}
+
+func removeNestedYamlKey(content, key string) (string, bool, error) {
+	parts := strings.Split(key, ".")
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		return "", false, err
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return "", false, nil
+	}
+	mapping := root.Content[0]
+	// A literal dotted key is the legacy flat form; preserve its comment-out
+	// behavior instead of interpreting it as a nested path.
+	if findMappingChild(mapping, key) != -1 {
+		return "", false, nil
+	}
+
+	type parentStep struct {
+		mapping *yaml.Node
+		index   int
+	}
+	steps := make([]parentStep, 0, len(parts))
+	current := mapping
+	for _, part := range parts {
+		idx := findMappingChild(current, part)
+		if idx == -1 {
+			return "", false, nil
+		}
+		steps = append(steps, parentStep{mapping: current, index: idx})
+		current = current.Content[idx+1]
+	}
+
+	leaf := steps[len(steps)-1]
+	leaf.mapping.Content = append(leaf.mapping.Content[:leaf.index], leaf.mapping.Content[leaf.index+2:]...)
+	for i := len(steps) - 2; i >= 0; i-- {
+		child := steps[i].mapping.Content[steps[i].index+1]
+		if child.Kind != yaml.MappingNode || len(child.Content) != 0 {
+			break
+		}
+		parent := steps[i]
+		parent.mapping.Content = append(parent.mapping.Content[:parent.index], parent.mapping.Content[parent.index+2:]...)
+	}
+	out, err := yaml.Marshal(&root)
+	if err != nil {
+		return "", false, err
+	}
+	return string(out), true, nil
+}
+
 // formatYamlValue formats a value appropriately for YAML.
 func formatYamlValue(value string) string {
 	// Boolean values
@@ -888,7 +1001,18 @@ func validateYamlConfigValue(key, value string) error {
 	case "dolt.shared-server":
 		lower := strings.ToLower(value)
 		if lower != "true" && lower != "false" {
-			return fmt.Errorf("dolt.shared-server must be \"true\" or \"false\", got %q", value)
+			return fmt.Errorf("%s must be \"true\" or \"false\", got %q", key, value)
+		}
+	case "dolt.server-owned-remote-base":
+		parsed, err := url.Parse(value)
+		if err != nil || parsed.Scheme != "https" || parsed.Host == "" || parsed.User == nil || parsed.User.Username() == "" {
+			return fmt.Errorf("dolt.server-owned-remote-base must be an HTTPS origin with a username, got %q", value)
+		}
+		if _, hasPassword := parsed.User.Password(); hasPassword {
+			return fmt.Errorf("dolt.server-owned-remote-base must not contain a password")
+		}
+		if (parsed.Path != "" && parsed.Path != "/") || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return fmt.Errorf("dolt.server-owned-remote-base must not contain a path, query, or fragment, got %q", value)
 		}
 	case "dolt.debug":
 		lower := strings.ToLower(value)

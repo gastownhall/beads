@@ -111,6 +111,77 @@ func TestIgnoredTableSnapshotRoundTrip(t *testing.T) {
 	}
 }
 
+// TestIgnoredTableSnapshotDiscoversSchemaPatterns guards against repeating the
+// 0062 regression: events became dolt_ignored after the pull code's static
+// table list was written, so pulls left it dirty and Dolt refused every merge.
+// Discovery must follow dolt_ignore itself, including tables added by future
+// migrations, rather than another list that can drift.
+func TestIgnoredTableSnapshotDiscoversSchemaPatterns(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const table = "future_pull_local_state"
+	if _, err := store.db.ExecContext(ctx,
+		"REPLACE INTO dolt_ignore (pattern, ignored) VALUES (?, true)", table); err != nil {
+		t.Fatalf("register future ignored table: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, "CALL DOLT_ADD('dolt_ignore')"); err != nil {
+		t.Fatalf("stage ignore rule: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-m', 'test: register future ignored table')"); err != nil {
+		t.Fatalf("commit ignore rule: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"CREATE TABLE "+quotePullIdentifier(table)+" (id INT PRIMARY KEY, value VARCHAR(32))"); err != nil {
+		t.Fatalf("create ignored table: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx,
+		"INSERT INTO "+quotePullIdentifier(table)+" VALUES (1, 'preserved')"); err != nil {
+		t.Fatalf("dirty ignored table: %v", err)
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	snapshots, err := snapshotDirtyIgnoredTables(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("snapshot ignored tables: %v", err)
+	}
+	found := false
+	for _, snapshot := range snapshots {
+		if snapshot.table == table {
+			found = true
+			break
+		}
+	}
+	if !found {
+		_ = tx.Rollback()
+		t.Fatalf("snapshot did not discover %s from dolt_ignore: %+v", table, snapshots)
+	}
+	if err := restoreDirtyIgnoredTables(ctx, tx, snapshots); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("restore ignored tables: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit restore: %v", err)
+	}
+
+	var value string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT value FROM "+quotePullIdentifier(table)+" WHERE id = 1").Scan(&value); err != nil {
+		t.Fatalf("query restored future table: %v", err)
+	}
+	if value != "preserved" {
+		t.Fatalf("restored value = %q, want preserved", value)
+	}
+}
+
 // TestFederationSyncCommitsConfigBeforeFetch is the `bd federation sync`
 // analogue of the pull config wedge: Sync auto-commits the working set before
 // its merge, and that pre-merge commit must include config. Plain Commit

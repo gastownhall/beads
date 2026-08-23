@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -28,16 +29,6 @@ import (
 const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a credential, just a filename
 
 const awsResponseChecksumValidationEnv = "AWS_RESPONSE_CHECKSUM_VALIDATION"
-
-// serverOwnsRemoteCredentialsEnv opts an external SQL server into executing
-// authenticated remote operations itself. The client still supplies the
-// non-secret username so CALL DOLT_PULL/PUSH can pass --user, while the
-// password remains exclusively in the server process environment.
-const serverOwnsRemoteCredentialsEnv = "BEADS_DOLT_SERVER_OWNS_REMOTE_CREDENTIALS" //nolint:gosec // G101: environment variable name, not credential material
-
-func serverOwnsRemoteCredentials() bool {
-	return os.Getenv(serverOwnsRemoteCredentialsEnv) == "1"
-}
 
 // federationEnvMutex protects process-wide env vars from concurrent access.
 // Environment variables are process-global, so we need to serialize federation operations.
@@ -445,13 +436,49 @@ func (s *DoltStore) updatePeerLastSync(ctx context.Context, name string) error {
 // Used to pass credentials to CLI subprocesses via cmd.Env (isolated) or to
 // the SQL path via process env vars under mutex protection.
 type remoteCredentials struct {
-	username string
-	password string
+	username    string
+	password    string
+	serverOwned bool
 }
 
 // empty returns true if no credentials are set.
 func (c *remoteCredentials) empty() bool {
 	return c == nil || (c.username == "" && c.password == "")
+}
+
+func (c *remoteCredentials) ownedByServer() bool {
+	return c != nil && c.serverOwned
+}
+
+// serverOwnedRemoteUsername verifies that a SQL-visible remote stays inside
+// the per-machine HTTPS trust boundary before allowing the server process to
+// use its own password. Repository configuration cannot broaden this origin.
+func serverOwnedRemoteUsername(baseURL, remoteURL string) (string, error) {
+	base, err := url.Parse(baseURL)
+	if err != nil || base.Scheme != "https" || base.Host == "" || base.User == nil || base.User.Username() == "" {
+		return "", fmt.Errorf("invalid server-owned remote base %q", baseURL)
+	}
+	if _, hasPassword := base.User.Password(); hasPassword {
+		return "", fmt.Errorf("server-owned remote base must not contain a password")
+	}
+	if (base.Path != "" && base.Path != "/") || base.RawQuery != "" || base.Fragment != "" {
+		return "", fmt.Errorf("server-owned remote base must be an origin without a path, query, or fragment")
+	}
+
+	remote, err := url.Parse(remoteURL)
+	if err != nil || remote.Scheme != "https" || remote.Host == "" || remote.User == nil {
+		return "", fmt.Errorf("remote URL %q is not an authenticated HTTPS remotes API URL", remoteURL)
+	}
+	if _, hasPassword := remote.User.Password(); hasPassword {
+		return "", fmt.Errorf("remote URL must not contain a password")
+	}
+	if remote.RawQuery != "" || remote.Fragment != "" || remote.Path == "" || remote.Path == "/" {
+		return "", fmt.Errorf("remote URL %q must identify a database without a query or fragment", remoteURL)
+	}
+	if !strings.EqualFold(remote.Scheme, base.Scheme) || !strings.EqualFold(remote.Host, base.Host) || remote.User.Username() != base.User.Username() {
+		return "", fmt.Errorf("remote URL %q is outside server-owned remote base %q", remoteURL, baseURL)
+	}
+	return base.User.Username(), nil
 }
 
 // applyToCmd sets DOLT_REMOTE_USER/PASSWORD on the subprocess environment,
@@ -689,7 +716,7 @@ func (s *DoltStore) shouldUseCLIForCredentials(ctx context.Context, remote strin
 }
 
 func (s *DoltStore) prepareCLIRouteForCredentials(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
-	if serverOwnsRemoteCredentials() {
+	if creds.ownedByServer() {
 		return false, nil
 	}
 	if creds.empty() {
@@ -720,8 +747,8 @@ func (s *DoltStore) shouldUseCLIForCredentialsWithError(ctx context.Context, rem
 	return s.prepareCLIRouteForCredentials(ctx, remote, creds)
 }
 
-func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, remote string) (bool, error) {
-	if serverOwnsRemoteCredentials() {
+func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
+	if creds.ownedByServer() {
 		return false, nil
 	}
 	if !s.serverMode {
@@ -810,7 +837,7 @@ func envPrefixesForRemoteURL(url string) []string {
 // authenticate. Routing through a CLI subprocess (dolt push/pull) ensures
 // the child process inherits the current environment (GH#6).
 func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string) bool {
-	ok, err := s.prepareCLIRouteForCloudAuth(ctx, remote)
+	ok, err := s.prepareCLIRouteForCloudAuth(ctx, remote, nil)
 	if err != nil {
 		log.Printf("warning: %v", err)
 		return false
@@ -818,8 +845,8 @@ func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string)
 	return ok
 }
 
-func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote string) (bool, error) {
-	if serverOwnsRemoteCredentials() {
+func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
+	if creds.ownedByServer() {
 		return false, nil
 	}
 	if !s.serverMode {
@@ -860,5 +887,5 @@ func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote stri
 }
 
 func (s *DoltStore) shouldUseCLIForCloudAuthWithError(ctx context.Context, remote string) (bool, error) {
-	return s.prepareCLIRouteForCloudAuth(ctx, remote)
+	return s.prepareCLIRouteForCloudAuth(ctx, remote, nil)
 }

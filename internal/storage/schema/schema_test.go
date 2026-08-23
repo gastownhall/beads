@@ -143,6 +143,27 @@ func TestIgnoredPendingMigrationDirtyTablesDetectsWispDependencies(t *testing.T)
 	}
 }
 
+func TestAllowDirtyIgnoredMigrateRequiresExactOperatorOptIn(t *testing.T) {
+	t.Setenv(AllowDirtyIgnoredMigrateEnv, "")
+	if allowDirtyIgnoredMigrate() {
+		t.Fatal("empty override enabled dirty ignored-table migration")
+	}
+
+	for _, value := range []string{"true", "TRUE", "yes", "0", " 1"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv(AllowDirtyIgnoredMigrateEnv, value)
+			if allowDirtyIgnoredMigrate() {
+				t.Fatalf("%s=%q enabled migration; want exact value 1 only", AllowDirtyIgnoredMigrateEnv, value)
+			}
+		})
+	}
+
+	t.Setenv(AllowDirtyIgnoredMigrateEnv, "1")
+	if !allowDirtyIgnoredMigrate() {
+		t.Fatalf("%s=1 did not enable designated maintenance migration", AllowDirtyIgnoredMigrateEnv)
+	}
+}
+
 func TestMigrationSQLTouchesTableStatementForms(t *testing.T) {
 	tests := []struct {
 		name string

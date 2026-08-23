@@ -1514,6 +1514,7 @@ var rootCmd = &cobra.Command{
 			doltCfg.Database = configfile.DefaultDoltDatabase
 		}
 		doltCfg.SyncRemote = resolveSyncRemote()
+		dolt.ApplyServerOwnedRemoteBase(doltCfg)
 
 		// --global flag: switch to the global shared-server database.
 		// Must be in shared-server mode; errors otherwise.

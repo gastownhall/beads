@@ -352,7 +352,10 @@ type DoltStore struct {
 	branch         string // Current branch
 	remoteUser     string // Remote auth user for Hosted Dolt push/pull (optional)
 	remotePassword string // Remote auth password for Hosted Dolt push/pull (optional)
-	serverMode     bool   // true when connected to external dolt sql-server (not embedded)
+	// serverOwnedRemoteBase keeps authenticated transfers on the SQL server
+	// only for the configured per-machine HTTPS origin.
+	serverOwnedRemoteBase string
+	serverMode            bool // true when connected to external dolt sql-server (not embedded)
 
 	// autoStartedServerDir is set when this store triggered a dolt sql-server
 	// auto-start. Close() uses it to stop the server when the last store
@@ -411,6 +414,10 @@ type Config struct {
 	// When set, Push/Pull use the --user flag and set DOLT_REMOTE_PASSWORD env var.
 	RemoteUser     string // Hosted Dolt remote user (set via DOLT_REMOTE_USER env var)
 	RemotePassword string // Hosted Dolt remote password (set via DOLT_REMOTE_PASSWORD env var)
+	// ServerOwnedRemoteBase declares the per-machine HTTPS origin whose remote
+	// password is owned by an external SQL server. It includes the username but
+	// never a password, for example https://root@dolt.example:32551.
+	ServerOwnedRemoteBase string
 
 	// SyncRemote holds the effective sync remote URL (from sync.remote
 	// or deprecated sync.git-remote). Used for context-aware error hints.
@@ -1529,12 +1536,18 @@ func applyConfigDefaults(cfg *Config) {
 		cfg.ServerPassword = os.Getenv("BEADS_DOLT_PASSWORD")
 	}
 
-	// Remote credentials for Hosted Dolt push/pull (env vars take precedence)
-	if cfg.RemoteUser == "" {
-		cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
-	}
-	if cfg.RemotePassword == "" {
-		cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+	// Remote credentials for Hosted Dolt push/pull. Server-owned mode is a
+	// durable routing policy: stale client credentials must not override it.
+	if cfg.ServerOwnedRemoteBase != "" {
+		cfg.RemoteUser = ""
+		cfg.RemotePassword = ""
+	} else {
+		if cfg.RemoteUser == "" {
+			cfg.RemoteUser = os.Getenv("DOLT_REMOTE_USER")
+		}
+		if cfg.RemotePassword == "" {
+			cfg.RemotePassword = os.Getenv("DOLT_REMOTE_PASSWORD")
+		}
 	}
 }
 
@@ -1959,6 +1972,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		branch:                 "main",
 		remoteUser:             cfg.RemoteUser,
 		remotePassword:         cfg.RemotePassword,
+		serverOwnedRemoteBase:  cfg.ServerOwnedRemoteBase,
 		serverMode:             true,
 		readOnly:               cfg.ReadOnly,
 		autoStartedServerDir:   autoStartedDir,
@@ -3621,13 +3635,45 @@ func (s *DoltStore) mainRemoteCredentials() *remoteCredentials {
 }
 
 // credentialsForRemote returns credentials only when the target remote is the
-// default remote (s.remote). Non-default remotes get nil creds to avoid sending
-// the wrong credentials to the wrong host.
-func (s *DoltStore) credentialsForRemote(remote string) *remoteCredentials {
-	if remote == s.remote {
-		return s.mainRemoteCredentials()
+// default remote (s.remote). In server-owned mode the non-secret username comes
+// exclusively from the SQL-visible HTTP remotes API URL; ambient client
+// credentials are ignored and the SQL server executes the transfer itself.
+func (s *DoltStore) credentialsForRemote(ctx context.Context, remote string) (*remoteCredentials, error) {
+	if remote != s.remote {
+		return nil, nil
 	}
-	return nil
+
+	creds := s.mainRemoteCredentials()
+	if creds == nil {
+		creds = &remoteCredentials{}
+	}
+	creds.serverOwned = s.serverOwnedRemoteBase != ""
+
+	if !creds.serverOwned {
+		if creds.empty() {
+			return nil, nil
+		}
+		return creds, nil
+	}
+	if !s.serverMode {
+		return nil, fmt.Errorf("remote %q is configured with server-owned credentials outside external-server mode", remote)
+	}
+
+	remotes, err := s.ListRemotes(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list Dolt remotes before resolving authentication for remote %q: %w", remote, err)
+	}
+	for _, configured := range remotes {
+		if configured.Name != remote {
+			continue
+		}
+		urlUser, err := serverOwnedRemoteUsername(s.serverOwnedRemoteBase, configured.URL)
+		if err != nil {
+			return nil, fmt.Errorf("remote %q cannot use server-owned credentials: %w", remote, err)
+		}
+		return &remoteCredentials{username: urlUser, serverOwned: true}, nil
+	}
+	return nil, fmt.Errorf("remote %q has server-owned credentials but no SQL-visible remote URL", remote)
 }
 
 // prePushFSCK runs dolt fsck --quiet to verify local chunk integrity before
@@ -3895,7 +3941,10 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 		)...),
 	)
 	defer func() { endSpan(span, retErr) }()
-	creds := s.credentialsForRemote(remote)
+	creds, err := s.credentialsForRemote(ctx, remote)
+	if err != nil {
+		return err
+	}
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
@@ -3919,24 +3968,30 @@ func (s *DoltStore) pushToRemote(ctx context.Context, remote string, force bool)
 	// etc.) are set and we're in server mode, route through CLI so the dolt
 	// subprocess inherits the current env. The SQL server may not have these
 	// vars if it was started in a different context (GH#6).
-	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
-		return err
-	} else if useCLI {
-		return s.doltCLIPush(ctx, remote, force, creds)
+	if !creds.ownedByServer() {
+		if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote, creds); err != nil {
+			return err
+		} else if useCLI {
+			return s.doltCLIPush(ctx, remote, force, creds)
+		}
+		if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote, creds); err != nil {
+			return err
+		} else if useCLI {
+			return s.doltCLIPush(ctx, remote, force, creds)
+		}
 	}
-	if useCLI, err := s.shouldUseCLIForLocalRemoteWithError(ctx, remote); err != nil {
-		return err
-	} else if useCLI {
-		return s.doltCLIPush(ctx, remote, force, creds)
-	}
-	if s.remoteUser != "" && remote == s.remote {
-		return withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
+	if creds != nil && creds.username != "" && remote == s.remote {
+		operationCreds := creds
+		if creds.ownedByServer() {
+			operationCreds = nil
+		}
+		return withRemoteOperationEnv(operationCreds, s.isS3Remote(ctx, remote), func() error {
 			if force {
-				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--force', '--user', ?, ?, ?)", creds.username, remote, s.branch); err != nil {
 					return fmt.Errorf("failed to force push to %s/%s: %w", remote, s.branch, err)
 				}
 			} else {
-				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", s.remoteUser, remote, s.branch); err != nil {
+				if err := s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_PUSH('--user', ?, ?, ?)", creds.username, remote, s.branch); err != nil {
 					return fmt.Errorf("failed to push to %s/%s: %w", remote, s.branch, err)
 				}
 			}
@@ -4018,7 +4073,8 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 		}
 	}
 
-	if err := s.pullTransport(ctx, remote); err != nil {
+	_, remoteUser, err := s.pullTransportReporting(ctx, remote)
+	if err != nil {
 		return err
 	}
 
@@ -4027,7 +4083,7 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 	// merge landed. Checked before the recompute: recomputing derived state
 	// over a merge that never arrived would report a second success on top of
 	// the first.
-	if err := s.verifyPullLanded(ctx, remote, preHead); err != nil {
+	if err := s.verifyPullLanded(ctx, remote, preHead, remoteUser); err != nil {
 		return err
 	}
 
@@ -4114,7 +4170,7 @@ func (s *DoltStore) branchHash(ctx context.Context, branch string) (string, erro
 // database on this branch, so the refresh below — the only part that costs a
 // network round trip — is skipped for every pull that actually merged
 // something. An empty preHead means it could not be read, which verifies.
-func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string) error {
+func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead, remoteUser string) error {
 	trackingRef := "remotes/" + remote + "/" + s.branch
 
 	localHash, headErr := s.branchHash(ctx, s.branch)
@@ -4126,7 +4182,8 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 	// reads a ref this connection wrote. Best-effort by design: a refresh that
 	// cannot run leaves the weaker stale-ref comparison, which is still worth
 	// making.
-	if err := schema.DrainCall(ctx, s.db, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
+	fetchQuery, fetchArgs := authenticatedFetchCall(remoteUser, remote, s.branch)
+	if err := schema.DrainCall(ctx, s.db, fetchQuery, fetchArgs...); err != nil {
 		log.Printf("warning: could not refresh %s to verify the pull landed: %v", trackingRef, err)
 	}
 
@@ -4166,7 +4223,7 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 // each route carries. Split from pullFromRemote so every successful route
 // funnels back through the is_blocked recompute.
 func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
-	_, err := s.pullTransportReporting(ctx, remote)
+	_, _, err := s.pullTransportReporting(ctx, remote)
 	return err
 }
 
@@ -4175,57 +4232,124 @@ func (s *DoltStore) pullTransport(ctx context.Context, remote string) error {
 // it merged or was already up to date, and its stdout is discarded — so they
 // report nothing; the SQL routes return what CALL DOLT_PULL (or the fallback's
 // CALL DOLT_MERGE) said. See pullReport for what that does and does not prove.
-func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, error) {
-	creds := s.credentialsForRemote(remote)
+//
+//nolint:unparam // pullReport is intentionally exposed to focused transport regression tests.
+func (s *DoltStore) pullTransportReporting(ctx context.Context, remote string) (pullReport, string, error) {
+	creds, err := s.credentialsForRemote(ctx, remote)
+	if err != nil {
+		return pullReport{}, "", err
+	}
+	remoteUser := ""
+	if creds != nil {
+		remoteUser = creds.username
+	}
 	// Git-protocol remotes: use CLI to avoid MySQL connection timeout during transfer.
 	// Must check before remoteUser — Hosted Dolt SSH remotes have remoteUser set
 	// but still need CLI to avoid SQL connection timeout.
 	// Credentials are passed directly to the subprocess via cmd.Env.
 	if useCLI, err := s.prepareCLIRouteForGitProtocol(ctx, remote); err != nil {
-		return pullReport{}, err
+		return pullReport{}, remoteUser, err
 	} else if useCLI {
 		// CLI pull leaves any conflicts in the working set; run the auto-resolver so
 		// git-protocol remotes get the same audit-only dependency / metadata repair
 		// as the SQL DOLT_PULL path (#4259).
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, remoteUser, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Credential CLI routing: mirrors git-protocol path, including post-pull
 	// auto-resolution.
 	if useCLI, err := s.prepareCLIRouteForCredentials(ctx, remote, creds); err != nil {
-		return pullReport{}, err
+		return pullReport{}, remoteUser, err
 	} else if useCLI {
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		return pullReport{}, remoteUser, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
 	}
 	// Cloud auth CLI routing (GH#6), including post-pull auto-resolution.
-	if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote); err != nil {
-		return pullReport{}, err
-	} else if useCLI {
-		return pullReport{}, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+	if !creds.ownedByServer() {
+		if useCLI, err := s.prepareCLIRouteForCloudAuth(ctx, remote, creds); err != nil {
+			return pullReport{}, remoteUser, err
+		} else if useCLI {
+			return pullReport{}, remoteUser, s.finishCLIPull(ctx, s.doltCLIPull(ctx, remote, creds))
+		}
 	}
 	// Local file:// pulls intentionally stay on the SQL path. The matching CLI
 	// guard is a push-only optimization; SQL pull keeps pullWithAutoResolve in
 	// charge of metadata-only conflict repair.
 	var report pullReport
-	if s.remoteUser != "" && remote == s.remote {
-		err := withRemoteOperationEnv(creds, s.isS3Remote(ctx, remote), func() error {
+	if creds != nil && creds.username != "" && remote == s.remote {
+		operationCreds := creds
+		if creds.ownedByServer() {
+			operationCreds = nil
+			// The shared external sql-server owns the remote password. Fetch on
+			// that server first and avoid DOLT_PULL entirely when the active
+			// branch already contains the refreshed tracking ref. This is more
+			// than an optimization: preparing a merge temporarily checks out
+			// dolt_ignored working-set tables, and an engine error can otherwise
+			// strand those local-only rows before their restoration commits.
+			noopReport, alreadyContains, fetchErr := s.serverOwnedPullNoop(ctx, remote, creds.username)
+			if fetchErr != nil {
+				return pullReport{}, remoteUser, fmt.Errorf("failed to fetch from %s/%s: %w", remote, s.branch, fetchErr)
+			}
+			if alreadyContains {
+				return noopReport, remoteUser, nil
+			}
+		}
+		err := withRemoteOperationEnv(operationCreds, s.isS3Remote(ctx, remote), func() error {
 			var err error
-			report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL('--user', ?, ?, ?)", s.remoteUser, remote, s.branch)
+			report, err = s.pullWithAutoResolveReporting(ctx, remote, creds.username, "CALL DOLT_PULL('--user', ?, ?, ?)", creds.username, remote, s.branch)
 			if err != nil {
 				return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 			}
 			return nil
 		})
-		return report, err
+		return report, remoteUser, err
 	}
-	err := withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
+	err = withRemoteOperationEnv(nil, s.isS3Remote(ctx, remote), func() error {
 		var err error
-		report, err = s.pullWithAutoResolveReporting(ctx, remote, "CALL DOLT_PULL(?, ?)", remote, s.branch)
+		report, err = s.pullWithAutoResolveReporting(ctx, remote, "", "CALL DOLT_PULL(?, ?)", remote, s.branch)
 		if err != nil {
 			return fmt.Errorf("failed to pull from %s/%s: %w", remote, s.branch, err)
 		}
 		return nil
 	})
-	return report, err
+	return report, remoteUser, err
+}
+
+func (s *DoltStore) serverOwnedPullNoop(ctx context.Context, remote, remoteUser string) (pullReport, bool, error) {
+	alreadyContains, err := s.fetchShowsRemoteContained(ctx, remote, remoteUser)
+	if err != nil || !alreadyContains {
+		return pullReport{}, false, err
+	}
+	return pullReport{Reported: true, Message: "Everything up-to-date"}, true, nil
+}
+
+// fetchShowsRemoteContained refreshes remote/branch through this SQL server
+// and reports whether the store's active branch already contains that exact
+// tracking tip. Equal and locally-ahead are both honest no-op pulls. Diverged
+// or remotely-ahead histories return false so the normal merge path runs.
+func (s *DoltStore) fetchShowsRemoteContained(ctx context.Context, remote, remoteUser string) (bool, error) {
+	fetchQuery, fetchArgs := authenticatedFetchCall(remoteUser, remote, s.branch)
+	if err := schema.DrainCall(ctx, s.db, fetchQuery, fetchArgs...); err != nil {
+		return false, err
+	}
+
+	trackingRef := "remotes/" + remote + "/" + s.branch
+	var remoteHash string
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT hash FROM dolt_remote_branches WHERE name = ?", trackingRef).Scan(&remoteHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	if remoteHash == "" {
+		return false, nil
+	}
+
+	var mergeBase sql.NullString
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT DOLT_MERGE_BASE(?, ?)", s.branch, trackingRef).Scan(&mergeBase); err != nil {
+		return false, err
+	}
+	return mergeBase.Valid && mergeBase.String == remoteHash, nil
 }
 
 // pullWithAutoResolve executes a DOLT_PULL query with long timeout and auto-resolves
@@ -4260,51 +4384,66 @@ func (s *DoltStore) openLongTimeoutConn() (*sql.DB, error) {
 // fallback targets it directly, so pulls from non-default remotes (PullRemote,
 // federation peers) no longer fall back to s.remote.
 func (s *DoltStore) pullWithAutoResolve(ctx context.Context, remote string, query string, args ...any) error {
-	_, err := s.pullWithAutoResolveReporting(ctx, remote, query, args...)
+	_, err := s.pullWithAutoResolveReporting(ctx, remote, "", query, args...)
 	return err
 }
 
 // pullWithAutoResolveReporting is pullWithAutoResolve plus the row the pull (or
 // the fetch+merge fallback) returned — the engine's own account of whether
 // anything merged. See pullReport.
-func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
+func (s *DoltStore) pullWithAutoResolveReporting(ctx context.Context, remote, remoteUser, query string, args ...any) (pullReport, error) {
 	var report pullReport
 	err := s.withCircuitWrite(ctx, func(ctx context.Context) error {
 		var err error
-		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, query, args...)
+		report, err = s.pullWithAutoResolveUnchecked(ctx, remote, remoteUser, query, args...)
 		return err
 	})
 	return report, err
 }
 
-func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote string, query string, args ...any) (pullReport, error) {
-	// Audited for be-b0am's fresh-connection branch hazard: NOT safe, and all
-	// three callers share it. Passing a branch argument does not avoid it.
-	//
+func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote, remoteUser, query string, args ...any) (report pullReport, retErr error) {
 	// DOLT_PULL's second positional arg names the remote ref to merge FROM
-	// (dolt's doDoltPull binds it to remoteRefName); the merge TARGET is
-	// always the session's current working branch (CWBHeadRef), which on this
-	// fresh openLongTimeoutConn connection is the database's default branch,
-	// never s.branch. So store.go's two callers, which pass s.branch to
-	// CALL DOLT_PULL(...), pin only the source and still merge into the
-	// default branch; federation.go's peer-pull route (CALL DOLT_PULL(?),
-	// remote only) derives both source and target from that same default
-	// branch. The GH#3144 fallback below has the same shape — DOLT_FETCH
-	// names the remote ref, but CALL DOLT_MERGE(trackingRef) merges into the
-	// current branch too.
-	//
-	// Left unfixed here deliberately: this is be-b0am's root cause on a
-	// pull/merge path, and a merge landing on the wrong branch has a much
-	// larger blast radius than a stale is_blocked flag, so it needs its own
-	// regression test asserting the merge target rather than riding an
-	// unrelated TDD cycle. Tracked as be-5ybd, which covers all three call
-	// sites. The fix is s.pinStoreBranch(ctx, db) before BeginTx below.
+	// (dolt's doDoltPull binds it to remoteRefName); its merge target is the
+	// session's current working branch. This dedicated connection therefore
+	// must be pinned to the store branch before either snapshots or pull run.
 	db, err := s.openLongTimeoutConn()
 	if err != nil {
 		return pullReport{}, err
 	}
 	defer db.Close()
-	tx, err := db.BeginTx(ctx, nil)
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		return pullReport{}, fmt.Errorf("failed to acquire pull connection: %w", err)
+	}
+	defer conn.Close()
+	if err := s.pinStoreBranch(ctx, conn); err != nil {
+		return pullReport{}, err
+	}
+
+	// Build connection-local snapshots before opening the merge transaction.
+	// Their contents survive an ordinary transaction rollback on this pinned
+	// connection, so conflict and engine-error paths can restore in a fresh tx.
+	ignoredSnapshots, err := prepareDirtyIgnoredTableSnapshots(ctx, conn)
+	if err != nil {
+		return pullReport{}, fmt.Errorf("snapshot ignored tables before pull: %w", err)
+	}
+	checkedOutIgnored := false
+	defer func() {
+		if retErr == nil || !checkedOutIgnored {
+			return
+		}
+		// Use a bounded detached context for ordinary engine/conflict failures.
+		// A driver-level cancellation closes the physical connection and its
+		// TEMPORARY snapshots; that storage-driver limitation is reported by the
+		// joined restore error rather than papered over with admin-side recovery.
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		if restoreErr := restoreDirtyIgnoredTablesAfterRollback(cleanupCtx, conn, ignoredSnapshots); restoreErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("restore ignored tables after failed pull: %w", restoreErr))
+		}
+	}()
+
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return pullReport{}, fmt.Errorf("failed to begin transaction: %w", err)
 	}
@@ -4325,10 +4464,12 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		return pullReport{}, fmt.Errorf("failed to set dolt_force_transaction_commit: %w", err)
 	}
 
-	ignoredSnapshots, err := snapshotDirtyIgnoredTables(ctx, tx)
-	if err != nil {
+	// Arm recovery before the first checkout: a later table can fail after an
+	// earlier DOLT_CHECKOUT has already mutated the working set.
+	checkedOutIgnored = len(ignoredSnapshots) > 0
+	if err := checkoutDirtyIgnoredTables(ctx, tx, ignoredSnapshots); err != nil {
 		_ = tx.Rollback()
-		return pullReport{}, fmt.Errorf("snapshot ignored tables before pull: %w", err)
+		return pullReport{}, fmt.Errorf("reset ignored tables before pull: %w", err)
 	}
 
 	// DOLT_PULL's row is the engine's only in-band account of what the pull
@@ -4337,14 +4478,15 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 	// is identical — and it is the difference between a caller that knows
 	// nothing arrived and one that only knows no error occurred (ga-bq9zd).
 	pullRow, pullErr := schema.CallReturningRow(ctx, tx, query, args...)
-	report := parseMergeReport(pullRow)
+	report = parseMergeReport(pullRow)
 
 	// GH#3144: When DOLT_PULL fails because upstream branch tracking is not
 	// configured in repo_state.json (common when remote was added via
 	// bd dolt remote add rather than bd bootstrap/dolt clone), fall back to
 	// DOLT_FETCH + DOLT_MERGE which does not require tracking config.
 	if pullErr != nil && isBranchTrackingError(pullErr) {
-		if err := schema.DrainCall(ctx, tx, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
+		fetchQuery, fetchArgs := authenticatedFetchCall(remoteUser, remote, s.branch)
+		if err := schema.DrainCall(ctx, tx, fetchQuery, fetchArgs...); err != nil {
 			_ = tx.Rollback()
 			return pullReport{}, fmt.Errorf("fetch from %s/%s: %w", remote, s.branch, err)
 		}
@@ -4369,22 +4511,15 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		return pullReport{}, fmt.Errorf("restore ignored tables after pull: %w", err)
 	}
 
-	return report, s.settleMergeInTx(ctx, tx, pullErr)
+	retErr = s.settleMergeInTx(ctx, tx, pullErr)
+	return report, retErr
 }
 
-// ignoredPullTables are local-only tables that Beads intentionally excludes
-// from Dolt commits. A merge still refuses a dirty ignored table, so SQL pulls
-// temporarily move these rows into connection-local tables and restore them
-// after the remote operation.
-var ignoredPullTables = []string{
-	"ignored_schema_migrations",
-	"local_metadata",
-	"repo_mtimes",
-	"wisps",
-	"wisp_labels",
-	"wisp_dependencies",
-	"wisp_events",
-	"wisp_comments",
+func authenticatedFetchCall(remoteUser, remote, branch string) (string, []any) {
+	if remoteUser != "" {
+		return "CALL DOLT_FETCH('--user', ?, ?, ?)", []any{remoteUser, remote, branch}
+	}
+	return "CALL DOLT_FETCH(?, ?)", []any{remote, branch}
 }
 
 type ignoredTableSnapshot struct {
@@ -4394,19 +4529,37 @@ type ignoredTableSnapshot struct {
 	ddl     string
 }
 
-func snapshotDirtyIgnoredTables(ctx context.Context, tx *sql.Tx) ([]ignoredTableSnapshot, error) {
-	dirty := make(map[string]bool)
-	rows, err := tx.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+type ignoredSnapshotConn interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func prepareDirtyIgnoredTableSnapshots(ctx context.Context, db ignoredSnapshotConn) ([]ignoredTableSnapshot, error) {
+	// Discover this set from dolt_ignore instead of duplicating the schema's
+	// ignore list here. The old hard-coded list predated the events plane flip
+	// (0062), so a dirty events table was left in place and DOLT_PULL refused to
+	// merge. Any future ignored table would have recreated the same wedge.
+	rows, err := db.QueryContext(ctx, `
+		SELECT DISTINCT ds.table_name
+		FROM dolt_status ds
+		WHERE EXISTS (
+			SELECT 1
+			FROM dolt_ignore di
+			WHERE di.ignored = true AND ds.table_name LIKE di.pattern
+		)
+		ORDER BY ds.table_name`)
 	if err != nil {
 		return nil, err
 	}
+	var dirtyIgnored []string
 	for rows.Next() {
 		var table string
 		if err := rows.Scan(&table); err != nil {
 			_ = rows.Close()
 			return nil, err
 		}
-		dirty[table] = true
+		dirtyIgnored = append(dirtyIgnored, table)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -4416,47 +4569,68 @@ func snapshotDirtyIgnoredTables(ctx context.Context, tx *sql.Tx) ([]ignoredTable
 	}
 
 	var snapshots []ignoredTableSnapshot
-	for _, table := range ignoredPullTables {
-		if !dirty[table] {
-			continue
-		}
-		temp := "__beads_pull_" + table
-		columns, err := pullSnapshotColumnList(ctx, tx, table)
+	for i, table := range dirtyIgnored {
+		quotedTable := quotePullIdentifier(table)
+		// The temporary name is generated locally rather than read from SQL,
+		// but quote it too so an unusual future table name cannot turn this
+		// maintenance path into malformed SQL.
+		temp := fmt.Sprintf("__beads_pull_%d", i)
+		quotedTemp := quotePullIdentifier(temp)
+		columns, err := pullSnapshotColumnList(ctx, db, table)
 		if err != nil {
 			return nil, err
 		}
 		var ddlTable, ddl string
-		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", table)).Scan(&ddlTable, &ddl); err != nil {
+		if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE "+quotedTable).Scan(&ddlTable, &ddl); err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE `%s` LIKE `%s`", temp, table)); err != nil {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE %s LIKE %s", quotedTemp, quotedTable)); err != nil {
 			return nil, err
 		}
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO `%s` (%s) SELECT %s FROM `%s`", temp, columns, columns, table)); err != nil {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", quotedTemp, columns, columns, quotedTable)); err != nil {
 			return nil, err
 		}
 		snapshots = append(snapshots, ignoredTableSnapshot{table: table, temp: temp, columns: columns, ddl: ddl})
 	}
 
+	return snapshots, nil
+}
+
+func checkoutDirtyIgnoredTables(ctx context.Context, tx *sql.Tx, snapshots []ignoredTableSnapshot) error {
 	if len(snapshots) == 0 {
-		return nil, nil
+		return nil
 	}
 	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
-		return nil, err
+		return err
 	}
 	for i := len(snapshots) - 1; i >= 0; i-- {
 		if _, err := tx.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", snapshots[i].table); err != nil {
-			return nil, err
+			return err
 		}
 	}
 	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func snapshotDirtyIgnoredTables(ctx context.Context, tx *sql.Tx) ([]ignoredTableSnapshot, error) {
+	snapshots, err := prepareDirtyIgnoredTableSnapshots(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkoutDirtyIgnoredTables(ctx, tx, snapshots); err != nil {
 		return nil, err
 	}
 	return snapshots, nil
 }
 
-func pullSnapshotColumnList(ctx context.Context, tx *sql.Tx, table string) (string, error) {
-	rows, err := tx.QueryContext(ctx, `
+func quotePullIdentifier(identifier string) string {
+	return "`" + strings.ReplaceAll(identifier, "`", "``") + "`"
+}
+
+func pullSnapshotColumnList(ctx context.Context, db ignoredSnapshotConn, table string) (string, error) {
+	rows, err := db.QueryContext(ctx, `
 		SELECT column_name
 		FROM information_schema.columns
 		WHERE table_schema = DATABASE() AND table_name = ?
@@ -4483,6 +4657,18 @@ func pullSnapshotColumnList(ctx context.Context, tx *sql.Tx, table string) (stri
 	return strings.Join(columns, ", "), nil
 }
 
+func restoreDirtyIgnoredTablesAfterRollback(ctx context.Context, conn *sql.Conn, snapshots []ignoredTableSnapshot) error {
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	if err := restoreDirtyIgnoredTables(ctx, tx, snapshots); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 func restoreDirtyIgnoredTables(ctx context.Context, tx *sql.Tx, snapshots []ignoredTableSnapshot) error {
 	if len(snapshots) == 0 {
 		return nil
@@ -4491,7 +4677,7 @@ func restoreDirtyIgnoredTables(ctx context.Context, tx *sql.Tx, snapshots []igno
 		return err
 	}
 	for i := len(snapshots) - 1; i >= 0; i-- {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE `%s`", snapshots[i].table)); err != nil {
+		if _, err := tx.ExecContext(ctx, "DROP TABLE "+quotePullIdentifier(snapshots[i].table)); err != nil {
 			return fmt.Errorf("drop reset %s: %w", snapshots[i].table, err)
 		}
 	}
@@ -4501,7 +4687,7 @@ func restoreDirtyIgnoredTables(ctx context.Context, tx *sql.Tx, snapshots []igno
 		}
 	}
 	for _, snapshot := range snapshots {
-		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO `%s` (%s) SELECT %s FROM `%s`", snapshot.table, snapshot.columns, snapshot.columns, snapshot.temp)); err != nil {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO %s (%s) SELECT %s FROM %s", quotePullIdentifier(snapshot.table), snapshot.columns, snapshot.columns, quotePullIdentifier(snapshot.temp))); err != nil {
 			return fmt.Errorf("restore %s: %w", snapshot.table, err)
 		}
 	}

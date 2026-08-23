@@ -1,15 +1,89 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
+
+func TestConcurrentUserYamlConfigWritesPreserveEveryKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	const writers = 64
+	start := make(chan struct{})
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			key := fmt.Sprintf("concurrent.key_%02d", i)
+			errs <- SetUserYamlConfig(key, fmt.Sprintf("value-%02d", i))
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent SetUserYamlConfig: %v", err)
+		}
+	}
+
+	for i := 0; i < writers; i++ {
+		key := fmt.Sprintf("concurrent.key_%02d", i)
+		want := fmt.Sprintf("value-%02d", i)
+		if got := GetUserYamlConfig(key); got != want {
+			t.Fatalf("GetUserYamlConfig(%q) = %q, want %q; a concurrent writer was lost", key, got, want)
+		}
+	}
+
+	configPath, err := UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("UserConfigYamlPath: %v", err)
+	}
+	info, err := os.Stat(configPath)
+	if err != nil {
+		t.Fatalf("stat user config: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("user config mode = %04o, want 0600", got)
+	}
+}
+
+func TestUnsetUserYamlConfigRemovesNestedKey(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	if err := SetUserYamlConfig("dolt.server-owned-remote-base", "https://root@dolt.example:32551"); err != nil {
+		t.Fatalf("set nested trust boundary: %v", err)
+	}
+	if err := SetUserYamlConfig("metrics.disabled", "true"); err != nil {
+		t.Fatalf("set sibling nested key: %v", err)
+	}
+	if err := UnsetUserYamlConfig("dolt.server-owned-remote-base"); err != nil {
+		t.Fatalf("unset nested trust boundary: %v", err)
+	}
+	if got := GetUserYamlConfig("dolt.server-owned-remote-base"); got != "" {
+		t.Fatalf("nested trust boundary remains after unset: %q", got)
+	}
+	if got := GetUserYamlConfig("metrics.disabled"); got != "true" {
+		t.Fatalf("unset changed sibling nested key: metrics.disabled=%q", got)
+	}
+}
 
 func TestIsYamlOnlyKey(t *testing.T) {
 	tests := []struct {
@@ -649,6 +723,31 @@ func TestValidateYamlConfigValue_SharedServer(t *testing.T) {
 	}
 	if err := validateYamlConfigValue("dolt.shared-server", "1"); err == nil {
 		t.Error("expected '1' to be invalid (not a boolean string)")
+	}
+}
+
+func TestValidateYamlConfigValue_ServerOwnedRemoteBase(t *testing.T) {
+	for _, value := range []string{
+		"https://root@dolt.permanet.io:32551",
+		"https://automation@dolt.example",
+	} {
+		if err := validateYamlConfigValue("dolt.server-owned-remote-base", value); err != nil {
+			t.Errorf("expected %q to be valid: %v", value, err)
+		}
+	}
+	for _, value := range []string{
+		"http://root@dolt.example",
+		"https://dolt.example",
+		"https://root:secret@dolt.example",
+		"https://root@dolt.example/database",
+		"https://root@dolt.example?target=other",
+	} {
+		if err := validateYamlConfigValue("dolt.server-owned-remote-base", value); err == nil {
+			t.Errorf("expected %q to be invalid", value)
+		}
+	}
+	if !IsUserGlobalKey("dolt.server-owned-remote-base") {
+		t.Fatal("server-owned remote trust boundary must be stored per machine")
 	}
 }
 

@@ -10,9 +10,56 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 )
+
+func TestApplyServerOwnedRemoteBase(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	if err := config.SetUserYamlConfig("dolt.server-owned-remote-base", "https://root@dolt.permanet.io:32551"); err != nil {
+		t.Fatalf("write user config.yaml: %v", err)
+	}
+	projectBeadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(projectBeadsDir, 0o755); err != nil {
+		t.Fatalf("create project beads directory: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(projectBeadsDir, "config.yaml"), []byte("dolt:\n  server-owned-remote-base: https://root@evil.example:32551\n"), 0o600); err != nil {
+		t.Fatalf("write hostile project config.yaml: %v", err)
+	}
+	t.Setenv("BEADS_DIR", projectBeadsDir)
+
+	cfg := &Config{}
+	ApplyServerOwnedRemoteBase(cfg)
+	if cfg.ServerOwnedRemoteBase != "https://root@dolt.permanet.io:32551" {
+		t.Fatalf("server-owned base = %q", cfg.ServerOwnedRemoteBase)
+	}
+
+	callerCfg := &Config{ServerOwnedRemoteBase: "https://root@caller.example:443"}
+	ApplyServerOwnedRemoteBase(callerCfg)
+	if callerCfg.ServerOwnedRemoteBase != "https://root@caller.example:443" {
+		t.Fatal("an explicit caller option must survive user-global configuration")
+	}
+}
+
+func TestApplyConfigDefaultsServerOwnedCredentialsIgnoreClientEnvironment(t *testing.T) {
+	t.Setenv("DOLT_REMOTE_USER", "permabot")
+	t.Setenv("DOLT_REMOTE_PASSWORD", "stale-client-password")
+
+	cfg := &Config{
+		ServerPort:            1,
+		RemoteUser:            "explicit-permabot",
+		RemotePassword:        "explicit-stale-password",
+		ServerOwnedRemoteBase: "https://root@dolt.permanet.io:32551",
+	}
+	applyConfigDefaults(cfg)
+	if cfg.RemoteUser != "" || cfg.RemotePassword != "" {
+		t.Fatalf("server-owned mode retained client credentials: user=%q password_set=%v", cfg.RemoteUser, cfg.RemotePassword != "")
+	}
+}
 
 // TestResolveAutoStart verifies all conditions that govern the AutoStart decision.
 //

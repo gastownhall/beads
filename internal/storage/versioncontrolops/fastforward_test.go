@@ -85,6 +85,43 @@ func TestLocalIsStrictAncestorOfInvalidRef(t *testing.T) {
 	}
 }
 
+func TestHeadEqualsRef(t *testing.T) {
+	tests := []struct {
+		name string
+		head string
+		ref  string
+		want bool
+	}{
+		{name: "equal", head: "abc123", ref: "abc123", want: true},
+		{name: "different", head: "abc123", ref: "def456", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			db, mock, err := sqlmock.New()
+			if err != nil {
+				t.Fatalf("sqlmock.New: %v", err)
+			}
+			defer db.Close()
+
+			mock.ExpectQuery(regexp.QuoteMeta("SELECT HASHOF('HEAD'), HASHOF(?)")).
+				WithArgs("origin/main").
+				WillReturnRows(sqlmock.NewRows([]string{"head_hash", "ref_hash"}).AddRow(tt.head, tt.ref))
+
+			got, err := HeadEqualsRef(context.Background(), db, "origin/main")
+			if err != nil {
+				t.Fatalf("HeadEqualsRef: %v", err)
+			}
+			if got != tt.want {
+				t.Fatalf("HeadEqualsRef = %v, want %v", got, tt.want)
+			}
+			if err := mock.ExpectationsWereMet(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestWorkingSetClean(t *testing.T) {
 	tests := []struct {
 		name   string

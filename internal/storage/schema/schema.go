@@ -38,6 +38,18 @@ func defaultStderr() io.Writer {
 
 const largeRigThreshold = 10000
 
+// AllowDirtyIgnoredMigrateEnv is an operator-only escape hatch for a clone
+// whose pending ignored migrations must transform pre-existing clone-local
+// rows. It is deliberately separate from BD_ALLOW_REMOTE_MIGRATE: selecting a
+// single remote migrator does not, by itself, authorize rewriting dirty local
+// state. Operators must stop every writer and take a cold backup before using
+// this override.
+const AllowDirtyIgnoredMigrateEnv = "BD_ALLOW_DIRTY_IGNORED_MIGRATE"
+
+func allowDirtyIgnoredMigrate() bool {
+	return os.Getenv(AllowDirtyIgnoredMigrateEnv) == "1"
+}
+
 // issueRowCounter returns the current issues-table row count, or an error if
 // the table is unreachable (fresh install → table doesn't exist yet). The
 // caller uses the error as the "no warning" signal. Variable so tests in this
@@ -600,7 +612,7 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 	if err != nil {
 		return applied, fmt.Errorf("checking dirty tables against pending ignored migrations: %w", err)
 	}
-	if len(touchedIgnoredDirtyTables) > 0 {
+	if len(touchedIgnoredDirtyTables) > 0 && !allowDirtyIgnoredMigrate() {
 		// Deliberately a plain, untyped error (unlike the main-source guard
 		// above, which returns *DirtyTablesError): this check fires mid-pass,
 		// after the main-source migrations have already applied. A lenient
@@ -611,7 +623,10 @@ func MigrateUp(ctx context.Context, db DBConn) (int, error) {
 		// tables like ignored_schema_migrations), not expected user data, so
 		// there is no dirty-commit recovery story to support here the way
 		// there is for the main-source guard (#4566 scope).
-		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s", strings.Join(touchedIgnoredDirtyTables, ", "))
+		return applied, fmt.Errorf("pending ignored schema migrations alter pre-existing dirty tables: %s; after stopping all writers and taking a cold backup, the designated migrator may set %s=1", strings.Join(touchedIgnoredDirtyTables, ", "), AllowDirtyIgnoredMigrateEnv)
+	}
+	if len(touchedIgnoredDirtyTables) > 0 {
+		fmt.Fprintf(stderr, "Warning: %s=1: migrating pre-existing clone-local ignored tables in place: %s\n", AllowDirtyIgnoredMigrateEnv, strings.Join(touchedIgnoredDirtyTables, ", "))
 	}
 
 	appliedIgnored, ignoredColumnAdded, err := ignoredSource.migrate(ctx, db, 0)

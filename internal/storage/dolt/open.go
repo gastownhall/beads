@@ -48,6 +48,17 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
 
+// ApplyServerOwnedRemoteBase resolves the durable per-machine trust boundary
+// that keeps authenticated remote operations inside an external SQL server.
+// It deliberately bypasses project configuration: a repository must not be
+// able to select an origin that receives a server-owned password.
+func ApplyServerOwnedRemoteBase(cfg *Config) {
+	if cfg.ServerOwnedRemoteBase != "" {
+		return
+	}
+	cfg.ServerOwnedRemoteBase = strings.TrimSpace(config.GetUserYamlConfig("dolt.server-owned-remote-base"))
+}
+
 // ApplyResolvedServerPort fills cfg's server port from doltserver's
 // precedence chain (env > port file > dolt config.yaml > beads config.yaml >
 // metadata.json), and — the part that is easy to drop — records WHICH of those
@@ -129,6 +140,7 @@ func NewFromConfigWithCLIOptions(ctx context.Context, beadsDir string, cfg *Conf
 	if err := applyResolvedConfig(ctx, beadsDir, fileCfg, cfg); err != nil {
 		return nil, err
 	}
+	ApplyServerOwnedRemoteBase(cfg)
 	ApplyCLIAutoStart(beadsDir, cfg)
 
 	return New(ctx, cfg)
@@ -159,6 +171,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	if err := applyResolvedConfig(ctx, beadsDir, fileCfg, cfg); err != nil {
 		return nil, err
 	}
+	ApplyServerOwnedRemoteBase(cfg)
 
 	// Enable auto-start for standalone users (similar to main.go's auto-start
 	// handling), with additional support for BEADS_TEST_MODE and a config.yaml
