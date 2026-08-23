@@ -4,7 +4,9 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -12,6 +14,7 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/github"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -456,6 +459,21 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		return HandleError("%v", err)
 	}
 
+	// Dependency-link push pass: converge beads epic/child links and "blocks"
+	// dependencies into GitHub sub-issues and issue dependencies. Runs after
+	// the content sync so relationships stay correct even when issue content
+	// itself was unchanged and the main push loop skipped the issue.
+	var linksPushed int
+	if push {
+		var linkWarnings []string
+		warnLink := func(msg string) {
+			linkWarnings = append(linkWarnings, msg)
+			_, _ = fmt.Fprintf(os.Stderr, "Warning: %s\n", msg)
+		}
+		linksPushed = pushGitHubDependencyLinks(ctx, gt, store, opts, githubSyncDryRun, out, warnLink)
+		result.Warnings = append(result.Warnings, linkWarnings...)
+	}
+
 	// Output results
 	if !githubSyncDryRun {
 		if result.Stats.Pulled > 0 {
@@ -464,6 +482,9 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 		}
 		if result.Stats.Pushed > 0 {
 			_, _ = fmt.Fprintf(out, "✓ Pushed %d issues\n", result.Stats.Pushed)
+		}
+		if linksPushed > 0 {
+			_, _ = fmt.Fprintf(out, "✓ Synced %d relationship links\n", linksPushed)
 		}
 		if result.Stats.Conflicts > 0 {
 			_, _ = fmt.Fprintf(out, "→ Resolved %d conflicts\n", result.Stats.Conflicts)
@@ -476,6 +497,133 @@ func runGitHubSync(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// githubLinkSyncData holds the desired GitHub relationship links collected
+// from beads dependency state for the issues in scope of a sync/push pass.
+type githubLinkSyncData struct {
+	DesiredLinks []github.DependencyLink
+}
+
+// collectGitHubLinkSyncData walks the beads issues in scope of opts and
+// derives the GitHub relationship links (sub-issue for epic/child,
+// blocked_by for beads "blocks" dependencies) that should exist remotely.
+// Only issues already linked to GitHub (a resolvable ExternalRef) can
+// contribute or receive a link.
+func collectGitHubLinkSyncData(ctx context.Context, st storage.Storage, opts tracker.SyncOptions) (githubLinkSyncData, []string) {
+	if st == nil {
+		return githubLinkSyncData{}, []string{"GitHub relationship sync skipped: database not available"}
+	}
+
+	allIssues, err := st.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil {
+		return githubLinkSyncData{}, []string{fmt.Sprintf("GitHub relationship sync skipped: %v", err)}
+	}
+
+	scopedIssues := filterGitHubLinkScopedIssues(allIssues, opts)
+	scopedIssueIDs := make(map[string]bool, len(scopedIssues))
+	for _, issue := range scopedIssues {
+		if issue != nil && issue.ID != "" {
+			scopedIssueIDs[issue.ID] = true
+		}
+	}
+
+	var warnings []string
+	var desired []github.DependencyLink
+	for _, issue := range scopedIssues {
+		if issue.ExternalRef == nil {
+			continue
+		}
+		deps, err := st.GetDependenciesWithMetadata(ctx, issue.ID)
+		if err != nil {
+			warnings = append(warnings, fmt.Sprintf("GitHub relationship sync skipped dependencies for %s: %v", issue.ID, err))
+			continue
+		}
+		for _, dep := range deps {
+			if !scopedIssueIDs[dep.ID] {
+				continue
+			}
+			switch dep.DependencyType {
+			case types.DepParentChild:
+				if dep.IssueType == types.TypeEpic {
+					if link, ok := github.SubIssueLinkFromParentChild(issue, dep); ok {
+						desired = append(desired, link)
+					}
+				}
+			case types.DepBlocks:
+				if link, ok := github.BlockedByLinkFromBeadsDependency(issue, dep); ok {
+					desired = append(desired, link)
+				}
+			}
+		}
+	}
+
+	return githubLinkSyncData{DesiredLinks: desired}, warnings
+}
+
+func filterGitHubLinkScopedIssues(issues []*types.Issue, opts tracker.SyncOptions) []*types.Issue {
+	var issueIDSet map[string]bool
+	if len(opts.IssueIDs) > 0 {
+		issueIDSet = make(map[string]bool, len(opts.IssueIDs))
+		for _, id := range opts.IssueIDs {
+			issueIDSet[id] = true
+		}
+	}
+
+	result := make([]*types.Issue, 0, len(issues))
+	for _, issue := range issues {
+		if issue == nil {
+			continue
+		}
+		if issueIDSet != nil && !issueIDSet[issue.ID] {
+			continue
+		}
+		if opts.ExcludeEphemeral && issue.Ephemeral {
+			continue
+		}
+		if len(opts.TypeFilter) > 0 && !slices.Contains(opts.TypeFilter, issue.IssueType) {
+			continue
+		}
+		if slices.Contains(opts.ExcludeTypes, issue.IssueType) {
+			continue
+		}
+		result = append(result, issue)
+	}
+	return result
+}
+
+// pushGitHubDependencyLinks runs the relationship push pass: it converts
+// beads epic/child links and "blocks" dependencies among the scoped issues
+// (per opts) into GitHub sub-issues and issue dependencies. Additive — stale
+// remote relationships are left untouched. Shared by `bd github sync` and
+// `bd github push` so both reach the same relationship parity. Dry-run plan
+// lines are written to out (unless --json); warnings are delivered via warn.
+// Returns the number of relationships created.
+func pushGitHubDependencyLinks(ctx context.Context, gt *github.Tracker, st storage.Storage, opts tracker.SyncOptions, dryRun bool, out io.Writer, warn func(string)) int {
+	linkData, collectWarnings := collectGitHubLinkSyncData(ctx, st, opts)
+	for _, warning := range collectWarnings {
+		warn(warning)
+	}
+
+	client := gt.GitHubClient()
+	if client == nil || len(linkData.DesiredLinks) == 0 {
+		return 0
+	}
+
+	resolver := github.NewLinkResolver(client)
+	res := resolver.PushLinks(ctx, linkData.DesiredLinks, github.PushLinkOptions{
+		DryRun: dryRun,
+		OnPlan: func(link github.DependencyLink) {
+			if !jsonOutput {
+				_, _ = fmt.Fprintf(out, "  [dry-run] Would create GitHub %s relationship: #%d -> #%d\n",
+					link.LinkType, link.FromNumber, link.ToNumber)
+			}
+		},
+	})
+	for _, err := range res.Errors {
+		warn(fmt.Sprintf("GitHub relationship sync: %v", err))
+	}
+	return res.Created
 }
 
 // buildGitHubPushHooks creates PushHooks for GitHub-specific push behavior.
