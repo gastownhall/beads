@@ -449,7 +449,7 @@ var roleContractCases = []roleContract{
 		RunMemoriesRememberRefusesAnUnderivableKey,
 		RunMemoriesRecallAnswersTheStoredValue,
 		RunMemoriesRecallReportsAMissAsNotFoundNotAnError,
-		RunMemoriesRecallConflatesStoredEmptyWithAbsent,
+		RunMemoriesEmptyRowIsPresentUntilForgotten,
 		RunMemoriesForgetRemovesExactlyTheNamedRow,
 		RunMemoriesForgetNeverTouchesTheSettingsPlane,
 		RunMemoriesForgetReportsTheForgottenValue,

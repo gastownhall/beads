@@ -88,11 +88,12 @@ func (m *memories) Recall(ctx context.Context, req memoryops.RecallRequest) (mem
 		return memoryops.RecallResult{}, err
 	}
 	return RunTxRead(ctx, m.provider, func(ctx context.Context, uw UnitOfWork) (memoryops.RecallResult, error) {
-		value, err := uw.ConfigUseCase().GetConfig(ctx, storagememoryops.StorageKey(key))
+		all, err := uw.ConfigUseCase().GetAllConfig(ctx)
 		if err != nil {
 			return memoryops.RecallResult{}, err
 		}
-		return memoryops.RecallResult{Key: key, Value: value, Found: value != ""}, nil
+		value, found := all[storagememoryops.StorageKey(key)]
+		return memoryops.RecallResult{Key: key, Value: value, Found: found}, nil
 	})
 }
 
@@ -111,11 +112,12 @@ func (m *memories) Forget(ctx context.Context, req memoryops.ForgetRequest) (mem
 	storageKey := storagememoryops.StorageKey(key)
 	result, err := RunTxResult(ctx, m.provider, func(ctx context.Context, uw UnitOfWork) (memoryops.ForgetResult, string, error) {
 		cfg := uw.ConfigUseCase()
-		previous, err := cfg.GetConfig(ctx, storageKey)
+		all, err := cfg.GetAllConfig(ctx)
 		if err != nil {
 			return memoryops.ForgetResult{}, "", err
 		}
-		if previous == "" {
+		previous, found := all[storageKey]
+		if !found {
 			return memoryops.ForgetResult{Key: key}, "", nil
 		}
 		if err := cfg.DeleteConfig(ctx, storageKey); err != nil {
