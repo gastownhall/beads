@@ -43,6 +43,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd ready` no longer offers an epic as claimable work beside its own open
+  children** (GH#5583). An epic is a container: its real work lives in the
+  children, which already appear on their own, so listing the parent next to
+  them sent an agent at the container record and cost it a cycle discovering
+  there was nothing there to do. `epic` now joins `merge-request`, `gate`,
+  `molecule`, `rig`, and the infra wisp types in the default ready-work type
+  exclusions, so the bare `bd ready` — the documented entry point — no longer
+  needs `--exclude-type epic` bolted on. `bd list` is unchanged, and
+  `bd ready --type epic` still returns epics, since an explicit `--type` skips
+  the default exclusions entirely.
+
 - **`bd show` labels `created_by` as `Created by:`, not `Owner:`** (be-ss66).
   The text view rendered `created_by` under a label naming a different
   concept. `owner` is a separate field holding a separate value — the git

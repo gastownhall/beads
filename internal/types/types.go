@@ -2136,7 +2136,7 @@ type WorkFilter struct {
 	IncludeEphemeral bool
 
 	// Type exclusion: exclude issues with these types from results.
-	// Appended to the default exclusion list (merge-request, gate, molecule, etc.).
+	// Appended to the default exclusion list (merge-request, gate, molecule, epic, etc.).
 	// When Type is set, ExcludeTypes is ignored (explicit type inclusion wins).
 	ExcludeTypes []IssueType
 

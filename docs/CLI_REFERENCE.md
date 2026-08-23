@@ -6761,7 +6761,7 @@ bd orphans [flags]
 
 Show ready work (open issues with no active blockers).
 
-Excludes in_progress, blocked, deferred, and hooked issues. This uses the
+Excludes in_progress, blocked, deferred, and hooked issues, as well as epics. This uses the
 GetReadyWork API which applies blocker-aware semantics to find truly claimable work.
 
 Note: 'bd list --ready' uses the same blocker-aware ready-work semantics.
