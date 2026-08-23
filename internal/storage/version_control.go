@@ -168,6 +168,23 @@ type VersionControl interface {
 	// data syncs through config — would be dropped, leaving the merge unconcluded
 	// and re-wedging the next pull/sync (GH#2474).
 	CommitMergeResolution(ctx context.Context, message string) error
+	// CommitAll commits the ENTIRE working set — every dirty non-ignored table,
+	// config included — with the given message. It is the storage entry point
+	// for the explicit operator commands (bd vc commit, bd dolt commit), which
+	// promise "all current changes": out-of-band writes (tables modified outside
+	// a tracked bd transaction, config above all) must be swept in here, or the
+	// doctor's dirty-working-set warning can never be cleared by its own
+	// recommended remedy. Unlike Commit, it reports honestly whether a commit
+	// was created: (false, nil) means nothing was committable (clean working
+	// set, or only dolt_ignore'd tables such as wisps were dirty), so callers
+	// can print "Nothing to commit" instead of claiming a commit that never
+	// happened. GH#2455's config exclusion is about AUTOMATIC commits sweeping
+	// a concurrent writer's half-applied config change; an operator explicitly
+	// asking to commit everything is the same trust level as CommitPending.
+	// The committed bool is the atomic signal whose absence forced the CLI's
+	// racy HEAD-before/HEAD-after comparison (the interface threading tracked
+	// as bd mybd-z9h7j; CommitPending already had the shape).
+	CommitAll(ctx context.Context, message string) (bool, error)
 	CommitPending(ctx context.Context, actor string) (bool, error)
 	CommitExists(ctx context.Context, commitHash string) (bool, error)
 	GetCurrentCommit(ctx context.Context) (string, error)

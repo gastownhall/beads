@@ -14,6 +14,13 @@ import (
 // TestMain starts an isolated Dolt server so fix tests don't hit the
 // production server on port 3307.
 func TestMain(m *testing.M) {
+	os.Exit(testMainInner(m))
+}
+
+// testMainInner holds TestMain's body so its defer runs before the process
+// exits — os.Exit skips deferred calls, so TestMain itself must never defer
+// anything (be-5kkk6).
+func testMainInner(m *testing.M) int {
 	os.Setenv("BEADS_TEST_MODE", "1")
 	// AD-01 (be-c5p): allow doctor/fix tests through the dolt.New
 	// database-name firewall when they connect to the spawned test server.
@@ -45,5 +52,5 @@ func TestMain(m *testing.M) {
 	os.Unsetenv("BEADS_DOLT_PORT")
 	os.Unsetenv("BEADS_TEST_MODE")
 	os.Unsetenv("BEADS_TEST_SERVER")
-	os.Exit(code)
+	return code
 }

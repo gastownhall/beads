@@ -162,7 +162,9 @@ func TestMigrationWorkNeededWhenWispTablesAbsent(t *testing.T) {
 	}
 	defer db.Close()
 
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
@@ -205,6 +207,7 @@ func TestMigrateAppliesUnderContradictedCursor(t *testing.T) {
 			AddRow("content_hash", "char(64)", "YES", "", nil, ""))
 
 	// The guarded read: cursor claims at-latest, sentinel probe contradicts it.
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))

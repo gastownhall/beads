@@ -1349,35 +1349,59 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// to config.yaml / global config, which may resolve to another project's server
 		// because metadata.json doesn't exist yet during init. For fresh inits, port 0
 		// forces auto-start to allocate an ephemeral port for THIS project.
+		// The source travels with the port. applyConfigDefaults reads a nonzero
+		// ServerPort with no source as a caller assertion (be-wf9a.1), and none
+		// of the three resolutions below is one: they are an ambient env var and
+		// two pieces of bd's own bookkeeping. Mislabeling them makes auto-start
+		// refuse to retarget a stale port the user never chose (GH#4052).
 		initPort := 0
+		initPortSource := doltserver.PortSourceUnset
+		initPortShared := false
 		if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
 			if port, err := strconv.Atoi(p); err == nil && port > 0 {
 				initPort = port
+				initPortSource = doltserver.PortSourceEnv
 			}
 		}
 		if initPort == 0 {
-			initPort = doltserver.ReadPortFile(beadsDir)
+			if port := doltserver.ReadPortFile(beadsDir); port > 0 {
+				initPort = port
+				initPortSource = doltserver.PortSourcePortFile
+			}
 		}
 		// Shared server mode intentionally uses a common port for all projects.
 		if initPort == 0 && doltserver.IsSharedServerMode() {
 			initPort = doltserver.DefaultSharedServerPort
+			initPortSource = doltserver.PortSourceSharedServerDefault
+			// Mirrors doltserver.DefaultConfig's own shared-mode fill. It makes
+			// newServerMode fail closed if the shared server is down and
+			// auto-start brings up a repo-local one instead — a different
+			// database, never a benign port refresh (GH#4052).
+			initPortShared = true
 		}
 		doltCfg := &dolt.Config{
-			Path:            storagePath,
-			BeadsDir:        beadsDir,
-			Database:        dbName,
-			ServerPort:      initPort,
-			ServerMode:      initServerMode,
-			ProxiedServer:   initProxiedServer,
-			CreateIfMissing: true, // bd init is the only path that should create databases
-			AutoStart:       initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
-			ServerTLS:       initDoltServerTLSFromEnv(),
+			Path:                   storagePath,
+			BeadsDir:               beadsDir,
+			Database:               dbName,
+			ServerPort:             initPort,
+			ServerPortSource:       initPortSource,
+			ServerPortSharedServer: initPortShared,
+			ServerMode:             initServerMode,
+			ProxiedServer:          initProxiedServer,
+			CreateIfMissing:        true, // bd init is the only path that should create databases
+			AutoStart:              initServerMode && os.Getenv("BEADS_DOLT_AUTO_START") != "0",
+			ServerTLS:              initDoltServerTLSFromEnv(),
 		}
 		if serverHost != "" {
 			doltCfg.ServerHost = serverHost
 		}
 		if serverPort != 0 {
+			// `bd init --server-port` IS a caller assertion — and it must
+			// replace the source resolved above, not inherit it, or an
+			// explicitly flagged port would carry a port-file provenance.
 			doltCfg.ServerPort = serverPort
+			doltCfg.ServerPortSource = doltserver.PortSourceCallerExplicit
+			doltCfg.ServerPortSharedServer = false
 		}
 		if serverSocket != "" {
 			doltCfg.ServerSocket = serverSocket
@@ -3338,16 +3362,22 @@ func verifyMetadata(ctx context.Context, store storage.DoltStorage, key, value s
 // sets config values that are not already present.
 func initGlobalDatabaseConfig(ctx context.Context, projectCfg *dolt.Config, quiet bool) {
 	globalCfg := &dolt.Config{
-		Path:            projectCfg.Path,
-		BeadsDir:        projectCfg.BeadsDir,
-		Database:        doltserver.GlobalDatabaseName,
-		ServerHost:      projectCfg.ServerHost,
-		ServerPort:      projectCfg.ServerPort,
-		ServerUser:      projectCfg.ServerUser,
-		ServerPassword:  projectCfg.ServerPassword,
-		ServerMode:      true,
-		CreateIfMissing: true,
-		AutoStart:       false, // server is already running
+		Path:       projectCfg.Path,
+		BeadsDir:   projectCfg.BeadsDir,
+		Database:   doltserver.GlobalDatabaseName,
+		ServerHost: projectCfg.ServerHost,
+		ServerPort: projectCfg.ServerPort,
+		// projectCfg has been through applyConfigDefaults, so its port is
+		// resolved and its source is accurate; copy both. Dropping the source
+		// here would re-label the copy caller-explicit on the way into the
+		// second dolt.New.
+		ServerPortSource:       projectCfg.ServerPortSource,
+		ServerPortSharedServer: projectCfg.ServerPortSharedServer,
+		ServerUser:             projectCfg.ServerUser,
+		ServerPassword:         projectCfg.ServerPassword,
+		ServerMode:             true,
+		CreateIfMissing:        true,
+		AutoStart:              false, // server is already running
 	}
 
 	globalStore, err := newDoltStore(ctx, globalCfg)

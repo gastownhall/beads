@@ -734,6 +734,15 @@ func runDiagnostics(path string) doctorResult {
 	blockedConsistencyCheck := convertWithCategory(doctor.CheckBlockedConsistencyWithStore(sharedStore), doctor.CategoryData)
 	result.Checks = append(result.Checks, blockedConsistencyCheck)
 
+	// Check 10d: label whitespace damage (#5812) — labels written by a bd that
+	// normalized on read but not on write, which no filter can match.
+	// Warn-only (does not fail OverallOK), same reasoning as the check above:
+	// this ships into databases that already carry the damage, and turning
+	// doctor red on pre-existing data across the fleet would be worse than
+	// surfacing it as actionable.
+	labelWhitespaceCheck := convertWithCategory(doctor.CheckLabelWhitespaceWithStore(sharedStore), doctor.CategoryData)
+	result.Checks = append(result.Checks, labelWhitespaceCheck)
+
 	// Check 11: Claude integration
 	claudeCheck := convertWithCategory(doctor.CheckClaude(path), doctor.CategoryIntegration)
 	result.Checks = append(result.Checks, claudeCheck)

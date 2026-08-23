@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`bd` warns when it stores a label containing a space**
+  ([#5813](https://github.com/gastownhall/beads/pull/5813)). Such a label is a
+  legitimate thing to ask for — `-l 'good first issue'` — and bd stores it as
+  asked rather than re-splitting a boundary the shell already decided. But it is
+  also exactly what a missed comma looks like, and that case cannot be told
+  apart from the deliberate one at the point of writing. A line on stderr
+  catches it at the keystroke instead of months later: `⚠ Stored "auth backend"
+  as ONE label — it contains a space.` It is advice, not an error; stdout is
+  untouched, so `--silent` still prints just the ID, and `--quiet` silences it.
+  Not emitted for `--remove-label`, since removing such a label is how the
+  damage gets repaired.
+
+- **`bd doctor` gains a `Label Whitespace` check** for finding damage already in
+  a database ([#5813](https://github.com/gastownhall/beads/pull/5813)). It
+  reports labels that contain whitespace or differ from their trimmed form, and
+  `bd doctor --fix` repairs them. The check is warn-only: a database with legacy
+  damage still exits 0. As with the rest of bare `bd doctor`, it does not yet
+  run in embedded mode (GH#3794).
+
+- **`bd stale` and `bd blocked` gain `--label`, `--label-any` and
+  `--exclude-label`** ([#5822](https://github.com/gastownhall/beads/pull/5822)),
+  with the same meanings and the same flag names they already have on `bd list`
+  and `bd ready`: `--label` is AND (repeatable, must have all), `--label-any` is
+  OR, `--exclude-label` drops anything carrying one. They were the two listing
+  commands with no label-scoped output at all, so a theme-scoped stale sweep had
+  to pull the whole list as JSON and post-filter it on the labels array.
+  Filtering happens in SQL ahead of `LIMIT`, not on the hydrated rows, so
+  `--label x --limit 10` returns ten matching issues rather than whatever
+  survives filtering the first ten. No `--theme` flag: beads has no theme
+  concept, themes are labels here, and `--label theme:x` is the native way to
+  say it.
+
 ### Changed
 
 - **`bd dep add` names the implicit `type=blocks` default, but only to an
@@ -21,6 +55,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   turns it off for operators who have internalised the default. `--json` output
   is unchanged.
 
+- **`bd show` labels `created_by` as `Created by:`, not `Owner:`** (be-ss66).
+  The text view rendered `created_by` under a label naming a different
+  concept. `owner` is a separate field holding a separate value — the git
+  author email kept for CV attribution — exposed as `owner` in `--json` and
+  never rendered in the text view at all. Two identities, one label, and the
+  label named the one that was not on screen. This is a correctness fix and
+  not polish: a reader asking "whose bead is this" reasonably reaches for
+  what the label promises, and two defect analyses were filed off exactly
+  that mistake in one evening, both measuring provenance from the wrong
+  column and both retracted after another agent disproved them. `bd show`
+  now prints `Created by: <identity>`. The `--json` payload is unchanged, and
+  a repo-wide audit found no in-tree parser of the old `Owner: ` text — the
+  only other producer, `bd github`'s repo-config display, names an actual
+  repository owner and keeps its label.
+
+- **`beads_dir` and `repo_root` are now OPTIONAL members of `ContextResponse`
+  on `GET /v0/beads/context`.** They are the only two members of the identity
+  handshake that describe the SERVER's filesystem rather than the workspace's
+  logical identity, and an absolute host path is not something a remote client
+  can act on — it cannot open it. The document already called publishing them
+  a cost "an operator accepts when binding beyond loopback"; while they were
+  required, accepting it was the only conforming option. A deployment that
+  does not want to disclose its filesystem layout can now withhold them and
+  still serve a conforming body.
+
+  **No body changes.** `bd serve` publishes both, always, exactly as before —
+  the relaxation is a promise to clients, not a switch on the server. What
+  changes is what a client may assume: it MUST tolerate their absence, and
+  MUST identify a workspace by `project_id`, `database` and `backend`, which
+  stay required. In Go, `apigen.ContextResponse.BeadsDir` and `.RepoRoot`
+  become `*string`.
+
+- **An explicitly configured Dolt server port now outranks the ambient
+  `BEADS_DOLT_SERVER_PORT`/`BEADS_DOLT_PORT` environment variables**
+  (be-wf9a.1, be-9tju, GH#4052). `ServerPort` resolution now carries a
+  *source* — which step of the chain produced the port — and the env read only
+  applies when that source is not an assertion by the user or by tooling acting
+  for them. Two deliberate behavior changes follow. **First**, a port set by the
+  caller before the store opens (a library caller filling in `Config.ServerPort`,
+  or `bd init --server-port`) is no longer silently replaced by whatever the
+  surrounding shell exported; previously the env var won unconditionally.
+  **Second**, the *legacy* `BEADS_DOLT_PORT` spelling no longer overrides a port
+  resolved from `.beads/config.yaml` (`dolt.port`), Dolt's own `config.yaml`
+  (`listener.port`), or `metadata.json` (`dolt_server_port`). The current
+  `BEADS_DOLT_SERVER_PORT` spelling is unaffected — it sits first in the
+  resolution chain and still wins over all of them.
+
+  **Compatibility:** a workspace that relied on exporting `BEADS_DOLT_PORT` to
+  redirect away from a port pinned in config now connects to the pinned port
+  instead. Switch to `BEADS_DOLT_SERVER_PORT`, or change the pinned value. Ports
+  that bd resolved for *itself* — the gitignored `.beads/dolt-server.port`, and
+  the shared-server default 3308 — stay non-authoritative and remain overridable
+  by either spelling, which is the case that kept working throughout.
+
+  A related failure goes away with it: because bd's own bookkeeping is no longer
+  mislabeled as user configuration, a stale `.beads/dolt-server.port` left by a
+  crashed server no longer makes auto-start refuse to start with *"bd will not
+  silently use a different port than the one you configured"* when nothing was
+  configured. Auto-start warns and retargets, as it did before. Shared-server
+  mode still fails closed there — a repo-local auto-start is a different
+  database, not a port refresh — but now says so in its own words.
+
 - **`bd reclaim` summarizes the leases its replica guard declined instead of
   naming every one, every run** (wy-sp2l4). A lease granted by another replica
   is by construction never reclaimed here, so the audit was not a one-off: it
@@ -34,6 +130,199 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a collapsed tail. Still stderr-only: `bd reclaim --json` owns stdout and its
   payload is unchanged. Under `--quiet` the audit now skips its queries
   entirely rather than running them to discard the output.
+
+- **Actor matching decodes an exact `--` run to `/` instead of collapsing it to
+  a generic separator** (be-p7dzx, bundled be-vc51). Identity comparison — used
+  by `ExpectedAssignee` on release and update, and by claim/close/unclaim
+  authorization — canonicalizes a run of `.`, `_` or `-` to one separator so the
+  same identity spelled under different layers' conventions compares equal. An
+  exact two-byte `--` run is now excluded from that collapse: it is gascity's
+  session-name encoding of a rig-qualified agent's `/`, so it decodes to `/`.
+  **Compatibility:** `gastown--mayor` now matches `gastown/mayor`, and stops
+  matching `gastown__mayor` and `gastown-mayor`. That is the intended fix rather
+  than a side effect — `gastown--mayor` is the agent `mayor` on rig `gastown`
+  while `gastown__mayor` is the dotted alias `gastown.mayor`, so matching them
+  was a widening — but any stored `--` spelling that is NOT a gascity slash
+  encoding changes equivalence class silently, with no error to notice. Longer
+  or mixed runs, `__` and `---` included, are unaffected and still collapse.
+
+### Fixed
+
+- **Incremental auto-export now actually takes the incremental path**
+  ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection
+  compared `GetStateHash()` values — a hash of the entire database plus
+  working set (`DOLT_HASHOF_DB()`), not a commit — but `ChangedIssueIDs` feeds
+  both endpoints straight into `dolt_diff()`, which only accepts real commit
+  hashes or the literal `WORKING`. Every incremental attempt therefore failed
+  to resolve a diff and silently fell back to a full export: correct output,
+  but the incremental short-circuit this feature exists for never actually
+  ran. The "to" endpoint is now `WORKING` (dolt_diff's own literal for the
+  live working set) paired with the previous export's real commit hash as
+  "from", so the incremental path resolves and fires as designed.
+
+  Three format/scope regressions surfaced alongside the dead code path, since
+  nothing had ever exercised it end-to-end: the incremental patch could leak
+  **memories** into the auto-export output (full export filters them; the
+  patch path did not), could include the configured **owner**'s own issues
+  where full export excludes them, and omitted the `_type` discriminator field
+  full export always writes. All three are now pinned by tests that diff a
+  patched run's output against a from-scratch full export of the same state.
+  The patch write is also now atomic (write-temp + rename), matching the
+  full-export path's existing guarantee.
+
+  The owner and `_type` fixes match full export exactly. **Memory records
+  deliberately do not**, and the difference is worth stating: where the full
+  path *refuses* to overwrite an `issues.jsonl` that already contains memory
+  lines (`guardAutoExportOverwrite`), the incremental path *preserves* them
+  verbatim and proceeds. Preserving is the better behavior — a manually
+  seeded export survives patching byte-for-byte instead of wedging — so the
+  incremental path keeps it rather than adopting the refusal.
+
+  **Scope: this is a server-mode (`DiffStore`) improvement only.**
+  `EmbeddedDoltStore` implements neither `DiffStore` nor `StateHasher`, so in
+  the default embedded mode the incremental path is inert (`incremental
+  skipped — store does not implement DiffStore`) and every cycle is still a
+  full export. The deletion-proof guard below is likewise server-mode only, so
+  [#5896](https://github.com/gastownhall/beads/issues/5896) stays open for
+  embedded mode, where `bd delete` still wedges auto-export.
+
+  **Caveat: the diff anchor only advances on real commits.** In server mode
+  dolt auto-commit is off, so with no commits being made the anchor stays put
+  and the diff range grows with every cycle. That is correct but not free:
+  once the change set crosses the 5000-id threshold, every export falls back
+  to a full rewrite until something commits and the anchor moves forward.
+
+- **`bd delete` no longer wedges auto-export in server mode**
+  ([#5806](https://github.com/gastownhall/beads/pull/5806), part of
+  [#5896](https://github.com/gastownhall/beads/issues/5896)). Auto-export's
+  orphan guard refuses to overwrite an `issues.jsonl` holding issue records
+  absent from the local store — the #4988 protection against a JSONL that has
+  run ahead of the database. A normal `bd delete` produced exactly that shape,
+  so a single delete left `issues.jsonl` permanently stale, with a "refusing
+  to overwrite" warning on every later command. The guard now asks `dolt_diff`
+  whether each JSONL-only id was genuinely removed since the last export's
+  anchor and, when proven, stops treating it as corruption.
+
+  The proof is deliberately narrow. It requires `diff_type='removed'` on the
+  **issues** table itself, so a label-, dependency- or comment-only change, a
+  delete-then-recreate, a wisp, or any diff error all still refuse. It also
+  requires the anchor to still be reachable from `HEAD`: after a
+  `DOLT_RESET --hard`, a branch checkout, or any other data-dir rewind, a row
+  reads as "removed" without anyone having deleted it, and honoring that
+  would drop a live record. Both conditions must hold, or the guard refuses as
+  before.
+
+- **Disabling telemetry no longer strands the queued eventsData backlog
+  forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics
+  *before* its prune step, and the spawn gate refused to schedule the child at
+  all when disabled — so the one machine whose queue can never again drain by
+  upload (the one that just opted out) kept every queued batch and orphaned
+  emitter temp indefinitely (2M+ files / 15.8GB observed on one control VM).
+  With metrics disabled, bd now still spawns the detached child under the same
+  marker-first throttle, and the child prunes by the normal TTL/cap policy and
+  exits without POSTing anything. Until that pre-existing backlog ages out, a
+  host that just opted out while its queue still holds batches younger than the
+  7-day TTL (and under the file/size caps) keeps forking the throttled,
+  detached, network-free prune child every flush interval — reclaiming nothing
+  until those batches age past the TTL — so new prune-only `bd send-metrics`
+  processes on a freshly disabled host are expected during that bounded window
+  and never POST. Once the backlog has decayed empty, spawns stop entirely; a
+  machine that never enabled telemetry has no queue directory and never forks.
+
+- **`bd show` on a deleted or purged issue no longer prints text identical to
+  an ID that never existed** (ga-m6inyb). `bd delete` and wisp `purge` both
+  remove a row (and its `events`) from the live tables with no trace left
+  behind, so "not found" was collapsing two states that call for opposite
+  responses — archived (success) and never-existed (possibly lost data) —
+  into one observable. This had a real cost: a gate-reviewer session showed
+  a legitimate issue successfully, hit an unrelated mysql i/o timeout on a
+  retry moments later, got the identical "not found" text for the same ID,
+  and reasonably concluded data had been lost — when the issue had simply
+  been archived in between. `bd show` on a missing ID now adds a second
+  line — `Hint: this ID may have never existed, or may reference a
+  deleted/purged record with no trace left in the live database — try 'bd
+  history <id>'` — pointing at the existing, opt-in `bd history <id>` for
+  anyone who wants to check further on a non-wisp issue (wisps are never
+  committed to history, purged or not, so there is no signal left to
+  recover for them). JSON output gains an additive `hint` field; the
+  existing `error` text is unchanged. **Direct-mode text output changes for
+  one path**: the single-ID not-found branch's first line changes from
+  `Error fetching <id>: no issue found matching "<id>"` to `Issue <id> not
+  found`, matching the wording the multi-ID and proxied-mode paths already
+  used (those two are unchanged aside from gaining the new second `Hint:`
+  line).
+
+- **Explicit commits now sweep the entire working set and report no-ops
+  honestly.** In server mode, `bd vc commit` and `bd dolt commit` previously
+  routed through the config-excluding automatic-commit path, so out-of-band
+  config changes could remain dirty even though the command exited
+  successfully. Both commands now include config while continuing to exclude
+  ignored wisp tables. A clean or otherwise non-committable working set reports
+  `Nothing to commit` (`committed: false` in JSON) instead of attributing an
+  unchanged HEAD to a new commit.
+
+- **Every CLI label write now normalizes its input, as every label filter
+  already did** ([#5813](https://github.com/gastownhall/beads/pull/5813),
+  fixes [#5812](https://github.com/gastownhall/beads/issues/5812)).
+  `utils.NormalizeLabels` (trim, drop empty, dedupe) was applied to `list`,
+  `search`, `ready`, `orphans`, `count` and workapi — and to no write path at
+  all. The filter trimmed its input and the store did not, so a label could not
+  match its own filter: `bd create --labels 'theme:a, theme:b'` stored
+  `theme:b` with pflag's leading space intact, and `bd list --label theme:b`
+  then returned nothing. The failure is silent in the worst way — a filtered
+  list quietly short of rows is indistinguishable from a complete one. One real
+  database had 150 such rows across 111 issues, found months later only because
+  theme-by-theme counts refused to reconcile. `create`, `quick`, `update`
+  (`--add-label`, `--remove-label`, `--set-labels`) and `tag` now normalize on
+  the way in. `--remove-label` matters as much as the additive flags: an
+  untrimmed `' theme:a'` silently removed nothing.
+
+  **`bd tag` is included deliberately.** Its help calls it "Shorthand for
+  `bd update <id> --add-label <label>`", and it was the last CLI door still
+  storing a positional verbatim. Normalization happens before the direct/proxied
+  route split, so the two routes cannot disagree. A label that is only
+  whitespace is now refused rather than dropped: the plural flags can discard an
+  empty element and still honor the rest of the request, but `bd tag` has one
+  label to add, so dropping it would report success having written nothing.
+
+  **Import and batch ingest are deliberately excluded** and keep round-trip
+  fidelity: what was exported is what is restored.
+
+- **`bd show` no longer corrupts shell globs and other quoted wildcards in a
+  description or notes**
+  ([#5799](https://github.com/gastownhall/beads/pull/5799)). CommonMark lets a
+  `*` or `_` run act as both an opener and a closer when the characters
+  flanking it fall in the same class, and a quoted glob is exactly that shape —
+  the `*` in `'*.captured'` sits between `'` and `.`. Two such runs therefore
+  paired, including across lines, since goldmark joins a paragraph's lines
+  before parsing. Everything between them rendered as emphasis: with color the
+  asterisks were consumed and **silently vanished** from the command, leaving a
+  still-plausible but different one on screen; without color, glamour's notty
+  style wrote a literal `**` into the middle of the text. Storage was never
+  affected — `bd show --json` always returned the body byte-for-byte — but the
+  rendered text is what a reader acts on, and what an agent reads when it takes
+  its instructions from a bead. Runs that can act as both opener and closer are
+  now hidden from the parser and restored afterwards, so `bd show` prints what
+  was stored.
+
+  **The known trade**, in two narrow shapes, both pinned by test: an authored
+  closer that is itself both-flanking no longer pairs, so `see *"quoted"*,
+  next` renders literally rather than italicized (color path only — notty
+  already printed it literally); and a backslash escape reaching for a
+  both-flanking delimiter keeps its backslash, so `\*.captured` renders as
+  `\*.captured`. An escape whose delimiter is not both-flanking, such as
+  `a \*literal\* b`, is unchanged. Both are shapes CommonMark itself treats as
+  ambiguous, and for a bead body — stored plain text, not authored markdown —
+  showing the stored characters is the better of the two failures. Ordinary
+  emphasis (`**bold**`, `*italic*`), `SELECT * FROM t`, code spans and fenced
+  blocks all render exactly as before.
+
+- **`bd blocked` silently ignored the label filters it already accepted**
+  ([#5822](https://github.com/gastownhall/beads/pull/5822)).
+  `types.WorkFilter` has carried `Labels`, `LabelsAny` and `ExcludeLabels` all
+  along, and `bd blocked` built one, but `GetBlockedIssuesInTx` only ever read
+  `ParentID`. Programmatic callers that set them got unfiltered results back and
+  no error — a full list where a scoped one was asked for.
 
 ### Documentation
 
@@ -524,6 +813,18 @@ never reused, per the v1.1.1 precedent.)
   now gone from the create path.
 
 ### Fixed
+
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **FreeBSD builds compile again** (#5661). The dbproxy process-identity arc
   (procid, unverified-process) shipped linux/darwin/windows implementations
@@ -2356,18 +2657,6 @@ remote-migrate gate from a blunt block into a state-aware one.
   ([#4516](https://github.com/gastownhall/beads/issues/4516)).
 
 ### Fixed
-
-- **`--label-any` is no longer silently dropped by `bd ready` and
-  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
-  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
-  filter was ignored on the ready/claim path (with or without `--parent`) on
-  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
-  this was dangerous rather than merely wrong: a worker fencing itself to its
-  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
-  happily claim another lane's issue and believe it was fenced. `--label-any`
-  now emits an OR-set membership clause that AND-combines with `--label`,
-  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
-  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **A failed v53 migration no longer traps the database, and the v53 repair
   now covers `wisp_dependencies` split-column drift.** rc.2 repaired the

@@ -82,7 +82,9 @@ These keys must live in `config.yaml`, not the database, because they are read b
 
 The full namespaces routed to YAML are:
 
-`routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`
+`routing.*`, `sync.*`, `git.*`, `directory.*`, `repos.*`, `external_projects.*`, `validation.*`, `lint.*`, `hierarchy.*`, `ai.*`, `backup.*`, `export.*`, `dolt.*`, `federation.*`, `metrics.*`, `list.*`
+
+`lint.*` holds lint settings: `lint.sections.<type>` is a comma-separated, additive list of sections that `bd lint` additionally requires for issues of that type (built-in required sections still apply; unset means no behavior change).
 
 Plus these individual keys:
 
