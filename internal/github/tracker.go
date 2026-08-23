@@ -35,6 +35,10 @@ type Tracker struct {
 	store  storage.Storage
 }
 
+// GitHubClient exposes the tracker's underlying REST client so callers
+// (e.g. the dependency-link push pass) can issue relationship API calls.
+func (t *Tracker) GitHubClient() *Client { return t.client }
+
 func (t *Tracker) Name() string         { return "github" }
 func (t *Tracker) DisplayName() string  { return "GitHub" }
 func (t *Tracker) ConfigPrefix() string { return "github" }
@@ -226,6 +230,25 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 		return ""
 	}
 	return matches[1]
+}
+
+// IssueNumberFromRef extracts a GitHub repository-scoped issue number from a
+// local external ref (a full GitHub issue URL or the "github:{digits}"
+// shorthand produced by BuildExternalRef).
+func IssueNumberFromRef(ref string) (int, bool) {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return 0, false
+	}
+	if m := ghShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		n, err := strconv.Atoi(m[1])
+		return n, err == nil && n > 0
+	}
+	if m := issueNumberPattern.FindStringSubmatch(ref); len(m) >= 2 {
+		n, err := strconv.Atoi(m[1])
+		return n, err == nil && n > 0
+	}
+	return 0, false
 }
 
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
