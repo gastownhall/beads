@@ -29,6 +29,16 @@ const credentialKeyFile = ".beads-credential-key" //nolint:gosec // G101: not a 
 
 const awsResponseChecksumValidationEnv = "AWS_RESPONSE_CHECKSUM_VALIDATION"
 
+// serverOwnsRemoteCredentialsEnv opts an external SQL server into executing
+// authenticated remote operations itself. The client still supplies the
+// non-secret username so CALL DOLT_PULL/PUSH can pass --user, while the
+// password remains exclusively in the server process environment.
+const serverOwnsRemoteCredentialsEnv = "BEADS_DOLT_SERVER_OWNS_REMOTE_CREDENTIALS"
+
+func serverOwnsRemoteCredentials() bool {
+	return os.Getenv(serverOwnsRemoteCredentialsEnv) == "1"
+}
+
 // federationEnvMutex protects process-wide env vars from concurrent access.
 // Environment variables are process-global, so we need to serialize federation operations.
 var federationEnvMutex sync.Mutex
@@ -679,6 +689,9 @@ func (s *DoltStore) shouldUseCLIForCredentials(ctx context.Context, remote strin
 }
 
 func (s *DoltStore) prepareCLIRouteForCredentials(ctx context.Context, remote string, creds *remoteCredentials) (bool, error) {
+	if serverOwnsRemoteCredentials() {
+		return false, nil
+	}
 	if creds.empty() {
 		return false, nil // no credentials to pass
 	}
@@ -708,6 +721,9 @@ func (s *DoltStore) shouldUseCLIForCredentialsWithError(ctx context.Context, rem
 }
 
 func (s *DoltStore) shouldUseCLIForLocalRemoteWithError(ctx context.Context, remote string) (bool, error) {
+	if serverOwnsRemoteCredentials() {
+		return false, nil
+	}
 	if !s.serverMode {
 		return false, nil
 	}
@@ -803,6 +819,9 @@ func (s *DoltStore) shouldUseCLIForCloudAuth(ctx context.Context, remote string)
 }
 
 func (s *DoltStore) prepareCLIRouteForCloudAuth(ctx context.Context, remote string) (bool, error) {
+	if serverOwnsRemoteCredentials() {
+		return false, nil
+	}
 	if !s.serverMode {
 		return false, nil // embedded mode: env vars are in-process
 	}

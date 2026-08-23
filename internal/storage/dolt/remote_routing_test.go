@@ -30,6 +30,40 @@ func TestEnsureMatchingCLIRemoteSurfacesValidationErrors(t *testing.T) {
 	}
 }
 
+func TestServerOwnedRemoteCredentialsDisableCLIRouting(t *testing.T) {
+	t.Setenv(serverOwnsRemoteCredentialsEnv, "1")
+	ctx := context.Background()
+	store := &DoltStore{serverMode: true}
+	creds := &remoteCredentials{username: "root"}
+
+	routes := []struct {
+		name string
+		run  func() (bool, error)
+	}{
+		{"credentials", func() (bool, error) {
+			return store.prepareCLIRouteForCredentials(ctx, "origin", creds)
+		}},
+		{"cloud auth", func() (bool, error) {
+			return store.prepareCLIRouteForCloudAuth(ctx, "origin")
+		}},
+		{"local remote", func() (bool, error) {
+			return store.shouldUseCLIForLocalRemoteWithError(ctx, "origin")
+		}},
+	}
+
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			useCLI, err := route.run()
+			if err != nil {
+				t.Fatalf("route returned error: %v", err)
+			}
+			if useCLI {
+				t.Fatal("expected SQL routing when the server owns remote credentials")
+			}
+		})
+	}
+}
+
 func TestSQLCapableCLIRoutingFallsBackWhenCLIDirIsNotDoltRepo(t *testing.T) {
 	ctx := context.Background()
 	creds := &remoteCredentials{username: "user", password: "pass"}
