@@ -33,7 +33,7 @@ const awsResponseChecksumValidationEnv = "AWS_RESPONSE_CHECKSUM_VALIDATION"
 // authenticated remote operations itself. The client still supplies the
 // non-secret username so CALL DOLT_PULL/PUSH can pass --user, while the
 // password remains exclusively in the server process environment.
-const serverOwnsRemoteCredentialsEnv = "BEADS_DOLT_SERVER_OWNS_REMOTE_CREDENTIALS"
+const serverOwnsRemoteCredentialsEnv = "BEADS_DOLT_SERVER_OWNS_REMOTE_CREDENTIALS" //nolint:gosec // G101: environment variable name, not credential material
 
 func serverOwnsRemoteCredentials() bool {
 	return os.Getenv(serverOwnsRemoteCredentialsEnv) == "1"

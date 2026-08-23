@@ -4325,6 +4325,12 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		return pullReport{}, fmt.Errorf("failed to set dolt_force_transaction_commit: %w", err)
 	}
 
+	ignoredSnapshots, err := snapshotDirtyIgnoredTables(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		return pullReport{}, fmt.Errorf("snapshot ignored tables before pull: %w", err)
+	}
+
 	// DOLT_PULL's row is the engine's only in-band account of what the pull
 	// did: `dolt pull` on the CLI exits 0 whether it merged or was already up
 	// to date, and so does this CALL. Capturing it costs nothing — the drain
@@ -4358,7 +4364,149 @@ func (s *DoltStore) pullWithAutoResolveUnchecked(ctx context.Context, remote str
 		pullErr = mergeErr
 	}
 
+	if err := restoreDirtyIgnoredTables(ctx, tx, ignoredSnapshots); err != nil {
+		_ = tx.Rollback()
+		return pullReport{}, fmt.Errorf("restore ignored tables after pull: %w", err)
+	}
+
 	return report, s.settleMergeInTx(ctx, tx, pullErr)
+}
+
+// ignoredPullTables are local-only tables that Beads intentionally excludes
+// from Dolt commits. A merge still refuses a dirty ignored table, so SQL pulls
+// temporarily move these rows into connection-local tables and restore them
+// after the remote operation.
+var ignoredPullTables = []string{
+	"ignored_schema_migrations",
+	"local_metadata",
+	"repo_mtimes",
+	"wisps",
+	"wisp_labels",
+	"wisp_dependencies",
+	"wisp_events",
+	"wisp_comments",
+}
+
+type ignoredTableSnapshot struct {
+	table   string
+	temp    string
+	columns string
+	ddl     string
+}
+
+func snapshotDirtyIgnoredTables(ctx context.Context, tx *sql.Tx) ([]ignoredTableSnapshot, error) {
+	dirty := make(map[string]bool)
+	rows, err := tx.QueryContext(ctx, "SELECT table_name FROM dolt_status")
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		dirty[table] = true
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	var snapshots []ignoredTableSnapshot
+	for _, table := range ignoredPullTables {
+		if !dirty[table] {
+			continue
+		}
+		temp := "__beads_pull_" + table
+		columns, err := pullSnapshotColumnList(ctx, tx, table)
+		if err != nil {
+			return nil, err
+		}
+		var ddlTable, ddl string
+		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SHOW CREATE TABLE `%s`", table)).Scan(&ddlTable, &ddl); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("CREATE TEMPORARY TABLE `%s` LIKE `%s`", temp, table)); err != nil {
+			return nil, err
+		}
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO `%s` (%s) SELECT %s FROM `%s`", temp, columns, columns, table)); err != nil {
+			return nil, err
+		}
+		snapshots = append(snapshots, ignoredTableSnapshot{table: table, temp: temp, columns: columns, ddl: ddl})
+	}
+
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		return nil, err
+	}
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if _, err := tx.ExecContext(ctx, "CALL DOLT_CHECKOUT(?)", snapshots[i].table); err != nil {
+			return nil, err
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1"); err != nil {
+		return nil, err
+	}
+	return snapshots, nil
+}
+
+func pullSnapshotColumnList(ctx context.Context, tx *sql.Tx, table string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT column_name
+		FROM information_schema.columns
+		WHERE table_schema = DATABASE() AND table_name = ?
+		ORDER BY ordinal_position`, table)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	var columns []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			return "", err
+		}
+		columns = append(columns, "`"+strings.ReplaceAll(column, "`", "``")+"`")
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(columns) == 0 {
+		return "", fmt.Errorf("ignored table %s has no columns", table)
+	}
+	return strings.Join(columns, ", "), nil
+}
+
+func restoreDirtyIgnoredTables(ctx context.Context, tx *sql.Tx, snapshots []ignoredTableSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 0"); err != nil {
+		return err
+	}
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("DROP TABLE `%s`", snapshots[i].table)); err != nil {
+			return fmt.Errorf("drop reset %s: %w", snapshots[i].table, err)
+		}
+	}
+	for _, snapshot := range snapshots {
+		if _, err := tx.ExecContext(ctx, snapshot.ddl); err != nil {
+			return fmt.Errorf("recreate %s: %w", snapshot.table, err)
+		}
+	}
+	for _, snapshot := range snapshots {
+		if _, err := tx.ExecContext(ctx, fmt.Sprintf("INSERT INTO `%s` (%s) SELECT %s FROM `%s`", snapshot.table, snapshot.columns, snapshot.columns, snapshot.temp)); err != nil {
+			return fmt.Errorf("restore %s: %w", snapshot.table, err)
+		}
+	}
+	_, err := tx.ExecContext(ctx, "SET FOREIGN_KEY_CHECKS = 1")
+	return err
 }
 
 // settleMergeInTx finishes a pull/merge that ran in tx: it auto-resolves the

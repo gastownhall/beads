@@ -61,6 +61,56 @@ func TestCommitBeforePullIncludesConfig(t *testing.T) {
 	}
 }
 
+func TestIgnoredTableSnapshotRoundTrip(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const key = "pull-snapshot-round-trip"
+	if _, err := store.db.ExecContext(ctx,
+		"REPLACE INTO local_metadata (`key`, value) VALUES (?, ?)", key, "preserved"); err != nil {
+		t.Fatalf("dirty local_metadata: %v", err)
+	}
+
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("begin transaction: %v", err)
+	}
+	snapshots, err := snapshotDirtyIgnoredTables(ctx, tx)
+	if err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("snapshot ignored tables: %v", err)
+	}
+	var resetCount int
+	if err := tx.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM local_metadata WHERE `key` = ?", key).Scan(&resetCount); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("query reset local_metadata: %v", err)
+	}
+	if resetCount != 0 {
+		_ = tx.Rollback()
+		t.Fatalf("local row count after snapshot = %d, want 0", resetCount)
+	}
+	if err := restoreDirtyIgnoredTables(ctx, tx, snapshots); err != nil {
+		_ = tx.Rollback()
+		t.Fatalf("restore ignored tables: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("commit restored working set: %v", err)
+	}
+
+	var value string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT value FROM local_metadata WHERE `key` = ?", key).Scan(&value); err != nil {
+		t.Fatalf("query restored local_metadata: %v", err)
+	}
+	if value != "preserved" {
+		t.Fatalf("restored value = %q, want preserved", value)
+	}
+}
+
 // TestFederationSyncCommitsConfigBeforeFetch is the `bd federation sync`
 // analogue of the pull config wedge: Sync auto-commits the working set before
 // its merge, and that pre-merge commit must include config. Plain Commit
