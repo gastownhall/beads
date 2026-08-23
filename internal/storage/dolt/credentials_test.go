@@ -100,6 +100,43 @@ func TestPrepareDoltCLITransferCommandAppliesCredentialsAndS3Env(t *testing.T) {
 	}
 }
 
+func TestDoltCLITransferArgsIncludeRemoteUser(t *testing.T) {
+	tests := []struct {
+		name string
+		got  []string
+		want []string
+	}{
+		{
+			name: "pull with credentials",
+			got:  doltCLIPullArgs("origin", "main", &remoteCredentials{username: "root", password: "secret"}),
+			want: []string{"pull", "--user", "root", "origin", "main"},
+		},
+		{
+			name: "push with credentials",
+			got:  doltCLIPushArgs("origin", "main", false, &remoteCredentials{username: "root", password: "secret"}),
+			want: []string{"push", "--user", "root", "origin", "main"},
+		},
+		{
+			name: "force push with credentials",
+			got:  doltCLIPushArgs("origin", "main", true, &remoteCredentials{username: "root", password: "secret"}),
+			want: []string{"push", "--force", "--user", "root", "origin", "main"},
+		},
+		{
+			name: "pull without credentials",
+			got:  doltCLIPullArgs("origin", "main", nil),
+			want: []string{"pull", "origin", "main"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if strings.Join(tt.got, "\x00") != strings.Join(tt.want, "\x00") {
+				t.Fatalf("args = %q, want %q", tt.got, tt.want)
+			}
+		})
+	}
+}
+
 func TestApplyNoGitHooksToCmd(t *testing.T) {
 	cmd := exec.Command("dolt", "push") // #nosec G204 -- test command is not executed
 	applyNoGitHooksToCmd(cmd)

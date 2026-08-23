@@ -3797,11 +3797,7 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 	if err := s.prePushFSCK(ctx); err != nil {
 		return err
 	}
-	args := []string{"push"}
-	if force {
-		args = append(args, "--force")
-	}
-	args = append(args, remote, s.branch)
+	args := doltCLIPushArgs(remote, s.branch, force, creds)
 	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
 	defer cancel()
 	applyNoGitHooksToCmd(cmd) // GH#3724
@@ -3810,6 +3806,15 @@ func (s *DoltStore) doltCLIPush(ctx context.Context, remote string, force bool, 
 		return cliTransferError("dolt push", remote, transferCtx, out, err)
 	}
 	return nil
+}
+
+func doltCLIPushArgs(remote, branch string, force bool, creds *remoteCredentials) []string {
+	args := []string{"push"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = appendDoltRemoteUser(args, creds)
+	return append(args, remote, branch)
 }
 
 // cliTransferError wraps a failed CLI transfer, distinguishing a transfer that
@@ -3827,13 +3832,29 @@ func cliTransferError(op, remote string, transferCtx context.Context, out []byte
 // Used for git-protocol remotes where CALL DOLT_PULL times out through the SQL connection.
 // If creds is non-nil, credentials are set on the subprocess environment only.
 func (s *DoltStore) doltCLIPull(ctx context.Context, remote string, creds *remoteCredentials) error {
-	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, "pull", remote, s.branch)
+	args := doltCLIPullArgs(remote, s.branch, creds)
+	cmd, transferCtx, cancel := s.prepareDoltCLITransfer(ctx, remote, creds, args...)
 	defer cancel()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return cliTransferError("dolt pull", remote, transferCtx, out, err)
 	}
 	return nil
+}
+
+func doltCLIPullArgs(remote, branch string, creds *remoteCredentials) []string {
+	args := appendDoltRemoteUser([]string{"pull"}, creds)
+	return append(args, remote, branch)
+}
+
+// appendDoltRemoteUser adds the username required by authenticated remotes API
+// transfers. DOLT_REMOTE_PASSWORD supplies only the password; the Dolt CLI
+// does not infer --user from DOLT_REMOTE_USER.
+func appendDoltRemoteUser(args []string, creds *remoteCredentials) []string {
+	if creds != nil && creds.username != "" {
+		return append(args, "--user", creds.username)
+	}
+	return args
 }
 
 // Push pushes commits to the remote.
