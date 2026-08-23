@@ -275,6 +275,11 @@ External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
+With no -t/--type the edge is created as type=blocks, which excludes the
+dependent from bd ready. When stderr is an interactive terminal, an advisory
+note says so once per command; it is silent for scripted and agent callers
+(non-TTY stderr) and can be turned off with --quiet or BD_NO_DEP_TYPE_WARNING=1.
+
 Examples:
   bd dep add bd-42 bd-41                              # Positional args
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
@@ -444,11 +449,46 @@ Examples:
 // choice never warns: -t (including an explicit -t blocks), and the
 // --blocked-by/--depends-on aliases, whose names already express the
 // blocking relationship. Non-blocks defaults do not warn either.
+//
+// The warning is advisory and fires on the documented-default majority path,
+// so it is scoped to an interactive operator: it is emitted only when stderr
+// is a TTY, and it honours the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
+// Scripted and agent callers — whose stderr is a pipe or a log file — never
+// see it, so it cannot train them to ignore stderr.
 func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
-	if explicit || dt != types.DepBlocks {
+	if !shouldWarnImplicitBlocksDefault(dt, explicit, quietFlag, os.Getenv("BD_NO_DEP_TYPE_WARNING"), ui.IsStderrTerminal()) {
 		return
 	}
-	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage\n") //nolint:gosec // G705: stderr, not a browser context
+	emitImplicitBlocksDefaultWarning()
+}
+
+// shouldWarnImplicitBlocksDefault is the testable predicate behind
+// warnImplicitBlocksDefault. It takes the quiet flag, the suppression env
+// value and the stderr TTY result as parameters so tests can cover every
+// combination without a real terminal — the same shape as
+// ui.shouldUseHyperlinks.
+func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bool, noWarnEnv string, stderrIsTerminal bool) bool {
+	if explicit || dt != types.DepBlocks {
+		return false
+	}
+	// --quiet is documented as "Suppress non-essential output (errors only)",
+	// and the other non-error stderr notices in this package (tips.go,
+	// metrics.go, routing_read.go) respect it the same way.
+	if quiet {
+		return false
+	}
+	// Explicit opt-out for operators who have internalised the default,
+	// following the BD_NO_EMOJI / BD_NO_COLOR precedent.
+	if noWarnEnv != "" {
+		return false
+	}
+	return stderrIsTerminal
+}
+
+// emitImplicitBlocksDefaultWarning writes the D1 warning. Split from the gate
+// so the message text can be asserted under a captured (non-TTY) stderr.
+func emitImplicitBlocksDefaultWarning() {
+	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
 }
 
 type bulkDepInput struct {
