@@ -21,3 +21,13 @@ versa.
   why*. They compose — independently arrived at the same hash-based-ID
   convention (`bd-a1b2`, `~hash`) for the same reason: preventing
   collisions across multi-agent and multi-branch work.
+
+## Task queues for agent fleets
+
+- **[bead-rs](https://github.com/jedarden/bead-rs)** — clean-room Rust
+  task-coordination store for agent fleets: a dependency graph of "beads" in
+  SQLite, exactly one unblocked bead handed out per request through a
+  single-transaction atomic claim, and a git-tracked checkpoint for recovery.
+  Same neighbourhood as Beads (it began as a response to read-then-write
+  claiming racing at twenty workers) but a separate lineage and schema; not a
+  Beads integration.
