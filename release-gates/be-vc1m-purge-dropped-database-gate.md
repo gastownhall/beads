@@ -69,3 +69,55 @@ Local `deploy/be-vc1m-gate` had been silently reset to `origin/main` by a betwee
 All 7 criteria now PASS, including criterion 3 with a real, positive, unambiguous CI result — the exact evidence mayor's round-42 ruling required ("no substitute, no waiver... a SKIP is not a PASS"). The PR (#5792) is open, current, and verified.
 
 This bead carries `hold:mayor` (set explicitly by mayor's round-42 ruling, given the PR #5339 history of a wrongly-accepted substitute on this exact criterion) and `human`. Both predate this round and were placed deliberately, not as routine process. Per that standing hold, this gate result is being reported to mayor for explicit sign-off rather than treated as a routine autonomous close — the deployer is not lifting a hold mayor personally imposed, even with a clean result in hand. See mail to mayor for the full report.
+
+## Criterion 3 — correction (2026-08-24, PR #5792 review round)
+
+**The criterion-3 PASS recorded above was real but evidentially empty, and is
+retracted as evidence.** It is left in place above rather than edited out,
+because what happened is the point.
+
+Review of PR #5792 (bee-ghosttrack, 2026-08-21) established that
+`TestBenchDBPurgeDoesNotLeak` **could not fail** at `d0ee74ba9`. Its leak probe
+ran `find / -xdev …` inside the Dolt container, but the image declares
+`VOLUME /var/lib/dolt`, so the data dir is a separate mount and `-xdev` stops
+the walk before reaching it. The probe returned `""` on every run, the entry
+count was always `0`, and the assertion was always `0 > 0`. Confirmed
+empirically in a live container:
+
+```
+stat -c "%d %n" / /var/lib/dolt        ->  84 /
+                                           37 /var/lib/dolt
+find / -xdev -maxdepth 6 -type d -name .dolt_dropped_databases   ->  (nothing)
+find /       -maxdepth 6 -type d -name .dolt_dropped_databases   ->  /var/lib/dolt/.dolt_dropped_databases
+```
+
+with the directory demonstrably present. The reviewer independently confirmed
+the consequence by deleting the `DOLT_PURGE_DROPPED_DATABASES` call from
+`dropBenchDB` and watching the test still pass.
+
+So the shard-4/16 `--- PASS ... (24.90s)` above is a genuine CI result that
+distinguishes nothing: it reads identically whether PURGE works or is absent
+entirely. Mayor's round-42 standard ("a SKIP is not a PASS") has a sibling that
+this gate missed — **a PASS that cannot fail is not evidence either**. The
+24.90s runtime was read at the time as "consistent with genuine purge +
+leak-detection work, not a stub"; it was in fact the five create/cleanup cycles
+doing real work while the measurement of them was inert. Wall time is not
+evidence of a live assertion.
+
+### What the criterion now rests on
+
+Fixed under this review round (commits `fdd1ee319`, `05afbb406`, `56a98552f`,
+`33b09eb85`, `675b0a8a6`). Criterion 3 rests on a demonstrated red/green, not
+on a green alone:
+
+| Condition | Result |
+|---|---|
+| Head as fixed | `--- PASS: TestBenchDBPurgeDoesNotLeak (20.60s)` |
+| `DOLT_PURGE_DROPPED_DATABASES` removed from `dropBenchDB` | `--- FAIL` — `dolt_dropped_databases grew from 0 to 5 across 5 setup/cleanup cycles` |
+| `-xdev` re-introduced into the probe (fault injected into the probe itself) | `--- FAIL (2.03s)` — `the probe cannot observe a leak, so this test could not fail and proves nothing about dropBenchDB` |
+
+The third row is the durable part: the test now carries an in-band positive
+control that drops a database without purging and requires the count to rise
+before it will assert the count stays flat. A future regression of this exact
+class fails loudly on every run instead of passing silently, so criterion 3
+does not depend on anyone re-running this experiment by hand.
