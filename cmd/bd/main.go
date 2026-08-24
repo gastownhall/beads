@@ -251,9 +251,11 @@ func runsPostCommandMaintenance(cmdName string, strictReadonly bool) bool {
 // bypasses.
 func resolveDoltServerConnection(ctx context.Context, beadsDir string, fileCfg *configfile.Config, doltCfg *dolt.Config) error {
 	doltCfg.ServerHost = fileCfg.GetDoltServerHost()
-	// Use doltserver.DefaultConfig for port resolution (env > port file >
-	// config.yaml). Port 0 is fine here — auto-start will resolve it.
-	doltCfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+	// Port 0 is fine here — auto-start will resolve it. Use the shared helper
+	// rather than DefaultConfig(...).Port: this hand-built doltCfg is handed
+	// straight to dolt.New, and a port arriving there without its source is
+	// read as a caller assertion (see ApplyResolvedServerPort).
+	dolt.ApplyResolvedServerPort(beadsDir, doltCfg)
 	doltCfg.ServerSocket = fileCfg.GetDoltServerSocket()
 	// A configured credential command targets an authenticating gateway server:
 	// run it for a short-lived token used as the connection username. Fail closed

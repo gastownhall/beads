@@ -2174,6 +2174,10 @@ type StaleFilter struct {
 	Days   int    // Issues not updated in this many days
 	Status string // Filter by status (open|in_progress|blocked), empty = all non-closed
 	Limit  int    // Maximum issues to return
+
+	Labels        []string // AND semantics: issue must have ALL these labels
+	LabelsAny     []string // OR semantics: issue must have AT LEAST ONE of these labels
+	ExcludeLabels []string // Exclusion: issue must NOT have ANY of these labels
 }
 
 // WispFilter is used to filter ListWisps queries.

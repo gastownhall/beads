@@ -207,3 +207,38 @@ func newCreateFlagsCommand(t *testing.T, args ...string) *cobra.Command {
 	}
 	return cmd
 }
+
+// TestIsAmbiguousRepoTarget covers bd-8d3f: an explicit relative/bare --repo
+// value with no existing workspace must be refused rather than silently
+// auto-vivified. Table-tested at the pure-function level since the embedded
+// dolt round trip is ~15s per case.
+func TestIsAmbiguousRepoTarget(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagChanged   bool
+		repoOverride  string
+		wantAmbiguous bool
+	}{
+		{"relative flag value is ambiguous", true, "some-other-rig", true},
+		{"nested relative flag value is ambiguous", true, "../sibling", true},
+		{"absolute flag value is unambiguous", true, "/abs/path", false},
+		{"tilde-prefixed flag value is unambiguous", true, "~/planning", false},
+		// Regression: an explicit but empty --repo value is the most
+		// ambiguous possible input (it silently resolves to the cwd, see
+		// routing.ExpandPath) and must still be gated, not exempted.
+		{"explicit empty flag value is ambiguous", true, "", true},
+		// Auto-routed paths (routing.mode: auto / routing.default) never
+		// set the --repo flag, so they're always exempt from the gate
+		// regardless of their shape.
+		{"unset flag is never ambiguous, relative-looking value", false, "some-other-rig", false},
+		{"unset flag is never ambiguous, empty value", false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAmbiguousRepoTarget(tt.flagChanged, tt.repoOverride)
+			if got != tt.wantAmbiguous {
+				t.Errorf("isAmbiguousRepoTarget(%v, %q) = %v, want %v", tt.flagChanged, tt.repoOverride, got, tt.wantAmbiguous)
+			}
+		})
+	}
+}

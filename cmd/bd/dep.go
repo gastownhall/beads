@@ -275,6 +275,11 @@ External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
 
+With no -t/--type the edge is created as type=blocks, which excludes the
+dependent from bd ready. When stderr is an interactive terminal, an advisory
+note says so once per command; it is silent for scripted and agent callers
+(non-TTY stderr) and can be turned off with --quiet or BD_NO_DEP_TYPE_WARNING=1.
+
 Examples:
   bd dep add bd-42 bd-41                              # Positional args
   bd dep add bd-42 --blocked-by bd-41                 # Flag syntax (same effect)
@@ -419,6 +424,9 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
+		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+		warnImplicitBlocksDefault(dt, explicit)
+
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"status":        "added",
@@ -434,6 +442,55 @@ Examples:
 	},
 }
 
+// warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
+// with the implicit type=blocks default it warns on stderr. A silent blocks
+// edge drops the dependent from bd ready, which is not what an operator
+// usually means when wiring a structural parent/child link. An explicit
+// choice never warns: -t (including an explicit -t blocks), and the
+// --blocked-by/--depends-on aliases, whose names already express the
+// blocking relationship. Non-blocks defaults do not warn either.
+//
+// The warning is advisory and fires on the documented-default majority path,
+// so it is scoped to an interactive operator: it is emitted only when stderr
+// is a TTY, and it honors the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
+// Scripted and agent callers — whose stderr is a pipe or a log file — never
+// see it, so it cannot train them to ignore stderr.
+func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
+	if !shouldWarnImplicitBlocksDefault(dt, explicit, quietFlag, os.Getenv("BD_NO_DEP_TYPE_WARNING"), ui.IsStderrTerminal()) {
+		return
+	}
+	emitImplicitBlocksDefaultWarning()
+}
+
+// shouldWarnImplicitBlocksDefault is the testable predicate behind
+// warnImplicitBlocksDefault. It takes the quiet flag, the suppression env
+// value and the stderr TTY result as parameters so tests can cover every
+// combination without a real terminal — the same shape as
+// ui.shouldUseHyperlinks.
+func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bool, noWarnEnv string, stderrIsTerminal bool) bool {
+	if explicit || dt != types.DepBlocks {
+		return false
+	}
+	// --quiet is documented as "Suppress non-essential output (errors only)",
+	// and the other non-error stderr notices in this package (tips.go,
+	// metrics.go, routing_read.go) respect it the same way.
+	if quiet {
+		return false
+	}
+	// Explicit opt-out for operators who have internalized the default,
+	// following the BD_NO_EMOJI / BD_NO_COLOR precedent.
+	if noWarnEnv != "" {
+		return false
+	}
+	return stderrIsTerminal
+}
+
+// emitImplicitBlocksDefaultWarning writes the D1 warning. Split from the gate
+// so the message text can be asserted under a captured (non-TTY) stderr.
+func emitImplicitBlocksDefaultWarning() {
+	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
+}
+
 type bulkDepInput struct {
 	From        string `json:"from"`
 	To          string `json:"to"`
@@ -447,9 +504,13 @@ type bulkDepEdge struct {
 	IssueID     string
 	DependsOnID string
 	Type        types.DependencyType
-	Store       storage.DoltStorage
-	StoreKey    string
-	Cleanups    []func()
+	// Defaulted is true when the line carried no "type" and fell back to
+	// the command-line default (D1 guard: the implicit default is what the
+	// stderr warning targets; explicit per-line types are the user's choice).
+	Defaulted bool
+	Store     storage.DoltStorage
+	StoreKey  string
+	Cleanups  []func()
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -508,6 +569,15 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 
 	if !noCycleCheck {
 		warnIfCyclesExist(targetStore)
+	}
+
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range resolved {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
 	}
 
 	if jsonOutput {
@@ -572,7 +642,8 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			to = strings.TrimSpace(in.DependsOnID)
 		}
 		depType := strings.TrimSpace(in.Type)
-		if depType == "" {
+		defaulted := depType == ""
+		if defaulted {
 			depType = defaultType
 		}
 
@@ -596,6 +667,7 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			IssueID:     from,
 			DependsOnID: to,
 			Type:        dt,
+			Defaulted:   defaulted,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -783,6 +855,47 @@ func printDepListEdges(anchors []issueops.AnchorEdges) error {
 	return nil
 }
 
+// warnDroppedDepEdges prints a stderr-only notice for every stored "down"
+// dependency edge of anchorID that shown (the Relations role's answer) left
+// out because its target has no row in this database — i.e. a cross-repo or
+// `external:` target (bd-mtla: `bd link` across databases reports success
+// and writes the row, but the single-id `bd dep list <id>` a caller runs
+// right after has no way to tell that from no dependency existing at all).
+//
+// It never writes to stdout, so the documented `bd dep list <id>` and
+// `--json` shapes for the common (fully-local) case are unchanged; a script
+// parsing stdout sees nothing new. A best-effort read: an error here is
+// swallowed rather than surfaced, since the command's actual answer was
+// already produced successfully by the Relations role above.
+func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{anchorID}, Types: depTypes})
+	if err != nil || len(result.Anchors) != 1 {
+		return
+	}
+	known := make(map[string]struct{}, len(shown))
+	for _, iss := range shown {
+		known[iss.ID] = struct{}{}
+	}
+	var dropped []*types.Dependency
+	for _, dep := range result.Anchors[0].Edges {
+		if _, ok := known[dep.DependsOnID]; !ok {
+			dropped = append(dropped, dep)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", anchorID, len(dropped))
+	for _, dep := range dropped {
+		fmt.Fprintf(os.Stderr, "  %s via %s\n", dep.DependsOnID, dep.Type)
+	}
+	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", anchorID, anchorID)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -914,6 +1027,22 @@ Examples:
 				return HandleErrorRespectJSON("%v", err)
 			}
 			allIssues = append(allIssues, issues...)
+		}
+
+		// Relations silently drops "down" edges whose target has no row in
+		// this database (the doc comment above the batch branch says so).
+		// EdgeReader doesn't have that gap, and batchMode&&"down" already
+		// used it above, so this is reached for "down" only when there is
+		// exactly one resolved anchor — warn on stderr (never stdout/--json,
+		// so the documented single-id shape and any script parsing it are
+		// untouched) naming any edge Relations left out, so a `bd link`
+		// across databases doesn't look indistinguishable from no link at
+		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
+		// role exists to detect it from here — tracked separately.
+		if direction == "down" && len(resolved) == 1 {
+			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+			}
 		}
 
 		if jsonOutput {

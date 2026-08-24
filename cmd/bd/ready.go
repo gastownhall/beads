@@ -282,6 +282,32 @@ This is useful for agents executing molecules to see which steps can run next.`,
 		return nil
 	},
 }
+
+// blockedFilterFromFlags builds the blocked-issue filter from blockedCmd's
+// flags. Both the direct and the proxied-server path call it, so the two
+// cannot drift as filtering flags are added.
+func blockedFilterFromFlags(cmd *cobra.Command) types.WorkFilter {
+	var filter types.WorkFilter
+	if parentID, _ := cmd.Flags().GetString("parent"); parentID != "" {
+		filter.ParentID = &parentID
+	}
+	// Normalize as every other label filter does (list_input.go:293-295,
+	// search.go:106, orphans.go:56, workapi/ready.go:56-58). These clauses
+	// match a label EXACTLY, so an untrimmed value silently under-reports:
+	// pflag's CSV split leaves the leading space in the everyday
+	// `--label 'a, b'` form, and `--label 'a,,b'` would AND in a `label = ''`
+	// clause that matches nothing at all. Without this, `--label` would not
+	// mean the same thing here as on the commands next to it -- which is the
+	// promise LabelSetClauses is documented to keep.
+	labels, _ := cmd.Flags().GetStringSlice("label")
+	labelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+	excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+	filter.Labels = utils.NormalizeLabels(labels)
+	filter.LabelsAny = utils.NormalizeLabels(labelsAny)
+	filter.ExcludeLabels = utils.NormalizeLabels(excludeLabels)
+	return filter
+}
+
 var blockedCmd = &cobra.Command{
 	Use:           "blocked",
 	Short:         "Show blocked issues",
@@ -301,11 +327,7 @@ var blockedCmd = &cobra.Command{
 		// Use global jsonOutput set by PersistentPreRun (respects config.yaml + env vars)
 		// Use factory to respect backend configuration (bd-m2jr: SQLite fallback fix)
 		ctx := rootCtx
-		parentID, _ := cmd.Flags().GetString("parent")
-		var blockedFilter types.WorkFilter
-		if parentID != "" {
-			blockedFilter.ParentID = &parentID
-		}
+		blockedFilter := blockedFilterFromFlags(cmd)
 		blocked, err := store.GetBlockedIssues(ctx, blockedFilter)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -731,5 +753,8 @@ func init() {
 	addMaxRowsFlag(readyCmd)
 	rootCmd.AddCommand(readyCmd)
 	blockedCmd.Flags().String("parent", "", "Filter to descendants of this bead/epic")
+	blockedCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	blockedCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	blockedCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	rootCmd.AddCommand(blockedCmd)
 }

@@ -501,6 +501,12 @@ func runLabelAdd(ctx context.Context, args []string) error {
 			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
 		}
 	}
+	// splitLabelArg already trims and drops empties, so this route never stored
+	// the untrimmed class. What it could not tell a caller is that
+	// `bd label add bd-1 'theme:a theme:b'` is ONE label — the same silent
+	// miscount #5812 is about, reached by a different command. Warning here
+	// keeps the whole CLI saying the same thing about the same input.
+	warnLabelsContainingWhitespace(labels)
 	issueIDs, err := resolveLabelIssueIDs(ctx, "add", issueIDs)
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)

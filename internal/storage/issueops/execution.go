@@ -240,7 +240,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value)
+		moved, err := MoveIssuePersistenceInTx(ctx, tx, current, attempt.Patch.Persistence.Value, attempt.Actor)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
