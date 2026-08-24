@@ -663,7 +663,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -741,7 +741,7 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -842,7 +842,7 @@ jobs:
           restore-keys: beads-go-build-v2-${{ runner.os }}-${{ runner.arch }}-go-${{ steps.setup-go.outputs.go-version }}-base-gms_pure_go-race-
 
       - name: Install Dolt (Linux/macOS)
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Verify dolt on PATH
         run: dolt version
@@ -895,7 +895,7 @@ jobs:
           cache: false
 
       - name: Install Dolt CLI
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |

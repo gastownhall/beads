@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
@@ -837,6 +838,7 @@ func clearCloudAuthEnv(t *testing.T) {
 func TestCloudAuthCLIRouting(t *testing.T) {
 	skipIfNoServer(t)
 	clearCloudAuthEnv(t)
+	start := time.Now()
 
 	tests := []struct {
 		name      string
@@ -867,22 +869,39 @@ func TestCloudAuthCLIRouting(t *testing.T) {
 		// Structural negative: missing conditions → SQL fallback
 		{"no cloud env", "az://account.blob.core.windows.net/container", "", "", false},
 	}
+	// Shared store: creating one Dolt database per case (16 total) is what
+	// made this test slow (see the regression guard below). Each case gets
+	// its own remote name (origin_0..origin_15) against a single store,
+	// since shouldUseCLIForCloudAuth's routing decision is keyed purely by
+	// remote name — distinct names are enough to keep cases isolated.
+	store := openCloudAuthTestStore(t, "route")
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			store := openCloudAuthTestStore(t, fmt.Sprintf("route_%d", i))
-			if err := store.AddRemote(ctx, "origin", tt.remoteURL); err != nil {
+			remote := fmt.Sprintf("origin_%d", i)
+			if err := store.AddRemote(ctx, remote, tt.remoteURL); err != nil {
 				t.Fatalf("AddRemote: %v", err)
 			}
-			addCloudAuthCLIRemote(t, store, "origin", tt.remoteURL)
+			addCloudAuthCLIRemote(t, store, remote, tt.remoteURL)
 			if tt.envKey != "" {
 				t.Setenv(tt.envKey, tt.envValue)
 			}
-			got := store.shouldUseCLIForCloudAuth(ctx, "origin")
+			got := store.shouldUseCLIForCloudAuth(ctx, remote)
 			if got != tt.wantCLI {
 				t.Errorf("shouldUseCLIForCloudAuth() = %v, want %v", got, tt.wantCLI)
 			}
 		})
+	}
+
+	// Regression guard: this test previously created one Dolt database per
+	// case (16 total), each slower than the last as server load grew,
+	// pushing wall time into the hundreds of seconds for a test that only
+	// exercises a pure routing predicate. 90s sits below every measured
+	// unfixed run and comfortably above the shared-store fix's expected
+	// time, so it fails on the old per-case-store shape without flaking
+	// under normal CI load.
+	if elapsed := time.Since(start); elapsed > 90*time.Second {
+		t.Fatalf("TestCloudAuthCLIRouting took %s, want < 90s (regression: are per-case Dolt databases being created again instead of a shared store?)", elapsed)
 	}
 }
 
@@ -899,6 +918,9 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 	})
 	t.Run("no remote configured", func(t *testing.T) {
 		skipIfNoServer(t)
+		// Needs its own fresh store: the precondition under test is the
+		// ABSENCE of any configured remote, which TestCloudAuthCLIRouting's
+		// shared store (populated with origin_0..origin_15) can't provide.
 		store := openCloudAuthTestStore(t, "structural_no_remote")
 		t.Setenv("AZURE_STORAGE_ACCOUNT", "myaccount")
 		if store.shouldUseCLIForCloudAuth(context.Background(), "origin") {
@@ -907,6 +929,10 @@ func TestCloudAuthCLIRoutingStructural(t *testing.T) {
 	})
 	t.Run("sql remote materializes local CLI remote", func(t *testing.T) {
 		skipIfNoServer(t)
+		// Needs its own fresh store: the precondition under test is a SQL
+		// remote with NO local CLI remote materialized yet (checked
+		// explicitly below), which a store shared across other cases —
+		// which pre-populate CLI remotes — can't provide.
 		store := openCloudAuthTestStore(t, "structural_sql_only")
 		remoteURL := "az://account.blob.core.windows.net/container"
 		if err := store.AddRemote(context.Background(), "origin", remoteURL); err != nil {

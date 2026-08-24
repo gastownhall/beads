@@ -403,8 +403,12 @@ wrote, and dolt 1.52.1 fails at both serving and reading.
 
 This is a warning, not a hard failure — there is deliberately no hard
 version floor, so an older dolt can still be used at your own risk. To
-resolve it, install a current dolt (https://docs.dolthub.com/introduction/installation)
-and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
+resolve it, install the pinned dolt version — see
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+— and either update PATH or set `BEADS_DOLT_BIN` to the new binary's path.
+Install that specific version rather than `latest`: 2.3.x is a newer release
+that satisfies this warning but carries a
+[separate data-operation defect](/architecture/dolt#which-dolt-version-to-install).
 
 The advisory repeats at most once per day, not on every command: the probe
 result and the warning timestamp are cached (keyed by the binary's path,
@@ -641,6 +645,35 @@ cd ~/project/component2 && bd init --prefix comp2
 bd admin compact --dolt
 ```
 
+If this or `bd flatten` stops with `Error 1105 (HY000): context canceled`,
+see [Storage reclaim fails with "context canceled"](#storage-reclaim-fails-with-context-canceled)
+below.
+
+### Storage reclaim fails with "context canceled"
+
+`bd flatten` and the Dolt-history compaction in `bd admin compact` finish by
+hard-resetting `main` onto a temporary branch; the merge-settle path behind
+`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
+merge. On Dolt 2.3.x a few percent of freshly created databases come up with
+`CALL DOLT_RESET('--hard')` broken for the life of the server process, so on
+an affected database those commands stop with:
+
+```
+Error 1105 (HY000): context canceled
+```
+
+Nothing else looks wrong — ordinary queries, commits, soft resets,
+`CALL DOLT_CLEAN()` and `CALL DOLT_CHECKOUT('.')` all still work — so the
+problem only shows up when something needs a hard reset. Confirm with the
+check in
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install),
+which also covers the fix: restarting `dolt sql-server` clears it for now,
+and installing the pinned Dolt version keeps it clear.
+
+This applies to server and proxied-server mode, which use the standalone
+`dolt` CLI. Embedded mode links its own Dolt engine at the version pinned in
+`go.mod` and is not affected by which `dolt` CLI is on your PATH.
+
 ## Agent Issues
 
 ### Agent creates duplicate issues
@@ -750,6 +783,65 @@ bd init -v
 protection → Ransomware protection → Controlled folder access → "Allow an
 app through Controlled folder access" → browse to `bd.exe` (typically
 `%USERPROFILE%\go\bin\bd.exe`). Then retry `bd init`.
+
+### Windows: `ENOENT` when a Node program spawns `bd`
+
+**Symptom:** An editor extension, MCP server, or script that shells out to
+`bd` fails on Windows with `spawn bd ENOENT`, even though `bd` runs fine in
+the same terminal.
+
+The npm package installs `bd` as a generated `bd.cmd` shim, not as an
+executable named `bd`. Node's `execFile()` and `spawn()` run their target
+directly instead of through a shell, so they never apply the `PATHEXT`
+resolution that finds `bd.cmd` — and a batch file is not directly executable
+in the first place.
+
+**Solution:** Name the shim explicitly and give it a shell:
+
+```js
+const { execFile } = require('node:child_process');
+
+const isWindows = process.platform === 'win32';
+
+execFile(
+  isWindows ? 'bd.cmd' : 'bd',
+  ['ready', '--json'],
+  { shell: isWindows },
+  (err, stdout) => { /* ... */ },
+);
+```
+
+To avoid a shell — and the argument quoting that comes with it — spawn the
+native binary the shim wraps, at `node_modules/@beads/bd/bin/bd.exe`.
+
+### Windows: `/tmp` paths silently land in the drive root
+
+**Symptom:** A `bd` command given a `/tmp/...` path reports success, but
+the file is not where you look for it — it was written to `C:\tmp\...`.
+
+`bd.exe` is a native Windows binary and does not share Git Bash's emulated
+POSIX filesystem. When a literal `/tmp/...` string reaches `bd`, it resolves
+against the current drive root.
+
+In a default interactive Git Bash this usually does *not* happen — Git for
+Windows converts standalone POSIX-path arguments to Windows paths before
+`bd.exe` sees them. The trap appears when that conversion is out of play:
+
+- `MSYS_NO_PATHCONV=1` or `MSYS2_ARG_CONV_EXCL` is set (common in
+  Docker-heavy environments)
+- the path comes from a config value or a file, not a command-line argument
+- `bd` is spawned by a non-MSYS parent — a Node script, editor extension,
+  or MCP server — which passes the string through verbatim:
+
+```js
+// From Node on Windows: no path conversion happens
+execFile('bd.cmd', ['export', '-o', '/tmp/issues.jsonl'], { shell: true }, ...);
+// bd writes C:\tmp\issues.jsonl — and exits 0
+```
+
+**Solution:** Hand `bd` a Windows path — `os.tmpdir()` from Node,
+`"$(cygpath -w /tmp)\issues.jsonl"` from Git Bash scripts. This applies to
+any path argument, including `--db` and config values.
 
 ### macOS: Gatekeeper blocking execution
 

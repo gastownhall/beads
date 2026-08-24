@@ -90,7 +90,7 @@ jobs:
       - name: Install Dolt CLI
         # TestProxiedServerExternalCreate needs the dolt binary on PATH; the
         # shared harness itself uses the dolt sql-server container image.
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Git and Dolt identity
         run: |
@@ -303,7 +303,7 @@ jobs:
           git config --global user.email "ci@beads.test"
 
       - name: Install Dolt
-        run: curl -fsSL https://github.com/dolthub/dolt/releases/latest/download/install.sh | sudo bash
+        run: ./scripts/ci/install-dolt.sh
 
       - name: Configure Dolt
         run: |
@@ -323,6 +323,69 @@ jobs:
         # BEADS_TEST_SKIP=dolt, so TestMain starts the shared server and the
         # suite runs instead of self-skipping.
         run: /tmp/dolt-conformance-test -test.v -test.count=1 -test.timeout=15m -test.run '^TestConformance$'
+
+  test-server-storage-full:
+    name: Test (Server Dolt Full Suite ${{ matrix.shard }}/${{ strategy.job-total }})
+    needs: [detect-ci-tier, build-embedded]
+    if: needs.detect-ci-tier.outputs.full_embedded == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Download binaries
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: embedded-test-binaries
+          path: /tmp/
+
+      - name: Fix permissions
+        run: chmod +x /tmp/dolt-conformance-test
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "CI Bot"
+          git config --global user.email "ci@beads.test"
+
+      - name: Install Dolt
+        run: ./scripts/ci/install-dolt.sh
+
+      - name: Configure Dolt
+        run: |
+          dolt config --global --add user.name "CI Bot"
+          dolt config --global --add user.email "ci@beads.test"
+          dolt version
+
+      - name: Pull Dolt sql-server image
+        # Presence of this image flips isDoltImageCached() true, so the suite
+        # exercises server Dolt instead of self-skipping. Keep the tag in sync
+        # with internal/testutil/testdoltcommon.go:DoltDockerImage.
+        run: ./scripts/ci/pull-dolt-image.sh
+
+      - name: Test
+        # build-embedded's dolt-conformance-test binary compiles every
+        # top-level test in internal/storage/dolt, not just conformance --
+        # test-server-storage above only ever runs the ^TestConformance$
+        # subset. Everything else in that binary (TestCreateGuard_*,
+        # federation/create-guard/concurrent suites, and diff-owned tests such
+        # as TestBenchDBPurgeDoesNotLeak on PR #5792) was reached by no
+        # PR-triggered lane and silently SKIPped for lack of a live server.
+        # This sibling job reuses the same artifact and server setup and runs
+        # everything else instead, so a SKIP there gets a real PASS/FAIL.
+        #
+        # Manifest-driven shard of the full suite (mirrors test-embedded-storage
+        # / server-storage-test-shard.sh): 1126 tests in one 15m-Go-timeout job
+        # never finished (job 95616282508 died at 256/1126 tests, 15m28s in,
+        # zero failures -- it just ran out of time). server-storage-test-shard.sh
+        # excludes TestConformance from discovery, so it never lands in one of
+        # these shards.
+        env:
+          BEADS_TEST_ENV_RUN_DOLT: "1"
+        run: bash .github/scripts/server-storage-test-shard.sh ${{ matrix.shard }} 16
 
   test-embedded-cmd:
     name: Test (Embedded Dolt Cmd ${{ matrix.shard }}/${{ strategy.job-total }})
@@ -389,6 +452,7 @@ jobs:
       - test-embedded-storage
       - test-embedded-conformance
       - test-server-storage
+      - test-server-storage-full
       - test-embedded-cmd
       - test-proxied-cmd
       - test-nix
@@ -405,6 +469,7 @@ jobs:
             TEST_EMBEDDED_STORAGE
             TEST_EMBEDDED_CONFORMANCE
             TEST_SERVER_STORAGE
+            TEST_SERVER_STORAGE_FULL
             TEST_EMBEDDED_CMD
             TEST_PROXIED_CMD
             TEST_NIX
@@ -414,13 +479,14 @@ jobs:
           TEST_EMBEDDED_STORAGE: ${{ needs.test-embedded-storage.result }}
           TEST_EMBEDDED_CONFORMANCE: ${{ needs.test-embedded-conformance.result }}
           TEST_SERVER_STORAGE: ${{ needs.test-server-storage.result }}
+          TEST_SERVER_STORAGE_FULL: ${{ needs.test-server-storage-full.result }}
           TEST_EMBEDDED_CMD: ${{ needs.test-embedded-cmd.result }}
           TEST_PROXIED_CMD: ${{ needs.test-proxied-cmd.result }}
           TEST_NIX: ${{ needs.test-nix.result }}
         run: |
           skipped_ok=""
           if [[ "$FULL_EMBEDDED" != "true" ]]; then
-            skipped_ok="BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_EMBEDDED_CMD TEST_PROXIED_CMD"
+            skipped_ok="BUILD_EMBEDDED TEST_EMBEDDED_STORAGE TEST_EMBEDDED_CONFORMANCE TEST_SERVER_STORAGE TEST_SERVER_STORAGE_FULL TEST_EMBEDDED_CMD TEST_PROXIED_CMD"
           fi
           export CI_GATE_SKIPPED_OK="$skipped_ok"
           bash .github/scripts/ci-gate.sh

@@ -433,3 +433,22 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 		})
 	}
 }
+
+// TestOptionalWispTable pins the set a wisp query may treat as "no wisps".
+// leases and wisp_labels are joined or hydrated by that query but are not the
+// wisp plane being absent, so tolerating them turns a broken database into an
+// empty result.
+func TestOptionalWispTable(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"wisps", "wisp_dependencies", "WISPS"} {
+		if !OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"leases", "wisp_labels", "issues", "labels", "", "wisp"} {
+		if OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = true, want false", name)
+		}
+	}
+}
