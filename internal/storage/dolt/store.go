@@ -1714,6 +1714,60 @@ var ensureRunningDetailed = doltserver.EnsureRunningDetailed
 // dolt sql-server process.
 var stopRejectedAutoStartedServer = doltserver.Stop
 
+// serverConnectionNeedsPreflight reports whether server mode should make the
+// lightweight transport probe before opening the MySQL connection. Local TCP
+// servers use the probe to support auto-start, and unix sockets use it to
+// preserve socket-specific diagnostics. Remote TCP servers cannot be
+// auto-started by this process, so their MySQL driver's longer connection
+// timeout is the authoritative reachability check (GH#5273).
+func serverConnectionNeedsPreflight(cfg *Config) bool {
+	return cfg.ServerSocket != "" || !isExternalServerHost(cfg.ServerHost)
+}
+
+// dialServerPreflight performs the optional lightweight transport probe. The
+// final result reports whether a probe ran, allowing the caller to keep the
+// existing local circuit-breaker behavior while recording remote success only
+// after the MySQL connection has opened.
+func dialServerPreflight(cfg *Config) (conn net.Conn, addr string, err error, ran bool) {
+	if cfg.ServerSocket != "" {
+		conn, err = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
+		return conn, cfg.ServerSocket, err, true
+	}
+
+	addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+	if !serverConnectionNeedsPreflight(cfg) {
+		return nil, addr, nil, false
+	}
+
+	conn, err = net.DialTimeout("tcp", addr, 500*time.Millisecond)
+	return conn, addr, err, true
+}
+
+// recordSkippedPreflightResult updates connection-level circuit state for the
+// remote TCP path and preserves the external-server diagnostic that the old
+// transport probe supplied. Semantic MySQL failures pass through unchanged.
+func recordSkippedPreflightResult(cfg *Config, breaker *circuitBreaker, err error) error {
+	if err == nil {
+		if breaker != nil {
+			breaker.RecordSuccess()
+		}
+		return nil
+	}
+	if !isConnectionError(err) {
+		return err
+	}
+	if breaker != nil {
+		breaker.RecordFailure()
+	}
+
+	addr := net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
+	return fmt.Errorf("Dolt server unreachable at %s: %w\n\n"+
+		"Configured Dolt server at %s is unreachable.\n"+
+		"Verify the external server is running and reachable from this host:\n"+
+		"  nc -zv %s %d  # or curl %s for an HTTP-style check",
+		addr, err, addr, cfg.ServerHost, cfg.ServerPort, addr)
+}
+
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
 // This path is pure Go and does not require CGO.
 func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
@@ -1740,20 +1794,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// the DSN built in openServerConnection agree on the transport.
 	cfg.ServerSocket = ResolveSocketTransport(cfg.ServerSocket, cfg.ServerHost, cfg.ServerPort, 500*time.Millisecond)
 
-	// Fail-fast connectivity check before MySQL protocol initialization.
-	// This gives an immediate, clear error if the Dolt server isn't running,
-	// rather than waiting for MySQL driver timeouts.
-	var addr string
-	var conn net.Conn
-	var dialErr error
-	if cfg.ServerSocket != "" {
-		addr = cfg.ServerSocket
-		conn, dialErr = net.DialTimeout("unix", cfg.ServerSocket, 500*time.Millisecond)
-	} else {
-		addr = net.JoinHostPort(cfg.ServerHost, fmt.Sprintf("%d", cfg.ServerPort))
-		conn, dialErr = net.DialTimeout("tcp", addr, 500*time.Millisecond)
-	}
-	if dialErr != nil {
+	// Fail-fast connectivity check before MySQL protocol initialization for
+	// local TCP and unix-socket servers. Remote TCP servers skip this redundant
+	// 500 ms probe and rely on the MySQL driver's 5-second connect timeout.
+	conn, addr, dialErr, preflightRan := dialServerPreflight(cfg)
+	if preflightRan && dialErr != nil {
 		// Auto-start: if enabled and connecting locally via TCP, start a server.
 		// Socket mode is excluded — auto-start creates a TCP listener, not a
 		// unix socket, so the DSN would still fail. Socket users are expected
@@ -1905,7 +1950,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 	// (dolt sql-server crash risk otherwise, gastownhall/beads#4132, #4133).
 	// This single close site covers both the initial successful dial above
 	// and the post-auto-start retry dial in the branch just above.
-	doltserver.DrainAndCloseProbe(conn)
+	if conn != nil {
+		doltserver.DrainAndCloseProbe(conn)
+	}
 
 	// If this process already owns a test-started auto-start server, later
 	// stores sharing it must participate in the refcount so one Close() does
@@ -1914,13 +1961,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 		autoStartedDir = serverDir
 	}
 
-	// TCP dial succeeded — record success to reset the breaker
-	if breaker != nil {
+	// A local transport probe succeeded — record success to reset the breaker.
+	if preflightRan && breaker != nil {
 		breaker.RecordSuccess()
 	}
 
 	// Server mode: connect via MySQL protocol to dolt sql-server
 	db, connStr, dbFacts, err := openServerConnection(ctx, cfg)
+	if !preflightRan && err != nil {
+		err = recordSkippedPreflightResult(cfg, breaker, err)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1935,7 +1985,13 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 
 	// Test connection
 	if err := db.PingContext(ctx); err != nil {
+		if !preflightRan {
+			err = recordSkippedPreflightResult(cfg, breaker, err)
+		}
 		return nil, fmt.Errorf("failed to ping Dolt database: %w", err)
+	}
+	if !preflightRan {
+		_ = recordSkippedPreflightResult(cfg, breaker, nil)
 	}
 
 	beadsDir := cfg.BeadsDir
