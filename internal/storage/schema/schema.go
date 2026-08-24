@@ -60,6 +60,72 @@ func emitLargeRigNotice(out io.Writer, count int64, err error) {
 	fmt.Fprintf(out, "Large rig detected (%d issues). This migration may take up to 90 seconds; do not interrupt.\n", count)
 }
 
+// migrationWatchdogInterval is the default interval between soft watchdog
+// warnings for a single long-running migration.
+const migrationWatchdogInterval = 5 * time.Minute
+
+// migrationWatchdogIntervalEnv overrides migrationWatchdogInterval.
+const migrationWatchdogIntervalEnv = "BEADS_MIGRATION_WATCHDOG_INTERVAL"
+
+// migrationWatchdogIntervalDuration returns the configured watchdog interval.
+// BEADS_MIGRATION_WATCHDOG_INTERVAL overrides the compiled-in default; valid
+// time.ParseDuration strings (e.g. "10m", "90s") are accepted. Unset, empty,
+// or unparsable values fall back to migrationWatchdogInterval — same
+// unset/invalid-falls-back-to-default shape as
+// internal/storage/dolt/store.go's timeoutFromEnv (a different package, so
+// not reused directly).
+func migrationWatchdogIntervalDuration() time.Duration {
+	raw := strings.TrimSpace(os.Getenv(migrationWatchdogIntervalEnv))
+	if raw == "" {
+		return migrationWatchdogInterval
+	}
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	return migrationWatchdogInterval
+}
+
+// runMigrationWithWatchdog runs fn — the same call runMigrations already
+// makes to execMigrationBody — while a background timer watches elapsed
+// time. If fn is still running after interval, it logs a WARN line to out
+// naming the migration's version, name, and elapsed time, and repeats every
+// additional interval for as long as fn keeps running, so an operator
+// watching logs can tell "still working" from "stopped emitting anything".
+//
+// This is observability only, never a circuit breaker: fn receives exactly
+// the ctx this function received (no wrapping timeout/cancel), and fn's
+// returned error is passed through unchanged. Migrations are allowed to run
+// arbitrarily long by design — store.go's own initSchema comment cites
+// migration 0047's full-table is_blocked recompute as a real example — and
+// no confirmed production hang exists today. See
+// engdocs/plans/be-m65rs-migration-watchdog-scoping.md for the full
+// rationale before turning this into a hard abort.
+func runMigrationWithWatchdog(ctx context.Context, out io.Writer, version int, name string, interval time.Duration, fn func(ctx context.Context) error) error {
+	start := time.Now()
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				fmt.Fprintf(out, "WARN: migration %04d (%s) still running after %s — watchdog check every %s, this is not an error\n",
+					version, name, time.Since(start).Round(time.Millisecond), interval)
+			}
+		}
+	}()
+
+	err := fn(ctx)
+	close(done)
+	wg.Wait()
+	return err
+}
+
 // humanMigrationName turns "0033_add_date_indexes.up.sql" into
 // "add_date_indexes" for the progress line.
 func humanMigrationName(filename string) string {
@@ -1668,7 +1734,12 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 
 		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
 		start := time.Now()
-		if err := execMigrationBody(ctx, db, string(data)); err != nil {
+		// Soft warning only, by design — see runMigrationWithWatchdog and
+		// engdocs/plans/be-m65rs-migration-watchdog-scoping.md before adding
+		// a hard timeout here.
+		if err := runMigrationWithWatchdog(ctx, stderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
+			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
+		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)
