@@ -348,7 +348,13 @@ func TestFederationHistoryQueries(t *testing.T) {
 	}
 }
 
-// TestFederationListRemotes tests the ListRemotes API
+// TestFederationListRemotes tests the ListRemotes API.
+//
+// Can report "context deadline exceeded" under the full concurrent test
+// suite even though its own operations complete in well under a second:
+// this package serializes access to one shared Dolt server through a
+// size-2 slot semaphore (acquireTestSlot in dolt_test.go), so heavy
+// parallel load queues test start rather than failing any assertion here.
 func TestFederationListRemotes(t *testing.T) {
 	skipIfNoDolt(t)
 
@@ -412,6 +418,10 @@ func TestFederationSyncStatus(t *testing.T) {
 	}
 }
 
+// Like TestFederationListRemotes above, this test can show "context
+// deadline exceeded" under full-suite concurrency due to the shared Dolt
+// server's bounded test-slot queue, not a defect in the sync/commit
+// ordering below.
 func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	skipIfNoDolt(t)
 
