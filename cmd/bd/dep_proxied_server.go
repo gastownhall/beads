@@ -244,6 +244,9 @@ func runDepAddProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
 
+	explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+	warnImplicitBlocksDefault(dt, explicit)
+
 	if jsonOutput {
 		_ = outputJSON(map[string]interface{}{
 			"status":        "added",
@@ -298,6 +301,15 @@ func runDepAddBulkProxied(cmd *cobra.Command, ctx context.Context, file, default
 
 	printCycleDetectionError(res.cycleErr)
 	printCycleWarnings(res.cycles)
+
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range edges {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
+	}
 
 	if jsonOutput {
 		out := make([]map[string]interface{}, 0, len(depEdges))

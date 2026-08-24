@@ -17,7 +17,7 @@ type blockingDepRecord struct {
 }
 
 func optionalBlockedTable(table string) bool {
-	return table == "wisps" || table == "wisp_dependencies"
+	return sqlbuild.OptionalWispTable(table)
 }
 
 func loadBlockingDepsForIssueIDsInTx(ctx context.Context, tx DBTX, depTables []string, issueIDs []string) ([]blockingDepRecord, error) {

@@ -274,7 +274,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay even
 			// though no audit event is written.
-			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -347,7 +347,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
@@ -355,7 +355,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
 	// as real to a replaying consumer as one added by an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -976,7 +976,7 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata)
+	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

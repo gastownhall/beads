@@ -3987,14 +3987,31 @@ func (s *DoltStore) pullFromRemoteUnchecked(ctx context.Context, remote string) 
 		}
 	}
 
-	// bd-6dnrw.3: capture the pre-pull HEAD so a successful merge can recompute
-	// the denormalized is_blocked column for the rows it changed. Read before
-	// the transport; an unreadable HEAD degrades to a full recompute.
+	// bd-6dnrw.3: capture the pre-pull commit of the branch this store reads so a
+	// successful merge can recompute the denormalized is_blocked column for the
+	// rows it changed. Read before the transport; an unreadable head degrades to
+	// a full recompute.
+	//
+	// ga-ivaps Finding 3: read this unconditionally, including for read-only
+	// stores. verifyPullLanded's cheap fast path — a head that moved is proof the
+	// transport landed — needs it, and without it every pull that DID merge
+	// something pays a network DOLT_FETCH round trip it could have skipped. (A
+	// no-op pull moves no head and refreshes the tracking ref regardless, so the
+	// saved round trip is on the merged pulls, never the no-op ones.)
+	// recomputeBlockedAfterPull below still runs only for writable stores.
+	//
+	// ga-ivaps Finding 1 (attempt 2): read the tip of s.branch, not the session
+	// HEAD. verifyPullLanded compares this against branchHash(ctx, s.branch) after
+	// the pull, so reading the same branch here is what makes "the head moved"
+	// mean THIS branch moved. On a multi-connection pool a query can land on a
+	// connection still checked out to the database's default branch (the be-b0am
+	// hazard), so GetCurrentCommit could report a different branch's head; when
+	// that differs from the post-pull s.branch tip the fast path fires on a merge
+	// that never reached s.branch and skips the very containment check meant to
+	// catch it. branchHash reads dolt_branches, which is branch-global.
 	preHead := ""
-	if !s.readOnly {
-		if h, err := s.GetCurrentCommit(ctx); err == nil {
-			preHead = h
-		}
+	if h, err := s.branchHash(ctx, s.branch); err == nil {
+		preHead = h
 	}
 
 	if err := s.pullTransport(ctx, remote); err != nil {
@@ -4105,7 +4122,16 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 	// reads a ref this connection wrote. Best-effort by design: a refresh that
 	// cannot run leaves the weaker stale-ref comparison, which is still worth
 	// making.
-	if err := schema.DrainCall(ctx, s.db, "CALL DOLT_FETCH(?, ?)", remote, s.branch); err != nil {
+	//
+	// ga-ivaps Finding (attempt 2): route the fetch over a long-timeout,
+	// credential-aware connection instead of s.db. s.db carries the default ~10s
+	// pool read timeout and none of the remote credentials the CLI-routed
+	// (git-protocol, credential, cloud-auth) remotes need, so on exactly those
+	// remotes the refresh would time out or auth-fail and the check would fall
+	// back to the stale-ref comparison — fail open — for the transports most
+	// likely to have dropped a merge. refreshTrackingRef mirrors the pull path's
+	// own network calls, so the refresh reaches the same remotes the pull can.
+	if err := s.refreshTrackingRef(ctx, remote); err != nil {
 		log.Printf("warning: could not refresh %s to verify the pull landed: %v", trackingRef, err)
 	}
 
@@ -4130,14 +4156,70 @@ func (s *DoltStore) verifyPullLanded(ctx context.Context, remote, preHead string
 		return nil
 	}
 
+	// ga-ivaps Finding 2 (attempt 2): the branch this database reads does not
+	// contain the refreshed tracking ref, and the merge base splits that into two
+	// states with very different recovery.
+	//
+	//   - mergeBase == localHash: local is a strict ANCESTOR of the tracking ref,
+	//     so the remote merely moved ahead and a plain re-pull fast-forwards it.
+	//     This is the ordinary "a peer pushed after our fetch" race — benign and
+	//     self-correcting — so it is wrapped in ErrPullBehindFastForwardable and
+	//     bd sync's loop retries it like a push race instead of hard-failing the
+	//     tick (cmd/bd/sync.go). The message still names both hashes and "merged
+	//     nothing", so a caller that surfaces it reads the same diagnosis.
+	//   - otherwise: local and the tracking ref have genuinely diverged (their
+	//     common ancestor is neither tip), which no re-pull can fast-forward away.
+	//     That is the stuck-transport / split-brain signal, and it stays a hard
+	//     error.
+	//
+	// The split fails safe: a true divergence can never be demoted to the
+	// retryable class, because its common ancestor is by definition neither tip.
+	// Distinguishing the benign race from a genuinely failed transport would
+	// still need the remote tip as of the transport's own fetch, which git-backed
+	// remotes never write into this database; the merge base is the best post-hoc
+	// split available. Classified before the display fallback below rewrites an
+	// empty localHash.
+	behindFastForwardable := localHash != "" && mergeBase.String == localHash
+
 	if localHash == "" {
 		localHash = "unknown"
 	}
-	return fmt.Errorf("pull from %s/%s reported success but merged nothing into %s: %s is at %s while %s is at %s "+
-		"(their common ancestor is %s), so the fetched commits are not on the branch this database reads; "+
-		"the transport did not land — re-run the pull, and if it repeats, check that the dolt CLI directory and "+
-		"the sql-server are serving the same database and branch",
+	mergedNothing := fmt.Errorf("pull from %s/%s reported success but merged nothing into %s: %s is at %s while %s is at %s "+
+		"(their common ancestor is %s), so the commits on the remote-tracking ref are not on the branch this "+
+		"database reads. Most often another client pushed after this pull fetched and a re-run will merge it; "+
+		"if the divergence survives repeated re-runs, the transport is not landing merges on this branch "+
+		"(for example the dolt CLI directory and the sql-server are serving different databases or branches)",
 		remote, s.branch, s.branch, s.branch, localHash, trackingRef, remoteHash, mergeBase.String)
+	if behindFastForwardable {
+		return fmt.Errorf("%w: %w", versioncontrolops.ErrPullBehindFastForwardable, mergedNothing)
+	}
+	return mergedNothing
+}
+
+// refreshTrackingRef fetches remote/s.branch into this database's
+// remote-tracking refs over a dedicated long-timeout, credential-aware
+// connection, so verifyPullLanded's comparison reads a tracking ref this
+// database just wrote. It mirrors pullTransport's own network calls: a
+// long-timeout connection (openLongTimeoutConn) wrapped in the remote's
+// credential/S3 environment (withRemoteOperationEnv), which is what lets the
+// refresh reach CLI-routed (git-protocol, credential, cloud-auth) remotes that
+// the default s.db pool — short read timeout, no CLI credentials — cannot.
+//
+// Only the FETCH runs here, and DOLT_FETCH is branch-global: it advances
+// remote-tracking refs and never touches the working branch, so the fresh
+// connection's default-branch checkout — the be-b0am hazard that makes a merge
+// on such a connection unsafe — does not apply. The containment reads in
+// verifyPullLanded stay on s.db, where the short pool timeout is right: they are
+// local, fast, and branch-parameterized.
+func (s *DoltStore) refreshTrackingRef(ctx context.Context, remote string) error {
+	db, err := s.openLongTimeoutConn()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	return withRemoteOperationEnv(s.credentialsForRemote(remote), s.isS3Remote(ctx, remote), func() error {
+		return schema.DrainCall(ctx, db, "CALL DOLT_FETCH(?, ?)", remote, s.branch)
+	})
 }
 
 // pullTransport routes one pull through CLI or SQL based on the remote's

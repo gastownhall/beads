@@ -109,66 +109,81 @@ type sqlStatement struct {
 	text string
 }
 
+// sqlSplitter is the state splitSQLStatements threads across the bytes of the
+// input: the statement being accumulated, the current and statement-start line
+// numbers, and whether the cursor sits inside a '...' literal or a `--` comment.
+// Pulling the per-byte transition into its own method keeps each concern
+// (statement flushing, byte dispatch) small enough to read on its own.
+type sqlSplitter struct {
+	out       []sqlStatement
+	cur       strings.Builder
+	line      int
+	startLine int
+	inString  bool
+	inComment bool
+}
+
+// flush appends the accumulated statement (trimmed) when non-empty and resets
+// the builder to begin the next statement at the current line.
+func (s *sqlSplitter) flush() {
+	if text := strings.TrimSpace(s.cur.String()); text != "" {
+		s.out = append(s.out, sqlStatement{line: s.startLine, text: text})
+	}
+	s.cur.Reset()
+	s.startLine = s.line
+}
+
+// step consumes the byte at sqlText[i] and returns how many additional bytes
+// it absorbed beyond that one — only an escaped quote inside a literal (a
+// doubled single-quote) consumes a second byte — so the caller can advance its
+// index. The branch order is significant and mirrors the original if/else-if
+// chain: a newline ends a `--` comment before any in-comment byte is dropped,
+// and a comment starts only outside a literal.
+func (s *sqlSplitter) step(sqlText string, i int) int {
+	c := sqlText[i]
+	switch {
+	case c == '\n':
+		s.line++
+		s.inComment = false
+		if s.cur.Len() == 0 {
+			s.startLine = s.line
+		}
+		s.cur.WriteByte(' ')
+	case s.inComment:
+		// Dropped: every byte up to the newline that closes the comment.
+	case !s.inString && c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-':
+		s.inComment = true
+	case c == '\'':
+		// A doubled quote inside a literal is an escaped quote, not a
+		// terminator: 0049 spells DEFAULT '' as DEFAULT ''''.
+		if s.inString && i+1 < len(sqlText) && sqlText[i+1] == '\'' {
+			s.cur.WriteString("''")
+			return 1
+		}
+		s.inString = !s.inString
+		s.cur.WriteByte(c)
+	case c == ';' && !s.inString:
+		s.flush()
+	default:
+		if s.cur.Len() == 0 && (c == ' ' || c == '\t' || c == '\r') {
+			s.startLine = s.line
+		}
+		s.cur.WriteByte(c)
+	}
+	return 0
+}
+
 // splitSQLStatements breaks sqlText at semicolons that are outside a string
 // literal, dropping `--` comments (also only outside a literal, since 0053
 // builds MD5 fragments that contain neither but 0049's quoted DDL does embed
 // doubled quotes). Each statement carries the line its first character sits on.
 func splitSQLStatements(sqlText string) []sqlStatement {
-	var out []sqlStatement
-	var cur strings.Builder
-
-	line, startLine := 1, 1
-	inString, inComment := false, false
-
-	flush := func() {
-		if text := strings.TrimSpace(cur.String()); text != "" {
-			out = append(out, sqlStatement{line: startLine, text: text})
-		}
-		cur.Reset()
-		startLine = line
+	s := sqlSplitter{line: 1, startLine: 1}
+	for i := 0; i < len(sqlText); {
+		i += s.step(sqlText, i) + 1
 	}
-
-	for i := 0; i < len(sqlText); i++ {
-		c := sqlText[i]
-		if c == '\n' {
-			line++
-			inComment = false
-			if cur.Len() == 0 {
-				startLine = line
-			}
-			cur.WriteByte(' ')
-			continue
-		}
-		if inComment {
-			continue
-		}
-		if !inString && c == '-' && i+1 < len(sqlText) && sqlText[i+1] == '-' {
-			inComment = true
-			continue
-		}
-		if c == '\'' {
-			// A doubled quote inside a literal is an escaped quote, not a
-			// terminator: 0049 spells DEFAULT '' as DEFAULT ''''.
-			if inString && i+1 < len(sqlText) && sqlText[i+1] == '\'' {
-				cur.WriteString("''")
-				i++
-				continue
-			}
-			inString = !inString
-			cur.WriteByte(c)
-			continue
-		}
-		if c == ';' && !inString {
-			flush()
-			continue
-		}
-		if cur.Len() == 0 && (c == ' ' || c == '\t' || c == '\r') {
-			startLine = line
-		}
-		cur.WriteByte(c)
-	}
-	flush()
-	return out
+	s.flush()
+	return s.out
 }
 
 // sqlStringLiterals returns the contents of every single-quoted literal in
