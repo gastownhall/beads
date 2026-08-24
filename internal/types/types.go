@@ -74,7 +74,8 @@ type Issue struct {
 	// ===== Concurrency (generic Issue JSON/JSONL omits this field) =====
 	// RowVersion is an opaque optimistic-concurrency token for the library's own
 	// Go call sites: the issues/wisps row_lock cell, a random non-zero value the
-	// engine rewrites on every status/ownership-mutating write. It is
+	// engine rewrites on scalar issue mutations and on an explicit transactional
+	// TouchIssue that publishes related-table mutations as one revision. It is
 	// EQUALITY-ONLY — compare it, never order or interpret it — and a change
 	// signals the row was mutated since you read it. It is json:"-" on purpose:
 	// row_lock is random per write, so generic Issue serialization would break
@@ -83,12 +84,14 @@ type Issue struct {
 	// NewIssueDetails, and on the wire at GET /v0/beads/issues/{id}); Go
 	// consumers read RowVersion directly.
 	//
-	// Coverage is deliberately partial: it changes on claim/close/unclaim and the
-	// generic update path, but NOT on direct-UPDATE paths that rewrite text
-	// without touching row_lock (RestoreFromSnapshotInTx, the compaction
-	// text-truncation path). For a complete change-detection key, combine it with
-	// updated_at (which those paths DO bump), status, and the label set
-	// (label-only and reopen writes change those, not row_lock).
+	// Coverage is deliberately partial: it changes on claim/close/unclaim, the
+	// generic update path, and Transaction.TouchIssue, but NOT on direct-UPDATE
+	// paths that rewrite text without touching row_lock (RestoreFromSnapshotInTx,
+	// the compaction text-truncation path). A raw label/dependency mutation also
+	// leaves it alone; a composite transaction that needs one revision for those
+	// related writes must call TouchIssue before commit. For a complete
+	// change-detection key outside that contract, combine it with updated_at,
+	// status, and the label set.
 	//
 	// 0 appears only on legacy rows backfilled by migration 0054 (DEFAULT 0) that
 	// have not been mutated since; any issue created by the current code path is

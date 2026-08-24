@@ -59,6 +59,29 @@ func (t *doltTransaction) isActiveWisp(ctx context.Context, id string) bool {
 	return err == nil
 }
 
+// txForIssueID returns the session that owns id, preferring a durable issue
+// when legacy/corrupt data contains the ID in both planes. The preference must
+// match TouchIssueInTx and CloseIssueCheckedInTx before either primitive runs:
+// choosing ignoredTx for a durable write would commit it after StageAndCommit
+// and leave the mutation outside Dolt history.
+func (t *doltTransaction) txForIssueID(ctx context.Context, id string) (*sql.Tx, bool, error) {
+	var exists int
+	err := t.regularTx.QueryRowContext(ctx, "SELECT 1 FROM issues WHERE id = ? LIMIT 1", id).Scan(&exists)
+	if err == nil {
+		return t.regularTx, false, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, fmt.Errorf("resolve transaction plane for %s: %w", id, err)
+	}
+	if t.isActiveWisp(ctx, id) {
+		return t.ignoredTx, true, nil
+	}
+	// Let the operation on regularTx return the canonical ErrNotFound. This
+	// also preserves the durable-plane default for a transaction that creates
+	// the row later in its callback.
+	return t.regularTx, false, nil
+}
+
 // CreateIssueImport is the import-friendly issue creation hook.
 // Dolt does not enforce prefix validation at the storage layer, so this delegates to CreateIssue.
 func (t *doltTransaction) CreateIssueImport(ctx context.Context, issue *types.Issue, actor string, skipPrefixValidation bool) error {
@@ -757,6 +780,29 @@ func (t *doltTransaction) UpdateIssue(ctx context.Context, id string, updates ma
 	return nil
 }
 
+func (t *doltTransaction) TouchIssue(ctx context.Context, id, actor string) error {
+	tx, selectedWisp, err := t.txForIssueID(ctx, id)
+	if err != nil {
+		return err
+	}
+	result, err := issueops.TouchIssueInTx(ctx, tx, id, actor)
+	if err != nil {
+		return wrapExecError("touch issue in tx", err)
+	}
+	// The server backend has two independently snapshotted sessions. A row can
+	// become dual-resident between the routing probe above and issueops' own
+	// durable-first probe. Never let that second view turn an ignored-session
+	// operation into a durable write (or vice versa): returning an error aborts
+	// both SQL transactions, including the touch that just ran.
+	if result.IsWisp != selectedWisp {
+		return fmt.Errorf("touch issue %s resolved a different storage plane within the transaction", id)
+	}
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(result.IsWisp)
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
+}
+
 func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	table := "issues"
 	eventTable := "events"
@@ -778,6 +824,31 @@ func (t *doltTransaction) CloseIssue(ctx context.Context, id string, reason stri
 		t.dirty.MarkDirty("issues")
 	}
 	return nil
+}
+
+func (t *doltTransaction) CloseIssueChecked(ctx context.Context, id, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	tx, selectedWisp, err := t.txForIssueID(ctx, id)
+	if err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	result, err := issueops.CloseIssueCheckedInTx(ctx, tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
+	if err != nil {
+		return storage.CloseIssueResult{}, wrapExecError("checked close issue in tx", err)
+	}
+	if result.IsWisp != selectedWisp {
+		return storage.CloseIssueResult{}, fmt.Errorf("checked close issue %s resolved a different storage plane within the transaction", id)
+	}
+	publicResult := storage.CloseIssueResult{Unchanged: result.AlreadyClosed, OpenChildren: result.OpenChildren}
+	if result.AlreadyClosed {
+		return publicResult, nil
+	}
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(result.IsWisp)
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return publicResult, nil
 }
 
 // ReopenIssueWithResult reopens an issue within this transaction and reports

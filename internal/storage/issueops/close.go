@@ -60,10 +60,10 @@ func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason,
 // so force bypasses the child and blocker policies, never the version check. Because
 // the read shares this transaction, a mismatch returns before any write and the
 // transaction rolls back with the issue unchanged (a true compare-and-swap).
-// row_lock only tracks lifecycle/ownership writes (status, assignee, started_at),
-// so this guards against a concurrent lifecycle change — not against concurrent
-// label, dependency, rename, or is_blocked writes that leave row_lock untouched
-// (see the freshRowLock invariant in lease.go).
+// row_lock tracks lifecycle/ownership writes, generic scalar updates, and
+// related-table composites whose transaction explicitly calls TouchIssue. A
+// raw label, dependency, rename, is_blocked, or compaction-only write leaves it
+// untouched (see the freshRowLock invariant in lease.go).
 func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool, expectedVersion *int64) (*CloseResult, error) {
 	if expectedVersion != nil {
 		if err := CheckVersionInTx(ctx, tx, id, *expectedVersion); err != nil {

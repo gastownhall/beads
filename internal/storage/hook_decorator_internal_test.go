@@ -91,10 +91,11 @@ func (s fakeHookStore) RunInIssueLifecycleTransaction(ctx context.Context, _ str
 
 type fakeHookTransaction struct {
 	Transaction
-	issues           map[string]*types.Issue
-	dropDependencies bool
-	reopenError      error
-	addLabelError    error
+	issues            map[string]*types.Issue
+	dropDependencies  bool
+	reopenError       error
+	addLabelError     error
+	closeCheckedError error
 }
 
 func (tx fakeHookTransaction) ReopenIssueWithResult(_ context.Context, _ string, _ string, _ string) (bool, error) {
@@ -103,6 +104,28 @@ func (tx fakeHookTransaction) ReopenIssueWithResult(_ context.Context, _ string,
 
 func (tx fakeHookTransaction) AddLabel(_ context.Context, _ string, _ string, _ string) error {
 	return tx.addLabelError
+}
+
+func (tx fakeHookTransaction) TouchIssue(_ context.Context, id, _ string) error {
+	issue, ok := tx.issues[id]
+	if !ok {
+		return ErrNotFound
+	}
+	issue.RowVersion = 22
+	issue.UpdatedAt = time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	return nil
+}
+
+func (tx fakeHookTransaction) CloseIssueChecked(_ context.Context, id, _ string, _ CloseIssueOptions) (CloseIssueResult, error) {
+	if tx.closeCheckedError != nil {
+		return CloseIssueResult{}, tx.closeCheckedError
+	}
+	issue, ok := tx.issues[id]
+	if !ok {
+		return CloseIssueResult{}, ErrNotFound
+	}
+	issue.Status = types.StatusClosed
+	return CloseIssueResult{}, nil
 }
 
 func (tx fakeHookTransaction) CreateIssue(_ context.Context, issue *types.Issue, _ string) error {
@@ -583,6 +606,56 @@ func TestHookFiringStoreIssueLifecycleTransactionReopenForwardsCommitOnly(t *tes
 			return nil
 		}); err != nil {
 			t.Fatal(err)
+		}
+	})
+}
+
+func TestHookTrackingTransactionTouchRefreshesPendingRevisionWithoutDuplicateHook(t *testing.T) {
+	issue := &types.Issue{ID: "touch-hook", RowVersion: 11}
+	pendingSnapshot := cloneIssueForHook(issue)
+	tracked := &hookTrackingTransaction{
+		Transaction: fakeHookTransaction{issues: map[string]*types.Issue{issue.ID: issue}},
+		pending:     []pendingHook{{event: hooks.EventUpdate, issue: pendingSnapshot}},
+	}
+
+	if err := tracked.TouchIssue(context.Background(), issue.ID, "tester"); err != nil {
+		t.Fatalf("TouchIssue: %v", err)
+	}
+	if len(tracked.pending) != 1 {
+		t.Fatalf("pending hook count = %d, want 1 (touch must not duplicate the related mutation hook)", len(tracked.pending))
+	}
+	got := tracked.pending[0].issue
+	if got.RowVersion != 22 || !got.UpdatedAt.Equal(issue.UpdatedAt) {
+		t.Fatalf("pending hook revision = (%d, %v), want touched (%d, %v)",
+			got.RowVersion, got.UpdatedAt, issue.RowVersion, issue.UpdatedAt)
+	}
+}
+
+func TestHookTrackingTransactionCloseIssueCheckedQueuesOnlySuccessfulClose(t *testing.T) {
+	t.Run("success", func(t *testing.T) {
+		issue := &types.Issue{ID: "checked-close-hook", Status: types.StatusOpen}
+		tracked := &hookTrackingTransaction{Transaction: fakeHookTransaction{
+			issues: map[string]*types.Issue{issue.ID: issue},
+		}}
+		if _, err := tracked.CloseIssueChecked(context.Background(), issue.ID, "tester", CloseIssueOptions{}); err != nil {
+			t.Fatalf("CloseIssueChecked: %v", err)
+		}
+		if len(tracked.pending) != 1 || tracked.pending[0].event != hooks.EventClose || tracked.pending[0].issue.Status != types.StatusClosed {
+			t.Fatalf("pending = %#v, want one close hook carrying the closed row", tracked.pending)
+		}
+	})
+
+	t.Run("refusal", func(t *testing.T) {
+		tracked := &hookTrackingTransaction{Transaction: fakeHookTransaction{
+			issues:            map[string]*types.Issue{"checked-close-hook": {ID: "checked-close-hook"}},
+			closeCheckedError: ErrCloseBlocked,
+		}}
+		_, err := tracked.CloseIssueChecked(context.Background(), "checked-close-hook", "tester", CloseIssueOptions{})
+		if !errors.Is(err, ErrCloseBlocked) {
+			t.Fatalf("CloseIssueChecked error = %v, want ErrCloseBlocked", err)
+		}
+		if len(tracked.pending) != 0 {
+			t.Fatalf("refused close queued hooks: %#v", tracked.pending)
 		}
 	})
 }

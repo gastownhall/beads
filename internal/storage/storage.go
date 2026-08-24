@@ -568,13 +568,11 @@ type CloseIssueOptions struct {
 	// requires version 0. Force bypasses child and blocker policy, not this
 	// version check.
 	//
-	// RowVersion tracks lifecycle/ownership writes only — it is rewritten by
-	// status, assignee, and started_at changes (claim, close, reclaim, unclaim,
-	// updateIssueInTx). So this is a "close only if the issue's lifecycle state
-	// is unchanged" guard, NOT an all-columns check: concurrent label, dependency,
-	// rename, is_blocked, or compaction-only writes intentionally do not bump
-	// row_lock and are not caught here (see the freshRowLock invariant in
-	// internal/storage/issueops/lease.go).
+	// RowVersion tracks lifecycle/ownership writes, generic scalar updates, and
+	// related-table composites whose transaction explicitly calls TouchIssue.
+	// A raw label, dependency, rename, is_blocked, or compaction-only write does
+	// not bump row_lock and is not caught here. See the freshRowLock invariant in
+	// internal/storage/issueops/lease.go.
 	ExpectedVersion *int64
 }
 
@@ -930,7 +928,18 @@ type Transaction interface {
 	CreateIssue(ctx context.Context, issue *types.Issue, actor string) error
 	CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error
 	UpdateIssue(ctx context.Context, id string, updates map[string]interface{}, actor string) error
+	// TouchIssue advances updated_at and replaces the issue's opaque, non-zero
+	// RowVersion without changing any user-authored issue field. It is for
+	// transaction-scoped composite mutations (labels, dependencies, hierarchy)
+	// whose related-table writes must publish a fresh issue revision in the SAME
+	// transaction. The touch carries normal update attribution and routes both
+	// permanent issues and explicit-ID wisps to their owning planes.
+	TouchIssue(ctx context.Context, id, actor string) error
 	CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error
+	// CloseIssueChecked applies the full close policy (open children and live
+	// direct blockers), optional version guard, and close as one transaction-
+	// scoped operation. Force bypasses policy only, never ExpectedVersion.
+	CloseIssueChecked(ctx context.Context, id, actor string, opts CloseIssueOptions) (CloseIssueResult, error)
 	DeleteIssue(ctx context.Context, id string) error
 	GetIssue(ctx context.Context, id string) (*types.Issue, error)                                    // For read-your-writes within transaction
 	SearchIssues(ctx context.Context, query string, filter types.IssueFilter) ([]*types.Issue, error) // For read-your-writes within transaction

@@ -699,6 +699,27 @@ func (t *hookTrackingTransaction) UpdateIssue(ctx context.Context, id string, up
 	return nil
 }
 
+// TouchIssue is an internal revision-publication step for a related-table
+// mutation whose update hook is already pending. It must not enqueue a second
+// user-visible hook, but the queued snapshots must carry the final revision and
+// updated_at that committed with that mutation.
+func (t *hookTrackingTransaction) TouchIssue(ctx context.Context, id, actor string) error {
+	if err := t.Transaction.TouchIssue(ctx, id, actor); err != nil {
+		return err
+	}
+	issue, err := t.Transaction.GetIssue(ctx, id)
+	if err != nil {
+		return nil
+	}
+	for i := range t.pending {
+		if t.pending[i].issue != nil && t.pending[i].issue.ID == id {
+			t.pending[i].issue.RowVersion = issue.RowVersion
+			t.pending[i].issue.UpdatedAt = issue.UpdatedAt
+		}
+	}
+	return nil
+}
+
 func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	if err := t.Transaction.CloseIssue(ctx, id, reason, actor, session); err != nil {
 		return err
@@ -707,6 +728,17 @@ func (t *hookTrackingTransaction) CloseIssue(ctx context.Context, id string, rea
 		t.pending = append(t.pending, pendingHook{hooks.EventClose, issue})
 	}
 	return nil
+}
+
+func (t *hookTrackingTransaction) CloseIssueChecked(ctx context.Context, id, actor string, opts CloseIssueOptions) (CloseIssueResult, error) {
+	result, err := t.Transaction.CloseIssueChecked(ctx, id, actor, opts)
+	if err != nil {
+		return result, err
+	}
+	if issue, getErr := t.Transaction.GetIssue(ctx, id); getErr == nil {
+		t.pending = append(t.pending, pendingHook{hooks.EventClose, issue})
+	}
+	return result, nil
 }
 
 type hookTrackingLifecycleTransaction struct {

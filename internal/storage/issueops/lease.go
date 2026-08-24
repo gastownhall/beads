@@ -81,7 +81,10 @@ func leaseTTL(ctx context.Context) time.Duration {
 // exemption of this kind, the lease heartbeat, no longer arises here — since
 // bd-lrgn1 heartbeats never touch the issues row at all.) So the invariant
 // cuts both ways: status/ownership writes MUST remint, aux-marker writes MUST
-// NOT. The remint direction is enforced at build time by
+// NOT. TouchIssueInTx is the deliberate bridge between those rules: it runs
+// only after a user-visible related-table mutation in the SAME transaction and
+// publishes that composite as one new revision; it is not an aux-maintenance
+// stamp. The remint direction is enforced at build time by
 // TestAllIssueRowWritesStampRowLock (row_lock_guard_test.go), whose exemption
 // markers are the machine-readable form of this list — widen the stamping
 // policy there first, not by ad-hoc stamps.

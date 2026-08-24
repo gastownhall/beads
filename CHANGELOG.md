@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Transaction-scoped revision publication and guarded close.** The public Go
+  `Transaction` interface now exposes `TouchIssue`, which atomically advances
+  `updated_at` and mints a distinct non-zero `RowVersion` after related-table
+  mutations without inventing metadata or changing user-authored fields, and
+  `CloseIssueChecked`, which applies open-child, live-blocker, and optional
+  version policy in that same transaction. Both route explicit-ID wisps, retain
+  actor attribution in audit/journal events, and preserve post-commit hook
+  semantics. This is a required-method addition to the experimental external
+  backend transaction interface; pinned out-of-tree backends must implement
+  both methods and rerun `backend/conformance` when upgrading.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped

@@ -75,6 +75,7 @@ var mutationEntryPoints = []string{
 	// update
 	"UpdateIssueInTx",
 	"UpdateIssueWithoutEventInTx",
+	"TouchIssueInTx",
 	"MergeMetadataInTx",
 	"DeleteMetadataInTx",
 	"ApplyLabelPatch",
