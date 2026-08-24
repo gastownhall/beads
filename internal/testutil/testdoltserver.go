@@ -182,9 +182,32 @@ func terminateSharedContainer() {
 	})
 }
 
-// StartIsolatedDoltContainer starts a per-test Dolt container and returns the
-// mapped host port. The container is terminated automatically when the test finishes.
-func StartIsolatedDoltContainer(t *testing.T) string {
+// IsolatedDoltContainer is a per-test Dolt container together with the
+// accessors a test needs to inspect it from the inside.
+type IsolatedDoltContainer struct {
+	// Port is the mapped host port of the container's Dolt server.
+	Port string
+
+	ctr *dolt.DoltContainer
+}
+
+// Exec runs cmd inside the container and returns its exit code and combined
+// output, demultiplexed (see containerExec).
+func (c *IsolatedDoltContainer) Exec(ctx context.Context, cmd []string) (int, string, error) {
+	if c == nil || c.ctr == nil {
+		return 0, "", fmt.Errorf("no Dolt container running")
+	}
+	return containerExec(ctx, c.ctr, cmd)
+}
+
+// StartIsolatedDoltContainerHandle starts a per-test Dolt container and
+// returns a handle to it. The container is terminated automatically when the
+// test finishes.
+//
+// Unlike StartIsolatedDoltContainer this does NOT touch BEADS_DOLT_PORT or
+// BEADS_DOLT_SERVER_PORT: those are process-wide, so a test that only wants
+// its own server should not perturb sibling tests sharing the process.
+func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	t.Helper()
 	if state := checkDolt(); state != doltReady {
 		t.Skipf("skipping test: %s", state)
@@ -210,10 +233,18 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		t.Fatalf("getting mapped port: %v", err)
 	}
 
-	portStr := port.Port()
-	t.Setenv("BEADS_DOLT_PORT", portStr)
-	t.Setenv("BEADS_DOLT_SERVER_PORT", portStr)
-	return portStr
+	return &IsolatedDoltContainer{Port: port.Port(), ctr: ctr}
+}
+
+// StartIsolatedDoltContainer starts a per-test Dolt container and returns the
+// mapped host port, additionally pointing BEADS_DOLT_PORT and
+// BEADS_DOLT_SERVER_PORT at it for the duration of the test.
+func StartIsolatedDoltContainer(t *testing.T) string {
+	t.Helper()
+	c := StartIsolatedDoltContainerHandle(t)
+	t.Setenv("BEADS_DOLT_PORT", c.Port)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", c.Port)
+	return c.Port
 }
 
 // ensureSharedContainer starts the singleton container and sets
@@ -308,23 +339,19 @@ func DoltContainerCrashError() error {
 	return nil
 }
 
-// DoltContainerExec runs cmd inside the shared Dolt container and returns its
-// exit code and combined output. Used by tests that need to inspect the
-// container's filesystem (e.g. the .dolt_dropped_databases/ directory),
-// which has no host-visible path since the container is started without a
-// bind-mounted data dir.
-func DoltContainerExec(ctx context.Context, cmd []string) (int, string, error) {
-	if doltSingletonSrv == nil || doltSingletonSrv.container == nil {
-		return 0, "", fmt.Errorf("no shared Dolt container running")
-	}
-	// tcexec.Multiplexed() is load-bearing, not decorative. Without it Exec
-	// hands back the raw hijacked Docker stream and io.ReadAll glues the
-	// 8-byte stdcopy frame header onto the payload: `echo hello` comes back
-	// as "\x01\x00\x00\x00\x00\x00\x00\x06hello\n". A caller that
-	// feeds such a string back into the container — a path read out of
-	// find(1), say — then fails with "invalid argument" on a prefix it
-	// cannot see.
-	code, reader, err := doltSingletonSrv.container.Exec(ctx, cmd, tcexec.Multiplexed())
+// containerExec runs cmd inside ctr and returns its exit code and combined
+// output. Used by tests that need to inspect a container's filesystem (e.g.
+// the .dolt_dropped_databases/ directory), which has no host-visible path
+// since the containers are started without a bind-mounted data dir.
+//
+// tcexec.Multiplexed() is load-bearing, not decorative. Without it Exec hands
+// back the raw hijacked Docker stream and io.ReadAll glues the 8-byte stdcopy
+// frame header onto the payload: `echo hello` returns
+// "\x01\x00\x00\x00\x00\x00\x00\x06hello\n". A caller that feeds such
+// a string back into the container — a path read out of find(1), say — then
+// fails with "invalid argument" on a prefix it cannot see.
+func containerExec(ctx context.Context, ctr *dolt.DoltContainer, cmd []string) (int, string, error) {
+	code, reader, err := ctr.Exec(ctx, cmd, tcexec.Multiplexed())
 	if err != nil {
 		return 0, "", fmt.Errorf("exec in Dolt container: %w", err)
 	}

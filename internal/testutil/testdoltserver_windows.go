@@ -46,7 +46,21 @@ func DoltContainerCrashed() bool { return false }
 // DoltContainerCrashError always returns nil on Windows (no container to monitor).
 func DoltContainerCrashError() error { return nil }
 
-// DoltContainerExec is not supported on Windows (no container to exec into).
-func DoltContainerExec(ctx context.Context, cmd []string) (int, string, error) {
-	return 0, "", fmt.Errorf("no shared Dolt container running")
+// IsolatedDoltContainer is the Windows stand-in for the per-test Dolt
+// container handle; no container is ever started on this platform.
+type IsolatedDoltContainer struct {
+	// Port is always empty on Windows.
+	Port string
+}
+
+// Exec is not supported on Windows (no container to exec into).
+func (c *IsolatedDoltContainer) Exec(_ context.Context, _ []string) (int, string, error) {
+	return 0, "", fmt.Errorf("no Dolt container running")
+}
+
+// StartIsolatedDoltContainerHandle is not supported on Windows CI.
+func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
+	t.Helper()
+	t.Skip("Docker not available on Windows CI")
+	return nil
 }
