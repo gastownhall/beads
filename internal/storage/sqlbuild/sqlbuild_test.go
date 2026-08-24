@@ -452,3 +452,30 @@ func TestOptionalWispTable(t *testing.T) {
 		}
 	}
 }
+
+func TestBuildReadyWorkWhereDeferredIsRestrictive(t *testing.T) {
+	t.Parallel()
+
+	where, args, err := BuildReadyWorkWhere(
+		types.WorkFilter{Status: types.StatusOpen, Deferred: true, IncludeDeferred: true},
+		IssuesFilterTables,
+		ReadyWorkWhereInputs{},
+	)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(where, "(defer_until IS NOT NULL OR status = ?)") {
+		t.Fatalf("deferred predicate missing from ready WHERE: %s", where)
+	}
+	if len(args) == 0 || args[len(args)-1] != types.StatusDeferred {
+		t.Fatalf("deferred status argument missing or misplaced: %v", args)
+	}
+
+	ordinary, _, err := BuildReadyWorkWhere(types.WorkFilter{Status: types.StatusOpen}, IssuesFilterTables, ReadyWorkWhereInputs{})
+	if err != nil {
+		t.Fatalf("ordinary filter failed: %v", err)
+	}
+	if strings.Contains(ordinary, "defer_until IS NOT NULL OR status = ?") {
+		t.Fatalf("ordinary ready filter unexpectedly became restrictive: %s", ordinary)
+	}
+}

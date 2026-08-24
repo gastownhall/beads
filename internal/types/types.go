@@ -2128,6 +2128,11 @@ type WorkFilter struct {
 
 	// Time-based deferral filtering (GH#820)
 	IncludeDeferred bool // If true, include issues with future defer_until timestamps
+	// Deferred restricts ready work to issues that are deferred (either a
+	// defer_until value is set or the issue has deferred status). This is the
+	// restrictive counterpart to IncludeDeferred, which only controls whether
+	// future-deferred issues are admitted alongside ordinary ready work.
+	Deferred bool `json:"-"`
 
 	// Ephemeral issue filtering
 	// By default, GetReadyWork excludes ephemeral wisps but includes
