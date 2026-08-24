@@ -16,6 +16,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
 )
 
@@ -316,7 +317,14 @@ func DoltContainerExec(ctx context.Context, cmd []string) (int, string, error) {
 	if doltSingletonSrv == nil || doltSingletonSrv.container == nil {
 		return 0, "", fmt.Errorf("no shared Dolt container running")
 	}
-	code, reader, err := doltSingletonSrv.container.Exec(ctx, cmd)
+	// tcexec.Multiplexed() is load-bearing, not decorative. Without it Exec
+	// hands back the raw hijacked Docker stream and io.ReadAll glues the
+	// 8-byte stdcopy frame header onto the payload: `echo hello` comes back
+	// as "\x01\x00\x00\x00\x00\x00\x00\x06hello\n". A caller that
+	// feeds such a string back into the container — a path read out of
+	// find(1), say — then fails with "invalid argument" on a prefix it
+	// cannot see.
+	code, reader, err := doltSingletonSrv.container.Exec(ctx, cmd, tcexec.Multiplexed())
 	if err != nil {
 		return 0, "", fmt.Errorf("exec in Dolt container: %w", err)
 	}
