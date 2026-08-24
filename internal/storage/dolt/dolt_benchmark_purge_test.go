@@ -65,6 +65,7 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 	defer admin.Close()
 
 	baseline := countDroppedDatabaseEntries(t, ctx, ctr)
+	requireLeakIsObservable(t, ctx, ctr, admin, baseline)
 
 	const iterations = 5
 	for i := 0; i < iterations; i++ {
@@ -80,6 +81,41 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 		t.Fatalf("dolt_dropped_databases grew from %d to %d across %d setup/cleanup cycles; "+
 			"dropBenchDB likely missing PURGE step (be-pq5)",
 			baseline, post, iterations)
+	}
+}
+
+// requireLeakIsObservable is the positive control: it proves the probe can
+// actually see a leak before the caller asserts there isn't one.
+//
+// It drops a throwaway database *without* purging, requires the count to go
+// up, then purges and requires it to come back down. Without this the test is
+// unfalsifiable — any probe that silently reports 0 for ever (the `-xdev` bug
+// above being exactly that) makes the real assertion pass vacuously, and a
+// green run says nothing about whether PURGE works. A PASS that cannot fail is
+// not evidence (PR #5792 review, findings 1 and 6).
+func requireLeakIsObservable(t *testing.T, ctx context.Context, ctr *testutil.IsolatedDoltContainer, admin *sql.DB, baseline int) {
+	t.Helper()
+
+	const controlDB = "beads_test_purge_control"
+	if _, err := admin.ExecContext(ctx, "CREATE DATABASE `"+controlDB+"`"); err != nil {
+		t.Fatalf("control: create database: %v", err)
+	}
+	if _, err := admin.ExecContext(ctx, "DROP DATABASE `"+controlDB+"`"); err != nil {
+		t.Fatalf("control: drop database: %v", err)
+	}
+
+	leaked := countDroppedDatabaseEntries(t, ctx, ctr)
+	if leaked <= baseline {
+		t.Fatalf("control: dropping %q without PURGE left the dropped-databases count at %d "+
+			"(baseline %d); the probe cannot observe a leak, so this test could not fail and "+
+			"proves nothing about dropBenchDB", controlDB, leaked, baseline)
+	}
+
+	if _, err := admin.ExecContext(ctx, "CALL DOLT_PURGE_DROPPED_DATABASES()"); err != nil {
+		t.Fatalf("control: purge dropped databases: %v", err)
+	}
+	if got := countDroppedDatabaseEntries(t, ctx, ctr); got > baseline {
+		t.Fatalf("control: PURGE left the dropped-databases count at %d, want <= baseline %d", got, baseline)
 	}
 }
 
