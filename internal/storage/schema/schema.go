@@ -1734,9 +1734,13 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 
 		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
 		start := time.Now()
-		// Soft warning only, by design — see runMigrationWithWatchdog and
-		// engdocs/plans/be-m65rs-migration-watchdog-scoping.md before adding
-		// a hard timeout here.
+		// Soft warning only, by design — never turn this into a hard
+		// timeout/abort. Migrations can legitimately run arbitrarily long
+		// (see the initSchema comment in internal/storage/dolt/store.go,
+		// e.g. migration 0047's full-table recompute); aborting mid-DDL
+		// risks leaving Dolt in a partially-migrated state with no clean
+		// rollback. Full scoping rationale and rejected alternatives:
+		// bd show be-m65rs.
 		if err := runMigrationWithWatchdog(ctx, stderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
