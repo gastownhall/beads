@@ -8,6 +8,21 @@ import (
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
+// findDroppedDirCmd locates the .dolt_dropped_databases directory anywhere in
+// the container.
+//
+// It deliberately does NOT use `find -xdev`. The Dolt image declares
+// VOLUME /var/lib/dolt (`docker image inspect dolthub/dolt-sql-server:2.2.0`
+// -> `{"/var/lib/dolt":{}}`), so the data dir is a *separate mount* from `/`:
+// inside the container `stat -c %d / /var/lib/dolt` reports different device
+// IDs. `-xdev` stops the walk dead at that boundary, so it never reached the
+// data dir at all — the probe returned "" on every run, the entry count was
+// always 0, and the leak assertion was vacuously true whether or not
+// dropBenchDB purged anything. The pseudo filesystems `-xdev` was there to
+// skip are pruned explicitly instead.
+const findDroppedDirCmd = `find / -maxdepth 6 \( -path /proc -o -path /sys -o -path /dev \) -prune ` +
+	`-o -type d -name .dolt_dropped_databases -print 2>/dev/null`
+
 // TestBenchDBPurgeDoesNotLeak is the regression gate for be-pq5: dropBenchDB
 // must DROP and then PURGE so the dropped-databases dir does not grow across
 // repeated bench samples. Without the PURGE call inside dropBenchDB, looped
@@ -108,13 +123,9 @@ func countDroppedDatabaseEntries(t *testing.T, ctx context.Context) int {
 func findDroppedDatabasesDir(t *testing.T, ctx context.Context) string {
 	t.Helper()
 
-	// -xdev keeps the search inside the container's single root filesystem
-	// (skips /proc, /sys, and similar mounts) and 2>/dev/null suppresses
-	// permission-denied noise; find's exit status is unreliable under
-	// suppressed errors so only stdout is trusted below.
-	_, out, err := testutil.DoltContainerExec(ctx, []string{
-		"sh", "-c", "find / -xdev -maxdepth 6 -type d -name .dolt_dropped_databases 2>/dev/null",
-	})
+	// find's exit status is unreliable with errors suppressed, so only stdout
+	// is trusted below.
+	_, out, err := testutil.DoltContainerExec(ctx, []string{"sh", "-c", findDroppedDirCmd})
 	if err != nil {
 		t.Fatalf("exec find in container to locate dropped-databases dir: %v", err)
 	}
