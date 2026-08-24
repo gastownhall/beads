@@ -608,6 +608,11 @@ func (e *Evaluator) applyNot(not *NotNode, filter *types.IssueFilter) error {
 
 // parseTimeValue parses a time value from a comparison node.
 // Supports duration values (7d, 24h) which are interpreted as "now - duration".
+//
+// Every field routed here (created, updated, closed, started) is a recorded
+// instant stored in UTC, so a bare date resolves in UTC rather than the host's
+// zone — otherwise created>'2026-08-17' selects a different 24 hours depending
+// on where it runs (#5823).
 func (e *Evaluator) parseTimeValue(comp *ComparisonNode) (time.Time, error) {
 	if comp.ValueType == TokenDuration {
 		// Duration values like 7d mean "7 days ago" for < comparisons
@@ -616,7 +621,7 @@ func (e *Evaluator) parseTimeValue(comp *ComparisonNode) (time.Time, error) {
 		return e.parseDurationAgo(comp.Value)
 	}
 	// Otherwise use the standard time parser
-	return timeparsing.ParseRelativeTime(comp.Value, e.now)
+	return timeparsing.ParseRelativeTimeIn(comp.Value, e.now, time.UTC)
 }
 
 // parseDurationAgo parses a duration and returns now - duration.

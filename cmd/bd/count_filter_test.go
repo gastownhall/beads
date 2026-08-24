@@ -82,14 +82,15 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		t.Errorf("group = %q with no --by-* flag, want the scalar count", group)
 	}
 
-	// parseTimeFlag resolves a bare date in the LOCAL zone, which is what a
-	// user typing --created-after 2026-01-01 means, then normalizes the
-	// representation to UTC so the storage layer binds the same instant on
-	// every backend. The expectation constructs local midnight and converts,
-	// so a change to either half of that contract shows up here instead of
-	// shifting every bound by the test machine's offset.
+	// parseTimeFlag resolves a bare date in UTC, because these bounds are
+	// compared against created_at/updated_at/closed_at, which are stored in UTC
+	// and reported in UTC by --json. Resolving in the LOCAL zone — the old
+	// behavior — made the same command select a different 24 hours per host and
+	// silently drop rows near the day boundary (#5823). Constructing the
+	// expectation in UTC rather than from time.Local is the assertion: on a
+	// machine whose offset is nonzero, the two disagree.
 	day := func(d int) *time.Time {
-		stamp := time.Date(2026, 1, d, 0, 0, 0, 0, time.Local).UTC()
+		stamp := time.Date(2026, 1, d, 0, 0, 0, 0, time.UTC)
 		return &stamp
 	}
 	priority, min, max := 1, 0, 4

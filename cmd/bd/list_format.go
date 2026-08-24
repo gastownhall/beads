@@ -13,11 +13,21 @@ import (
 	"github.com/steveyegge/beads/internal/ui"
 )
 
-// parseTimeFlag parses time strings using the layered time parsing architecture.
-// Supports compact durations (+6h, -1d), natural language (tomorrow, next monday),
-// and absolute formats (2006-01-02, RFC3339).
+// parseTimeFlag parses the date-bound filter flags (--created-after and its
+// siblings) using the layered time parsing architecture. Supports compact
+// durations (+6h, -1d), natural language (tomorrow, next monday), and absolute
+// formats (2006-01-02, RFC3339).
+//
+// Bare dates resolve in UTC because these bounds are compared against
+// created_at/updated_at/closed_at, which are stored in UTC and reported in UTC
+// by --json. Reading a date out of one command and passing it to another has to
+// select the same rows on every host; parsing in the host's zone silently
+// shifted the window by its offset and returned a short result set that looked
+// complete (#5823). Deadlines the user sets (--due, --defer) still parse
+// locally, since those name a day in the user's calendar rather than a point in
+// the stored timeline.
 func parseTimeFlag(s string) (time.Time, error) {
-	return timeparsing.ParseRelativeTime(s, time.Now())
+	return timeparsing.ParseRelativeTimeIn(s, time.Now(), time.UTC)
 }
 
 // pinIndicator returns a pushpin emoji prefix for pinned issues

@@ -251,12 +251,12 @@ func registerCountFlags(cmd *cobra.Command) {
 	cmd.Flags().String("notes-contains", "", "Filter by notes substring")
 
 	// Date ranges
-	cmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
-	cmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+	cmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD is UTC, or RFC3339)")
+	cmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD is UTC, or RFC3339)")
+	cmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD is UTC, or RFC3339)")
+	cmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD is UTC, or RFC3339)")
+	cmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD is UTC, or RFC3339)")
+	cmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD is UTC, or RFC3339)")
 
 	// Empty/null checks
 	cmd.Flags().Bool("empty-description", false, "Filter issues with empty description")

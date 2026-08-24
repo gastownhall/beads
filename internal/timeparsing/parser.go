@@ -142,8 +142,25 @@ var dateOnlyRe = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}$`)
 // Timezone-less inputs are interpreted in now's location. Returns the parsed
 // time in UTC or an error if no layer could parse the input.
 func ParseRelativeTime(s string, now time.Time) (time.Time, error) {
-	location := now.Location()
+	return ParseRelativeTimeIn(s, now, now.Location())
+}
 
+// ParseRelativeTimeIn is ParseRelativeTime with the zone for timezone-less
+// absolute literals (a bare YYYY-MM-DD, or a datetime written without an
+// offset) supplied separately from now.
+//
+// The two are different questions, and conflating them is what made the same
+// filter command return different rows on different hosts (#5823). now is only
+// the instant relative expressions count from, and it names the same instant
+// whatever zone it carries. location decides which 24 hours "2026-08-17" means,
+// which has to agree with whatever the result gets compared against: UTC for a
+// bound tested against a stored timestamp, local for a deadline a human is
+// setting.
+//
+// Natural language deliberately keeps counting from now rather than from
+// location. "tomorrow" is a claim about the speaker's calendar, not the
+// database's.
+func ParseRelativeTimeIn(s string, now time.Time, location *time.Location) (time.Time, error) {
 	// Layer 1: Compact duration
 	if t, err := ParseCompactDuration(s, now); err == nil {
 		return t.UTC(), nil

@@ -425,12 +425,12 @@ func init() {
 	listCmd.Flags().String("external-ref", "", "Filter by exact external_ref value")
 
 	// Date ranges
-	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD or RFC3339)")
-	listCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD or RFC3339)")
+	listCmd.Flags().String("created-after", "", "Filter issues created after date (YYYY-MM-DD is UTC, or RFC3339)")
+	listCmd.Flags().String("created-before", "", "Filter issues created before date (YYYY-MM-DD is UTC, or RFC3339)")
+	listCmd.Flags().String("updated-after", "", "Filter issues updated after date (YYYY-MM-DD is UTC, or RFC3339)")
+	listCmd.Flags().String("updated-before", "", "Filter issues updated before date (YYYY-MM-DD is UTC, or RFC3339)")
+	listCmd.Flags().String("closed-after", "", "Filter issues closed after date (YYYY-MM-DD is UTC, or RFC3339)")
+	listCmd.Flags().String("closed-before", "", "Filter issues closed before date (YYYY-MM-DD is UTC, or RFC3339)")
 
 	// Empty/null checks
 	listCmd.Flags().Bool("empty-description", false, "Filter issues with empty or missing description")
@@ -487,10 +487,10 @@ func init() {
 
 	// Time-based scheduling filters (GH#820)
 	listCmd.Flags().Bool("deferred", false, "Show only issues with defer_until set")
-	listCmd.Flags().String("defer-after", "", "Filter issues deferred after date (supports relative: +6h, tomorrow)")
-	listCmd.Flags().String("defer-before", "", "Filter issues deferred before date (supports relative: +6h, tomorrow)")
-	listCmd.Flags().String("due-after", "", "Filter issues due after date (supports relative: +6h, tomorrow)")
-	listCmd.Flags().String("due-before", "", "Filter issues due before date (supports relative: +6h, tomorrow)")
+	listCmd.Flags().String("defer-after", "", "Filter issues deferred after date (YYYY-MM-DD is UTC; supports relative: +6h, tomorrow)")
+	listCmd.Flags().String("defer-before", "", "Filter issues deferred before date (YYYY-MM-DD is UTC; supports relative: +6h, tomorrow)")
+	listCmd.Flags().String("due-after", "", "Filter issues due after date (YYYY-MM-DD is UTC; supports relative: +6h, tomorrow)")
+	listCmd.Flags().String("due-before", "", "Filter issues due before date (YYYY-MM-DD is UTC; supports relative: +6h, tomorrow)")
 	listCmd.Flags().Bool("overdue", false, "Show only issues with due_at in the past (not closed)")
 
 	// Pretty and watch flags (GH#654)
