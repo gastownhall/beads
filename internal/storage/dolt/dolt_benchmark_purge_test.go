@@ -2,9 +2,12 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -41,6 +44,14 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 	skipIfNoServer(t)
 	ctx := context.Background()
 
+	admin, err := sql.Open("mysql", doltutil.ServerDSN{
+		Host: "127.0.0.1", Port: testServerPort, User: "root", Timeout: 10 * time.Second,
+	}.String())
+	if err != nil {
+		t.Fatalf("open admin connection: %v", err)
+	}
+	defer admin.Close()
+
 	baseline := countDroppedDatabaseEntries(t, ctx)
 
 	const iterations = 5
@@ -48,6 +59,7 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 		dbName := benchDatabaseName()
 		store := newPurgeRegressionStore(t, ctx, dbName)
 		dropBenchDB(t, store, dbName)
+		requireDatabaseDropped(t, ctx, admin, dbName)
 		store.Close()
 	}
 
@@ -56,6 +68,36 @@ func TestBenchDBPurgeDoesNotLeak(t *testing.T) {
 		t.Fatalf("dolt_dropped_databases grew from %d to %d across %d setup/cleanup cycles; "+
 			"dropBenchDB likely missing PURGE step (be-pq5)",
 			baseline, post, iterations)
+	}
+}
+
+// requireDatabaseDropped fails if dbName is still listed by SHOW DATABASES.
+//
+// dropBenchDB only Logf's when its DROP fails (dolt_benchmark_test.go:155), so
+// a silently-failed drop would leave the database live, leak nothing into the
+// dropped-databases dir, and let the leak assertion below pass for entirely
+// the wrong reason.
+func requireDatabaseDropped(t *testing.T, ctx context.Context, admin *sql.DB, dbName string) {
+	t.Helper()
+
+	rows, err := admin.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		t.Fatalf("SHOW DATABASES: %v", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan database name: %v", err)
+		}
+		if strings.EqualFold(name, dbName) {
+			t.Fatalf("database %q is still present after dropBenchDB: the DROP failed silently, "+
+				"so the leak count measures nothing", dbName)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate SHOW DATABASES: %v", err)
 	}
 }
 
