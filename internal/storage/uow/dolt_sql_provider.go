@@ -3,8 +3,10 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
@@ -22,6 +24,16 @@ import (
 const (
 	defaultBranch           = "main"
 	defaultProxyIdleTimeout = 30 * time.Second
+
+	// pingAttemptTimeout bounds a single ping so a non-responsive server
+	// fails this attempt instead of hanging.
+	pingAttemptTimeout = 2 * time.Second
+	// pingPollInterval paces retries between ping attempts.
+	pingPollInterval = 200 * time.Millisecond
+	// pingRetryDeadline bounds the whole retry loop in openDB/pingUntilReady;
+	// on give-up the last error is returned wrapped exactly like an
+	// unretried ping always was.
+	pingRetryDeadline = 30 * time.Second
 )
 
 type doltSQLProvider struct {
@@ -316,10 +328,43 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
-	if err := conn.PingContext(ctx); err != nil {
+	if err := pingUntilReady(ctx, conn); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
+}
+
+// pingUntilReady retries a connection-level ping failure within a bounded
+// deadline. Every readiness gate ahead of openDB (dbproxy's
+// waitForServerReady, probePort) is TCP-only, so this is the first point
+// anything proves the Dolt SQL engine can actually serve a query — mirrors
+// the shape already proven at testutil.waitForDoltReady/pingDoltOnce rather
+// than inventing a new one. A non-retryable error (e.g. MySQL 1045
+// access-denied) fails on the first attempt instead of stalling the full
+// deadline.
+func pingUntilReady(ctx context.Context, conn *sql.DB) error {
+	deadline := time.Now().Add(pingRetryDeadline)
+	var lastErr error
+	for {
+		pingCtx, cancel := context.WithTimeout(ctx, pingAttemptTimeout)
+		lastErr = conn.PingContext(pingCtx)
+		cancel()
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryablePingError(lastErr) || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(pingPollInterval)
+	}
+}
+
+// isRetryablePingError reports whether err is a connection-level ping
+// failure worth retrying while a Dolt SQL server's query engine is still
+// warming up, rather than a real failure (e.g. MySQL 1045 access-denied)
+// that retrying cannot fix.
+func isRetryablePingError(err error) bool {
+	return errors.Is(err, driver.ErrBadConn) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
