@@ -52,6 +52,24 @@ func trackBdVersion() {
 
 }
 
+// trackBdVersionPreview detects an upgrade for preview/dry-run commands without
+// updating .local_version. Preview commands must not consume the one-shot
+// version marker because they also skip autoMigrateOnVersionBump; the next real
+// command still needs to perform that reconciliation.
+func trackBdVersionPreview() {
+	beadsDir := beads.FindBeadsDir()
+	if beadsDir == "" {
+		return
+	}
+
+	localVersionPath := filepath.Join(beadsDir, localVersionFile)
+	lastVersion := readLocalVersion(localVersionPath)
+	if lastVersion != "" && lastVersion != Version && doctor.CompareVersions(Version, lastVersion) > 0 {
+		versionUpgradeDetected = true
+		previousVersion = lastVersion
+	}
+}
+
 // readLocalVersion reads the last bd version from the local version file.
 // Returns empty string if file doesn't exist or can't be read.
 func readLocalVersion(path string) string {

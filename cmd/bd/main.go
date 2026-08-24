@@ -143,6 +143,22 @@ func isReadOnlyCommand(cmdName string) bool {
 	return readOnlyCommands[cmdName]
 }
 
+// isPreviewCommand reports whether cmd was explicitly invoked in a
+// non-mutating preview mode. Preview flags are command-local rather than
+// persistent, so checking them here after Cobra has parsed the selected
+// command is the earliest reliable point to keep the store open read-only.
+func isPreviewCommand(cmd *cobra.Command) bool {
+	for _, name := range []string{"dry-run", "inspect"} {
+		if flag := cmd.Flags().Lookup(name); flag != nil {
+			enabled, err := cmd.Flags().GetBool(name)
+			if err == nil && enabled {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // isWorkingSetReconcileCommand reports whether cmd's whole purpose is to
 // reconcile the Dolt working set: "bd dolt commit" or "bd vc commit". These
 // commands are the documented recovery from a pending-migration dirty-table
@@ -980,22 +996,38 @@ var rootCmd = &cobra.Command{
 			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
 		}
 
-		// Track bd version changes
-		// Best-effort tracking - failures are silent
-		trackBdVersion()
+		// Check if this is a read-only command (GH#804) or an explicitly
+		// non-mutating preview. Both must open the store read-only: otherwise
+		// schema initialization runs before the command's RunE can honor
+		// --dry-run/--inspect or reject invalid arguments.
+		previewMode := isPreviewCommand(cmd)
+		useReadOnly := isReadOnlyCommand(cmd.Name()) || previewMode
 
-		// Check if this is a read-only command (GH#804)
-		// Read-only commands open the store in read-only mode to avoid modifying
-		// the database (which breaks file watchers).
-		useReadOnly := isReadOnlyCommand(cmd.Name())
+		// Track bd version changes.
+		// Best-effort tracking - failures are silent.
+		//
+		// A preview detects the change but must not consume it:
+		// .local_version is the one-shot signal autoMigrateOnVersionBump reads,
+		// and preview commands deliberately skip that reconciliation below.
+		if previewMode {
+			trackBdVersionPreview()
+		} else {
+			trackBdVersion()
+		}
 
 		// Auto-migrate database on version bump (bd-jgxi).
-		// Runs for ALL commands (including read-only ones) because the migration
+		// Runs for ALL non-preview commands (including read-only ones) because the migration
 		// opens its own store connection, writes the version metadata, commits it,
 		// and closes BEFORE the main store is opened. This ensures bd doctor and
 		// read-only commands see the correct version after a CLI upgrade.
-
-		autoMigrateOnVersionBump(beadsDir)
+		//
+		// Preview paths must never call this helper: it opens a separate
+		// writable store before the main read-only store and can therefore
+		// apply schema migrations before RunE validates arguments or renders a
+		// dry-run plan.
+		if !previewMode {
+			autoMigrateOnVersionBump(beadsDir)
+		}
 
 		// Initialize direct storage access
 		var err error
