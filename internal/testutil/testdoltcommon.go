@@ -26,13 +26,14 @@ import (
 //     dolt sql-server matching this fleet's real deployment shape. See
 //     be-j3szz for the full evidence chain.
 //   - Containers can leak because Ryuk (testcontainers-go's orphan-reaper
-//     sidecar) is disabled for this harness (TESTCONTAINERS_RYUK_DISABLED=true,
-//     a workaround for this host's broken dockerd/containerd — see be-hsa9t),
-//     so there is no safety net when a test process exits without running
-//     its cleanup (e.g. os.Exit called before a deferred
-//     TerminateDoltContainer). See be-5kkk6 for a historical incident (101
-//     leaked containers, swap exhaustion) and the testMainInner pattern this
-//     repo now uses elsewhere to guarantee deferred cleanup actually runs.
+//     sidecar) is disabled for this harness (TESTCONTAINERS_RYUK_DISABLED=true;
+//     under rootless podman Ryuk frequently cannot start because it wants
+//     the runtime socket — see be-w3n2m), so there is no safety net when a
+//     test process exits without running its cleanup (e.g. os.Exit called
+//     before a deferred TerminateDoltContainer). See be-5kkk6 for a
+//     historical incident (101 leaked containers, swap exhaustion) and the
+//     testMainInner pattern this repo now uses elsewhere to guarantee
+//     deferred cleanup actually runs.
 const DoltDockerImage = "dolthub/dolt-sql-server:2.2.0"
 
 // RequireDoltBinary ensures the `dolt` CLI binary is available, and honors
