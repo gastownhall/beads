@@ -75,6 +75,13 @@ type PushHooks struct {
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
 	ContentEqual func(local *types.Issue, remote *TrackerIssue) bool
 
+	// FieldDiff, if set, names the fields that a push would change between the
+	// local issue and the fetched remote. The dry-run push preview uses it to
+	// show WHAT an update would modify (e.g. "title, labels (-2: bug, question)")
+	// instead of a bare "would update" line that hides destructive potential.
+	// If nil, dry-run prints the update without field detail.
+	FieldDiff func(local *types.Issue, remote *TrackerIssue) []string
+
 	// ContentHash, if set, returns a stable fingerprint of the issue's pushable
 	// fields. When present, the engine binds the hash to the issue's external_ref
 	// and TargetScope (when provided), and persists that fingerprint in local_metadata
@@ -442,6 +449,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		// Surface non-fatal fetch problems (e.g. a GitHub comment thread that
+		// could not be downloaded) instead of silently dropping them.
+		for _, w := range extIssue.Warnings {
+			e.warn("%s (%s)", w, extIssue.Identifier)
+		}
+
 		// Check if we already have this issue before dry-run so preview stats
 		// distinguish creates from updates.
 		ref := e.Tracker.BuildExternalRef(&extIssue)
@@ -506,7 +519,7 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			dryRunIssues = append(dryRunIssues, &dryRunIssue)
 		}
 
-		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) {
+		if existing != nil && pullIssueEqual(existing, conv.Issue, ref) && !e.pullCommentsPending(ctx, existing, conv.Issue) {
 			stats.Skipped++
 			continue
 		}
@@ -529,7 +542,23 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 
 			if err := e.Store.RunInIssueLifecycleTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.IssueLifecycleTransaction) error {
-				return applyPullIssueUpdate(ctx, tx, existing.ID, updates, conv.Issue.Labels, e.Actor)
+				if err := applyPullIssueUpdate(ctx, tx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
+					return err
+				}
+				// Merge the remote comment thread. ImportIssueComment derives
+				// the comment ID from content, collapsing onto an identical
+				// existing row, so repeated pulls only add genuinely new
+				// comments.
+				for _, c := range conv.Issue.Comments {
+					createdAt := c.CreatedAt
+					if createdAt.IsZero() {
+						createdAt = time.Now()
+					}
+					if _, err := tx.ImportIssueComment(ctx, existing.ID, c.Author, c.Text, createdAt); err != nil {
+						return fmt.Errorf("importing comment %q: %w", c.ID, err)
+					}
+				}
+				return nil
 			}); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
@@ -582,6 +611,24 @@ func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransact
 		return err
 	}
 	return syncIssueLabels(ctx, tx, id, labels, actor)
+}
+
+// pullCommentsPending reports whether the remote issue carries comments that
+// the local copy does not have yet. When the remote thread is fully imported,
+// the issue counts as unchanged and the pull can skip it. Local-only comments
+// (written in beads) make the local count larger, which is fine: the merge is
+// content-collapsing, so only genuinely new remote comments import.
+func (e *Engine) pullCommentsPending(ctx context.Context, existing *types.Issue, remote *types.Issue) bool {
+	if len(remote.Comments) == 0 {
+		return false
+	}
+	comments, err := e.Store.GetIssueComments(ctx, existing.ID)
+	if err != nil {
+		// Unable to compare cheaply: report pending so the update path runs.
+		// The merge dedups, so a redundant update is harmless.
+		return true
+	}
+	return len(comments) < len(remote.Comments)
 }
 
 // applyPullIssueFields applies a pulled issue's fields while preserving the
@@ -921,6 +968,41 @@ func (e *Engine) recordPushHash(ctx context.Context, issue *types.Issue, externa
 	}
 }
 
+// dryRunPushVerdict mirrors a real push's skip decision for an already-linked
+// issue (no force flag, no stored-hash hit): fetch the remote and compare
+// content. wouldSkip is true when a real run would leave the issue untouched.
+// detail names the fields an update would change (empty when unknown), so the
+// dry-run preview discloses what an update would actually modify instead of
+// hiding behind "would update".
+func (e *Engine) dryRunPushVerdict(ctx context.Context, issue *types.Issue, externalRef string) (wouldSkip bool, detail string, err error) {
+	extID := e.Tracker.ExtractIdentifier(externalRef)
+	if extID == "" {
+		return false, "", nil
+	}
+
+	extIssue, err := e.Tracker.FetchIssue(ctx, extID)
+	if isRateLimitExhausted(err) {
+		return false, "", fmt.Errorf("sync aborted: %w", err)
+	}
+	if err != nil || extIssue == nil {
+		// A real run falls through to UpdateIssue when its fetch fails; say so.
+		return false, "", nil
+	}
+
+	if e.PushHooks != nil && e.PushHooks.ContentEqual != nil {
+		if e.PushHooks.ContentEqual(issue, extIssue) {
+			return true, "", nil
+		}
+		if e.PushHooks.FieldDiff != nil {
+			return false, strings.Join(e.PushHooks.FieldDiff(issue, extIssue), ", "), nil
+		}
+		return false, "", nil
+	}
+
+	// Default engine logic without a hook: skip when external is same or newer.
+	return !extIssue.UpdatedAt.Before(issue.UpdatedAt), "", nil
+}
+
 func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs map[string]bool) (*PushStats, error) {
 	ctx, span := syncTracer.Start(ctx, "tracker.push",
 		trace.WithAttributes(
@@ -1056,9 +1138,27 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				// Content unchanged since last push: a real run would skip this
 				// issue, so the preview must say so too (gastownhall/beads#4214).
 				stats.Skipped++
-			} else {
-				e.msg("[dry-run] Would update in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
+			} else if forceIDs[issue.ID] {
+				e.msg("[dry-run] Would overwrite in %s (conflict resolution): %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
 				stats.Updated++
+			} else {
+				wouldSkip, detail, err := e.dryRunPushVerdict(ctx, issue, extRef)
+				if err != nil {
+					return stats, err
+				}
+				if wouldSkip {
+					// A real run fetches the remote and skips when it already
+					// matches; the preview must reach the same verdict or every
+					// freshly imported issue shows up as a phantom update.
+					stats.Skipped++
+				} else {
+					suffix := ""
+					if detail != "" {
+						suffix = fmt.Sprintf(" [%s]", detail)
+					}
+					e.msg("[dry-run] Would update in %s%s: %s", e.Tracker.DisplayName(), suffix, ui.SanitizeForTerminal(issue.Title))
+					stats.Updated++
+				}
 			}
 			continue
 		}
