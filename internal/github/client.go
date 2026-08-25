@@ -450,6 +450,45 @@ func (c *Client) AddBlockedBy(ctx context.Context, number, blockingIssueID int) 
 	return nil
 }
 
+// ListIssueComments retrieves all comments on an issue, following pagination.
+func (c *Client) ListIssueComments(ctx context.Context, number int) ([]IssueComment, error) {
+	var allComments []IssueComment
+	page := 1
+
+	for {
+		select {
+		case <-ctx.Done():
+			return allComments, ctx.Err()
+		default:
+		}
+
+		urlStr := fmt.Sprintf("%s%s/issues/%d/comments?per_page=%d&page=%d",
+			c.BaseURL, c.repoPath(), number, MaxPerPage, page)
+
+		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch comments for issue #%d: %w", number, err)
+		}
+
+		var comments []IssueComment
+		if err := json.Unmarshal(respBody, &comments); err != nil {
+			return nil, fmt.Errorf("failed to parse comments response for issue #%d: %w", number, err)
+		}
+		allComments = append(allComments, comments...)
+
+		if nextPageURL(headers) == "" {
+			break
+		}
+		page++
+
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+	}
+
+	return allComments, nil
+}
+
 // ListRepositories retrieves repositories accessible to the authenticated user.
 func (c *Client) ListRepositories(ctx context.Context) ([]Repository, error) {
 	var allRepos []Repository
