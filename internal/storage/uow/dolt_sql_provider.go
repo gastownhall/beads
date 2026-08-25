@@ -3,13 +3,15 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -311,12 +313,47 @@ func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string)
 	}.String()
 }
 
+// pinger is the subset of *sql.DB that pingWithRetry needs, narrowed so
+// tests can script a sequence of transient failures without a real
+// connection.
+type pinger interface {
+	PingContext(ctx context.Context) error
+}
+
+// isTransientPingError reports whether err is a connection-level failure
+// worth retrying — the shapes a Dolt server produces when it drops a
+// connection mid-handshake or mid-ping — as opposed to a durable rejection
+// (bad credentials, unknown database) that retrying cannot fix.
+func isTransientPingError(err error) bool {
+	return errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, mysql.ErrInvalidConn) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF)
+}
+
+// pingWithRetry pings p, retrying transient connection failures under bo and
+// stopping immediately on any other error or context cancellation.
+func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff) error {
+	return backoff.Retry(func() error {
+		err := p.PingContext(ctx)
+		if err == nil {
+			return nil
+		}
+		if isTransientPingError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
+	}, backoff.WithContext(bo, ctx))
+}
+
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
-	if err := conn.PingContext(ctx); err != nil {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxElapsedTime = 30 * time.Second
+	if err := pingWithRetry(ctx, conn, bo); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
