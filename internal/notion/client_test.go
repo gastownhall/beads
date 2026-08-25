@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestClientRetrieveDataSourceSetsHeaders(t *testing.T) {
@@ -220,5 +221,143 @@ func TestResolveDataSourceReferenceFallsBackToDatabase(t *testing.T) {
 	}
 	if resolved.Database == nil || resolved.Database.ID != "429e5bf9-7fae-8080-bb4a-d94e1387655d" {
 		t.Fatalf("database = %+v", resolved.Database)
+	}
+}
+
+func TestClientQueryDataSourceRespectsConfiguredPageBound(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		// Never terminates: the bound is the only thing that can stop this.
+		_, _ = io.WriteString(w, `{"results":[{"id":"p"}],"has_more":true,"next_cursor":"c"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL).WithMaxQueryPages(3)
+	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	if err == nil {
+		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
+	}
+	if calls != 3 {
+		t.Fatalf("requests = %d, want 3 (the configured bound)", calls)
+	}
+	// The row figure is the actionable half: it is what a caller compares
+	// against the size of their data source.
+	if !strings.Contains(err.Error(), "3 pages") || !strings.Contains(err.Error(), "300 rows") {
+		t.Fatalf("error should name the bound in pages and rows, got: %v", err)
+	}
+}
+
+func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		_, _ = io.WriteString(w, `{"results":[{"id":"p"}],"has_more":true,"next_cursor":"c"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	if _, err := client.QueryDataSource(context.Background(), "ds_123"); err == nil {
+		t.Fatal("QueryDataSource succeeded, want pagination-bound error")
+	}
+	if calls != maxQueryPages {
+		t.Fatalf("requests = %d, want the unchanged default %d", calls, maxQueryPages)
+	}
+}
+
+func TestClientRetriesRateLimitedRequestHonouringRetryAfter(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		if calls == 1 {
+			w.Header().Set("Retry-After", "2")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"code":"rate_limited","message":"Rate limited."}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"results":[{"id":"page-1"}],"has_more":false}`)
+	}))
+	defer server.Close()
+
+	var slept []time.Duration
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	client.sleep = func(d time.Duration) { slept = append(slept, d) }
+
+	pages, err := client.QueryDataSource(context.Background(), "ds_123")
+	if err != nil {
+		t.Fatalf("QueryDataSource returned error: %v", err)
+	}
+	if len(pages) != 1 {
+		t.Fatalf("pages = %d, want 1", len(pages))
+	}
+	if calls != 2 {
+		t.Fatalf("requests = %d, want 2 (one rate-limited, one retried)", calls)
+	}
+	if len(slept) != 1 || slept[0] != 2*time.Second {
+		t.Fatalf("slept = %v, want exactly the 2s the Retry-After header asked for", slept)
+	}
+}
+
+func TestClientDoesNotRetryServerErrorOnPost(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		_, _ = io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = io.WriteString(w, `{"code":"internal_server_error","message":"boom"}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	client.sleep = func(time.Duration) { t.Fatal("POST 5xx must not be retried") }
+
+	if _, err := client.QueryDataSource(context.Background(), "ds_123"); err == nil {
+		t.Fatal("QueryDataSource succeeded, want server error")
+	}
+	// Replaying a POST that may already have been applied server-side is how
+	// duplicates get made; one attempt is the correct behaviour.
+	if calls != 1 {
+		t.Fatalf("requests = %d, want 1", calls)
+	}
+}
+
+func TestClientRetriesServerErrorOnGet(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		_, _ = io.WriteString(w, `{"id":"user-1","name":"Ada"}`)
+	}))
+	defer server.Close()
+
+	var slept []time.Duration
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	client.sleep = func(d time.Duration) { slept = append(slept, d) }
+
+	if _, err := client.GetCurrentUser(context.Background()); err != nil {
+		t.Fatalf("GetCurrentUser returned error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("requests = %d, want 2 (GET has no side effects, so it retries)", calls)
+	}
+	// No Retry-After on the 502, so the exponential fallback applies.
+	if len(slept) != 1 || slept[0] != time.Second {
+		t.Fatalf("slept = %v, want the 1s exponential fallback", slept)
 	}
 }
