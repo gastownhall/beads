@@ -331,8 +331,6 @@ func isTransientPingError(err error) bool {
 		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-// pingWithRetry pings p, retrying transient connection failures under bo and
-// stopping immediately on any other error or context cancellation.
 func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff) error {
 	return backoff.Retry(func() error {
 		err := p.PingContext(ctx)
