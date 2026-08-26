@@ -45,6 +45,9 @@ func TestCheckFederationRemotesAPI_NonDoltBackend(t *testing.T) {
 }
 
 func TestCheckFederationRemotesAPI_NoDoltDatabase(t *testing.T) {
+	// The check resolves the shared server when the ambient environment
+	// enables shared mode; this test inspects the per-project layout.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
@@ -73,6 +76,7 @@ func TestCheckFederationRemotesAPI_NoDoltDatabase(t *testing.T) {
 func TestCheckFederationRemotesAPI_ServerNotRunning(t *testing.T) {
 	// Isolate from orchestrator daemon which would be detected as a running server
 	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
@@ -184,6 +188,7 @@ func TestDoltServerConfig_HonorsAutoStartOptOut(t *testing.T) {
 func TestCheckFederationRemotesAPI_PidFileInBeadsDir(t *testing.T) {
 	// Isolate from orchestrator daemon which would be detected as a running server
 	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 
 	// Verify the fix: PID file should be looked for in beadsDir, not doltPath.
 	// The old code had: filepath.Join(doltPath, "dolt-server.pid") which was wrong.
@@ -415,10 +420,10 @@ func TestCheckFederationRemotesAPI_EnvOverridesConfig(t *testing.T) {
 	}
 }
 
-// remotesAPITarget isolates the inputs checkRemotesAPIListener resolves from:
+// remotesAPITarget isolates the inputs resolveFederationRemotesAPITarget reads:
 // the server mode, the user-global dolt.remotesapi-port ("" leaves it unset)
 // and BEADS_DOLT_REMOTESAPI_PORT ("" leaves it unset).
-func remotesAPITarget(t *testing.T, shared bool, userGlobalPort, envPort string) string {
+func remotesAPITarget(t *testing.T, shared bool, userGlobalPort, envPort string) federationRemotesAPITarget {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -440,7 +445,11 @@ func remotesAPITarget(t *testing.T, shared bool, userGlobalPort, envPort string)
 	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return beadsDir
+	target, err := resolveFederationRemotesAPITarget(beadsDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return target
 }
 
 // localTCPPort returns a loopback port, still listening when open is true and
@@ -483,8 +492,8 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 	t.Run("unreachable shared server prescribes a restart", func(t *testing.T) {
 		port := localTCPPort(t, false)
 		check := checkRemotesAPIListener(remotesAPITarget(t, true, strconv.Itoa(port), ""), 4242)
-		if check.Status != StatusError || !strings.Contains(check.Fix, "bd dolt stop && bd dolt start") {
-			t.Fatalf("got %s, Fix %q; want StatusError with the stop/start remedy", check.Status, check.Fix)
+		if check.Status != StatusError || !strings.Contains(check.Fix, "bd dolt restart") || strings.Contains(check.Fix, "bd dolt stop") {
+			t.Fatalf("got %s, Fix %q; want StatusError with the fenced restart remedy", check.Status, check.Fix)
 		}
 	})
 
@@ -496,7 +505,7 @@ func TestCheckRemotesAPIListener(t *testing.T) {
 		}
 		// bd never opens a listener for a per-project server, so a restart
 		// cannot clear this error.
-		if !strings.Contains(check.Fix, "--remotesapi-port "+strconv.Itoa(port)) || strings.Contains(check.Fix, "bd dolt stop") {
+		if !strings.Contains(check.Fix, "--remotesapi-port "+strconv.Itoa(port)) || strings.Contains(check.Fix, "restart") {
 			t.Fatalf("Fix %q must name --remotesapi-port %d and must not prescribe a restart", check.Fix, port)
 		}
 	})
@@ -555,6 +564,9 @@ func TestCheckFederationChecks_CategoryIsFederation(t *testing.T) {
 }
 
 func TestDoltServerConfig_PopulatesFromConfig(t *testing.T) {
+	// Shared mode pins the server host to loopback; this test covers the
+	// per-project host from metadata.json.
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 	tmpDir := t.TempDir()
 	beadsDir := filepath.Join(tmpDir, ".beads")
 	doltDir := filepath.Join(beadsDir, "dolt")
@@ -691,6 +703,7 @@ func TestCheckFederationRemotesAPI_ServerRunningNoPeers(t *testing.T) {
 	// Isolate from orchestrator daemon — we'll simulate "server running" via
 	// a standalone PID file pointing at a real dolt process on the host.
 	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
 
 	// Find a running dolt process on the host to use for the PID file.
 	// This makes doltserver.IsRunning() return true via the standalone path.

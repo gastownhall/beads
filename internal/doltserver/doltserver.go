@@ -1561,7 +1561,7 @@ func adoptRunningServer(serverDir string, state *State) int {
 		// restarted since the setting appeared is an expected state, not a
 		// broken install. Keep the auto-start fast path serving SQL and
 		// surface the gap as a warning; the explicit lifecycle paths
-		// (Start, adoption) still fail hard with the stop/start remedy.
+		// (Start, adoption) still fail hard with the restart remedy.
 		fmt.Fprintf(os.Stderr, "Warning: %v\n", verr)
 	} else {
 		state = verified
@@ -1585,11 +1585,11 @@ func validateDistinctServerPorts(sqlPort, remotesAPIPort int) error {
 func verifyRemotesAPIState(cfg *Config, state *State) (*State, error) {
 	state.RemotesAPIPort = cfg.RemotesAPIPort
 	if err := validateDistinctServerPorts(state.Port, cfg.RemotesAPIPort); err != nil {
-		return nil, fmt.Errorf("%w and run 'bd dolt stop && bd dolt start'", err)
+		return nil, fmt.Errorf("%w and run 'bd dolt restart'", err)
 	}
 	if cfg.RemotesAPIPort > 0 && !ProbeRemotesAPI(cfg.RemotesAPIPort) {
 		return nil, fmt.Errorf(
-			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt stop && bd dolt start' to apply the shared-server setting",
+			"Dolt server is running on SQL port %d, but configured remotesapi port %d is not reachable; run 'bd dolt restart' to apply the shared-server setting",
 			state.Port,
 			cfg.RemotesAPIPort,
 		)
