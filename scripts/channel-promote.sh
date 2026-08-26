@@ -37,6 +37,7 @@ BUMP="auto"
 STAMP=""
 SEQ=""
 BASE_TAG_OVERRIDE=""
+ALLOW_MULTI_MIGRATION=0
 APPLY=0
 
 usage() {
@@ -52,6 +53,11 @@ Options:
   --stamp <YYYYMMDD>     Dev builds only. Defaults to today (UTC).
   --seq <N>              Beta builds only. Defaults to 1, or one past the
                          highest existing beta tag for the same base version.
+  --allow-multi-migration
+                         Beta only. Cut across more than one schema step. The
+                         default refusal exists because twelve forward-only
+                         steps in one release is what broke v1.2.1; override
+                         deliberately or not at all.
   --base-tag <tag>       Compare the schema delta against this tag instead of
                          the nearest ancestor tag. Use when promoting a beta
                          from a prior beta rather than from a stable line.
@@ -74,6 +80,7 @@ while [ $# -gt 0 ]; do
         --stamp)   STAMP="${2:-}"; shift 2 ;;
         --seq)     SEQ="${2:-}"; shift 2 ;;
         --base-tag) BASE_TAG_OVERRIDE="${2:-}"; shift 2 ;;
+        --allow-multi-migration) ALLOW_MULTI_MIGRATION=1; shift ;;
         --apply)   APPLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo -e "${RED}Unknown argument: $1${NC}" >&2; usage >&2; exit 1 ;;
@@ -270,12 +277,20 @@ else
     echo -e "  ${YELLOW}schema delta: ${MIGRATION_COUNT} migration(s) since ${BASE_TAG}${NC}"
     printf '%s\n' "$NEW_MIGRATIONS" | sed 's|^|    |'
     if [ "$CHANNEL" = "beta" ] && [ "$MIGRATION_COUNT" -gt 1 ]; then
-        echo
-        echo -e "  ${RED}BLOCKED: a beta may carry at most one schema step.${NC}"
-        echo "  Twelve forward-only steps in one release is the shape that broke"
-        echo "  v1.2.1. Cut a beta at the first migration boundary instead, or"
-        echo "  override deliberately in the workflow dispatch."
-        exit 1
+        if [ "$ALLOW_MULTI_MIGRATION" -eq 1 ]; then
+            echo
+            echo -e "  ${YELLOW}OVERRIDDEN: cutting a beta across ${MIGRATION_COUNT} schema steps${NC}"
+            echo "  because --allow-multi-migration was passed. Each step is applied"
+            echo "  forward-only on first access, so a user who hits a problem is"
+            echo "  ${MIGRATION_COUNT} steps from the last good schema, not one."
+        else
+            echo
+            echo -e "  ${RED}BLOCKED: a beta may carry at most one schema step.${NC}"
+            echo "  Twelve forward-only steps in one release is the shape that broke"
+            echo "  v1.2.1. Cut a beta at the first migration boundary instead, or"
+            echo "  pass --allow-multi-migration deliberately."
+            exit 1
+        fi
     fi
 fi
 echo
