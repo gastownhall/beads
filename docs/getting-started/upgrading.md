@@ -118,8 +118,8 @@ bd hooks install
 # 3. Check for any outdated hooks
 bd info  # Shows warnings if hooks are outdated
 
-# 4. If using Dolt backend, restart the server
-bd dolt stop && bd dolt start
+# 4. If using server/shared-server mode, restart the Dolt server
+bd dolt restart   # Not applicable to the default embedded backend
 ```
 
 **Why update hooks?** Git hooks are versioned with bd. Outdated hooks may miss export refresh, legacy fallback, or safety fixes.
