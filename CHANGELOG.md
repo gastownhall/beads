@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Release channels — Canary, Dev, Beta, Stable — so that cutting a release is
+  a decision rather than a ceremony** (#5867). A channel is a branch and
+  promotion moves a branch pointer, modelled on Chrome. Canary is `main` built
+  on every merge, published as one rolling prerelease. Dev cuts nightly from a
+  commit that passed the nightly suite. Beta runs the full release gate weekly
+  and carries at most one schema migration, because forward-only steps are the
+  distance a user is from a schema their installed binary can read. Stable
+  promotes a soaked Beta behind the `stable-release` environment, which holds
+  the job until a release maintainer approves — `v*` tag creation stays
+  restricted to release maintainers, so only the labour moves, not the
+  authority. The promotion dossier is generated into `release-gates/<tag>.md`
+  in the existing format, with every figure queried rather than asserted: gate
+  results from the check runs recorded on the candidate, soak from the
+  release's `published_at`, manifest and schema delta from git ancestry.
+  `release.yml` is unchanged — a hyphenated tag already published a prerelease
+  and already reached none of Homebrew, PyPI or npm. See
+  `engdocs/RELEASE-CHANNELS.md`.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
