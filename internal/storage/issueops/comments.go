@@ -13,11 +13,18 @@ import (
 
 // GetIssueCommentsInTx retrieves comments for an issue within an existing
 // transaction. Automatically routes to wisp_comments if the ID is an active wisp.
-//
-//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func GetIssueCommentsInTx(ctx context.Context, tx DBTX, issueID string) ([]*types.Comment, error) {
+	return GetIssueCommentsForPlaneInTx(ctx, tx, issueID, IsActiveWispInTx(ctx, tx, issueID))
+}
+
+// GetIssueCommentsForPlaneInTx retrieves comments from exactly the selected
+// aggregate. It is the relation-hydration counterpart to
+// GetIssueForPlaneInTx for callers that already resolved a dual-resident ID.
+//
+//nolint:gosec // G201: table is one of the two hardcoded comment table names.
+func GetIssueCommentsForPlaneInTx(ctx context.Context, tx DBTX, issueID string, isWisp bool) ([]*types.Comment, error) {
 	table := "comments"
-	if IsActiveWispInTx(ctx, tx, issueID) {
+	if isWisp {
 		table = "wisp_comments"
 	}
 
@@ -282,9 +289,9 @@ func addIssueCommentInTx(ctx context.Context, tx *sql.Tx, issueID, author, text 
 		Text:      text,
 		CreatedAt: stored,
 	}
-	if err := RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+	if err := RecordCommentEventForPlaneInTx(ctx, tx, issueID, &EventComment{
 		ID: id, Author: author, Text: text, CreatedAt: stored, Source: CommentSourceStructured,
-	}); err != nil {
+	}, issueTable == "wisps"); err != nil {
 		return nil, err
 	}
 	return comment, nil
@@ -316,7 +323,7 @@ func AddCommentEventInTx(ctx context.Context, tx DBTX, issueID, actor, comment s
 	// An audit-trail comment is replayable text a consumer must be able to
 	// reproduce, so it carries the same payload as a structured comment,
 	// distinguished by Source.
-	return RecordCommentEventInTx(ctx, tx, issueID, &EventComment{
+	return RecordCommentEventForPlaneInTx(ctx, tx, issueID, &EventComment{
 		ID: id, Author: actor, Text: comment, CreatedAt: stored, Source: CommentSourceAudit,
-	})
+	}, isWisp)
 }

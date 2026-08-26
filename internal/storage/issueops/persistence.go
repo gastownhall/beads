@@ -61,8 +61,21 @@ func MoveIssuePersistenceInTx(ctx context.Context, tx DBTX, current *types.Issue
 		return result, nil
 	}
 	if !sourceWisp && targetWisp {
-		if err := rejectPersistenceDemotion(ctx, tx, current.ID); err != nil {
+		if err := CheckPersistenceDemotionAllowedInTx(ctx, tx, current.ID); err != nil {
 			return PersistenceMoveResult{}, err
+		}
+		// provenance_events has no wisp-plane counterpart and follows its
+		// durable issue through ON DELETE CASCADE. Preserve that established
+		// lifecycle, but report the concrete durable table change so selective
+		// staging cannot leave the removed rows visible at HEAD.
+		var provenanceRows int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM provenance_events WHERE issue_id = ?`, current.ID,
+		).Scan(&provenanceRows); err != nil {
+			return PersistenceMoveResult{}, fmt.Errorf("count provenance events before demotion: %w", err)
+		}
+		if provenanceRows > 0 {
+			result.ChangedTables["provenance_events"] = true
 		}
 	}
 	move := *current
@@ -138,7 +151,11 @@ func persistenceIssueTable(wisp bool) string {
 	return "issues"
 }
 
-func rejectPersistenceDemotion(ctx context.Context, tx DBTX, id string) error {
+// CheckPersistenceDemotionAllowedInTx refuses a move to the wisp plane while
+// durable snapshots still reference the issue. Those tables have no wisp
+// counterpart, and deleting the durable issue would cascade-delete the only
+// restore source.
+func CheckPersistenceDemotionAllowedInTx(ctx context.Context, tx DBTX, id string) error {
 	for _, table := range []string{"issue_snapshots", "compaction_snapshots"} {
 		var count int
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE issue_id = ?`, table), id).Scan(&count); err != nil {

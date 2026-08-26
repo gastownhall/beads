@@ -152,11 +152,11 @@ var journalTransactions sync.Map // map[DBTX]bool; entries live for one transact
 // which binds activation to a concrete tx. This context form exists because the
 // domain/db suite drives repositories over a bare Runner. It is dangerous
 // anywhere else: the seq allocation is an UPDATE followed by a SELECT that MUST
-// observe that UPDATE, so pointing it at a *sql.DB (pooled, autocommit) or at
-// one half of a split transaction would let the two statements land on
-// different connections and silently mint duplicate or out-of-order seqs — the
-// exact failure the counter exists to prevent. journalEnabled refuses the
-// non-transactional case rather than trusting callers.
+// observe that UPDATE, so pointing it at a *sql.DB (pooled, autocommit) could
+// let the two statements land on different connections and silently mint
+// duplicate or out-of-order seqs — the exact failure the counter exists to
+// prevent. journalEnabled refuses the non-transactional case rather than
+// trusting callers.
 func WithEventsJournal(ctx context.Context, enabled bool) context.Context {
 	return context.WithValue(ctx, journalContextKey{}, enabled)
 }
@@ -288,7 +288,7 @@ func recordBlockedJournalChanges(
 		// mark passes) that carry no actor of their own; attributing the
 		// triggering mutation here would mean threading an actor through the
 		// whole blocked-state layer, so these rows record no actor.
-		if err := RecordEventInTx(ctx, tx, EventUpdate, key.id, ""); err != nil {
+		if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, key.id, "", key.table == "wisps"); err != nil {
 			return fmt.Errorf("journal: record derived is_blocked update for %s: %w", key.id, err)
 		}
 	}
@@ -311,6 +311,21 @@ func RecordEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor st
 		return nil
 	}
 	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	return recordEventWithSnapshot(ctx, tx, op, issueID, actor, issue, err)
+}
+
+// RecordEventForPlaneInTx records a mutation snapshot from the caller-selected
+// issue plane. It is required when a facade has already resolved a dual-
+// resident ID; probing again could journal the untouched twin.
+func RecordEventForPlaneInTx(ctx context.Context, tx DBTX, op EventOp, issueID, actor string, isWisp bool) error {
+	if !journalEnabled(ctx, tx) {
+		return nil
+	}
+	issue, err := getJournalIssueForPlaneInTx(ctx, tx, issueID, isWisp)
+	return recordEventWithSnapshot(ctx, tx, op, issueID, actor, issue, err)
+}
+
+func recordEventWithSnapshot(ctx context.Context, tx DBTX, op EventOp, issueID, actor string, issue *types.Issue, err error) error {
 	if err != nil {
 		// The row should exist for a non-delete op; a missing row means the
 		// mutation and the journal disagree, so fail the transaction rather than
@@ -353,6 +368,20 @@ func RecordDepEventInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind,
 		return nil
 	}
 	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	return recordDepEventWithSnapshot(ctx, tx, op, issueID, kind, target, metadata, actor, issue, err)
+}
+
+// RecordDepEventForPlaneInTx is RecordDepEventInTx pinned to the dependency
+// source's selected issue plane.
+func RecordDepEventForPlaneInTx(ctx context.Context, tx DBTX, op EventOp, issueID, kind, target, metadata, actor string, isWisp bool) error {
+	if !journalEnabled(ctx, tx) {
+		return nil
+	}
+	issue, err := getJournalIssueForPlaneInTx(ctx, tx, issueID, isWisp)
+	return recordDepEventWithSnapshot(ctx, tx, op, issueID, kind, target, metadata, actor, issue, err)
+}
+
+func recordDepEventWithSnapshot(ctx context.Context, tx DBTX, op EventOp, issueID, kind, target, metadata, actor string, issue *types.Issue, err error) error {
 	if err != nil {
 		// The dependency source may itself have been deleted (cascade); record
 		// the edge change with a null snapshot rather than failing.
@@ -372,6 +401,20 @@ func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, commen
 		return nil
 	}
 	issue, err := getJournalIssueInTx(ctx, tx, issueID)
+	return recordCommentEventWithSnapshot(ctx, tx, issueID, comment, issue, err)
+}
+
+// RecordCommentEventForPlaneInTx is RecordCommentEventInTx pinned to the
+// commented issue's selected plane.
+func RecordCommentEventForPlaneInTx(ctx context.Context, tx DBTX, issueID string, comment *EventComment, isWisp bool) error {
+	if !journalEnabled(ctx, tx) {
+		return nil
+	}
+	issue, err := getJournalIssueForPlaneInTx(ctx, tx, issueID, isWisp)
+	return recordCommentEventWithSnapshot(ctx, tx, issueID, comment, issue, err)
+}
+
+func recordCommentEventWithSnapshot(ctx context.Context, tx DBTX, issueID string, comment *EventComment, issue *types.Issue, err error) error {
 	if err != nil {
 		return fmt.Errorf("journal: snapshot comment for %s: %w", issueID, err)
 	}
@@ -383,32 +426,35 @@ func RecordCommentEventInTx(ctx context.Context, tx DBTX, issueID string, commen
 // hydration, but it is required in a journal snapshot because a dependency
 // delta must be replayable without re-running graph maintenance.
 func getJournalIssueInTx(ctx context.Context, tx DBTX, issueID string) (*types.Issue, error) {
-	for _, candidate := range []struct {
-		issueTable string
-		labelTable string
-	}{
-		{"issues", "labels"},
-		{"wisps", "wisp_labels"},
-	} {
-		issue, err := getIssueFromTableInTx(ctx, tx, candidate.issueTable, candidate.labelTable, issueID)
+	for _, isWisp := range []bool{false, true} {
+		issue, err := getJournalIssueForPlaneInTx(ctx, tx, issueID, isWisp)
 		if errors.Is(err, storage.ErrNotFound) {
 			continue
 		}
 		if err != nil {
-			if optionalBlockedTable(candidate.issueTable) && isTableNotExistError(err) {
-				continue
-			}
 			return nil, err
 		}
-		var blocked int
-		//nolint:gosec // candidate.issueTable is one of the two hardcoded values above.
-		if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT is_blocked FROM %s WHERE id = ?", candidate.issueTable), issueID).Scan(&blocked); err != nil {
-			return nil, fmt.Errorf("journal: read is_blocked for %s: %w", issueID, err)
-		}
-		issue.IsBlocked = blocked != 0
 		return issue, nil
 	}
 	return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, issueID)
+}
+
+func getJournalIssueForPlaneInTx(ctx context.Context, tx DBTX, issueID string, isWisp bool) (*types.Issue, error) {
+	issueTable, labelTable, _, _ := WispTableRouting(isWisp)
+	issue, err := getIssueFromTableInTx(ctx, tx, issueTable, labelTable, issueID)
+	if err != nil {
+		if optionalBlockedTable(issueTable) && isTableNotExistError(err) {
+			return nil, storage.ErrNotFound
+		}
+		return nil, err
+	}
+	var blocked int
+	//nolint:gosec // issueTable comes from WispTableRouting.
+	if err := tx.QueryRowContext(ctx, fmt.Sprintf("SELECT is_blocked FROM %s WHERE id = ?", issueTable), issueID).Scan(&blocked); err != nil {
+		return nil, fmt.Errorf("journal: read is_blocked for %s from %s: %w", issueID, issueTable, err)
+	}
+	issue.IsBlocked = blocked != 0
+	return issue, nil
 }
 
 // insertEventRow performs the actual INSERT. It is the ONE seam both write

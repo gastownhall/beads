@@ -872,7 +872,6 @@ var doltMetrics struct {
 	poolWaitMs           metric.Float64Histogram
 	claimVerifyLost      metric.Int64Counter
 	claimVerifyRecovered metric.Int64Counter
-	ignoredTxFreshPool   metric.Int64Counter
 }
 
 func init() {
@@ -920,10 +919,6 @@ func init() {
 	doltMetrics.claimVerifyRecovered, _ = m.Int64Counter("bd.claim_verify_recovered_total",
 		metric.WithDescription("Indeterminate claim-family commits resolved by re-read (label: op, outcome=applied|replayed)"),
 		metric.WithUnit("{write}"),
-	)
-	doltMetrics.ignoredTxFreshPool, _ = m.Int64Counter("bd.db.ignored_tx_fresh_pool",
-		metric.WithDescription("ignored-tx transactions that fell back to a dedicated single-connection pool instead of borrowing from the main pool"),
-		metric.WithUnit("{tx}"),
 	)
 }
 

@@ -14,7 +14,7 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 		return fmt.Errorf("wisp %s not found", id)
 	}
 
-	issue, err := GetIssueInTx(ctx, tx, id)
+	issue, err := GetIssueForPlaneInTx(ctx, tx, id, true)
 	if err != nil {
 		return fmt.Errorf("get wisp for promote: %w", err)
 	}
@@ -105,6 +105,29 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 		return fmt.Errorf("delete copied wisp comments for promoted wisp %s: %w", id, err)
 	}
 
+	// A parent keeps allocating hierarchical child IDs after promotion. Move
+	// its counter with the rest of the aggregate so the next durable child does
+	// not reuse an ID that was already allocated while the parent was a wisp.
+	// Tolerate a pre-existing durable counter by preserving the larger value;
+	// old repair migrations could leave both rows behind.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO child_counters (parent_id, last_child)
+		SELECT parent_id, last_child FROM wisp_child_counters WHERE parent_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("copy child counter for promoted wisp %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE child_counters cc
+		JOIN wisp_child_counters wcc ON wcc.parent_id = cc.parent_id
+		SET cc.last_child = GREATEST(cc.last_child, wcc.last_child)
+		WHERE wcc.parent_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("merge child counter for promoted wisp %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM wisp_child_counters WHERE parent_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied child counter for promoted wisp %s: %w", id, err)
+	}
+
 	if err := RetargetInboundDependenciesToIssueInTx(ctx, tx, id); err != nil {
 		return err
 	}
@@ -132,7 +155,7 @@ func PromoteFromEphemeralInTx(ctx context.Context, tx DBTX, id string, actor str
 	// The bead keeps its ID across promotion; only its plane changes. Journal
 	// one update carrying the now-durable snapshot, after derived blocked-state
 	// maintenance has settled.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, false); err != nil {
 		return err
 	}
 	return nil

@@ -35,6 +35,19 @@ func GetIssueInTx(ctx context.Context, tx DBTX, id string) (*types.Issue, error)
 	return nil, err
 }
 
+// GetIssueForPlaneInTx retrieves id from exactly the caller-selected issue
+// plane, including that plane's labels. Mutation facades use it after they
+// have resolved a dual-resident ID so their preimage, CAS, audit event, and
+// journal snapshot cannot silently switch to the sibling aggregate.
+func GetIssueForPlaneInTx(ctx context.Context, tx DBTX, id string, isWisp bool) (*types.Issue, error) {
+	issueTable, labelTable, _, _ := WispTableRouting(isWisp)
+	issue, err := getIssueFromTableInTx(ctx, tx, issueTable, labelTable, id)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	return issue, err
+}
+
 // missingOptionalIssueTable reports whether err is the absence of the optional
 // issue plane the hydration query just read. The hydration FROM clause also
 // carries sqlbuild.LeaseJoin, so a blanket table-not-exist check here folds a

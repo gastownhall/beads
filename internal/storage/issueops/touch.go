@@ -41,6 +41,27 @@ func TouchIssueInTx(ctx context.Context, tx DBTX, id, actor string) (*TouchIssue
 	if err != nil {
 		return nil, fmt.Errorf("read issue before touch: %w", err)
 	}
+	return touchIssueForPlaneInTx(ctx, tx, id, actor, isWisp, oldIssue)
+}
+
+// TouchIssueForPlaneInTx publishes a fresh revision on the caller-selected
+// storage plane. A facade that already resolved a dual-resident ID uses this
+// form so the read, mutation, audit event, and journal snapshot stay on the
+// same aggregate. The ordinary TouchIssueInTx path retains its established
+// issues-first classification.
+func TouchIssueForPlaneInTx(ctx context.Context, tx DBTX, id, actor string, isWisp bool) (*TouchIssueResult, error) {
+	issueTable, labelTable, _, _ := WispTableRouting(isWisp)
+	oldIssue, err := getIssueFromTableInTx(ctx, tx, issueTable, labelTable, id)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read issue before touch: %w", err)
+	}
+	return touchIssueForPlaneInTx(ctx, tx, id, actor, isWisp, oldIssue)
+}
+
+func touchIssueForPlaneInTx(ctx context.Context, tx DBTX, id, actor string, isWisp bool, oldIssue *types.Issue) (*TouchIssueResult, error) {
 
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 	nextRowLock := freshRowLock()
@@ -70,7 +91,7 @@ func TouchIssueInTx(ctx context.Context, tx DBTX, id, actor string) (*TouchIssue
 	if err := RecordFullEventInTable(ctx, tx, eventTable, id, types.EventUpdated, actor, string(oldData), "{}"); err != nil {
 		return nil, fmt.Errorf("record touch event: %w", err)
 	}
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, isWisp); err != nil {
 		return nil, err
 	}
 	return &TouchIssueResult{IsWisp: isWisp}, nil

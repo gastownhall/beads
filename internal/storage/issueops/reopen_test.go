@@ -43,8 +43,8 @@ func TestReopenIssueInTxRetriesConditionalUpdateWhenLatestStatusIsCustomDone(t *
 		WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("archived", string(types.CategoryDone)))
 
 	// A fresh custom done status after the conditional miss must be retried, not
-	// reported as an unchanged reopen.
-	expectInactiveWisp()
+	// reported as an unchanged reopen. The retry remains pinned to the plane
+	// selected at entry, so it does not probe wisps a second time.
 	expectStatus("archived")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT name, category FROM custom_statuses ORDER BY name")).
 		WillReturnRows(sqlmock.NewRows([]string{"name", "category"}).AddRow("archived", string(types.CategoryDone)))
@@ -171,13 +171,13 @@ func TestReopenIssueInTxReportsConcurrentChangeAfterRetryExhaustion(t *testing.T
 		}
 	}
 	expectAttempt := func() {
-		expectInactiveWisp()
 		expectStatus()
 		expectAffectedQueries()
 		mock.ExpectExec(`(?s)UPDATE issues\s+SET status`).WillReturnResult(sqlmock.NewResult(0, 0))
 		expectStatus()
 	}
 
+	expectInactiveWisp()
 	expectAttempt()
 	expectAttempt()
 	mock.ExpectRollback()

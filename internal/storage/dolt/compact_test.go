@@ -720,6 +720,18 @@ func TestApplyCompaction(t *testing.T) {
 	if retrieved.CompactedAt == nil {
 		t.Error("expected compacted_at to be set")
 	}
+
+	var headLevel, headOriginalSize int
+	var headCommit string
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT compaction_level, original_size, compacted_at_commit
+		FROM issues AS OF 'HEAD' WHERE id = ?
+	`, issue.ID).Scan(&headLevel, &headOriginalSize, &headCommit); err != nil {
+		t.Fatalf("read compaction metadata AS OF HEAD: %v", err)
+	}
+	if headLevel != 1 || headOriginalSize != 5000 || headCommit != "abc123" {
+		t.Fatalf("compaction metadata AS OF HEAD = level:%d size:%d commit:%q, want 1/5000/abc123", headLevel, headOriginalSize, headCommit)
+	}
 }
 
 // =============================================================================
@@ -820,6 +832,15 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	if err := store.SnapshotIssue(ctx, issue.ID, 1); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
+	var headSnapshots int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM compaction_snapshots AS OF 'HEAD' WHERE issue_id = ?`, issue.ID,
+	).Scan(&headSnapshots); err != nil {
+		t.Fatalf("read snapshot AS OF HEAD: %v", err)
+	}
+	if headSnapshots != 1 {
+		t.Fatalf("snapshot rows AS OF HEAD = %d, want 1", headSnapshots)
+	}
 	updates := map[string]interface{}{
 		"description": "summary", "design": "", "notes": "", "acceptance_criteria": "",
 	}
@@ -828,6 +849,15 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 	if err := store.ApplyCompaction(ctx, issue.ID, 1, 100, 7, "deadbeef"); err != nil {
 		t.Fatalf("apply compaction: %v", err)
+	}
+	var compactedHeadLevel int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT compaction_level FROM issues AS OF 'HEAD' WHERE id = ?`, issue.ID,
+	).Scan(&compactedHeadLevel); err != nil {
+		t.Fatalf("read compacted issue AS OF HEAD: %v", err)
+	}
+	if compactedHeadLevel != 1 {
+		t.Fatalf("compaction level AS OF HEAD = %d, want 1", compactedHeadLevel)
 	}
 
 	// Snapshot preserves the originals.
@@ -864,5 +894,15 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 	if got.CompactionLevel != 0 {
 		t.Fatalf("expected compaction_level reset to 0, got %d", got.CompactionLevel)
+	}
+	var headDescription string
+	var restoredHeadLevel int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT description, compaction_level FROM issues AS OF 'HEAD' WHERE id = ?
+	`, issue.ID).Scan(&headDescription, &restoredHeadLevel); err != nil {
+		t.Fatalf("read restored issue AS OF HEAD: %v", err)
+	}
+	if headDescription != "the original description" || restoredHeadLevel != 0 {
+		t.Fatalf("restored issue AS OF HEAD = description:%q level:%d", headDescription, restoredHeadLevel)
 	}
 }

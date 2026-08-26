@@ -136,26 +136,27 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	// The plane restriction is resolved HERE, inside the update's own
 	// transaction, so a caller that serves durable issues only cannot be handed
 	// a wisp by a resolve that ran earlier.
-	if attempt.IssuePlaneOnly && IsActiveWispInTx(ctx, tx, attempt.IssueID) {
+	selectedWisp := IsActiveWispInTx(ctx, tx, attempt.IssueID)
+	if attempt.IssuePlaneOnly && selectedWisp {
 		return publicops.UpdateResult{}, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, attempt.IssueID)
 	}
 	tables := ChangedTables{}
-	before, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+	before, err := GetIssueForPlaneInTx(ctx, tx, attempt.IssueID, selectedWisp)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
 	if attempt.ExpectedVersion != nil {
-		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+		if err := CheckVersionForPlaneInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion, selectedWisp); err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
 	}
 	if attempt.ExpectedStatus != nil {
 		status := string(*attempt.ExpectedStatus)
 		attempt.ExpectedStatus = nil
-		if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, &status); err != nil {
+		if err := CheckExpectedFieldsForPlaneInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, &status, selectedWisp); err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
-	} else if err := CheckExpectedFieldsInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil); err != nil {
+	} else if err := CheckExpectedFieldsForPlaneInTx(ctx, tx, attempt.IssueID, attempt.ExpectedAssignee, nil, selectedWisp); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
@@ -175,7 +176,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	current := before
 	if attempt.Claim {
-		current, err = GetIssueInTx(ctx, tx, attempt.IssueID)
+		current, err = GetIssueForPlaneInTx(ctx, tx, attempt.IssueID, selectedWisp)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -201,7 +202,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		updates[OpForceClosePolicy] = true
 	}
 	if len(updates) > 0 {
-		updated, err := UpdateIssueInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor)
+		updated, err := UpdateIssueForPlaneInTx(ctx, tx, attempt.IssueID, updates, attempt.Actor, selectedWisp)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -220,7 +221,7 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	if labelsChanged {
 		changedAny = true
-		_, labelTable, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		_, labelTable, eventTable, _ := WispTableRouting(selectedWisp)
 		tables.Add(labelTable, eventTable)
 	}
 	parentResult, err := ApplyParentPatch(ctx, tx, current, attempt.Patch.ParentID, attempt.Actor)
@@ -229,14 +230,14 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	}
 	if parentResult.Changed {
 		changedAny = true
-		_, _, _, dependencyTable := WispTableRouting(IsActiveWispInTx(ctx, tx, attempt.IssueID))
+		_, _, _, dependencyTable := WispTableRouting(selectedWisp)
 		tables.Add(dependencyTable)
 		if parentResult.IssueRowsChanged {
 			tables.Add("issues")
 		}
 	}
 	if attempt.Patch.Persistence.Set {
-		current, err := GetIssueInTx(ctx, tx, attempt.IssueID)
+		current, err := GetIssueForPlaneInTx(ctx, tx, attempt.IssueID, selectedWisp)
 		if err != nil {
 			return publicops.UpdateResult{}, nil, err
 		}
@@ -247,9 +248,13 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 		if moved.Changed {
 			changedAny = true
 			tables.Merge(moved.ChangedTables)
+			// A persistence move deliberately changes the aggregate's plane.
+			// Resolve that one explicit transition before final hydration; all
+			// guards and writes above remained pinned to the entry plane.
+			selectedWisp = IsActiveWispInTx(ctx, tx, attempt.IssueID)
 		}
 	}
-	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	hydrated, err := HydrateIssueOperationResultForPlane(ctx, tx, attempt.IssueID, false, selectedWisp)
 	if err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
@@ -275,7 +280,8 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.CloseResult{}, nil, fmt.Errorf("%w: close requires actor and issue ID", storage.ErrValidation)
 	}
-	closed, err := CloseIssueCheckedInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, attempt.Session, attempt.Force, attempt.ExpectedVersion)
+	selectedWisp := IsActiveWispInTx(ctx, tx, attempt.IssueID)
+	closed, err := CloseIssueCheckedForPlaneInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, attempt.Session, attempt.Force, attempt.ExpectedVersion, selectedWisp)
 	if err != nil {
 		return publicops.CloseResult{}, nil, err
 	}
@@ -288,7 +294,7 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	if closed.IssueRowsChanged {
 		tables.Add("issues")
 	}
-	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	hydrated, err := HydrateIssueOperationResultForPlane(ctx, tx, attempt.IssueID, false, selectedWisp)
 	if err != nil {
 		return publicops.CloseResult{}, nil, err
 	}
@@ -301,12 +307,13 @@ func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequ
 	if attempt.Actor == "" || attempt.IssueID == "" {
 		return publicops.ReopenResult{}, nil, fmt.Errorf("%w: reopen requires actor and issue ID", storage.ErrValidation)
 	}
+	selectedWisp := IsActiveWispInTx(ctx, tx, attempt.IssueID)
 	if attempt.ExpectedVersion != nil {
-		if err := CheckVersionInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion); err != nil {
+		if err := CheckVersionForPlaneInTx(ctx, tx, attempt.IssueID, *attempt.ExpectedVersion, selectedWisp); err != nil {
 			return publicops.ReopenResult{}, nil, err
 		}
 	}
-	reopened, err := ReopenIssueInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor)
+	reopened, err := ReopenIssueForPlaneInTx(ctx, tx, attempt.IssueID, attempt.Reason, attempt.Actor, selectedWisp)
 	if err != nil {
 		return publicops.ReopenResult{}, nil, err
 	}
@@ -318,7 +325,7 @@ func ExecuteReopen(ctx context.Context, tx *sql.Tx, request publicops.ReopenRequ
 	if reopened.IssueRowsChanged {
 		tables.Add("issues")
 	}
-	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
+	hydrated, err := HydrateIssueOperationResultForPlane(ctx, tx, attempt.IssueID, false, selectedWisp)
 	if err != nil {
 		return publicops.ReopenResult{}, nil, err
 	}

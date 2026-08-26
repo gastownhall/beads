@@ -270,10 +270,9 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 }
 
 // CreateIssuesInTxWithContext is CreateIssuesInTxWithResult with a
-// caller-supplied BatchContext. Callers that split config reads from row
-// writes across SQL sessions (doltTransaction's wisp tier) build the context
-// on the session that sees in-transaction config writes and pass it here.
-// The caller's bc is not modified, so one context can serve several calls.
+// caller-supplied BatchContext. Transaction facades can read validation config
+// once, then reuse it while processing durable and wisp subsets. The caller's
+// bc is not modified, so one context can serve several calls.
 func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext, issues []*types.Issue, actor string) (CreateIssuesResult, error) {
 	opts := bc.Opts
 	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)

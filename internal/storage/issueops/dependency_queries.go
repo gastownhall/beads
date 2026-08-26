@@ -904,25 +904,48 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID st
 //
 //nolint:gosec // G201: table names are hardcoded constants.
 func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string, error) {
-	var blocked bool
-	found := false
-	for _, table := range []string{"issues", "wisps"} {
+	for _, candidate := range []struct {
+		table  string
+		isWisp bool
+	}{
+		{table: "issues"},
+		{table: "wisps", isWisp: true},
+	} {
 		var b int
-		//nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
-		err := tx.QueryRowContext(ctx, "SELECT is_blocked FROM "+table+" WHERE id = ?", issueID).Scan(&b)
+		err := tx.QueryRowContext(ctx, "SELECT is_blocked FROM "+candidate.table+" WHERE id = ?", issueID).Scan(&b)
 		if err == nil {
-			blocked = b != 0
-			found = true
-			break
+			return isBlockedAfterRead(ctx, tx, issueID, b != 0, []string{"dependencies", "wisp_dependencies"})
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			if optionalBlockedTable(table) && isTableNotExistError(err) {
+			if optionalBlockedTable(candidate.table) && isTableNotExistError(err) {
 				continue
 			}
-			return false, nil, fmt.Errorf("read is_blocked from %s: %w", table, err)
+			return false, nil, fmt.Errorf("read is_blocked from %s: %w", candidate.table, err)
 		}
 	}
-	if !found || !blocked {
+	return false, nil, nil
+}
+
+// IsBlockedForPlaneInTx evaluates the direct-blocker policy for the selected
+// aggregate. The explicit plane is required by callers that have already
+// resolved a dual-resident ID; probing again would let the policy read the
+// durable twin while the lifecycle write targets the wisp (or vice versa).
+func IsBlockedForPlaneInTx(ctx context.Context, tx DBTX, issueID string, isWisp bool) (bool, []string, error) {
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	var b int
+	err := tx.QueryRowContext(ctx, "SELECT is_blocked FROM "+issueTable+" WHERE id = ?", issueID).Scan(&b)
+	if errors.Is(err, sql.ErrNoRows) || (optionalBlockedTable(issueTable) && isTableNotExistError(err)) {
+		return false, nil, nil
+	}
+	if err != nil {
+		return false, nil, fmt.Errorf("read is_blocked from %s: %w", issueTable, err)
+	}
+	_, _, _, depTable := WispTableRouting(isWisp)
+	return isBlockedAfterRead(ctx, tx, issueID, b != 0, []string{depTable})
+}
+
+func isBlockedAfterRead(ctx context.Context, tx DBTX, issueID string, blocked bool, depTables []string) (bool, []string, error) {
+	if !blocked {
 		return false, nil, nil
 	}
 
@@ -930,7 +953,7 @@ func IsBlockedInTx(ctx context.Context, tx DBTX, issueID string) (bool, []string
 		dependsOnID, depType string
 	}
 	var edges []depEdge
-	for _, depTable := range []string{"dependencies", "wisp_dependencies"} {
+	for _, depTable := range depTables {
 		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
 			SELECT %s AS depends_on_id, type FROM %s
 			WHERE issue_id = ? AND type IN ('blocks', 'waits-for', 'conditional-blocks')
@@ -1016,6 +1039,26 @@ func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]
 			}
 			return nil, err
 		}
+	}
+	return blocked, nil
+}
+
+// IsBlockedBatchForPlaneInTx reads the stored blocked flag only from the
+// caller-selected issue plane. Transaction facades use it after partitioning
+// IDs wisp-first so a dual-resident ID cannot be silently replaced by the
+// durable-first collision rule of IsBlockedBatchInTx.
+func IsBlockedBatchForPlaneInTx(ctx context.Context, tx DBTX, ids []string, isWisp bool) (map[string]bool, error) {
+	blocked := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return blocked, nil
+	}
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	seen := make(map[string]bool, len(ids))
+	if err := readIsBlockedIntoFromTable(ctx, tx, issueTable, ids, seen, blocked); err != nil {
+		if optionalBlockedTable(issueTable) && isTableNotExistError(err) {
+			return blocked, nil
+		}
+		return nil, err
 	}
 	return blocked, nil
 }

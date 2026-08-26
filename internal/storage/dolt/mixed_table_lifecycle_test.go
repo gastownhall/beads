@@ -3,6 +3,7 @@ package dolt
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -164,6 +165,129 @@ func TestDemoteToWispLeavesIgnoredWispTablesUnstaged(t *testing.T) {
 	}
 }
 
+func TestDemoteToWispPreservesChildCounterAndPublishesDurableRemoval(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const id = "mixed-demote-counter"
+	createPerm(t, ctx, store, id)
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO child_counters (parent_id, last_child) VALUES (?, 7)`, id,
+	); err != nil {
+		t.Fatalf("seed durable child counter: %v", err)
+	}
+	if err := store.doltAddAndCommit(ctx, []string{"child_counters"}, "test: seed demotion counter"); err != nil {
+		t.Fatalf("commit durable child counter: %v", err)
+	}
+
+	if err := store.UpdateIssue(ctx, id, map[string]interface{}{"no_history": true}, "tester"); err != nil {
+		t.Fatalf("demote issue: %v", err)
+	}
+
+	var wispCounter, durableWorking, durableHead int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ? AND last_child = 7`, id,
+	).Scan(&wispCounter); err != nil {
+		t.Fatalf("read wisp child counter: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM child_counters WHERE parent_id = ?`, id,
+	).Scan(&durableWorking); err != nil {
+		t.Fatalf("read working durable child counter: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM child_counters AS OF 'HEAD' WHERE parent_id = ?`, id,
+	).Scan(&durableHead); err != nil {
+		t.Fatalf("read durable child counter AS OF HEAD: %v", err)
+	}
+	if wispCounter != 1 || durableWorking != 0 || durableHead != 0 {
+		t.Fatalf("counters after demotion = wisp:%d durable working/HEAD:%d/%d, want 1/0/0", wispCounter, durableWorking, durableHead)
+	}
+}
+
+func TestDemoteToWispRefusesRetainedSnapshotsAtomically(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		table   string
+		seedSQL string
+	}{
+		{
+			name:  "issue-snapshot",
+			table: "issue_snapshots",
+			seedSQL: `INSERT INTO issue_snapshots
+				(id, issue_id, snapshot_time, compaction_level, original_size, compressed_size, original_content, archived_events)
+				VALUES ('11111111-1111-1111-1111-111111111111', ?, NOW(), 1, 10, 5, 'original', '[]')`,
+		},
+		{
+			name:  "compaction-snapshot",
+			table: "compaction_snapshots",
+			seedSQL: `INSERT INTO compaction_snapshots
+				(id, issue_id, compaction_level, snapshot_json, created_at)
+				VALUES ('22222222-2222-2222-2222-222222222222', ?, 1, '{}', NOW())`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, cleanup := setupTestStore(t)
+			defer cleanup()
+			ctx, cancel := testContext(t)
+			defer cancel()
+
+			id := "mixed-demote-retained-" + tc.name
+			createPerm(t, ctx, store, id)
+			if _, err := store.db.ExecContext(ctx, tc.seedSQL, id); err != nil {
+				t.Fatalf("seed %s: %v", tc.table, err)
+			}
+			if err := store.doltAddAndCommit(ctx, []string{tc.table}, "test: seed retained snapshot"); err != nil {
+				t.Fatalf("commit %s: %v", tc.table, err)
+			}
+
+			err := store.UpdateIssue(ctx, id, map[string]interface{}{
+				"no_history": true,
+				"title":      "must roll back",
+			}, "tester")
+			if err == nil || !strings.Contains(err.Error(), "cannot demote issue "+id+" with retained snapshots") {
+				t.Fatalf("UpdateIssue error = %v, want retained-snapshot refusal", err)
+			}
+
+			got, err := store.GetIssue(ctx, id)
+			if err != nil {
+				t.Fatalf("GetIssue after refusal: %v", err)
+			}
+			if got.NoHistory || got.Ephemeral || got.Title == "must roll back" {
+				t.Fatalf("issue changed despite refused demotion: %+v", got)
+			}
+
+			var snapshotWorking, snapshotHead, issueWorking, issueHead, wispWorking int
+			if err := store.db.QueryRowContext(ctx,
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE issue_id = ?`, tc.table), id,
+			).Scan(&snapshotWorking); err != nil {
+				t.Fatalf("read working %s: %v", tc.table, err)
+			}
+			if err := store.db.QueryRowContext(ctx,
+				fmt.Sprintf(`SELECT COUNT(*) FROM %s AS OF 'HEAD' WHERE issue_id = ?`, tc.table), id,
+			).Scan(&snapshotHead); err != nil {
+				t.Fatalf("read %s AS OF HEAD: %v", tc.table, err)
+			}
+			if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, id).Scan(&issueWorking); err != nil {
+				t.Fatalf("read working issue: %v", err)
+			}
+			if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = ?`, id).Scan(&issueHead); err != nil {
+				t.Fatalf("read issue AS OF HEAD: %v", err)
+			}
+			if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM wisps WHERE id = ?`, id).Scan(&wispWorking); err != nil {
+				t.Fatalf("read working wisp: %v", err)
+			}
+			if snapshotWorking != 1 || snapshotHead != 1 || issueWorking != 1 || issueHead != 1 || wispWorking != 0 {
+				t.Fatalf("rows after refused demotion = snapshot working/HEAD:%d/%d issue working/HEAD:%d/%d wisp:%d, want 1/1 1/1 0",
+					snapshotWorking, snapshotHead, issueWorking, issueHead, wispWorking)
+			}
+		})
+	}
+}
+
 func TestPromoteFromEphemeralPreservesInboundDependencies(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
@@ -202,6 +326,46 @@ func TestPromoteFromEphemeralPreservesInboundDependencies(t *testing.T) {
 	}
 
 	assertDependencyTargetColumns(t, store, "dependencies", "mixed-promote-src", "mixed-promote-target", true)
+}
+
+func TestPromoteFromEphemeralPreservesChildCounterAndPublishesIt(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	const id = "mixed-promote-counter"
+	createWisp(t, ctx, store, id)
+	if _, err := store.db.ExecContext(ctx,
+		`INSERT INTO wisp_child_counters (parent_id, last_child) VALUES (?, 7)`, id,
+	); err != nil {
+		t.Fatalf("seed wisp child counter: %v", err)
+	}
+
+	if err := store.PromoteFromEphemeral(ctx, id, "tester"); err != nil {
+		t.Fatalf("PromoteFromEphemeral: %v", err)
+	}
+
+	var wispCounter, durableWorking, durableHead int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM wisp_child_counters WHERE parent_id = ?`, id,
+	).Scan(&wispCounter); err != nil {
+		t.Fatalf("read wisp child counter: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM child_counters WHERE parent_id = ? AND last_child = 7`, id,
+	).Scan(&durableWorking); err != nil {
+		t.Fatalf("read working durable child counter: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM child_counters AS OF 'HEAD' WHERE parent_id = ? AND last_child = 7`, id,
+	).Scan(&durableHead); err != nil {
+		t.Fatalf("read durable child counter AS OF HEAD: %v", err)
+	}
+	if wispCounter != 0 || durableWorking != 1 || durableHead != 1 {
+		t.Fatalf("counters after promotion = wisp:%d durable working/HEAD:%d/%d, want 0/1/1", wispCounter, durableWorking, durableHead)
+	}
 }
 
 func TestPromoteFromEphemeralRejectsCrossTypedTargetCollision(t *testing.T) {

@@ -15,16 +15,29 @@ type DirtyTableTracker struct {
 	tables map[string]bool
 }
 
-// MarkDirty records that a tracked table was modified.
-// Dolt-ignored tables (wisps, wisp_*) are skipped since they cannot be staged.
+// MarkDirty records that a tracked table was modified. Clone-local tables in
+// the canonical dolt_ignore set are skipped: they commit with the SQL
+// transaction but can never be staged into history.
 func (t *DirtyTableTracker) MarkDirty(table string) {
-	if table == "wisps" || strings.HasPrefix(table, "wisp_") {
+	if isDoltIgnoredTable(table) {
 		return
 	}
 	if t.tables == nil {
 		t.tables = make(map[string]bool)
 	}
 	t.tables[table] = true
+}
+
+func isDoltIgnoredTable(table string) bool {
+	if table == "wisps" || strings.HasPrefix(table, "wisp_") {
+		return true
+	}
+	switch table {
+	case "bd_events_journal", "bd_events_seq", "events", "ignored_schema_migrations", "leases", "local_metadata", "repo_mtimes":
+		return true
+	default:
+		return false
+	}
 }
 
 // DirtyTables returns the set of tables that were modified.

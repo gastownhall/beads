@@ -283,7 +283,7 @@ func waitForTransactionRelease(ctx context.Context, release <-chan struct{}) err
 	}
 }
 
-func TestRunInTransactionIgnoredWritesStayOnActiveBranch(t *testing.T) {
+func TestRunInTransactionWispWritesStayOnActiveBranch(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 
@@ -298,7 +298,7 @@ func TestRunInTransactionIgnoredWritesStayOnActiveBranch(t *testing.T) {
 	wispID := "test-wisp-branch-local"
 	wisp := &types.Issue{
 		ID:        wispID,
-		Title:     "branch-local ignored tx wisp",
+		Title:     "branch-local transaction wisp",
 		Status:    types.StatusOpen,
 		Priority:  2,
 		IssueType: types.TypeTask,
@@ -326,9 +326,18 @@ func TestRunInTransactionIgnoredWritesStayOnActiveBranch(t *testing.T) {
 func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+	store.SetEventsJournalEnabled(false)
 
 	ctx, cancel := testContext(t)
 	defer cancel()
+	clearJournal(t, store)
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("test store MaxOpenConnections = %d, want 1", got)
+	}
+	headBefore, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before wisp-only transaction: %v", err)
+	}
 
 	createdAt := time.Date(2026, 5, 22, 6, 0, 0, 0, time.UTC)
 	wisp := &types.Issue{
@@ -364,6 +373,87 @@ func TestRunInTransactionWispCreatePersistsInitialSideTables(t *testing.T) {
 	}
 	if labelEventCount != 2 {
 		t.Fatalf("wisp label event count for %s = %d, want 2", wisp.ID, labelEventCount)
+	}
+
+	headAfter, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after wisp-only transaction: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Fatalf("wisp-only transaction changed HEAD from %s to %s", headBefore, headAfter)
+	}
+	var headWisp, ignoredStatus, journalRows int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM wisps AS OF 'HEAD' WHERE id = ?", wisp.ID,
+	).Scan(&headWisp); err != nil {
+		t.Fatalf("read wisp AS OF HEAD: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM dolt_status
+		WHERE table_name IN ('wisps', 'wisp_labels', 'wisp_comments', 'wisp_events', 'wisp_child_counters', 'wisp_dependencies')
+	`).Scan(&ignoredStatus); err != nil {
+		t.Fatalf("read ignored-table dolt_status: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&journalRows); err != nil {
+		t.Fatalf("read disabled events journal: %v", err)
+	}
+	if headWisp != 0 || ignoredStatus != 0 || journalRows != 0 {
+		t.Fatalf("wisp-only history = HEAD rows:%d dolt_status:%d journal:%d, want 0/0/0", headWisp, ignoredStatus, journalRows)
+	}
+}
+
+func TestRunInTransactionCallbackErrorRollsBackDurableAndWispPlanes(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	store.SetEventsJournalEnabled(false)
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+	clearJournal(t, store)
+	headBefore, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before rollback probe: %v", err)
+	}
+
+	regular := crossTierRegularIssue("tx-unified-rollback-regular", "rollback regular")
+	wisp := crossTierWispIssue("tx-unified-rollback-wisp", "rollback wisp")
+	sentinel := errors.New("deliberate unified transaction rollback")
+	err = store.RunInTransaction(ctx, "test: roll back both issue planes", func(tx storage.Transaction) error {
+		if err := tx.CreateIssue(ctx, regular, "tester"); err != nil {
+			return err
+		}
+		if err := tx.CreateIssue(ctx, wisp, "tester"); err != nil {
+			return err
+		}
+		if err := tx.AddLabel(ctx, regular.ID, "rolled-back", "tester"); err != nil {
+			return err
+		}
+		if err := tx.AddLabel(ctx, wisp.ID, "rolled-back", "tester"); err != nil {
+			return err
+		}
+		return sentinel
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("RunInTransaction error = %v, want rollback sentinel", err)
+	}
+
+	assertIssueCount(ctx, t, store.db, regular.ID, 0)
+	assertWispCount(ctx, t, store.db, wisp.ID, 0)
+	assertTableCount(ctx, t, store.db, "labels", regular.ID, 0)
+	assertTableCount(ctx, t, store.db, "wisp_labels", wisp.ID, 0)
+	headAfter, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after rollback probe: %v", err)
+	}
+	if headAfter != headBefore {
+		t.Fatalf("rolled-back transaction changed HEAD from %s to %s", headBefore, headAfter)
+	}
+	var journalRows int
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&journalRows); err != nil {
+		t.Fatalf("read disabled journal after rollback: %v", err)
+	}
+	if journalRows != 0 {
+		t.Fatalf("journal rows after rollback = %d, want 0", journalRows)
 	}
 }
 
@@ -547,9 +637,18 @@ func assertEventsNotCommitted(ctx context.Context, t *testing.T, db *sql.DB) {
 func TestRunInTransactionCreateIssuesMixedWispReadYourWrites(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+	store.SetEventsJournalEnabled(false)
 
 	ctx, cancel := testContext(t)
 	defer cancel()
+	clearJournal(t, store)
+	if got := store.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("test store MaxOpenConnections = %d, want 1", got)
+	}
+	headBefore, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit before mixed transaction: %v", err)
+	}
 
 	regular := &types.Issue{
 		ID:        "test-mixed-batch-regular",
@@ -596,6 +695,30 @@ func TestRunInTransactionCreateIssuesMixedWispReadYourWrites(t *testing.T) {
 	assertIssueCount(ctx, t, store.db, regular.ID, 1)
 	assertWispCount(ctx, t, store.db, wisp.ID, 1)
 	assertTableCount(ctx, t, store.db, "wisp_labels", wisp.ID, 2)
+	headAfter, err := store.GetCurrentCommit(ctx)
+	if err != nil {
+		t.Fatalf("GetCurrentCommit after mixed transaction: %v", err)
+	}
+	if headAfter == headBefore {
+		t.Fatal("mixed durable+wisp transaction did not publish its durable issue")
+	}
+	var headRegular, headWisp, journalRows int
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM issues AS OF 'HEAD' WHERE id = ?", regular.ID,
+	).Scan(&headRegular); err != nil {
+		t.Fatalf("read regular issue AS OF HEAD: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM wisps AS OF 'HEAD' WHERE id = ?", wisp.ID,
+	).Scan(&headWisp); err != nil {
+		t.Fatalf("read wisp AS OF HEAD: %v", err)
+	}
+	if err := store.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM bd_events_journal").Scan(&journalRows); err != nil {
+		t.Fatalf("read disabled journal after mixed transaction: %v", err)
+	}
+	if headRegular != 1 || headWisp != 0 || journalRows != 0 {
+		t.Fatalf("mixed history = durable HEAD:%d wisp HEAD:%d journal:%d, want 1/0/0", headRegular, headWisp, journalRows)
+	}
 }
 
 func TestRunInTransactionCreateIssuesAllWispBatchReconcilesChildCounters(t *testing.T) {

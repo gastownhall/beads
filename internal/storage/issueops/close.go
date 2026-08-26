@@ -34,6 +34,13 @@ func CloseIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 	return closeIssueInTx(ctx, tx, id, reason, actor, session, true)
 }
 
+// CloseIssueForPlaneInTx applies normal close semantics to the caller-selected
+// aggregate. Direct and transaction facades use it after resolving a dual-
+// resident ID so every read, mutation, and journal snapshot stays on one plane.
+func CloseIssueForPlaneInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string, isWisp bool) (*CloseResult, error) {
+	return closeIssueForPlaneInTx(ctx, tx, id, reason, actor, session, true, isWisp)
+}
+
 func CloseIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string) (*CloseResult, error) {
 	return closeIssueInTx(ctx, tx, id, reason, actor, session, false)
 }
@@ -105,6 +112,50 @@ func CloseIssueCheckedInTx(ctx context.Context, tx DBTX, id, reason, actor, sess
 	return result, nil
 }
 
+// CloseIssueCheckedForPlaneInTx applies checked-close semantics to the
+// caller-selected aggregate. Carrying the transaction facade's wisp-first
+// routing decision into every policy read and mutation prevents a dual-
+// resident ID from being checked on one plane and closed on its twin.
+func CloseIssueCheckedForPlaneInTx(ctx context.Context, tx DBTX, id, reason, actor, session string, force bool, expectedVersion *int64, isWisp bool) (*CloseResult, error) {
+	if expectedVersion != nil {
+		if err := CheckVersionForPlaneInTx(ctx, tx, id, *expectedVersion, isWisp); err != nil {
+			return nil, err
+		}
+	}
+	closed, found, err := isClosedForPlaneInTx(ctx, tx, id, isWisp)
+	if err != nil {
+		return nil, err
+	}
+	if !found {
+		return nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	targetColumn := "depends_on_issue_id"
+	if isWisp {
+		targetColumn = "depends_on_wisp_id"
+	}
+	if !closeCheckedSavepointEligible(tx) {
+		return closeIssueCheckedForPlaneAfterSavepoint(ctx, tx, id, reason, actor, session, force, closed, targetColumn, isWisp)
+	}
+	savepoint, err := createCloseCheckedSavepoint(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	result, scopedErr := closeIssueCheckedForPlaneAfterSavepoint(ctx, tx, id, reason, actor, session, force, closed, targetColumn, isWisp)
+	if scopedErr != nil {
+		if cleanupErr := rollbackAndReleaseCloseCheckedSavepoint(ctx, tx, savepoint); cleanupErr != nil {
+			return nil, fmt.Errorf("discard checked close savepoint after %v: %w", scopedErr, cleanupErr)
+		}
+		return nil, scopedErr
+	}
+	if err := releaseCloseCheckedSavepoint(ctx, tx, savepoint); err != nil {
+		if rollbackErr := rollbackToCloseCheckedSavepoint(ctx, tx, savepoint); rollbackErr != nil {
+			return nil, fmt.Errorf("release checked close savepoint: %v; rollback to savepoint: %w", err, rollbackErr)
+		}
+		return nil, err
+	}
+	return result, nil
+}
+
 func closeCheckedSavepointEligible(tx DBTX) bool {
 	switch tx.(type) {
 	case *sql.Tx, *sql.Conn:
@@ -120,6 +171,19 @@ func closeIssueCheckedAfterSavepoint(ctx context.Context, tx DBTX, id, reason, a
 		return nil, err
 	}
 	result, err := CloseIssueInTx(ctx, tx, id, reason, actor, session)
+	if err != nil {
+		return nil, err
+	}
+	result.OpenChildren = openChildren
+	return result, nil
+}
+
+func closeIssueCheckedForPlaneAfterSavepoint(ctx context.Context, tx DBTX, id, reason, actor, session string, force, closed bool, targetColumn string, isWisp bool) (*CloseResult, error) {
+	openChildren, err := enforceClosePolicyForPlaneInTx(ctx, tx, id, targetColumn, force, closed, isWisp)
+	if err != nil {
+		return nil, err
+	}
+	result, err := closeIssueForPlaneInTx(ctx, tx, id, reason, actor, session, true, isWisp)
 	if err != nil {
 		return nil, err
 	}
@@ -160,6 +224,48 @@ func enforceClosePolicyForTargetInTx(ctx context.Context, tx DBTX, id, targetCol
 		}
 	}
 	return openChildren, nil
+}
+
+func enforceClosePolicyForPlaneInTx(ctx context.Context, tx DBTX, id, targetColumn string, force, closed, isWisp bool) (int, error) {
+	if err := touchDependencyCoordinationInTx(ctx, tx, id); err != nil {
+		return 0, err
+	}
+	openChildren, err := countOpenChildrenForTargetInTx(ctx, tx, id, targetColumn)
+	if err != nil {
+		return 0, err
+	}
+	if !force && openChildren > 0 {
+		return 0, &storage.CloseOpenChildrenError{IssueID: id, OpenChildren: openChildren}
+	}
+	if !force && !closed {
+		blocked, blockers, err := IsBlockedForPlaneInTx(ctx, tx, id, isWisp)
+		if err != nil {
+			return 0, err
+		}
+		if blocked && len(blockers) > 0 {
+			return 0, fmt.Errorf("%w: %s is blocked by %v", storage.ErrCloseBlocked, id, blockers)
+		}
+	}
+	return openChildren, nil
+}
+
+// EnforceClosePolicyForPlaneInTx applies close policy to the caller-selected
+// aggregate without closing it. It is the explicit-plane sibling used by a
+// generic update that crosses into a done status after the transaction facade
+// has already resolved a dual-resident ID wisp-first.
+func EnforceClosePolicyForPlaneInTx(ctx context.Context, tx DBTX, id string, force, isWisp bool) (int, error) {
+	closed, found, err := isClosedForPlaneInTx(ctx, tx, id, isWisp)
+	if err != nil {
+		return 0, err
+	}
+	if !found {
+		return 0, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+	}
+	targetColumn := "depends_on_issue_id"
+	if isWisp {
+		targetColumn = "depends_on_wisp_id"
+	}
+	return enforceClosePolicyForPlaneInTx(ctx, tx, id, targetColumn, force, closed, isWisp)
 }
 
 // EnforceClosePolicyInTx applies the close policy to id without closing it, for
@@ -314,9 +420,27 @@ func isClosedInTx(ctx context.Context, tx DBTX, id string) (closed bool, targetC
 	return false, "", false, nil
 }
 
+func isClosedForPlaneInTx(ctx context.Context, tx DBTX, id string, isWisp bool) (closed, found bool, err error) {
+	issueTable, _, _, _ := WispTableRouting(isWisp)
+	var status string
+	err = tx.QueryRowContext(ctx, "SELECT status FROM "+issueTable+" WHERE id = ?", id).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) || (optionalBlockedTable(issueTable) && isTableNotExistError(err)) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, fmt.Errorf("read status from %s: %w", issueTable, err)
+	}
+	return types.Status(status) == types.StatusClosed, true, nil
+}
+
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string, recordEvent bool) (*CloseResult, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
+	return closeIssueForPlaneInTx(ctx, tx, id, reason, actor, session, recordEvent, isWisp)
+}
+
+//nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
+func closeIssueForPlaneInTx(ctx context.Context, tx DBTX, id string, reason, actor, session string, recordEvent, isWisp bool) (*CloseResult, error) {
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
 	var affectedIssues, affectedWisps []string
@@ -384,7 +508,7 @@ func closeIssueInTx(ctx context.Context, tx DBTX, id string, reason, actor, sess
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// recordEvent gates the human audit event, never the journal.
-	if err := RecordEventInTx(ctx, tx, EventClose, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventClose, id, actor, isWisp); err != nil {
 		return nil, err
 	}
 

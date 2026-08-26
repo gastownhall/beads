@@ -21,6 +21,15 @@ const maxRecursiveResults = 10000
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
+	_, err := DeleteIssueInTxWithResult(ctx, tx, id)
+	return err
+}
+
+// DeleteIssueInTxWithResult is DeleteIssueInTx with per-plane derived-row
+// change reporting for storage facades that must stage recomputed durable
+// issue rows alongside the deletion.
+func DeleteIssueInTxWithResult(ctx context.Context, tx *sql.Tx, id string) (RecomputeIsBlockedResult, error) {
+	var result RecomputeIsBlockedResult
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 
 	var deletedIssues, deletedWisps []string
@@ -31,41 +40,60 @@ func DeleteIssueInTx(ctx context.Context, tx *sql.Tx, id string) error {
 	}
 	affectedIssues, affectedWisps, aerr := AffectedByDeletionInTx(ctx, tx, deletedIssues, deletedWisps)
 	if aerr != nil {
-		return fmt.Errorf("affected by delete for %s: %w", id, aerr)
+		return result, fmt.Errorf("affected by delete for %s: %w", id, aerr)
 	}
 
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, []string{id}); err != nil {
-		return fmt.Errorf("journal dependency removals for %s: %w", id, err)
+	if err := RecordDependencyRemovalsForIssuePlanesInTx(ctx, tx, deletedIssues, deletedWisps); err != nil {
+		return result, fmt.Errorf("journal dependency removals for %s: %w", id, err)
 	}
-	if err := deleteIssueRowInTx(ctx, tx, id, isWisp); err != nil {
-		return err
-	}
-
-	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
-		return fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
+	resurfacedDurable, err := deleteIssueRowInTx(ctx, tx, id, isWisp)
+	if err != nil {
+		return result, err
 	}
 
-	return nil
+	result, err = RecomputeIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
+		return result, fmt.Errorf("recompute is_blocked after delete for %s: %w", id, err)
+	}
+	if resurfacedDurable {
+		// The journal protocol has one logical ID namespace. Removing the
+		// selected wisp while a durable twin remains reveals a replacement
+		// snapshot; it is an update, not disappearance of the logical ID.
+		if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, "", false); err != nil {
+			return result, fmt.Errorf("journal resurfaced durable issue %s: %w", id, err)
+		}
+	}
+
+	return result, nil
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool) error {
+func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool) (bool, error) {
+	resurfacedDurable := false
+	if isWisp && journalEnabled(ctx, tx) {
+		var count int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id = ?", id).Scan(&count); err != nil {
+			return false, fmt.Errorf("journal: check durable twin for %s: %w", id, err)
+		}
+		resurfacedDurable = count != 0
+	}
+
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 	result, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", issueTable), id)
 	if err != nil {
-		return fmt.Errorf("delete issue from %s: %w", issueTable, err)
+		return false, fmt.Errorf("delete issue from %s: %w", issueTable, err)
 	}
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("get rows affected: %w", err)
+		return false, fmt.Errorf("get rows affected: %w", err)
 	}
 	if rows == 0 {
 		// Wrap the sentinel so callers can errors.Is(..., storage.ErrNotFound),
 		// matching GetIssue/UpdateIssue. The storage conformance suite asserts
 		// this parity across not-found paths.
-		return fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		return false, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
 	}
 	// Journal the delete in the same transaction. This worker backs single
 	// deletes (DeleteIssueInTx) and the per-wisp branch of the bulk delete
@@ -73,18 +101,20 @@ func deleteIssueRowInTx(ctx context.Context, tx *sql.Tx, id string, isWisp bool)
 	// ids directly. The rows==0 return above is what keeps this
 	// actually-deleted-only. The delete plumbing (storage.DeleteIssue and the
 	// bulk/cascade resolvers) carries no actor, so the row records none.
-	if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
-		return err
+	if !resurfacedDurable {
+		if err := RecordDeleteInTx(ctx, tx, id, ""); err != nil {
+			return false, err
+		}
 	}
 	if isWisp {
 		if err := DeleteWispFromDependenciesInTx(ctx, tx, id); err != nil {
-			return err
+			return false, err
 		}
 	} else if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 		// A deleted issue holds no lease.
-		return err
+		return false, err
 	}
-	return nil
+	return resurfacedDurable, nil
 }
 
 // DeletionSet is the EXACT set of rows one delete removes, split by the plane
@@ -295,13 +325,18 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 	}
 	// Edges are journaled before the rows go, while their source snapshots can
 	// still be read.
-	if err := RecordDependencyRemovalsForIssuesInTx(ctx, tx, set.All); err != nil {
+	if err := RecordDependencyRemovalsForIssuePlanesInTx(ctx, tx, set.RegularIDs, set.WispIDs); err != nil {
 		return nil, fmt.Errorf("journal dependency removals for batch delete: %w", err)
 	}
 
+	resurfacedDurables := make([]string, 0, len(set.WispIDs))
 	for _, id := range set.WispIDs {
-		if err := deleteIssueRowInTx(ctx, tx, id, true); err != nil {
+		resurfaced, err := deleteIssueRowInTx(ctx, tx, id, true)
+		if err != nil {
 			return nil, fmt.Errorf("delete wisp %s: %w", id, err)
+		}
+		if resurfaced {
+			resurfacedDurables = append(resurfacedDurables, id)
 		}
 	}
 
@@ -344,6 +379,11 @@ func DeleteResolvedSetInTx(ctx context.Context, tx *sql.Tx, set DeletionSet, dry
 
 	if err := RecomputeIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return nil, fmt.Errorf("recompute is_blocked after batch delete: %w", err)
+	}
+	for _, id := range resurfacedDurables {
+		if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, "", false); err != nil {
+			return nil, fmt.Errorf("journal resurfaced durable issue %s: %w", id, err)
+		}
 	}
 
 	return result, nil

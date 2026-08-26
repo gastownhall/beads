@@ -74,22 +74,16 @@ func TestTxReadYourWritesWithComment(t *testing.T) {
 	}
 }
 
-// TestTxReadYourWritesWispTier pins the two-session wisp behavior of the new
-// reads on the classic Dolt store (wisp rows live on ignoredTx, durable on
-// regularTx). It proves:
-//   - Single-tier reads route to the owning session and ARE read-your-writes for
-//     an uncommitted wisp (GetIssueCommentsPage, IsBlocked, IsBlockedBatch).
-//   - Both-tiers-spanning reads run on regularTx and, per the documented
-//     two-session caveat, do NOT yet see a wisp edge written in the same open
-//     transaction (GetDependentRecords/CountDependentRecords) — and DO see it
-//     once the transaction commits.
+// TestTxReadYourWritesWispTier pins the unified callback snapshot: single-tier
+// and both-tiers-spanning reads all observe uncommitted wisp writes made earlier
+// in the same transaction.
 func TestTxReadYourWritesWispTier(t *testing.T) {
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
 	ctx, cancel := testContext(t)
 	defer cancel()
 
-	// Committed durable blocker (its open status must be visible cross-session).
+	// Committed durable blocker (its open status must be visible cross-plane).
 	blocker := crossTierRegularIssue("txw-block", "committed durable blocker")
 	if err := store.CreateIssue(ctx, blocker, "tester"); err != nil {
 		t.Fatalf("CreateIssue blocker: %v", err)
@@ -128,7 +122,7 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 		if err := tx.CreateIssue(ctx, wisp, "tester"); err != nil {
 			return err
 		}
-		// Wisp-sourced blocks edge → wisp_dependencies (ignoredTx); wisp blocked.
+		// Wisp-sourced blocks edge → wisp_dependencies; wisp blocked.
 		if err := tx.AddDependency(ctx, &types.Dependency{IssueID: "txw-wisp", DependsOnID: "txw-block", Type: types.DepBlocks}, "tester"); err != nil {
 			return err
 		}
@@ -159,22 +153,21 @@ func TestTxReadYourWritesWispTier(t *testing.T) {
 			t.Errorf("in-tx IsBlockedBatch = %v, want txw-wisp blocked, txw-block not", batch)
 		}
 
-		// Both-tiers-spanning reads do NOT yet see the uncommitted wisp edge
-		// (documented two-session caveat): txw-block's only inbound edge is the
-		// wisp edge, uncommitted on the ignored session.
+		// Both-tiers-spanning reads share the same SQL transaction and see the
+		// uncommitted wisp edge too.
 		dependents, err := tx.GetDependentRecords(ctx, "txw-block", "", 0, "")
 		if err != nil {
 			return err
 		}
-		if len(dependents) != 0 {
-			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want empty (uncommitted wisp edge not visible on regularTx)", dependents)
+		if len(dependents) != 1 || dependents[0].IssueID != "txw-wisp" {
+			t.Errorf("in-tx GetDependentRecords(txw-block) = %v, want one edge from txw-wisp", dependents)
 		}
 		nDep, err := tx.CountDependentRecords(ctx, "txw-block", "")
 		if err != nil {
 			return err
 		}
-		if nDep != 0 {
-			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 0 (documented caveat)", nDep)
+		if nDep != 1 {
+			t.Errorf("in-tx CountDependentRecords(txw-block) = %d, want 1", nDep)
 		}
 		return nil
 	})

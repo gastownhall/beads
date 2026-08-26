@@ -144,30 +144,42 @@ func RecomputeIsBlockedInTxWithResult(
 }
 
 func MarkIsBlockedInTx(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) error {
+	_, err := MarkIsBlockedInTxWithResult(ctx, tx, issueIDs, wispIDs)
+	return err
+}
+
+// MarkIsBlockedInTxWithResult is the monotonic blocked-state pass with the
+// same per-plane row-change report as RecomputeIsBlockedInTxWithResult. Storage
+// facades use the report to stage every durable issue row changed as a derived
+// consequence of a dependency mutation.
+func MarkIsBlockedInTxWithResult(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (RecomputeIsBlockedResult, error) {
+	var result RecomputeIsBlockedResult
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
-		return nil
+		return result, nil
 	}
 	before, err := captureBlockedJournalSnapshot(ctx, tx, issueIDs, wispIDs)
 	if err != nil {
-		return err
+		return result, err
 	}
 	for {
 		var changed int64
 
 		n, err := markIsBlockedPassForIssuesInTx(ctx, tx, issueIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.IssueRowsChanged = result.IssueRowsChanged || n > 0
 
 		n, err = markIsBlockedPassForWispsInTx(ctx, tx, wispIDs)
 		if err != nil {
-			return err
+			return result, err
 		}
 		changed += n
+		result.WispRowsChanged = result.WispRowsChanged || n > 0
 
 		if changed == 0 {
-			return recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
+			return result, recordBlockedJournalChanges(ctx, tx, before, issueIDs, wispIDs)
 		}
 	}
 }

@@ -48,12 +48,21 @@ func (s *DoltStore) createIssue(ctx context.Context, issue *types.Issue, actor s
 			return err
 		}
 		result, err = issueops.CreateIssueInTxWithResult(ctx, tx, bc, issue, actor)
-		return err
+		if err != nil {
+			return err
+		}
+		if useWispsTable {
+			var changes wispDurableChanges
+			changes.Merge(issueops.CreateIssueDirtyTables(ctx, issue, result))
+			return s.publishWispDurableChangesInTx(ctx, tx, changes, fmt.Sprintf("bd: create %s", issue.ID))
+		}
+		return nil
 	}); err != nil {
 		return err
 	}
 
-	// Dolt versioning — wisps and no-history issues skip DOLT_COMMIT.
+	// The wisp callback above already published any concrete durable side
+	// effects. Regular issues publish their full changed-table set here.
 	if !issue.Ephemeral && !issue.NoHistory {
 		if err := s.doltAddAndCommit(ctx, createIssueCommitTables(ctx, issue, result),
 			fmt.Sprintf("bd: create %s", issue.ID)); err != nil {
@@ -103,8 +112,9 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 		return nil
 	}
 
-	// All-wisps fast path: one SQL transaction, no Dolt versioning.
-	// Covers both ephemeral issues and no-history issues (both skip DOLT_COMMIT).
+	// All-wisps fast path: one SQL transaction. Ignored-only work creates no
+	// Dolt version, while concrete durable counters/derived rows are published
+	// from the result contract before SQL commit.
 	if issueops.AllWisps(issues) {
 		for _, issue := range issues {
 			if !issue.NoHistory {
@@ -112,8 +122,13 @@ func (s *DoltStore) createIssuesWithFullOptions(ctx context.Context, issues []*t
 			}
 		}
 		return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-			_, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
-			return err
+			result, err := issueops.CreateIssuesInTxWithResult(ctx, tx, issues, actor, opts)
+			if err != nil {
+				return err
+			}
+			var changes wispDurableChanges
+			changes.Merge(issueops.CreateIssuesDirtyTables(ctx, issues, result))
+			return s.publishWispDurableChangesInTx(ctx, tx, changes, fmt.Sprintf("bd: create %d issue(s)", len(issues)))
 		})
 	}
 
@@ -203,7 +218,8 @@ func (s *DoltStore) updateIssue(ctx context.Context, id string, updates map[stri
 	}
 
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
-	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	// The wisp row is ignored; any durable derived rows are published by the
+	// direct-wisp result contract.
 	if s.isActiveWisp(ctx, id) {
 		return s.updateWisp(ctx, id, updates, actor)
 	}
@@ -260,7 +276,8 @@ func (s *DoltStore) updateIssueChecked(ctx context.Context, id string, updates m
 	}
 
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
-	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	// The wisp row is ignored; any durable derived rows are published by the
+	// direct-wisp result contract.
 	if s.isActiveWisp(ctx, id) {
 		return s.updateWispChecked(ctx, id, updates, actor, opts)
 	}
@@ -339,7 +356,6 @@ func (s *DoltStore) ClaimIssue(ctx context.Context, id string, actor string) err
 
 func (s *DoltStore) claimIssue(ctx context.Context, id string, actor string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
-	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
 	if s.isActiveWisp(ctx, id) {
 		return s.claimWisp(ctx, id, actor)
 	}
@@ -551,14 +567,12 @@ func (s *DoltStore) ReopenIssue(ctx context.Context, id string, reason string, a
 		if !res.Changed {
 			return nil
 		}
-		switch {
-		case !res.IsWisp:
+		if !res.IsWisp {
 			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues", "events"}, fmt.Sprintf("bd: reopen %s", id))
-		case res.IssueRowsChanged:
-			return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: reopen %s", id))
-		default:
-			return nil
 		}
+		var changes wispDurableChanges
+		changes.Mark("issues", res.IssueRowsChanged)
+		return s.publishWispDurableChangesInTx(ctx, tx, changes, fmt.Sprintf("bd: reopen %s", id))
 	})
 }
 
@@ -579,7 +593,7 @@ func (s *DoltStore) CloseIssue(ctx context.Context, id string, reason string, ac
 
 func (s *DoltStore) closeIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
-	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	// Closing a wisp can publish durable depender readiness.
 	if s.isActiveWisp(ctx, id) {
 		return s.closeWisp(ctx, id, reason, actor, session)
 	}
@@ -619,7 +633,7 @@ func (s *DoltStore) CloseIssueChecked(ctx context.Context, id string, actor stri
 
 func (s *DoltStore) closeIssueChecked(ctx context.Context, id string, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
 	// Route ephemeral IDs to wisps table (falls through for promoted wisps).
-	// Wisps skip DOLT_COMMIT since they live in dolt_ignored tables.
+	// Closing a wisp can publish durable depender readiness.
 	if s.isActiveWisp(ctx, id) {
 		return s.closeWispChecked(ctx, id, actor, opts)
 	}
