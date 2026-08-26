@@ -22,13 +22,6 @@ beads_test_env_enter() {
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
 
-    if [[ -z "${GOCACHE:-}" ]]; then
-        local go_cache
-        go_cache="$(go env GOCACHE 2>/dev/null || true)"
-        if [[ -n "$go_cache" ]]; then
-            export GOCACHE="$go_cache"
-        fi
-    fi
     if [[ -z "${GOMODCACHE:-}" ]]; then
         local go_mod_cache
         go_mod_cache="$(go env GOMODCACHE 2>/dev/null || true)"
@@ -37,7 +30,7 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp" "$root/go-cache"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
@@ -46,6 +39,10 @@ beads_test_env_enter() {
     export DOLT_ROOT_PATH="$root/dolt-root"
     export TMPDIR="$root/tmp"
     export GOTMPDIR="$root/go-tmp"
+    # A shared GOCACHE can be swept or rewritten by another agent while this
+    # compiler is reading it. Keep build objects private to this invocation;
+    # GOMODCACHE remains shared because downloaded modules are immutable.
+    export GOCACHE="$root/go-cache"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
