@@ -237,6 +237,21 @@ type migrationSource struct {
 	// TestSentinelTablesAreCreatedByTheSeries enforces the creating side only;
 	// the dropping side is this comment.
 	sentinelTables []string
+	// sentinelColumns are clone-local columns whose absence contradicts an
+	// otherwise at-latest cursor just as strongly as an absent sentinel table.
+	//
+	// INVARIANT: no future migration in this series may DROP or RENAME a
+	// sentinel column (or the table carrying it). Older binaries in the field
+	// check their own sentinel list against the live schema, so removing one
+	// would make every healthy newer database read as "contradicted" to them
+	// and re-run their whole series. TestSentinelColumnsAreCreatedByTheSeries
+	// enforces the creating side only; the dropping side is this comment.
+	sentinelColumns []schemaSentinelColumn
+}
+
+type schemaSentinelColumn struct {
+	table  string
+	column string
 }
 
 var (
@@ -254,6 +269,9 @@ var (
 		// missing; wisps is checked too so a partially materialized database
 		// is caught by whichever is absent.
 		sentinelTables: []string{"wisps", "wisp_dependencies"},
+		// A historical ignored-v16 ordinal collision can leave the local
+		// leases table present but without the column frozen 0016 adds.
+		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node"}},
 	}
 )
 
@@ -1180,6 +1198,15 @@ func (m migrationSource) cursorContradictedBySchema(ctx context.Context, db DBCo
 			return true, nil
 		}
 	}
+	for _, column := range m.sentinelColumns {
+		present, err := sentinelColumnExists(ctx, db, column.table, column.column)
+		if err != nil {
+			return false, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
+		}
+		if !present {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
@@ -1196,6 +1223,8 @@ var sentinelTableExists = func(ctx context.Context, db DBConn, table string) (bo
 	}
 	return n > 0, nil
 }
+
+var sentinelColumnExists = schemaColumnExists
 
 func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int, error) {
 	current, err := m.currentVersion(ctx, db)
