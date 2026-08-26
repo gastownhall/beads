@@ -540,10 +540,14 @@ func findProjectBeadsDir() string {
 		return ""
 	}
 
+	ceiling := testDiscoveryCeiling(cwd)
 	for dir := cwd; dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
+		}
+		if ceiling != "" && filepath.Clean(dir) == ceiling {
+			break
 		}
 	}
 
@@ -553,6 +557,36 @@ func findProjectBeadsDir() string {
 	}
 
 	return filepath.Dir(configPath)
+}
+
+func testDiscoveryCeiling(start string) string {
+	raw := os.Getenv("BEADS_TEST_DISCOVERY_CEILING")
+	if raw == "" {
+		tmp := os.Getenv("TMPDIR")
+		if tmp == "" {
+			return ""
+		}
+		candidate := filepath.Dir(tmp)
+		if _, err := os.Stat(filepath.Join(candidate, ".beads-test-discovery-ceiling")); err != nil {
+			return ""
+		}
+		raw = candidate
+	}
+	start, err := filepath.Abs(start)
+	if err != nil {
+		return ""
+	}
+	ceiling, err := filepath.Abs(raw)
+	if err != nil {
+		return ""
+	}
+	start = filepath.Clean(start)
+	ceiling = filepath.Clean(ceiling)
+	rel, err := filepath.Rel(ceiling, start)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return ceiling
 }
 
 // updateYamlKey updates a key in yaml content, handling commented-out keys.

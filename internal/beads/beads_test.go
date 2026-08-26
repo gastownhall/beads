@@ -45,6 +45,28 @@ func TestFindDatabasePathEnvVar(t *testing.T) {
 	}
 }
 
+func TestFindBeadsDirFromHonorsHermeticDiscoveryCeiling(t *testing.T) {
+	outer := t.TempDir()
+	outerBeads := filepath.Join(outer, ".beads")
+	if err := os.MkdirAll(outerBeads, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outerBeads, "metadata.json"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ceiling := filepath.Join(outer, "sandbox")
+	start := filepath.Join(ceiling, "tmp", "case")
+	if err := os.MkdirAll(start, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_TEST_ENV_ACTIVE", "1")
+	t.Setenv("BEADS_TEST_DISCOVERY_CEILING", ceiling)
+
+	if got := FindBeadsDirFrom(start); got != "" {
+		t.Fatalf("FindBeadsDirFrom escaped test ceiling: got %q, outer ledger %q", got, outerBeads)
+	}
+}
+
 func TestFindDatabasePathInTree(t *testing.T) {
 	// Save original env vars
 	originalDB := os.Getenv("BEADS_DB")

@@ -22,6 +22,7 @@ beads_test_env_enter() {
     root="$(mktemp -d "$tmp_base/beads-test-env-XXXXXX")"
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
+    export BEADS_TEST_DISCOVERY_CEILING="$root"
 
     if [[ -z "${GOMODCACHE:-}" ]]; then
         local go_mod_cache
@@ -34,6 +35,7 @@ beads_test_env_enter() {
     local go_cache
     go_cache="${BEADS_TEST_GOCACHE:-$cache_home/beads/go-build}"
     mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp" "$go_cache"
+    : >"$root/.beads-test-discovery-ceiling"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
@@ -50,7 +52,9 @@ beads_test_env_enter() {
     export GOCACHE="$go_cache"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
-    export BEADS_TEST_IGNORE_REPO_CONFIG=1
+    # Discovery is bounded by the harness root, so package tests remain free to
+    # exercise repository-config behavior instead of globally disabling it.
+    unset BEADS_TEST_IGNORE_REPO_CONFIG
     if [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" != "1" ]]; then
         beads_test_env_add_skip "dolt"
     fi
@@ -101,5 +105,6 @@ beads_test_env_cleanup() {
     if [[ -n "${BEADS_TEST_ENV_ROOT:-}" ]]; then
         rm -rf "$BEADS_TEST_ENV_ROOT"
         unset BEADS_TEST_ENV_ROOT
+        unset BEADS_TEST_DISCOVERY_CEILING
     fi
 }

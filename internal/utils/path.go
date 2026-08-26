@@ -64,6 +64,32 @@ func CanonicalizePath(path string) string {
 	return canonical
 }
 
+// TestDiscoveryCeiling returns the highest directory that ancestor discovery
+// may inspect for a path created by the hermetic test harness. The ceiling is
+// deliberately inert unless the harness provides an explicit ceiling or its
+// private TMPDIR carries the harness marker, so production semantics are unchanged.
+func TestDiscoveryCeiling(start string) string {
+	raw := os.Getenv("BEADS_TEST_DISCOVERY_CEILING")
+	if raw == "" {
+		tmp := os.Getenv("TMPDIR")
+		if tmp == "" {
+			return ""
+		}
+		candidate := filepath.Dir(CanonicalizePath(tmp))
+		if _, err := os.Stat(filepath.Join(candidate, ".beads-test-discovery-ceiling")); err != nil {
+			return ""
+		}
+		raw = candidate
+	}
+	start = CanonicalizePath(start)
+	ceiling := CanonicalizePath(raw)
+	rel, err := filepath.Rel(ceiling, start)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return ""
+	}
+	return ceiling
+}
+
 // resolveCanonicalCase resolves a path to its true filesystem case.
 // On macOS, walks each path component and matches against actual directory
 // entries to recover the correct case (HFS+/APFS are case-insensitive).

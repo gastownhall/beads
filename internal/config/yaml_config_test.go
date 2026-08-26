@@ -581,6 +581,29 @@ func TestFindProjectBeadsDir_NonGitTreeWithoutConfig(t *testing.T) {
 	}
 }
 
+func TestFindProjectBeadsDirHonorsHermeticDiscoveryCeiling(t *testing.T) {
+	restore := envSnapshot(t)
+	defer restore()
+
+	outer := t.TempDir()
+	outerBeads := filepath.Join(outer, ".beads")
+	if err := os.MkdirAll(outerBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ceiling := filepath.Join(outer, "sandbox")
+	start := filepath.Join(ceiling, "tmp", "case")
+	if err := os.MkdirAll(start, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_TEST_ENV_ACTIVE", "1")
+	t.Setenv("BEADS_TEST_DISCOVERY_CEILING", ceiling)
+	t.Chdir(start)
+
+	if got := findProjectBeadsDir(); got != "" {
+		t.Fatalf("findProjectBeadsDir escaped test ceiling: got %q, outer ledger %q", got, outerBeads)
+	}
+}
+
 // TestValidateYamlConfigValue_HierarchyMaxDepth tests validation of hierarchy.max-depth (GH#995)
 func TestValidateYamlConfigValue_HierarchyMaxDepth(t *testing.T) {
 	tests := []struct {
