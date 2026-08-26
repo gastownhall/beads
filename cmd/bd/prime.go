@@ -443,6 +443,10 @@ func outputMCPContext(w io.Writer, stealthMode bool) error {
 - Persistence you don't need beats lost context
 - ` + profileRule + `
 
+## Workspace Placement Law
+- Never clone durable projects into ` + "`/tmp`" + `. In Gas Town, use a registered rig and a managed ` + "`crew/<name>`" + ` or ` + "`polecats/<name>`" + ` lane.
+- Outside Gas Town, use a persistent workspace root. Keep bounded scratch in an ignored project-local directory and export ` + "`TMPDIR`" + `/` + "`GOTMPDIR`" + ` to it.
+
 Start: Check ` + "`ready`" + ` tool for available work.
 `
 	_, _ = fmt.Fprint(w, context)
@@ -573,6 +577,12 @@ git status                  # Check changed files
 - ` + profileRule + `
 - ` + gitWorkflowRule + `
 - Session management: check ` + "`bd ready`" + ` for available work
+
+## Workspace Placement Law
+- **Never clone durable projects into ` + "`/tmp`" + `**. System temporary storage is only for bounded, disposable artifacts with reliable cleanup.
+- **Inside Gas Town**, register the project as a rig and work only in managed lanes such as ` + "`<rig>/mayor/rig`" + `, ` + "`<rig>/crew/<name>`" + `, or ` + "`<rig>/polecats/<name>`" + `.
+- **Outside Gas Town**, use a persistent workspace root on a capacity-managed volume; do not improvise clones or virtual environments under ` + "`/tmp`" + `.
+- Keep build/test scratch under a project-scoped ignored directory, set ` + "`TMPDIR`" + `/` + "`GOTMPDIR`" + ` explicitly, and clean it on exit or interruption.
 
 ## Essential Commands
 

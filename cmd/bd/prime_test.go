@@ -230,6 +230,27 @@ func TestPrimeClaimGuidanceUsesAtomicClaim(t *testing.T) {
 	}
 }
 
+func TestPrimeTeachesPersistentWorkspacePlacement(t *testing.T) {
+	defer stubPrimeStoreUnavailable()()
+	defer stubIsEphemeralBranch(false)()
+	defer stubPrimeHasGitRemote(true)()
+
+	var buf bytes.Buffer
+	if err := outputPrimeContext(&buf, false, false); err != nil {
+		t.Fatalf("outputPrimeContext failed: %v", err)
+	}
+	for _, required := range []string{
+		"Workspace Placement Law",
+		"Never clone durable projects into `/tmp`",
+		"<rig>/crew/<name>",
+		"TMPDIR`/`GOTMPDIR",
+	} {
+		if !strings.Contains(buf.String(), required) {
+			t.Fatalf("prime output missing workspace placement rule %q", required)
+		}
+	}
+}
+
 func TestPrimeStartsWithTruncationDirective(t *testing.T) {
 	defer stubPrimeStoreUnavailable()()
 	defer stubIsEphemeralBranch(false)()

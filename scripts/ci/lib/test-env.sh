@@ -14,8 +14,11 @@ beads_test_env_enter() {
         return 0
     fi
 
-    local root
-    root="$(mktemp -d "${TMPDIR:-/tmp}/beads-test-env-XXXXXX")"
+    local repo_root tmp_base root
+    repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+    tmp_base="${BEADS_TEST_TMP_BASE:-$repo_root/.test-tmp}"
+    mkdir -p "$tmp_base"
+    root="$(mktemp -d "$tmp_base/beads-test-env-XXXXXX")"
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
 
@@ -34,13 +37,15 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
     export USERPROFILE="$root/home"
     export XDG_CONFIG_HOME="$root/xdg-config"
     export DOLT_ROOT_PATH="$root/dolt-root"
+    export TMPDIR="$root/tmp"
+    export GOTMPDIR="$root/go-tmp"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
