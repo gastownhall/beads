@@ -93,6 +93,7 @@ func TestUOW_ConcurrentMergeOps_NoLostUpdate(t *testing.T) {
 		0,
 		false,
 		"",
+		WithCreateIfMissing(true),
 	)
 	require.NoError(t, err)
 	require.NotNil(t, provider)

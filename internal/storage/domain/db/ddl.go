@@ -23,6 +23,11 @@ func ValidateIdentifier(name string) error {
 }
 
 type DDLSQLRepository interface {
+	// DatabaseExists reports whether the named database is present on the
+	// server. It iterates SHOW DATABASES rather than using SHOW DATABASES LIKE
+	// because Dolt treats _ and % as wildcards without backslash escaping, so
+	// names like "beads_vulcan" would match unrelated databases.
+	DatabaseExists(ctx context.Context, database string) (bool, error)
 	CreateDatabaseIfNotExists(ctx context.Context, database string) error
 	// CreateDatabase issues a bare CREATE DATABASE (no IF NOT EXISTS) so the
 	// server arbitrates creation atomically: success proves this call created
@@ -42,6 +47,28 @@ type ddlSQLRepository struct {
 }
 
 var _ DDLSQLRepository = (*ddlSQLRepository)(nil)
+
+func (r *ddlSQLRepository) DatabaseExists(ctx context.Context, database string) (bool, error) {
+	rows, err := r.runner.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return false, fmt.Errorf("db: DatabaseExists: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, fmt.Errorf("db: DatabaseExists: %w", err)
+		}
+		if name == database {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("db: DatabaseExists: %w", err)
+	}
+	return false, nil
+}
 
 func (r *ddlSQLRepository) CreateDatabaseIfNotExists(ctx context.Context, database string) error {
 	ident, err := quoteIdentifier(database)

@@ -181,7 +181,9 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", fsResult.LocalVersionErr)
 	}
 
-	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "")
+	// bd init is the one command whose open may create the database (#2189):
+	// every other proxied call site opens with create disabled.
+	initUOWProvider, err := newProxiedServerUOWProviderAdopting(ctx, beadsDir, "", uow.WithCreateIfMissing(true))
 	if err != nil {
 		return fmt.Errorf("failed to open uow provider: %v", err)
 	}

@@ -71,6 +71,8 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, 5).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	mock.ExpectQuery(regexp.QuoteMeta("SHOW DATABASES")).
+		WillReturnRows(sqlmock.NewRows([]string{"Database"}))
 	mock.ExpectExec(regexp.QuoteMeta("CREATE DATABASE `beads`")).
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	mock.ExpectExec(regexp.QuoteMeta("USE `beads`")).
@@ -89,9 +91,10 @@ func TestInitSchemaAcquiresMigrationLockBeforeBootstrapDDL(t *testing.T) {
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
 	p := &doltSQLProvider{
-		defaultBranch:  defaultBranch,
-		db:             db,
-		serverEndpoint: "tcp:127.0.0.1:3306",
+		defaultBranch:   defaultBranch,
+		db:              db,
+		serverEndpoint:  "tcp:127.0.0.1:3306",
+		createIfMissing: true,
 	}
 	err = p.initSchema(context.Background(), "beads")
 	if err == nil || !strings.Contains(err.Error(), "first migration statement failed") {
