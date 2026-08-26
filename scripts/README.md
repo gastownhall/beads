@@ -29,6 +29,12 @@ the fast PR-core contract even on shared agent hosts. Set
 tests through these broad wrappers, or `BEADS_TEST_ENV_DISABLE=1` when debugging
 against your real local configuration.
 
+The disposable HOME, Dolt roots, sockets, and Go temporary build directory live
+under the user cache and are removed on exit. `GOCACHE` is deliberately retained
+at `$XDG_CACHE_HOME/beads/go-build`: rebuilding a private race-enabled cache for
+every invocation can consume several GiB before cleanup. Override it with
+`BEADS_TEST_GOCACHE` when a fully private build cache is required.
+
 The broad Go wrappers also cap package and test parallelism to `4` by default
 (`GO_TEST_PKG_PARALLEL` and `GO_TEST_PARALLEL`). This avoids turning high-core
 shared hosts into a different test topology than GitHub Actions.

@@ -31,7 +31,9 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp" "$root/go-cache"
+    local go_cache
+    go_cache="${BEADS_TEST_GOCACHE:-$cache_home/beads/go-build}"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp" "$root/go-tmp" "$go_cache"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
@@ -40,10 +42,12 @@ beads_test_env_enter() {
     export DOLT_ROOT_PATH="$root/dolt-root"
     export TMPDIR="$root/tmp"
     export GOTMPDIR="$root/go-tmp"
-    # A shared GOCACHE can be swept or rewritten by another agent while this
-    # compiler is reading it. Keep build objects private to this invocation;
-    # GOMODCACHE remains shared because downloaded modules are immutable.
-    export GOCACHE="$root/go-cache"
+    # Keep the Go build cache persistent and separate from the disposable test
+    # root. A private race-enabled cache is several GiB per invocation and can
+    # exhaust a host before the EXIT trap has a chance to reclaim it. The Go
+    # cache itself is content-addressed and concurrency-safe; callers that need
+    # a one-shot cache can override BEADS_TEST_GOCACHE explicitly.
+    export GOCACHE="$go_cache"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
     export BEADS_TEST_IGNORE_REPO_CONFIG=1
