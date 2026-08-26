@@ -25,9 +25,10 @@ set -euo pipefail
 #                          [--repo owner/name] [--out <path>] [--allow-short-soak]
 # =============================================================================
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
 FROM_BETA=""
+PREVIEW=""
 SOAK_DAYS=7
 REPO="gastownhall/beads"
 OUT=""
@@ -37,9 +38,18 @@ EXPECT_RED=()
 usage() {
     cat <<'USAGE'
 Usage: channel-gate-report.sh --from-beta <tag> [options]
+       channel-gate-report.sh --preview [<ref>] [options]
 
 Options:
-  --from-beta <tag>      The beta tag proposed for promotion. Required.
+  --from-beta <tag>      The beta tag proposed for promotion.
+  --preview [<ref>]      Instead of judging a promotion, report what a stable
+                         release cut from <ref> (default HEAD) would FIRST
+                         ship: how much merged work is in no published stable
+                         release, how old the oldest of it is, and whether the
+                         span crosses a schema boundary. No soak and no gate
+                         sections — there is no candidate to have soaked or
+                         been gated. Answers "what are we sitting on?" without
+                         needing to cut anything first.
   --soak-days <N>        Minimum soak before promotion is allowed. Default 7.
   --repo <owner/name>    Repository to query. Default gastownhall/beads.
   --out <path>           Where to write. Default release-gates/v<version>.md
@@ -66,6 +76,13 @@ USAGE
 while [ $# -gt 0 ]; do
     case "$1" in
         --from-beta) FROM_BETA="${2:-}"; shift 2 ;;
+        --preview)
+            # Optional ref; bare --preview means HEAD.
+            if [ "${2:-}" != "" ] && [ "${2#-}" = "${2}" ]; then
+                PREVIEW="$2"; shift 2
+            else
+                PREVIEW="HEAD"; shift
+            fi ;;
         --soak-days) SOAK_DAYS="${2:-}"; shift 2 ;;
         --repo)      REPO="${2:-}"; shift 2 ;;
         --out)       OUT="${2:-}"; shift 2 ;;
@@ -76,7 +93,14 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-[ -n "$FROM_BETA" ] || { echo -e "${RED}ERROR: --from-beta is required${NC}" >&2; usage >&2; exit 1; }
+if [ -z "$FROM_BETA" ] && [ -z "$PREVIEW" ]; then
+    echo -e "${RED}ERROR: one of --from-beta or --preview is required${NC}" >&2; usage >&2; exit 1
+fi
+if [ -n "$FROM_BETA" ] && [ -n "$PREVIEW" ]; then
+    echo -e "${RED}ERROR: --from-beta and --preview are different questions${NC}" >&2
+    echo "--from-beta judges a candidate; --preview reports what is unshipped." >&2
+    exit 1
+fi
 command -v gh >/dev/null 2>&1 || { echo -e "${RED}ERROR: gh CLI not found${NC}" >&2; exit 1; }
 
 REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -89,10 +113,10 @@ cd "$REPO_ROOT"
 #
 # A TAG NAME IS NOT PROOF OF A RELEASE, and here that distinction inverts the
 # answer rather than shading it. `v1.2.1` carries no prerelease identifier in
-# its name, so any name-based filter (`--exclude '*-*'`) would treat it as
-# stable — but GitHub has it flagged `prerelease: true`, because it was
-# withdrawn. Using it as a baseline understates what a release ships by the
-# entire backlog behind it.
+# its name, so any name-based filter (`--exclude '*-*'`) treats it as stable —
+# but GitHub has it flagged `prerelease: true`, because it was withdrawn. Using
+# it as a baseline understates what a release ships by the entire backlog
+# behind it.
 #
 # So validity comes from what GitHub published: not a draft, not a prerelease,
 # and actually published. Tags absent from the local clone are dropped, since
@@ -128,6 +152,72 @@ nearest_released_ancestor() {
     done
     printf '%s' "$best"
 }
+
+# -----------------------------------------------------------------------------
+# Preview: what is sitting unshipped
+# -----------------------------------------------------------------------------
+
+if [ -n "$PREVIEW" ]; then
+    git rev-parse --verify --quiet "${PREVIEW}^{commit}" >/dev/null \
+        || { echo -e "${RED}ERROR: '$PREVIEW' is not a known ref${NC}" >&2; exit 1; }
+    REF_SHA="$(git rev-parse "${PREVIEW}^{commit}")"
+
+    # The unreleased set is everything on the ref that is in NO valid release —
+    # not everything since the newest tag. Those differ whenever a release was
+    # cut from a side branch, which is the case here.
+    UNRELEASED="$(git rev-list "$REF_SHA" --not $VALID_TAGS 2>/dev/null || true)"
+    UNREL_COUNT="$(printf '%s' "$UNRELEASED" | grep -c . || true)"
+
+    PR_NUMS="$(printf '%s\n' "$UNRELEASED" \
+                 | while IFS= read -r c; do [ -n "$c" ] && git log -1 --format='%s' "$c"; done \
+                 | grep -oE '\(#[0-9]+\)$' | tr -d '()#' | sort -un || true)"
+    PR_COUNT="$(printf '%s' "$PR_NUMS" | grep -c . || true)"
+
+    LAST_RELEASED="$(nearest_released_ancestor "$REF_SHA")"
+
+    if [ "$UNREL_COUNT" -gt 0 ]; then
+        OLDEST_SHA="$(printf '%s\n' "$UNRELEASED" | tail -1)"
+        OLDEST_DATE="$(git log -1 --format='%ci' "$OLDEST_SHA" | cut -d' ' -f1)"
+        OLDEST_AGE_DAYS="$(( ( $(date -u +%s) - $(git log -1 --format='%ct' "$OLDEST_SHA") ) / 86400 ))"
+        NEW_MIGS="$(git diff --name-only --diff-filter=A "${LAST_RELEASED}..${REF_SHA}" -- "$MIGRATION_DIR" 2>/dev/null \
+                     | grep -E "^${MIGRATION_DIR}/[0-9]{4}_.*\.up\.sql$" || true)"
+        MIG_COUNT="$(printf '%s' "$NEW_MIGS" | grep -c . || true)"
+    else
+        OLDEST_DATE="n/a"; OLDEST_AGE_DAYS=0; MIG_COUNT=0; NEW_MIGS=""
+    fi
+
+    echo
+    echo -e "${BLUE}=== Unshipped work on $(git rev-parse --short "$REF_SHA") ===${NC}"
+    echo
+    printf '  %-28s %s\n' "valid stable releases" "$(printf '%s' "$VALID_TAGS" | wc -w | tr -d ' ')"
+    printf '  %-28s %s\n' "last released ancestor" "${LAST_RELEASED:-<none>}"
+    printf '  %-28s %s\n' "commits in no release" "$UNREL_COUNT"
+    printf '  %-28s %s\n' "pull requests unshipped" "$PR_COUNT"
+    printf '  %-28s %s\n' "oldest unshipped" "${OLDEST_DATE} (${OLDEST_AGE_DAYS}d)"
+    if [ "$MIG_COUNT" -eq 0 ]; then
+        printf '  %-28s %s\n' "schema steps" "none — schema-compatible"
+    else
+        printf '  %-28s %s\n' "schema steps" "$MIG_COUNT"
+        printf '%s\n' "$NEW_MIGS" | sed 's|^|      |'
+        if [ "$MIG_COUNT" -gt 1 ]; then
+            echo
+            echo -e "  ${YELLOW}More than one schema step: a beta may carry only one, so this${NC}"
+            echo -e "  ${YELLOW}span needs cutting at the first migration boundary.${NC}"
+        fi
+    fi
+    echo
+
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        {
+            echo "unreleased_commits=$UNREL_COUNT"
+            echo "unreleased_prs=$PR_COUNT"
+            echo "oldest_unreleased_days=$OLDEST_AGE_DAYS"
+            echo "last_released=${LAST_RELEASED}"
+            echo "migration_count=$MIG_COUNT"
+        } >> "$GITHUB_OUTPUT"
+    fi
+    exit 0
+fi
 
 git rev-parse --verify --quiet "${FROM_BETA}^{commit}" >/dev/null \
     || { echo -e "${RED}ERROR: '$FROM_BETA' is not a known tag${NC}" >&2; exit 1; }
