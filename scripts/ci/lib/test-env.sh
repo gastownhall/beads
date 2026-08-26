@@ -14,9 +14,10 @@ beads_test_env_enter() {
         return 0
     fi
 
-    local repo_root tmp_base root
+    local repo_root cache_home tmp_base root
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-    tmp_base="${BEADS_TEST_TMP_BASE:-$repo_root/.test-tmp}"
+    cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+    tmp_base="${BEADS_TEST_TMP_BASE:-$cache_home/beads/test-tmp}"
     mkdir -p "$tmp_base"
     root="$(mktemp -d "$tmp_base/beads-test-env-XXXXXX")"
     export BEADS_TEST_ENV_ROOT="$root"
