@@ -631,7 +631,7 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 // expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
 // currentVersion issues to confirm a non-zero ignored cursor against the
 // schema it claims (gh 5033). They fire only for a non-zero cursor, in
-// ignoredSource.sentinelTables order.
+// ignoredSource's table then column sentinel order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 	count := 0
 	if present {
@@ -640,6 +640,12 @@ func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 	for range ignoredSource.sentinelTables {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	}
+	if present {
+		for range ignoredSource.sentinelColumns {
+			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		}
 	}
 }
 
