@@ -37,15 +37,21 @@ BUMP="auto"
 STAMP=""
 SEQ=""
 BASE_TAG_OVERRIDE=""
+FROM_BETA=""
 ALLOW_MULTI_MIGRATION=0
 APPLY=0
 
 usage() {
     cat <<'USAGE'
-Usage: channel-promote.sh --channel <dev|beta> [options]
+Usage: channel-promote.sh --channel <dev|beta|stable> [options]
 
 Options:
-  --channel <dev|beta>   Which channel to stage a build for. Required.
+  --channel <dev|beta|stable>
+                         Which channel to stage a build for. Required.
+                         "stable" is a promotion and requires --from-beta.
+  --from-beta <tag>      Stable only. The beta tag being promoted. Its base
+                         version becomes the stable version, and HEAD must be
+                         that beta's exact commit.
   --bump <auto|minor|patch>
                          How to derive the next base version from the current
                          one. "auto" (default) reads CHANGELOG [Unreleased]:
@@ -80,6 +86,7 @@ while [ $# -gt 0 ]; do
         --stamp)   STAMP="${2:-}"; shift 2 ;;
         --seq)     SEQ="${2:-}"; shift 2 ;;
         --base-tag) BASE_TAG_OVERRIDE="${2:-}"; shift 2 ;;
+        --from-beta) FROM_BETA="${2:-}"; shift 2 ;;
         --allow-multi-migration) ALLOW_MULTI_MIGRATION=1; shift ;;
         --apply)   APPLY=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -93,6 +100,15 @@ done
 
 case "$CHANNEL" in
     dev|beta) ;;
+    stable)
+        if [ -z "$FROM_BETA" ]; then
+            echo -e "${RED}ERROR: --channel stable requires --from-beta <tag>${NC}" >&2
+            echo "Stable is a PROMOTION, never a fresh cut. Its version is the base" >&2
+            echo "version of the beta being promoted, and its commit is that beta's" >&2
+            echo "commit — so that what ships is what soaked, not a rebuild of it." >&2
+            exit 1
+        fi
+        ;;
     canary)
         cat >&2 <<'CANARY'
 ERROR: canary takes no version bump.
@@ -186,6 +202,46 @@ case "$CHANNEL" in
         fi
         NEW_VERSION="${NEXT_BASE}-beta.${SEQ}"
         ;;
+    stable)
+        # A promotion, not a cut. The version is the beta's base version and
+        # NOTHING is recomputed from CHANGELOG or version.go — recomputing here
+        # is how a stable release ends up shipping a different version from the
+        # one that soaked.
+        if ! git rev-parse --verify --quiet "${FROM_BETA}^{commit}" >/dev/null; then
+            echo -e "${RED}ERROR: --from-beta '$FROM_BETA' is not a known tag${NC}" >&2; exit 1
+        fi
+        BETA_VERSION="${FROM_BETA#v}"
+        # -rc.N is the identifier RELEASING.md already documents and every
+        # existing prerelease here uses; -beta.N is this proposal's. Both are
+        # gated candidates, so both promote. dev and canary are not.
+        case "$BETA_VERSION" in
+            *-beta.*|*-rc.*) ;;
+            *-dev.*|*-canary.*)
+               echo -e "${RED}ERROR: '$FROM_BETA' has not been through the release gate${NC}" >&2
+               echo "Stable promotes from a beta or rc only. A dev build has passed the" >&2
+               echo "nightly suite but not the full gate, and promoting one skips exactly" >&2
+               echo "the checks the gate exists to run." >&2
+               exit 1 ;;
+            *) echo -e "${RED}ERROR: '$FROM_BETA' is not a prerelease tag${NC}" >&2
+               echo "Stable is a promotion of a candidate, never a fresh cut." >&2
+               exit 1 ;;
+        esac
+        NEW_VERSION="${BETA_VERSION%%-*}"
+        NEXT_BASE="$NEW_VERSION"
+
+        # The tree must BE the beta's tree. Anything else and what ships is not
+        # what was gated.
+        BETA_SHA="$(git rev-parse "${FROM_BETA}^{commit}")"
+        HEAD_SHA="$(git rev-parse HEAD)"
+        if [ "$BETA_SHA" != "$HEAD_SHA" ]; then
+            echo -e "${RED}ERROR: HEAD is not the commit tagged $FROM_BETA${NC}" >&2
+            echo "  HEAD      $HEAD_SHA" >&2
+            echo "  $FROM_BETA  $BETA_SHA" >&2
+            echo "Check out the beta commit before promoting. Promoting a different" >&2
+            echo "tree ships code that never soaked." >&2
+            exit 1
+        fi
+        ;;
 esac
 
 # update-versions.sh's own accepted shape. Fail here rather than halfway
@@ -240,6 +296,11 @@ if [ -n "$BASE_TAG_OVERRIDE" ]; then
         exit 1
     fi
     BASE_TAG="$BASE_TAG_OVERRIDE"
+elif [ "$CHANNEL" = "stable" ]; then
+    # For a stable promotion the interesting delta is "since the last STABLE",
+    # not since the beta we are promoting — describe would return that beta at
+    # distance 0 and report nothing new. --exclude drops prerelease tags.
+    BASE_TAG="$(git describe --tags --abbrev=0 --match 'v*' --exclude '*-*' HEAD 2>/dev/null || true)"
 else
     BASE_TAG="$(git describe --tags --abbrev=0 --match 'v*' HEAD 2>/dev/null || true)"
 fi
@@ -262,8 +323,13 @@ echo
 echo -e "${BLUE}=== beads channel promotion — ${CHANNEL} ===${NC}"
 echo
 printf '  %-22s %s\n' "current version"   "$CURRENT_VERSION"
-printf '  %-22s %s\n' "base bump"         "${BUMP}${AUTO_NOTE}"
-printf '  %-22s %s\n' "next base"         "$NEXT_BASE"
+if [ "$CHANNEL" = "stable" ]; then
+    printf '  %-22s %s\n' "promoting"     "$FROM_BETA"
+    printf '  %-22s %s\n' "version source" "the beta's base version (not recomputed)"
+else
+    printf '  %-22s %s\n' "base bump"     "${BUMP}${AUTO_NOTE}"
+    printf '  %-22s %s\n' "next base"     "$NEXT_BASE"
+fi
 printf '  %-22s %s\n' "channel version"   "$NEW_VERSION"
 printf '  %-22s %s\n' "ancestor tag"      "${BASE_TAG:-<none found>}"
 printf '  %-22s %s\n' "commit"            "$(git rev-parse --short HEAD)"

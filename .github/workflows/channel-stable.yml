@@ -1,0 +1,244 @@
+# Stable channel — promote a soaked beta, on one human approval.
+#
+# Part of the release-channel proposal for gastownhall/beads (issue #5867).
+# Phase 2 of three; see engdocs/RELEASE-CHANNELS.md in the same PR.
+#
+# THE POINT OF THIS FILE. Cutting a stable release today means a maintainer
+# running a multi-hour gate by hand on a dev box and then writing the evidence
+# into release-gates/<tag>.md themselves. That is why releases are rare, and
+# rare releases are what make each one heavy. Here the gate has already run —
+# on the beta, in CI — and this workflow only assembles what it found and asks
+# one person one question.
+#
+# Two jobs, deliberately:
+#
+#   dossier   Assembles the evidence and publishes it as a job summary. Runs
+#             freely, blocks nothing, changes nothing. A FAIL verdict here
+#             means the promote job never even offers an approval button.
+#
+#   promote   Gated on the `stable-release` environment. GitHub holds it until
+#             a required reviewer approves, and records who and when. Only then
+#             does anything get tagged.
+#
+# WHAT APPROVAL COSTS AND WHAT IT DOES. Creating the stable tag triggers
+# release.yml, which — because the tag carries no prerelease identifier — also
+# publishes to PyPI and npm and makes the release eligible for the
+# homebrew-core autobump. It is the step that reaches users. Declining costs
+# nothing: the beta stays published and a later beta can be proposed instead.
+#
+# THIS DOES NOT WIDEN WHO MAY RELEASE. RELEASING.md restricts v* tag creation
+# to release maintainers and that stays true: the environment's reviewer list
+# is exactly that set. What changes is the labour, not the authority.
+#
+# ADOPTION PREREQUISITES, which this workflow cannot grant itself:
+#   1. An environment named `stable-release` with required reviewers set to the
+#      release maintainers. Without it the promote job runs unattended, which
+#      is the one outcome this design must not have — so the job asserts the
+#      environment is present and fails closed if it is not.
+#   2. refs/heads/channel/* writable by GITHUB_TOKEN.
+#   3. The v* tag ruleset must admit the Actions bot.
+
+name: Channel — Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_beta:
+        description: "Beta or rc tag to promote (e.g. v1.3.0-beta.2)"
+        required: true
+        type: string
+      soak_days:
+        description: "Minimum soak in days"
+        required: false
+        default: "7"
+        type: string
+      expect_red:
+        description: "Pre-declared red check, as 'GLOB=reason'. One per line."
+        required: false
+        default: ""
+        type: string
+      allow_short_soak:
+        description: "Promote despite a short soak (records the shortfall)"
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: channel-stable
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BD_DISABLE_METRICS: "1"
+  BD_DISABLE_EVENT_FLUSH: "1"
+
+jobs:
+  dossier:
+    name: Assemble release-gate dossier
+    if: ${{ github.repository == 'gastownhall/beads' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      verdict: ${{ steps.gate.outputs.verdict }}
+      stable_tag: ${{ steps.gate.outputs.stable_tag }}
+      stable_version: ${{ steps.gate.outputs.stable_version }}
+      beta_sha: ${{ steps.gate.outputs.beta_sha }}
+      report: ${{ steps.gate.outputs.report }}
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          ref: ${{ inputs.from_beta }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Assemble
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -uo pipefail
+          args=(--from-beta "${{ inputs.from_beta }}" --soak-days "${{ inputs.soak_days }}")
+          if [ "${{ inputs.allow_short_soak }}" = "true" ]; then
+            args+=(--allow-short-soak)
+          fi
+          # One --expect-red per non-blank input line.
+          while IFS= read -r line; do
+            [ -n "${line// /}" ] || continue
+            args+=(--expect-red "$line")
+          done <<< "${{ inputs.expect_red }}"
+
+          bash scripts/channel-gate-report.sh "${args[@]}"
+          echo "gate_exit=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the dossier as the job summary
+        if: always()
+        run: cat "${{ steps.gate.outputs.report }}" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        if: always()
+        with:
+          name: release-gate-dossier
+          path: ${{ steps.gate.outputs.report }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Refuse to offer a failed promotion
+        if: ${{ steps.gate.outputs.verdict == 'FAIL' }}
+        run: |
+          echo "::error::Verdict FAIL — not offering this for approval. Read the summary above."
+          exit 1
+
+  promote:
+    name: Promote to stable (requires approval)
+    needs: dossier
+    if: ${{ needs.dossier.outputs.verdict != 'FAIL' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # THIS LINE IS THE APPROVAL GATE. GitHub holds the job here until a
+    # required reviewer on the `stable-release` environment approves, and
+    # records the approver against the run.
+    environment:
+      name: stable-release
+      url: https://github.com/${{ github.repository }}/releases/tag/${{ needs.dossier.outputs.stable_tag }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # The beta's exact commit. What soaked is what ships.
+          ref: ${{ needs.dossier.outputs.beta_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      # Fail closed. If the environment has no reviewers the job would have run
+      # unattended, and an unattended stable release is the failure mode this
+      # whole design exists to prevent — so prove a human was asked.
+      - name: Assert the approval was human
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          reviewers=$(gh api \
+            "repos/${{ github.repository }}/environments/stable-release" \
+            --jq '[.protection_rules[] | select(.type=="required_reviewers") | .reviewers[]] | length' \
+            2>/dev/null || echo 0)
+          if [ "$reviewers" -eq 0 ]; then
+            echo "::error::The stable-release environment has no required reviewers."
+            echo "This job would have promoted a release with nobody asked. Configure"
+            echo "required reviewers on the environment before using this workflow."
+            exit 1
+          fi
+          echo "stable-release has $reviewers required reviewer(s); approval was human."
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+
+      - name: Install uv
+        run: python -m pip install uv==0.11.16
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: release-gate-dossier
+          path: release-gates/
+
+      - name: Configure git identity
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Stage the stable version
+        id: plan
+        run: |
+          bash scripts/channel-promote.sh \
+            --channel stable \
+            --from-beta "${{ inputs.from_beta }}" \
+            --apply
+
+      - name: Commit the promotion and its evidence
+        run: |
+          set -euo pipefail
+          version="${{ needs.dossier.outputs.stable_version }}"
+          git add -A
+          git commit -m "chore(release): promote ${{ inputs.from_beta }} to v${version}
+
+          Approved by ${{ github.actor }} via the stable-release environment.
+          The release-gate dossier is committed alongside, so the evidence lives
+          in the repository rather than on the releaser's machine."
+
+      - name: Move the channel pointer and tag
+        run: |
+          set -euo pipefail
+          version="${{ needs.dossier.outputs.stable_version }}"
+          git push --force origin HEAD:refs/heads/channel/stable
+          git tag -a "v${version}" -m "Release v${version}
+
+          Promoted from ${{ inputs.from_beta }} after soak. Gate evidence in
+          release-gates/v${version}.md."
+          # This push is what triggers release.yml and reaches users.
+          git push origin "v${version}"
+
+      - name: Summary
+        run: |
+          {
+            echo "## Promoted \`${{ inputs.from_beta }}\` → \`v${{ needs.dossier.outputs.stable_version }}\`"
+            echo
+            echo "Approved by @${{ github.actor }}."
+            echo "Gate evidence committed to \`release-gates/v${{ needs.dossier.outputs.stable_version }}.md\`."
+            echo
+            echo "\`release.yml\` is now building the release. It will publish the"
+            echo "GitHub release, PyPI and npm, and make the release eligible for"
+            echo "the homebrew-core autobump."
+          } >> "$GITHUB_STEP_SUMMARY"
