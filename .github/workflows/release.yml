@@ -27,7 +27,7 @@ jobs:
   # ships with version.go bumped but the docs snapshot missing (which otherwise
   # only surfaces as a red main after the artifacts are already published).
   verify-version-consistency:
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -57,7 +57,7 @@ jobs:
 
   release-package-mcp:
     name: Release Package Gate (MCP)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs: verify-version-consistency
     runs-on: ubuntu-latest
     steps:
@@ -90,7 +90,7 @@ jobs:
 
   release-package-npm:
     name: Release Package Gate (npm)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs: verify-version-consistency
     runs-on: ubuntu-latest
     steps:
@@ -112,7 +112,7 @@ jobs:
 
   release-package-website:
     name: Release Package Gate (website)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs: verify-version-consistency
     runs-on: ubuntu-latest
     steps:
@@ -131,7 +131,7 @@ jobs:
 
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs:
       - release-package-mcp
       - release-package-npm
@@ -163,7 +163,7 @@ jobs:
           version: '~> v2'
           args: >
             release --clean --parallelism 1
-            ${{ github.repository != 'gastownhall/beads' && '--skip=publish --skip=announce' || '' }}
+            ${{ github.repository != 'marlon-costa-dc/beads' && '--skip=publish --skip=announce' || '' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Windows code signing (optional - signing is skipped if not set)
@@ -185,7 +185,7 @@ jobs:
   goreleaser-macos:
     # Build macOS binaries with CGO_ENABLED=1 for embedded Dolt support.
     # Runs on native macOS to avoid zig/osxcross cross-compilation issues.
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs: goreleaser
     runs-on: macos-latest
     steps:
@@ -298,7 +298,7 @@ jobs:
   attest-release:
     # Attest the complete release after GoReleaser assets and the native macOS
     # archives have both populated checksums.txt.
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') }}
+    if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
     needs: [goreleaser, goreleaser-macos]
     runs-on: ubuntu-latest
     steps:
