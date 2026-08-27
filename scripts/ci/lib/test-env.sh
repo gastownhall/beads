@@ -52,9 +52,10 @@ beads_test_env_enter() {
     export GOCACHE="$go_cache"
     export GIT_CONFIG_NOSYSTEM=1
     export GIT_CONFIG_GLOBAL="$root/gitconfig"
-    # Discovery is bounded by the harness root, so package tests remain free to
-    # exercise repository-config behavior instead of globally disabling it.
-    unset BEADS_TEST_IGNORE_REPO_CONFIG
+    # Keep package tests isolated from the invoking checkout's repository and
+    # user configuration. Focused tests can explicitly clear this variable
+    # when repository-config behavior is the subject under test.
+    export BEADS_TEST_IGNORE_REPO_CONFIG=1
     if [[ "${BEADS_TEST_ENV_RUN_DOLT:-0}" != "1" ]]; then
         beads_test_env_add_skip "dolt"
     fi

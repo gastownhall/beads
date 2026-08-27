@@ -36,7 +36,7 @@ SKIP_PATTERN=$(build_skip_pattern)
 VERBOSE="${TEST_VERBOSE:-}"
 RUN_PATTERN="${TEST_RUN:-}"
 COVERAGE="${TEST_COVER:-}"
-COVERPROFILE="${TEST_COVERPROFILE:-/tmp/beads.coverage.out}"
+COVERPROFILE="${TEST_COVERPROFILE:-$BEADS_TEST_ENV_ROOT/beads.coverage.out}"
 COVERPKG="${TEST_COVERPKG:-}"
 
 # Parse arguments
@@ -82,7 +82,7 @@ fi
 # This reduces 8-16+ concurrent dolt processes down to 1.
 if [[ "${BEADS_TEST_SHARED_SERVER:-}" == "1" && -z "${BEADS_DOLT_PORT:-}" ]]; then
     if command -v dolt &>/dev/null; then
-        SHARED_DOLT_DIR=$(mktemp -d /tmp/beads-shared-test-dolt-XXXXXX)
+        SHARED_DOLT_DIR=$(mktemp -d "$BEADS_TEST_ENV_ROOT/beads-shared-test-dolt-XXXXXX")
         DOLT_ROOT_PATH="$SHARED_DOLT_DIR"
         export DOLT_ROOT_PATH
 
