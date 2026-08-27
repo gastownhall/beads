@@ -95,7 +95,7 @@ func TestEmbeddedCount(t *testing.T) {
 
 	t.Run("basic_count_no_filters", func(t *testing.T) {
 		out := strings.TrimSpace(bdCount(t, bd, dir))
-		// Should return a number >= 8 (we created 8 issues)
+		// Should return a number >= 9 (we created 9 issues)
 		if out == "0" {
 			t.Error("expected non-zero count")
 		}
@@ -168,6 +168,8 @@ func TestEmbeddedCount(t *testing.T) {
 			t.Errorf("expected at least 2 issues with either label, got %d", count)
 		}
 	})
+
+	// ===== Metadata filter =====
 
 	t.Run("filter_by_metadata_field", func(t *testing.T) {
 		got := int(bdCountJSON(t, bd, dir, "--metadata-field", "count_scope=matching")["count"].(float64))

@@ -2315,7 +2315,7 @@ type CountIssuesParams struct {
 	// NoLabels Only issues carrying no label.
 	NoLabels *bool `form:"no_labels,omitempty" json:"no_labels,omitempty"`
 
-	// MetadataField Top-level metadata equality filter in `key=value` form. Repeat the parameter to require every pair. The value is everything after the first `=`; an invalid key is a `400`.
+	// MetadataField Top-level metadata equality filter as `key=value`, split on the first `=`. Repeatable. An invalid key is a 400.
 	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
 
 	// IncludeInfra Count the cardinality of `bd list --include-infra --all` instead of the durable plane. IT CHANGES FOUR THINGS AT ONCE, and they are listed rather than summarized because a caller reading "include infra" would expect one:

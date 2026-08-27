@@ -1859,9 +1859,8 @@ paths:
         - name: metadata_field
           in: query
           description: >-
-            Top-level metadata equality filter in `key=value` form. Repeat the
-            parameter to require every pair. The value is everything after the
-            first `=`; an invalid key is a `400`.
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
           style: form
           explode: true
           schema:
@@ -1938,11 +1937,12 @@ paths:
             set.
 
 
-            EVERY REFUSAL HERE IS THE TRANSPORT'S. The two predicates the count
-            role can reject are also refused at the edge: an invalid metadata
-            key by `metadata_field`, and an unknown bucketing dimension by
-            `group_by`. An unrecognized `status` or `type` is not a refusal; it
-            matches nothing and answers `0`.
+            A malformed `metadata_field` shape and an unknown `group_by` are
+            transport refusals. An invalid metadata key passes query decoding,
+            then `BuildCountFilter` rejects it and `failReadErr` classifies the
+            role's error as a `400` on `metadata_field`. An unrecognized
+            `status` or `type` is not a refusal; it matches nothing and answers
+            `0`.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:

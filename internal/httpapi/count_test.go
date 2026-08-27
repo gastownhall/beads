@@ -537,14 +537,12 @@ func TestCountParametersMatchTheHandler(t *testing.T) {
 // constants so the server and the role cannot drift; this compares that list
 // against the DOCUMENT, which is the third party to the agreement.
 //
-// IT IS ALSO WHAT MAKES THIS ROLE ErrValidation UNREACHABLE FROM THE WIRE:
-// this handler refuses an unknown group at the edge. Metadata-key validation
-// is likewise repeated at the edge by q.metadataFields. So every
-// `invalid_argument` this operation emits is the transport's, and the shared
-// read failure path never sees a role refusal. If the enum here and the role's
-// constants ever diverged, a value this server accepted and the role refused
-// would arrive as an unclassified 500, which is the regression this comparison
-// prevents.
+// It also keeps the role's group refusal unreachable from the wire: the
+// handler refuses an unknown group at the edge. Metadata validation is a
+// separate path. An invalid key reaches BuildCountFilter, whose role refusal
+// failReadErr classifies as a 400 on `metadata_field`. This test guards only the
+// group vocabulary; if that enum and the role's constants diverged, a value the
+// server accepted and the role refused would arrive as an unclassified 500.
 func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 	doc := loadSpec(t)
 	so := specOps(t, doc)["countIssues"]

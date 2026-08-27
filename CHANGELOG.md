@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd count` supports repeatable `--metadata-field key=value` filters**
+  ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
+  count the same metadata-scoped set `bd list` returns without fetching every
+  row.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
