@@ -218,6 +218,15 @@ func BuildIssueFilterClauses(query string, filter types.IssueFilter, tables Filt
 			whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
 		}
 	}
+	if filter.EphemeralTier != nil {
+		// The tier discriminator, not the raw flag: typed wisps minted without
+		// the ephemeral flag are still ephemeral-tier (types.IssueFilter).
+		if *filter.EphemeralTier {
+			whereClauses = append(whereClauses, "(ephemeral = 1 OR (wisp_type IS NOT NULL AND wisp_type <> ''))")
+		} else {
+			whereClauses = append(whereClauses, "((ephemeral = 0 OR ephemeral IS NULL) AND (wisp_type = '' OR wisp_type IS NULL))")
+		}
+	}
 	if filter.IsTemplate != nil {
 		if *filter.IsTemplate {
 			whereClauses = append(whereClauses, "is_template = 1")

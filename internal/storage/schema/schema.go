@@ -321,42 +321,14 @@ var versionGatedDoltIgnorePatterns = []struct {
 	{"events", 62}, // 0062_events_dolt_ignore (bd-red8u)
 }
 
-// seedDoltIgnorePatterns idempotently asserts the canonical dolt_ignore
-// patterns and reports whether it actually changed anything. INSERT IGNORE
-// leaves existing rows untouched, so a healthy database sees no working-set
-// change and an explicit operator override (pattern present with
-// ignored=false) is respected. On an under-seeded database the new rows land
-// in the working set and take effect immediately; who commits them depends on
-// the pass: when migration work is needed, MigrateUp exempts dolt_ignore from
-// the pre-existing-dirty guards as pass-owned state (same treatment as the
-// aux-rekey tables) and stageSchemaTables commits it with the pass; on the
-// no-work short-circuit, MigrateUp commits the seed itself in a scoped,
-// labeled commit (keyed off the changed return value) so the heal converges
-// in one pass instead of riding along inside an unrelated later commit.
-func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
-	changed := false
-	seedOne := func(pattern string) error {
-		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
-		if err != nil {
-			return fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
-		}
-		// A RowsAffected error degrades to changed=false for that row: the
-		// seed then stays an uncommitted working-set diff swept up by the
-		// next commit, exactly the pre-scoped-commit behavior.
-		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
-			changed = true
-		}
-		return nil
-	}
-	for _, pattern := range doltIgnorePatterns {
-		if err := seedOne(pattern); err != nil {
-			return changed, err
-		}
-	}
-	// Version-gated patterns seed only once the main cursor proves the flip
-	// migration applied. The cursor table may not exist yet (first-ever run,
-	// before mainSource.migrate bootstraps it): treat that as version 0 and
-	// skip — the flip migration registers its own pattern when it applies.
+// doltIgnoreSeedCandidates is the pattern set this open should assert: the
+// canonical patterns plus any version-gated pattern the main cursor
+// qualifies. The cursor table may not exist yet (first-ever run, before
+// mainSource.migrate bootstraps it): treat that as version 0 and skip the
+// gated ones — the flip migration registers its own pattern when it applies.
+func doltIgnoreSeedCandidates(ctx context.Context, db DBConn) []string {
+	candidates := make([]string, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
+	candidates = append(candidates, doltIgnorePatterns...)
 	mainVersion, err := mainSource.currentVersion(ctx, db)
 	if err != nil {
 		mainVersion = 0
@@ -365,8 +337,112 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 		if mainVersion < gated.minMainVersion {
 			continue
 		}
-		if err := seedOne(gated.pattern); err != nil {
-			return changed, err
+		candidates = append(candidates, gated.pattern)
+	}
+	return candidates
+}
+
+// missingDoltIgnorePatterns reports which candidates have no row in
+// dolt_ignore yet, i.e. exactly the ones an INSERT IGNORE would actually
+// insert. The probe is a single `WHERE pattern IN (...)` so the equality that
+// decides it is the COLUMN's own collation — the same comparison the primary
+// key uses to swallow an INSERT IGNORE — rather than Go string equality
+// guessing at it. The returned values are the STORED spellings, which under a
+// case-insensitive collation may differ in case from the candidate, so they
+// are matched back case-insensitively; the candidate set has no two entries
+// that collide under case folding, and under a case-sensitive collation the
+// database only ever returns exact matches, so the fold cannot mis-attribute.
+//
+// A read failure is not fatal: dolt_ignore does not exist on a never-migrated
+// database (the first INSERT creates it), and that path is privileged by
+// construction. Treat the probe as "nothing present" and let the writes run,
+// which is exactly the pre-read behavior. A partial read (the query succeeds
+// but iteration fails partway) degrades identically: the half-filled result is
+// discarded so it can never misclassify a registered pattern as missing.
+func missingDoltIgnorePatterns(ctx context.Context, db DBConn, candidates []string) []string {
+	present := make(map[string]bool, len(candidates))
+	placeholders := make([]string, len(candidates))
+	args := make([]any, len(candidates))
+	for i, pattern := range candidates {
+		placeholders[i] = "?"
+		args[i] = pattern
+	}
+	query := "SELECT pattern FROM dolt_ignore WHERE pattern IN (" + strings.Join(placeholders, ", ") + ")"
+	if rows, err := db.QueryContext(ctx, query, args...); err == nil {
+		readErr := false
+		for rows.Next() {
+			var stored string
+			if err := rows.Scan(&stored); err != nil {
+				readErr = true
+				break
+			}
+			present[strings.ToLower(stored)] = true
+		}
+		// rows.Err() surfaces an iteration failure that rows.Next() swallowed;
+		// a Scan error above is tracked separately because rows.Err() does not
+		// report it. Either way the read did not complete.
+		if err := rows.Err(); err != nil {
+			readErr = true
+		}
+		_ = rows.Close()
+		// A partial read must not drive the write decision. If iteration failed
+		// partway, present is half-filled, so a genuinely-registered pattern
+		// would be misclassified as missing and draw a spurious INSERT IGNORE —
+		// the exact command-denied write this seed exists to avoid on a
+		// SELECT/DML-only fence. Discard the partial map so a partial read
+		// degrades to the same "nothing present" blind-write as a query-level
+		// failure, which only ever runs on the privileged opener.
+		if readErr {
+			present = nil
+		}
+	}
+	missing := make([]string, 0, len(candidates))
+	for _, pattern := range candidates {
+		if present[strings.ToLower(pattern)] {
+			continue
+		}
+		missing = append(missing, pattern)
+	}
+	return missing
+}
+
+// seedDoltIgnorePatterns idempotently asserts the canonical dolt_ignore
+// patterns and reports whether it actually changed anything.
+//
+// It READS before it writes, and issues no statement at all for a pattern
+// that is already registered. That is not an optimization: the store is
+// opened by every client, including a wire client coming through the hosted
+// or box fence, whose operator grant is deliberately SELECT/DML-on-data-only.
+// A blind `INSERT IGNORE` is a write for privilege purposes even when it
+// changes nothing, so the unconditional form made a correctly-seeded database
+// un-openable through a fence, and the only way to open it was to grant
+// INSERT on dolt_ignore — which lets a wire client register a pattern for
+// `issues` and silently stop its own writes from ever being committed. The
+// read costs one round trip and removes the need for that grant.
+//
+// The write path is unchanged where a write is genuinely owed: INSERT IGNORE
+// leaves existing rows untouched, so an explicit operator override (pattern
+// present with ignored=false) is respected even in the race where the probe
+// missed it. On an under-seeded database the new rows land in the working set
+// and take effect immediately; who commits them depends on the pass: when
+// migration work is needed, MigrateUp exempts dolt_ignore from the
+// pre-existing-dirty guards as pass-owned state (same treatment as the
+// aux-rekey tables) and stageSchemaTables commits it with the pass; on the
+// no-work short-circuit, MigrateUp commits the seed itself in a scoped,
+// labeled commit (keyed off the changed return value) so the heal converges
+// in one pass instead of riding along inside an unrelated later commit.
+func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
+	changed := false
+	for _, pattern := range missingDoltIgnorePatterns(ctx, db, doltIgnoreSeedCandidates(ctx, db)) {
+		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
+		if err != nil {
+			return changed, fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
+		}
+		// A RowsAffected error degrades to changed=false for that row: the
+		// seed then stays an uncommitted working-set diff swept up by the
+		// next commit, exactly the pre-scoped-commit behavior.
+		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
+			changed = true
 		}
 	}
 	return changed, nil

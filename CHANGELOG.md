@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Write commands now refuse to run while a MIGRATION-FREEZE sentinel sits
+  at the town root** (dc-6jaq), mirroring the gate the gt CLI already applies
+  to `gt mail send`/`nudge`/`sling`/`assign`. `bd create`/`update`/`close`/
+  `remember`/`import` and every other command gated by `CheckReadonly`
+  (~120 call sites, `bd q` included) now print `⛔ town is frozen for
+  migration (by <operator>)` and exit 1 instead of writing to a store mid-
+  migration. The check runs twice: once early in the root command, before
+  version-bump auto-migration or JSONL auto-import can touch the store, and
+  again at each write command's own chokepoint. Read commands (`list`,
+  `show`, `ready`, …) keep working during a freeze — the same early check
+  also skips version tracking and auto-migration for them, so a frozen store
+  is never rewritten just because someone ran a read. `--dry-run`/`--inspect`
+  previews are blocked at the per-command chokepoint instead, same as strict
+  `--readonly` already blocks them. Clear the freeze with `gt migrate thaw`.
+
 - **`bd dep add` names the implicit `type=blocks` default, but only to an
   interactive operator** (#5854). Creating an edge with no `-t/--type` silently
   produces a `blocks` edge, which drops the dependent out of `bd ready` — the
@@ -157,6 +172,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
 
 ### Fixed
+
+- **`bd prime` says when it could NOT read the memory plane**
+  ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
+  unreachable store made prime omit the memory section entirely, so a session
+  that woke with zero recall looked exactly like a workspace that simply has no
+  memories — same output, same exit 0, no way for a fleet operator to tell them
+  apart. Prime still never fails a session-start hook, but a memory read it
+  cannot serve now renders `Skipped: beads storage unavailable (<error>) —
+  persistent memories were NOT injected this session`, alongside the timeout
+  banner that already existed for a deadline. Both the classic and the
+  proxied-server route share the banner. A workspace-less directory, and a
+  healthy store with no memories, stay silent as before.
 
 - **Incremental auto-export now actually takes the incremental path**
   ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection

@@ -1916,6 +1916,17 @@ type IssueFilter struct {
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
 
+	// EphemeralTier selects a SWEEP TIER rather than the raw ephemeral flag:
+	// a row is ephemeral-tier when ephemeral=1 OR it carries a wisp_type.
+	// The distinction exists because the flag alone misses typed wisps minted
+	// without it (older creators set wisp_type but not ephemeral), and those
+	// rows must fall to `bd purge`, not accumulate forever — while NoHistory
+	// beads (wisps plane, ephemeral=0, no wisp_type) stay durable-tier.
+	// Unlike Ephemeral=true this field does NOT route the search to the wisps
+	// plane alone; a tier query must merge both planes, because legacy typed
+	// wisps can live in the issues table. nil = no tier constraint.
+	EphemeralTier *bool
+
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)
 

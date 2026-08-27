@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -295,37 +296,58 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// expectIgnorePatternSeed mocks the unconditional dolt_ignore pattern seed
-// MigrateUp runs before anything else, with every pattern actually inserted
-// (RowsAffected=1: an under-seeded database). mainVersion is what the seed's
-// cursor probe reports; version-gated patterns (events, >= 0062) are only
-// expected when it qualifies them.
-func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 1)
-}
-
-// expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
-// INSERT IGNORE hits an existing row (RowsAffected=0), nothing changes.
-func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 0)
-}
-
-func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64) {
-	for _, pattern := range doltIgnorePatterns {
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
-			WithArgs(pattern).
-			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
-	}
-	expectCursorProbe(mock, "schema_migrations", true)
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+// expectedIgnoreSeedCandidates is the pattern set the seed asserts at a given
+// main cursor: the canonical set plus the version-gated ones that qualify.
+func expectedIgnoreSeedCandidates(mainVersion int) []string {
+	candidates := append([]string(nil), doltIgnorePatterns...)
 	for _, gated := range versionGatedDoltIgnorePatterns {
 		if mainVersion < gated.minMainVersion {
 			continue
 		}
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
-			WithArgs(gated.pattern).
-			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
+		candidates = append(candidates, gated.pattern)
 	}
+	return candidates
+}
+
+// expectIgnoreSeedProbe mocks the seed's read half: the cursor probe that
+// decides the version-gated patterns, then the single presence SELECT.
+// alreadyPresent is what dolt_ignore reports back.
+func expectIgnoreSeedProbe(mock sqlmock.Sqlmock, mainVersion int, alreadyPresent []string) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+	args := make([]driver.Value, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
+	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
+		args = append(args, pattern)
+	}
+	rows := sqlmock.NewRows([]string{"pattern"})
+	for _, pattern := range alreadyPresent {
+		rows.AddRow(pattern)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore WHERE pattern IN (")).
+		WithArgs(args...).
+		WillReturnRows(rows)
+}
+
+// expectIgnorePatternSeed mocks the dolt_ignore pattern seed MigrateUp runs
+// before anything else on an UNDER-SEEDED database: the probe finds nothing,
+// so every pattern is inserted (RowsAffected=1). mainVersion is what the
+// seed's cursor probe reports; version-gated patterns (events, >= 0062) are
+// only expected when it qualifies them.
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnoreSeedProbe(mock, mainVersion, nil)
+	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+}
+
+// expectIgnorePatternSeedNoop mocks the seed on a healthy database: the probe
+// finds every pattern already registered, so NO statement is issued at all.
+// This is the shape a fenced wire client must produce — it holds no write
+// grant on dolt_ignore, so an INSERT here is an error, not a no-op.
+func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnoreSeedProbe(mock, mainVersion, expectedIgnoreSeedCandidates(mainVersion))
 }
 
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {

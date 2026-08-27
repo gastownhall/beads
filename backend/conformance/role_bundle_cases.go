@@ -624,6 +624,8 @@ var roleContractCases = []roleContract{
 		RunSweeperRefusesAnUnfilteredDurableSweep,
 		RunSweeperRefusesAMalformedRequest,
 		RunSweeperClearsOneTierAndLeavesTheOther,
+		RunSweeperTreatsALegacyTypedWispAsEphemeralTier,
+		RunSweeperLeavesNoHistoryBeadsToTheDurableTier,
 		RunSweeperProtectsPinnedRows,
 		RunSweeperHonorsTheCutoffAndThePattern,
 		RunSweeperDryRunChangesNothing,
