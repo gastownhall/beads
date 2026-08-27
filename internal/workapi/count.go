@@ -63,6 +63,10 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 		Priority:            in.Priority,
 		PriorityMin:         in.PriorityMin,
 		PriorityMax:         in.PriorityMax,
+		MetadataFields:      in.MetadataFields,
+	}
+	if err := ValidateMetadataFilters(in.MetadataFields, ""); err != nil {
+		return types.IssueFilter{}, err
 	}
 
 	// Status and IssueType are taken as written. Neither is validated against

@@ -723,12 +723,11 @@ var operationCodes = map[string][]Code{
 	// from the listings' beside it: a malformed boolean, integer or timestamp, a
 	// repeated single-valued parameter, and a `group_by` outside the closed set.
 	//
-	// No ROLE refusal is reachable. issueops.Counter has exactly one
-	// ErrValidation — ValidateCountGroup's unknown dimension, since
-	// BuildCountFilter cannot fail — and countGroupOf refuses that dimension at
-	// the edge, so the shared read failure path never classifies a count. An
-	// unrecognized status or type is not a refusal at all here; the role
-	// promises it matches nothing and answers 0.
+	// No ROLE refusal is reachable. countGroupOf refuses an unknown group and
+	// q.metadataFields refuses a malformed metadata key at the edge, before the
+	// role can reject either. The shared read failure path therefore never
+	// classifies a count. An unrecognized status or type is not a refusal at all
+	// here; the role promises it matches nothing and answers 0.
 	// TestCountGroupEnumMatchesTheRolesVocabulary is what keeps that true.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
