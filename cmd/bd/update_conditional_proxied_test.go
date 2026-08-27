@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -103,4 +104,40 @@ func TestProxiedServerUpdateIfGuards(t *testing.T) {
 			t.Errorf("expected the --claim exclusion in the error, got:\n%s", out)
 		}
 	})
+}
+
+// TestProxiedServerUpdateIfVersion pins parity with the embedded CLI: the
+// revision read through the proxied show path guards the same lifecycle update
+// transaction, and a stale token is the same exit-13/no-write verdict.
+func TestProxiedServerUpdateIfVersion(t *testing.T) {
+	requireSharedProxiedServer(t)
+	t.Parallel()
+	bd := buildEmbeddedBD(t)
+	p := newSharedProxiedProject(t, bd, "uvp")
+	issue := bdProxiedCreate(t, bd, p.dir, "Version guard via proxy")
+
+	first := revisionFromShowJSON(t, []byte(bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--json")))
+	if out, err := bdProxiedRun(t, bd, p.dir, "update", issue.ID,
+		"--if-version", strconv.FormatInt(first, 10), "--priority", "1"); err != nil {
+		t.Fatalf("matching version update failed: %v\n%s", err, out)
+	}
+	second := revisionFromShowJSON(t, []byte(bdProxiedShowRaw(t, bd, p.dir, issue.ID, "--json")))
+	if second == first {
+		t.Fatalf("revision did not change after proxied write: %d", first)
+	}
+	if out, err := bdProxiedRun(t, bd, p.dir, "update", issue.ID, "--priority", "2"); err != nil {
+		t.Fatalf("competing update failed: %v\n%s", err, out)
+	}
+
+	out, code := bdProxiedUpdateFailCode(t, bd, p.dir, issue.ID,
+		"--if-version", strconv.FormatInt(second, 10), "--priority", "3")
+	if code != ExitGuardMismatch {
+		t.Fatalf("stale proxied version exit = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "version mismatch") {
+		t.Errorf("stale proxied version output lacks mismatch sentinel:\n%s", out)
+	}
+	if got := bdProxiedShow(t, bd, p.dir, issue.ID).Priority; got != 2 {
+		t.Errorf("stale proxied version clobbered winner: priority=%d, want 2", got)
+	}
 }

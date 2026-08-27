@@ -3,14 +3,41 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
 )
+
+func revisionFromShowJSON(t *testing.T, raw []byte) int64 {
+	t.Helper()
+	start := strings.IndexByte(string(raw), '{')
+	if start < 0 {
+		t.Fatalf("show output has no JSON object:\n%s", raw)
+	}
+	var details types.IssueDetails
+	if err := json.NewDecoder(strings.NewReader(string(raw[start:]))).Decode(&details); err != nil {
+		t.Fatalf("decode show details: %v\n%s", err, raw)
+	}
+	return details.Revision
+}
+
+func bdShowRevision(t *testing.T, bd, dir, id string) int64 {
+	t.Helper()
+	cmd := exec.Command(bd, "show", id, "--json")
+	cmd.Dir = dir
+	cmd.Env = bdEnv(dir)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("bd show %s --json failed: %v\n%s", id, err, out)
+	}
+	return revisionFromShowJSON(t, out)
+}
 
 // bdUpdateFailCode runs "bd update" expecting failure and returns the combined
 // output plus the process exit code, so guard tests can assert the
@@ -136,6 +163,42 @@ func TestUpdateIfGuardsCLI(t *testing.T) {
 			t.Errorf("mixed guard+lookup failure exit code = %d, want 1\n%s", code, out)
 		}
 	})
+}
+
+// TestUpdateIfVersionCLI proves the revision emitted by `bd show --json` is a
+// usable cross-process compare-and-swap token for `bd update`. A matching token
+// applies, a later independent write remints it, and replaying the stale token
+// exits 13 without clobbering that winner.
+func TestUpdateIfVersionCLI(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "uv")
+	issue := bdCreate(t, bd, dir, "Version guarded update", "--type", "task")
+
+	first := bdShowRevision(t, bd, dir, issue.ID)
+	bdUpdate(t, bd, dir, issue.ID, "--if-version", strconv.FormatInt(first, 10), "--priority", "1")
+	second := bdShowRevision(t, bd, dir, issue.ID)
+	if second == first {
+		t.Fatalf("revision did not change after write: %d", first)
+	}
+
+	// A different process wins after the caller's read.
+	bdUpdate(t, bd, dir, issue.ID, "--priority", "2")
+	out, code := bdUpdateFailCode(t, bd, dir, issue.ID,
+		"--if-version", strconv.FormatInt(second, 10), "--priority", "3")
+	if code != ExitGuardMismatch {
+		t.Fatalf("stale version exit = %d, want %d\n%s", code, ExitGuardMismatch, out)
+	}
+	if !strings.Contains(out, "version mismatch") {
+		t.Errorf("stale version output lacks mismatch sentinel:\n%s", out)
+	}
+	if got := bdShow(t, bd, dir, issue.ID).Priority; got != 2 {
+		t.Errorf("stale version clobbered winner: priority=%d, want 2", got)
+	}
 }
 
 // TestUpdateIfGuardsFlagValidation drives the CLI-surface rules that keep the

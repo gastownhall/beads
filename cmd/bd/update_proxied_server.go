@@ -24,6 +24,9 @@ func runUpdateProxiedServer(cmd *cobra.Command, ctx context.Context, args []stri
 	if err != nil {
 		return err
 	}
+	if in.ifVersion != nil && len(args) != 1 {
+		return HandleErrorRespectJSON("--if-version requires exactly one issue ID")
+	}
 	if isUpdateInputNoop(in) {
 		fmt.Println("No updates specified")
 		return nil
@@ -129,6 +132,7 @@ func applyUpdateProxiedOne(ctx context.Context, id string, in *updateInput) (*ty
 		force:            in.force,
 		expectedAssignee: in.ifAssignee,
 		expectedStatus:   expectedStatus,
+		expectedVersion:  in.ifVersion,
 		provenance:       fmt.Sprintf("bd: update %s", id),
 	})
 	if err != nil {

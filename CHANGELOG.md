@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd update --if-version N` exposes the row revision as a CLI compare-and-swap guard**
+  ([#6029](https://github.com/gastownhall/beads/issues/6029)). Read the opaque
+  token from `bd show --json`; a matching update applies atomically, while a
+  stale token writes nothing and exits 13 like the existing assignee/status
+  guards. The embedded and proxied-server command paths share the same
+  lifecycle precondition, so external workflow coordinators can update
+  metadata without relying on process-local locks or a read-then-write race.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
