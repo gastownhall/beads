@@ -172,8 +172,16 @@ ifeq ($(OS),Windows_NT)
 	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@rm -f $(INSTALL_DIR)/bd
-	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/bd
+	@set -eu; \
+		tmp="$(INSTALL_DIR)/.bd.install.$$$$"; \
+		trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
+		if [ "$$(uname -s)" = Linux ]; then \
+			cp --reflink=auto $(BUILD_DIR)/bd "$$tmp"; \
+		else \
+			cp $(BUILD_DIR)/bd "$$tmp"; \
+		fi; \
+		mv -f "$$tmp" $(INSTALL_DIR)/bd; \
+		trap - EXIT HUP INT TERM
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
 	@rm -f $(INSTALL_DIR)/beads
 	@ln -s bd $(INSTALL_DIR)/beads
