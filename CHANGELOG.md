@@ -53,6 +53,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Write commands now refuse to run while a MIGRATION-FREEZE sentinel sits
+  at the town root** (dc-6jaq), mirroring the gate the gt CLI already applies
+  to `gt mail send`/`nudge`/`sling`/`assign`. `bd create`/`update`/`close`/
+  `remember`/`import` and every other command gated by `CheckReadonly`
+  (~120 call sites, `bd q` included) now print `⛔ town is frozen for
+  migration (by <operator>)` and exit 1 instead of writing to a store mid-
+  migration. The check runs twice: once early in the root command, before
+  version-bump auto-migration or JSONL auto-import can touch the store, and
+  again at each write command's own chokepoint. Read commands (`list`,
+  `show`, `ready`, …) keep working during a freeze — the same early check
+  also skips version tracking and auto-migration for them, so a frozen store
+  is never rewritten just because someone ran a read. `--dry-run`/`--inspect`
+  previews are blocked at the per-command chokepoint instead, same as strict
+  `--readonly` already blocks them. Clear the freeze with `gt migrate thaw`.
+
 - **`bd dep add` names the implicit `type=blocks` default, but only to an
   interactive operator** (#5854). Creating an edge with no `-t/--type` silently
   produces a `blocks` edge, which drops the dependent out of `bd ready` — the
@@ -157,6 +172,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
 
 ### Fixed
+
+- **`bd prime` says when it could NOT read the memory plane**
+  ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
+  unreachable store made prime omit the memory section entirely, so a session
+  that woke with zero recall looked exactly like a workspace that simply has no
+  memories — same output, same exit 0, no way for a fleet operator to tell them
+  apart. Prime still never fails a session-start hook, but a memory read it
+  cannot serve now renders `Skipped: beads storage unavailable (<error>) —
+  persistent memories were NOT injected this session`, alongside the timeout
+  banner that already existed for a deadline. Both the classic and the
+  proxied-server route share the banner. A workspace-less directory, and a
+  healthy store with no memories, stay silent as before.
+
+- **`bd` no longer serializes every invocation behind the schema-init advisory
+  lock.** The schema-init probe ran entirely inside the database-scoped
+  `GET_LOCK('bd_schema_init:<db>', 5)`, so on a shared Dolt server every `bd`
+  process queued behind every other one to discover that it had nothing to
+  migrate. Measured on an 18-seat rig: 1500 `is_free_lock` samples over 14s
+  found the lock held 96.7% of the time, held runs had a 673ms median and a
+  4.2s max, and free gaps had a 0ms median — the lock was handed straight from
+  holder to holder. That queue was 0.4-2.4s of pure waiting on every claim,
+  heartbeat, list, comment and mail check. `MigrateUpWithLock` now answers the
+  steady-state question first, without the lock — it puts the session on the
+  target database (proving the database exists before issuing any statement
+  that could fail, so a fresh bootstrap still falls through to the locked
+  `CREATE DATABASE`; callers whose pool already names the database inject
+  nothing and the probe simply declines a session that is elsewhere), then
+  asks whether both migration cursors are at this
+  binary's latest with the content-hash column and custom-status/type backfills
+  done, whether all the canonical `dolt_ignore` patterns are present, and
+  finally whether the migration lock is free — and takes `GET_LOCK` only on the
+  path that can actually migrate. That last term is what keeps the probe honest
+  while a peer is mid-pass: the cursors land before the backfills and rekeys
+  finish, so a held lock, not the cursors alone, is the proof that nobody is
+  rewriting the tables underneath this caller. The probe issues no writes —
+  its one session mutation is the `USE` that pins the target database — and fails
+  closed: any error, any unreadable state, and anything short of provably
+  converged falls through to the locked path unchanged, as does any caller
+  carrying fresh-bootstrap heal authority.
 
 - **Incremental auto-export now actually takes the incremental path**
   ([#5806](https://github.com/gastownhall/beads/pull/5806)). Change detection
@@ -378,6 +432,53 @@ stopgap (`BD_IGNORE_SCHEMA_SKEW=1`).
   `go install github.com/steveyegge/beads/cmd/bd@latest` resolves to this
   release instead of the accidental one. (The retract block is also
   carried on main so future tags keep the retractions.)
+- **`sort` on `GET /v0/beads/issues`.** The listing served one order —
+  `(created_at DESC, id ASC)` — because the cursor is a keyset position in it,
+  and the spec said so in its own words: "the sort order is welded to the cursor
+  contract, and a new order needs new surface." The cost of that welding fell on
+  every client that wanted `bd list`'s ordering, because the only way to get it
+  was to page the whole result set and re-sort locally. Measured over a
+  1400-row store at the 200-row page an HTTP client actually uses, that is
+  **7 requests plus a client-side comparator; `?sort=priority` is 1**
+  (`TestProxiedServerListSortRetiresTheWalk`, which runs both strategies against
+  a real `bd serve` and checks both against `bd list --json` row for row). It is
+  the one cost on this surface that got worse as a project grew.
+
+  **Two values, and the set is closed.** `created` is the existing order, now
+  spellable. `priority` is `(priority ASC, created_at DESC, id ASC)` — `bd
+  list`'s flagless ordering, which is also what `bd list --sort priority`
+  produces, so one served order retires the walk for both. The other seven
+  orders `bd list --sort` takes are not offered: each value here is a cursor
+  contract needing a key proven total, and `id` is a natural-numeric order no
+  database expresses, `updated` moves on every write, `closed` is nullable, and
+  `status`/`title`/`type`/`assignee` are mutable and unindexed.
+
+  **Absent `sort` still means `created`, permanently.** It is the compatibility
+  contract for every client written before the parameter existed; changing it
+  would alter which rows a truncated page contains, with no error to notice it
+  by. A server that predates the parameter answers `param: "sort"` with
+  `reason: "unknown_parameter"`, which is the per-parameter capability probe a
+  client dispatches on to fall back.
+
+  **The cursor now carries its order, and a mismatch is refused.** This is the
+  half that makes the parameter safe rather than merely useful. The token was
+  base64 of `{t,i}` with no binding, so a `created`-order cursor replayed under
+  `sort=priority` would have decoded perfectly and been read as a position in a
+  different total order — a page that both skips and duplicates rows, served
+  with a 200, undetectable by the client. Tokens are now `v2` with an explicit
+  order member and decode refuses any token whose order differs from the
+  request's, as `invalid_cursor` (documented recovery: restart paging).
+  Outstanding `v1` tokens stay readable as the `created`-order positions they
+  are, so **no traversal in flight has to restart**. This does not contradict
+  "the token carries no filters": filters select the set, the order decides what
+  the position means.
+
+  **`priority` is a mutable key**, which `created_at` is not, and the spec says
+  so: under `created` only new rows move relative to a walk, while a priority
+  update moves an existing row too, so it can be seen twice or missed. That is
+  the already-documented "a cursor pins a position, not a snapshot" caveat
+  reached by a second route, not a new class of error — unchanged data never
+  skips or repeats under either order.
 
 ## [1.2.1] - 2026-08-11
 

@@ -398,8 +398,24 @@ type ListRequest struct {
 	// AfterCreatedAt and AfterID carry a decoded keyset position in the
 	// (created_at DESC, id ASC) order. The opaque token that encodes them is a
 	// transport concern and never reaches this contract.
+	//
+	// AfterPriority EXTENDS that position to the (priority ASC, created_at
+	// DESC, id ASC) order — the order SortBy="priority" and the empty default
+	// render — and is honored by every implementation, on BOTH tier legs, the
+	// same way the pair above is. It is the same position and not a second
+	// one: AfterCreatedAt alone decides whether one was supplied, so a
+	// priority with no instant is ignored exactly as an AfterID with no instant
+	// is.
+	//
+	// SET IT ONLY UNDER THE ORDER IT NAMES. A priority position under
+	// SortBy="created" positions in an order the ORDER BY does not render, and
+	// the page that comes back is a walk through rows neither side agrees on.
+	// The order the request asks for and the order the position was minted in
+	// are one decision; the transport above this contract is what keeps them
+	// from drifting.
 	AfterCreatedAt *time.Time
 	AfterID        string
+	AfterPriority  *int
 
 	// MaxRows is a DEFENSIVE CAP rather than a page. It bounds how many rows
 	// the query may match before the whole answer is refused; 0 disables it.

@@ -91,9 +91,11 @@ var readyScopeFields = []readyScopeField{
 	{"PriorityMin", "--priority-min", func(r ListRequest) bool { return r.PriorityMin != nil }},
 	{"PriorityMax", "--priority-max", func(r ListRequest) bool { return r.PriorityMax != nil }},
 
-	// The keyset position is a pair and only the timestamp half decides
-	// whether one was supplied; AfterID alone is not a position.
-	{"AfterCreatedAt/AfterID", "cursor", func(r ListRequest) bool { return r.AfterCreatedAt != nil }},
+	// The keyset position is a tuple and only the timestamp half decides
+	// whether one was supplied; neither AfterID nor AfterPriority alone is a
+	// position. All three are named in the refusal because a caller who dropped
+	// only the ones named would still be sending part of a position.
+	{"AfterCreatedAt/AfterID/AfterPriority", "cursor", func(r ListRequest) bool { return r.AfterCreatedAt != nil }},
 }
 
 // ValidateReadyFlagScope refuses a list request that combines ReadyFlag with a

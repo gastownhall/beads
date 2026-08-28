@@ -49,9 +49,14 @@ import (
 //
 //   - `bd show --json` emits an array of one; GET /v0/beads/issues/{id} emits
 //     the object. The CLI envelope is byte-pinned by the protocol corpus.
-//   - `bd list`'s default order is priority-first; the list endpoint's is
-//     (created_at DESC, id ASC), because the cursor is a keyset position in
-//     the created order. The ITEM SET and every item's JSON still match.
+//   - `bd list`'s default order is priority-first; the list endpoint's DEFAULT
+//     is (created_at DESC, id ASC), because that is what the operation served
+//     before it had a `sort` parameter and the default is its compatibility
+//     contract. It is no longer a divergence a client has to live with:
+//     `sort=priority` serves `bd list`'s own order, row for row, and
+//     TestProxiedServerListSortRetiresTheWalk measures that against this same
+//     CLI over 1400 rows. The ITEM SET and every item's JSON match under
+//     either order.
 //   - THE DEFAULT LIMIT. The endpoint always defaults to
 //     workapi.DefaultListLimit; `bd list` resolves a five-way CLI policy
 //     first (an explicit --limit, --all, a configured list.limit, piped
@@ -295,13 +300,13 @@ func TestProxiedServerServeReadParity(t *testing.T) {
 		// read epilogue (fetch, sort, trim, has_more) can differ without
 		// changing the unlimited answer.
 		//
-		// `--sort created` is what makes the two surfaces comparable under a
-		// limit: the endpoint's order is welded to the cursor contract and is
-		// always (created_at DESC, id ASC), so asking the CLI for the same
-		// order is the only way a truncated page can be compared row for row
-		// rather than by count.
+		// Naming the order on BOTH sides is what makes a truncated page
+		// comparable row for row rather than by count: the two surfaces have
+		// different defaults (the endpoint keeps `created` for compatibility,
+		// the CLI is priority-first), so a truncation comparison that named
+		// neither would be comparing two different top-2s.
 		cli := cliItems(t, bd, p.dir, "list", "--json", "--limit", "2", "--sort", "created")
-		got := sp.items(t, "/v0/beads/issues?limit=2")
+		got := sp.items(t, "/v0/beads/issues?limit=2&sort=created")
 		if len(cli) != 2 {
 			t.Fatalf("`bd list --limit 2` returned %d items, want 2", len(cli))
 		}
@@ -309,6 +314,16 @@ func TestProxiedServerServeReadParity(t *testing.T) {
 			t.Fatalf("GET issues?limit=2 returned %d items, want 2", len(got))
 		}
 		assertItemsMatch(t, "list --limit 2", cli, got)
+
+		// The other order, under the same truncation. This is where the two
+		// defaults used to force a client to choose between the CLI's ordering
+		// and a bounded page; now the same two rows come back on both sides.
+		cliByPriority := cliItems(t, bd, p.dir, "list", "--json", "--limit", "2", "--sort", "priority")
+		gotByPriority := sp.items(t, "/v0/beads/issues?limit=2&sort=priority")
+		assertItemsMatch(t, "list --sort priority --limit 2", cliByPriority, gotByPriority)
+		if a, b := itemIDs(cliByPriority), itemIDs(gotByPriority); !reflect.DeepEqual(a, b) {
+			t.Errorf("a truncated priority page differs between the surfaces\n cli: %v\nhttp: %v", a, b)
+		}
 	})
 
 	t.Run("a limit the database cannot push down still truncates", func(t *testing.T) {
@@ -319,13 +334,25 @@ func TestProxiedServerServeReadParity(t *testing.T) {
 		// this command answered with every row while the direct route answered
 		// with two.
 		//
-		// There is no HTTP half to compare against: the list endpoint takes no
-		// `sort` parameter. What is being pinned is that the CLI's two routes
-		// agree, which is the same property by a different pair.
+		// There is no HTTP half to compare against, and that is deliberate
+		// rather than an oversight: `id` is precisely the order the list
+		// endpoint's `sort` refuses, because a sort SQL cannot express has no
+		// keyset predicate and so cannot be paged with a cursor. What is being
+		// pinned is that the CLI's two routes agree, which is the same property
+		// by a different pair.
 		cli := cliItems(t, bd, p.dir, "list", "--json", "--limit", "2", "--sort", "id")
 		if len(cli) != 2 {
 			t.Errorf("`bd list --sort id --limit 2` returned %d items (%v), want 2 — a sort SQL cannot express still has to respect the limit",
 				len(cli), itemIDs(cli))
+		}
+		// The endpoint turns it down by name, so a client that tried to move
+		// this command onto HTTP learns why rather than receiving a page in an
+		// order it did not ask for.
+		status, body := sp.object(t, "/v0/beads/issues?limit=2&sort=id")
+		if status != http.StatusBadRequest {
+			t.Errorf("GET issues?sort=id: status = %d, want 400: %v", status, body)
+		} else if body["param"] != "sort" || body["reason"] != "invalid_value" {
+			t.Errorf("GET issues?sort=id: body = %v, want param=sort reason=invalid_value", body)
 		}
 	})
 

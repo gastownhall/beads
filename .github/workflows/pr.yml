@@ -332,6 +332,44 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go test -tags gms_pure_go -count=1 -run '^TestWorktreeRemove' ./cmd/bd
 
+  # internal/storage/dbproxy/server carries the platform-portable path
+  # handling that #5820 introduced (testPlatformPath, external dolt config
+  # validation, DSN shaping), and until now no PR-triggered job executed the
+  # package on Windows - the platform those paths target - so a path-shaped
+  # regression stayed invisible until someone ran it by hand (the #5820
+  # review merged on a contributor's windows/amd64 attestation for exactly
+  # that reason). Same pattern as the focused jobs above: run exactly this
+  # package on windows-latest. Tests that need a dolt binary Skipf loudly
+  # (dolt is not installed on the Windows runners), and the unix-socket
+  # cases skip on Windows by design - the portability class this job guards
+  # runs without either.
+  #
+  # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
+  # following the `test-macos` precedent above: promoting a new job to
+  # required-for-merge is a maintainer call once it has run clean for a while.
+  # Until then it runs on every PR and surfaces red on the PR page without
+  # blocking the merge lane. Say the word and I will wire it into the gate in
+  # the same PR - the three edits are `ci-gate.needs`, `CI_GATE_REQUIRED`, and
+  # `TEST_WINDOWS_DBPROXY_SERVER: ${{ needs.test-windows-dbproxy-server.result }}`.
+  test-windows-dbproxy-server:
+    name: Test (Windows) dbproxy server package
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+
+      - name: Set up Go
+        id: setup-go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Run dbproxy server package tests on Windows
+        env:
+          CGO_ENABLED: "0"
+        run: go test -tags gms_pure_go -count=1 -v ./internal/storage/dbproxy/server/
+
   # Fast check to ensure all version files are in sync
   check-version-consistency:
     name: Check version consistency

@@ -146,6 +146,11 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 		if !issue.Ephemeral && !issue.NoHistory && infraTypes[string(issue.IssueType)] {
 			issue.Ephemeral = true
 		}
+		// A wisp_type is a claim of ephemerality, same as ExecuteCreate: a
+		// typed wisp minted without the flag escapes every TTL/GC/purge tier.
+		if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
+			issue.Ephemeral = true
+		}
 		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
 			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, ClassifyPublicCreateError(err))
 		}

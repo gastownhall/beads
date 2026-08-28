@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/metrics"
+	"github.com/steveyegge/beads/internal/migration"
 	"github.com/steveyegge/beads/internal/molecules"
 	"github.com/steveyegge/beads/internal/remotecache"
 	"github.com/steveyegge/beads/internal/routing"
@@ -1380,13 +1381,52 @@ var rootCmd = &cobra.Command{
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
 
+		// dc-6jaq: consult the MIGRATION-FREEZE sentinel here, before any of
+		// this hook's own store-touching side effects — trackBdVersion below
+		// (writes .local_version), autoMigrateOnVersionBump (opens its own
+		// store connection and can apply a schema migration), and
+		// maybeAutoImportJSONL (imports into the store when empty) all run
+		// before the command's RunE, where CheckReadonly would otherwise
+		// catch a frozen write first. By then the most dangerous writes this
+		// gate exists to prevent would already be done. useReadOnly already
+		// carries the exact classification this early gate must skip (strict
+		// --readonly, or a command on the read-only allowlist) — reusing it
+		// here means there is no second, independently-maintained list of
+		// "write" commands to drift out of sync with the one useReadOnly is
+		// built from. An explicit --dry-run/--inspect preview also sets
+		// useReadOnly and so skips this early gate the same way, but is NOT
+		// exempt overall: CheckReadonly's own freeze check runs again,
+		// unconditionally, at the per-command chokepoint once RunE is
+		// reached, and that later call has no preview awareness — so a
+		// preview on a frozen town still exits 1 there, fail-closed, same as
+		// strict --readonly already blocks `create --dry-run` today.
+		if !useReadOnly {
+			CheckMigrationFreeze(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()+" "))
+		}
+
+		// dc-6jaq (review round 2, ask #1): a command classified read-only —
+		// or an explicit preview — is deliberately allowed past the gate
+		// above; diagnosis must keep working during a freeze. But
+		// trackBdVersion/autoMigrateOnVersionBump below are this hook's OWN
+		// writes against the (possibly frozen) store, run regardless of the
+		// command's own classification — so "the command is a read" must not
+		// imply "these side effects may still run". Reproduced pre-fix:
+		// freeze the town, seed .local_version with a stale version, run
+		// `bd list` — exit 0 (correct, it's a read), but .local_version was
+		// silently rewritten mid-freeze anyway. Skip both calls under an
+		// active freeze without blocking the read itself. Short-circuits on
+		// !policy.runMaintenance (strict --readonly) so the IsFrozen/
+		// findTownRoot filesystem walk isn't paid on that path, where these
+		// calls are already skipped for an unrelated reason.
+		frozenForMaintenance := policy.runMaintenance && migration.IsFrozen(findTownRoot())
+
 		// Track bd version changes unless strict readonly forbids repository mutation.
 		// Best-effort tracking - failures are silent.
 		//
 		// A preview detects the change but must not consume it: .local_version
 		// is the one-shot signal autoMigrateOnVersionBump reads, and a preview
 		// skips that reconciliation (see below). See trackBdVersionPreview.
-		if policy.runMaintenance {
+		if policy.runMaintenance && !frozenForMaintenance {
 			if previewMode {
 				trackBdVersionPreview()
 			} else {
@@ -1418,8 +1458,9 @@ var rootCmd = &cobra.Command{
 		// Preview paths must never call this helper: it opens a separate
 		// writable store before the main read-only store and can therefore
 		// apply schema migrations before RunE validates arguments or renders a
-		// dry-run plan.
-		if policy.runMaintenance && !previewMode {
+		// dry-run plan. frozenForMaintenance excludes it for the same reason
+		// as the trackBdVersion call above — see that comment.
+		if policy.runMaintenance && !previewMode && !frozenForMaintenance {
 			autoMigrateOnVersionBump(beadsDir)
 		}
 
