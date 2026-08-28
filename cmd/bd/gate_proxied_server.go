@@ -50,7 +50,7 @@ func (proxiedFreshReadGetter) GetIssue(ctx context.Context, id string) (*types.I
 
 	result, routeErr := resolveViaPrefixRouting(ctx, id)
 	if routeErr != nil {
-		return nil, routeErr
+		return nil, localErr
 	}
 	defer result.Close()
 	return result.Issue, nil

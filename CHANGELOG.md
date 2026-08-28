@@ -53,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd gate check` resolves bead gates whose target lives in a prefix-routed
+  rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
+  miss, the evaluator follows the target bead ID through `routes.jsonl` and
+  reads the owning store without writing to it. This covers explicit gate
+  checks in embedded, server, and proxied-server command paths; the legacy
+  `<rig>:<bead-id>` await value remains accepted for compatibility.
+
 - **Write commands now refuse to run while a MIGRATION-FREEZE sentinel sits
   at the town root** (dc-6jaq), mirroring the gate the gt CLI already applies
   to `gt mail send`/`nudge`/`sling`/`assign`. `bd create`/`update`/`close`/
