@@ -1002,25 +1002,59 @@ paths:
         types), each carrying dependency, dependent and comment counts.
 
 
-        ORDERING IS FIXED AND DIVERGES FROM `bd list` DELIBERATELY. Every page
-        of this operation — cursored or not — is ordered by
-        `(created_at DESC, id ASC)`, while `bd list`'s default ordering is
-        priority-first. The divergence is the price of a correct cursor: the
-        cursor is a keyset position in the created order, so if the first page
-        fell back to priority ordering the second page would skip and duplicate
-        rows. That is also why v0 exposes no `sort` parameter — the sort order
-        is welded to the cursor contract, and a new order needs new surface.
+        ORDERING IS NAMED BY `sort`, AND THE VOCABULARY IS CLOSED. Two orders
+        are served: `created` — `(created_at DESC, id ASC)`, the default and
+        the only order earlier revisions had — and `priority` —
+        `(priority ASC, created_at DESC, id ASC)`, which is `bd list`'s
+        flagless ordering and also what `bd list --sort priority` produces.
+        Absent `sort` means `created`, permanently: it is the compatibility
+        contract for every client written before this parameter existed.
 
 
-        The item set, and each item's JSON, are identical to `bd list --json`;
-        only the order differs.
+        THE ORDER AND THE CURSOR ARE ONE DECISION, which is why the vocabulary
+        is closed rather than the nine-value display vocabulary `bd list --sort`
+        and `GET /v0/beads/issues:query` take. A `cursor` is a keyset POSITION
+        in a total order, so each served order needs its own strictly-after
+        predicate and its own proof that its key is total. Both of these have
+        one: `priority` and `created_at` are non-null and `id` is unique, so a
+        page boundary landing inside a run of equal keys resolves on `id` with
+        no dropped and no repeated row. The other seven orders do not — `id` is
+        a natural-numeric order no database expresses, `updated` moves on every
+        write, `closed` is nullable, and `status`/`title`/`type`/`assignee` are
+        mutable and unindexed — so they are not offered here at all rather than
+        offered behind a cursor that would silently skip and duplicate.
+
+
+        A CURSOR IS A POSITION IN THE ORDER IT WAS MINTED IN, and re-sending
+        one under a different `sort` is refused with 400 `invalid_cursor`
+        (recovery: restart paging). This is the one thing about a cursor that
+        is NOT "just repeat your request": mismatched FILTERS are undetectable
+        and silently resume from the old position, while a mismatched ORDER is
+        detected and refused, because a position whose order is unknown is not
+        interpretable at all.
+
+
+        `priority` IS A MUTABLE KEY, which `created_at` is not, and a paging
+        client should know what that costs. Under `created` only new rows move
+        relative to a walk; under `priority` an `bd update --priority` moves an
+        existing row too, so it can be seen twice or missed. That is the
+        already-documented consequence of a cursor pinning a position rather
+        than a snapshot, reached by updates as well as by creations — not a new
+        class of error. Unchanged data never skips or repeats under either
+        order.
+
+
+        The item set, and each item's JSON, are identical to `bd list --json`.
+        Under `sort=priority` so is the order, so a client that used to page
+        this operation to exhaustion and re-sort client-side to reproduce
+        `bd list` can now ask for one page.
 
 
         EPHEMERAL ROWS ARE OUT OF SCOPE BY DEFAULT and are admitted by
         `include_ephemeral`, which merges that tier IN ADDITION to the durable
-        one. The merged page is ordered by the same `(created_at DESC, id ASC)`
-        key across both tiers as if they were one table, and `cursor` pages
-        across the merge without skipping or repeating a row.
+        one. The merged page is ordered by the requested `sort` across both
+        tiers as if they were one table, and `cursor` pages across the merge
+        without skipping or repeating a row.
 
 
         `include_ephemeral` and `include_infra` are INDEPENDENT and compose:
@@ -1165,8 +1199,8 @@ paths:
           in: query
           description: >-
             Include the ephemeral tier — ephemeral rows and the non-synced
-            rows stored beside them — merged into the same
-            `(created_at DESC, id ASC)` order as the durable ones.
+            rows stored beside them — merged into the same order as the durable
+            ones, whichever order `sort` named.
 
 
             It admits a TIER and takes no TYPE exclusion off, so a row whose
@@ -1206,6 +1240,50 @@ paths:
           description: Only issues carrying this top-level metadata key.
           schema:
             type: string
+        - name: sort
+          in: query
+          description: >-
+            Which of the two served total orders this page is in. `created` is
+            `(created_at DESC, id ASC)`; `priority` is
+            `(priority ASC, created_at DESC, id ASC)` — `bd list`'s flagless
+            ordering, and the order `bd list --sort priority` produces.
+
+
+            THE DEFAULT IS `created` AND WILL NOT CHANGE. It is what this
+            operation served before this parameter existed, so moving it would
+            alter which rows a truncated page contains for every client written
+            against that behavior, with no error to notice it by.
+
+
+            THE VOCABULARY IS CLOSED, and deliberately smaller than the nine
+            values `bd list --sort` and `GET /v0/beads/issues:query` take. Each
+            value here is a cursor contract, not a display preference: it needs
+            a keyset predicate and a key proven total. See the operation
+            description for why the other seven have neither.
+
+
+            A value outside the enum is a 400 `invalid_argument` with
+            `param: "sort"` and `reason: "invalid_value"`. A server that
+            predates this parameter answers `param: "sort"` with
+            `reason: "unknown_parameter"` instead, which is the per-parameter
+            capability probe a client can dispatch on to fall back to paging in
+            `created` order and sorting client-side.
+          schema:
+            type: string
+            enum: [created, priority]
+            default: created
+            # CODEGEN TRAP, verified against oapi-codegen v2.6.0: these are the
+            # names the generator ALREADY produces for this enum, spelled out so
+            # it stops renaming a DIFFERENT one. It resolves colliding constant
+            # names by prefixing the type name, and adding a third `priority`
+            # value to the package flipped that resolution for
+            # `ListReadyWorkParamsSort`, whose constants regenerated as bare
+            # `Hybrid`/`Oldest`/`Priority` — a breaking rename of exported
+            # identifiers, in a package whose whole job is to be a stable
+            # generated client, caused by an unrelated parameter. Pinning the
+            # names here makes the regeneration purely additive. Removing this
+            # line reproduces the rename; that is the check, not a guess.
+            x-enum-varnames: [ListIssuesParamsSortCreated, ListIssuesParamsSortPriority]
         - name: cursor
           in: query
           description: >-
@@ -1218,21 +1296,32 @@ paths:
             the same value cannot succeed.
 
 
-            LIFETIME: a cursor holds a position and a private encoding version,
-            and nothing else. The server keeps no state for it, so it does not
-            expire, does not become invalid when the server restarts, and is
-            not tied to the connection that issued it; the only thing that
-            invalidates one is a change to the encoding, which surfaces as
-            `invalid_cursor`.
+            LIFETIME: a cursor holds a position, the ORDER that position is in,
+            and a private encoding version — and nothing else. The server keeps
+            no state for it, so it does not expire, does not become invalid
+            when the server restarts, and is not tied to the connection that
+            issued it; the only thing that invalidates one is a change to the
+            encoding, which surfaces as `invalid_cursor`. A token minted before
+            `sort` existed is still accepted, as the `created`-order position
+            it is, so no traversal in flight across a server upgrade has to be
+            restarted.
 
 
-            MISUSE IS NOT DETECTABLE, which is why repeating the filters
-            matters. Because the token carries no filters, a page fetched with
-            a cursor minted under DIFFERENT filters is not refused: the server
-            applies the filters of the current request from the position of the
-            old one, silently skipping every row the new filter set would have
-            placed before that position. Repeat every filter verbatim for the
-            whole traversal, and start a new traversal when they change.
+            THE ORDER MUST MATCH, AND THAT MISMATCH IS DETECTED. A cursor
+            minted under one `sort` and re-sent under another is refused with
+            400 `invalid_cursor`; the same instant and id name a different row
+            in a different order, so resuming from it would skip and duplicate
+            rows silently. Send the same `sort` for the whole traversal.
+
+
+            FILTER MISUSE IS *NOT* DETECTABLE, which is the difference, and why
+            repeating the filters matters. Because the token carries no
+            filters, a page fetched with a cursor minted under DIFFERENT
+            filters is not refused: the server applies the filters of the
+            current request from the position of the old one, silently skipping
+            every row the new filter set would have placed before that
+            position. Repeat every filter verbatim for the whole traversal, and
+            start a new traversal when they change.
           schema:
             type: string
         - name: limit
@@ -3332,7 +3421,7 @@ paths:
 
 
         A collection-level custom method rather than `DELETE
-        /v0/beads/issues/{id}`: this acts on a SET, its behaviour turns on
+        /v0/beads/issues/{id}`: this acts on a SET, its behavior turns on
         three flags, and a `DELETE` carrying those in a query string is the
         shape where a dropped parameter changes what is erased. Sending a body
         makes every one of them a member the server refuses by name if it does
@@ -4578,7 +4667,7 @@ paths:
         command's `--json` emits.
 
 
-        THESE ARE ROWS, NOT NEIGHBOURS, and that is the difference from the
+        THESE ARE ROWS, NOT NEIGHBORS, and that is the difference from the
         `dependencies` member of `GET /v0/beads/issues/{id}`'s issue body. A
         dependency target may be an `external:` reference or an id belonging to
         another repository, and this database holds no issue for either; such

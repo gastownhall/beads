@@ -533,6 +533,7 @@ var roleContractCases = []roleContract{
 		RunReaderReadyParentScopesToItsTransitiveDescendants,
 		RunReaderListParentReachesEveryDescendantAndOnlyItsOwn,
 		RunReaderListKeysetWalkOverAnOversizedGroupLosesNothingAndRepeatsNothing,
+		RunReaderListPriorityKeysetWalkOverAnOversizedEqualKeyRunLosesNothingAndRepeatsNothing,
 		RunReaderListKeysetPositionNarrowsWithoutReplacingTheOtherPredicates,
 		RunReaderListIncludeEphemeralMergesThePlanesIntoOneOrder,
 		RunReaderListWispTypeNarrowsTheAdmittedPlaneRatherThanAdmittingIt,

@@ -356,15 +356,23 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		MetadataFields: q.metadataFields("metadata_field"),
 		HasMetadataKey: q.str("has_metadata_key"),
 
-		// ORDERING IS FIXED AND DIVERGES FROM `bd list` DELIBERATELY, which is
-		// why there is no `sort` parameter to decode. The cursor is a keyset
-		// position in the created order, so a first page under `bd list`'s
-		// priority-first default would make the second page skip and duplicate
-		// rows. The order is welded to the cursor contract.
-		SortBy: "created",
-
 		Limit: q.limit(),
 	}
+
+	// THE ORDER AND THE CURSOR ARE ONE DECISION. Each served order is a keyset
+	// contract — its own position shape and its own strictly-after predicate —
+	// so `sort` selects the ORDER BY and, with it, what a position means. The
+	// vocabulary is closed for that reason and not for tidiness: the seven
+	// other orders `bd list --sort` takes have no proven total key (mutable,
+	// nullable, or not expressible in SQL at all), and serving one behind a
+	// cursor would page a walk that skips and repeats rows.
+	//
+	// SortBy takes the wire value verbatim, which is safe only because the two
+	// vocabularies coincide by construction: sqlbuild.SortDefs already spells
+	// these orders `created` and `priority`, and `priority` there is exactly
+	// (priority ASC, created_at DESC, id ASC) — `bd list`'s flagless order.
+	order := listOrder(q.oneOf("sort", string(listOrderDefault), listOrders...))
+	req.SortBy = string(order)
 
 	token := q.str("cursor")
 
@@ -372,7 +380,11 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if token != "" {
-		pos, ok := decodeCursor(token)
+		// Decoded AGAINST the order this request asked for. A token minted in
+		// the other order is refused rather than reinterpreted: its instant and
+		// its id would decode perfectly and mean something else, which is a
+		// skipped-and-duplicated page served with a 200.
+		pos, ok := decodeCursor(token, order)
 		if !ok {
 			requestInfo(r.Context()).refuse(token)
 			s.fail(w, r, InvalidCursor())
@@ -380,6 +392,7 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		}
 		req.AfterCreatedAt = &pos.CreatedAt
 		req.AfterID = pos.ID
+		req.AfterPriority = pos.Priority
 	}
 	if !s.allowUnlimited(w, r, req.Limit) {
 		return
@@ -404,7 +417,10 @@ func (s *Server) handleListIssues(w http.ResponseWriter, r *http.Request) {
 		// Present if and only if has_more, which the document states as a
 		// biconditional: a client that sees one and not the other has no way
 		// to know whether paging is finished.
-		if next := cursorFor(page.Items); next != "" {
+		// Minted in the order this page was SERVED in, so the token a client
+		// hands back is a position the next request can only be read against
+		// the same way.
+		if next := cursorFor(page.Items, order); next != "" {
 			body.NextCursor = &next
 		}
 	}
