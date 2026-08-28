@@ -1,12 +1,131 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
+
+func TestEmptyServerInitWitnessInputQualifies(t *testing.T) {
+	valid := emptyServerInitWitnessInput{
+		ExplicitServer:   true,
+		ExplicitDatabase: true,
+		Database:         "hq",
+		ReinitLocal:      true,
+		ExplicitHost:     true,
+		ServerHost:       "127.0.0.1",
+		ExplicitPort:     true,
+		ServerPort:       3307,
+	}
+	tests := map[string]struct {
+		input emptyServerInitWitnessInput
+		want  bool
+	}{
+		"explicit TCP":              {input: valid, want: true},
+		"missing explicit server":   {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitServer = false })},
+		"missing explicit database": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitDatabase = false })},
+		"missing reinit":            {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ReinitLocal = false })},
+		"proxied server":            {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ProxiedServer = true })},
+		"shared server":             {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.SharedServer = true })},
+		"missing explicit TCP port": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitPort = false })},
+		"missing explicit TCP host": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitHost = false })},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := tt.input.qualifies(); got != tt.want {
+				t.Fatalf("qualifies() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func withEmptyServerInput(in emptyServerInitWitnessInput, mutate func(*emptyServerInitWitnessInput)) emptyServerInitWitnessInput {
+	mutate(&in)
+	return in
+}
+
+func TestCreateEmptyServerInitWitnessDoesNotReplaceExistingWitness(t *testing.T) {
+	beadsDir := t.TempDir()
+	witnessPath := filepath.Join(beadsDir, localVersionFile)
+	historicalWitness := []byte("0.62.0\n")
+	if err := os.WriteFile(witnessPath, historicalWitness, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := createEmptyServerInitWitness(emptyServerInitWitnessQualification{beadsDir: beadsDir})
+	if err == nil {
+		t.Fatal("createEmptyServerInitWitness() succeeded over an existing historical witness")
+	}
+	got, err := os.ReadFile(witnessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, historicalWitness) {
+		t.Fatalf("historical witness was modified: got %q, want %q", got, historicalWitness)
+	}
+}
+
+func TestCreateEmptyServerInitWitnessWritesCurrentVersionExclusively(t *testing.T) {
+	beadsDir := t.TempDir()
+	qualification := emptyServerInitWitnessQualification{beadsDir: beadsDir}
+	if err := createEmptyServerInitWitness(qualification); err != nil {
+		t.Fatalf("createEmptyServerInitWitness() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != Version+"\n" {
+		t.Fatalf("witness = %q, want %q", got, Version+"\n")
+	}
+}
+
+func TestPinEmptyServerInitWitnessPinsQualifiedTCPConnection(t *testing.T) {
+	cfg := &dolt.Config{
+		ServerSocket:   "/tmp/stale.sock",
+		ServerHost:     "wrong-host",
+		ServerPort:     3307,
+		ServerUser:     "wrong-user",
+		ServerPassword: "wrong-password",
+		ServerTLS:      false,
+		Database:       "wrong_database",
+		AutoStart:      true,
+	}
+	qualification := emptyServerInitWitnessQualification{dsn: doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     43123,
+		User:     "qualified-user",
+		Password: "qualified-password",
+		Database: "qualified_database",
+		TLS:      true,
+	}}
+
+	pinEmptyServerInitWitness(cfg, qualification)
+
+	if cfg.ServerSocket != "" || cfg.ServerHost != "127.0.0.1" || cfg.ServerPort != 43123 ||
+		cfg.ServerUser != "qualified-user" || cfg.ServerPassword != "qualified-password" ||
+		!cfg.ServerTLS || cfg.Database != "qualified_database" || cfg.AutoStart {
+		t.Fatalf("pin did not preserve the qualified TCP connection: %+v", cfg)
+	}
+}
+
+func TestSelectedServerDatabaseIsEmptyFailsClosedWhenUnreachable(t *testing.T) {
+	empty, err := selectedServerDatabaseIsEmpty(doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     1,
+		User:     "root",
+		Database: "missing",
+	})
+	if err == nil || empty {
+		t.Fatalf("selectedServerDatabaseIsEmpty() = (%v, %v), want false with an error", empty, err)
+	}
+}
 
 func TestInitGuardServerMessage(t *testing.T) {
 	tests := map[string]struct {
