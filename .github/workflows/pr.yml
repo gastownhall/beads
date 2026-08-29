@@ -441,9 +441,13 @@ jobs:
   # review merged on a contributor's windows/amd64 attestation for exactly
   # that reason). Same pattern as the focused jobs above: run exactly this
   # package on windows-latest. Tests that need a dolt binary Skipf loudly
-  # (dolt is not installed on the Windows runners), and the unix-socket
-  # cases skip on Windows by design - the portability class this job guards
-  # runs without either.
+  # (dolt is not installed on the Windows runners). Of the unix-socket
+  # cases, only TestDoltServer_StartStop_UnixSocket skips on Windows by
+  # design; the two unix-socket dial subtests in
+  # external_dolt_server_test.go carry no Windows guard and run green there
+  # on Windows AF_UNIX support, so the job covers more of the package than
+  # a skip-all reading suggests. The portability class this job guards
+  # runs without either dolt or a live socket server.
   #
   # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
   # following the `test-macos` precedent above: promoting a new job to
