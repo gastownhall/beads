@@ -52,7 +52,9 @@ Options:
                          needing to cut anything first.
   --soak-days <N>        Minimum soak before promotion is allowed. Default 7.
   --repo <owner/name>    Repository to query. Default gastownhall/beads.
-  --out <path>           Where to write. Default release-gates/v<version>.md
+  --out <path>           Where to write the dossier. Default
+                         release-gates/v<version>.md. Not valid with --preview,
+                         which reports to stdout and writes nothing.
   --allow-short-soak     Record the shortfall and continue rather than failing.
                          For a security fix that cannot wait out the window.
   --expect-red 'GLOB=reason'
@@ -99,6 +101,13 @@ fi
 if [ -n "$FROM_BETA" ] && [ -n "$PREVIEW" ]; then
     echo -e "${RED}ERROR: --from-beta and --preview are different questions${NC}" >&2
     echo "--from-beta judges a candidate; --preview reports what is unshipped." >&2
+    exit 1
+fi
+if [ -n "$PREVIEW" ] && [ -n "$OUT" ]; then
+    echo -e "${RED}ERROR: --out does not apply to --preview${NC}" >&2
+    echo "--preview reports to stdout and writes no dossier — there is no" >&2
+    echo "candidate, so there is nothing to record. Redirect instead:" >&2
+    echo "  channel-gate-report.sh --preview > unshipped.txt" >&2
     exit 1
 fi
 command -v gh >/dev/null 2>&1 || { echo -e "${RED}ERROR: gh CLI not found${NC}" >&2; exit 1; }
