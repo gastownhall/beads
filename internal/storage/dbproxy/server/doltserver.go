@@ -22,6 +22,7 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/execwin"
 	"github.com/steveyegge/beads/internal/procid"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
@@ -136,25 +137,29 @@ func (s *DoltServer) DSN(_ context.Context, database, user, password string) str
 }
 
 func (s *DoltServer) doltConfigure(ctx context.Context) error {
-	probe := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--get", "user.name")
+	// execwin.Hide on every spawn below: this method runs inside
+	// bd db-proxy-child, which is started with DETACHED_PROCESS and so has no
+	// console. Without CREATE_NO_WINDOW each of these console applications
+	// would allocate a visible console on Windows. See internal/execwin.
+	probe := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--get", "user.name"))
 	if out, err := probe.Output(); err == nil && strings.TrimSpace(string(out)) != "" {
 		return nil
 	}
 	name, email := "beads", "beads@localhost"
-	if out, err := exec.CommandContext(ctx, "git", "config", "user.name").Output(); err == nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, "git", "config", "user.name")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			name = v
 		}
 	}
-	if out, err := exec.CommandContext(ctx, "git", "config", "user.email").Output(); err == nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, "git", "config", "user.email")).Output(); err == nil {
 		if v := strings.TrimSpace(string(out)); v != "" {
 			email = v
 		}
 	}
-	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.name", name).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.name", name)).CombinedOutput(); err != nil {
 		return fmt.Errorf("server: DoltServer.doltConfigure: set user.name: %w\n%s", err, out)
 	}
-	if out, err := exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.email", email).CombinedOutput(); err != nil {
+	if out, err := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "config", "--global", "--add", "user.email", email)).CombinedOutput(); err != nil {
 		return fmt.Errorf("server: DoltServer.doltConfigure: set user.email: %w\n%s", err, out)
 	}
 	return nil
@@ -165,7 +170,7 @@ func (s *DoltServer) doltInit(ctx context.Context) error {
 		return fmt.Errorf("server: DoltServer.doltInit: mkdir %q: %w", s.rootDir, err)
 	}
 
-	cmd := exec.CommandContext(ctx, s.doltBinExec, "init")
+	cmd := execwin.Hide(exec.CommandContext(ctx, s.doltBinExec, "init"))
 	cmd.Dir = s.rootDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		if strings.Contains(string(out), "already been initialized") {
@@ -248,6 +253,10 @@ func (s *DoltServer) Start(ctx context.Context) error {
 
 	cmd := exec.CommandContext(managedCtx, s.doltBinExec, args...)
 	cmd.Dir = s.rootDir
+	// Windows: detach from any console so the server never allocates one (its
+	// output already goes to s.logFile). Nil off Windows, preserving the
+	// original behavior there. See procattr_windows.go.
+	cmd.SysProcAttr = managedServerSysProcAttr()
 	cmd.Stdin = nil
 	if s.logFile != nil {
 		cmd.Stdout = s.logFile
