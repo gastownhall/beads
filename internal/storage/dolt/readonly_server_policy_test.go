@@ -134,3 +134,29 @@ func TestServerOpenCanAutoStartHonorsDisableAutoStart(t *testing.T) {
 		t.Fatal("ordinary classified-read (ReadOnly without DisableAutoStart) must retain auto-start behavior")
 	}
 }
+
+func TestDeferWakeSweepEligibleHonorsClassifiedRead(t *testing.T) {
+	cases := []struct {
+		name           string
+		readOnly       bool
+		classifiedRead bool
+		want           bool
+	}{
+		{name: "writable open sweeps", readOnly: false, classifiedRead: false, want: true},
+		{name: "strict read-only never sweeps", readOnly: true, classifiedRead: false, want: false},
+		// An ordinary classified-read command (bd ready, bd list) sets
+		// readOnly but the store is genuinely writable underneath, so the
+		// defer-wake sweep must still run (regression guard for be-vbhpf:
+		// the sweep silently early-returned for every read-only-classified
+		// command in server mode, not just strict --readonly/preview).
+		{name: "classified-read still sweeps despite readOnly", readOnly: true, classifiedRead: true, want: true},
+		{name: "classifiedRead without readOnly stays eligible", readOnly: false, classifiedRead: true, want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := deferWakeSweepEligible(tc.readOnly, tc.classifiedRead); got != tc.want {
+				t.Fatalf("deferWakeSweepEligible(readOnly=%v, classifiedRead=%v) = %v, want %v", tc.readOnly, tc.classifiedRead, got, tc.want)
+			}
+		})
+	}
+}
