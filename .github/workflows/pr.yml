@@ -756,6 +756,61 @@ jobs:
           BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
 
+  messgo:
+    name: Messgo (production Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: "0"
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          # The script compares the complete production files in the PR with
+          # the merge base; shallow history cannot resolve that base.
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Check messgo rulesets
+        env:
+          MESSGO_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: ./scripts/ci/messgo.sh
+
+  mutago:
+    name: Mutago (changed production Go)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      CGO_ENABLED: "0"
+    # Mutation analysis is deliberately bounded: a pathological package must
+    # fail with a useful timeout rather than consume an unbounded runner.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Check covered mutation score
+        env:
+          MUTAGO_DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          # Two workers keep mutation analysis within the runner's resource
+          # budget; callers can override this for a local diagnostic run.
+          MUTAGO_WORKERS: '2'
+        run: ./scripts/ci/mutago.sh
+
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and
   # also live behind the existing ./... matrix, but TestDomainDB requires the
@@ -1309,6 +1364,8 @@ jobs:
       - pr-policy-wrapper
       - pr-core-wrapper
       - pr-lint-wrapper
+      - messgo
+      - mutago
       - test-domain-uow
       - contract-corpus
       - fmt-check
@@ -1339,6 +1396,8 @@ jobs:
             PR_POLICY_WRAPPER
             PR_CORE_WRAPPER
             PR_LINT_WRAPPER
+            MESSGO
+            MUTAGO
             TEST_DOMAIN_UOW
             CONTRACT_CORPUS
             FMT_CHECK
@@ -1361,6 +1420,8 @@ jobs:
           PR_POLICY_WRAPPER: ${{ needs.pr-policy-wrapper.result }}
           PR_CORE_WRAPPER: ${{ needs.pr-core-wrapper.result }}
           PR_LINT_WRAPPER: ${{ needs.pr-lint-wrapper.result }}
+          MESSGO: ${{ needs.messgo.result }}
+          MUTAGO: ${{ needs.mutago.result }}
           TEST_DOMAIN_UOW: ${{ needs.test-domain-uow.result }}
           CONTRACT_CORPUS: ${{ needs.contract-corpus.result }}
           FMT_CHECK: ${{ needs.fmt-check.result }}

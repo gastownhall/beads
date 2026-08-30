@@ -61,6 +61,64 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresMessgoAndMutago(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+
+	for _, jobName := range []string{"messgo", "mutago"} {
+		job := workflow.job(t, jobName)
+		if job.RunsOn != "ubuntu-latest" {
+			t.Errorf("%s runs-on = %q, want ubuntu-latest", jobName, job.RunsOn)
+		}
+		if job.Env["CGO_ENABLED"] != "0" {
+			t.Errorf("%s CGO_ENABLED = %q, want 0", jobName, job.Env["CGO_ENABLED"])
+		}
+		checkout := job.Steps[0]
+		if actionFamily(checkout.Uses) != "actions/checkout" || checkout.With["fetch-depth"] != "0" {
+			t.Errorf("%s checkout = uses %q with %v, want full history checkout", jobName, checkout.Uses, checkout.With)
+		}
+		setupGo := job.step(t, "Set up Go")
+		if setupGo.Uses != setupGoActionFamily+"@"+setupGoSHA || setupGo.With["go-version-file"] != "go.mod" || setupGo.With["cache"] != "false" {
+			t.Errorf("%s setup-go = uses %q with %v", jobName, setupGo.Uses, setupGo.With)
+		}
+	}
+
+	messgo := workflow.job(t, "messgo")
+	messgoStep := messgo.step(t, "Check messgo rulesets")
+	if messgoStep.Run != "./scripts/ci/messgo.sh" {
+		t.Errorf("messgo command = %q", messgoStep.Run)
+	}
+	if messgoStep.Env["MESSGO_DIFF_BASE"] != "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" {
+		t.Errorf("messgo base env = %q", messgoStep.Env["MESSGO_DIFF_BASE"])
+	}
+
+	mutago := workflow.job(t, "mutago")
+	if mutago.TimeoutMinutes != 60 {
+		t.Errorf("mutago timeout = %d, want 60 minutes", mutago.TimeoutMinutes)
+	}
+	mutagoStep := mutago.step(t, "Check covered mutation score")
+	if mutagoStep.Run != "./scripts/ci/mutago.sh" {
+		t.Errorf("mutago command = %q", mutagoStep.Run)
+	}
+	if mutagoStep.Env["MUTAGO_DIFF_BASE"] != "${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}" {
+		t.Errorf("mutago base env = %q", mutagoStep.Env["MUTAGO_DIFF_BASE"])
+	}
+
+	for jobName, gateKey := range map[string]string{"messgo": "MESSGO", "mutago": "MUTAGO"} {
+		if !contains(gate.Needs, jobName) {
+			t.Errorf("ci-gate needs %q: %v", jobName, gate.Needs)
+		}
+		wantEnv := "${{ needs." + jobName + ".result }}"
+		if got := gateEnv[gateKey]; got != wantEnv {
+			t.Errorf("ci-gate env %s = %q, want %q", gateKey, got, wantEnv)
+		}
+		if !contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+			t.Errorf("ci-gate required set omits %s", gateKey)
+		}
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
