@@ -41,7 +41,7 @@
     },
     "envelope/dep_remove": {
       "cmd": "bd dep remove corpus-root corpus-dep --json",
-      "sha256": "487ed7702bc7d92c54f7e02860886671eaedd034da9f4cebd1efd4cc46374bd0"
+      "sha256": "9e2d0224b4989eb7d05f7247c2fe51ef8e8864d7023bcd8f924ce331c59614cc"
     },
     "envelope/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
@@ -109,7 +109,7 @@
     },
     "flat/dep_remove": {
       "cmd": "bd dep remove corpus-root corpus-dep --json",
-      "sha256": "579d8ab3187919344bf8e6f4f726cbde885205d9f531aa3833adc560c6e93430"
+      "sha256": "2cad2bf44a31d11c50a70f37e935175bd6a35fe87e87211f2a2fe4432b5ae63a"
     },
     "flat/error": {
       "cmd": "bd show nonexistent-xyz-corpus --json",
