@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"slices"
 	"sync"
 	"testing"
@@ -154,28 +156,53 @@ func TestShouldCheckGate(t *testing.T) {
 type fakeBeadGateGetter struct {
 	issues map[string]*types.Issue
 	err    error
+	gotID  string
 }
 
 func (f *fakeBeadGateGetter) GetIssue(_ context.Context, id string) (*types.Issue, error) {
+	f.gotID = id
 	if f.err != nil {
 		return nil, f.err
 	}
 	return f.issues[id], nil
 }
 
-func TestCheckBeadGate_CrossRigStaysPending(t *testing.T) {
+func TestCheckBeadGate_CrossRigUsesBeadIDForRoutedLookup(t *testing.T) {
 	ctx := context.Background()
+	st := &fakeBeadGateGetter{issues: map[string]*types.Issue{
+		"gt-abc": {ID: "gt-abc", Status: types.StatusClosed},
+	}}
 
-	// The cross-rig <rig>:<bead-id> form cannot be evaluated since multi-rig
-	// routing was removed; it must stay pending with the explanatory message,
-	// never consult the store, and never resolve.
+	satisfied, reason := checkBeadGate(ctx, st, "gastown:gt-abc")
+	if !satisfied {
+		t.Fatalf("expected closed routed bead to satisfy gate, got reason %q", reason)
+	}
+	if st.gotID != "gt-abc" {
+		t.Fatalf("routed lookup ID = %q, want %q", st.gotID, "gt-abc")
+	}
+}
+
+func TestProxiedFreshReadGetterPreservesLocalNotFoundWhenRoutingUnavailable(t *testing.T) {
+	withStubbedProxiedLookup(t, nil)
+
+	oldDBPath := dbPath
+	dbPath = filepath.Join(t.TempDir(), ".beads", "dolt")
+	t.Cleanup(func() { dbPath = oldDBPath })
+
+	_, err := (proxiedFreshReadGetter{}).GetIssue(context.Background(), "bd-missing")
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("GetIssue error = %v, want original local not-found", err)
+	}
+}
+
+func TestCheckBeadGate_InvalidCrossRigFormat(t *testing.T) {
+	ctx := context.Background()
 	tests := []struct {
 		name    string
 		awaitID string
 	}{
 		{name: "missing rig", awaitID: ":gt-abc"},
 		{name: "missing bead", awaitID: "my-project:"},
-		{name: "well-formed cross-rig", awaitID: "nonexistent:some-id"},
 	}
 
 	for _, tt := range tests {
@@ -184,8 +211,8 @@ func TestCheckBeadGate_CrossRigStaysPending(t *testing.T) {
 			if satisfied {
 				t.Errorf("expected not satisfied for %q", tt.awaitID)
 			}
-			if !gateTestContainsIgnoreCase(reason, "multi-rig routing removed") {
-				t.Errorf("reason %q does not contain %q", reason, "multi-rig routing removed")
+			if !gateTestContainsIgnoreCase(reason, "expected <rig>:<bead-id>") {
+				t.Errorf("reason %q does not describe the expected format", reason)
 			}
 		})
 	}
