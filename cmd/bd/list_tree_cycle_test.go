@@ -1,0 +1,161 @@
+package main
+
+import (
+	"bytes"
+	"io"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// captureBoundedStdout runs fn with os.Stdout redirected and returns what it
+// printed, discarding anything past limit.
+//
+// The package already has captureStdout (test_helpers_pure_test.go), but it
+// buffers without a cap: against the pre-fix renderer, whose output is
+// unbounded, that helper would exhaust memory instead of failing the test.
+// This variant caps the read and keeps draining so the writer never blocks on
+// a full pipe. It takes the same stdioMutex to stay race-free with the
+// existing helper.
+func captureBoundedStdout(t *testing.T, limit int64, fn func()) string {
+	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stdout
+	os.Stdout = w
+
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, io.LimitReader(r, limit))
+		// Drain any remainder so the writer never blocks on a full pipe.
+		_, _ = io.Copy(io.Discard, r)
+		done <- buf.String()
+	}()
+
+	fn()
+
+	os.Stdout = orig
+	_ = w.Close()
+	out := <-done
+	_ = r.Close()
+	return out
+}
+
+// mutualSupersedesEpics builds the exact shape observed in the wild on the
+// cosmos rig: two epics that supersede each other.
+//
+//	cosmos-v51z --supersedes--> cosmos-14zh
+//	cosmos-14zh --supersedes--> cosmos-v51z
+//
+// buildIssueTreeWithDeps promoted any dependency whose target is an epic into a
+// parent-child tree edge, so this pair became a hierarchy cycle and
+// printPrettyTree — which had no visited set and no depth cap — walked it
+// forever (17.7 GB of output before the OOM killer intervened).
+func mutualSupersedesEpics() ([]*types.Issue, map[string][]*types.Dependency) {
+	now := time.Now()
+	mk := func(id string) *types.Issue {
+		return &types.Issue{
+			ID:        id,
+			Title:     "epic " + id,
+			IssueType: "epic",
+			Status:    "open",
+			Priority:  1,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	a, b := mk("bd-cyca"), mk("bd-cycb")
+
+	deps := map[string][]*types.Dependency{
+		a.ID: {{IssueID: a.ID, DependsOnID: b.ID, Type: types.DepSupersedes}},
+		b.ID: {{IssueID: b.ID, DependsOnID: a.ID, Type: types.DepSupersedes}},
+	}
+	return []*types.Issue{a, b}, deps
+}
+
+// TestBuildIssueTreeWithDeps_SupersedesIsNotHierarchy pins the structural fix:
+// a supersedes edge is a version chain, not containment, and must never become
+// a tree edge — not even when its target is an epic.
+func TestBuildIssueTreeWithDeps_SupersedesIsNotHierarchy(t *testing.T) {
+	issues, deps := mutualSupersedesEpics()
+
+	roots, childrenMap := buildIssueTreeWithDeps(issues, deps)
+
+	if len(roots) != 2 {
+		t.Errorf("roots = %d, want 2 (neither epic contains the other)", len(roots))
+	}
+	for parent, kids := range childrenMap {
+		if len(kids) > 0 {
+			t.Errorf("childrenMap[%s] = %d children, want 0: supersedes must not build hierarchy",
+				parent, len(kids))
+		}
+	}
+}
+
+// TestPrintPrettyTree_TerminatesOnCycle is the regression guard for the OOM.
+// It forces a cycle directly into childrenMap — bypassing the structural fix —
+// so the renderer's own defenses are what is under test. Before the fix this
+// never returns.
+func TestPrintPrettyTree_TerminatesOnCycle(t *testing.T) {
+	issues, _ := mutualSupersedesEpics()
+	a, b := issues[0], issues[1]
+
+	childrenMap := map[string][]*types.Issue{
+		a.ID: {b},
+		b.ID: {a},
+	}
+
+	const limit = 1 << 20 // 1 MiB is orders of magnitude above any sane output
+
+	finished := make(chan string, 1)
+	go func() {
+		finished <- captureBoundedStdout(t, limit, func() {
+			printPrettyTree(childrenMap, a.ID, "")
+		})
+	}()
+
+	select {
+	case out := <-finished:
+		if n := strings.Count(out, b.ID); n > maxTreeDepth+1 {
+			t.Errorf("%s rendered %d times, want <= %d: cycle is not being cut",
+				b.ID, n, maxTreeDepth+1)
+		}
+		if len(out) >= limit {
+			t.Errorf("output hit the %d byte cap: renderer is still unbounded", limit)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("printPrettyTree did not terminate on a cyclic childrenMap")
+	}
+}
+
+// TestDisplayPrettyList_CycleEndToEnd exercises the public entry point on the
+// real-world shape, proving `bd list` as a whole terminates.
+func TestDisplayPrettyList_CycleEndToEnd(t *testing.T) {
+	issues, deps := mutualSupersedesEpics()
+
+	finished := make(chan string, 1)
+	go func() {
+		finished <- captureBoundedStdout(t, 1<<20, func() {
+			displayPrettyListWithDeps(issues, false, deps)
+		})
+	}()
+
+	select {
+	case out := <-finished:
+		if !strings.Contains(out, "Total: 2 issues") {
+			t.Errorf("summary missing; got:\n%s", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("displayPrettyListWithDeps did not terminate on a mutual-supersedes graph")
+	}
+}
