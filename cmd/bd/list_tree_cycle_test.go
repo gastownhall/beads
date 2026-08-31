@@ -83,6 +83,82 @@ func mutualSupersedesEpics() ([]*types.Issue, map[string][]*types.Dependency) {
 	return []*types.Issue{a, b}, deps
 }
 
+// epicBlockedByItsOwnChild builds the shape reported upstream in #5887: an
+// epic and its child, where the epic is also blocked by that child.
+//
+//	child --parent-child--> epic     (child belongs to the epic)
+//	epic  --blocks-------->  child   (epic is blocked by its own child)
+//
+// "An epic is blocked until one of its children is done" is ordinary modelling,
+// so no misuse is required to reach the failure — which is what made this worse
+// than the earlier molecule-traversal cycle (#2719). Both nodes are epics here,
+// matching the reported z6nr.40/z6nr.41 pair, because the old rule promoted an
+// edge to hierarchy whenever its *target* was an epic.
+func epicBlockedByItsOwnChild() ([]*types.Issue, map[string][]*types.Dependency) {
+	now := time.Now()
+	mk := func(id string) *types.Issue {
+		return &types.Issue{
+			ID:        id,
+			Title:     "epic " + id,
+			IssueType: "epic",
+			Status:    "open",
+			Priority:  1,
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+	}
+	parent, child := mk("bd-ep41"), mk("bd-ep40")
+
+	deps := map[string][]*types.Dependency{
+		child.ID:  {{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepParentChild}},
+		parent.ID: {{IssueID: parent.ID, DependsOnID: child.ID, Type: types.DepBlocks}},
+	}
+	return []*types.Issue{parent, child}, deps
+}
+
+// TestBuildIssueTreeWithDeps_BlocksIsNotHierarchy covers upstream #5887: a
+// `blocks` edge must not become a tree edge just because its target is an epic.
+// The parent-child edge still nests; the blocks edge must not nest back.
+func TestBuildIssueTreeWithDeps_BlocksIsNotHierarchy(t *testing.T) {
+	issues, deps := epicBlockedByItsOwnChild()
+	parent, child := issues[0], issues[1]
+
+	roots, childrenMap := buildIssueTreeWithDeps(issues, deps)
+
+	if len(roots) != 1 || roots[0].ID != parent.ID {
+		t.Errorf("roots = %v, want exactly [%s]", roots, parent.ID)
+	}
+	if got := childrenMap[parent.ID]; len(got) != 1 || got[0].ID != child.ID {
+		t.Errorf("childrenMap[%s] = %v, want [%s]", parent.ID, got, child.ID)
+	}
+	if got := childrenMap[child.ID]; len(got) != 0 {
+		t.Errorf("childrenMap[%s] = %v, want empty: a blocks edge is not containment",
+			child.ID, got)
+	}
+}
+
+// TestDisplayPrettyList_EpicBlockedByChildTerminates is the end-to-end guard for
+// #5887: the reported graph must render and terminate.
+func TestDisplayPrettyList_EpicBlockedByChildTerminates(t *testing.T) {
+	issues, deps := epicBlockedByItsOwnChild()
+
+	finished := make(chan string, 1)
+	go func() {
+		finished <- captureBoundedStdout(t, 1<<20, func() {
+			displayPrettyListWithDeps(issues, false, deps)
+		})
+	}()
+
+	select {
+	case out := <-finished:
+		if !strings.Contains(out, "Total: 2 issues") {
+			t.Errorf("summary missing; got:\n%s", out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("displayPrettyListWithDeps did not terminate on the #5887 graph")
+	}
+}
+
 // TestBuildIssueTreeWithDeps_SupersedesIsNotHierarchy pins the structural fix:
 // a supersedes edge is a version chain, not containment, and must never become
 // a tree edge — not even when its target is an epic.
