@@ -159,6 +159,41 @@ func TestDisplayPrettyList_EpicBlockedByChildTerminates(t *testing.T) {
 	}
 }
 
+// TestPrintPrettyTree_DiamondStillRendersBothPaths guards against over-cutting:
+// the visited set is scoped to the ancestor path, not the whole walk, so a node
+// legitimately reachable through two different parents must render under each.
+func TestPrintPrettyTree_DiamondStillRendersBothPaths(t *testing.T) {
+	now := time.Now()
+	mk := func(id string) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: id, IssueType: "task", Status: "open",
+			Priority: 1, CreatedAt: now, UpdatedAt: now,
+		}
+	}
+	root, left, right, leaf := mk("bd-d0"), mk("bd-d1"), mk("bd-d2"), mk("bd-d3")
+	// Distinct title so counting occurrences of the ID is not doubled by the
+	// title column, which formatPrettyIssue also prints.
+	leaf.Title = "shared leaf"
+
+	childrenMap := map[string][]*types.Issue{
+		root.ID:  {left, right},
+		left.ID:  {leaf},
+		right.ID: {leaf},
+	}
+
+	out := captureBoundedStdout(t, 1<<20, func() {
+		printPrettyTree(childrenMap, root.ID, "")
+	})
+
+	if n := strings.Count(out, leaf.ID); n != 2 {
+		t.Errorf("%s rendered %d times, want 2 (once under each parent):\n%s",
+			leaf.ID, n, out)
+	}
+	if strings.Contains(out, "(cycle)") {
+		t.Errorf("diamond wrongly reported as a cycle:\n%s", out)
+	}
+}
+
 // TestBuildIssueTreeWithDeps_SupersedesIsNotHierarchy pins the structural fix:
 // a supersedes edge is a version chain, not containment, and must never become
 // a tree edge — not even when its target is an epic.
