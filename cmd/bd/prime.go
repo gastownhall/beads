@@ -124,6 +124,11 @@ Memory injection caps:
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// Hosts like cmux may inject NODE_OPTIONS=--require=<tmp preload>.
+		// If that preload vanishes, SessionStart/`bd prime` crashes with
+		// MODULE_NOT_FOUND. Drop missing --require targets first.
+		scrubStaleNodeOptionsRequire()
+
 		evt := metrics.NewCommandEvent("prime")
 		defer func() {
 			if c := metrics.Global(); c != nil {
