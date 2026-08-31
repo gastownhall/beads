@@ -336,10 +336,27 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 	// yet, still prefer sync recovery first for Action=="none" so a default
 	// shared-server "beads" DB from another project cannot mask a real clone.
 	if dbAction, ok := existingBootstrapDBPlan(beadsDir, cfg, isServer, isSharedServer); ok {
-		if beadsDirExists || dbAction.Action != "none" {
+		if dbAction.Action != "none" {
 			return dbAction
 		}
-		plan = dbAction
+		// dbAction.Action == "none": a local database is present. It is normally
+		// authoritative (validate-and-report, no re-clone — GH#5037). The one
+		// exception is #5915: an empty embedded skeleton (0 issues) that the
+		// SessionStart `bd prime` hook auto-created on a fresh clone before
+		// hydration. If such a skeleton exists AND a remote with data is
+		// available, fall through to remote detection so bootstrap hydrates
+		// instead of reporting "nothing to do" and stranding the workspace.
+		// A legitimately empty `bd init` database with no hydratable remote is
+		// still left alone. The emptiness probe opens the embedded engine, so it
+		// is gated behind the cheap remote check to keep the common path fast.
+		if !isServer && bootstrapHasHydratableRemote() &&
+			embeddedDBIsEmpty(filepath.Join(beadsDir, "embeddeddolt"), cfg.GetDoltDatabase()) {
+			plan = dbAction // fall through to sync detection; restored as fallback if none found
+		} else if beadsDirExists {
+			return dbAction
+		} else {
+			plan = dbAction
+		}
 	}
 
 	// Check sync.remote (primary) or sync.git-remote (deprecated fallback)
@@ -472,6 +489,52 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 	plan.Action = "none"
 	plan.Reason = "Database already exists at " + dbPath
 	return plan, true
+}
+
+// embeddedDBIsEmpty reports true ONLY when dataDir holds a readable embedded
+// Dolt database whose `issues` table contains zero rows — the fingerprint of
+// the skeleton the SessionStart `bd prime` hook creates before hydration
+// (#5915). Any failure to open the engine or read the issues table returns
+// false, so the caller treats the directory as an authoritative existing
+// database and leaves it untouched. This deliberate error==false rule keeps
+// two behaviors intact: a bare directory that is not a valid Dolt database
+// (OpenSQL errors) is left alone, and a pure-Go (CGO_ENABLED=0) build, whose
+// OpenSQL stub always errors, keeps the pre-existing "database already exists"
+// detection. We re-clone over a local database only when we can PROVE it holds
+// no issue data, never on an ambiguous or unreadable directory.
+func embeddedDBIsEmpty(dataDir, dbName string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, dbName, "")
+	if err != nil {
+		return false
+	}
+	defer func() { _ = cleanup() }()
+
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
+		return false
+	}
+	return count == 0
+}
+
+// bootstrapHasHydratableRemote reports whether a Dolt remote with data is
+// available to clone from — a configured sync.remote that is a real Dolt remote
+// (not a git code-repository URL), or a git origin carrying refs/dolt/data. It
+// mirrors the sync-detection logic in detectBootstrapAction and is used to gate
+// the #5915 empty-skeleton hydration so the (engine-opening) emptiness probe
+// only runs when hydration is actually possible.
+func bootstrapHasHydratableRemote() bool {
+	if syncRemote := resolveSyncRemote(); syncRemote != "" {
+		return !isGitCodeRepoURL(syncRemote)
+	}
+	if isGitRepo() && !isBareGitRepo() {
+		if originURL, err := gitOriginGetURL(); err == nil && originURL != "" {
+			return gitOriginHasDoltDataRef()
+		}
+	}
+	return false
 }
 
 func bootstrapSharedServerMode(beadsDir string) bool {
@@ -924,6 +987,20 @@ func resolveRemoteCloneMode(beadsDir string, cfg *configfile.Config, cloneMode r
 // cloneViaEmbedded clones using the embedded Dolt engine (CGO required).
 func cloneViaEmbedded(ctx context.Context, beadsDir, remoteURL, dbName string) error {
 	dataDir := filepath.Join(beadsDir, "embeddeddolt")
+	// An existing embeddeddolt directory makes DOLT_CLONE fail with "database
+	// exists" (Error 1007). Detection only routes an already-present directory
+	// here in the empty-skeleton case (#5915): the SessionStart `bd prime` hook
+	// created a Dolt skeleton with zero issues before hydration. Remove such a
+	// provably-empty skeleton so the clone starts clean — mirroring the
+	// documented manual recovery (`rm -rf .beads/embeddeddolt && bd bootstrap`).
+	// A directory we cannot prove is empty (it holds issues, or cannot be
+	// opened/read) is left untouched so real data is never destroyed; the clone
+	// then surfaces the existing-database error exactly as before.
+	if info, err := os.Stat(dataDir); err == nil && info.IsDir() && embeddedDBIsEmpty(dataDir, dbName) {
+		if err := os.RemoveAll(dataDir); err != nil {
+			return fmt.Errorf("remove empty embedded skeleton before clone: %w", err)
+		}
+	}
 	if err := os.MkdirAll(dataDir, 0o750); err != nil {
 		return fmt.Errorf("create embeddeddolt directory: %w", err)
 	}
