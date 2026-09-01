@@ -1,13 +1,5 @@
--- IDEMPOTENCY (2026-08-31): --allow-empty on every DOLT_COMMIT.
---
--- Same defect as 0040. This migration opens with DELETE FROM
--- dolt_nonlocal_tables followed by DOLT_COMMIT. On a re-run after a partial
--- application the table is already empty, the DELETE stages nothing, and the
--- commit dies with `Error 1105: nothing to commit` — aborting schema init and
--- leaving the database stuck, exactly as 0040 did. Found by fixing 0040 and
--- watching the failure move one migration down (igr, 2026-08-31).
 DELETE FROM dolt_nonlocal_tables;
-CALL DOLT_COMMIT('--allow-empty', '-Am', 'disable nonlocal tables for fk migrations');
+CALL DOLT_COMMIT('-Am', 'disable nonlocal tables for fk migrations');
 SET FOREIGN_KEY_CHECKS = 0;
 
 SET @needs_drop_old_fk = (
