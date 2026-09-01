@@ -812,3 +812,30 @@ func TestPrime_RawMarkdown_NotJSON_WithoutFlag(t *testing.T) {
 		t.Fatal("prime output without --hook-json should not be valid JSON (regression guard)")
 	}
 }
+
+// GH#6095: bd prime --help must document all three PRIME.md resolution
+// tiers (current-directory, resolved workspace .beads, global config) in
+// their actual lookup order, not just the first tier.
+func TestPrimeHelpMentionsAllFallbackTiers(t *testing.T) {
+	needles := []string{
+		".beads/PRIME.md relative to the current directory",
+		".beads directory bd resolves for this workspace",
+		"~/.config/beads/PRIME.md",
+	}
+	positions := make([]int, len(needles))
+	for i, needle := range needles {
+		pos := strings.Index(primeCmd.Long, needle)
+		if pos == -1 {
+			t.Errorf("prime help missing %q", needle)
+		}
+		positions[i] = pos
+	}
+	for i := 1; i < len(positions); i++ {
+		if positions[i-1] == -1 || positions[i] == -1 {
+			continue
+		}
+		if positions[i] <= positions[i-1] {
+			t.Errorf("prime help documents fallback tiers out of order: %q at %d should come before %q at %d", needles[i-1], positions[i-1], needles[i], positions[i])
+		}
+	}
+}
