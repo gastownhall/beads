@@ -99,18 +99,20 @@ type CycleReport struct {
 	// Cycles is the canonical, sorted set. It is empty — never nil — when the
 	// graph is acyclic.
 	//
-	// ITS LENGTH IS THE TOTAL, and that is the point of carrying unhydratable
+	// ITS LENGTH IS THE TOTAL FOUND BY THE SELECTED WALK, and that is the point
+	// of carrying unhydratable
 	// members rather than dropping them: a cycle nothing can describe is still
 	// counted here, so "found N cycles" cannot shrink because a row went
 	// missing. There is no separate count field, because there is no cycle this
 	// slice omits.
 	//
 	// IT IS NOT PROMISED TO BE EVERY SIMPLE CYCLE IN THE GRAPH. Enumerating
-	// those is exponential in the worst case; the detector records one cycle per
-	// back edge of a depth-first walk, so two cycles sharing every node but one
-	// edge may be reported as one. What IS promised is that the slice is empty
-	// exactly when the graph is acyclic, and that the same graph always yields
-	// the same slice.
+	// those is exponential in the worst case. The default detector records one
+	// cycle per back edge of a depth-first walk, while IncludeTracks records one
+	// qualifying cycle per strongly connected component. Two cycles sharing
+	// every node but one edge may therefore be reported as one. What IS promised
+	// is that the slice is empty exactly when the selected walk has no qualifying
+	// cycle, and that the same graph and request always yield the same slice.
 	Cycles []Cycle `json:"cycles"`
 }
 
