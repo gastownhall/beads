@@ -156,8 +156,8 @@ func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) [][]string {
 		}
 
 		returnPath := reachPath(plain, to, from)
-		if returnPath == nil {
-			continue // Impossible for two members of one strongly connected component.
+		if len(returnPath) == 0 {
+			panic("mixed cycle component has no return path")
 		}
 		cycle := append([]string{from}, returnPath[:len(returnPath)-1]...)
 		cycles = append(cycles, rotateToLowest(cycle))
