@@ -451,11 +451,26 @@ jobs:
         run: make ci-pr-lint
 
   # Cross-platform test matrix (Linux/macOS only - Windows uses smoke tests)
+  #
+  # Both legs run every package in one `./...` invocation, so go test's DEFAULT
+  # 10m per-package deadline applied — and cmd/bd outgrew it. scripts/test.sh
+  # already documents the floor for local runs: cmd/bd is the slowest package at
+  # ~18min wall, which is why TEST_TIMEOUT defaults to 25m there. CI was still on
+  # the 10m default and rode the edge: on 2026-09-01 main run 33497003321 failed
+  # twice with `panic: test timed out after 10m0s` in cmd/bd AND, in the same
+  # coverage pass, internal/storage/uow — different tests only 1-12s in flight
+  # each attempt (a package-wide crawl on the 2-core coverage-instrumented
+  # runner, not a hang), while a rerun of the identical tree passed. Match
+  # scripts/test.sh's 25m per-package deadline and keep it inside one finite job
+  # budget, the same shape the storage/uow and conformance jobs below use: the go
+  # deadline fires first and prints goroutine stacks, so a REAL hang is still
+  # diagnosable rather than being cut off by a bare job kill.
   test:
     name: Test (${{ matrix.os }})
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.os }}
     needs: build-artifacts
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -468,7 +483,7 @@ jobs:
           # macOS: full test suite, no coverage (faster)
           - os: macos-latest
             coverage: false
-            test-flags: '-v -race -short'
+            test-flags: '-v -race -short -timeout=25m'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -551,7 +566,7 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+            -- -tags gms_pure_go -race -short -timeout=25m -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}

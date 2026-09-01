@@ -52,7 +52,7 @@ var createCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("create")
+		CheckReadonly("create") // also covers CheckMigrationFreeze (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("create")
 		defer func() {
@@ -211,6 +211,18 @@ var createCmd = &cobra.Command{
 			}
 			wisp = true
 			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
+		}
+		// Reconcile the requested durable class with the effective wisp plane
+		// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
+		// contradicts --ephemeral/--no-history and is rejected, so the durable
+		// intent is preserved rather than silently collapsed into an
+		// effective-ephemeral record; a per-type config default yields to the
+		// explicit flag. versioned normalizes to the unset marker only after the
+		// check (C2.4).
+		var storageClassConflict bool
+		storageClass, storageClassConflict = reconcileStorageClassPlane(storageClass, storageClassFlag != "", wisp || noHistory)
+		if storageClassConflict {
+			return HandleError("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", storageClass)
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -695,13 +707,16 @@ type createIssueParams struct {
 	Metadata           json.RawMessage
 }
 
-// resolveStorageClass resolves the effective storage class at create time
+// resolveStorageClass resolves the requested storage class at create time
 // (Protocol v0.1 C1.3): the explicit --storage-class flag wins; otherwise the
 // per-type config default storage-class.<type> applies; otherwise unset.
-// Versioned normalizes to unset — the class marker is omitted when versioned
-// (C2.4), and both spell identical semantics (C1.2). Values are validated
-// wherever they came from: a bad flag is a usage error, a bad config value is
-// a config bug and fails just as loudly.
+// The parsed class is returned verbatim, including versioned. The caller must
+// normalize versioned to the unset marker (the marker is omitted when
+// versioned, C2.4) only AFTER plane-conflict validation, so an explicit durable
+// request paired with a wisp-plane flag is rejected rather than silently erased
+// into an effective-ephemeral row. Values are validated wherever they came
+// from: a bad flag is a usage error, a bad config value is a config bug and
+// fails just as loudly.
 func resolveStorageClass(explicit string, issueType types.IssueType) (types.StorageClass, error) {
 	raw := explicit
 	if raw == "" {
@@ -717,10 +732,31 @@ func resolveStorageClass(explicit string, issueType types.IssueType) (types.Stor
 		}
 		return "", err
 	}
-	if class == types.StorageClassVersioned {
-		return "", nil
-	}
 	return class, nil
+}
+
+// reconcileStorageClassPlane applies flag-over-config precedence between a
+// resolved storage class and the effective wisp plane (Protocol v0.1 §C1.3).
+// A wisp-plane record is ephemeral by construction, so a durable class
+// (versioned/unversioned) cannot ride on it. explicit reports whether the class
+// came from an explicit flag/field rather than a per-type config default:
+//   - explicit durable class + wisp plane -> conflict=true; the caller rejects
+//     it so the durable intent is preserved rather than silently collapsed into
+//     an effective-ephemeral record;
+//   - config-derived durable class + wisp plane -> cleared, yielding to the
+//     explicit --ephemeral/--no-history plane.
+//
+// versioned normalizes to the unset marker (C2.4) only after the check, so the
+// durable request survives long enough to be honored, rejected, or yielded. On
+// conflict the class is returned verbatim so the caller can name it in the error.
+func reconcileStorageClassPlane(class types.StorageClass, explicit, wispPlane bool) (types.StorageClass, bool) {
+	if class != "" && wispPlane {
+		if explicit {
+			return class, true
+		}
+		class = "" // config default yields to the explicit wisp-plane flag
+	}
+	return class.Normalize(), false
 }
 
 func buildCreateIssue(params createIssueParams) *types.Issue {

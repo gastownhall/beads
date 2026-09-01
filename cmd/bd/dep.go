@@ -1157,10 +1157,6 @@ var depRemoveCmd = &cobra.Command{
 		// for a genuine removal, matching bd dep add's edge event and the
 		// proxied bd dep remove path.
 		//
-		// The role's Removed verdict is not printed, for the reason the proxied
-		// route gives: `bd dep remove` has always confirmed the same way whether
-		// or not an edge was there, and reporting the difference now would
-		// change what every existing script reads.
 		editor, err := fromStore.DependencyEditor()
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
@@ -1169,11 +1165,12 @@ var depRemoveCmd = &cobra.Command{
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		if _, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
+		result, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
 			Actor:       actor,
 			IssueID:     fullFromID,
 			DependsOnID: fullToID,
-		}); err != nil {
+		})
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -1185,11 +1182,21 @@ var depRemoveCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
+			status := "removed"
+			if !result.Removed {
+				status = "not_found"
+			}
 			return outputJSON(map[string]interface{}{
-				"status":        "removed",
+				"status":        status,
+				"removed":       result.Removed,
 				"issue_id":      fullFromID,
 				"depends_on_id": fullToID,
 			})
+		}
+		if !result.Removed {
+			fmt.Printf("No dependency found: %s → %s\n",
+				formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
+			return nil
 		}
 
 		fmt.Printf("%s Removed dependency: %s → %s\n",

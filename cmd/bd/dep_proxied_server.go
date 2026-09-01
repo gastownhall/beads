@@ -345,24 +345,33 @@ func runDepRemoveProxiedServer(_ *cobra.Command, ctx context.Context, args []str
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
-	// The role's Removed verdict is not printed. `bd dep remove` has always
-	// confirmed the same way whether or not an edge was there, and reporting
-	// the difference now would change what every existing script reads.
-	if _, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
+	result, err := editor.RemoveDependency(ctx, issueops.RemoveDependencyRequest{
 		Actor:       actor,
 		IssueID:     fromID,
 		DependsOnID: toID,
-	}); err != nil {
+	})
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	res := depEdgeFeedback(ctx, fromID, toID, false)
 
 	if jsonOutput {
+		status := "removed"
+		if !result.Removed {
+			status = "not_found"
+		}
 		_ = outputJSON(map[string]interface{}{
-			"status":        "removed",
+			"status":        status,
+			"removed":       result.Removed,
 			"issue_id":      fromID,
 			"depends_on_id": toID,
 		})
+		return nil
+	}
+	if !result.Removed {
+		fmt.Printf("No dependency found: %s → %s\n",
+			formatFeedbackIDParen(fromID, res.fromTitle),
+			formatFeedbackIDParen(toID, res.toTitle))
 		return nil
 	}
 

@@ -302,25 +302,38 @@ func TestGetIssueRefusesAnImpossibleIDFromTheEdge(t *testing.T) {
 // nothing, encodeCursor broken outright included.
 func TestCursorRoundTrips(t *testing.T) {
 	created := time.Now().UTC().Truncate(time.Second)
-	items := []*types.IssueWithCounts{{Issue: &types.Issue{ID: "bd-7", CreatedAt: created}}}
+	items := []*types.IssueWithCounts{{Issue: &types.Issue{ID: "bd-7", CreatedAt: created, Priority: 2}}}
 
-	token := cursorFor(items)
-	if token == "" {
-		t.Fatal("cursorFor returned no token for a nonempty page")
-	}
-	pos, ok := decodeCursor(token)
-	if !ok {
-		t.Fatalf("a token this server minted did not decode: %q", token)
-	}
-	if pos.ID != "bd-7" {
-		t.Errorf("decoded id = %q, want bd-7", pos.ID)
-	}
-	if !pos.CreatedAt.Equal(created) {
-		t.Errorf("decoded created_at = %s, want %s — the position is a keyset predicate, so a lossy instant skips or repeats rows", pos.CreatedAt, created)
+	// Both served orders, because a round trip that held for one and lost a
+	// member of the other's position would still page — into the wrong rows.
+	for _, order := range []listOrder{orderCreated, orderPriority} {
+		token := cursorFor(items, order)
+		if token == "" {
+			t.Fatalf("%s: cursorFor returned no token for a nonempty page", order)
+		}
+		pos, ok := decodeCursor(token, order)
+		if !ok {
+			t.Fatalf("%s: a token this server minted did not decode: %q", order, token)
+		}
+		if pos.ID != "bd-7" {
+			t.Errorf("%s: decoded id = %q, want bd-7", order, pos.ID)
+		}
+		if !pos.CreatedAt.Equal(created) {
+			t.Errorf("%s: decoded created_at = %s, want %s — the position is a keyset predicate, so a lossy instant skips or repeats rows", order, pos.CreatedAt, created)
+		}
+		if order == orderPriority {
+			if pos.Priority == nil {
+				t.Errorf("%s: decoded no priority; this order's position is (priority, created_at, id)", order)
+			} else if *pos.Priority != 2 {
+				t.Errorf("%s: decoded priority = %d, want 2", order, *pos.Priority)
+			}
+		} else if pos.Priority != nil {
+			t.Errorf("%s: decoded a priority (%d) it has no place for", order, *pos.Priority)
+		}
 	}
 
-	for _, bad := range []string{"", "v0.abc", "v1.!!!", "v1.", "not-a-cursor"} {
-		if _, ok := decodeCursor(bad); ok {
+	for _, bad := range []string{"", "v0.abc", "v1.!!!", "v1.", "v2.!!!", "v2.", "v3.abc", "not-a-cursor"} {
+		if _, ok := decodeCursor(bad, orderCreated); ok {
 			t.Errorf("decodeCursor(%q) succeeded; every unreadable token is the same client situation", bad)
 		}
 	}

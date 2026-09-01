@@ -136,6 +136,24 @@ func (e CountDependencyEdgesParamsDirection) Valid() bool {
 	}
 }
 
+// Defines values for ListIssuesParamsSort.
+const (
+	ListIssuesParamsSortCreated  ListIssuesParamsSort = "created"
+	ListIssuesParamsSortPriority ListIssuesParamsSort = "priority"
+)
+
+// Valid indicates whether the value is a known member of the ListIssuesParamsSort enum.
+func (e ListIssuesParamsSort) Valid() bool {
+	switch e {
+	case ListIssuesParamsSortCreated:
+		return true
+	case ListIssuesParamsSortPriority:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ListRelatedIssuesParamsDirection.
 const (
 	ListRelatedIssuesParamsDirectionIn  ListRelatedIssuesParamsDirection = "in"
@@ -2112,7 +2130,7 @@ type ListIssuesParams struct {
 	// IncludeInfra Include the workspace's configured infrastructure issue types. This also admits the ephemeral plane those types live in, so it is strictly wider than `include_ephemeral`.
 	IncludeInfra *bool `form:"include_infra,omitempty" json:"include_infra,omitempty"`
 
-	// IncludeEphemeral Include the ephemeral tier — ephemeral rows and the non-synced rows stored beside them — merged into the same `(created_at DESC, id ASC)` order as the durable ones.
+	// IncludeEphemeral Include the ephemeral tier — ephemeral rows and the non-synced rows stored beside them — merged into the same order as the durable ones, whichever order `sort` named.
 	//
 	// It admits a TIER and takes no TYPE exclusion off, so a row whose type this operation already hides stays hidden. That includes the configured infrastructure types: ephemeral `agent`, `role` and `message` rows need `include_infra` as well as, or instead of, this one. What `include_ephemeral` alone reaches is the ephemeral rows of the types a listing already shows.
 	IncludeEphemeral *bool `form:"include_ephemeral,omitempty" json:"include_ephemeral,omitempty"`
@@ -2129,11 +2147,22 @@ type ListIssuesParams struct {
 	// HasMetadataKey Only issues carrying this top-level metadata key.
 	HasMetadataKey *string `form:"has_metadata_key,omitempty" json:"has_metadata_key,omitempty"`
 
+	// Sort Which of the two served total orders this page is in. `created` is `(created_at DESC, id ASC)`; `priority` is `(priority ASC, created_at DESC, id ASC)` — `bd list`'s flagless ordering, and the order `bd list --sort priority` produces.
+	//
+	// THE DEFAULT IS `created` AND WILL NOT CHANGE. It is what this operation served before this parameter existed, so moving it would alter which rows a truncated page contains for every client written against that behavior, with no error to notice it by.
+	//
+	// THE VOCABULARY IS CLOSED, and deliberately smaller than the nine values `bd list --sort` and `GET /v0/beads/issues:query` take. Each value here is a cursor contract, not a display preference: it needs a keyset predicate and a key proven total. See the operation description for why the other seven have neither.
+	//
+	// A value outside the enum is a 400 `invalid_argument` with `param: "sort"` and `reason: "invalid_value"`. A server that predates this parameter answers `param: "sort"` with `reason: "unknown_parameter"` instead, which is the per-parameter capability probe a client can dispatch on to fall back to paging in `created` order and sorting client-side.
+	Sort *ListIssuesParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
 	// Cursor Opaque keyset position, taken verbatim from a previous response's `next_cursor`. Clients MUST NOT construct, parse or mutate it: its encoding is server-private and versioned, and an undecodable or unknown-version value is refused with 400 `invalid_cursor`. The recovery for that refusal is normative: restart paging with no `cursor` at all — the position cannot be salvaged, and re-sending the same value cannot succeed.
 	//
-	// LIFETIME: a cursor holds a position and a private encoding version, and nothing else. The server keeps no state for it, so it does not expire, does not become invalid when the server restarts, and is not tied to the connection that issued it; the only thing that invalidates one is a change to the encoding, which surfaces as `invalid_cursor`.
+	// LIFETIME: a cursor holds a position, the ORDER that position is in, and a private encoding version — and nothing else. The server keeps no state for it, so it does not expire, does not become invalid when the server restarts, and is not tied to the connection that issued it; the only thing that invalidates one is a change to the encoding, which surfaces as `invalid_cursor`. A token minted before `sort` existed is still accepted, as the `created`-order position it is, so no traversal in flight across a server upgrade has to be restarted.
 	//
-	// MISUSE IS NOT DETECTABLE, which is why repeating the filters matters. Because the token carries no filters, a page fetched with a cursor minted under DIFFERENT filters is not refused: the server applies the filters of the current request from the position of the old one, silently skipping every row the new filter set would have placed before that position. Repeat every filter verbatim for the whole traversal, and start a new traversal when they change.
+	// THE ORDER MUST MATCH, AND THAT MISMATCH IS DETECTED. A cursor minted under one `sort` and re-sent under another is refused with 400 `invalid_cursor`; the same instant and id name a different row in a different order, so resuming from it would skip and duplicate rows silently. Send the same `sort` for the whole traversal.
+	//
+	// FILTER MISUSE IS *NOT* DETECTABLE, which is the difference, and why repeating the filters matters. Because the token carries no filters, a page fetched with a cursor minted under DIFFERENT filters is not refused: the server applies the filters of the current request from the position of the old one, silently skipping every row the new filter set would have placed before that position. Repeat every filter verbatim for the whole traversal, and start a new traversal when they change.
 	Cursor *string `form:"cursor,omitempty" json:"cursor,omitempty"`
 
 	// Limit Maximum number of items to return. `0` means unlimited, exactly as `bd list --limit 0` does — the two surfaces read the same shared default and the same zero semantics, so they cannot diverge. An unlimited page reports `has_more: false` and carries no `next_cursor`. A negative value is a 400.
@@ -2148,6 +2177,9 @@ type ListIssuesParams struct {
 	// The response carries no marker for the omission, so an omitted field is indistinguishable from a genuinely empty one: only the client that sent this parameter knows the rows are partial. Fetch a whole issue with `GET /v0/beads/issues/{id}`.
 	Brief *bool `form:"brief,omitempty" json:"brief,omitempty"`
 }
+
+// ListIssuesParamsSort defines parameters for ListIssues.
+type ListIssuesParamsSort string
 
 // GetIssueParams defines parameters for GetIssue.
 type GetIssueParams struct {

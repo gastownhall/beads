@@ -1901,6 +1901,33 @@ type IssueFilter struct {
 	AfterCreatedAt *time.Time
 	AfterID        string
 
+	// AfterPriority EXTENDS the position above to the (priority ASC,
+	// created_at DESC, id ASC) order — the order SortBy="priority" (and the
+	// empty default) renders. When it is set the restriction becomes
+	// (priority > AfterPriority)
+	//   OR (priority = AfterPriority AND created_at < AfterCreatedAt)
+	//   OR (priority = AfterPriority AND created_at = AfterCreatedAt AND id > AfterID),
+	// which is total for the same reason the pair above is: priority and
+	// created_at are NOT NULL and id is the primary key, so a page boundary
+	// inside a run of equal (priority, created_at) resolves on id with no
+	// dropped and no duplicated row.
+	//
+	// IT IS THE SAME POSITION, NOT A SECOND ONE. AfterCreatedAt still decides
+	// whether a position was supplied at all; a priority with no instant is
+	// half a position and is ignored, exactly as AfterID alone is. Set it only
+	// under the priority order — pairing it with SortBy="created" positions in
+	// an order the ORDER BY does not render, which pages a walk through rows
+	// in an order neither side agrees on.
+	//
+	// THE KEY IS MUTABLE, which created_at is not, and that changes what a
+	// walk can promise. `bd update --priority` moves a row between pages
+	// mid-walk, so a row can be seen twice or missed — the already-documented
+	// consequence of pinning a position rather than a snapshot, reached here
+	// by updates as well as by creations. What totality buys is that
+	// UNCHANGED data never skips or duplicates, which is what welding the
+	// listing to the created order originally bought.
+	AfterPriority *int
+
 	// Empty/null checks
 	EmptyDescription bool
 	NoAssignee       bool
@@ -1915,6 +1942,17 @@ type IssueFilter struct {
 
 	// Ephemeral filtering
 	Ephemeral *bool // Filter by ephemeral flag (nil = any, true = only ephemeral, false = only persistent)
+
+	// EphemeralTier selects a SWEEP TIER rather than the raw ephemeral flag:
+	// a row is ephemeral-tier when ephemeral=1 OR it carries a wisp_type.
+	// The distinction exists because the flag alone misses typed wisps minted
+	// without it (older creators set wisp_type but not ephemeral), and those
+	// rows must fall to `bd purge`, not accumulate forever — while NoHistory
+	// beads (wisps plane, ephemeral=0, no wisp_type) stay durable-tier.
+	// Unlike Ephemeral=true this field does NOT route the search to the wisps
+	// plane alone; a tier query must merge both planes, because legacy typed
+	// wisps can live in the issues table. nil = no tier constraint.
+	EphemeralTier *bool
 
 	// Pinned filtering
 	Pinned *bool // Filter by pinned flag (nil = any, true = only pinned, false = only non-pinned)

@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/steveyegge/beads/internal/debug"
 )
 
 const (
@@ -55,6 +57,7 @@ type MigrateLockOption func(*migrateLockOptions)
 type migrateLockOptions struct {
 	freshBootstrapHeal *freshBootstrapHealRequest
 	lockedPreparation  *lockedPreparationRequest
+	databaseSelector   DatabaseSelector
 }
 
 type freshBootstrapHealRequest struct {
@@ -169,6 +172,38 @@ func WithLockedPreparation(endpoint string, fn LockedPreparation) MigrateLockOpt
 	}
 }
 
+// DatabaseSelector puts a pinned session on databaseName for the pre-lock
+// convergence probe and returns the identifier-quoted name the probe uses to
+// schema-qualify its reads. Returning an error, like everything else in the
+// probe, fails closed onto the locked path.
+//
+// It is injected rather than implemented here on purpose. Selecting a database
+// and quoting an identifier belong to the DDL repository in
+// internal/storage/domain/db — but that package's own test suite migrates a
+// scratch database with this package, so a schema -> domain/db import compiles
+// as a library and then fails the domain/db TEST build with "import cycle not
+// allowed in test". Inverting the dependency lets the one caller that needs
+// the probe to reach an unselected session hand in the repository's real
+// implementation, so the fast path still issues preparation's exact statement
+// without this package depending on it.
+type DatabaseSelector func(ctx context.Context, conn DBConn, databaseName string) (quotedName string, err error)
+
+// WithDatabaseSelector lets the convergence probe put the pinned session on
+// the target database itself.
+//
+// Without it the probe cannot issue USE, so it declines unless the session is
+// already on databaseName — correct for callers whose pool DSN already names
+// the database (internal/storage/dolt). The proxied CLI open is the caller
+// that needs it: it pins its schema-init pool with an EMPTY DSN database and
+// USEs only inside the locked preparation, so an uninjected probe would read
+// NULL from DATABASE() and decline on every single invocation, which is
+// exactly the defect this option exists to close.
+func WithDatabaseSelector(fn DatabaseSelector) MigrateLockOption {
+	return func(o *migrateLockOptions) {
+		o.databaseSelector = fn
+	}
+}
+
 // MigrateUpWithLock serializes schema migrations for a single Dolt sql-server
 // database. conn must be a pinned *sql.Conn because MySQL/Dolt named locks are
 // session-scoped; GET_LOCK, migrations, and RELEASE_LOCK must run on the same
@@ -179,6 +214,38 @@ func MigrateUpWithLock(ctx context.Context, conn *sql.Conn, databaseName string,
 	var o migrateLockOptions
 	for _, opt := range opts {
 		opt(&o)
+	}
+
+	// Steady-state fast path. In the overwhelmingly common case the database
+	// is already at this binary's schema and the whole locked pass is a probe
+	// that finds nothing to do — but running that probe under the
+	// database-scoped GET_LOCK serialized every bd invocation on a shared Dolt
+	// server behind every other one (96.7% lock saturation on an 18-seat rig;
+	// see alreadyConverged). Answer the same question first, without the lock,
+	// and take the lock only on the path that can actually migrate.
+	//
+	// Skipped when the caller carries fresh-bootstrap heal authority: that
+	// capability is issued only to the init that just created the database, so
+	// there is nothing converged to detect and the bootstrap path stays
+	// exactly as it was. A caller's locked preparation is skipped only once
+	// alreadyConverged has proved the database already existed and put the
+	// session on it — preparation's CREATE DATABASE would then have failed
+	// with "database exists" and captured no authority, and its USE is the
+	// statement alreadyConverged itself issued.
+	if o.freshBootstrapHeal == nil {
+		converged, convergedErr := alreadyConverged(ctx, conn, databaseName, o.databaseSelector)
+		switch {
+		case convergedErr != nil:
+			// Advisory only: the probe fails closed onto the locked path
+			// below, so this is never fatal. But a silently discarded error is
+			// a fast path that has quietly stopped firing — the exact failure
+			// mode that leaves the GET_LOCK saturation this exists to remove
+			// looking like a mystery. Say so where BD_DEBUG/-v can see it.
+			debug.Logf("schema: convergence fast path unavailable for %q, taking the migration lock: %v\n",
+				databaseName, convergedErr)
+		case converged:
+			return 0, nil
+		}
 	}
 
 	lockName := MigrationLockName(databaseName)
