@@ -200,8 +200,10 @@ func RunCycleDetectorMergesTheDurableAndEphemeralPlanes(t *testing.T, ctx contex
 
 // RunCycleDetectorFollowsOnlyBlockingEdges pins cycledetector.go:110-119: the
 // walk follows `blocks` and `conditional-blocks`, and nothing else — not
-// `waits-for`, whose gate semantics make a mutual wait legitimate, and not
-// `parent-child`, which the ADD-time gate does walk.
+// `waits-for`, whose gate semantics make a mutual wait legitimate, not
+// `parent-child`, which the ADD-time gate does walk, and not `tracks`, on the
+// DEFAULT (zero-value) request. IncludeTracks's own widened walk is pinned
+// separately by RunCycleDetectorIncludeTracks*, below.
 //
 // The conditional-blocks half is asserted in the same case as the exclusions on
 // purpose: a body narrowed to `blocks` alone would pass an exclusion-only case,
@@ -217,6 +219,7 @@ func RunCycleDetectorFollowsOnlyBlockingEdges(t *testing.T, ctx context.Context,
 		{types.DepWaitsFor, "wait", false},
 		{types.DepParentChild, "kid", false},
 		{types.DepRelated, "rel", false},
+		{types.DepTracks, "trk", false},
 	} {
 		first := fmt.Sprintf("%s-edge-%s-a", fixture.IssuePrefix, test.slug)
 		second := fmt.Sprintf("%s-edge-%s-b", fixture.IssuePrefix, test.slug)
@@ -234,6 +237,53 @@ func RunCycleDetectorFollowsOnlyBlockingEdges(t *testing.T, ctx context.Context,
 			t.Errorf("a mutual %s pair produced %v; that edge type is outside this walk", test.edgeType, found)
 		}
 	}
+}
+
+// RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop pins
+// DetectCyclesRequest.IncludeTracks's own guard: widening the walk to `tracks`
+// must not resurrect the PR #4933 false-positive shape, where ordinary
+// convoy/tracking topology with no scheduling edge at all got reported as a
+// cycle. A loop made entirely of `tracks` edges stays silent even with
+// IncludeTracks set.
+func RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) {
+	t.Helper()
+	first := fixture.IssuePrefix + "-trkloop-a"
+	second := fixture.IssuePrefix + "-trkloop-b"
+	seedCycleDetectorIssue(t, ctx, fixture, first)
+	seedCycleDetectorIssue(t, ctx, fixture, second)
+	seedCycleDetectorEdges(t, ctx, fixture, false,
+		cycleDetectorEdge{Source: first, Target: second, Type: types.DepTracks},
+		cycleDetectorEdge{Source: second, Target: first, Type: types.DepTracks})
+
+	report := cycleDetectorReportIncludingTracks(t, ctx, fixture)
+	if found := cycleDetectorTouching(report, first, second); len(found) > 0 {
+		t.Errorf("a mutual tracks-only pair produced %v under IncludeTracks, want none: a cycle needs at least one scheduling edge", found)
+	}
+}
+
+// RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape pins the gc-818bx
+// deadlock this option exists to surface: a molecule root that
+// blocks-depends on its own entry step, which tracks-depends back to the
+// root. Neither edge alone is a cycle; the shape only closes across both edge
+// types, which is exactly what the default (blocks-only) walk cannot see.
+func RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) {
+	t.Helper()
+	root := fixture.IssuePrefix + "-molroot"
+	step := fixture.IssuePrefix + "-molstep"
+	seedCycleDetectorIssue(t, ctx, fixture, root)
+	seedCycleDetectorIssue(t, ctx, fixture, step)
+	seedCycleDetectorEdges(t, ctx, fixture, false,
+		cycleDetectorEdge{Source: root, Target: step, Type: types.DepBlocks},
+		cycleDetectorEdge{Source: step, Target: root, Type: types.DepTracks})
+
+	// The default request must still see nothing: the closing edge is a
+	// tracks edge, outside the base walk.
+	if found := cycleDetectorTouching(cycleDetectorReport(t, ctx, fixture), root, step); len(found) > 0 {
+		t.Errorf("the default request reported %v; IncludeTracks defaults to false and must leave the base walk unchanged", found)
+	}
+
+	cycle := cycleDetectorFind(t, cycleDetectorReportIncludingTracks(t, ctx, fixture), root, step)
+	assertCycleDetectorPath(t, cycle, root, step)
 }
 
 // RunCycleDetectorReportsAnHonestPartial pins cycledetector.go:140-144 and
@@ -427,6 +477,17 @@ func cycleDetectorSeed(id string) *types.Issue {
 func cycleDetectorReport(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) publicops.CycleReport {
 	t.Helper()
 	report, err := fixture.Detector.DetectCycles(ctx, publicops.DetectCyclesRequest{})
+	if err != nil {
+		t.Fatalf("DetectCycles: %v", err)
+	}
+	return report
+}
+
+// cycleDetectorReportIncludingTracks is cycleDetectorReport with
+// IncludeTracks set, for the cases pinning that option's own widened walk.
+func cycleDetectorReportIncludingTracks(t *testing.T, ctx context.Context, fixture CycleDetectorFixture) publicops.CycleReport {
+	t.Helper()
+	report, err := fixture.Detector.DetectCycles(ctx, publicops.DetectCyclesRequest{IncludeTracks: true})
 	if err != nil {
 		t.Fatalf("DetectCycles: %v", err)
 	}

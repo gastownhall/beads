@@ -195,3 +195,148 @@ func TestBuildCyclesLeavesACompleteCycleUnmarked(t *testing.T) {
 		t.Error("Partial = true for a fully described cycle")
 	}
 }
+
+// The IncludeTracks widening: CanonicalMixedCyclePaths adds `tracks` edges to
+// the walk but must report a cycle only when a scheduling (blocks/
+// conditional-blocks) edge is also on it. This is the gc-818bx guard: the
+// shape it exists to surface is a molecule root that blocks-depends
+// (transitively) on its own entry step, which tracks-depends back to the
+// root, WITHOUT reopening the "thousands of cycles" regression a
+// tracks-in-the-plain-walk change caused and had to revert (ordinary convoy
+// topology loops constantly through tracks alone).
+
+// TestCanonicalMixedCyclePathsIgnoresAPureTracksLoop pins the regression
+// guard directly: a loop made entirely of tracks edges — the shape a convoy
+// and its tracked issues form routinely — must not be reported.
+func TestCanonicalMixedCyclePathsIgnoresAPureTracksLoop(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"a": {{To: "b"}},
+		"b": {{To: "c"}},
+		"c": {{To: "a"}},
+	}
+	if got := CanonicalMixedCyclePaths(graph); len(got) != 0 {
+		t.Errorf("pure-tracks loop reported %v, want no cycles: tracks-only convoy topology is not a deadlock", got)
+	}
+}
+
+// TestCanonicalMixedCyclePathsFindsTheMoleculeRootShape pins the case gc-818bx
+// exists for: a root that blocks-depends (transitively) on its own entry
+// step, closed by a tracks edge back to the root. Neither
+// CanonicalCyclePaths (no tracks edge at all) nor a plain-tracks walk (no
+// scheduling requirement) would report this correctly — the former misses it
+// entirely, the latter would drown it in every other tracks loop.
+func TestCanonicalMixedCyclePathsFindsTheMoleculeRootShape(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"root": {{To: "step", Scheduling: true}},
+		"step": {{To: "root"}}, // tracks edge closing the loop
+	}
+	got := CanonicalMixedCyclePaths(graph)
+	want := [][]string{{"root", "step"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cycles = %v, want %v: a blocks edge plus a closing tracks edge is exactly the deadlock this option surfaces", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsStillFindsAPureSchedulingCycle keeps parity with
+// CanonicalCyclePaths for the case that needs no tracks edge at all.
+func TestCanonicalMixedCyclePathsStillFindsAPureSchedulingCycle(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"a": {{To: "b", Scheduling: true}},
+		"b": {{To: "a", Scheduling: true}},
+	}
+	got := CanonicalMixedCyclePaths(graph)
+	want := [][]string{{"a", "b"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cycles = %v, want %v", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsAcceptsASchedulingEdgeAnywhereOnTheLoop checks
+// that the requirement is "at least one scheduling edge on the cycle", not
+// specifically on the closing edge — a longer chain where the blocks edge
+// sits in the middle must still be reported.
+func TestCanonicalMixedCyclePathsAcceptsASchedulingEdgeAnywhereOnTheLoop(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"a": {{To: "b"}},                   // tracks
+		"b": {{To: "c", Scheduling: true}}, // blocks, in the middle of the loop
+		"c": {{To: "a"}},                   // tracks, closes the loop
+	}
+	got := CanonicalMixedCyclePaths(graph)
+	want := [][]string{{"a", "b", "c"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cycles = %v, want %v: a scheduling edge anywhere on the loop must qualify it, not only the closing edge", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsSelfLoop mirrors
+// TestCanonicalCyclePathsFindsSelfLoopsAndReportsNoneForAnAcyclicGraph for the
+// mixed graph: a self-loop qualifies exactly when its own edge is scheduling.
+func TestCanonicalMixedCyclePathsSelfLoop(t *testing.T) {
+	if got := CanonicalMixedCyclePaths(map[string][]MixedCycleEdge{"a": {{To: "a", Scheduling: true}}}); !reflect.DeepEqual(got, [][]string{{"a"}}) {
+		t.Errorf("blocking self-loop = %v, want [[a]]", got)
+	}
+	if got := CanonicalMixedCyclePaths(map[string][]MixedCycleEdge{"a": {{To: "a"}}}); len(got) != 0 {
+		t.Errorf("tracks-only self-loop = %v, want no cycles", got)
+	}
+	if got := CanonicalMixedCyclePaths(nil); len(got) != 0 {
+		t.Errorf("empty graph produced %v, want no cycles", got)
+	}
+}
+
+// TestCanonicalMixedCyclePathsCollapsesParallelEdgesByOringScheduling mirrors
+// TestCanonicalCyclePathsCollapsesParallelEdges: two rows for the same pair of
+// nodes — one a tracks edge, one blocking — must collapse to one edge that is
+// scheduling, not fall out of the requirement because the dedup happened to
+// keep the tracks-flavored copy.
+func TestCanonicalMixedCyclePathsCollapsesParallelEdgesByOringScheduling(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"a": {{To: "b"}, {To: "b", Scheduling: true}},
+		"b": {{To: "a"}},
+	}
+	got := CanonicalMixedCyclePaths(graph)
+	want := [][]string{{"a", "b"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cycles = %v, want %v: a duplicated edge where either copy is scheduling must count as scheduling", got, want)
+	}
+}
+
+// TestCanonicalMixedCyclePathsIsIndependentOfMapOrder mirrors
+// TestCanonicalCyclePathsIsIndependentOfMapOrder against the mixed walk: it is
+// a separate implementation and must earn the same determinism guarantee
+// independently.
+func TestCanonicalMixedCyclePathsIsIndependentOfMapOrder(t *testing.T) {
+	type rawEdge struct {
+		from, to   string
+		scheduling bool
+	}
+	edges := []rawEdge{
+		{"a", "b", true}, {"b", "c", false}, {"c", "a", false},
+		{"c", "d", true}, {"d", "b", false},
+		{"e", "f", false}, {"f", "e", false},
+		{"a", "e", true}, {"g", "a", false}, {"g", "f", false},
+	}
+
+	rng := rand.New(rand.NewSource(1))
+	var first [][]string
+	for attempt := range 40 {
+		shuffled := slices.Clone(edges)
+		rng.Shuffle(len(shuffled), func(i, j int) { shuffled[i], shuffled[j] = shuffled[j], shuffled[i] })
+
+		graph := map[string][]MixedCycleEdge{}
+		for _, edge := range shuffled {
+			graph[edge.from] = append(graph[edge.from], MixedCycleEdge{To: edge.to, Scheduling: edge.scheduling})
+		}
+
+		got := CanonicalMixedCyclePaths(graph)
+		if attempt == 0 {
+			first = got
+			continue
+		}
+		if !reflect.DeepEqual(got, first) {
+			t.Fatalf("run %d produced %v, run 0 produced %v: the same graph must produce the same report", attempt, got, first)
+		}
+	}
+	if len(first) == 0 {
+		t.Fatal("the fixture graph has qualifying cycles; the detector found none")
+	}
+}

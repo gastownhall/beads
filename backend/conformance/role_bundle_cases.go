@@ -205,6 +205,8 @@ var roleContractCases = []roleContract{
 		RunCycleDetectorReportsTheSameCyclesEveryRun,
 		RunCycleDetectorMergesTheDurableAndEphemeralPlanes,
 		RunCycleDetectorFollowsOnlyBlockingEdges,
+		RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop,
+		RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape,
 		RunCycleDetectorReportsAnHonestPartial,
 		RunCycleDetectorCountsAWhollyUndescribableCycle,
 		RunCycleDetectorWritesNothing,

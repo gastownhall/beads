@@ -120,6 +120,58 @@ func appendDependencyGraphInTx(ctx context.Context, tx DBTX, depTables []string,
 	return nil
 }
 
+// MixedCycleEdge is one edge in the widened graph AppendMixedCycleGraphInTx
+// builds: a neighbor plus whether the edge that reaches it is a blocking
+// (scheduling) edge, as opposed to a `tracks` edge kept only to complete a
+// path. CanonicalMixedCyclePaths uses the flag to require a blocking edge on
+// every cycle it reports.
+type MixedCycleEdge struct {
+	To         string
+	Scheduling bool
+}
+
+// AppendMixedCycleGraphInTx adds blocks, conditional-blocks, and tracks
+// dependency edges from the given tables on tx into graph, tagging each edge
+// scheduling or not. It is the edge set behind
+// issueops.DetectCyclesRequest.IncludeTracks: wide enough to see a molecule
+// root's `tracks` edge back to its own entry step, while a cycle made
+// ENTIRELY of tracks edges is excluded downstream — ordinary convoy topology
+// loops constantly through tracks alone, and reporting every one of those
+// loops is the "thousands of cycles" regression a previous change to the
+// plain (blocks-only) walk caused and had to revert; this widened walk must
+// not reintroduce it under a different name.
+//
+//nolint:gosec // G201: depTable is hardcoded to "dependencies" or "wisp_dependencies"
+func AppendMixedCycleGraphInTx(ctx context.Context, tx DBTX, depTables []string, graph map[string][]MixedCycleEdge) error {
+	for _, depTable := range depTables {
+		rows, err := tx.QueryContext(ctx, fmt.Sprintf(`
+			SELECT issue_id, %s AS depends_on_id, type
+			FROM %s
+		`, DepTargetExpr, depTable))
+		if err != nil {
+			return fmt.Errorf("mixed cycle graph: query %s: %w", depTable, err)
+		}
+		for rows.Next() {
+			var issueID, dependsOnID, depType string
+			if err := rows.Scan(&issueID, &dependsOnID, &depType); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("mixed cycle graph: scan %s: %w", depTable, err)
+			}
+			switch types.DependencyType(depType) {
+			case types.DepBlocks, types.DepConditionalBlocks:
+				graph[issueID] = append(graph[issueID], MixedCycleEdge{To: dependsOnID, Scheduling: true})
+			case types.DepTracks:
+				graph[issueID] = append(graph[issueID], MixedCycleEdge{To: dependsOnID})
+			}
+		}
+		_ = rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("mixed cycle graph: rows %s: %w", depTable, err)
+		}
+	}
+	return nil
+}
+
 // CycleThroughEdgesInGraph reports a rendered cycle that traverses
 // one of the new edges (issueID -> dependsOnID pairs), or "" when no new edge
 // lies on a cycle. An edge u -> v is on a cycle exactly when u is reachable

@@ -39,6 +39,12 @@ func TestCycleDetectorContract(t *testing.T) {
 	t.Run("FollowsOnlyBlockingEdges", func(t *testing.T) {
 		conformance.RunCycleDetectorFollowsOnlyBlockingEdges(t, ctx, fixture)
 	})
+	t.Run("IncludeTracksIgnoresAPureTracksLoop", func(t *testing.T) {
+		conformance.RunCycleDetectorIncludeTracksIgnoresAPureTracksLoop(t, ctx, fixture)
+	})
+	t.Run("IncludeTracksFindsTheMoleculeRootShape", func(t *testing.T) {
+		conformance.RunCycleDetectorIncludeTracksFindsTheMoleculeRootShape(t, ctx, fixture)
+	})
 	t.Run("ReportsAnHonestPartial", func(t *testing.T) {
 		conformance.RunCycleDetectorReportsAnHonestPartial(t, ctx, fixture)
 	})
