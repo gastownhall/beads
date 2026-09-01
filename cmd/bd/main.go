@@ -1592,12 +1592,27 @@ var rootCmd = &cobra.Command{
 		// deployments that empty relic answers every query with an empty
 		// result set and exit 0 (false-empty), which readers misinterpret as
 		// "no work". Absent metadata.json (cfg == nil, cfgErr == nil) keeps
-		// the fresh-repo embedded default below — unless env/config.yaml
-		// supply a remote host (GH#3545): host inference must not depend
-		// on metadata existing, so substitute the default config and let
-		// the normal mode/connection resolution run.
-		if cfg == nil && configfile.DefaultConfig().HostImpliesServerMode() {
-			logConfigDiscovery(beadsDir, "no metadata.json; host inference (GH#3545) selects server mode")
+		// the fresh-repo embedded default below — unless the env/config.yaml
+		// layers already select server mode: that decision must not depend on
+		// metadata existing, so substitute the default config and let the
+		// normal mode/connection resolution run.
+		//
+		// The gate asks IsDoltServerMode — the same resolver the branch below
+		// uses to set doltCfg.ServerMode — rather than HostImpliesServerMode.
+		// Host inference (GH#3545) answers only one layer of that question and
+		// deliberately returns false as soon as config.yaml names a
+		// `dolt.mode`: correct for inferring FROM a host, wrong as the whole
+		// gate. A workspace declaring `dolt.mode: server` in .beads/config.yaml
+		// with no metadata.json therefore kept cfg nil, fell through to the
+		// embedded branch, and answered every query out of a phantom
+		// .beads/embeddeddolt database that same run had just created —
+		// exit 0, no rows, nothing to distinguish it from real emptiness.
+		// BEADS_DOLT_SERVER_MODE=1 did not rescue it either; the old gate
+		// never consulted it. IsDoltServerMode is a superset of
+		// HostImpliesServerMode, so nothing that reached server mode before
+		// stops reaching it now.
+		if cfg == nil && configfile.DefaultConfig().IsDoltServerMode() {
+			logConfigDiscovery(beadsDir, "no metadata.json; env/config.yaml select server mode")
 			cfg = configfile.DefaultConfig()
 		}
 		if cfg != nil {
