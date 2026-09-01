@@ -896,6 +896,74 @@ func migrationSQLTouchesTable(sqlText, table string) bool {
 	return false
 }
 
+// nonlocalRegistrationVersion is migration 0040, which registers the
+// clone-local tables in dolt_nonlocal_tables. It interleaves four INSERTs with
+// four DOLT_COMMITs and runs as a single ExecContext, so a connection drop
+// partway through leaves committed rows behind without ever recording the
+// version in schema_migrations. The next open replays 0040 from the top, dies
+// on "duplicate primary key given: [wisps]", and the database is bricked: no
+// later migration can help, because migrate aborts at 0040 before reaching one.
+const nonlocalRegistrationVersion = 40
+
+// repairPartialNonlocalRegistration clears the rows left behind by a partially
+// applied migration 0040 so that migration can replay cleanly.
+//
+// The rows are transient registrations, not durable state: migration 0041
+// deletes them wholesale as its first statement. A database whose cursor has
+// not yet reached 0040 therefore has nothing to lose by dropping them, and
+// everything to lose by keeping them.
+//
+// The deletion has to be committed, not merely staged. 0040 re-inserts exactly
+// the rows it inserted before, so an uncommitted delete leaves the working set
+// byte-identical to HEAD and 0040's own DOLT_COMMIT fails with "nothing to
+// commit" — trading one brick for another. Committing the delete first makes
+// each of 0040's inserts a real change again.
+//
+// Only dolt_nonlocal_tables is staged, and MigrateUp has already unstaged every
+// pre-existing dirty table by the time migrate runs, so the commit cannot sweep
+// up a caller's uncommitted work.
+//
+// The repair is deliberately narrow, and is a no-op on every healthy database.
+// It runs only when the cursor sits below 0040, this pass is going to replay
+// 0040, and rows are actually present. A fresh database and an already-migrated
+// one both leave dolt_nonlocal_tables empty at this point, so the probe returns
+// zero and nothing is written — success behavior, including the sequence of
+// Dolt commits and the recorded content hashes, is unchanged.
+func (m migrationSource) repairPartialNonlocalRegistration(ctx context.Context, db DBConn, current, target int) error {
+	if m.cursorTable != mainSource.cursorTable {
+		return nil
+	}
+	if current >= nonlocalRegistrationVersion || target < nonlocalRegistrationVersion {
+		return nil
+	}
+	var rows int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM dolt_nonlocal_tables").Scan(&rows); err != nil {
+		// dolt_nonlocal_tables is a Dolt system table. If it cannot be read
+		// there is no partial 0040 to repair, and failing here would turn a
+		// recovery probe into a new way to fail an otherwise fine migration.
+		return nil
+	}
+	if rows == 0 {
+		return nil
+	}
+	log.Printf("schema migration repairing partially applied migration %04d: clearing %d stale dolt_nonlocal_tables row(s)",
+		nonlocalRegistrationVersion, rows)
+	if _, err := db.ExecContext(ctx, "DELETE FROM dolt_nonlocal_tables"); err != nil {
+		return fmt.Errorf("clearing partially applied migration %04d nonlocal table registrations: %w",
+			nonlocalRegistrationVersion, err)
+	}
+	if _, err := db.ExecContext(ctx, "CALL DOLT_ADD('dolt_nonlocal_tables')"); err != nil {
+		return fmt.Errorf("staging cleared nonlocal table registrations: %w", err)
+	}
+	if _, err := db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('-m', 'schema: clear partially applied nonlocal table registrations')"); err != nil {
+		if !strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return fmt.Errorf("committing cleared nonlocal table registrations: %w", err)
+		}
+	}
+	return nil
+}
+
 // migrate brings the source up to its latest version and returns the number of
 // numbered migrations applied plus whether it added the content_hash column to a
 // pre-existing cursor table. The column signal lets MigrateUp stage and commit
@@ -924,6 +992,10 @@ func (m migrationSource) migrate(ctx context.Context, db DBConn, upTo int) (int,
 
 	if current >= target {
 		return 0, columnAdded, nil
+	}
+
+	if err := m.repairPartialNonlocalRegistration(ctx, db, current, target); err != nil {
+		return 0, columnAdded, err
 	}
 
 	count := 0
