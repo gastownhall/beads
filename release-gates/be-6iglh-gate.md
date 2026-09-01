@@ -53,3 +53,50 @@ Isolated deploy branch cut from the reviewer-recorded commit `1e77cae4cce5e36f96
 - `be-9ogs6` — ambient `~/.beads` leaks into tests assuming a clean workspace. Open, unfixed. Did not manifest in this session's full-suite baseline.
 - `be-epvkz` — flaky `TestCloseAndFlushPersistsQueuedEvents` under host load. Open, unfixed. Did not manifest in this session's full-suite baseline.
 - `be-a0dxu` — `ci-pr-policy` version-consistency false positive on local `.githooks/commit-msg` shim (gate-tracker). Reproduced this run exactly as tracked; attributed per criterion 3b.
+
+## Rebase addendum — 2026-09-01 (be-5fjqh)
+
+Everything above was recorded against base `cbfc505e39a60514c57dcdb5afe155c8659647ba`.
+`origin/main` has since advanced 6 commits, PR #6082 went `CONFLICTING`, and the
+hourly pr-audit filed `be-5fjqh`. `beads/investigator` rebased the branch. The
+original record is left verbatim; this section states only what changed.
+
+- **New base:** `origin/main` @ `0efe0adf5eb9902f93b08f50611883b7deef0e39`.
+- **New SHAs:** red `e507f1944`, green `0d132d3f8` (were `942b23978`, `36f5bcfc6`).
+- **Conflict — one file, `cmd/bd/main.go`.** This branch and `e05000d64`
+  (`fix(import): converge on resume and survive server pauses`, wy-sbgucn) each
+  append a field to the same `dolt.Config` literal at the same anchor line
+  (`LenientOpen:`) with no separating context — an adjacent-insertion collision,
+  textual and not semantic. Resolved **keep-both**: `PoolReadTimeoutFallback`
+  sets a connection-pool read deadline in `buildServerDSN`; `ClassifiedRead`
+  gates the defer-wake sweep in `wakeExpiredDefers`. Disjoint code paths.
+- **Equivalence:** the five non-conflicting files are byte-identical to the
+  reviewed patch — `git patch-id --stable` is
+  `08eb38b0c0f29bbce4ef2648df53a662fdddc05a` both before and after the rebase.
+  In `cmd/bd/main.go` the diff against the new base is the same +4 lines as
+  before; main's `PoolReadTimeoutFallback` is now base context.
+- **Blast radius of the base move:** the 6 new commits touch neither
+  `internal/storage/dolt/queries.go` (where the fix lives) nor the read-only
+  policy logic in `cmd/bd/main.go`. `internal/storage/issueops/create.go` loses
+  only a dead exported wrapper (`FilterCreateIssuesMixedBucketDependencies`,
+  wy-p0c7ut) on the create path, not the wake path.
+
+### Re-verified at the new base
+
+| Check | Result |
+|---|---|
+| `go build ./...` | exit 0 |
+| `TestDeferWakeSweepEligibleHonorsClassifiedRead` | PASS, 4/4 subtests |
+| `TestBuildServerDSN_PoolReadTimeoutFallback` (main's field, co-resident) | PASS |
+| `TestServerModeDeferAutoWake` | PASS, 4/4 subtests, `ok cmd/bd 44.027s` |
+
+Container-backed runs used the same environment as the original gate:
+`BEADS_TEST_ENV_RUN_DOLT=1 BEADS_TEST_PROXIED_SERVER=1 TESTCONTAINERS_RYUK_DISABLED=true`,
+image `dolthub/dolt-sql-server:2.2.0`.
+
+### NOT re-run at the new base
+
+Criterion 3's full suite (`TEST_COVER=1 ./scripts/test.sh`) and criterion 3b's
+`make ci-pr-policy` still refer to base `cbfc505e3`. A full-suite re-gate at the
+new base remains the outstanding pre-merge step; this rebase cleared the merge
+conflict and re-proved the diff-owned behavior, nothing wider.
