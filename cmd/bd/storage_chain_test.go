@@ -42,8 +42,12 @@ func TestWireStorageDecorators_TelemetryOff_HookOn(t *testing.T) {
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	if inner := hf.Unwrap(); inner.(*stubChainStore) != raw {
-		t.Errorf("HookFiringStore.Unwrap() should return raw store directly when telemetry off; got %T", inner)
+	gate, ok := hf.Unwrap().(*storage.PreWriteGateStore)
+	if !ok {
+		t.Fatalf("HookFiringStore.Unwrap() = %T, want *storage.PreWriteGateStore", hf.Unwrap())
+	}
+	if inner := gate.Unwrap(); inner.(*stubChainStore) != raw {
+		t.Errorf("PreWriteGateStore.Unwrap() should return raw store directly when telemetry off; got %T", inner)
 	}
 }
 
@@ -61,9 +65,13 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	inst, ok := hf.Unwrap().(*telemetry.InstrumentedStorage)
+	gate, ok := hf.Unwrap().(*storage.PreWriteGateStore)
 	if !ok {
-		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", hf.Unwrap())
+		t.Fatalf("middle decorator: got %T; want *storage.PreWriteGateStore", hf.Unwrap())
+	}
+	inst, ok := gate.Unwrap().(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatalf("inner decorator: got %T; want *telemetry.InstrumentedStorage", gate.Unwrap())
 	}
 	if inner := inst.Unwrap(); inner.(*stubChainStore) != raw {
 		t.Errorf("InstrumentedStorage.Unwrap() should return raw store; got %T", inner)
@@ -106,9 +114,13 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
 
-	inst, ok := got.(*telemetry.InstrumentedStorage)
+	gate, ok := got.(*storage.PreWriteGateStore)
 	if !ok {
-		t.Fatalf("expected *telemetry.InstrumentedStorage when hooks disabled; got %T", got)
+		t.Fatalf("expected *storage.PreWriteGateStore when hooks disabled; got %T", got)
+	}
+	inst, ok := gate.Unwrap().(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatalf("expected *telemetry.InstrumentedStorage inside gate when hooks disabled; got %T", gate.Unwrap())
 	}
 	if inner := inst.Unwrap(); inner.(*stubChainStore) != raw {
 		t.Errorf("InstrumentedStorage.Unwrap() should return raw store; got %T", inner)
@@ -119,8 +131,9 @@ func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
-	if got.(*stubChainStore) != raw {
-		t.Errorf("with telemetry off and hooks disabled, expected raw store back; got %T", got)
+	gate, ok := got.(*storage.PreWriteGateStore)
+	if !ok || gate.Unwrap().(*stubChainStore) != raw {
+		t.Errorf("with telemetry off and hooks disabled, expected pre-write gate over raw store; got %T", got)
 	}
 }
 

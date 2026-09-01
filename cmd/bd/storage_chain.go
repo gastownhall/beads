@@ -9,12 +9,16 @@ import (
 // wireStorageDecorators composes the storage chain in the order the rest of
 // bd expects:
 //
-//	caller → HookFiringStore (outer) → InstrumentedStorage → raw DoltStorage
+//	caller → HookFiringStore (optional outer) → PreWriteGateStore →
+//	         InstrumentedStorage → raw DoltStorage
 //
 // telemetry.WrapStorage is a no-op when telemetry is disabled, so the
 // instrumentation layer is only present when BD_OTEL_ENABLED=true (or a
-// legacy BD_OTEL_* selector is set). The hook layer sits outermost so
-// storage spans measure pure DB time without hook-firing overhead.
+// legacy BD_OTEL_* selector is set). The post-commit hook layer sits outermost
+// so storage spans measure pure DB time without hook-firing overhead. The
+// pre-write layer is present whenever a runner exists, including --no-hooks:
+// that flag disables best-effort notifications, never a configured admission
+// gate.
 //
 // Extracted from main.go's PersistentPreRunE so the chain composition is
 // unit-testable — the bug this PR fixes was a missing WrapStorage call,
@@ -24,6 +28,9 @@ func wireStorageDecorators(store storage.DoltStorage, hookRunner *hooks.Runner, 
 		return nil
 	}
 	store = telemetry.WrapStorage(store)
+	if hookRunner != nil {
+		store = storage.NewPreWriteGateStore(store, hookRunner)
+	}
 	if hookRunner != nil && !hooksDisabled {
 		store = storage.NewHookFiringStore(store, hookRunner)
 	}
