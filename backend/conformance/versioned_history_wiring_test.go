@@ -12,11 +12,10 @@ import (
 // — and runs every R16/R16.1/R17/R20 case once each, proving the whole suite
 // compiles and skips cleanly under today's CI (NFR-01).
 //
-// This is NOT a per-backend wiring file like internal/storage/dolt's — there
-// is no real per-backend accessor for any of these capabilities yet, so a
-// real per-backend fixture would be indistinguishable, all-nil boilerplate
-// repeated three times. This one local test stands in for that until Phase 3
-// gives a real backend something non-nil to wire here instead.
+// Each leg under internal/storage wires these same entrypoints, with the same
+// all-nil fixtures, so TestEveryLegWiresEveryRoleContract counts them; this
+// local copy is not a substitute for those, it just proves the all-skip
+// behavior once without needing to build all three legs to see it.
 func TestVersionedHistoryPhase0RunsInFullSkipMode(t *testing.T) {
 	ctx := context.Background()
 
