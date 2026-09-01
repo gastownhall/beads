@@ -2422,15 +2422,6 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 		return db, connStr, serverConnFacts{}, nil
 	}
 
-	// Ensure database exists (may need to create it)
-	// First connect without database to create it
-	initConnStr := buildServerDSN(cfg, "")
-	initDB, err := sql.Open("mysql", initConnStr)
-	if err != nil {
-		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
-	}
-	defer func() { _ = initDB.Close() }()
-
 	// Validate database name to prevent SQL injection via backtick escaping
 	if err := ValidateDatabaseName(cfg.Database); err != nil {
 		return nil, "", serverConnFacts{}, fmt.Errorf("invalid database name %q: %w", cfg.Database, err)
@@ -2447,6 +2438,36 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 				"this is a test database name on the production server (see DOLT-WAR-ROOM.md)",
 			cfg.Database, cfg.ServerPort)
 	}
+
+	// Fast path (wy-s8ytnw), keyed the same way as Gateway above rather than
+	// by deleting the probe: connect straight to the target database. A
+	// successful connect IS the existence proof, so the steady-state open —
+	// a database that already exists, which is every open but the very
+	// first — skips the no-database init connection (one full MySQL
+	// session per bd invocation on a shared server) and its SHOW DATABASES.
+	// The facts are exact, not merely unproven as for Gateway: existence is
+	// established, and `created` is honestly false — this call created
+	// nothing, so fresh-bootstrap heal stays unarmed and the CreateIfMissing
+	// identity gate (GH#4637) sees alreadyExisted exactly as the SHOW
+	// DATABASES probe would have reported it.
+	//
+	// Any failure — Unknown database (1049) because it does not exist yet,
+	// server down, bad credentials — falls through to the historical
+	// probe-then-create path, which owns creation, the #5042 ownership
+	// signal, databaseNotFoundError, and every error message callers match.
+	if pingErr := db.PingContext(ctx); pingErr == nil {
+		connReady = true
+		return db, connStr, serverConnFacts{alreadyExisted: true}, nil
+	}
+
+	// Ensure database exists (may need to create it)
+	// First connect without database to create it
+	initConnStr := buildServerDSN(cfg, "")
+	initDB, err := sql.Open("mysql", initConnStr)
+	if err != nil {
+		return nil, "", serverConnFacts{}, fmt.Errorf("failed to open init connection: %w", err)
+	}
+	defer func() { _ = initDB.Close() }()
 
 	// Check if the database already exists before deciding whether to create it.
 	// This prevents the shadow database bug: without CreateIfMissing, connecting
