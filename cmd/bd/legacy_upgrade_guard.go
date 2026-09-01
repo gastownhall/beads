@@ -39,7 +39,7 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 	if err := validateConfiguredBackend(cfg, beadsDir); err != nil {
 		return err
 	}
-	serverMode := cfg != nil && strings.EqualFold(cfg.DoltMode, configfile.DoltModeServer)
+	serverMode := workspaceSelectsServerMode(cfg)
 	if embeddeddolt.HasRepository(beadsDir) && !serverMode {
 		return nil
 	}
@@ -51,11 +51,31 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 	if !hasLocalDoltRoot {
 		return nil
 	}
+	// Positive evidence that this workspace belongs to the current era settles
+	// it for every mode. Only the ambiguity that remains after these is
+	// mode-specific, so the refusals below are the only part that branches.
+	if classifyVersionWitness(version) == witnessEraCurrent {
+		// A witness naming bd 1.0 or later can only have been written by a
+		// current-era binary, and only after this same guard admitted the
+		// workspace (PersistentPreRunE runs the guard before trackBdVersion,
+		// and doctor runs it before its own copy of that call). No legacy
+		// release could have produced it. Reading it as proof only in server
+		// mode left the escape hatch unreachable for a workspace the running
+		// binary demonstrably created itself.
+		return nil
+	}
+	if doltserver.IsSharedServerMode() && !(present && legacyServerVersion(version)) {
+		// A shared Dolt sql-server owns .beads/dolt, so there is no embedded
+		// historical schema to protect — unless the witness affirmatively names
+		// the 0.55–0.62 server era. This admission used to sit inside the
+		// embedded arm below. Leaving it there while config.yaml started
+		// selecting server mode would have moved shared-server workspaces bd
+		// admits today onto the refusing arm: the mode changed, the evidence
+		// did not.
+		return nil
+	}
 	if serverMode {
-		switch classifyVersionWitness(version) {
-		case witnessEraCurrent:
-			return nil
-		case witnessEraUnknown:
+		if present && classifyVersionWitness(version) == witnessEraUnknown {
 			// A witness that is present but unreadable — including one left
 			// blank or whitespace-only by an interrupted or disk-full
 			// best-effort write — is not evidence of a legacy workspace: every
@@ -66,18 +86,13 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 			// command over an advisory, gitignored file. A genuinely absent
 			// witness is not present and still refuses below, preserving the
 			// pre-1.0 guard invariant.
-			if present {
-				warnUnreadableVersionWitness(beadsDir, version)
-				return nil
-			}
+			warnUnreadableVersionWitness(beadsDir, version)
+			return nil
 		}
 		return legacyUpgradeRefusal("legacy Dolt server workspace")
 	}
 	if cfg == nil || cfg.DoltMode == "" ||
 		strings.EqualFold(cfg.DoltMode, configfile.DoltModeEmbedded) {
-		if doltserver.IsSharedServerMode() && !(present && legacyServerVersion(version)) {
-			return nil
-		}
 		reason := "legacy Dolt workspace"
 		if _, validVersion := legacyVersionMinor(version); present && validVersion {
 			reason = fmt.Sprintf("legacy Dolt workspace from bd %s", version)
@@ -85,6 +100,30 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 		return legacyUpgradeRefusal(reason)
 	}
 	return nil
+}
+
+// workspaceSelectsServerMode reports whether bd will open beadsDir through a
+// Dolt sql-server rather than as an embedded database.
+//
+// It asks configfile's own resolver instead of reading metadata.json's
+// dolt_mode directly. That field is only the highest-priority layer of the
+// decision: a workspace that declares `dolt.mode: server` in .beads/config.yaml
+// and has no metadata.json at all — the shape gc provisions — is just as much a
+// server workspace, and IsDoltServerMode documents the full precedence chain
+// that store selection then uses. Reading the top layer alone classified those
+// as embedded, and an embedded workspace owning a .beads/dolt root is precisely
+// what this guard refuses, so bd rejected server workspaces it had created
+// itself moments earlier.
+//
+// The config.yaml layer resolves against the SELECTED workspace: main.go binds
+// the discovered target before admission for exactly this reason, which is also
+// what makes doltserver.IsSharedServerMode() above read the target's config
+// rather than the caller's.
+func workspaceSelectsServerMode(cfg *configfile.Config) bool {
+	if cfg == nil {
+		cfg = configfile.DefaultConfig()
+	}
+	return cfg.IsDoltServerMode()
 }
 
 func isHistoricalSQLiteWorkspace(beadsDir string, cfg *configfile.Config) bool {

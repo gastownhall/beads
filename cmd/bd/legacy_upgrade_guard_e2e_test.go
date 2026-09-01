@@ -478,6 +478,77 @@ func TestLegacyGuardUsesSelectedTargetSharedServerConfig(t *testing.T) {
 	}
 }
 
+// TestLegacyGuardAdmitsConfigYamlServerWorkspace runs the real binary against
+// the workspace shape gc provisions — `dolt.mode: server` in
+// .beads/config.yaml, a local .beads/dolt root, a metadata.json that names no
+// dolt_mode — and pins that the guard no longer calls it legacy. The in-process
+// guard tests bind the workspace config themselves; only a subprocess proves
+// that PersistentPreRunE's own binding puts the selected workspace's
+// config.yaml in front of the guard.
+//
+// The command still fails: the workspace points at a Dolt server that is not
+// running. That is the point — reaching the connection attempt means admission
+// succeeded and the workspace routed as a server workspace rather than being
+// refused or opened as a phantom embedded database.
+func TestLegacyGuardAdmitsConfigYamlServerWorkspace(t *testing.T) {
+	bd := buildBDUnderTest(t)
+	tests := []struct {
+		name              string
+		version           string
+		wantLegacyRefusal bool
+	}{
+		{name: "current era witness", version: "1.3.0"},
+		{name: "release candidate witness", version: "1.3.0-rc.1"},
+		{name: "historical witness still refuses", version: "0.62.0", wantLegacyRefusal: true},
+		{name: "missing witness still refuses", wantLegacyRefusal: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repoDir := t.TempDir()
+			initGitRepo(t, repoDir)
+			beadsDir := filepath.Join(repoDir, ".beads")
+			if err := os.MkdirAll(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeFile(t, filepath.Join(beadsDir, "metadata.json"), []byte(`{"backend":"dolt","dolt_database":"hq"}`))
+			writeFile(t, filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  mode: server\n  auto-start: false\n"))
+			if tt.version != "" {
+				writeFile(t, filepath.Join(beadsDir, localVersionFile), []byte(tt.version+"\n"))
+			}
+
+			commandCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(commandCtx, bd, "list", "--json", "--limit", "0", "--all")
+			cmd.Dir = repoDir
+			cmd.Env = append(os.Environ(),
+				"BD_DISABLE_METRICS=1",
+				"BD_DISABLE_EVENT_FLUSH=1",
+				"BEADS_DOLT_AUTO_START=0",
+				"BEADS_DOLT_SERVER_PORT=59999",
+				"BEADS_DOLT_SHARED_SERVER=0",
+				"HOME="+t.TempDir(),
+			)
+			output, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("bd list unexpectedly succeeded against an unreachable server:\n%s", output)
+			}
+			hasLegacyRefusal := strings.Contains(string(output), "explicit migration is required")
+			if hasLegacyRefusal != tt.wantLegacyRefusal {
+				t.Fatalf("bd list legacy refusal=%v, want %v:\n%s", hasLegacyRefusal, tt.wantLegacyRefusal, output)
+			}
+			if !tt.wantLegacyRefusal && !strings.Contains(string(output), "Dolt server") {
+				t.Fatalf("admitted workspace did not route as a server workspace:\n%s", output)
+			}
+			if !tt.wantLegacyRefusal {
+				if _, err := os.Stat(filepath.Join(beadsDir, "embeddeddolt")); !os.IsNotExist(err) {
+					t.Fatalf("admitted server workspace created a phantom embedded database: %v", err)
+				}
+			}
+		})
+	}
+}
+
 func legacyUpgradeTreeDigest(t *testing.T, root string) string {
 	t.Helper()
 	var entries []string
