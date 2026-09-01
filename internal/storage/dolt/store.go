@@ -2832,14 +2832,16 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 // A workspace pointed at an externally-managed server purely by that env var
 // therefore resolved ServerModeOwned while bd was connected to a server it had
 // never started: bd believed it owned a private server and silently promoted
-// the schema of a shared one. So this predicate asks the stricter question
-// directly — did THIS workspace's own bookkeeping produce the endpoint we
-// connected to? — and keeps ResolveServerMode as one arm of the answer.
+// the schema of a shared one.
 //
-// Each check below can only ADD a shared classification; none can remove one.
-// That is deliberate, and it is what makes the #6088 narrowing survive: a
-// topology that was gated before this function returns at the same place it
-// always did.
+// So ownership is not inferred from the connection at all. It is PROVEN, by
+// the state files bd writes when it starts a server (see
+// doltserver.ManagesLiveServerOnPort), and everything else is shared. The
+// inverse — enumerating the ways an endpoint can be foreign — was tried and is
+// unbounded: an env var, a config.yaml pin, `bd init --server-port`, a
+// hand-built library Config and a stale port file all produce a local TCP
+// endpoint indistinguishable from an owned one, and each is a separate silent
+// bypass. There is exactly one way to be sure, and it is cheap.
 func sharedServerDatabase(cfg *Config) bool {
 	// No workspace to prove ownership from — a bare dolt.New pointed at some
 	// endpoint. Fail closed.
@@ -2852,76 +2854,28 @@ func sharedServerDatabase(cfg *Config) bool {
 	if !isLocalHost(cfg.ServerHost) || cfg.ServerTLS || cfg.ServerSocket != "" {
 		return true
 	}
-	// A gateway credential command mints a short-lived token to present as the
-	// connection username to an authenticating server. bd's auto-start brings up
-	// a plain local root@localhost dolt sql-server and never issues tokens, so
-	// anything reached this way is operator-managed. In practice such a
-	// deployment also names its endpoint from the environment and would be
-	// caught below; asserting it here makes the case independent of that.
-	if cfg.Gateway {
-		return true
-	}
 	// The one shared topology that is otherwise indistinguishable from an
 	// owned one: same machine, same TCP shape, one server for many workspaces.
 	if doltserver.IsSharedServerMode() {
 		return true
 	}
-	// The endpoint was named from outside this workspace's own bookkeeping.
-	if !workspaceOwnsEndpoint(cfg) {
+	// The proof. Without a live server bd started for THIS workspace on the
+	// very port this store is connected to, the database belongs to someone
+	// else and migrating it is not this open's call to make.
+	//
+	// cfg.BeadsDir, not doltserver.ResolveServerDir(cfg.BeadsDir): the two
+	// differ only in shared-server mode, which returned above. Resolving here
+	// would read another directory's state files for the one topology this
+	// line can no longer be reached in.
+	if !doltserver.ManagesLiveServerOnPort(cfg.BeadsDir, cfg.ServerPort) {
 		return true
 	}
+	// Proof of a bd-managed server does not override an explicit declaration
+	// that the lifecycle is external (metadata dolt_server_port, host
+	// inference, BEADS_DOLT_SERVER_MODE). Keeping this last means the change
+	// above can only ever ADD shared classifications to what #5920/#6048
+	// already gated, never remove one.
 	return doltserver.ResolveServerMode(cfg.BeadsDir) != doltserver.ServerModeOwned
-}
-
-// workspaceOwnsEndpoint reports whether the port this store connected on came
-// from bd's own record of a server it started for THIS workspace, rather than
-// from an operator naming a pre-existing endpoint.
-//
-// The distinction matters because the two are otherwise identical from inside
-// the process: both end as "a local TCP dolt sql-server on port N". What
-// separates them is provenance, which doltserver already records on every open
-// as Config.ServerPortSource (stamped by applyConfigDefaults, so it is present
-// on the library path as well as the CLI's).
-//
-// The port file escape hatch covers the overlap: bd started the server for this
-// workspace AND the operator spelled the same port again in the environment.
-// The env read wins the precedence chain, so the source reads "env" even though
-// bd owns the server — .beads/dolt-server.port naming that same port is bd's
-// own proof that it did. That is the shape #5781's lenient-open recovery runs
-// in, and it must keep migrating on open.
-func workspaceOwnsEndpoint(cfg *Config) bool {
-	if portSourceIsWorkspaceBookkeeping(cfg.ServerPortSource) {
-		return true
-	}
-	return cfg.ServerPort > 0 && doltserver.ReadPortFile(cfg.BeadsDir) == cfg.ServerPort
-}
-
-// portSourceIsWorkspaceBookkeeping reports whether a port-resolution step names
-// an endpoint this workspace established for itself. The complement — the env
-// vars, beads' config.yaml, metadata.json, and the two documented fallback
-// defaults — are all an operator writing down where a server already lives.
-func portSourceIsWorkspaceBookkeeping(src doltserver.PortSource) bool {
-	switch src {
-	case doltserver.PortSourceUnset:
-		// Nothing resolved a port: there is no external endpoint to be pointed
-		// at, and auto-start will allocate an ephemeral one.
-		return true
-	case doltserver.PortSourcePortFile:
-		// .beads/dolt-server.port — written by doltserver.Start with the port
-		// bd actually bound. This is the ownership record itself.
-		return true
-	case doltserver.PortSourceDoltConfigYaml:
-		// The config.yaml of the dolt server living inside this workspace's own
-		// dolt directory, which only exists because bd put a server there.
-		return true
-	case doltserver.PortSourceCallerExplicit:
-		// An in-process caller asserted the port before New ran (be-wf9a.1).
-		// It outranks the ambient environment by design, and the callers that
-		// do it — bd init --server-port, the #5781 recovery tests — are
-		// operating on a server this process is managing.
-		return true
-	}
-	return false
 }
 
 func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshBootstrapHealCapability) (int, error) {

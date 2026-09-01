@@ -542,6 +542,54 @@ func ReadPortFile(beadsDir string) int {
 	return readPortFile(beadsDir)
 }
 
+// ManagesLiveServerOnPort reports whether beadsDir has a dolt sql-server that
+// bd started FOR IT and that is still alive on port. It is the affirmative
+// proof of ownership: bd writes both state files in Start(), so a workspace
+// that can show a live PID beside a port file naming the port a caller is
+// actually connected on is a workspace whose server bd brought up.
+//
+// The absence of that proof is what matters at the call sites. An operator who
+// points bd at an endpoint — through BEADS_DOLT_SERVER_PORT, a config.yaml
+// pin, `bd init --server-port`, or a hand-built library Config — produces no
+// state files at all, because bd never started anything. Nothing else about
+// the connection distinguishes the two: both end as "a local TCP dolt
+// sql-server on port N".
+//
+// Read-only, deliberately. IsRunning answers a similar question but repairs as
+// it goes: it deletes stale PID and port files, and will stop an orphaned
+// server whose port it cannot determine. Callers that are merely classifying a
+// connection must not mutate a workspace's server state as a side effect, so
+// this duplicates the two cheap checks rather than reusing IsRunning.
+//
+// It stops short of IsRunning's isDoltProcess() command-name check, which
+// shells out to `ps` (PowerShell on Windows) — measured at hundreds of
+// milliseconds on a busy machine, and this runs on every writable open. The
+// residual gap is a recycled PID: the recorded server died, an unrelated live
+// process inherited its PID number, AND the port file still names the port
+// some other server now answers on. That is strictly narrower than the gap
+// left by trusting the port file alone, and it fails toward "owned" only when
+// all three coincide. Callers needing certainty over latency should use
+// IsRunning.
+func ManagesLiveServerOnPort(beadsDir string, port int) bool {
+	if beadsDir == "" || port <= 0 {
+		return false
+	}
+	// The port file first: it is the cheaper read, and a workspace pointed at
+	// somebody else's endpoint usually has no port file at all.
+	if readPortFile(beadsDir) != port {
+		return false
+	}
+	data, err := os.ReadFile(pidPath(beadsDir))
+	if err != nil {
+		return false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return false
+	}
+	return isProcessAlive(pid)
+}
+
 // PortFileSnapshot captures the exact prior contents of a project's port
 // file, so a caller that speculatively lets EnsureRunningDetailed write a
 // new one can restore the pre-call state exactly if it later decides not to

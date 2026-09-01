@@ -284,18 +284,6 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		// precedence chain and carries the source along with the port.
 		ApplyResolvedServerPort(beadsDir, cfg)
 	}
-	// A configured unix socket, exactly as cmd/bd's resolveDoltServerConnection
-	// resolves it. Without this the library open path and the CLI disagree about
-	// the transport for the SAME workspace: the CLI dials the socket while a
-	// library caller (doctor's SharedStore, embedders) silently falls back to
-	// host:port. It also blinded sharedServerDatabase, whose socket arm is meant
-	// to catch exactly this topology — bd's auto-start only ever creates a TCP
-	// listener, so a socket is always someone else's server. A socket that is
-	// configured but not currently connectable stays harmless: newServerMode
-	// normalizes it back to TCP through ResolveSocketTransport.
-	if cfg.ServerSocket == "" {
-		cfg.ServerSocket = fileCfg.GetDoltServerSocket()
-	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
 	// closed (see ApplyGatewayCredential). The command runs only in server mode — an
