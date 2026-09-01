@@ -886,8 +886,8 @@ func (r *dependencySQLRepositoryImpl) DetectCycles(ctx context.Context) ([][]*ty
 	return out, nil
 }
 
-func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context) (publicops.CycleReport, error) {
-	out, err := issueops.DetectCycleReportInTx(ctx, r.runner)
+func (r *dependencySQLRepositoryImpl) DetectCycleReport(ctx context.Context, req publicops.DetectCyclesRequest) (publicops.CycleReport, error) {
+	out, err := issueops.DetectCycleReportInTx(ctx, r.runner, req)
 	if err != nil {
 		return publicops.CycleReport{}, fmt.Errorf("db: DependencySQLRepository.DetectCycleReport: %w", err)
 	}

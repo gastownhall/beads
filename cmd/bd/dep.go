@@ -1261,7 +1261,8 @@ var depCyclesCmd = &cobra.Command{
 
 		// Both routes, one body: the only difference between them is which
 		// accessor answers, and that is inside openCycleDetector.
-		return runDepCycles()
+		includeTracks, _ := cmd.Flags().GetBool("include-tracks")
+		return runDepCycles(includeTracks)
 	},
 }
 
@@ -1563,6 +1564,11 @@ func init() {
 
 	depListCmd.Flags().String("direction", "down", "Direction: 'down' (dependencies), 'up' (dependents)")
 	depListCmd.Flags().StringP("type", "t", "", "Filter by dependency type (e.g., tracks, blocks, parent-child)")
+
+	// Widens the walk, never narrows it: a cycle is still reported only when it
+	// contains a blocks/conditional-blocks edge, so ordinary tracks-only convoy
+	// topology stays silent. See issueops.DetectCyclesRequest.IncludeTracks.
+	depCyclesCmd.Flags().Bool("include-tracks", false, "Also walk 'tracks' edges, reporting a cycle only when it also contains a blocks/conditional-blocks edge (diagnostic for molecule-root deadlocks hidden by tracks-only propagation)")
 
 	// Issue ID completions for dep subcommands
 	depAddCmd.ValidArgsFunction = issueIDCompletion
