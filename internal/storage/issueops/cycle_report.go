@@ -81,28 +81,32 @@ func CanonicalCyclePaths(graph map[string][]string) [][]string {
 	return cycles
 }
 
-// CanonicalMixedCyclePaths is CanonicalCyclePaths widened to a graph that also
-// carries `tracks` edges (MixedCycleEdge.Scheduling false), with one added
-// requirement: a reported cycle must contain at least one scheduling edge —
-// the closing edge counts. Without that requirement this would rediscover the
-// "thousands of cycles" regression AppendMixedCycleGraphInTx documents:
-// ordinary convoy/tracking topology loops constantly through tracks alone,
-// and none of those loops is a deadlock. WITH it, the shape this exists for —
-// a molecule root that blocks-depends (transitively) on its own entry step,
-// which tracks-depends back to the root — is reported, because the blocks
-// edges on that path satisfy the requirement even though the closing edge
-// does not.
+// CanonicalMixedCyclePaths finds one qualifying cycle per strongly connected
+// component in a graph that also carries `tracks` edges
+// (MixedCycleEdge.Scheduling false). A component qualifies only when it
+// contains a scheduling edge: every internal edge of a strongly connected
+// component lies on a cycle, so choosing one such edge and a stable return
+// path cannot miss a mixed cycle merely because a tracks-only back edge was
+// visited first.
 //
-// Determinism and rotation follow CanonicalCyclePaths for the same reason: a
-// depth-first walk over Go maps and unordered SQL reads must not let the
-// answer, or which cycles are even found, depend on iteration order.
+// Requiring a scheduling edge avoids the "thousands of cycles" regression
+// AppendMixedCycleGraphInTx documents: ordinary convoy/tracking topology loops
+// constantly through tracks alone, and none of those loops is a deadlock.
+// WITH the requirement, the shape this exists for — a molecule root that
+// blocks-depends (transitively) on its own entry step, which tracks-depends
+// back to the root — is reported.
+//
+// Nodes, adjacency lists, components, the chosen scheduling edge, and its
+// return path are all ordered. The answer therefore depends only on the graph,
+// not Go map or SQL row order.
 func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) [][]string {
 	adjacency := make(map[string][]MixedCycleEdge, len(graph))
-	roots := make([]string, 0, len(graph))
+	nodeSet := make(map[string]struct{}, len(graph))
 	for node, edges := range graph {
-		roots = append(roots, node)
+		nodeSet[node] = struct{}{}
 		scheduling := make(map[string]bool, len(edges))
 		for _, edge := range edges {
+			nodeSet[edge.To] = struct{}{}
 			scheduling[edge.To] = scheduling[edge.To] || edge.Scheduling
 		}
 		targets := make([]string, 0, len(scheduling))
@@ -116,57 +120,107 @@ func CanonicalMixedCyclePaths(graph map[string][]MixedCycleEdge) [][]string {
 		}
 		adjacency[node] = deduped
 	}
-	slices.Sort(roots)
+	nodes := make([]string, 0, len(nodeSet))
+	plain := make(map[string][]string, len(nodeSet))
+	for node := range nodeSet {
+		nodes = append(nodes, node)
+		for _, edge := range adjacency[node] {
+			plain[node] = append(plain[node], edge.To)
+		}
+	}
+	slices.Sort(nodes)
 
 	var cycles [][]string
-	visited := make(map[string]bool, len(roots))
-	onPath := make(map[string]bool, len(roots))
-	path := make([]string, 0, len(roots))
-	// pathScheduling[i] is whether the edge that reached path[i] (from
-	// path[i-1]) is a scheduling edge. Index 0 is a placeholder: nothing
-	// reaches a root from inside the walk, and it is never read as part of a
-	// cycle's edge set (a cycle's slice starts at start+1, never at 0 itself).
-	pathScheduling := make([]bool, 0, len(roots))
+	for _, component := range mixedStronglyConnectedComponents(adjacency, nodes) {
+		members := make(map[string]bool, len(component))
+		for _, node := range component {
+			members[node] = true
+		}
 
-	var walk func(node string, enteredViaScheduling bool)
-	walk = func(node string, enteredViaScheduling bool) {
-		visited[node] = true
-		onPath[node] = true
-		path = append(path, node)
-		pathScheduling = append(pathScheduling, enteredViaScheduling)
+		var from, to string
+		found := false
+		for _, node := range component {
+			for _, edge := range adjacency[node] {
+				if edge.Scheduling && members[edge.To] {
+					from, to = node, edge.To
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			continue
+		}
+
+		returnPath := reachPath(plain, to, from)
+		if returnPath == nil {
+			continue // Impossible for two members of one strongly connected component.
+		}
+		cycle := append([]string{from}, returnPath[:len(returnPath)-1]...)
+		cycles = append(cycles, rotateToLowest(cycle))
+	}
+	slices.SortFunc(cycles, slices.Compare)
+	return cycles
+}
+
+// mixedStronglyConnectedComponents returns Tarjan components with both their
+// members and the component list sorted. Targets without outgoing edges are in
+// nodes too, so singleton sinks remain part of the traversal even though they
+// can never qualify on their own.
+func mixedStronglyConnectedComponents(adjacency map[string][]MixedCycleEdge, nodes []string) [][]string {
+	nextIndex := 0
+	index := make(map[string]int, len(nodes))
+	lowlink := make(map[string]int, len(nodes))
+	onStack := make(map[string]bool, len(nodes))
+	stack := make([]string, 0, len(nodes))
+	components := make([][]string, 0)
+
+	var visit func(string)
+	visit = func(node string) {
+		nextIndex++
+		index[node] = nextIndex
+		lowlink[node] = nextIndex
+		stack = append(stack, node)
+		onStack[node] = true
 
 		for _, edge := range adjacency[node] {
-			switch {
-			case !visited[edge.To]:
-				walk(edge.To, edge.Scheduling)
-			case onPath[edge.To]:
-				// A back edge: the cycle is the suffix of the current path that
-				// starts at the neighbor, closed by this edge.
-				if start := slices.Index(path, edge.To); start >= 0 {
-					hasScheduling := edge.Scheduling
-					for _, sched := range pathScheduling[start+1:] {
-						hasScheduling = hasScheduling || sched
-					}
-					if hasScheduling {
-						cycles = append(cycles, rotateToLowest(path[start:]))
-					}
-				}
+			neighbor := edge.To
+			if index[neighbor] == 0 {
+				visit(neighbor)
+				lowlink[node] = min(lowlink[node], lowlink[neighbor])
+			} else if onStack[neighbor] {
+				lowlink[node] = min(lowlink[node], index[neighbor])
 			}
 		}
 
-		path = path[:len(path)-1]
-		pathScheduling = pathScheduling[:len(pathScheduling)-1]
-		onPath[node] = false
+		if lowlink[node] != index[node] {
+			return
+		}
+		component := make([]string, 0)
+		for {
+			last := len(stack) - 1
+			member := stack[last]
+			stack = stack[:last]
+			onStack[member] = false
+			component = append(component, member)
+			if member == node {
+				break
+			}
+		}
+		slices.Sort(component)
+		components = append(components, component)
 	}
 
-	for _, root := range roots {
-		if !visited[root] {
-			walk(root, false)
+	for _, node := range nodes {
+		if index[node] == 0 {
+			visit(node)
 		}
 	}
-
-	slices.SortFunc(cycles, slices.Compare)
-	return cycles
+	slices.SortFunc(components, slices.Compare)
+	return components
 }
 
 // rotateToLowest returns a copy of a cycle path rotated so its lowest id comes

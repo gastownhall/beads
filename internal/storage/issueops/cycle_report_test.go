@@ -237,6 +237,28 @@ func TestCanonicalMixedCyclePathsFindsTheMoleculeRootShape(t *testing.T) {
 	}
 }
 
+// TestCanonicalMixedCyclePathsFindsASchedulingCycleAfterATracksOnlyBackEdge
+// pins the edge-labelled DFS trap from the exact-head review of gc-818bx. A
+// global visited set can first close and ignore the tracks-only a-b loop, then
+// miss the qualifying a-c-b-a loop because b is visited but no longer on the
+// active path when c reaches it.
+func TestCanonicalMixedCyclePathsFindsASchedulingCycleAfterATracksOnlyBackEdge(t *testing.T) {
+	graph := map[string][]MixedCycleEdge{
+		"a": {
+			{To: "b"},
+			{To: "c", Scheduling: true},
+		},
+		"b": {{To: "a"}},
+		"c": {{To: "b"}},
+	}
+
+	got := CanonicalMixedCyclePaths(graph)
+	want := [][]string{{"a", "c", "b"}}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cycles = %v, want %v: a tracks-only back edge must not hide a different cycle containing a scheduling edge", got, want)
+	}
+}
+
 // TestCanonicalMixedCyclePathsStillFindsAPureSchedulingCycle keeps parity with
 // CanonicalCyclePaths for the case that needs no tracks edge at all.
 func TestCanonicalMixedCyclePathsStillFindsAPureSchedulingCycle(t *testing.T) {
