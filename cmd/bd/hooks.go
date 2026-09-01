@@ -536,11 +536,15 @@ func checkGitHooksAt(hooksDir string) []HookStatus {
 			Name: hookName,
 		}
 
-		// Check if hook exists
+		// Check if hook exists and is a beads-managed hook (GH#6084).
+		// getHookVersion returns (hookVersionInfo{}, nil) — no error — when the
+		// file is readable but contains no beads markers. Only set Installed=true
+		// when the file is actually a beads hook; a foreign file that beads never
+		// touched must not be reported as installed.
 		hookPath := filepath.Join(hooksDir, hookName)
 		versionInfo, err := getHookVersion(hookPath)
-		if err != nil {
-			// Hook doesn't exist or couldn't be read
+		if err != nil || !versionInfo.IsBdHook {
+			// Hook doesn't exist, couldn't be read, or is not a beads hook
 			status.Installed = false
 		} else {
 			status.Installed = true
@@ -549,7 +553,7 @@ func checkGitHooksAt(hooksDir string) []HookStatus {
 
 			// Thin shims are never outdated (they delegate to bd)
 			// bd hooks are outdated if version is missing (legacy inline) or differs
-			if !versionInfo.IsShim && versionInfo.IsBdHook && versionInfo.Version != Version {
+			if !versionInfo.IsShim && versionInfo.Version != Version {
 				status.Outdated = true
 			}
 		}
