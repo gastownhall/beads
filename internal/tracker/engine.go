@@ -497,6 +497,12 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			}
 		}
 
+		// Some integrations have local-only control fields that the external
+		// tracker cannot own. Merge those fields after all conversion hooks so
+		// comparison, dry-run output, scalar updates, and label sync use the
+		// same ownership policy.
+		mergeLocalPullFields(mapper, existing, conv.Issue)
+
 		pendingDeps = appendFilteredDependencies(pendingDeps, conv.Dependencies, opts.DependencyTypes, opts.DependencySources)
 		if opts.DryRun {
 			dryRunIssue := *conv.Issue
@@ -616,6 +622,17 @@ func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
 		localRef = strings.TrimSpace(*local.ExternalRef)
 	}
 	return localRef == strings.TrimSpace(ref)
+}
+
+func mergeLocalPullFields(mapper FieldMapper, local, remote *types.Issue) {
+	if local == nil || remote == nil {
+		return
+	}
+	merger, ok := mapper.(PullFieldMerger)
+	if !ok {
+		return
+	}
+	merger.MergeLocalFields(local, remote)
 }
 
 func buildPullIssueUpdates(existing *types.Issue, remote *types.Issue, ref string) map[string]interface{} {
@@ -1286,9 +1303,22 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 		return
 	}
 
-	conv := e.Tracker.FieldMapper().IssueToBeads(extIssue)
+	mapper := e.Tracker.FieldMapper()
+	conv := mapper.IssueToBeads(extIssue)
 	if conv == nil || conv.Issue == nil {
 		return
+	}
+	if _, ok := mapper.(PullFieldMerger); ok {
+		local, err := e.findLocalIssue(ctx, c.IssueID)
+		if err != nil {
+			e.warn("Failed to read %s before re-import: %v", c.IssueID, err)
+			return
+		}
+		if local == nil {
+			e.warn("Failed to read %s before re-import: local issue not found", c.IssueID)
+			return
+		}
+		mergeLocalPullFields(mapper, local, conv.Issue)
 	}
 
 	updates := map[string]interface{}{
@@ -1308,6 +1338,20 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 	}); err != nil {
 		e.warn("Failed to update %s during reimport: %v", c.IssueID, err)
 	}
+}
+
+// findLocalIssue finds one local issue for an optional pull merge. GetIssue
+// keeps the lookup bounded to the conflict target instead of scanning the
+// local issue collection.
+func (e *Engine) findLocalIssue(ctx context.Context, id string) (*types.Issue, error) {
+	issue, err := e.Store.GetIssue(ctx, id)
+	if errors.Is(err, storage.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return issue, nil
 }
 
 // createDependencies creates dependencies from the pending list, matching
