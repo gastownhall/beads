@@ -3,7 +3,13 @@ repos:
     rev: v2.10.1
     hooks:
       - id: golangci-lint
-        args: [--timeout=5m]
+        # Mirror the ci-pr-lint gate (scripts/pr-lint.sh) so pre-commit and CI
+        # apply the same lint shape.
+        args:
+          - --config=.golangci.yml
+          - --modules-download-mode=readonly
+          - --timeout=5m
+          - --build-tags=gms_pure_go
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v6.0.0
