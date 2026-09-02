@@ -30,7 +30,7 @@ func resolveProxiedCustomTypes(dbTypes []string) []string {
 
 func runCreateProxiedServer(cmd *cobra.Command, ctx context.Context, in createInput) error {
 	if in.repoOverrideSet {
-		return HandleError("--repo is not supported with --proxied-server")
+		return AssertProxyCapability(ProxyModeProxied, ProxyCapRepo)
 	}
 	switch {
 	case in.graphFile != "":
