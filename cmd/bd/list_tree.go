@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/internal/ui"
 	"github.com/steveyegge/beads/internal/utils"
 )
 
@@ -111,11 +112,43 @@ func compareIssuesByPriority(a, b *types.Issue) int {
 	return utils.NaturalCompareIDs(a.ID, b.ID)
 }
 
+// maxTreeDepth caps how deep printPrettyTree will recurse. It mirrors the
+// depth ceiling renderTree already enforces in dep.go, so a malformed or
+// future edge type can never turn `bd list` into an unbounded writer again.
+// Real hierarchies are orders of magnitude shallower than this.
+const maxTreeDepth = 64
+
 // printPrettyTree recursively prints the issue tree.
 // Children are ordered by dependency then priority when dr != nil (--deps), else
 // by priority (P0 first) for intuitive reading. When dr is set, each node's
 // dependency edges are annotated just beneath it.
 func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, prefix string, dr *depRender) {
+	printPrettyTreeGuarded(childrenMap, parentID, prefix, dr,
+		map[string]bool{parentID: true}, 0)
+}
+
+// printPrettyTreeGuarded carries the two defenses renderTree (dep.go) already
+// has and this renderer lacks: a visited set covering the current ancestor
+// path, and a depth ceiling.
+//
+// Without them a cyclic childrenMap is walked forever (GH#5887): a single cycle
+// took `bd list` to 17.4 GB RSS and 119 s, while --flat and --json on the same
+// data stayed at ~75 MB and 0.2 s. Scoping the visited set to the ancestor path
+// rather than the whole walk keeps a node reachable through two different
+// parents rendering under each, which is legitimate, while cutting a node that
+// reappears inside its own ancestry, which is not.
+func printPrettyTreeGuarded(
+	childrenMap map[string][]*types.Issue,
+	parentID string,
+	prefix string,
+	dr *depRender,
+	visited map[string]bool,
+	depth int,
+) {
+	if depth >= maxTreeDepth {
+		return
+	}
+
 	children := childrenMap[parentID]
 
 	if dr != nil {
@@ -131,6 +164,15 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 		if isLast {
 			connector = "└── "
 		}
+
+		// A child already on this path closes a cycle: render it once, marked,
+		// and stop. Without this the walk never terminates.
+		if visited[child.ID] {
+			fmt.Printf("%s%s%s %s\n", prefix, connector, formatPrettyIssue(child),
+				ui.RenderMuted("(cycle)"))
+			continue
+		}
+
 		fmt.Printf("%s%s%s\n", prefix, connector, formatPrettyIssue(child))
 
 		extension := "│   "
@@ -138,7 +180,10 @@ func printPrettyTree(childrenMap map[string][]*types.Issue, parentID string, pre
 			extension = "    "
 		}
 		dr.annotationsFor(child.ID, prefix+extension)
-		printPrettyTree(childrenMap, child.ID, prefix+extension, dr)
+
+		visited[child.ID] = true
+		printPrettyTreeGuarded(childrenMap, child.ID, prefix+extension, dr, visited, depth+1)
+		delete(visited, child.ID)
 	}
 }
 
