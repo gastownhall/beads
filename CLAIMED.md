@@ -28,3 +28,4 @@ here makes the next such situation visible at claim time.
 | Issue(s) / slot | Who | Since | Where |
 |---|---|---|---|
 | Versioned beads, phases 0–3 ([milestone 1](https://github.com/gastownhall/beads/milestone/1): #6132–#6138; design #5898) | @quad341 | 2026-09-01 | phase PRs from `deploy/*` branches; phase 0: #6147 |
+| Versioned beads Phase 1 — migration slot 0067 (`issue_versions`, `store_epoch`, `issues.current_revision`); be-hs42e.2 / #6134 | @quad341 | 2026-09-02 | branch `builder/be-hs42e.2`, PR pending |
