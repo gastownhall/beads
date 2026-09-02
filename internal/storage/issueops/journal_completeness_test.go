@@ -8,10 +8,14 @@ import (
 
 // The emit helpers a function calls to journal a row directly.
 var journalEmitHelpers = map[string]bool{
-	"RecordEventInTx":    true,
-	"RecordDeleteInTx":   true,
-	"RecordDepEventInTx": true,
-	"insertEventRow":     true,
+	"RecordEventInTx":                true,
+	"RecordEventForPlaneInTx":        true,
+	"RecordDeleteInTx":               true,
+	"RecordDepEventInTx":             true,
+	"RecordDepEventForPlaneInTx":     true,
+	"RecordCommentEventInTx":         true,
+	"RecordCommentEventForPlaneInTx": true,
+	"insertEventRow":                 true,
 }
 
 // derivedReadinessEmitters journal, but only the readiness flips of AFFECTED
@@ -33,6 +37,7 @@ var derivedReadinessEmitters = map[string]bool{
 	"recomputeIsBlockedAfterMergeScoped": true,
 	"recomputeIsBlockedForAll":           true,
 	"MarkIsBlockedInTx":                  true,
+	"MarkIsBlockedInTxWithResult":        true,
 	"recordBlockedJournalChanges":        true,
 }
 
@@ -74,7 +79,10 @@ var mutationEntryPoints = []string{
 	"PersistDependenciesWithOptionsResult", // creation-time dependency edges
 	// update
 	"UpdateIssueInTx",
+	"UpdateIssueForPlaneInTx",
 	"UpdateIssueWithoutEventInTx",
+	"TouchIssueInTx",
+	"TouchIssueForPlaneInTx",
 	"MergeMetadataInTx",
 	"DeleteMetadataInTx",
 	"ApplyLabelPatch",
@@ -82,11 +90,14 @@ var mutationEntryPoints = []string{
 	"MoveIssuePersistenceInTx",
 	// close / reopen, including the guarded CAS + savepoint path
 	"CloseIssueInTx",
+	"CloseIssueForPlaneInTx",
 	"CloseIssueWithoutEventInTx",
 	"CloseIssueCheckedInTx",
+	"CloseIssueCheckedForPlaneInTx",
 	"ReopenIssueInTx",
 	// delete, including the role body and the resolved-set worker
 	"DeleteIssueInTx",
+	"DeleteIssueInTxWithResult",
 	"DeleteIssuesInTx",
 	"DeleteResolvedSetInTx",
 	"DeleteIssuesBySourceRepoInTx",
@@ -102,7 +113,9 @@ var mutationEntryPoints = []string{
 	// plane moves, graph edges, labels, comments, renames
 	"PromoteFromEphemeralInTx",
 	"AddDependencyInTx",
+	"AddDependencyInTxWithResult",
 	"RemoveDependencyInTx",
+	"RemoveDependencyInTxWithResult",
 	"AddLabelInTx",
 	"RemoveLabelInTx",
 	"UpdateIssueIDInTx",
@@ -115,6 +128,7 @@ var mutationEntryPoints = []string{
 	"RecomputeIsBlockedForWispIDsInTx",
 	"RecomputeIsBlockedAfterMergeInTx",
 	"MarkIsBlockedInTx",
+	"MarkIsBlockedInTxWithResult",
 	"RecomputeAllIsBlockedInTx",
 	"WakeExpiredDefersInTx",
 	"SweepInTx",
@@ -158,18 +172,20 @@ var beadDMLExemptions = map[string]string{
 
 	// (3) constituent sub-helpers; the calling entry point journals the whole
 	// mutation once (a create/rename/promote/delete emits a single row).
-	"InsertIssueIntoTable":                   "raw issue insert; the calling create entry point journals the create",
-	"InsertIssueIfNew":                       "raw issue insert; the calling create entry point journals the create",
-	"InsertIssueStrictInTx":                  "raw issue insert; the calling create/persistence-move entry point journals it",
-	"InsertDerivedComment":                   "raw comment insert; the calling comment/create entry point journals it",
-	"PersistLabels":                          "constituent label write of a create; the create entry point journals it",
-	"PersistComments":                        "constituent comment write of a create; the create entry point journals it",
-	"UpdateWispIDInDependenciesInTx":         "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
-	"UpdateIssueIDInDependenciesInTx":        "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
-	"RetargetInboundDependenciesToWispInTx":  "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
-	"RetargetInboundDependenciesToIssueInTx": "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
-	"DeleteWispFromDependenciesInTx":         "cleans up dep rows during a delete that journals the delete",
-	"DeleteWispsFromDependenciesInTx":        "cleans up dep rows during a delete that journals the delete",
+	"InsertIssueIntoTable":                      "raw issue insert; the calling create entry point journals the create",
+	"InsertIssueIfNew":                          "raw issue insert; the calling create entry point journals the create",
+	"InsertIssueStrictInTx":                     "raw issue insert; the calling create/persistence-move entry point journals it",
+	"InsertDerivedComment":                      "raw comment insert; the calling comment/create entry point journals it",
+	"PersistLabels":                             "constituent label write of a create; the create entry point journals it",
+	"PersistComments":                           "constituent comment write of a create; the create entry point journals it",
+	"UpdateWispIDInDependenciesInTx":            "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
+	"UpdateIssueIDInDependenciesInTx":           "rewrites dep rows during a rename; UpdateIssueIDInTx journals the rename",
+	"RetargetInboundDependenciesToWispInTx":     "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
+	"RetargetInboundDependenciesToIssueInTx":    "rewrites dep rows during promote; PromoteFromEphemeralInTx journals it",
+	"DeleteWispFromDependenciesInTx":            "cleans up dep rows during a delete that journals the delete",
+	"DeleteWispsFromDependenciesInTx":           "cleans up dep rows during a delete that journals the delete",
+	"DeleteWispFromDependenciesInTxWithResult":  "result-reporting form of cross-plane cleanup owned by a journaling delete",
+	"DeleteWispsFromDependenciesInTxWithResult": "batched result-reporting form of cross-plane cleanup owned by a journaling delete",
 
 	// (4) compaction maintenance — a lossy content rewrite outside the
 	// create/update/close/delete/dep/label op vocabulary. Carried from the

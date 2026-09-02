@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strconv"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
@@ -49,7 +50,10 @@ func (s *DoltStore) CheckEligibility(ctx context.Context, issueID string, tier i
 // ApplyCompaction records a compaction result in the database.
 func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier int, originalSize int, _ int, commitHash string) error {
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.ApplyCompactionInTx(ctx, tx, issueID, tier, originalSize, commitHash)
+		if err := issueops.ApplyCompactionInTx(ctx, tx, issueID, tier, originalSize, commitHash); err != nil {
+			return err
+		}
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: compact %s to tier %d", issueID, tier))
 	})
 }
 
@@ -57,7 +61,10 @@ func (s *DoltStore) ApplyCompaction(ctx context.Context, issueID string, tier in
 // compaction overwrites it. See issueops.SnapshotIssueInTx.
 func (s *DoltStore) SnapshotIssue(ctx context.Context, issueID string, tier int) error {
 	return s.withRetryTx(ctx, func(tx *sql.Tx) error {
-		return issueops.SnapshotIssueInTx(ctx, tx, issueID, tier)
+		if err := issueops.SnapshotIssueInTx(ctx, tx, issueID, tier); err != nil {
+			return err
+		}
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"compaction_snapshots"}, fmt.Sprintf("bd: snapshot %s before tier %d compaction", issueID, tier))
 	})
 }
 
@@ -80,7 +87,10 @@ func (s *DoltStore) RestoreFromSnapshot(ctx context.Context, issueID string) (*t
 	err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		var err error
 		snap, err = issueops.RestoreFromSnapshotInTx(ctx, tx, issueID)
-		return err
+		if err != nil || snap == nil {
+			return err
+		}
+		return s.doltAddAndCommitInTx(ctx, tx, []string{"issues"}, fmt.Sprintf("bd: restore %s from compaction snapshot", issueID))
 	})
 	return snap, err
 }

@@ -117,7 +117,14 @@ func (c *claimCommitBoundaryConn) QueryContext(_ context.Context, query string, 
 			columns: claimBoundaryIssueColumns(),
 			values:  [][]driver.Value{claimBoundaryIssueValues(c.driver.activeID)},
 		}, nil
+	case strings.Contains(query, "FROM wisps") && strings.Contains(query, "WHERE id = ?"):
+		return &claimCommitBoundaryRows{
+			columns: claimBoundaryIssueColumns(),
+			values:  [][]driver.Value{claimBoundaryIssueValues(c.driver.activeID)},
+		}, nil
 	case strings.Contains(query, "SELECT label FROM labels"):
+		return &claimCommitBoundaryRows{columns: []string{"label"}}, nil
+	case strings.Contains(query, "SELECT label FROM wisp_labels"):
 		return &claimCommitBoundaryRows{columns: []string{"label"}}, nil
 	case strings.Contains(query, "SELECT issue_id, label FROM labels"):
 		return &claimCommitBoundaryRows{columns: []string{"issue_id", "label"}}, nil

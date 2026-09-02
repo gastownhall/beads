@@ -265,6 +265,8 @@ func RunAll(t *testing.T, factory Factory) {
 	t.Run("TransactionCallbackAtMostOnce", func(t *testing.T) { testTransactionCallbackAtMostOnce(t, factory) })
 	t.Run("TransactionSnapshotReads", func(t *testing.T) { testTransactionSnapshotReads(t, factory) })
 	t.Run("TransactionReadYourWrites", func(t *testing.T) { testTransactionReadYourWrites(t, factory) })
+	t.Run("TransactionTouchIssue", func(t *testing.T) { testTransactionTouchIssue(t, factory) })
+	t.Run("TransactionCloseIssueChecked", func(t *testing.T) { testTransactionCloseIssueChecked(t, factory) })
 	t.Run("TransactionUpdateRecordsHistory", func(t *testing.T) { testTransactionUpdateRecordsHistory(t, factory) })
 	t.Run("TransactionSearchIncludeDependencies", func(t *testing.T) { testTransactionSearchIncludeDependencies(t, factory) })
 	t.Run("TransactionSearchKeysetWalk", func(t *testing.T) { testTransactionSearchKeysetWalk(t, factory) })

@@ -1,6 +1,7 @@
 package conformance
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -24,6 +25,240 @@ import (
 // agree on — the store-level form of the same operation — rather than from the
 // other backend. Making two backends agree on the wrong answer would be worse
 // than the divergence, because the disagreement is the only signal there is.
+
+// testTransactionTouchIssue pins the transaction-only revision primitive used
+// after a composite mutation changes related tables but no issue scalar. The
+// issue row must move in the SAME transaction, so a caller can hand the fresh
+// opaque token back only after all of the related writes have committed.
+//
+// The wisp leg deliberately uses an ordinary-looking explicit ID. Routing it
+// by a "-wisp-" naming convention instead of by its stored plane therefore
+// turns this case red. Running the same case through RunAll makes server Dolt
+// and embedded Dolt prove the identical contract.
+func testTransactionTouchIssue(t *testing.T, f Factory) {
+	for _, tc := range []struct {
+		name      string
+		id        string
+		ephemeral bool
+	}{
+		{name: "Permanent", id: "txtouch-permanent"},
+		{name: "ExplicitIDWisp", id: "txtouch-explicit", ephemeral: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := f(t)
+			c := ctx()
+			seedTime := time.Date(2024, 3, 4, 5, 6, 7, 0, time.UTC)
+			issue := withDefaults(&types.Issue{
+				ID:          tc.id,
+				Title:       "Touch subject",
+				Description: "user-authored description",
+				Notes:       "user-authored notes",
+				Assignee:    "owner",
+				CreatedAt:   seedTime,
+				UpdatedAt:   seedTime,
+				Metadata:    json.RawMessage(`{"source":"touch-conformance"}`),
+				Ephemeral:   tc.ephemeral,
+			})
+			must(t, s.CreateIssue(c, issue, "seed-actor"))
+			must(t, s.AddLabel(c, tc.id, "keep-me", "seed-actor"))
+
+			before, err := s.GetIssue(c, tc.id)
+			must(t, err)
+			beforeEvents, err := s.GetEvents(c, tc.id, 0)
+			must(t, err)
+			if before.RowVersion == 0 {
+				t.Fatal("fixture row version is 0; current creates must mint a live token")
+			}
+
+			var inside *types.Issue
+			must(t, s.RunInTransaction(c, "bd: touch "+tc.id, func(tx storage.Transaction) error {
+				if err := tx.TouchIssue(c, tc.id, "touch-actor"); err != nil {
+					return err
+				}
+				inside, err = tx.GetIssue(c, tc.id)
+				return err
+			}))
+
+			after, err := s.GetIssue(c, tc.id)
+			must(t, err)
+			if inside == nil {
+				t.Fatal("transaction read returned no touched issue")
+			}
+			if after.RowVersion == 0 || after.RowVersion == before.RowVersion {
+				t.Errorf("row version after touch = %d, want a fresh non-zero token distinct from %d",
+					after.RowVersion, before.RowVersion)
+			}
+			if inside.RowVersion != after.RowVersion {
+				t.Errorf("read-your-writes row version = %d, committed row version = %d",
+					inside.RowVersion, after.RowVersion)
+			}
+			if !after.UpdatedAt.After(before.UpdatedAt) {
+				t.Errorf("updated_at after touch = %v, want later than seeded %v", after.UpdatedAt, before.UpdatedAt)
+			}
+			if !inside.UpdatedAt.Equal(after.UpdatedAt) {
+				t.Errorf("read-your-writes updated_at = %v, committed updated_at = %v", inside.UpdatedAt, after.UpdatedAt)
+			}
+
+			// updated_at and RowVersion are the whole allowed row delta. Normalizing
+			// them away makes any hidden metadata or user-visible field change fail.
+			wantContent, gotContent := *before, *after
+			gotContent.UpdatedAt = wantContent.UpdatedAt
+			gotContent.RowVersion = wantContent.RowVersion
+			if !reflect.DeepEqual(&gotContent, &wantContent) {
+				t.Errorf("touch changed issue content:\n before: %#v\n  after: %#v", before, after)
+			}
+
+			afterEvents, err := s.GetEvents(c, tc.id, 0)
+			must(t, err)
+			if len(afterEvents) != len(beforeEvents)+1 {
+				t.Fatalf("touch changed event count from %d to %d, want exactly one attributed update",
+					len(beforeEvents), len(afterEvents))
+			}
+			updatedByActor := 0
+			for _, event := range afterEvents {
+				if event.EventType == types.EventUpdated && event.Actor == "touch-actor" {
+					updatedByActor++
+				}
+			}
+			if updatedByActor != 1 {
+				t.Errorf("touch recorded %d %q events attributed to touch-actor, want 1",
+					updatedByActor, types.EventUpdated)
+			}
+		})
+	}
+}
+
+// testTransactionCloseIssueChecked pins the transaction surface to the same
+// full close policy as Storage.CloseIssueChecked. A transaction caller cannot
+// safely reconstruct either guard from separate reads: the shared close body
+// touches dependency-coordination cells before counting children, so a racing
+// parent-child insert conflicts instead of cell-merging past a stale count.
+func testTransactionCloseIssueChecked(t *testing.T, f Factory) {
+	t.Run("OpenChildRefusalAndForce", func(t *testing.T) {
+		s := f(t)
+		c := ctx()
+		parent, child := "txcc-parent", "txcc-child"
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: parent, Title: "Parent"}), "seed"))
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: child, Title: "Child"}), "seed"))
+		must(t, s.AddDependency(c, &types.Dependency{
+			IssueID: child, DependsOnID: parent, Type: types.DepParentChild,
+		}, "seed"))
+
+		before, err := s.GetIssue(c, parent)
+		must(t, err)
+		beforeEvents := countIssueEvents(t, s, parent, types.EventClosed)
+		err = s.RunInTransaction(c, "bd: checked close "+parent, func(tx storage.Transaction) error {
+			_, closeErr := tx.CloseIssueChecked(c, parent, "closer", storage.CloseIssueOptions{Reason: "done"})
+			return closeErr
+		})
+		var openChildren *storage.CloseOpenChildrenError
+		if !errors.As(err, &openChildren) {
+			t.Fatalf("checked close with an open child: err = %v, want *CloseOpenChildrenError", err)
+		}
+		if openChildren.IssueID != parent || openChildren.OpenChildren != 1 {
+			t.Errorf("open-child refusal = %#v, want issue %s and count 1", openChildren, parent)
+		}
+		afterRefusal, getErr := s.GetIssue(c, parent)
+		must(t, getErr)
+		if !reflect.DeepEqual(afterRefusal, before) {
+			t.Errorf("open-child refusal changed parent:\n before: %#v\n  after: %#v", before, afterRefusal)
+		}
+		if got := countIssueEvents(t, s, parent, types.EventClosed); got != beforeEvents {
+			t.Errorf("open-child refusal changed closed-event count from %d to %d", beforeEvents, got)
+		}
+
+		var forced storage.CloseIssueResult
+		must(t, s.RunInTransaction(c, "bd: force checked close "+parent, func(tx storage.Transaction) error {
+			forced, err = tx.CloseIssueChecked(c, parent, "closer", storage.CloseIssueOptions{
+				Reason: "forced done", Session: "session-1", Force: true,
+			})
+			return err
+		}))
+		if forced.Unchanged || forced.OpenChildren != 1 {
+			t.Errorf("forced checked close result = %#v, want changed with one reported open child", forced)
+		}
+		closed, err := s.GetIssue(c, parent)
+		must(t, err)
+		if closed.Status != types.StatusClosed || closed.CloseReason != "forced done" || closed.ClosedBySession != "session-1" {
+			t.Errorf("forced checked close state = status %q, reason %q, session %q",
+				closed.Status, closed.CloseReason, closed.ClosedBySession)
+		}
+		if got := countIssueEvents(t, s, parent, types.EventClosed); got != beforeEvents+1 {
+			t.Errorf("forced checked close recorded %d closed events, want %d", got, beforeEvents+1)
+		}
+	})
+
+	t.Run("LiveBlockerRefusal", func(t *testing.T) {
+		s := f(t)
+		c := ctx()
+		blocked, blocker := "txcc-blocked", "txcc-blocker"
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: blocked, Title: "Blocked"}), "seed"))
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: blocker, Title: "Blocker"}), "seed"))
+		must(t, s.AddDependency(c, &types.Dependency{
+			IssueID: blocked, DependsOnID: blocker, Type: types.DepBlocks,
+		}, "seed"))
+		before, err := s.GetIssue(c, blocked)
+		must(t, err)
+		err = s.RunInTransaction(c, "bd: checked close "+blocked, func(tx storage.Transaction) error {
+			_, closeErr := tx.CloseIssueChecked(c, blocked, "closer", storage.CloseIssueOptions{})
+			return closeErr
+		})
+		if !errors.Is(err, storage.ErrCloseBlocked) {
+			t.Fatalf("checked close with a live blocker: err = %v, want ErrCloseBlocked", err)
+		}
+		after, getErr := s.GetIssue(c, blocked)
+		must(t, getErr)
+		if !reflect.DeepEqual(after, before) {
+			t.Errorf("blocker refusal changed issue:\n before: %#v\n  after: %#v", before, after)
+		}
+		if got := countIssueEvents(t, s, blocked, types.EventClosed); got != 0 {
+			t.Errorf("blocker refusal recorded %d closed events, want 0", got)
+		}
+	})
+
+	t.Run("ExplicitIDWisp", func(t *testing.T) {
+		s := f(t)
+		c := ctx()
+		wispID, controlID := "txcc-explicit", "txcc-durable-control"
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: wispID, Title: "Wisp", Ephemeral: true}), "seed"))
+		must(t, s.CreateIssue(c, withDefaults(&types.Issue{ID: controlID, Title: "Control"}), "seed"))
+		before, err := s.GetIssue(c, wispID)
+		must(t, err)
+		expected := before.RowVersion
+		var result storage.CloseIssueResult
+		must(t, s.RunInTransaction(c, "bd: checked close "+wispID, func(tx storage.Transaction) error {
+			result, err = tx.CloseIssueChecked(c, wispID, "wisp-closer", storage.CloseIssueOptions{
+				Reason: "wisp done", Session: "wisp-session", ExpectedVersion: &expected,
+			})
+			return err
+		}))
+		if result.Unchanged {
+			t.Fatal("first checked close of explicit-ID wisp reported Unchanged")
+		}
+		closed, err := s.GetIssue(c, wispID)
+		must(t, err)
+		if closed.Status != types.StatusClosed || closed.CloseReason != "wisp done" || closed.ClosedBySession != "wisp-session" {
+			t.Errorf("wisp checked close state = status %q, reason %q, session %q",
+				closed.Status, closed.CloseReason, closed.ClosedBySession)
+		}
+		control, err := s.GetIssue(c, controlID)
+		must(t, err)
+		if control.Status != types.StatusOpen {
+			t.Errorf("durable control status = %q, want open; wisp routing reached the wrong plane", control.Status)
+		}
+		events, err := s.GetEvents(c, wispID, 0)
+		must(t, err)
+		closedByActor := 0
+		for _, event := range events {
+			if event.EventType == types.EventClosed && event.Actor == "wisp-closer" {
+				closedByActor++
+			}
+		}
+		if closedByActor != 1 {
+			t.Errorf("explicit-ID wisp recorded %d closed events attributed to wisp-closer, want 1", closedByActor)
+		}
+	})
+}
 
 // testTransactionUpdateRecordsHistory pins Transaction.UpdateIssue to the same
 // history the store-level UpdateIssue records (ga-1huib.7).

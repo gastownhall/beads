@@ -54,7 +54,7 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 		}
 	}
 
-	var eventWritten bool
+	var mutationResult issueops.DependencyMutationResult
 	if err := s.withRetryTx(ctx, func(tx *sql.Tx) error {
 		opts := issueops.AddDependencyOpts{
 			SourceTable:   "issues",
@@ -65,7 +65,7 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 			EmitEvent:     addOpts.EmitEvent,
 		}
 		var e error
-		eventWritten, e = issueops.AddDependencyInTx(ctx, tx, dep, actor, opts)
+		mutationResult, e = issueops.AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
 		return e
 	}); err != nil {
 		return err
@@ -76,8 +76,11 @@ func (s *DoltStore) addDependencyWithOptions(ctx context.Context, dep *types.Dep
 	// idempotent add writes no event, so staging events would sweep unrelated
 	// pending event rows into this dependency commit.
 	tables := []string{"dependencies"}
-	if eventWritten {
+	if mutationResult.EventWritten {
 		tables = append(tables, "events")
+	}
+	if mutationResult.IssueRowsChanged {
+		tables = append(tables, "issues")
 	}
 	return s.doltAddAndCommit(ctx, tables, "dependency: add "+string(dep.Type)+" "+dep.IssueID+" -> "+dep.DependsOnID)
 }
@@ -95,7 +98,8 @@ func (s *DoltStore) RemoveDependency(ctx context.Context, issueID, dependsOnID s
 // EmitEvent records a dependency_removed history event for the explicit dep verb.
 func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, dependsOnID string, actor string, rmOpts storage.DependencyRemoveOptions) error {
 	return s.withCircuitWrite(ctx, func(ctx context.Context) error {
-		// Wisps live in dolt_ignored tables — skip Dolt versioning entirely.
+		// Wisp-owned rows are ignored, but readiness propagation can change
+		// durable issues and must publish those rows.
 		if s.isActiveWisp(ctx, issueID) {
 			tx, err := s.db.BeginTx(ctx, nil)
 			if err != nil {
@@ -104,10 +108,15 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 			defer func() { _ = tx.Rollback() }()
 			clearJournalScope := s.scopeEventsJournalTransaction(tx)
 			defer clearJournalScope()
-			if _, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent); err != nil {
+			result, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+			if err != nil {
 				return err
 			}
-			if err := s.commitSQLTx(ctx, "commit remove wisp dependency", tx); err != nil {
+			var changes wispDurableChanges
+			changes.Mark("issues", result.IssueRowsChanged)
+			if err := s.commitWispMutationTx(ctx, tx, changes,
+				"dependency: remove "+issueID+" -> "+dependsOnID,
+				"commit remove wisp dependency"); err != nil {
 				return err
 			}
 			return nil
@@ -122,7 +131,7 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		clearJournalScope := s.scopeEventsJournalTransaction(tx)
 		defer clearJournalScope()
 
-		eventWritten, err := issueops.RemoveDependencyInTx(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
+		mutationResult, err := issueops.RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, rmOpts.EmitEvent)
 		if err != nil {
 			return err
 		}
@@ -136,8 +145,11 @@ func (s *DoltStore) RemoveDependencyWithOptions(ctx context.Context, issueID, de
 		// structural or missing-edge remove writes no event, so staging events would
 		// sweep unrelated pending event rows into this dependency commit.
 		tables := []string{"dependencies"}
-		if eventWritten {
+		if mutationResult.EventWritten {
 			tables = append(tables, "events")
+		}
+		if mutationResult.IssueRowsChanged {
+			tables = append(tables, "issues")
 		}
 		return s.doltAddAndCommit(ctx, tables, "dependency: remove "+issueID+" -> "+dependsOnID)
 	})

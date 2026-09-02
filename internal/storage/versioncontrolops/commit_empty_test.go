@@ -32,6 +32,23 @@ var matchPendingQuery = regexp.MustCompile(`SELECT COUNT\(\*\) FROM dolt_status 
 // precise "anything actually staged?" check issued after DOLT_ADD).
 var matchStagedQuery = regexp.MustCompile(`SELECT COUNT\(\*\) FROM dolt_status WHERE staged = 1`)
 
+func TestDirtyTableTrackerExcludesCloneLocalTables(t *testing.T) {
+	var tracker DirtyTableTracker
+	for _, table := range []string{
+		"wisps", "wisp_labels", "events", "leases", "local_metadata",
+		"repo_mtimes", "bd_events_journal", "bd_events_seq", "ignored_schema_migrations",
+	} {
+		tracker.MarkDirty(table)
+	}
+	tracker.MarkDirty("issues")
+	tracker.MarkDirty("dependencies")
+
+	got := tracker.DirtyTables()
+	if len(got) != 2 || !got["issues"] || !got["dependencies"] {
+		t.Fatalf("DirtyTables = %v, want only issues and dependencies", got)
+	}
+}
+
 func TestStageAndCommitSkipsWhenNothingPending(t *testing.T) {
 	db, mock, err := sqlmock.New(sqlmock.QueryMatcherOption(sqlmock.QueryMatcherRegexp))
 	if err != nil {

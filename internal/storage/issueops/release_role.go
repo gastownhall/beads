@@ -51,7 +51,8 @@ import (
 // are the raw seam's own, in the raw seam's order, and the raw calls still run
 // them — this body narrows nothing and widens nothing.
 func ReleaseIssueInTx(ctx context.Context, tx DBTX, req publicops.ReleaseRequest) (publicops.ReleaseResult, ReleaseWrite, error) {
-	before, err := GetIssueInTx(ctx, tx, req.IssueID)
+	isWisp := IsActiveWispInTx(ctx, tx, req.IssueID)
+	before, err := GetIssueForPlaneInTx(ctx, tx, req.IssueID, isWisp)
 	if err != nil {
 		// GetIssueInTx already answers ErrNotFound for an id on neither plane,
 		// which is the role's own vocabulary; wrapping it would put this
@@ -102,7 +103,7 @@ func ReleaseIssueInTx(ctx context.Context, tx DBTX, req publicops.ReleaseRequest
 	// composed from the request and the pre-state. A caller feeds
 	// Issue.RowVersion straight back as the next operation's ExpectedVersion,
 	// and a token this body invented would be a token no writer minted.
-	after, err := GetIssueInTx(ctx, tx, req.IssueID)
+	after, err := GetIssueForPlaneInTx(ctx, tx, req.IssueID, isWisp)
 	if err != nil {
 		return publicops.ReleaseResult{}, ReleaseWrite{}, fmt.Errorf(
 			"release %s: read back the released row: %w", req.IssueID, err)
@@ -114,7 +115,7 @@ func ReleaseIssueInTx(ctx context.Context, tx DBTX, req publicops.ReleaseRequest
 	// ChangedTables drops the wisp tables on purpose, so an EPHEMERAL release
 	// reports Wrote with an EMPTY table set: the distinction the
 	// version-control legs need, and the one a single bool would lose.
-	issueTable, _, eventTable, _ := WispTableRouting(IsActiveWispInTx(ctx, tx, req.IssueID))
+	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 	write := ReleaseWrite{Wrote: true, Tables: ChangedTables{}}
 	write.Tables.Add(issueTable, eventTable)
 

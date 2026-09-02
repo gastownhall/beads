@@ -12,7 +12,7 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-var permanentIssueAuxTables = []string{"issues", "labels", "dependencies", "events", "comments", "provenance_events"}
+var permanentIssueAuxTables = []string{"issues", "labels", "dependencies", "events", "comments", "child_counters", "provenance_events"}
 
 // IsEphemeralID returns true if the ID belongs to an ephemeral issue.
 func IsEphemeralID(id string) bool {
@@ -232,6 +232,12 @@ func (s *DoltStore) DemoteToWisp(ctx context.Context, id string, updates map[str
 // atomic version precondition in the same transaction; DemoteToWisp's behavior
 // is unchanged.
 func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string, updates map[string]interface{}, actor string) error {
+	// Snapshot tables have no wisp-plane equivalents and cascade on issue
+	// deletion. Refuse before applying any requested field update so a caller
+	// can never lose its restore source through this legacy move path.
+	if err := issueops.CheckPersistenceDemotionAllowedInTx(ctx, tx, id); err != nil {
+		return err
+	}
 	if _, err := issueops.UpdateIssueWithoutEventInTx(ctx, tx, id, updates, actor); err != nil {
 		return fmt.Errorf("update issue before demotion: %w", err)
 	}
@@ -290,6 +296,28 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM comments WHERE issue_id = ?`, id); err != nil {
 		return fmt.Errorf("delete copied comments for demoted issue %s: %w", id, err)
+	}
+
+	// Preserve hierarchical child allocation across the plane move. The wisp
+	// table is ignored by Dolt, while deleting the durable source row must be
+	// included in the demotion commit (permanentIssueAuxTables includes
+	// child_counters). Keep the larger value if a repair left both rows behind.
+	if _, err := tx.ExecContext(ctx, `
+		INSERT IGNORE INTO wisp_child_counters (parent_id, last_child)
+		SELECT parent_id, last_child FROM child_counters WHERE parent_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("copy child counter for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE wisp_child_counters wcc
+		JOIN child_counters cc ON cc.parent_id = wcc.parent_id
+		SET wcc.last_child = GREATEST(wcc.last_child, cc.last_child)
+		WHERE cc.parent_id = ?
+	`, id); err != nil {
+		return fmt.Errorf("merge child counter for demoted issue %s: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM child_counters WHERE parent_id = ?`, id); err != nil {
+		return fmt.Errorf("delete copied child counter for demoted issue %s: %w", id, err)
 	}
 
 	if err := issueops.RecordFullEventInTable(ctx, tx, "wisp_events", id, types.EventUpdated, actor, "", "demoted to wisp"); err != nil {

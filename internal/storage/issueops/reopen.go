@@ -23,12 +23,18 @@ type ReopenResult struct {
 // ReopenIssueInTx reopens only statuses in the done category. It leaves all
 // other statuses unchanged.
 func ReopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string) (*ReopenResult, error) {
-	return reopenIssueInTx(ctx, tx, id, reason, actor, true)
+	return ReopenIssueForPlaneInTx(ctx, tx, id, reason, actor, IsActiveWispInTx(ctx, tx, id))
+}
+
+// ReopenIssueForPlaneInTx applies reopen semantics to the caller-selected
+// aggregate. Keeping retry reads on that plane prevents a dual-resident ID
+// from switching targets after the facade has applied its version guard.
+func ReopenIssueForPlaneInTx(ctx context.Context, tx DBTX, id, reason, actor string, isWisp bool) (*ReopenResult, error) {
+	return reopenIssueForPlaneInTx(ctx, tx, id, reason, actor, true, isWisp)
 }
 
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
-func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, retryOnConditionalMiss bool) (*ReopenResult, error) {
-	isWisp := IsActiveWispInTx(ctx, tx, id)
+func reopenIssueForPlaneInTx(ctx context.Context, tx DBTX, id, reason, actor string, retryOnConditionalMiss, isWisp bool) (*ReopenResult, error) {
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
 	var current string
@@ -92,7 +98,7 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 			return &ReopenResult{IsWisp: isWisp, AlreadyOpen: latestStatus == types.StatusOpen}, nil
 		}
 		if retryOnConditionalMiss {
-			return reopenIssueInTx(ctx, tx, id, reason, actor, false)
+			return reopenIssueForPlaneInTx(ctx, tx, id, reason, actor, false, isWisp)
 		}
 		return nil, fmt.Errorf("reopen issue %s: status changed concurrently", id)
 	}
@@ -118,7 +124,7 @@ func reopenIssueInTx(ctx context.Context, tx DBTX, id, reason, actor string, ret
 
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// A reopen is a status change, so it journals as an update.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, isWisp); err != nil {
 		return nil, err
 	}
 

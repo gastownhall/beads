@@ -44,7 +44,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
 	// Read old issue inside the transaction for event recording.
-	oldIssue, err := GetIssueInTx(ctx, tx, id)
+	oldIssue, err := GetIssueForPlaneInTx(ctx, tx, id, isWisp)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get issue for claim: %w", err)
 	}
@@ -219,7 +219,7 @@ func ClaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string) (*Cla
 	// A claim changes assignee and status, so it journals as an update. The
 	// idempotent re-claim path returns above without writing and journals
 	// nothing.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, isWisp); err != nil {
 		return nil, err
 	}
 
@@ -285,13 +285,14 @@ func ClaimReadyIssueInTx(
 		return nil, err
 	}
 	for _, issue := range readyIssues {
-		if _, err := ClaimIssueInTx(ctx, tx, issue.ID, actor); err != nil {
+		claimResult, err := ClaimIssueInTx(ctx, tx, issue.ID, actor)
+		if err != nil {
 			if errors.Is(err, storage.ErrAlreadyClaimed) || errors.Is(err, storage.ErrNotClaimable) {
 				continue
 			}
 			return nil, err
 		}
-		claimed, err := GetIssueInTx(ctx, tx, issue.ID)
+		claimed, err := GetIssueForPlaneInTx(ctx, tx, issue.ID, claimResult.IsWisp)
 		if err != nil {
 			return nil, fmt.Errorf("get claimed issue: %w", err)
 		}

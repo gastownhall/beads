@@ -125,11 +125,6 @@ type AddDependencyOpts struct {
 	// that intentionally trade validation cost for bulk graph wiring speed.
 	SkipCycleCheck bool
 	TargetKind     *DepTargetKind
-	// PrecheckedTarget, when non-nil, replaces the in-tx target read: the
-	// target is known to exist with this type and status. Callers that set
-	// it must also set TargetKind, since target classification otherwise
-	// queries tx too.
-	PrecheckedTarget *DepTargetPrecheck
 	// EmitEvent records a dependency_added event on the source's event table
 	// for a genuine new edge. Only the explicit dependency verbs (bd dep add /
 	// bd link and their bulk twin) set it; create-with-deps and structural
@@ -137,20 +132,6 @@ type AddDependencyOpts struct {
 	// edge produces no event. This mirrors the proxied repository's
 	// DepInsertOpts.EmitEvent gate so both backends record identical history.
 	EmitEvent bool
-}
-
-// DepTargetPrecheck carries a target-issue row the caller has already read
-// from the transaction that can see it. Dolt server mode splits one logical
-// transaction across two SQL sessions (versioned tables vs dolt-ignored wisp
-// tables); when the dependency write table lives on one session and the
-// target issue on the other, a target read on tx misses rows created earlier
-// in the same logical transaction. The caller reads the target on its own
-// session and passes the row here; existence validation, cross-type blocking
-// validation, and the direct is_blocked mark then use these values instead
-// of querying the target table on tx.
-type DepTargetPrecheck struct {
-	IssueType string
-	Status    string
 }
 
 // AddDependencyInTx validates and inserts a dependency within an existing
@@ -171,7 +152,30 @@ type DepTargetPrecheck struct {
 // Dolt commit stage the events table only when an event row exists, so a
 // no-event add cannot sweep unrelated pending rows into the commit (GH#2455).
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil)
+	result, err := AddDependencyInTxWithResult(ctx, tx, dep, actor, opts)
+	return result.EventWritten, err
+}
+
+// DependencyMutationResult reports the audit-event and derived issue-table
+// effects of one dependency mutation. Facades that create Dolt revisions use
+// the row-change flags to stage every durable issue row changed by blocked-
+// state maintenance, not only the dependency table named by the verb.
+type DependencyMutationResult struct {
+	EventWritten     bool
+	IssueRowsChanged bool
+	WispRowsChanged  bool
+}
+
+// AddDependencyInTxWithResult is AddDependencyInTx with complete per-plane
+// derived-row change reporting.
+func AddDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (DependencyMutationResult, error) {
+	var recomputed RecomputeIsBlockedResult
+	eventWritten, err := addDependencyInTx(ctx, tx, dep, actor, opts, &recomputed)
+	return DependencyMutationResult{
+		EventWritten:     eventWritten,
+		IssueRowsChanged: recomputed.IssueRowsChanged,
+		WispRowsChanged:  recomputed.WispRowsChanged,
+	}, err
 }
 
 func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
@@ -223,13 +227,9 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("failed to check issue existence: %w", err)
 	}
 
-	// Validate target issue exists (skip for external and cross-prefix refs,
-	// and for targets the caller already read on their own transaction).
+	// Validate target issue exists (skip for external and cross-prefix refs).
 	var targetType string
-	switch {
-	case opts.PrecheckedTarget != nil:
-		targetType = opts.PrecheckedTarget.IssueType
-	case !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix:
+	if !strings.HasPrefix(dep.DependsOnID, "external:") && !opts.IsCrossPrefix {
 		//nolint:gosec // G201: targetTable is from WispTableRouting ("issues" or "wisps")
 		if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT issue_type FROM %s WHERE id = ?`, targetTable), dep.DependsOnID).Scan(&targetType); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
@@ -278,7 +278,7 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay even
 			// though no audit event is written.
-			return false, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+			return false, RecordDepEventForPlaneInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor, writeTable == "wisp_dependencies")
 		}
 		return false, &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -337,8 +337,13 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		return false, fmt.Errorf("affected by add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, aerr)
 	}
 	if dep.Type == types.DepBlocks || dep.Type == types.DepConditionalBlocks {
-		if err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind, opts.PrecheckedTarget); err != nil {
+		directChanged, err := markDirectBlockingDependencySourceInTx(ctx, tx, dep.IssueID, srcIsWisp, dep.DependsOnID, kind)
+		if err != nil {
 			return false, fmt.Errorf("mark direct is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
+		}
+		if directChanged && recomputeResult != nil {
+			recomputeResult.IssueRowsChanged = recomputeResult.IssueRowsChanged || !srcIsWisp
+			recomputeResult.WispRowsChanged = recomputeResult.WispRowsChanged || srcIsWisp
 		}
 		affectedIssues, affectedWisps = RemoveSourceFromAffected(dep.IssueID, srcIsWisp, affectedIssues, affectedWisps)
 	}
@@ -351,15 +356,17 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		return eventWritten, RecordDepEventForPlaneInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor, srcIsWisp)
 	}
-	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
+	marked, err := MarkIsBlockedInTxWithResult(ctx, tx, affectedIssues, affectedWisps)
+	if err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
+	mergeRecomputeIsBlockedResult(recomputeResult, marked)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
 	// as real to a replaying consumer as one added by an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	return eventWritten, RecordDepEventForPlaneInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor, srcIsWisp)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -386,7 +393,7 @@ func removeID(ids []string, remove string) []string {
 }
 
 //nolint:gosec // G201: table names are selected from fixed issue/wisp tables.
-func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind, precheckedTarget *DepTargetPrecheck) error {
+func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, source string, srcIsWisp bool, target string, targetKind DepTargetKind) (bool, error) {
 	sourceTable := "issues"
 	if srcIsWisp {
 		sourceTable = "wisps"
@@ -398,23 +405,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	case DepTargetWisp:
 		targetTable = "wisps"
 	default:
-		return nil
-	}
-
-	if precheckedTarget != nil {
-		// The target row lives on another session; the EXISTS gate below
-		// would miss it there. Its openness is already known, so gate in Go
-		// and mark the source (whose table always matches tx) directly.
-		if types.Status(precheckedTarget.Status) == types.StatusClosed || types.Status(precheckedTarget.Status) == types.StatusPinned {
-			return nil
-		}
-		_, err := tx.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
-			WHERE s.id = ?
-			  AND s.is_blocked = 0
-			  AND s.status <> 'closed' AND s.status <> 'pinned'
-		`, sourceTable), source)
-		return err
+		return false, nil
 	}
 
 	// MySQL 8.0+ rejects UPDATE <T> ... WHERE EXISTS (SELECT FROM <T> ...)
@@ -423,7 +414,7 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 	// targetTable. Wrapping the inner SELECT in a derived table makes MySQL
 	// treat it as an independent rowset, satisfying the restriction. Dolt
 	// accepts both forms, so this is a no-op there.
-	_, err := tx.ExecContext(ctx, fmt.Sprintf(`
+	result, err := tx.ExecContext(ctx, fmt.Sprintf(`
 		UPDATE %s s SET s.is_blocked = 1, s.updated_at = s.updated_at
 		WHERE s.id = ?
 		  AND s.is_blocked = 0
@@ -435,7 +426,11 @@ func markDirectBlockingDependencySourceInTx(ctx context.Context, tx *sql.Tx, sou
 		    WHERE t.status <> 'closed' AND t.status <> 'pinned'
 		  )
 	`, sourceTable, targetTable), source, target)
-	return err
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows > 0, err
 }
 
 // CheckDependencyCycleInTx rejects self-dependencies and cycles across the
@@ -580,25 +575,51 @@ func isAncestorInTx(ctx context.Context, tx DBTX, node, candidate string, depTab
 }
 
 func DeleteWispFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispID string) error {
-	if _, err := tx.ExecContext(ctx,
-		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID); err != nil {
-		return fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
+	_, err := DeleteWispFromDependenciesInTxWithResult(ctx, tx, wispID)
+	return err
+}
+
+// DeleteWispFromDependenciesInTxWithResult reports whether the explicit
+// cross-plane cleanup changed the durable dependencies table.
+func DeleteWispFromDependenciesInTxWithResult(ctx context.Context, tx *sql.Tx, wispID string) (bool, error) {
+	result, err := tx.ExecContext(ctx,
+		"DELETE FROM dependencies WHERE depends_on_wisp_id = ?", wispID)
+	if err != nil {
+		return false, fmt.Errorf("delete wisp %s from dependencies: %w", wispID, err)
 	}
-	return nil
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count dependencies removed for wisp %s: %w", wispID, err)
+	}
+	return rows > 0, nil
 }
 
 //nolint:gosec // G201: inClause contains only ? placeholders
 func DeleteWispsFromDependenciesInTx(ctx context.Context, tx *sql.Tx, wispIDs []string) error {
+	_, err := DeleteWispsFromDependenciesInTxWithResult(ctx, tx, wispIDs)
+	return err
+}
+
+// DeleteWispsFromDependenciesInTxWithResult is the batched result-reporting
+// form of DeleteWispFromDependenciesInTxWithResult.
+//
+//nolint:gosec // G201: inClause contains only ? placeholders
+func DeleteWispsFromDependenciesInTxWithResult(ctx context.Context, tx *sql.Tx, wispIDs []string) (bool, error) {
 	if len(wispIDs) == 0 {
-		return nil
+		return false, nil
 	}
 	inClause, args := buildSQLInClause(wispIDs)
-	if _, err := tx.ExecContext(ctx,
+	result, err := tx.ExecContext(ctx,
 		fmt.Sprintf("DELETE FROM dependencies WHERE depends_on_wisp_id IN (%s)", inClause),
-		args...); err != nil {
-		return fmt.Errorf("delete wisps from dependencies: %w", err)
+		args...)
+	if err != nil {
+		return false, fmt.Errorf("delete wisps from dependencies: %w", err)
 	}
-	return nil
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("count dependencies removed for wisps: %w", err)
+	}
+	return rows > 0, nil
 }
 
 // Dependency target rewrites reinsert matching rows because Dolt can leave the
@@ -922,7 +943,20 @@ func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, n
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
-	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil)
+	result, err := RemoveDependencyInTxWithResult(ctx, tx, issueID, dependsOnID, actor, emitEvent)
+	return result.EventWritten, err
+}
+
+// RemoveDependencyInTxWithResult is RemoveDependencyInTx with complete
+// per-plane derived-row change reporting.
+func RemoveDependencyInTxWithResult(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (DependencyMutationResult, error) {
+	var recomputed RecomputeIsBlockedResult
+	eventWritten, err := removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, &recomputed)
+	return DependencyMutationResult{
+		EventWritten:     eventWritten,
+		IssueRowsChanged: recomputed.IssueRowsChanged,
+		WispRowsChanged:  recomputed.WispRowsChanged,
+	}, err
 }
 
 func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
@@ -980,7 +1014,7 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
 	// consumer as one from an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
+	return eventWritten, RecordDepEventForPlaneInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor, isWisp)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {

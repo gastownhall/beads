@@ -32,10 +32,17 @@ import (
 //
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
 func CheckExpectedFieldsInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string) error {
+	isWisp := IsActiveWispInTx(ctx, tx, id)
+	return CheckExpectedFieldsForPlaneInTx(ctx, tx, id, expectedAssignee, expectedStatus, isWisp)
+}
+
+// CheckExpectedFieldsForPlaneInTx performs the semantic-field preconditions
+// against the caller-selected aggregate. It prevents a dual-resident ID from
+// being checked on one plane and updated on its twin.
+func CheckExpectedFieldsForPlaneInTx(ctx context.Context, tx DBTX, id string, expectedAssignee, expectedStatus *string, isWisp bool) error {
 	if expectedAssignee == nil && expectedStatus == nil {
 		return nil
 	}
-	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	var assignee sql.NullString

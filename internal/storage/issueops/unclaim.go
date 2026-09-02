@@ -38,7 +38,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
-	oldIssue, err := GetIssueInTx(ctx, tx, id)
+	oldIssue, err := GetIssueForPlaneInTx(ctx, tx, id, isWisp)
 	if err != nil {
 		return fmt.Errorf("failed to get issue for unclaim: %w", err)
 	}
@@ -95,7 +95,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 		// The pre-checks passed, so a 0-row result means the row changed
 		// underneath us: re-read to disambiguate an ownership change from a
 		// status change. actorMatches, not verbatim, mirrors the precheck above.
-		current, gerr := GetIssueInTx(ctx, tx, id)
+		current, gerr := GetIssueForPlaneInTx(ctx, tx, id, isWisp)
 		if gerr != nil {
 			return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 		}
@@ -106,7 +106,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 		return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 	}
 
-	return finishUnclaimInTx(ctx, tx, eventTable, id, actor, oldIssue)
+	return finishUnclaimInTx(ctx, tx, eventTable, id, actor, oldIssue, isWisp)
 }
 
 // finishUnclaimInTx applies the post-UPDATE half of a release shared by
@@ -114,7 +114,7 @@ func UnclaimIssueInTx(ctx context.Context, tx DBTX, id string, actor string, for
 // no-op when none exists, e.g. a wisp or an open-but-assigned issue that was
 // never leased) and records the "unclaimed" event. The row mutation
 // (assignee/status/started_at/row_lock) must already have been applied in tx.
-func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id string, actor string, oldIssue *types.Issue) error {
+func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id string, actor string, oldIssue *types.Issue, isWisp bool) error {
 	if err := DeleteLeaseInTx(ctx, tx, id); err != nil {
 		return err
 	}
@@ -130,7 +130,7 @@ func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id strin
 	// A release changes assignee and status, so it journals as an update. Both
 	// unclaim entry points funnel through here after their CAS succeeded, so
 	// this covers the conditional release too.
-	return RecordEventInTx(ctx, tx, EventUpdate, id, actor)
+	return RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, isWisp)
 }
 
 // UnclaimIssueIfAssigneeInTx atomically releases a claim only while the issue is
@@ -160,7 +160,7 @@ func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor s
 	isWisp := IsActiveWispInTx(ctx, tx, id)
 	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
 
-	oldIssue, err := GetIssueInTx(ctx, tx, id)
+	oldIssue, err := GetIssueForPlaneInTx(ctx, tx, id, isWisp)
 	if err != nil {
 		return fmt.Errorf("failed to get issue for unclaim: %w", err)
 	}
@@ -214,7 +214,7 @@ func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor s
 		// mid-tx). Re-read and disambiguate, mirroring UnclaimIssueInTx: a
 		// mismatched holder (under actorMatches) is the CAS verdict
 		// (ErrAssigneeMismatch), otherwise the status is no longer releasable.
-		current, gerr := GetIssueInTx(ctx, tx, id)
+		current, gerr := GetIssueForPlaneInTx(ctx, tx, id, isWisp)
 		if gerr != nil {
 			return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 		}
@@ -224,5 +224,5 @@ func UnclaimIssueIfAssigneeInTx(ctx context.Context, tx DBTX, id string, actor s
 		return fmt.Errorf("failed to unclaim issue %s: no matching row", id)
 	}
 
-	return finishUnclaimInTx(ctx, tx, eventTable, id, actor, oldIssue)
+	return finishUnclaimInTx(ctx, tx, eventTable, id, actor, oldIssue, isWisp)
 }

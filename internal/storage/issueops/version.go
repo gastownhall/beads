@@ -27,6 +27,13 @@ import (
 //nolint:gosec // G201: table name comes from WispTableRouting (hardcoded constants)
 func CheckVersionInTx(ctx context.Context, tx DBTX, id string, expected int64) error {
 	isWisp := IsActiveWispInTx(ctx, tx, id)
+	return CheckVersionForPlaneInTx(ctx, tx, id, expected, isWisp)
+}
+
+// CheckVersionForPlaneInTx performs the row-version precondition against the
+// caller-selected issue plane. The explicit form prevents a dual-resident ID
+// from being checked on one aggregate and mutated on its twin.
+func CheckVersionForPlaneInTx(ctx context.Context, tx DBTX, id string, expected int64, isWisp bool) error {
 	issueTable, _, _, _ := WispTableRouting(isWisp)
 
 	// row_lock is NOT NULL DEFAULT 0, but scan defensively so a NULL maps to 0

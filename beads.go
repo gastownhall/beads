@@ -70,15 +70,20 @@ type DependencyAddOptions = storage.DependencyAddOptions
 // the DependencyAddOptions/AddDependencyWithOptions split.
 type DependencyRemoveOptions = storage.DependencyRemoveOptions
 
-// CloseIssueOptions carries the optional inputs to Storage.CloseIssueChecked —
-// an atomic, guarded close that refuses a still-blocked issue with
-// ErrCloseBlocked unless Force is set. Exported so consumers can name it without
-// importing internal/storage.
+// CloseIssueOptions carries the optional inputs to Storage.CloseIssueChecked
+// and Transaction.CloseIssueChecked — an atomic, guarded close that refuses a
+// still-blocked issue with ErrCloseBlocked or a parent with open children with
+// ErrCloseOpenChildren unless Force is set. Exported so consumers can name it
+// without importing internal/storage.
 type CloseIssueOptions = storage.CloseIssueOptions
 
 // CloseIssueResult reports the outcome of Storage.CloseIssueChecked. Unchanged
 // is true when the issue was already closed (idempotent no-op).
 type CloseIssueResult = storage.CloseIssueResult
+
+// CloseOpenChildrenError reports the issue and child count behind an
+// ErrCloseOpenChildren refusal.
+type CloseOpenChildrenError = storage.CloseOpenChildrenError
 
 // UpdateIssueOptions carries the optional inputs to Storage.UpdateIssueChecked —
 // an update with an optional ExpectedVersion compare-and-swap that refuses a
@@ -506,13 +511,14 @@ const MaxFieldLen = types.MaxFieldLen
 // on message text. Each is an ALIAS of the internal sentinel, so the identity
 // is preserved across the package boundary.
 var (
-	ErrNotFound        = storage.ErrNotFound
-	ErrAlreadyClaimed  = storage.ErrAlreadyClaimed
-	ErrNotClaimable    = storage.ErrNotClaimable
-	ErrCloseBlocked    = storage.ErrCloseBlocked
-	ErrVersionMismatch = storage.ErrVersionMismatch
-	ErrSelfDependency  = domain.ErrSelfDependency
-	ErrDependencyCycle = domain.ErrDependencyCycle
+	ErrNotFound          = storage.ErrNotFound
+	ErrAlreadyClaimed    = storage.ErrAlreadyClaimed
+	ErrNotClaimable      = storage.ErrNotClaimable
+	ErrCloseBlocked      = storage.ErrCloseBlocked
+	ErrCloseOpenChildren = storage.ErrCloseOpenChildren
+	ErrVersionMismatch   = storage.ErrVersionMismatch
+	ErrSelfDependency    = domain.ErrSelfDependency
+	ErrDependencyCycle   = domain.ErrDependencyCycle
 	// ErrDependencySourceNotFound and ErrDependencyTargetNotFound are the two
 	// endpoint-existence refusals AddDependency and AddDependencies raise; the
 	// typed value carrying the missing id is DependencyEndpointNotFoundError.

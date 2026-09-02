@@ -3,6 +3,7 @@ package issueops
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"sort"
@@ -335,17 +336,27 @@ type UpdateResult struct {
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func UpdateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, true)
+	isWisp := IsActiveWispInTx(ctx, tx, id)
+	return updateIssueForPlaneInTx(ctx, tx, id, updates, actor, true, isWisp)
+}
+
+// UpdateIssueForPlaneInTx applies normal update semantics to the
+// caller-selected aggregate. A transaction facade that already resolved a
+// dual-resident ID uses this form so the pre-update row, close-policy gate,
+// mutation, audit event, and journal snapshot all stay on that same plane.
+func UpdateIssueForPlaneInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, isWisp bool) (*UpdateResult, error) {
+	return updateIssueForPlaneInTx(ctx, tx, id, updates, actor, true, isWisp)
 }
 
 // UpdateIssueWithoutEventInTx applies normal update semantics without recording
 // an intermediate event. Demotion uses this to preserve the historical event
 // stream: create/update history is copied, then a single demotion event is added.
 func UpdateIssueWithoutEventInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string) (*UpdateResult, error) {
-	return updateIssueInTx(ctx, tx, id, updates, actor, false)
+	isWisp := IsActiveWispInTx(ctx, tx, id)
+	return updateIssueForPlaneInTx(ctx, tx, id, updates, actor, false, isWisp)
 }
 
-func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent bool) (*UpdateResult, error) {
+func updateIssueForPlaneInTx(ctx context.Context, tx DBTX, id string, updates map[string]interface{}, actor string, recordEvent, isWisp bool) (out *UpdateResult, retErr error) {
 	updates = cloneUpdateFields(updates)
 	// Pop the override before anything reads the map as a set of columns. It
 	// has to come out ahead of the no-op filter too: the filter keeps every key
@@ -353,9 +364,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// allowlist and be refused by name.
 	forceClosePolicy := PopForceClosePolicy(updates)
 
-	// Route to correct table.
-	isWisp := IsActiveWispInTx(ctx, tx, id)
-	issueTable, _, eventTable, _ := WispTableRouting(isWisp)
+	issueTable, labelTable, eventTable, _ := WispTableRouting(isWisp)
 
 	// Read the pre-update row inside the transaction and fold any
 	// read-merge-write operations (metadata edits, note appends) into concrete
@@ -367,7 +376,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// transaction — the CLI's old behavior — silently erased concurrent
 	// committed writes to sibling keys (GH audit: 7 of 200 exit-0
 	// --set-metadata writes lost).
-	oldIssue, updates, err := readIssueAndResolveMergeOps(ctx, tx, id, updates)
+	oldIssue, updates, err := readIssueAndResolveMergeOpsForPlane(ctx, tx, issueTable, labelTable, id, updates)
 	if err != nil {
 		return nil, err
 	}
@@ -407,8 +416,30 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	if err != nil {
 		return nil, err
 	}
+	if crossing && closeCheckedSavepointEligible(tx) {
+		savepoint, err := createCloseCheckedSavepoint(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if retErr != nil {
+				if cleanupErr := rollbackAndReleaseCloseCheckedSavepoint(ctx, tx, savepoint); cleanupErr != nil {
+					retErr = fmt.Errorf("discard done-status update savepoint after %v: %w", retErr, cleanupErr)
+				}
+				return
+			}
+			if releaseErr := releaseCloseCheckedSavepoint(ctx, tx, savepoint); releaseErr != nil {
+				out = nil
+				if rollbackErr := rollbackToCloseCheckedSavepoint(ctx, tx, savepoint); rollbackErr != nil {
+					retErr = fmt.Errorf("release done-status update savepoint: %v; rollback to savepoint: %w", releaseErr, rollbackErr)
+					return
+				}
+				retErr = releaseErr
+			}
+		}()
+	}
 	if crossing {
-		if _, err := EnforceClosePolicyInTx(ctx, tx, id, forceClosePolicy); err != nil {
+		if _, err := EnforceClosePolicyForPlaneInTx(ctx, tx, id, forceClosePolicy, isWisp); err != nil {
 			return nil, err
 		}
 	}
@@ -541,7 +572,7 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	// so the journal row carries the settled bead. recordEvent controls the
 	// human-facing audit event only: the journal is a machine replay feed and
 	// must never have a hole punched in it by an audit-suppressing caller.
-	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
+	if err := RecordEventForPlaneInTx(ctx, tx, EventUpdate, id, actor, isWisp); err != nil {
 		return nil, err
 	}
 	return updateResult, nil
@@ -1008,13 +1039,16 @@ func mergeOpStrings(op string, value interface{}, present bool) ([]string, error
 	}
 }
 
-// readIssueAndResolveMergeOps reads the pre-update row in-transaction and folds
+// readIssueAndResolveMergeOpsForPlane reads the pre-update row in-transaction and folds
 // any merge-operation keys (metadata edits, note appends) into concrete column
 // values against that row, returning the row and the rewritten update map. It
-// keeps the read-merge-write plumbing off updateIssueInTx's already-large body.
-func readIssueAndResolveMergeOps(ctx context.Context, tx DBTX, id string, updates map[string]interface{}) (*types.Issue, map[string]interface{}, error) {
-	oldIssue, err := GetIssueInTx(ctx, tx, id)
+// keeps the read-merge-write plumbing off updateIssueForPlaneInTx's already-large body.
+func readIssueAndResolveMergeOpsForPlane(ctx context.Context, tx DBTX, issueTable, labelTable, id string, updates map[string]interface{}) (*types.Issue, map[string]interface{}, error) {
+	oldIssue, err := getIssueFromTableInTx(ctx, tx, issueTable, labelTable, id)
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			return nil, nil, fmt.Errorf("%w: issue %s", storage.ErrNotFound, id)
+		}
 		return nil, nil, fmt.Errorf("failed to get issue for update: %w", err)
 	}
 	resolved, err := ResolveMergeOps(oldIssue, updates)

@@ -113,6 +113,17 @@ func (t *embeddedTransaction) UpdateIssue(ctx context.Context, id string, update
 	return nil
 }
 
+func (t *embeddedTransaction) TouchIssue(ctx context.Context, id, actor string) error {
+	result, err := issueops.TouchIssueInTx(ctx, t.tx, id, actor)
+	if err != nil {
+		return err
+	}
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(result.IsWisp)
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	return nil
+}
+
 func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason string, actor string, session string) error {
 	issueTable, _, eventTable, _ := issueops.WispTableRouting(issueops.IsActiveWispInTx(ctx, t.tx, id))
 	result, err := issueops.CloseIssueInTx(ctx, t.tx, id, reason, actor, session)
@@ -125,6 +136,24 @@ func (t *embeddedTransaction) CloseIssue(ctx context.Context, id string, reason 
 		t.dirty.MarkDirty("issues")
 	}
 	return nil
+}
+
+func (t *embeddedTransaction) CloseIssueChecked(ctx context.Context, id, actor string, opts storage.CloseIssueOptions) (storage.CloseIssueResult, error) {
+	result, err := issueops.CloseIssueCheckedInTx(ctx, t.tx, id, opts.Reason, actor, opts.Session, opts.Force, opts.ExpectedVersion)
+	if err != nil {
+		return storage.CloseIssueResult{}, err
+	}
+	publicResult := storage.CloseIssueResult{Unchanged: result.AlreadyClosed, OpenChildren: result.OpenChildren}
+	if result.AlreadyClosed {
+		return publicResult, nil
+	}
+	issueTable, _, eventTable, _ := issueops.WispTableRouting(result.IsWisp)
+	t.dirty.MarkDirty(issueTable)
+	t.dirty.MarkDirty(eventTable)
+	if result.IssueRowsChanged {
+		t.dirty.MarkDirty("issues")
+	}
+	return publicResult, nil
 }
 
 // ReopenIssueWithResult lets transaction-scoped callers preserve lifecycle
