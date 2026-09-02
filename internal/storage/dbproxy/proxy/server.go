@@ -84,6 +84,7 @@ const (
 	readyDialTimeout       = 2 * time.Second
 	readyInitialBackoff    = 50 * time.Millisecond
 	readyMaxBackoff        = 1 * time.Second
+	backendDialTimeout     = 5 * time.Second
 	idleWatcherMinInterval = 1 * time.Second
 	backendStopTimeout     = 5 * time.Minute
 	tcpKeepAlivePeriod     = 30 * time.Second
@@ -437,7 +438,9 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	}()
 
 	p.stats.IncBackendDialAttempt()
-	backend, err := p.server.Dial(ctx)
+	dialCtx, cancelDial := context.WithTimeout(ctx, backendDialTimeout)
+	backend, err := p.server.Dial(dialCtx)
+	cancelDial()
 	if err != nil {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()
