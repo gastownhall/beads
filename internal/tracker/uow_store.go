@@ -14,7 +14,17 @@ import (
 // contract. Every operation uses a request-scoped unit of work; lifecycle
 // updates and label replacement remain one atomic transaction.
 func NewUOWStore(provider uow.UnitOfWorkProvider) Store {
-	if provider == nil || (reflect.ValueOf(provider).Kind() == reflect.Ptr && reflect.ValueOf(provider).IsNil()) {
+	if provider == nil {
+		return nil
+	}
+	v := reflect.ValueOf(provider)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Ptr, reflect.Slice:
+		if v.IsNil() {
+			return nil
+		}
+	}
+	if v.IsValid() == false {
 		return nil
 	}
 	return &uowStore{provider: provider}
