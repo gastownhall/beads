@@ -2,8 +2,10 @@ package tracker
 
 import (
 	"context"
+	"errors"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -41,5 +43,19 @@ func TestNewStorePreservesNarrowStore(t *testing.T) {
 	stub := contractStoreStub{}
 	if got := NewStore(stub); got == nil {
 		t.Fatal("NewStore returned nil for a Store implementation")
+	}
+}
+
+type failingUOWProvider struct{ err error }
+
+func (p failingUOWProvider) NewUOW(context.Context) (uow.UnitOfWork, error) { return nil, p.err }
+func (p failingUOWProvider) Close(context.Context) error                    { return nil }
+
+func TestUOWStorePropagatesProviderFailure(t *testing.T) {
+	want := errors.New("provider unavailable")
+	store := NewUOWStore(failingUOWProvider{err: want})
+	_, err := store.GetConfig(context.Background(), "linear.team_id")
+	if !errors.Is(err, want) {
+		t.Fatalf("GetConfig error = %v, want %v", err, want)
 	}
 }

@@ -131,11 +131,6 @@ type Engine struct {
 	warnings []string
 }
 
-type lifecycleStorage interface {
-	storage.Storage
-	storage.IssueLifecycleStore
-}
-
 // NewEngine creates a new sync engine for the given tracker and storage.
 func NewEngine(tracker IssueTracker, store interface{}, actor string) *Engine {
 	return &Engine{
@@ -783,7 +778,21 @@ func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue
 // never see this optional capability even when the concrete store underneath
 // implements it — the same reason cmd/bd type-asserts through
 // storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
-func externalRefHistoryQuerier(store Store) (storage.ExternalRefHistoryQuerier, bool) {
+func externalRefHistoryQuerier(store Store) (ExternalRefHistoryStore, bool) {
+	if q, ok := store.(ExternalRefHistoryStore); ok {
+		return q, true
+	}
+	if direct, ok := store.(*directStore); ok {
+		if q, ok := direct.Storage.(ExternalRefHistoryStore); ok {
+			return q, true
+		}
+		if dolt, ok := direct.Storage.(storage.DoltStorage); ok {
+			if q, ok := storage.UnwrapStore(dolt).(ExternalRefHistoryStore); ok {
+				return q, true
+			}
+		}
+		return nil, false
+	}
 	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
 		return q, true
 	}
