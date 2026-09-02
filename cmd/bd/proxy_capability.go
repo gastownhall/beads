@@ -98,6 +98,7 @@ type ProxyCapabilityRow struct {
 }
 
 var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
+	"doctor":                 refused("proxy.doctor.unsupported", "doctor is not supported in proxied-server mode"),
 	"backup":                 refused("proxy.backup.unsupported", "backup is not supported in proxied-server mode"),
 	"restore":                refused("proxy.restore.unsupported", "restore is not supported in proxied-server mode"),
 	"diff":                   refused("proxy.diff.unsupported", "diff is not supported in proxied-server mode"),

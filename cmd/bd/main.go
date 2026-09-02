@@ -1256,6 +1256,9 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
+			if cmdName == "doctor" && usesProxiedServer() {
+				return validateProxyMaintenanceBeforeProvider(cmd)
+			}
 			if beadsDir == "" {
 				beadsDir = beads.FindBeadsDir()
 			}
