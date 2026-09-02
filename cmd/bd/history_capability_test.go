@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -35,5 +37,32 @@ func TestSyncRefusesBeforeProvider(t *testing.T) {
 	}
 	if code, ok := exitCodeFromError(err); !ok || code != 1 {
 		t.Fatalf("sync exit = %#v", err)
+	}
+}
+
+func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
+	oldProvider := uowProvider
+	oldJSON := jsonOutput
+	t.Cleanup(func() { uowProvider = oldProvider; jsonOutput = oldJSON })
+	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt commit", "dolt remote add", "sync"} {
+		parts := strings.Split(path, " ")
+		root := &cobra.Command{Use: "bd"}
+		cmd := &cobra.Command{Use: parts[0]}
+		root.AddCommand(cmd)
+		for _, part := range parts[1:] {
+			child := &cobra.Command{Use: part}
+			cmd.AddCommand(child)
+			cmd = child
+		}
+		uowProvider = nil
+		jsonOutput = true
+		out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
+		var got map[string]any
+		if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] == nil {
+			t.Fatalf("%s refusal = %q (%v)", path, out, err)
+		}
+		if uowProvider != nil {
+			t.Fatal("refusal initialized provider")
+		}
 	}
 }
