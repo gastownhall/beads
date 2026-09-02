@@ -163,6 +163,23 @@ func TestWrapUOWProviderFiltersProxiedReadyWork(t *testing.T) {
 	}
 }
 
+func TestWrapUOWProviderKeepsUnitOfWorkUnwrappable(t *testing.T) {
+	inner := &fakeUOW{}
+	provider := WrapUOWProvider(&fakeUOWProvider{uw: inner}, nil, nil)
+	wrapped, err := provider.NewUOW(t.Context())
+	if err != nil {
+		t.Fatalf("NewUOW: %v", err)
+	}
+
+	unwrapper, ok := wrapped.(interface{ Unwrap() uow.UnitOfWork })
+	if !ok {
+		t.Fatalf("wrapped UOW %T does not expose Unwrap", wrapped)
+	}
+	if got := unwrapper.Unwrap(); got != inner {
+		t.Fatalf("Unwrap() = %T, want the wrapped UOW", got)
+	}
+}
+
 func TestWrapUOWProviderPreservesIssueReader(t *testing.T) {
 	inner := &fakeUOWProvider{uw: &fakeUOW{}}
 	provider := WrapUOWProvider(inner, nil, nil)

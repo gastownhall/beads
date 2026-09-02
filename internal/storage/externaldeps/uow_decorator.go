@@ -186,6 +186,11 @@ type unitOfWork struct {
 
 var _ uow.UnitOfWork = (*unitOfWork)(nil)
 
+// Unwrap keeps the transaction runner reachable to infrastructure roles such
+// as import. The policy only decorates use-case methods, so peeling it does
+// not bypass a mutation guard for callers that use the domain surface.
+func (u *unitOfWork) Unwrap() uow.UnitOfWork { return u.UnitOfWork }
+
 func (u *unitOfWork) IssueUseCase() domain.IssueUseCase {
 	if u.issue == nil {
 		u.issue = &issueUseCase{
