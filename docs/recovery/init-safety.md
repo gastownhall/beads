@@ -122,7 +122,9 @@ for why the token is never echoed in `bd`'s error messages.
 
 ## init-local-exists
 
-**Exit code:** `11` (`ExitLocalExistsRefused`)
+**Exit code:** `12` (`ExitDestroyTokenMissing`) for the non-interactive
+refusal below; `11` (`ExitLocalExistsRefused`) when you decline the
+interactive confirmation.
 
 **Symptom**
 
