@@ -142,11 +142,23 @@ func TestRunLinearTeamsAPIOnlyDoesNotOpenLocalStore(t *testing.T) {
 func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
 	t.Setenv("LINEAR_API_KEY", "api-key")
 	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
+	oldTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() != "https://proxy.example/graphql" {
+			return nil, fmt.Errorf("unexpected endpoint %s", req.URL)
+		}
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"teams":{"nodes":[]}}}`)), Header: make(http.Header), Request: req}, nil
+	})
 	client, err := buildLinearClientAPIOnly(context.Background(), "", st)
 	if err != nil {
 		t.Fatalf("build client: %v", err)
 	}
-	if client == nil {
-		t.Fatal("nil client")
+	if _, err := client.FetchTeams(context.Background()); err != nil {
+		t.Fatalf("fetch teams: %v", err)
 	}
 }
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
