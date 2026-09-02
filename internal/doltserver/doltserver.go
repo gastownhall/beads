@@ -543,10 +543,13 @@ func ReadPortFile(beadsDir string) int {
 }
 
 // ManagesLiveServerOnPort reports whether beadsDir has a dolt sql-server that
-// bd started FOR IT and that is still alive on port. It is the affirmative
-// proof of ownership: bd writes both state files in Start(), so a workspace
-// that can show a live PID beside a port file naming the port a caller is
-// actually connected on is a workspace whose server bd brought up.
+// bd brought under management FOR IT and that is still alive on port. It is
+// the affirmative proof of ownership available from local state: bd writes
+// both state files in Start(), so a workspace that can show a live PID beside
+// a port file naming the port a caller is actually connected on is a workspace
+// whose server bd started — or adopted — for itself. Two file reads and a
+// signal 0 cannot separate those two, which is why the invariant is stated
+// that way; see the residual gaps below.
 //
 // The absence of that proof is what matters at the call sites. An operator who
 // points bd at an endpoint — through BEADS_DOLT_SERVER_PORT, a config.yaml
@@ -561,15 +564,34 @@ func ReadPortFile(beadsDir string) int {
 // connection must not mutate a workspace's server state as a side effect, so
 // this duplicates the two cheap checks rather than reusing IsRunning.
 //
-// It stops short of IsRunning's isDoltProcess() command-name check, which
-// shells out to `ps` (PowerShell on Windows) — measured at hundreds of
-// milliseconds on a busy machine, and this runs on every writable open. The
-// residual gap is a recycled PID: the recorded server died, an unrelated live
-// process inherited its PID number, AND the port file still names the port
-// some other server now answers on. That is strictly narrower than the gap
-// left by trusting the port file alone, and it fails toward "owned" only when
-// all three coincide. Callers needing certainty over latency should use
-// IsRunning.
+// Two residual gaps remain, both of which answer "owned" for a server bd did
+// not launch. Both are narrower than what trusting the port file alone — or
+// ResolveServerMode alone — left open, and #6123 owns closing them as part of
+// reconciling the four resolvers that answer "is this dolt server ours?".
+//
+// Adopted server (the wider of the two). Start() writes these same two state
+// files for a server it adopts rather than launches: reclaimPort returns the
+// PID of a dolt process whose CWD is this workspace's dolt dir, and Start
+// records that foreign PID and the port before reporting Running. So an
+// operator running `dolt sql-server` over .beads/dolt under systemd or a
+// container — exactly the operator portConflictDiagnostics addresses — mints
+// this proof by typing `bd dolt start`. Closing it means recording adoption
+// distinctly from launch (skip the write on the adopt branch, or mark it so
+// this helper declines it), which is a behavior change on the auto-start path
+// and belongs with #6123 rather than in a gate-hardening patch. It is unix-only
+// in practice: isProcessInDir returns false on Windows, so reclaimPort never
+// takes the CWD-match adopt branch there.
+//
+// Recycled PID (narrower). This stops short of IsRunning's isDoltProcess()
+// command-name check, which shells out to `ps` (PowerShell on Windows) —
+// measured at hundreds of milliseconds on a busy machine, and this runs on
+// every writable open. So: the recorded server died, an unrelated live process
+// inherited its PID number, AND the port file still names the port some other
+// server now answers on. It fails toward "owned" only when all three coincide.
+// Note that isDoltProcess here would close only this gap, not the adopted-server
+// one — reclaimPort already requires isDoltProcess before it will adopt.
+//
+// Callers needing certainty over latency should use IsRunning.
 func ManagesLiveServerOnPort(beadsDir string, port int) bool {
 	if beadsDir == "" || port <= 0 {
 		return false
