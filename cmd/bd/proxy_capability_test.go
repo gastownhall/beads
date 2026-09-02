@@ -103,7 +103,13 @@ func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	oldProvider := uowProvider
 	uowProvider = nil
 	t.Cleanup(func() { uowProvider = oldProvider })
-	_ = validateProxyMaintenanceBeforeProvider(hooks)
+	err := validateProxyMaintenanceBeforeProvider(hooks)
+	if err == nil {
+		t.Fatal("expected typed maintenance refusal")
+	}
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Fatalf("exit = %v, want 1", err)
+	}
 	after, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
