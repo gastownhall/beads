@@ -519,6 +519,13 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 	} else {
 		issue.UpdatedAt = issue.UpdatedAt.UTC()
 	}
+	normalizeTimePtrToUTC(issue.StartedAt)
+	normalizeTimePtrToUTC(issue.ClosedAt)
+	normalizeTimePtrToUTC(issue.LeaseExpiresAt)
+	normalizeTimePtrToUTC(issue.HeartbeatAt)
+	normalizeTimePtrToUTC(issue.DueAt)
+	normalizeTimePtrToUTC(issue.DeferUntil)
+	normalizeTimePtrToUTC(issue.CompactedAt)
 
 	// Ensure closed issues have a closed_at timestamp.
 	if issue.Status == types.StatusClosed && issue.ClosedAt == nil {
@@ -537,6 +544,12 @@ func PrepareIssueForInsert(issue *types.Issue, customStatuses, customTypes []str
 		issue.ContentHash = issue.ComputeContentHash()
 	}
 	return nil
+}
+
+func normalizeTimePtrToUTC(value *time.Time) {
+	if value != nil && !value.IsZero() {
+		*value = value.UTC()
+	}
 }
 
 // ValidateIssueIDPrefix validates that the issue ID matches the configured prefix
@@ -776,6 +789,8 @@ func PersistComments(ctx context.Context, tx DBTX, issue *types.Issue) (CreateIs
 				return result, fmt.Errorf("failed to insert comment for %s: %w", issue.ID, err)
 			}
 			createdAt = stamped
+		} else {
+			createdAt = createdAt.UTC()
 		}
 		createdAtText := FormatAuxTime(createdAt)
 		if comment.ID == "" {
@@ -906,10 +921,7 @@ func PersistDependenciesWithOptionsResult(ctx context.Context, tx DBTX, issues [
 				return result, fmt.Errorf("invalid dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 			}
 
-			createdAt := dep.CreatedAt
-			if createdAt.IsZero() {
-				createdAt = time.Now().UTC()
-			}
+			createdAt := dependencyCreatedAt(dep)
 			// Deterministic id from (issue_id, target) keeps bulk-imported edges
 			// merge-safe across clones — two clones importing the same JSONL get the
 			// same primary key, not two random UUIDs that collide on uk_dep_* (#4259).
@@ -963,6 +975,13 @@ func dependencyCreatedBy(dep *types.Dependency, actor string) string {
 		return dep.CreatedBy
 	}
 	return actor
+}
+
+func dependencyCreatedAt(dep *types.Dependency) time.Time {
+	if dep == nil || dep.CreatedAt.IsZero() {
+		return time.Now().UTC()
+	}
+	return dep.CreatedAt.UTC()
 }
 
 func recordSkippedDependency(opts storage.BatchCreateOptions, dep *types.Dependency, reason string) {
