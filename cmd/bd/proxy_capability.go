@@ -162,6 +162,9 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
 	if strings.Contains(path, " ") {
+		if class, ok := LookupHistoryCapability(path); ok && class == HistoryDirectOnly {
+			return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.history.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
+		}
 		return nil
 	}
 	if rule, ok := proxyMaintenanceRefusals[name]; ok {
