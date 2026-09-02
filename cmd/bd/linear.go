@@ -950,6 +950,8 @@ func runLinearTeams(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return HandleError("database not available: %v", err)
 		}
+	} else if store != nil {
+		configStore = tracker.NewStore(store)
 	}
 	client, err := buildLinearClientAPIOnly(ctx, "", configStore)
 	if err != nil {
