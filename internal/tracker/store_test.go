@@ -61,9 +61,17 @@ func TestUOWStorePropagatesProviderFailure(t *testing.T) {
 	}
 }
 
+func TestNewUOWStoreTypedNilIsSafe(t *testing.T) {
+	var provider *failingUOWProvider
+	if got := NewUOWStore(provider); got != nil {
+		t.Fatalf("typed nil provider returned %T", got)
+	}
+}
+
 type lifecycleStoreFake struct {
 	storage.Storage
-	labels []string
+	labels    []string
+	updateErr error
 }
 
 func (s *lifecycleStoreFake) RunInIssueLifecycleTransaction(ctx context.Context, _ string, fn func(storage.IssueLifecycleTransaction) error) error {
@@ -76,7 +84,7 @@ type lifecycleTxFake struct {
 }
 
 func (tx *lifecycleTxFake) UpdateIssue(context.Context, string, map[string]interface{}, string) error {
-	return nil
+	return tx.store.updateErr
 }
 func (tx *lifecycleTxFake) GetLabels(context.Context, string) ([]string, error) {
 	return append([]string(nil), tx.store.labels...), nil
@@ -113,5 +121,16 @@ func TestDirectStoreApplyIssueUpdateDistinguishesOmittedAndEmptyLabels(t *testin
 	}
 	if len(underlying.labels) != 0 {
 		t.Fatalf("empty labels did not clear state: %v", underlying.labels)
+	}
+}
+
+func TestDirectStoreApplyIssueUpdateFailureDoesNotTouchLabels(t *testing.T) {
+	underlying := &lifecycleStoreFake{labels: []string{"keep"}, updateErr: errors.New("update failed")}
+	store := NewStore(underlying).(*directStore)
+	if err := store.ApplyIssueUpdate(context.Background(), "bd-1", nil, []string{}, "actor"); !errors.Is(err, underlying.updateErr) {
+		t.Fatalf("error = %v", err)
+	}
+	if len(underlying.labels) != 1 || underlying.labels[0] != "keep" {
+		t.Fatalf("failed update changed labels: %v", underlying.labels)
 	}
 }

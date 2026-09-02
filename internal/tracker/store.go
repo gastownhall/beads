@@ -51,6 +51,9 @@ func NewStore(value interface{}) Store {
 
 type directStore struct{ storage.Storage }
 
+var _ Store = (*directStore)(nil)
+var _ IssueUpdater = (*directStore)(nil)
+
 func (s *directStore) ApplyIssueUpdate(ctx context.Context, id string, updates map[string]interface{}, labels []string, actor string) error {
 	dolt, ok := s.Storage.(storage.IssueLifecycleStore)
 	if !ok {
