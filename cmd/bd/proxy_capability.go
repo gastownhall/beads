@@ -1,6 +1,10 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/spf13/cobra"
+)
 
 // ProxyCapability identifies a command feature whose availability differs by
 // storage topology.
@@ -21,26 +25,158 @@ const (
 	ProxyModeProxied ProxyMode = "proxied-server"
 )
 
+// ProxyTopology distinguishes the provider deployment shape. Capability
+// policy is currently identical across proxied shapes, but retaining this
+// dimension prevents an external TCP server from being conflated with a local
+// managed one as more surfaces are added.
+type ProxyTopology string
+
+const (
+	ProxyTopologyAny          ProxyTopology = "any"
+	ProxyTopologyManagedLocal ProxyTopology = "managed-local"
+	ProxyTopologyExternalTCP  ProxyTopology = "external-tcp"
+	ProxyTopologyExternalUnix ProxyTopology = "external-unix"
+)
+
+// ProxyCapabilityOutcome describes what the front door does with a feature.
+type ProxyCapabilityOutcome string
+
+const (
+	ProxyOutcomeHonored   ProxyCapabilityOutcome = "honored"
+	ProxyOutcomeRefused   ProxyCapabilityOutcome = "refused"
+	ProxyOutcomeDelegated ProxyCapabilityOutcome = "delegated"
+	ProxyOutcomeNA        ProxyCapabilityOutcome = "N/A"
+)
+
+// proxyCapabilityRule is the stable contract for one command/argument/topology
+// capability. Mutates is false for all refusals; ExitCode is used by the CLI
+// when rendering a typed refusal.
 type proxyCapabilityRule struct {
-	Supported bool
-	Message   string
+	Outcome  ProxyCapabilityOutcome
+	Code     string
+	Message  string
+	ExitCode int
+	Mutates  bool
+}
+
+// ProxyCapabilityError is a machine-identifiable front-door refusal.
+type ProxyCapabilityError struct {
+	Code     string
+	Message  string
+	ExitCode int
+	Mutates  bool
+}
+
+func (e *ProxyCapabilityError) Error() string { return e.Message }
+
+func refused(code, message string) proxyCapabilityRule {
+	return proxyCapabilityRule{Outcome: ProxyOutcomeRefused, Code: code, Message: message, ExitCode: 1}
+}
+
+func honored() proxyCapabilityRule {
+	return proxyCapabilityRule{Outcome: ProxyOutcomeHonored, ExitCode: 0}
+}
+
+func notApplicable() proxyCapabilityRule { return proxyCapabilityRule{Outcome: ProxyOutcomeNA} }
+
+// ProxyCapabilityKey identifies a command's flag/argument on a topology.
+// Argument is intentionally explicit (for example, "--watch"), allowing
+// callers and tests to distinguish a command that lacks a flag (N/A) from one
+// that refuses it.
+type ProxyCapabilityKey struct {
+	Command  string
+	Argument string
+	Mode     ProxyMode
+	Topology ProxyTopology
+}
+
+// ProxyCapabilityRow is an inspectable command/argument/topology policy row.
+type ProxyCapabilityRow struct {
+	ProxyCapabilityKey
+	Rule proxyCapabilityRule
+}
+
+// LookupProxyCapabilityFor returns the command/argument-specific rule. An
+// absent command row falls back to the topology-wide default.
+func LookupProxyCapabilityFor(command, argument string, mode ProxyMode) (proxyCapabilityRule, bool) {
+	capability := ProxyCapability(argument)
+	if len(argument) > 2 && argument[:2] == "--" {
+		capability = ProxyCapability(argument[2:])
+	}
+	if commands, ok := proxyCommandCapabilities[command]; ok {
+		if modes, ok := commands[mode]; ok {
+			if rule, ok := modes[capability]; ok {
+				return rule, true
+			}
+		}
+	}
+	return LookupProxyCapability(mode, capability)
 }
 
 var proxyCapabilityMatrix = map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
 	ProxyModeDirect: {
-		ProxyCapReadonly: {Supported: true}, ProxyCapMaxRows: {Supported: true},
-		ProxyCapWatch: {Supported: true}, ProxyCapRepo: {Supported: true},
+		ProxyCapReadonly: honored(), ProxyCapMaxRows: honored(),
+		ProxyCapWatch: honored(), ProxyCapRepo: honored(),
 	},
 	ProxyModeProxied: {
-		ProxyCapReadonly: {Supported: true}, ProxyCapMaxRows: {Supported: true},
-		ProxyCapWatch: {Message: "watch mode not supported in proxied-server mode"},
-		ProxyCapRepo:  {Message: "--repo is not supported with --proxied-server"},
+		ProxyCapReadonly: refused("proxy.readonly.unsupported", "strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access"),
+		ProxyCapMaxRows:  refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode"),
+		ProxyCapWatch:    refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode"),
+		ProxyCapRepo:     refused("proxy.repo.unsupported", "--repo is not supported with --proxied-server"),
 	},
 }
 
 var proxyCommandCapabilities = map[string]map[ProxyMode]map[ProxyCapability]proxyCapabilityRule{
-	"show": {ProxyModeProxied: {ProxyCapWatch: {Message: "watch mode not supported in proxied-server mode"}}},
-	"list": {ProxyModeProxied: {ProxyCapWatch: {Supported: true}}},
+	"show":            {ProxyModeProxied: {ProxyCapWatch: refused("proxy.watch.unsupported", "watch mode not supported in proxied-server mode")}},
+	"list":            {ProxyModeProxied: {ProxyCapWatch: honored(), ProxyCapMaxRows: honored(), ProxyCapRepo: notApplicable()}},
+	"dep tree":        {ProxyModeProxied: {ProxyCapMaxRows: honored()}},
+	"ready":           {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
+	"graph":           {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
+	"find-duplicates": {ProxyModeProxied: {ProxyCapMaxRows: refused("proxy.max_rows.unsupported", "--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")}},
+}
+
+// proxyCapabilityRows materializes the policy for every supported proxied
+// topology. Keeping rows explicit makes matrix audits and front-door tests
+// deterministic even though the current provider implementations share rules.
+var proxyCapabilityRows = buildProxyCapabilityRows()
+
+func buildProxyCapabilityRows() []ProxyCapabilityRow {
+	topologies := []ProxyTopology{ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix}
+	var rows []ProxyCapabilityRow
+	for _, topology := range topologies {
+		for _, capability := range []ProxyCapability{ProxyCapReadonly, ProxyCapMaxRows, ProxyCapWatch, ProxyCapRepo} {
+			rule, _ := LookupProxyCapability(ProxyModeProxied, capability)
+			rows = append(rows, ProxyCapabilityRow{ProxyCapabilityKey{"", string(capability), ProxyModeProxied, topology}, rule})
+		}
+		for command, modes := range proxyCommandCapabilities {
+			for mode, capabilities := range modes {
+				for capability, rule := range capabilities {
+					rows = append(rows, ProxyCapabilityRow{ProxyCapabilityKey{command, string(capability), mode, topology}, rule})
+				}
+			}
+		}
+	}
+	return rows
+}
+
+// LookupProxyCapabilityAt returns a topology-keyed rule. Unknown topology is
+// rejected; ProxyTopologyAny applies the topology-independent direct policy.
+func LookupProxyCapabilityAt(command, argument string, mode ProxyMode, topology ProxyTopology) (proxyCapabilityRule, bool) {
+	if topology != ProxyTopologyAny && topology != ProxyTopologyManagedLocal && topology != ProxyTopologyExternalTCP && topology != ProxyTopologyExternalUnix {
+		return proxyCapabilityRule{}, false
+	}
+	if len(argument) > 2 && argument[:2] == "--" {
+		argument = argument[2:]
+	}
+	for _, row := range proxyCapabilityRows {
+		if row.Command == command && row.Argument == argument && row.Mode == mode && row.Topology == topology {
+			return row.Rule, true
+		}
+	}
+	if topology == ProxyTopologyAny {
+		return LookupProxyCapabilityFor(command, argument, mode)
+	}
+	return proxyCapabilityRule{}, false
 }
 
 // LookupProxyCapability returns the typed rule for a mode/capability pair.
@@ -63,19 +199,60 @@ func AssertProxyCommandCapability(command string, mode ProxyMode, capability Pro
 	if commands, ok := proxyCommandCapabilities[command]; ok {
 		if modes, ok := commands[mode]; ok {
 			if rule, ok := modes[capability]; ok {
-				if rule.Supported {
+				if rule.Outcome == ProxyOutcomeHonored || rule.Outcome == ProxyOutcomeDelegated {
 					return nil
+				}
+				if rule.Code != "" {
+					return &ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode, Mutates: rule.Mutates}
 				}
 				return fmt.Errorf("%s", rule.Message)
 			}
 		}
 	}
 	rule, ok := LookupProxyCapability(mode, capability)
-	if !ok || !rule.Supported {
+	if !ok || (rule.Outcome != ProxyOutcomeHonored && rule.Outcome != ProxyOutcomeDelegated) {
+		if rule.Code != "" {
+			return &ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode, Mutates: rule.Mutates}
+		}
 		if rule.Message != "" {
 			return fmt.Errorf("%s", rule.Message)
 		}
 		return fmt.Errorf("%s is not supported in %s mode", capability, mode)
+	}
+	return nil
+}
+
+// validateProxyCapabilitiesBeforeProvider runs refusals that can be decided
+// from argv before the proxied provider is opened.
+func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
+	if cmd == nil {
+		return nil
+	}
+	name := cmd.Name()
+	if name == "create" && cmd.Flags().Changed("repo") {
+		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapRepo))
+	}
+	if name == "show" {
+		if watch, _ := cmd.Flags().GetBool("watch"); watch {
+			return HandleProxyCapabilityError(AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
+		}
+	}
+	if name == "ready" {
+		if claim, _ := cmd.Flags().GetBool("claim"); claim {
+			if _, _, err := resolveMaxRows(cmd); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	if name == "ready" || name == "graph" || name == "find-duplicates" {
+		maxRows, _, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if maxRows > 0 {
+			return HandleProxyCapabilityError(AssertProxyCommandCapability(name, ProxyModeProxied, ProxyCapMaxRows))
+		}
 	}
 	return nil
 }
