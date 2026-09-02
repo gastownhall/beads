@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	publicops "github.com/steveyegge/beads/issueops"
+
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -121,7 +123,12 @@ func closeIssueCheckedAfterSavepoint(ctx context.Context, tx DBTX, id, reason, a
 	}
 	result, err := CloseIssueInTx(ctx, tx, id, reason, actor, session)
 	if err != nil {
-		return nil, err
+		// Write phase: the refusal vocabulary is fully decided by the policy
+		// phase above, so any failure inside the close write itself -
+		// including a journal snapshot's post-update ErrNotFound - is
+		// infrastructure for the batch taxonomy, never a per-item refusal.
+		// Single-close callers see the same chain via Unwrap.
+		return nil, publicops.MarkPostWrite(err)
 	}
 	result.OpenChildren = openChildren
 	return result, nil

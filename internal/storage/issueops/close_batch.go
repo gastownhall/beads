@@ -3,8 +3,10 @@ package issueops
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/types"
@@ -33,6 +35,71 @@ func ValidateCloseBatchRequest(request publicops.CloseBatchRequest) error {
 		}
 	}
 	return nil
+}
+
+// CloseRefusalStaysPerItem is the error taxonomy every BatchCloser body
+// applies, single-sourced here so the classification is a contract rather than
+// one backend's habit. It reports whether err is one of the typed close
+// refusals the role doc keeps PER ITEM (issueops/batchcloser.go:87-91): the
+// item's outcome carries it and the loop continues.
+//
+// The per-item vocabulary is exactly the one CloseOutcome.Err promises —
+// ErrNotFound, ErrCloseBlocked and the open-children refusal
+// (*CloseOpenChildrenError, matched through its ErrCloseOpenChildren sentinel).
+// EVERYTHING ELSE is a failure of the REQUEST: context cancellation, driver
+// and transaction errors, and post-write hydration failures all mean the
+// method's own error, no outcomes, and a rollback of every write the batch had
+// staged (batchcloser.go:119-126) — a caller that sees an error never has to
+// wonder which prefix of its list got through, and an infrastructure failure
+// never decays into one item's "refusal".
+//
+// ErrVersionMismatch is deliberately absent: a batch item carries no
+// ExpectedVersion (batchcloser.go:48-53, and deleter.go:74-76 for why the
+// category stays empty), so the precondition vocabulary is unreachable here.
+// The day an item grows one, it joins this list alongside its request field.
+func CloseRefusalStaysPerItem(err error) bool {
+	// Phase outranks sentinel: an error marked publicops.PostWriteError
+	// carries no refusal meaning even when it wraps ErrNotFound - the close
+	// already landed in the transaction (ExecuteClose's hydration reload,
+	// domain closeChecked's reload), so a vanished row is corruption
+	// evidence, not something the caller can act on item-by-item.
+	var pw publicops.PostWriteError
+	if errors.As(err, &pw) {
+		return false
+	}
+	return errors.Is(err, storage.ErrNotFound) ||
+		errors.Is(err, storage.ErrCloseBlocked) ||
+		errors.Is(err, storage.ErrCloseOpenChildren)
+}
+
+// batchCloseHydrationFailureID, when non-nil, names the ONE item whose
+// post-close hydration the batch bodies fail on purpose. It is a TEST SEAM for
+// the conformance contract and nothing else: the mid-batch infrastructure
+// clause (batchcloser.go:119-126) cannot be reached from a fixture's inputs —
+// every deterministic per-item failure is a domain refusal, and a dead context
+// fails before the transaction begins — so the contract arms this seam
+// instead. Production code never sets it; the atomic is only so a parallel
+// test elsewhere in a package cannot race the nil read.
+var batchCloseHydrationFailureID atomic.Pointer[string]
+
+// FailBatchCloseHydrationOf arms the hydration test seam for issueID and
+// returns the disarm. It is called by the per-backend conformance wirings
+// (through BatchCloserFixture.FailHydrationOf), never by production code.
+func FailBatchCloseHydrationOf(issueID string) (disarm func()) {
+	batchCloseHydrationFailureID.Store(&issueID)
+	return func() { batchCloseHydrationFailureID.Store(nil) }
+}
+
+// InducedBatchCloseHydrationFailure reports the armed seam's failure for
+// issueID, or nil. Both batch-close bodies consult it where their real
+// hydration runs, so an induced failure takes the exact path a genuine
+// hydration failure takes — through the taxonomy, not around it.
+func InducedBatchCloseHydrationFailure(issueID string) error {
+	armed := batchCloseHydrationFailureID.Load()
+	if armed == nil || *armed != issueID {
+		return nil
+	}
+	return fmt.Errorf("induced hydration failure for %s (conformance test seam)", issueID)
 }
 
 // CloseBatchCommitMessage is the history entry a batch records. It is the
@@ -104,11 +171,14 @@ func closeOutcomeIsEphemeral(outcome publicops.CloseOutcome) bool {
 // tables changed. It is the store-backed body behind the BatchCloser accessor;
 // the unit-of-work provider has its own, for the same reason Lifecycle does.
 //
-// A per-item failure lands in that item's outcome and the loop CONTINUES —
-// skipping a refused id and committing the survivors is what closing a list of
-// issues has always done, and it is the behavior the CLI's per-id stderr
-// reports. Only a request-level failure aborts, and it aborts by returning an
-// error, which rolls the whole transaction back.
+// A per-item REFUSAL — CloseRefusalStaysPerItem's vocabulary — lands in that
+// item's outcome and the loop CONTINUES: skipping a refused id and committing
+// the survivors is what closing a list of issues has always done, and it is
+// the behavior the CLI's per-id stderr reports. Any OTHER failure is
+// infrastructure and aborts the request by returning an error, which rolls the
+// whole transaction back — including the items that had already closed inside
+// it, so no partial prefix commits and no infrastructure failure is
+// misreported as one item's refusal.
 //
 // claimFilter is request.ClaimNext already translated by the caller's request
 // builder, because this package speaks WorkFilter. A nil filter skips the
@@ -127,7 +197,13 @@ func ExecuteCloseBatch(ctx context.Context, tx *sql.Tx, request publicops.CloseB
 			Session: request.Session,
 			Force:   request.Force,
 		})
+		if err == nil {
+			err = InducedBatchCloseHydrationFailure(item.IssueID)
+		}
 		if err != nil {
+			if !CloseRefusalStaysPerItem(err) {
+				return publicops.CloseBatchResult{}, nil, fmt.Errorf("close batch item %s: %w", item.IssueID, err)
+			}
 			result.Outcomes[i] = publicops.CloseOutcome{IssueID: item.IssueID, Err: err}
 			continue
 		}

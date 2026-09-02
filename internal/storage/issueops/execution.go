@@ -297,7 +297,10 @@ func ExecuteClose(ctx context.Context, tx *sql.Tx, request publicops.CloseReques
 	}
 	hydrated, err := HydrateIssueOperationResult(ctx, tx, attempt.IssueID, false)
 	if err != nil {
-		return publicops.CloseResult{}, nil, err
+		// Post-write phase: the close is already staged in tx. Mark it so
+		// the batch taxonomy cannot mistake a reload ErrNotFound for a
+		// pre-write refusal and commit the staged close as a "skip".
+		return publicops.CloseResult{}, nil, publicops.MarkPostWrite(err)
 	}
 	return publicops.CloseResult{Issue: hydrated, Changed: changed, OpenChildren: closed.OpenChildren}, tables, nil
 }

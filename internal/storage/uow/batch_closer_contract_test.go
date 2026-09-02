@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/backend/conformance"
+	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
 )
 
 // The unit-of-work backend's wiring of the BatchCloser contract, and the only
@@ -33,6 +34,7 @@ func TestBatchCloserContract(t *testing.T) {
 		{name: "RequestValidationReturnsZeroResultAndChangesNothing", prefix: "bc-valid", run: conformance.RunBatchCloserRequestValidationReturnsZeroResultAndChangesNothing},
 		{name: "ClaimFilterValueFailureIsARequestValidationFailure", prefix: "bc-badsort", run: conformance.RunBatchCloserClaimFilterValueFailureIsARequestValidationFailure},
 		{name: "BackendFailureReturnsNoOutcomes", prefix: "bc-deadctx", run: conformance.RunBatchCloserBackendFailureReturnsNoOutcomes},
+		{name: "MidBatchInfrastructureFailureAbortsTheBatch", prefix: "bc-midinfra", run: conformance.RunBatchCloserMidBatchInfrastructureFailureAbortsTheBatch},
 		{name: "IdempotentRecloseIsAPerItemSuccess", prefix: "bc-reclose", run: conformance.RunBatchCloserIdempotentRecloseIsAPerItemSuccess},
 		{name: "AllIdempotentBatchLandsNothing", prefix: "bc-allidem", run: conformance.RunBatchCloserAllIdempotentBatchLandsNothing},
 		{name: "DuplicateItemRecloseAtItsOwnIndex", prefix: "bc-dup", run: conformance.RunBatchCloserDuplicateItemRecloseAtItsOwnIndex},
@@ -83,5 +85,9 @@ func newUOWBatchCloserFixture(t *testing.T, provider UnitOfWorkProvider, prefix 
 		QueryScalar:          kit.QueryScalar,
 		CountHistory:         kit.CountHistory,
 		CountHistoryMatching: kit.CountHistoryMatching,
+		// The shared hydration seam: this body hydrates through the domain use
+		// cases, but consults the same storageissueops seam the store bodies do,
+		// so one arming covers all three backends.
+		FailHydrationOf: storageissueops.FailBatchCloseHydrationOf,
 	}
 }

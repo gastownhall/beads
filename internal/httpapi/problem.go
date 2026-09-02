@@ -1359,6 +1359,7 @@ func ClassifyError(err error) Result {
 	// `if` away from a pruned-past checkpoint arriving as a generic 500 on
 	// whichever arm forgot it.
 	var truncated *storage.EventsJournalTruncatedError
+	var postWrite issueops.PostWriteError
 
 	switch {
 	case err == nil:
@@ -1366,6 +1367,16 @@ func ClassifyError(err error) Result {
 
 	case errors.As(err, &truncated):
 		return EventsJournalTruncated(truncated)
+
+	// Phase outranks sentinel outward too, but ONLY for the miss sentinels:
+	// a post-write-marked ErrNotFound (a reload or journal miss AFTER a
+	// close already landed in the transaction) is infrastructure evidence,
+	// not a client-addressable miss, so it must not map to 404. Any other
+	// post-write failure keeps its natural classification below - a
+	// retryable serialization or connection error must retain its
+	// busy/unavailable code and Retry-After semantics.
+	case errors.As(err, &postWrite) && (errors.Is(err, storage.ErrNotFound) || errors.Is(err, sql.ErrNoRows)):
+		return newResult(CodeInternal, "")
 
 	// Not-found normalization belongs in the shared read path, which folds the
 	// two miss shapes (a wrapped sql.ErrNoRows, and a nil issue with a nil
