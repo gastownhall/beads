@@ -327,8 +327,26 @@ func (s *DoltServer) waitReady(ctx context.Context) error {
 		conn, err := s.Dial(dctx)
 		dcancel()
 		if err == nil {
-			_ = conn.Close()
-			return nil
+			// Drain the MySQL greeting before closing so the probe ends in a
+			// clean FIN, not a RST the server counts as an aborted handshake
+			// (gastownhall/beads#4132, same sweep as #5277). A dial that
+			// succeeds without a greeting means the TCP listener is up but the
+			// MySQL engine is still starting: keep polling instead of
+			// declaring ready.
+			if doltserver.DrainAndCloseProbe(conn) {
+				// Re-check liveness after the drain's short blocking read: a
+				// greeting that lands after the caller gave up, or after the
+				// server process exited, must not convert into a successful
+				// start.
+				if s.egCtx.Err() != nil {
+					return errors.New("dolt sql-server exited before listener became ready")
+				}
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return nil
+			}
+			err = errors.New("listener accepted the connection but sent no MySQL greeting")
 		}
 
 		if time.Now().After(deadline) {
