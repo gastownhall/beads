@@ -14,6 +14,7 @@ This document describes the complete release process for beads, including GitHub
 - [5. npm Package Release](#5-npm-package-release)
 - [6. Verify Release](#6-verify-release)
 - [Prerelease / Release Candidate (RC) Workflow](#prerelease--release-candidate-rc-workflow)
+- [Release Channels (automated)](#release-channels-automated)
 - [Hotfix Releases](#hotfix-releases)
 - [Rollback Procedure](#rollback-procedure)
 
@@ -598,6 +599,28 @@ above. Tag creation is restricted to release maintainers; see
   (`./scripts/update-versions.sh 1.1.0`). The stable release **does** publish
   to Homebrew/PyPI/npm, so follow the standard
   [Prepare Release](#1-prepare-release) steps from there.
+
+## Release Channels (automated)
+
+Everything above is the manual process, and it stays correct — it is what you
+want for a hotfix or any out-of-band release.
+
+For routine releases there is also a channel pipeline modelled on Chrome:
+**Canary → Dev → Beta → Stable**, where a channel is a branch and promotion
+moves a branch pointer. It performs the same prep this document prescribes —
+`update-versions.sh`, `uv lock`, `check-versions.sh` — and runs the same gates,
+on a schedule, so that promoting to stable is reading one generated
+`release-gates/<tag>.md` and approving a held job.
+
+- Canary is `main`, built, on every merge — one rolling prerelease.
+- Dev cuts nightly from a commit that passed the nightly suite.
+- Beta runs the full release gate weekly and carries at most one schema step.
+- Stable promotes a soaked Beta, gated on the `stable-release` environment.
+  `v*` tag creation stays restricted to release maintainers; only the labour
+  moves.
+
+Full detail, including the setup the workflows cannot grant themselves:
+[engdocs/RELEASE-CHANNELS.md](engdocs/RELEASE-CHANNELS.md).
 
 ## Hotfix Releases
 
