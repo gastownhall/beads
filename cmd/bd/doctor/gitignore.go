@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -167,6 +168,21 @@ func CheckGitignore(repoPath string) DoctorCheck {
 		}
 	}
 
+	// A pattern-complete file with loose permissions must still surface as a
+	// warning: doctor --fix only schedules FixGitignore for non-ok checks, so
+	// an ok here would leave the permission repair unreachable.
+	if runtime.GOOS != "windows" {
+		if info, err := os.Stat(gitignorePath); err == nil && info.Mode().Perm() != 0600 {
+			return DoctorCheck{
+				Name:    "Gitignore",
+				Status:  "warning",
+				Message: "Loose permissions on .beads/.gitignore",
+				Detail:  fmt.Sprintf("Mode is %04o, want 0600", info.Mode().Perm()),
+				Fix:     "Run: bd doctor --fix or bd init (safe to re-run)",
+			}
+		}
+	}
+
 	return DoctorCheck{
 		Name:    "Gitignore",
 		Status:  "ok",
@@ -189,17 +205,20 @@ func EnsureGitignoreForBeadsDir(beadsDir string) error {
 		return fmt.Errorf("read .beads/.gitignore: %w", err)
 	}
 
-	missing := missingGitignorePatterns(string(content))
-	if len(missing) == 0 {
-		return nil
-	}
-
+	// Tighten permissions before the pattern check so a pattern-complete
+	// file with loose perms (e.g. 0644) still gets locked down; the
+	// early return below must not skip this (flagged post-#5285).
 	if info, err := os.Stat(gitignorePath); err == nil {
-		if info.Mode().Perm()&0200 == 0 {
+		if info.Mode().Perm() != 0600 {
 			if err := os.Chmod(gitignorePath, 0600); err != nil {
 				return fmt.Errorf("chmod .beads/.gitignore: %w", err)
 			}
 		}
+	}
+
+	missing := missingGitignorePatterns(string(content))
+	if len(missing) == 0 {
+		return nil
 	}
 
 	existingContent := string(content)
