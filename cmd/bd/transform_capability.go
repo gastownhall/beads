@@ -1,31 +1,50 @@
 package main
 
 import (
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 	"sort"
 	"strings"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 type TransformCapability struct {
 	Path     string
 	Argument string
 	Outcome  ProxyCapabilityOutcome
+	Code     string
+	Message  string
+	ExitCode int
+	Mutates  bool
 }
 
 var transformCapabilityRows = []TransformCapability{
-	{Path: "rename", Outcome: ProxyOutcomeRefused}, {Path: "rename-prefix", Outcome: ProxyOutcomeRefused},
-	{Path: "duplicate", Outcome: ProxyOutcomeRefused}, {Path: "supersede", Outcome: ProxyOutcomeRefused},
+	transformRefused("rename"),
+	transformRefused("rename-prefix"),
+	transformRefused("duplicate"),
+	transformRefused("supersede"),
 	{Path: "duplicates", Outcome: ProxyOutcomeHonored},
-	{Path: "duplicates", Argument: "--auto-merge", Outcome: ProxyOutcomeRefused},
+	transformRefusedWithArgs("duplicates", "--auto-merge"),
 	{Path: "duplicates", Argument: "--auto-merge --dry-run", Outcome: ProxyOutcomeHonored},
 }
 
-var transformCapabilityMatrix = map[string]proxyCapabilityRule{
-	"rename":        refused("proxy.transform.unsupported", "rename is not supported in proxied-server mode"),
-	"rename-prefix": refused("proxy.transform.unsupported", "rename-prefix is not supported in proxied-server mode"),
-	"duplicate":     refused("proxy.transform.unsupported", "duplicate is not supported in proxied-server mode"),
-	"supersede":     refused("proxy.transform.unsupported", "supersede is not supported in proxied-server mode"),
+func transformRefused(path string) TransformCapability {
+	return transformRefusedWithArgs(path, "")
+}
+
+func transformRefusedWithArgs(path, argument string) TransformCapability {
+	displayPath := path
+	if argument != "" {
+		displayPath += " " + argument
+	}
+	return TransformCapability{
+		Path: path, Argument: argument, Outcome: ProxyOutcomeRefused,
+		Code: "proxy.transform.unsupported", Message: displayPath + " is not supported in proxied-server mode", ExitCode: 1,
+	}
+}
+
+func transformCapabilityError(row TransformCapability) *ProxyCapabilityError {
+	return &ProxyCapabilityError{Code: row.Code, Message: row.Message, ExitCode: row.ExitCode, Mutates: row.Mutates}
 }
 
 func lookupTransformCapability(cmd *cobra.Command) (TransformCapability, bool) {
@@ -47,16 +66,10 @@ func validateProxyTransformBeforeProvider(cmd *cobra.Command) error {
 	if cmd == nil {
 		return nil
 	}
-	path := cmd.CommandPath()
-	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
-	if row, ok := lookupTransformCapability(cmd); ok && row.Outcome == ProxyOutcomeRefused {
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.transform.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
-	}
-	if rule, ok := transformCapabilityMatrix[path]; ok {
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
-	}
-	if path == "duplicates" {
-		return nil
+	if row, ok := lookupTransformCapability(cmd); ok {
+		if row.Outcome == ProxyOutcomeRefused {
+			return HandleProxyCapabilityError(transformCapabilityError(row))
+		}
 	}
 	return nil
 }
