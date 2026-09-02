@@ -115,7 +115,9 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"backup sync":      refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
 	"backup remove":    refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
 	"backup status":    refused("proxy.backup.unsupported", "backup status is not supported in proxied-server mode"),
+	"backup restore":   refused("proxy.backup.unsupported", "backup restore is not supported in proxied-server mode"),
 	"migrate sync":     refused("proxy.migrate.unsupported", "migrate sync is not supported in proxied-server mode"),
+	"migrate-issues":   refused("proxy.migrate.unsupported", "migrate-issues is not supported in proxied-server mode"),
 	"gate discover":    refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
 }
 
@@ -143,6 +145,9 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 	name := cmd.Name()
 	path := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
 	if name == "compact" {
+		if cmd.Flags().Lookup("dolt") == nil {
+			return nil // root `bd compact` is the Dolt history command
+		}
 		dolt, _ := cmd.Flags().GetBool("dolt")
 		if dolt {
 			return nil
