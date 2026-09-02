@@ -30,6 +30,21 @@ const (
 // OpenSQL opens an embedded Dolt database at dir. The returned cleanup
 // function closes both the *sql.DB and the underlying connector.
 func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	return openSQL(ctx, dir, database, branch, nil, doltembed.NewConnector)
+}
+
+type connectorFactory func(doltembed.Config) (*doltembed.Connector, error)
+
+func openReadOnlySQL(ctx context.Context, dir, database, branch string) (*sql.DB, func() error, error) {
+	return openSQL(ctx, dir, database, branch, filesystemHasAvailableSpace, doltembed.NewConnector)
+}
+
+func openSQL(
+	ctx context.Context,
+	dir, database, branch string,
+	spaceProbe availableSpaceProbe,
+	newConnector connectorFactory,
+) (*sql.DB, func() error, error) {
 	dsn := buildDSN(dir, database)
 
 	cfg, err := doltembed.ParseDSN(dsn)
@@ -42,7 +57,17 @@ func OpenSQL(ctx context.Context, dir, database, branch string) (*sql.DB, func()
 	bo.MaxInterval = 5 * time.Second
 	cfg.BackOff = bo
 
-	connector, err := doltembed.NewConnector(cfg)
+	if spaceProbe != nil {
+		available, probeErr := spaceProbe(dir)
+		// This guard only claims the exact, authoritative exhaustion signal.
+		// If the platform cannot report space, preserve the prior open behavior
+		// and let the connector return its own filesystem error.
+		if probeErr == nil && !available {
+			return nil, nil, &FilesystemFullError{Path: dir}
+		}
+	}
+
+	connector, err := newConnector(cfg)
 	if err != nil {
 		return nil, nil, err
 	}
