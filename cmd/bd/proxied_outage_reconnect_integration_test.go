@@ -194,12 +194,15 @@ func startOutageBridge(t *testing.T, endpoint, upstreamPort string, socket bool)
 	t.Helper()
 	var listen string
 	if socket {
+		// socat refuses to bind over a stale pathname after an outage.
+		_ = os.Remove(endpoint)
 		listen = "UNIX-LISTEN:" + endpoint + ",fork"
 	} else {
 		listen = "TCP-LISTEN:" + endpoint + ",bind=127.0.0.1,reuseaddr,fork"
 	}
 	cmd := exec.Command("socat", listen, "TCP:127.0.0.1:"+upstreamPort)
 	require.NoError(t, cmd.Start())
+	require.Eventually(t, func() bool { return processAlive(cmd.Process.Pid) }, time.Second, 20*time.Millisecond, "outage bridge process did not remain alive")
 	if socket {
 		waitForSocket(t, endpoint)
 	}
