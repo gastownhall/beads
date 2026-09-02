@@ -11,7 +11,8 @@ const (
 )
 
 var historyCapabilityMatrix = map[string]HistoryCapabilityClass{
-	"branch": HistoryDirectOnly, "conflicts": HistoryDirectOnly, "repo": HistoryDirectOnly,
+	"history": HistoryProxySupported,
+	"branch":  HistoryDirectOnly, "conflicts": HistoryDirectOnly, "repo": HistoryDirectOnly,
 	"federation": HistoryDirectOnly, "vc": HistoryDirectOnly, "flatten": HistoryDirectOnly,
 	"dolt push": HistoryDirectOnly, "dolt pull": HistoryDirectOnly, "dolt commit": HistoryDirectOnly,
 	"dolt remote": HistoryDirectOnly, "sync": HistoryDirectOnly,
