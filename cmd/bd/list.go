@@ -470,6 +470,14 @@ func init() {
 	// Infra type filtering: exclude agent/role/message by default
 	listCmd.Flags().Bool("include-infra", false, "Include infrastructure beads (agent/role/message) in output")
 
+	// Ephemeral plane: the wisps table is suppressed by default. This is the
+	// PLANE knob on its own — ListRequest.IncludeEphemeral — as distinct from
+	// --include-infra, which admits the plane AND lifts the infra-type
+	// exclusions above. Without it the plane is reachable from the CLI only
+	// through --include-infra's wider bundle, which leaves --wisp-type below
+	// with no narrow way to match anything.
+	listCmd.Flags().Bool("include-ephemeral", false, "Include ephemeral wisp-plane rows in output (normally hidden)")
+
 	// Explicit type exclusion
 	listCmd.Flags().StringSlice("exclude-type", nil, "Exclude issue types from results (comma-separated or repeatable, e.g., --exclude-type=convoy,epic)")
 

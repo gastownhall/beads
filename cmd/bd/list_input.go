@@ -134,6 +134,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.IncludeTemplates, _ = cmd.Flags().GetBool("include-templates")
 	in.IncludeGates, _ = cmd.Flags().GetBool("include-gates")
 	in.IncludeInfra, _ = cmd.Flags().GetBool("include-infra")
+	in.IncludeEphemeral, _ = cmd.Flags().GetBool("include-ephemeral")
 	in.ExcludeTypes, _ = cmd.Flags().GetStringSlice("exclude-type")
 
 	in.ParentID, _ = cmd.Flags().GetString("parent")
@@ -158,6 +159,28 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 			return in, HandleError("invalid wisp-type %q (must be %s)", s, types.ValidWispTypeNames())
 		}
 		in.WispType = &wt
+
+		// wisp_type is a PREDICATE, not a plane selector (see
+		// issueops.ListRequest.WispType): it narrows whatever the rest of the
+		// request admitted. On a default listing that is the durable rows,
+		// which carry no classification — so this request cannot match a row
+		// for ANY input, and would report an empty listing rather than the
+		// unread plane that actually holds the answer.
+		//
+		// The request stays LAWFUL at the API layer, where composing to empty
+		// is the pinned contract. Refusing it belongs HERE, at the CLI, where
+		// the only thing a human can have meant is the combination that
+		// answers with rows.
+		//
+		// An explicit --type is left alone: an infra type routes to the plane
+		// by itself, so the request may be satisfiable and this cannot tell
+		// without the workspace's infra vocabulary, which this layer does not
+		// load.
+		if !in.IncludeEphemeral && !in.IncludeInfra && in.IssueType == "" {
+			return in, HandleErrorWithHint(
+				fmt.Sprintf("--wisp-type %s cannot match anything here: it filters the wisp_type column, and this listing admits only durable rows, which never carry one", s),
+				"add --include-ephemeral to admit the ephemeral plane (or --include-infra, which admits it as part of a wider bundle)")
+		}
 	}
 
 	in.DeferredFlag, _ = cmd.Flags().GetBool("deferred")
