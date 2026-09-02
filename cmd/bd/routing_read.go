@@ -49,7 +49,7 @@ func getRoutingConfigValue(ctx context.Context, store storage.DoltStorage, key s
 }
 
 func determineAutoRoutedRepoPath(ctx context.Context, store storage.DoltStorage) (string, routing.RoutingRule) {
-	userRole, err := routing.DetectUserRole(".")
+	userRole, err := detectUserRoleForActiveRepo()
 	if err != nil {
 		debug.Logf("Warning: failed to detect user role: %v\n", err)
 	}
