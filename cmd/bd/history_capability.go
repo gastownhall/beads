@@ -15,7 +15,9 @@ var historyCapabilityMatrix = map[string]HistoryCapabilityClass{
 	"branch":  HistoryDirectOnly, "conflicts": HistoryDirectOnly, "repo": HistoryDirectOnly,
 	"federation": HistoryDirectOnly, "vc": HistoryDirectOnly, "flatten": HistoryDirectOnly,
 	"dolt push": HistoryDirectOnly, "dolt pull": HistoryDirectOnly, "dolt commit": HistoryDirectOnly,
-	"dolt remote": HistoryDirectOnly, "sync": HistoryDirectOnly,
+	"dolt remote": HistoryDirectOnly, "dolt remote add": HistoryDirectOnly, "dolt remote list": HistoryDirectOnly,
+	"dolt remote reset-data": HistoryDirectOnly, "dolt remote remove": HistoryProxySupported,
+	"sync": HistoryDirectOnly,
 }
 
 // LookupHistoryCapability classifies an exact command path. Unknown paths are
