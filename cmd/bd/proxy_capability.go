@@ -119,6 +119,21 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"gate discover":    refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
 }
 
+func init() {
+	for parent, children := range map[string][]string{
+		"vc":         {"merge", "commit", "status"},
+		"federation": {"sync", "status", "add-peer", "remove-peer", "list-peers"},
+		"repo":       {"add", "remove", "list", "sync"},
+		"conflicts":  {"list", "show", "resolve"},
+		"migrate":    {"hooks", "issues"},
+	} {
+		rule := proxyMaintenanceRefusals[parent]
+		for _, child := range children {
+			proxyMaintenanceRefusals[parent+" "+child] = rule
+		}
+	}
+}
+
 // validateProxyMaintenanceBeforeProvider rejects known direct-only commands
 // before migrations, auto-start, or provider construction.
 func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
@@ -137,6 +152,9 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 	}
 	if rule, ok := proxyMaintenanceRefusals[path]; ok {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
+	}
+	if strings.Contains(path, " ") {
+		return nil
 	}
 	if rule, ok := proxyMaintenanceRefusals[name]; ok {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
