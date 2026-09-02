@@ -66,6 +66,27 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 	}
 }
 
+func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	for _, path := range []string{"backup init", "backup status", "migrate sync", "gate discover"} {
+		parts := strings.Split(path, " ")
+		root := &cobra.Command{Use: "bd"}
+		parent := &cobra.Command{Use: parts[0]}
+		child := &cobra.Command{Use: parts[1]}
+		root.AddCommand(parent)
+		parent.AddCommand(child)
+		out := captureStdout(t, func() error {
+			_ = validateProxyMaintenanceBeforeProvider(child)
+			return nil
+		})
+		if !strings.Contains(out, `"code":`) {
+			t.Errorf("%s produced no typed refusal: %s", path, out)
+		}
+	}
+}
+
 func TestProxyCapabilityRefusalFrontDoorTextBeforeProvider(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = false
