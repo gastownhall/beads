@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 
@@ -63,10 +64,15 @@ func TestMigration0067AddsVersionedBeadsSchema(t *testing.T) {
 		t.Error("0067 up migration must not seed store_epoch — every new table starts empty in Phase 1 (no reads/writes of the new surfaces until Phase 2)")
 	}
 
-	downSQL, err := MigrationSQL(migration0067Down)
+	// down.sql files are not part of the embedded FS (only migrations/*.up.sql
+	// is //go:embed'd — see mainSource.files), so unlike the up side above,
+	// this reads straight from disk by package-relative path, matching
+	// TestMigration0035HandlesLegacyWispDependenciesShape's precedent.
+	downBytes, err := os.ReadFile("migrations/" + migration0067Down)
 	if err != nil {
-		t.Fatalf("MigrationSQL(%s) error = %v, want the migration file to exist", migration0067Down, err)
+		t.Fatalf("read %s: %v, want the migration file to exist", migration0067Down, err)
 	}
+	downSQL := string(downBytes)
 	for _, want := range []string{
 		"DROP TABLE",
 		"issue_versions",
@@ -105,7 +111,7 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	requireDoltDataType(t, dir, "issue_versions", "durable_state", "json", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_actor", "varchar(255)", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_agent", "varchar(255)", "YES")
-	requireDoltColumnShape(t, dir, "issue_versions", "change_message", "longtext", "YES")
+	requireDoltColumnShape(t, dir, "issue_versions", "change_message", "text", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_at", "datetime", "NO")
 	requireDoltColumnShape(t, dir, "issue_versions", "removed_at", "datetime", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "removed_reason", "varchar(255)", "YES")
