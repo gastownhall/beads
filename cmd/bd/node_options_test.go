@@ -79,3 +79,15 @@ func TestScrubStaleNodeOptionsRequireEnv(t *testing.T) {
 		t.Fatalf("NODE_OPTIONS after scrub = %q, want %q", got, want)
 	}
 }
+
+func TestScrubStaleNodeOptionsRequireEnvUnsetsWhenOnlyMissing(t *testing.T) {
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "gone.cjs")
+	t.Setenv("NODE_OPTIONS", "--require="+missing)
+
+	scrubStaleNodeOptionsRequire()
+
+	if got, ok := os.LookupEnv("NODE_OPTIONS"); ok {
+		t.Fatalf("NODE_OPTIONS still set after scrubbing only-missing require: %q", got)
+	}
+}
