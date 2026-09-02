@@ -1360,6 +1360,13 @@ var rootCmd = &cobra.Command{
 		if backendErr := validateConfiguredBackend(cfg); backendErr != nil {
 			return HandleError("%v", backendErr)
 		}
+		// The proxied provider cannot guarantee strict read-only semantics. Refuse
+		// before provider construction so no connection, migration, or mutation
+		// is attempted; expose the same stable capability code as other proxy
+		// front-door refusals.
+		if readonlyMode && cfg != nil && cfg.IsDoltProxiedServerMode() {
+			return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapReadonly))
+		}
 		if readonlyMode && !backendSupportsStrictReadonly(cfg) {
 			return HandleError("strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access")
 		}
@@ -1598,6 +1605,9 @@ var rootCmd = &cobra.Command{
 		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
+			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
+				return err
+			}
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride, previewProviderOptions(previewMode)...)
 			if err != nil {
 				return HandleError("failed to open uow provider: %v", err)
