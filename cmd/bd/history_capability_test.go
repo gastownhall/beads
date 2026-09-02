@@ -7,6 +7,9 @@ import (
 )
 
 func TestHistoryCapabilityMatrixExactPaths(t *testing.T) {
+	if got, ok := LookupHistoryCapability("history"); !ok || got != HistoryProxySupported {
+		t.Fatalf("history = %q, %v; want proxy-supported", got, ok)
+	}
 	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt commit", "dolt remote", "sync"} {
 		if got, ok := LookupHistoryCapability(path); !ok || got != HistoryDirectOnly {
 			t.Errorf("%q = %q, %v; want direct-only", path, got, ok)
