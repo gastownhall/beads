@@ -98,27 +98,30 @@ type ProxyCapabilityRow struct {
 }
 
 var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
-	"doctor":           refused("proxy.doctor.unsupported", "doctor is not supported in proxied-server mode"),
-	"backup":           refused("proxy.backup.unsupported", "backup is not supported in proxied-server mode"),
-	"restore":          refused("proxy.restore.unsupported", "restore is not supported in proxied-server mode"),
-	"diff":             refused("proxy.diff.unsupported", "diff is not supported in proxied-server mode"),
-	"flatten":          refused("proxy.flatten.unsupported", "flatten is not supported in proxied-server mode"),
-	"migrate":          refused("proxy.migrate.unsupported", "migrate is not supported in proxied-server mode"),
-	"migrate-personal": refused("proxy.migrate.unsupported", "migrate-personal is not supported in proxied-server mode"),
-	"branch":           refused("proxy.branch.unsupported", "branch is not supported in proxied-server mode"),
-	"conflicts":        refused("proxy.conflicts.unsupported", "conflicts is not supported in proxied-server mode"),
-	"vc":               refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
-	"federation":       refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
-	"repo":             refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
-	"compact":          refused("proxy.compact.unsupported", "compact requires --dolt in proxied-server mode"),
-	"backup init":      refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
-	"backup sync":      refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
-	"backup remove":    refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
-	"backup status":    refused("proxy.backup.unsupported", "backup status is not supported in proxied-server mode"),
-	"backup restore":   refused("proxy.backup.unsupported", "backup restore is not supported in proxied-server mode"),
-	"migrate sync":     refused("proxy.migrate.unsupported", "migrate sync is not supported in proxied-server mode"),
-	"migrate-issues":   refused("proxy.migrate.unsupported", "migrate-issues is not supported in proxied-server mode"),
-	"gate discover":    refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
+	"doctor":                 refused("proxy.doctor.unsupported", "doctor is not supported in proxied-server mode"),
+	"backup":                 refused("proxy.backup.unsupported", "backup is not supported in proxied-server mode"),
+	"restore":                refused("proxy.restore.unsupported", "restore is not supported in proxied-server mode"),
+	"diff":                   refused("proxy.diff.unsupported", "diff is not supported in proxied-server mode"),
+	"flatten":                refused("proxy.flatten.unsupported", "flatten is not supported in proxied-server mode"),
+	"migrate":                refused("proxy.migrate.unsupported", "migrate is not supported in proxied-server mode"),
+	"migrate-personal":       refused("proxy.migrate.unsupported", "migrate-personal is not supported in proxied-server mode"),
+	"branch":                 refused("proxy.branch.unsupported", "branch is not supported in proxied-server mode"),
+	"conflicts":              refused("proxy.conflicts.unsupported", "conflicts is not supported in proxied-server mode"),
+	"vc":                     refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
+	"federation":             refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
+	"repo":                   refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
+	"compact":                refused("proxy.compact.unsupported", "compact requires --dolt in proxied-server mode"),
+	"backup init":            refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
+	"backup sync":            refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
+	"backup remove":          refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
+	"backup status":          refused("proxy.backup.unsupported", "backup status is not supported in proxied-server mode"),
+	"backup restore":         refused("proxy.backup.unsupported", "backup restore is not supported in proxied-server mode"),
+	"migrate sync":           refused("proxy.migrate.unsupported", "migrate sync is not supported in proxied-server mode"),
+	"migrate-issues":         refused("proxy.migrate.unsupported", "migrate-issues is not supported in proxied-server mode"),
+	"gate discover":          refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
+	"admin cleanup":          refused("proxy.admin.unsupported", "admin cleanup is not supported in proxied-server mode"),
+	"admin reset":            refused("proxy.admin.unsupported", "admin reset is not supported in proxied-server mode"),
+	"dolt remote reset-data": refused("proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode"),
 }
 
 func init() {
@@ -309,14 +312,15 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	if name == "ready" {
-		if claim, _ := cmd.Flags().GetBool("claim"); claim {
-			if _, _, err := resolveMaxRows(cmd); err != nil {
-				return err
-			}
-			return nil
+		maxRows, _, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if maxRows > 0 {
+			return HandleProxyCapabilityError(AssertProxyCommandCapability(name, ProxyModeProxied, ProxyCapMaxRows))
 		}
 	}
-	if name == "ready" || name == "graph" || name == "find-duplicates" {
+	if name == "graph" || name == "find-duplicates" {
 		maxRows, _, err := resolveMaxRows(cmd)
 		if err != nil {
 			return err
