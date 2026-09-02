@@ -89,6 +89,27 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 	}
 }
 
+func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
+	for _, path := range []string{"cook", "ship", "swarm create", "swarm list", "merge-slot create", "merge-slot check", "merge-slot acquire", "merge-slot release"} {
+		parts := strings.Split(path, " ")
+		root := &cobra.Command{Use: "bd"}
+		cmd := &cobra.Command{Use: parts[0]}
+		root.AddCommand(cmd)
+		for _, childName := range parts[1:] {
+			child := &cobra.Command{Use: childName}
+			cmd.AddCommand(child)
+			cmd = child
+		}
+		err := validateProxyMaintenanceBeforeProvider(cmd)
+		if err == nil {
+			t.Fatalf("%s unexpectedly allowed", path)
+		}
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("%s exit=%v, want 1", path, err)
+		}
+	}
+}
+
 func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
 	root := &cobra.Command{Use: "bd"}
 	migrate := &cobra.Command{Use: "migrate"}

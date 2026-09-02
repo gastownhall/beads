@@ -121,6 +121,14 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"gate discover":          refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
 	"admin cleanup":          refused("proxy.admin.unsupported", "admin cleanup is not supported in proxied-server mode"),
 	"admin reset":            refused("proxy.admin.unsupported", "admin reset is not supported in proxied-server mode"),
+	"cook":                   refused("proxy.formula.unsupported", "cook is not supported in proxied-server mode"),
+	"ship":                   refused("proxy.formula.unsupported", "ship is not supported in proxied-server mode"),
+	"swarm create":           refused("proxy.swarm.unsupported", "swarm create is not supported in proxied-server mode"),
+	"swarm list":             refused("proxy.swarm.unsupported", "swarm list is not supported in proxied-server mode"),
+	"merge-slot create":      refused("proxy.merge_slot.unsupported", "merge-slot create is not supported in proxied-server mode"),
+	"merge-slot check":       refused("proxy.merge_slot.unsupported", "merge-slot check is not supported in proxied-server mode"),
+	"merge-slot acquire":     refused("proxy.merge_slot.unsupported", "merge-slot acquire is not supported in proxied-server mode"),
+	"merge-slot release":     refused("proxy.merge_slot.unsupported", "merge-slot release is not supported in proxied-server mode"),
 	"dolt remote reset-data": refused("proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode"),
 }
 
