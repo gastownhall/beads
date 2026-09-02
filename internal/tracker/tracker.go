@@ -76,6 +76,15 @@ type PullStatsProvider interface {
 	LastPullStats() (queried int, candidates int)
 }
 
+// PullFieldMerger is an optional capability for integrations with fields that
+// are owned locally rather than by the external tracker. The engine calls it
+// only for an existing local issue, after the remote issue has been converted
+// and pull hooks have run. Implementations may overlay local-only fields onto
+// the converted issue before the engine compares or persists it.
+type PullFieldMerger interface {
+	MergeLocalFields(local *types.Issue, remote *types.Issue)
+}
+
 // FieldMapper handles bidirectional conversion of issue fields between
 // an external tracker and beads. Each tracker provides its own mapper.
 type FieldMapper interface {

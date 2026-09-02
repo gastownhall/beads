@@ -76,6 +76,12 @@ func (m *linearFieldMapper) IssueToBeads(ti *tracker.TrackerIssue) *tracker.Issu
 	}
 }
 
+// MergeLocalFields preserves orchestration controls that Linear cannot own
+// while allowing product fields to continue syncing through the engine.
+func (m *linearFieldMapper) MergeLocalFields(local, remote *types.Issue) {
+	MergeLocalControlState(local, remote, m.config)
+}
+
 func (m *linearFieldMapper) IssueToTracker(issue *types.Issue) map[string]interface{} {
 	updates := map[string]interface{}{
 		"title":       issue.Title,
