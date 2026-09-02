@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/steveyegge/beads/internal/config"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -36,7 +35,7 @@ const gitLabMilestoneIdentifierPrefix = "milestone:"
 type Tracker struct {
 	client      *Client
 	config      *MappingConfig
-	store       storage.Storage
+	store       tracker.Store
 	filter      *IssueFilter // Optional filters for issue fetching
 	projectPath string       // GitLab project path (e.g., "socwave/socwave") for GraphQL
 }
@@ -48,7 +47,7 @@ func (t *Tracker) ConfigPrefix() string { return "gitlab" }
 // GitLabClient returns the underlying GitLab API client.
 func (t *Tracker) GitLabClient() *Client { return t.client }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	token, err := t.getConfig(ctx, "gitlab.token", "GITLAB_TOKEN")

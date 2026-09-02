@@ -114,7 +114,7 @@ type PushHooks struct {
 // integrations follow, eliminating duplication between Linear, GitLab, etc.
 type Engine struct {
 	Tracker   IssueTracker
-	Store     lifecycleStorage
+	Store     Store
 	Actor     string
 	PullHooks *PullHooks
 	PushHooks *PushHooks
@@ -137,16 +137,19 @@ type lifecycleStorage interface {
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
-func NewEngine(tracker IssueTracker, store lifecycleStorage, actor string) *Engine {
+func NewEngine(tracker IssueTracker, store interface{}, actor string) *Engine {
 	return &Engine{
 		Tracker: tracker,
-		Store:   store,
+		Store:   NewStore(store),
 		Actor:   actor,
 	}
 }
 
 // Sync performs a complete synchronization operation based on the given options.
 func (e *Engine) Sync(ctx context.Context, opts SyncOptions) (*SyncResult, error) {
+	if e == nil || e.Store == nil {
+		return nil, fmt.Errorf("tracker sync store is not initialized")
+	}
 	ctx, span := syncTracer.Start(ctx, "tracker.sync",
 		trace.WithAttributes(
 			attribute.String("sync.tracker", e.Tracker.DisplayName()),
@@ -528,9 +531,14 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 				updates["metadata"] = raw
 			}
 
-			if err := e.Store.RunInIssueLifecycleTransaction(ctx, fmt.Sprintf("bd: pull update %s", existing.ID), func(tx storage.IssueLifecycleTransaction) error {
-				return applyPullIssueUpdate(ctx, tx, existing.ID, updates, conv.Issue.Labels, e.Actor)
-			}); err != nil {
+			markPullIssueFields(updates)
+			updater, ok := e.Store.(IssueUpdater)
+			if !ok {
+				e.warn("tracker store does not support atomic issue updates")
+				stats.Errors++
+				continue
+			}
+			if err := updater.ApplyIssueUpdate(ctx, existing.ID, updates, conv.Issue.Labels, e.Actor); err != nil {
 				e.warn("Failed to update %s: %v", existing.ID, err)
 				stats.Errors++
 				if pulledIDs != nil {
@@ -584,18 +592,15 @@ func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransact
 	return syncIssueLabels(ctx, tx, id, labels, actor)
 }
 
-// applyPullIssueFields applies a pulled issue's fields while preserving the
-// caller's control over related collections such as labels.
-//
-// A pull always forces close policy. The remote tracker is authoritative for
-// the status it reports, and it knows nothing about local-only children or
-// local-only blockers — refusing an upstream close because of them would wedge
-// sync on state the remote cannot see and the operator did not create. Both the
-// pull and the conflict reimport route through here, so this is the one place
-// that decision lives.
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {
-	updates[issueops.OpForceClosePolicy] = true
+	markPullIssueFields(updates)
 	return tx.UpdateIssue(ctx, id, updates, actor)
+}
+
+// markPullIssueFields adds the external-authority close policy marker shared
+// by direct and proxied store adapters.
+func markPullIssueFields(updates map[string]interface{}) {
+	updates[issueops.OpForceClosePolicy] = true
 }
 
 func pullIssueEqual(local *types.Issue, remote *types.Issue, ref string) bool {
@@ -778,7 +783,7 @@ func (e *Engine) externalRefChangedAfter(ctx context.Context, local *types.Issue
 // never see this optional capability even when the concrete store underneath
 // implements it — the same reason cmd/bd type-asserts through
 // storage.UnwrapStore for RawDBAccessor, StoreLocator, and friends.
-func externalRefHistoryQuerier(store storage.Storage) (storage.ExternalRefHistoryQuerier, bool) {
+func externalRefHistoryQuerier(store Store) (storage.ExternalRefHistoryQuerier, bool) {
 	if q, ok := store.(storage.ExternalRefHistoryQuerier); ok {
 		return q, true
 	}
@@ -1303,9 +1308,13 @@ func (e *Engine) reimportIssue(ctx context.Context, c Conflict) {
 		}
 	}
 
-	if err := e.Store.RunInIssueLifecycleTransaction(ctx, fmt.Sprintf("bd: reimport update %s", c.IssueID), func(tx storage.IssueLifecycleTransaction) error {
-		return applyPullIssueFields(ctx, tx, c.IssueID, updates, e.Actor)
-	}); err != nil {
+	markPullIssueFields(updates)
+	updater, ok := e.Store.(IssueUpdater)
+	if !ok {
+		e.warn("tracker store does not support atomic issue updates")
+		return
+	}
+	if err := updater.ApplyIssueUpdate(ctx, c.IssueID, updates, nil, e.Actor); err != nil {
 		e.warn("Failed to update %s during reimport: %v", c.IssueID, err)
 	}
 }
@@ -1475,7 +1484,7 @@ func (e *Engine) dependencyIssueResolver(ctx context.Context, extraIssues []*typ
 	}, nil
 }
 
-func dependencyExists(ctx context.Context, store storage.Storage, issueID, dependsOnID string, depType types.DependencyType) bool {
+func dependencyExists(ctx context.Context, store Store, issueID, dependsOnID string, depType types.DependencyType) bool {
 	if strings.TrimSpace(issueID) == "" || strings.TrimSpace(dependsOnID) == "" {
 		return false
 	}

@@ -215,9 +215,6 @@ func init() {
 }
 
 func runLinearSync(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("linear sync is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("linear-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -312,7 +309,8 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("--milestones only applies when pulling from Linear")
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 
@@ -331,7 +329,7 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 
 	lt := &linear.Tracker{}
 	lt.SetTeamIDs(teamIDs)
-	if err := lt.Init(ctx, store); err != nil {
+	if err := lt.Init(ctx, trackerStore); err != nil {
 		return HandleErrorRespectJSON("initializing Linear tracker: %v", err)
 	}
 	if willPush {
@@ -340,11 +338,11 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	engine := tracker.NewEngine(lt, store, actor)
+	engine := tracker.NewEngine(lt, trackerStore, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	engine.PullHooks = buildLinearPullHooks(ctx, linearPullHookOptions{
+	engine.PullHooks = buildLinearPullHooksForStore(ctx, trackerStore, linearPullHookOptions{
 		Milestones: milestones,
 		DryRun:     dryRun,
 		Actor:      actor,
@@ -375,7 +373,7 @@ func runLinearSync(cmd *cobra.Command, args []string) error {
 	}
 	allowProjectCreates := opts.ParentID != "" || len(opts.IssueIDs) > 0
 
-	engine.PushHooks = buildLinearPushHooks(ctx, lt, allowProjectCreates)
+	engine.PushHooks = buildLinearPushHooksForStore(ctx, trackerStore, lt, allowProjectCreates)
 
 	if preferLocal {
 		opts.ConflictResolution = tracker.ConflictLocal
@@ -480,10 +478,10 @@ type linearPullHookOptions struct {
 
 // buildLinearPullHooks creates PullHooks for Linear-specific pull behavior.
 func buildLinearPullHooks(ctx context.Context, opts linearPullHookOptions) *tracker.PullHooks {
-	return buildLinearPullHooksForStore(ctx, store, opts)
+	return buildLinearPullHooksForStore(ctx, tracker.NewStore(store), opts)
 }
 
-func buildLinearPullHooksForStore(ctx context.Context, st storage.Storage, opts linearPullHookOptions) *tracker.PullHooks {
+func buildLinearPullHooksForStore(ctx context.Context, st tracker.Store, opts linearPullHookOptions) *tracker.PullHooks {
 	idMode := getLinearIDMode(ctx)
 	hashLength := getLinearHashLength(ctx)
 
@@ -573,7 +571,7 @@ func isLinearMilestoneExternalRef(ref string) bool {
 	return strings.HasPrefix(strings.TrimSpace(ref), linearMilestoneExternalRefPrefix)
 }
 
-func ensureLinearMilestoneEpic(ctx context.Context, st storage.Storage, ms *linear.ProjectMilestone, actor string, generateID func(context.Context, *types.Issue) error) (string, error) {
+func ensureLinearMilestoneEpic(ctx context.Context, st tracker.Store, ms *linear.ProjectMilestone, actor string, generateID func(context.Context, *types.Issue) error) (string, error) {
 	milestoneID := strings.TrimSpace(ms.ID)
 	if milestoneID == "" {
 		return "", fmt.Errorf("Linear project milestone is missing id")
@@ -644,7 +642,7 @@ func ensureLinearMilestoneEpic(ctx context.Context, st storage.Storage, ms *line
 	return ref, nil
 }
 
-func findLinearMilestoneEpic(ctx context.Context, st storage.Storage, ref, milestoneID, title string) (*types.Issue, error) {
+func findLinearMilestoneEpic(ctx context.Context, st tracker.Store, ref, milestoneID, title string) (*types.Issue, error) {
 	if existing, err := st.GetIssueByExternalRef(ctx, ref); err == nil {
 		return existing, nil
 	} else if !errors.Is(err, storage.ErrNotFound) {
@@ -747,6 +745,10 @@ func isLinearMilestoneIssue(issue *types.Issue) bool {
 
 // buildLinearPushHooks creates PushHooks for Linear-specific push behavior.
 func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectCreates bool) *tracker.PushHooks {
+	return buildLinearPushHooksForStore(ctx, tracker.NewStore(store), lt, allowProjectCreates)
+}
+
+func buildLinearPushHooksForStore(ctx context.Context, st tracker.Store, lt *linear.Tracker, allowProjectCreates bool) *tracker.PushHooks {
 	config := lt.MappingConfig()
 	var labelOnce sync.Once
 	var labelCache *linear.LabelCache
@@ -790,7 +792,7 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 			if isLinearMilestoneIssue(issue) {
 				return false
 			}
-			if projectID, _ := store.GetConfig(ctx, "linear.project_id"); projectID != "" {
+			if projectID, _ := st.GetConfig(ctx, "linear.project_id"); projectID != "" {
 				if issue.ExternalRef == nil || strings.TrimSpace(*issue.ExternalRef) == "" {
 					if !allowProjectCreates {
 						return false
@@ -799,7 +801,7 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 			}
 
 			// Apply push prefix filtering if configured
-			pushPrefix, _ := store.GetConfig(ctx, "linear.push_prefix")
+			pushPrefix, _ := st.GetConfig(ctx, "linear.push_prefix")
 			if pushPrefix == "" {
 				return true
 			}
@@ -816,9 +818,6 @@ func buildLinearPushHooks(ctx context.Context, lt *linear.Tracker, allowProjectC
 }
 
 func runLinearStatus(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("linear status is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("linear-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -828,7 +827,8 @@ func runLinearStatus(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
@@ -836,12 +836,12 @@ func runLinearStatus(cmd *cobra.Command, args []string) error {
 	oauthClientID, _ := getLinearConfig(ctx, "linear.oauth_client_id")
 	oauthClientSecret, _ := getLinearConfig(ctx, "linear.oauth_client_secret")
 	teamIDs := getLinearTeamIDs(ctx, nil)
-	lastSync, _ := store.GetConfig(ctx, "linear.last_sync")
+	lastSync, _ := trackerStore.GetConfig(ctx, "linear.last_sync")
 
 	hasOAuth := oauthClientID != "" && oauthClientSecret != ""
 	configured := (apiKey != "" || hasOAuth) && len(teamIDs) > 0
 
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	allIssues, err := trackerStore.SearchIssues(ctx, "", types.IssueFilter{})
 	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
@@ -932,9 +932,6 @@ func runLinearStatus(cmd *cobra.Command, args []string) error {
 }
 
 func runLinearTeams(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("linear teams is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("linear-teams")
 	defer func() {
 		if c := metrics.Global(); c != nil {

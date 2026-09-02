@@ -96,9 +96,6 @@ func init() {
 }
 
 func runJiraSync(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("jira sync is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("jira-sync")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -122,7 +119,8 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("cannot use both --prefer-local and --prefer-jira")
 	}
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 
@@ -137,15 +135,15 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 	if len(cliProjects) > 0 {
 		jt.SetProjectKeys(tracker.DeduplicateStrings(cliProjects))
 	}
-	if err := jt.Init(ctx, store); err != nil {
+	if err := jt.Init(ctx, trackerStore); err != nil {
 		return HandleErrorRespectJSON("initializing Jira tracker: %v", err)
 	}
 
-	engine := tracker.NewEngine(jt, store, actor)
+	engine := tracker.NewEngine(jt, trackerStore, actor)
 	engine.OnMessage = func(msg string) { fmt.Println("  " + msg) }
 	engine.OnWarning = func(msg string) { fmt.Fprintf(os.Stderr, "Warning: %s\n", msg) }
 
-	engine.PushHooks = buildJiraPushHooks(ctx)
+	engine.PushHooks = buildJiraPushHooksForStore(ctx, trackerStore)
 
 	opts := tracker.SyncOptions{
 		Pull:       pull,
@@ -207,9 +205,13 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 
 // buildJiraPushHooks creates PushHooks for Jira-specific push behavior.
 func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
+	return buildJiraPushHooksForStore(ctx, tracker.NewStore(store))
+}
+
+func buildJiraPushHooksForStore(ctx context.Context, st tracker.Store) *tracker.PushHooks {
 	return &tracker.PushHooks{
 		ShouldPush: func(issue *types.Issue) bool {
-			pushPrefix, _ := store.GetConfig(ctx, "jira.push_prefix")
+			pushPrefix, _ := st.GetConfig(ctx, "jira.push_prefix")
 			if pushPrefix == "" {
 				return true
 			}
@@ -226,9 +228,6 @@ func buildJiraPushHooks(ctx context.Context) *tracker.PushHooks {
 }
 
 func runJiraStatus(cmd *cobra.Command, args []string) error {
-	if usesProxiedServer() {
-		return HandleErrorRespectJSON("jira status is not supported in proxied-server mode")
-	}
 	evt := metrics.NewCommandEvent("jira-status")
 	defer func() {
 		if c := metrics.Global(); c != nil {
@@ -238,22 +237,23 @@ func runJiraStatus(cmd *cobra.Command, args []string) error {
 
 	ctx := rootCtx
 
-	if err := ensureStoreActive(); err != nil {
+	trackerStore, err := trackerStoreForCommand(rootCtx)
+	if err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
-	jiraURL, _ := store.GetConfig(ctx, "jira.url")
-	lastSync, _ := store.GetConfig(ctx, "jira.last_sync")
+	jiraURL, _ := trackerStore.GetConfig(ctx, "jira.url")
+	lastSync, _ := trackerStore.GetConfig(ctx, "jira.last_sync")
 
-	pluralProjects, _ := store.GetConfig(ctx, "jira.projects")
-	singularProject, _ := store.GetConfig(ctx, "jira.project")
+	pluralProjects, _ := trackerStore.GetConfig(ctx, "jira.projects")
+	singularProject, _ := trackerStore.GetConfig(ctx, "jira.project")
 	projectKeys := tracker.ResolveProjectIDs(nil, pluralProjects, singularProject)
 
 	configured := jiraURL != "" && len(projectKeys) > 0
 
 	// jira sync is a round-trip path — opt out of BEADS_MAX_ROWS
 	// (designer §4.1) so a misconfigured env doesn't abort partway.
-	allIssues, err := store.SearchIssues(ctx, "", types.IssueFilter{
+	allIssues, err := trackerStore.SearchIssues(ctx, "", types.IssueFilter{
 		MaxRows:       0,
 		MaxRowsSource: "",
 	})
