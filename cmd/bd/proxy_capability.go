@@ -111,6 +111,12 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"federation":       refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
 	"repo":             refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
 	"compact":          refused("proxy.compact.unsupported", "compact requires --dolt in proxied-server mode"),
+	"backup init":      refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
+	"backup sync":      refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
+	"backup remove":    refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
+	"backup status":    refused("proxy.backup.unsupported", "backup status is not supported in proxied-server mode"),
+	"migrate sync":     refused("proxy.migrate.unsupported", "migrate sync is not supported in proxied-server mode"),
+	"gate discover":    refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
 }
 
 // validateProxyMaintenanceBeforeProvider rejects known direct-only commands
@@ -120,6 +126,7 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 		return nil
 	}
 	name := cmd.Name()
+	path := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
 	if name == "compact" {
 		dolt, _ := cmd.Flags().GetBool("dolt")
 		if dolt {
@@ -128,8 +135,8 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 		rule := proxyMaintenanceRefusals["compact"]
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
-	if strings.Contains(cmd.CommandPath(), "gate discover") {
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.gate.unsupported", Message: "gate discover is not supported in proxied-server mode", ExitCode: 1})
+	if rule, ok := proxyMaintenanceRefusals[path]; ok {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
 	if rule, ok := proxyMaintenanceRefusals[name]; ok {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
