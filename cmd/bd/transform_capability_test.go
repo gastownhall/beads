@@ -15,7 +15,11 @@ func transformTestCommand(path string, flags ...string) *cobra.Command {
 	root := &cobra.Command{Use: "bd"}
 	cmd := &cobra.Command{Use: path}
 	for _, flag := range flags {
-		cmd.Flags().Bool(flag, false, "")
+		if flag == "of" || flag == "with" {
+			cmd.Flags().String(flag, "", "")
+		} else {
+			cmd.Flags().Bool(flag, false, "")
+		}
 	}
 	root.AddCommand(cmd)
 	return cmd
@@ -32,8 +36,13 @@ func TestProxyTransformCapabilityRows(t *testing.T) {
 	}{
 		{name: "rename", path: "rename", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename is not supported in proxied-server mode", exit: 1},
 		{name: "rename-prefix", path: "rename-prefix", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix is not supported in proxied-server mode", exit: 1},
+		{name: "rename-prefix dry-run", path: "rename-prefix", argument: "--dry-run", flags: []string{"dry-run"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --dry-run is not supported in proxied-server mode", exit: 1},
+		{name: "rename-prefix repair", path: "rename-prefix", argument: "--repair", flags: []string{"repair"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --repair is not supported in proxied-server mode", exit: 1},
+		{name: "rename-prefix repair dry-run", path: "rename-prefix", argument: "--dry-run --repair", flags: []string{"dry-run", "repair"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "rename-prefix --dry-run --repair is not supported in proxied-server mode", exit: 1},
 		{name: "duplicate", path: "duplicate", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicate is not supported in proxied-server mode", exit: 1},
+		{name: "duplicate of", path: "duplicate", argument: "--of", flags: []string{"of"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicate --of is not supported in proxied-server mode", exit: 1},
 		{name: "supersede", path: "supersede", outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "supersede is not supported in proxied-server mode", exit: 1},
+		{name: "supersede with", path: "supersede", argument: "--with", flags: []string{"with"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "supersede --with is not supported in proxied-server mode", exit: 1},
 		{name: "duplicates", path: "duplicates", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeHonored},
 		{name: "duplicates auto-merge", path: "duplicates", argument: "--auto-merge", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeRefused, code: "proxy.transform.unsupported", message: "duplicates --auto-merge is not supported in proxied-server mode", exit: 1},
 		{name: "duplicates auto-merge dry-run", path: "duplicates", argument: "--auto-merge --dry-run", flags: []string{"auto-merge", "dry-run"}, outcome: ProxyOutcomeHonored},
@@ -118,6 +127,25 @@ func TestProxyTransformRefusalRendering(t *testing.T) {
 	}
 }
 
+func TestProxyTransformMatcherIgnoresInheritedOutputFlags(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	root.PersistentFlags().Bool("json", false, "output JSON")
+	cmd := &cobra.Command{Use: "duplicates"}
+	cmd.Flags().Bool("auto-merge", false, "")
+	cmd.Flags().Bool("dry-run", false, "")
+	root.AddCommand(cmd)
+	if err := cmd.Flags().Set("auto-merge", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := root.PersistentFlags().Set("json", "true"); err != nil {
+		t.Fatal(err)
+	}
+	row, ok := lookupTransformCapability(cmd)
+	if !ok || row.Argument != "--auto-merge" || row.Outcome != ProxyOutcomeRefused {
+		t.Fatalf("row with inherited --json = %#v, ok=%v", row, ok)
+	}
+}
+
 func TestProxyTransformRefusalHasNoProviderOrFileMutation(t *testing.T) {
 	dir := t.TempDir()
 	version := []byte("version-before\n")
@@ -135,8 +163,12 @@ func TestProxyTransformRefusalHasNoProviderOrFileMutation(t *testing.T) {
 	t.Cleanup(func() { uowProvider = oldProvider })
 
 	cmd := transformTestCommand("supersede")
-	if err := validateProxyTransformBeforeProvider(cmd); err == nil {
+	err := validateProxyTransformBeforeProvider(cmd)
+	if err == nil {
 		t.Fatal("expected transform refusal")
+	}
+	if code, ok := exitCodeFromError(err); !ok || code != 1 {
+		t.Fatalf("exit = %v, want 1", err)
 	}
 	if uowProvider != nil {
 		t.Fatal("transform refusal initialized a provider")
