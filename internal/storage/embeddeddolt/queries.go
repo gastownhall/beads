@@ -9,9 +9,17 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
+
+// WakeExpiredDefersAdvisory preserves the backend wake contract for decorators.
+func (s *EmbeddedDoltStore) WakeExpiredDefersAdvisory(ctx context.Context) {
+	s.wakeExpiredDefers(ctx)
+}
+
+var _ storage.ExpiredDeferWaker = (*EmbeddedDoltStore)(nil)
 
 // wakeExpiredDefers runs the lazy defer-wake sweep (issueops.WakeExpiredDefersInTx)
 // in its own write transaction before a ready-work read. Advisory by contract:

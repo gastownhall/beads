@@ -60,6 +60,11 @@ func (c *readyClaimer) ClaimNext(ctx context.Context, req issueops.ClaimNextRequ
 	if err != nil {
 		return issueops.ClaimNextResult{}, err
 	}
+	// ClaimReadyIssue does not perform the lazy wake owned by backend ready
+	// roles. Preserve it before selection, including through telemetry/hooks.
+	if waker, ok := storage.UnwrapStore(c.policy.inner).(storage.ExpiredDeferWaker); ok {
+		waker.WakeExpiredDefersAdvisory(ctx)
+	}
 	claimed, err := c.policy.ClaimReadyIssue(ctx, filter, req.Actor)
 	if err != nil || claimed == nil {
 		return issueops.ClaimNextResult{}, err
