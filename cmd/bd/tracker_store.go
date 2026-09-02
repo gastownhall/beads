@@ -14,7 +14,11 @@ func trackerStoreForCommand(ctx context.Context) (tracker.Store, error) {
 		if uowProvider == nil {
 			return nil, fmt.Errorf("proxied-server provider not initialized")
 		}
-		return tracker.NewUOWStore(uowProvider), nil
+		store := tracker.NewUOWStore(uowProvider)
+		if store == nil {
+			return nil, fmt.Errorf("proxied-server provider is invalid")
+		}
+		return store, nil
 	}
 	if err := ensureStoreActiveWithContext(ctx); err != nil {
 		return nil, err
