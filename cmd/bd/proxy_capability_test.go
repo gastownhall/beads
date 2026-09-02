@@ -56,10 +56,12 @@ func TestProxyCapabilityCommandRows(t *testing.T) {
 		{"show", "--watch", ProxyOutcomeRefused},
 		{"list", "--watch", ProxyOutcomeHonored},
 	}
-	for _, tc := range cases {
-		rule, ok := LookupProxyCapabilityAt(tc.command, tc.argument, ProxyModeProxied, ProxyTopologyExternalTCP)
-		if !ok || rule.Outcome != tc.outcome {
-			t.Errorf("%s %s outcome=%q ok=%v, want %q", tc.command, tc.argument, rule.Outcome, ok, tc.outcome)
+	for _, topology := range []ProxyTopology{ProxyTopologyManagedLocal, ProxyTopologyExternalTCP, ProxyTopologyExternalUnix} {
+		for _, tc := range cases {
+			rule, ok := LookupProxyCapabilityAt(tc.command, tc.argument, ProxyModeProxied, topology)
+			if !ok || rule.Outcome != tc.outcome {
+				t.Errorf("topology=%s %s %s outcome=%q ok=%v, want %q", topology, tc.command, tc.argument, rule.Outcome, ok, tc.outcome)
+			}
 		}
 	}
 }
