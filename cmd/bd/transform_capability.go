@@ -1,6 +1,9 @@
 package main
 
-import "github.com/spf13/cobra"
+import (
+	"github.com/spf13/cobra"
+	"strings"
+)
 
 type TransformCapability struct {
 	Path     string
@@ -11,6 +14,7 @@ type TransformCapability struct {
 var transformCapabilityRows = []TransformCapability{
 	{Path: "rename", Outcome: ProxyOutcomeRefused}, {Path: "rename-prefix", Outcome: ProxyOutcomeRefused},
 	{Path: "duplicate", Outcome: ProxyOutcomeRefused}, {Path: "supersede", Outcome: ProxyOutcomeRefused},
+	{Path: "duplicates", Outcome: ProxyOutcomeHonored},
 	{Path: "duplicates", Argument: "--auto-merge", Outcome: ProxyOutcomeRefused},
 	{Path: "duplicates", Argument: "--auto-merge --dry-run", Outcome: ProxyOutcomeHonored},
 }
@@ -27,9 +31,7 @@ func validateProxyTransformBeforeProvider(cmd *cobra.Command) error {
 		return nil
 	}
 	path := cmd.CommandPath()
-	if cmd.Root() != cmd {
-		path = path[len(cmd.Root().Name())+1:]
-	}
+	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
 	if rule, ok := transformCapabilityMatrix[path]; ok {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}

@@ -6,6 +6,9 @@ import (
 )
 
 func TestProxyTransformRefusals(t *testing.T) {
+	if len(transformCapabilityRows) == 0 {
+		t.Fatal("transform capability rows must be populated")
+	}
 	for _, path := range []string{"rename", "rename-prefix", "duplicate", "supersede"} {
 		root := &cobra.Command{Use: "bd"}
 		cmd := &cobra.Command{Use: path}
