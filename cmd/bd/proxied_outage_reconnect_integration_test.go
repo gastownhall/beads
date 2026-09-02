@@ -142,7 +142,7 @@ func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
 func TestManagedLocalProxiedOutageReconnectContract(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildEmbeddedBD(t)
-	p := bdManagedLocalInit(t, bd, "outage_managed", proxy.IdleTimeoutNever)
+	p := bdManagedLocalInit(t, bd, "outage_managed", 5*time.Minute)
 	sentinel := bdProxiedCreate(t, bd, p.dir, "managed outage sentinel")
 	proxyBefore := readManagedProxyPidFile(t, p)
 	backend := readManagedBackendPidFile(t, p)
@@ -166,6 +166,13 @@ func TestManagedLocalProxiedOutageReconnectContract(t *testing.T) {
 		t.Fatalf("managed-local sentinel lost after command-level restart: %+v", got)
 	}
 	proxyAfter := readManagedProxyPidFile(t, p)
+	backendAfter := readManagedBackendPidFile(t, p)
+	if proxyBefore == nil || processAlive(proxyBefore.Pid) || processAlive(backend.Pid) {
+		t.Fatalf("managed child death left old processes alive: proxy=%v backend=%v", processAlive(proxyBefore.Pid), processAlive(backend.Pid))
+	}
+	if backendAfter == nil || !processAlive(backendAfter.Pid) {
+		t.Fatalf("managed restart backend not alive: %+v", backendAfter)
+	}
 	if proxyBefore == nil || proxyAfter == nil || proxyAfter.Pid == proxyBefore.Pid {
 		t.Fatalf("managed child death did not force a fresh proxy: before=%+v after=%+v", proxyBefore, proxyAfter)
 	}
