@@ -468,4 +468,61 @@ func TestProxiedServerImport(t *testing.T) {
 			t.Errorf("title after upsert = %q, want the imported rewrite", got)
 		}
 	})
+
+	// Review of this PR found the original proxied branch skipped the
+	// vocabulary pre-validation entirely, which made --skip-invalid a silent
+	// no-op for validation-class rejects on this route: a `"status":"verify"`
+	// record reached the server-side batch writer and aborted the whole UOW —
+	// nothing imported, no line number, with or without the flag. This pins
+	// the fixed contract: strict mode fails up front naming the record's
+	// source line, and --skip-invalid imports the valid records around it.
+	t.Run("skip_invalid_partitions_validation_rejects", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "impv")
+		db := openProxiedDB(t, p)
+
+		badLine := `{"id":"impv-bad","title":"Bogus status","issue_type":"task","status":"verify","priority":2}`
+		fixture := importFixtureJSONL(t, fixtureIssues("impv"), badLine)
+		path := filepath.Join(p.dir, "invalid.jsonl")
+		if err := os.WriteFile(path, []byte(fixture), 0o644); err != nil {
+			t.Fatalf("write fixture: %v", err)
+		}
+
+		// Default (strict): fail before the batch, naming the source line
+		// (header line 1 + three fixture rows = line 5), importing nothing.
+		_, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, "import", path)
+		if err == nil {
+			t.Fatal("strict import with an invalid record: want failure, got success")
+		}
+		if !strings.Contains(stderr, "line 5") {
+			t.Errorf("strict failure stderr = %q, want it to name line 5", stderr)
+		}
+		if !strings.Contains(stderr, "--skip-invalid") {
+			t.Errorf("strict failure stderr = %q, want it to advertise --skip-invalid", stderr)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-%'"); got != 0 {
+			t.Errorf("issue rows after strict failure = %d, want 0", got)
+		}
+
+		// --skip-invalid: the three valid records import, the bad one is
+		// quarantined verbatim via --rejects.
+		rejects := filepath.Join(p.dir, "rejects.jsonl")
+		report := bdProxiedImport(t, bd, p.dir, path, "--skip-invalid", "--rejects", rejects)
+		if !strings.Contains(report, "Imported 3 issues") {
+			t.Errorf("skip-invalid report = %q, want 'Imported 3 issues'", report)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id LIKE 'impv-r%'"); got != 3 {
+			t.Errorf("issue rows = %d, want 3", got)
+		}
+		if got := proxiedImportQueryInt(t, db, "SELECT COUNT(*) FROM issues WHERE id = 'impv-bad'"); got != 0 {
+			t.Errorf("impv-bad rows = %d, want 0 (validation-invalid record must be skipped)", got)
+		}
+		data, rerr := os.ReadFile(rejects)
+		if rerr != nil {
+			t.Fatalf("rejects file not written: %v", rerr)
+		}
+		if got := strings.TrimSpace(string(data)); got != badLine {
+			t.Errorf("rejects content = %q, want the rejected line verbatim %q", got, badLine)
+		}
+	})
 }

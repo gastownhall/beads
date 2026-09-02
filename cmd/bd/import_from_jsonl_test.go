@@ -781,3 +781,78 @@ func TestImportFromLocalJSONL_LegacyFormats(t *testing.T) {
 		}
 	})
 }
+
+// TestImportFromLocalJSONLRejectContract pins the two-tier reject contract
+// the GH#4492 work gave the whole-database restore paths (`bd bootstrap`,
+// `bd init --from-jsonl`): a line that is not JSON at all still fails the
+// entire restore (a corrupt export must not restore minus its damaged part
+// while reporting success), while a record the writer would refuse is
+// skipped and quarantined so one bad row cannot discard the rest.
+func TestImportFromLocalJSONLRejectContract(t *testing.T) {
+	skipIfNoDolt(t)
+
+	t.Run("corrupt line fails the whole restore with its line number", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		store := newTestStore(t, filepath.Join(tmpDir, "dolt"))
+
+		jsonlContent := `{"id":"test-good1","title":"First","type":"task","status":"open","priority":2}
+{this is not json at all
+{"id":"test-good2","title":"Second","type":"task","status":"open","priority":2}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx := context.Background()
+		_, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err == nil {
+			t.Fatal("importFromLocalJSONL on corrupt file: want error, got nil")
+		}
+		if !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("error = %v, want it to name line 2", err)
+		}
+		if _, gerr := store.GetIssue(ctx, "test-good1"); gerr == nil {
+			t.Error("test-good1 was imported despite the restore failing")
+		}
+	})
+
+	t.Run("writer-refused record is skipped and quarantined", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		store := newTestStore(t, filepath.Join(tmpDir, "dolt"))
+
+		badLine := `{"id":"test-bad","title":"Bogus status","type":"task","status":"verify","priority":2}`
+		jsonlContent := `{"id":"test-ok1","title":"First","type":"task","status":"open","priority":2}
+` + badLine + `
+{"id":"test-ok2","title":"Second","type":"task","status":"open","priority":2}
+`
+		jsonlPath := filepath.Join(tmpDir, "issues.jsonl")
+		if err := os.WriteFile(jsonlPath, []byte(jsonlContent), 0o644); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx := context.Background()
+		count, err := importFromLocalJSONL(ctx, store, jsonlPath)
+		if err != nil {
+			t.Fatalf("importFromLocalJSONL: %v", err)
+		}
+		if count != 2 {
+			t.Errorf("imported %d issues, want 2 (the valid ones)", count)
+		}
+		if _, gerr := store.GetIssue(ctx, "test-ok1"); gerr != nil {
+			t.Errorf("test-ok1 missing: %v", gerr)
+		}
+		if _, gerr := store.GetIssue(ctx, "test-bad"); gerr == nil {
+			t.Error("test-bad was imported despite its invalid status")
+		}
+
+		quarantine := rejectFilePath(jsonlPath)
+		data, rerr := os.ReadFile(quarantine)
+		if rerr != nil {
+			t.Fatalf("quarantine file not written: %v", rerr)
+		}
+		if got := strings.TrimSpace(string(data)); got != badLine {
+			t.Errorf("quarantine content = %q, want the rejected line verbatim %q", got, badLine)
+		}
+	})
+}

@@ -109,13 +109,53 @@ func maybeAutoImportJSONL(ctx context.Context, s storage.DoltStorage, beadsDir s
 	}
 
 	// Parse the JSONL file without touching the store.
-	issues, configEntries, err := parseJSONLFile(jsonlPath)
+	parsed, err := parseJSONLFile(jsonlPath)
 	if err != nil {
 		writeAutoImportStamp(beadsDir, info)
 		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %v\n", jsonlPath, err)
 		return
 	}
+	// A line that is not JSON at all means the file is corrupt, not that one
+	// record is bad. This is the upgrade-recovery path into an empty database,
+	// so importing everything except the damaged part would look like a
+	// successful recovery — keep failing loudly, as before.
+	if bad := firstParseReject(parsed.Rejected); bad != nil {
+		writeAutoImportStamp(beadsDir, info)
+		fmt.Fprintf(os.Stderr, "warning: auto-import: failed to parse %s: %s (line %d)\n", jsonlPath, bad.Reason, bad.Line)
+		return
+	}
+
+	issues, configEntries := parsed.Issues, parsed.Config
+
+	// Skip records the writer would reject rather than letting one bad row
+	// abort the whole recovery import (GH#4492). This path runs unattended on
+	// the 0.56→1.0 upgrade, so the rejects are quarantined next to the source:
+	// nobody is watching stderr when it fires.
+	rejected := parsed.Rejected
+	if customStatuses, customTypes, vocabErr := importVocabulary(ctx, s); vocabErr == nil {
+		var invalid []rejectedRecord
+		issues, invalid = partitionImportRecords(issues, parsed.Sources, customStatuses, customTypes)
+		rejected = append(rejected, invalid...)
+	} else {
+		fmt.Fprintf(os.Stderr, "warning: auto-import: skipping pre-validation: %v\n", vocabErr)
+	}
+	rejected = orderRejects(rejected)
+	quarantine := rejectFilePath(jsonlPath)
+	wrote, werr := writeRejectFile(quarantine, rejected)
+	if werr != nil {
+		fmt.Fprintf(os.Stderr, "warning: auto-import: %v\n", werr)
+		quarantine = ""
+	} else if !wrote {
+		quarantine = ""
+	}
+	reportRejectedRecords(os.Stderr, jsonlPath, rejected, quarantine)
+
 	if len(issues) == 0 {
+		if len(rejected) > 0 {
+			// Every record was unusable. Stamp so the next command does not
+			// re-walk the same broken file, but leave the DB untouched.
+			writeAutoImportStamp(beadsDir, info)
+		}
 		return // nothing to import
 	}
 

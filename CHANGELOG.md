@@ -283,6 +283,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   would drop a live record. Both conditions must hold, or the guard refuses as
   before.
 
+- **`bd import` reports which record was invalid, and `--skip-invalid` imports
+  the rest of the file around it** (#4492, #5202). A single record the writer
+  would refuse (for example `"status":"verify"` without that custom status
+  configured) used to abort the whole import inside the transaction: nothing
+  imported, no line number, no hint. The importer now validates records
+  up front — on the classic *and* proxied-server routes — and fails with the
+  first offending record's source line and reason. Two new flags:
+  `--skip-invalid` imports the valid records and reports the skipped ones
+  (opt-in, so scripts relying on a nonzero exit still get one by default), and
+  `--rejects <file>` quarantines the skipped records verbatim for repair and
+  re-import. `--json` gains `invalid_skipped`, `invalid_records`, and
+  `rejects_written_to`. Whole-database restore paths (`bd bootstrap`,
+  `bd init --from-jsonl`, upgrade auto-import) keep failing loudly on corrupt
+  lines but no longer let one writer-refused row discard the rest of the file.
+  A dry run no longer writes (or removes) the `--rejects` file.
+
 - **Disabling telemetry no longer strands the queued eventsData backlog
   forever** (GH#5712). `bd send-metrics` early-returned on disabled metrics
   *before* its prune step, and the spawn gate refused to schedule the child at

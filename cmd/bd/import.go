@@ -76,6 +76,17 @@ an import is visible. To deliberately restore an older snapshot, pass
 --allow-stale, which imports every row even when it overwrites newer
 local state.
 
+A record that fails validation (an unknown status, a missing title, a line
+that is not valid JSON) aborts the import and nothing is written, so a
+malformed file is never half-imported behind a zero exit status. The failure
+names the offending line and the validator's own reason instead of surfacing
+as a rolled-back transaction.
+
+Pass --skip-invalid to import the valid records and set the invalid ones
+aside: the survivors commit, and each rejection is reported on stderr with its
+line number and reason. Add --rejects <file> to write the skipped lines out
+verbatim, so they can be repaired and re-imported on their own.
+
 Large imports are written in bounded transactions (a few hundred issues
 each, with a short pause between commits) with progress on stderr, so
 concurrent bd commands keep working while the import runs instead of
@@ -103,10 +114,12 @@ EXAMPLES:
 }
 
 var (
-	importDryRun     bool
-	importDedup      bool
-	importAllowStale bool
-	importInput      string
+	importDryRun      bool
+	importDedup       bool
+	importAllowStale  bool
+	importSkipInvalid bool
+	importRejects     string
+	importInput       string
 )
 
 func init() {
@@ -114,6 +127,8 @@ func init() {
 	importCmd.Flags().BoolVar(&importDryRun, "dry-run", false, "Show what would be imported without importing")
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
+	importCmd.Flags().BoolVar(&importSkipInvalid, "skip-invalid", false, "Skip records that fail validation and import the rest, instead of failing on the first one")
+	importCmd.Flags().StringVar(&importRejects, "rejects", "", "Write skipped invalid records to this file, verbatim, for repair and re-import")
 	rootCmd.AddCommand(importCmd)
 }
 
@@ -171,7 +186,9 @@ func runImportInner(args []string) error {
 	fromStdin := importInput == "-" || (len(args) > 0 && args[0] == "-")
 
 	if fromStdin {
-		return runImportFromReader(ctx, os.Stdin, "stdin")
+		// sourceFilePath is "" here: stdin has no file to collide with the
+		// --rejects path.
+		return runImportFromReader(ctx, os.Stdin, "stdin", "")
 	}
 
 	// Determine source file
@@ -219,39 +236,142 @@ func runImportInner(args []string) error {
 	}
 	defer f.Close()
 
-	return runImportFromReader(ctx, f, jsonlPath)
+	return runImportFromReader(ctx, f, jsonlPath, jsonlPath)
 }
 
 type importResultJSON struct {
-	Source              string         `json:"source"`
-	Created             int            `json:"created"`
-	Updated             int            `json:"updated,omitempty"`
-	Unchanged           int            `json:"unchanged,omitempty"`
-	Skipped             int            `json:"skipped"`
-	DedupHits           int            `json:"dedup_skipped,omitempty"`
-	Memories            int            `json:"memories,omitempty"`
-	IDs                 []string       `json:"ids,omitempty"`
-	UpdatedIssues       []ImportChange `json:"updated_issues,omitempty"`
-	TieKeptLocalIDs     []string       `json:"tie_kept_local_ids,omitempty"`
-	StaleSkippedIDs     []string       `json:"stale_skipped_ids,omitempty"`
-	SkippedDependencies []string       `json:"skipped_dependencies,omitempty"`
-	DryRun              bool           `json:"dry_run,omitempty"`
+	Source    string `json:"source"`
+	Created   int    `json:"created"`
+	Updated   int    `json:"updated,omitempty"`
+	Unchanged int    `json:"unchanged,omitempty"`
+	Skipped   int    `json:"skipped"`
+	DedupHits int    `json:"dedup_skipped,omitempty"`
+	// Invalid counts records rejected by record-level validation and skipped
+	// so the rest of the file could import (GH#4492). Kept separate from
+	// Skipped, which counts dedup hits.
+	Invalid             int              `json:"invalid_skipped,omitempty"`
+	InvalidRecords      []rejectedRecord `json:"invalid_records,omitempty"`
+	RejectsWrittenTo    string           `json:"rejects_written_to,omitempty"`
+	Memories            int              `json:"memories,omitempty"`
+	IDs                 []string         `json:"ids,omitempty"`
+	UpdatedIssues       []ImportChange   `json:"updated_issues,omitempty"`
+	TieKeptLocalIDs     []string         `json:"tie_kept_local_ids,omitempty"`
+	StaleSkippedIDs     []string         `json:"stale_skipped_ids,omitempty"`
+	SkippedDependencies []string         `json:"skipped_dependencies,omitempty"`
+	DryRun              bool             `json:"dry_run,omitempty"`
 }
 
-func runImportFromReader(ctx context.Context, r io.Reader, source string) error {
-	issues, memories, err := parseImportRecords(r)
+// sourceFilePath is the real path of the import source when it is a file, and
+// "" when importing from stdin (which cannot be truncated by --rejects — see
+// the collision guard in resolveImportRejects). It is distinct from source,
+// which is a human-readable label ("stdin" or the file path) used only in
+// messages.
+func runImportFromReader(ctx context.Context, r io.Reader, source string, sourceFilePath string) error {
+	issues, sources, memories, rejected, err := parseImportRecords(r)
 	if err != nil {
 		return err
 	}
 
 	if usesProxiedServer() {
-		return runImportRecordsProxied(ctx, issues, memories, source)
+		// Same vocabulary pre-validation as the classic path below, read
+		// through the UOW provider's ConfigUseCase — the proxied route has no
+		// local store handle, but the vocabulary is still reachable, and
+		// without this partition a validation-invalid record would reach the
+		// server-side batch writer and abort the whole batch with no line
+		// number and no --skip-invalid escape: the exact GH#4492 failure, on
+		// the primary deployment mode.
+		if customStatuses, customTypes, vocabErr := importVocabularyProxied(ctx); vocabErr == nil {
+			var invalid []rejectedRecord
+			issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
+			rejected = append(rejected, invalid...)
+		} else if importSkipInvalid {
+			// Without the vocabulary a custom status is indistinguishable
+			// from a typo, so leave the batch alone and let the writer's
+			// error stand (mirrors the classic branch below).
+			fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
+		}
+		rejects, rerr := resolveImportRejects(rejected, source, sourceFilePath)
+		if rerr != nil {
+			return rerr
+		}
+		return runImportRecordsProxied(ctx, issues, memories, source, rejects)
 	}
 
 	if store == nil {
 		return fmt.Errorf("no database — run 'bd init' or 'bd bootstrap' first")
 	}
-	return runImportRecordsClassic(ctx, issues, memories, source)
+
+	// Partition out records the writer would reject, before dedup — dedup
+	// filters `issues` and would desynchronise it from `sources`. Historically a
+	// single bad record aborted the entire transaction and nothing imported
+	// (GH#4492); now the batch imports without it and the fault is reported.
+	if customStatuses, customTypes, vocabErr := importVocabulary(ctx, store); vocabErr == nil {
+		var invalid []rejectedRecord
+		issues, invalid = partitionImportRecords(issues, sources, customStatuses, customTypes)
+		rejected = append(rejected, invalid...)
+	} else if importSkipInvalid {
+		// Without the vocabulary a custom status is indistinguishable from a
+		// typo, so leave the batch alone and let the writer's error stand.
+		fmt.Fprintf(os.Stderr, "warning: skipping import pre-validation: %v\n", vocabErr)
+	}
+	rejects, rerr := resolveImportRejects(rejected, source, sourceFilePath)
+	if rerr != nil {
+		return rerr
+	}
+	return runImportRecordsClassic(ctx, issues, memories, source, rejects)
+}
+
+// importRejectOutcome carries the resolved reject batch into the mode-specific
+// import pipelines so both report it identically in the JSON result.
+type importRejectOutcome struct {
+	rejected  []rejectedRecord
+	writtenTo string
+}
+
+// resolveImportRejects runs the shared tail of reject handling: source
+// ordering, the strict-mode failure, the --rejects source-collision guard, the
+// quarantine write, and the stderr report. writtenTo is "" unless the
+// quarantine file holds this run's content.
+func resolveImportRejects(rejected []rejectedRecord, source, sourceFilePath string) (importRejectOutcome, error) {
+	rejected = orderRejects(rejected)
+	if !importSkipInvalid && len(rejected) > 0 {
+		return importRejectOutcome{}, firstRejectError(rejected)
+	}
+	rejectPath := importRejects
+	if rejectPath != "" {
+		// writeRejectFile truncates and rewrites rejectPath, so if it happens
+		// to name the import source (directly, via a relative alias, or
+		// through a symlink) the source would be destroyed and replaced with
+		// only the rejected lines. Refuse before writing anything.
+		if collide, cerr := rejectPathCollidesWithSource(rejectPath, sourceFilePath); cerr != nil {
+			return importRejectOutcome{}, cerr
+		} else if collide {
+			return importRejectOutcome{}, fmt.Errorf("--rejects %s names the same file as the import source; writing rejects would truncate and overwrite the source, so refusing (pass a different --rejects path)", rejectPath)
+		}
+	}
+	// A dry run must not touch the filesystem: writeRejectFile both writes
+	// the quarantine and REMOVES a pre-existing file at the --rejects path
+	// when this run has no rejects, and either mutation violates --dry-run's
+	// contract. The strict-mode failure and the collision guard above still
+	// run, so a dry run refuses exactly where the real run would.
+	rejectsWritten := false
+	if !importDryRun {
+		var werr error
+		rejectsWritten, werr = writeRejectFile(rejectPath, rejected)
+		if werr != nil {
+			return importRejectOutcome{}, werr
+		}
+	}
+	// Only advertise the path when it holds this run's content — writeRejectFile
+	// removes a stale file from a previous run instead of leaving it in place,
+	// so a path that was cleaned up (or never written, including the dry-run
+	// case) must not be reported.
+	reportedRejectPath := ""
+	if rejectsWritten {
+		reportedRejectPath = rejectPath
+	}
+	reportRejectedRecords(os.Stderr, source, rejected, reportedRejectPath)
+	return importRejectOutcome{rejected: rejected, writtenTo: reportedRejectPath}, nil
 }
 
 // parseImportRecords scans one JSONL stream into issue rows and memory
@@ -260,22 +380,37 @@ func runImportFromReader(ctx context.Context, r io.Reader, source string) error 
 // reader): the optional _schema header and tombstones are skipped, and the
 // "wisp_plane" boolean is honored as the explicit wisps-plane marker (and
 // the legacy "wisp" alias for "ephemeral") via applyImportWispPlane.
-func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
+//
+// Lines that fail to parse do not abort the scan; they are collected as
+// rejectedRecords for the caller to fail on (default) or skip
+// (--skip-invalid), per GH#4492. sources is index-aligned with issues so
+// later validation can name each record's source line.
+func parseImportRecords(r io.Reader) ([]*types.Issue, []recordSource, []memoryRecord, []rejectedRecord, error) {
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 
 	var issues []*types.Issue
+	var sources []recordSource
+	var rejected []rejectedRecord
 	var memories []memoryRecord
+	lineNo := 0
 
 	for scanner.Scan() {
 		line := scanner.Text()
+		lineNo++
 		if line == "" {
 			continue
 		}
 
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			rejected = append(rejected, rejectedRecord{
+				Line:   lineNo,
+				Reason: fmt.Sprintf("failed to parse JSONL line: %v", err),
+				Kind:   rejectParse,
+				raw:    line,
+			})
+			continue
 		}
 
 		// Skip the optional beads-jsonl header record (§J1.3). A canonical
@@ -295,7 +430,13 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					rejected = append(rejected, rejectedRecord{
+						Line:   lineNo,
+						Reason: fmt.Sprintf("failed to parse memory record: %v", err),
+						Kind:   rejectParse,
+						raw:    line,
+					})
+					continue
 				}
 				if mem.Key != "" && mem.Value != "" {
 					memories = append(memories, mem)
@@ -306,7 +447,13 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			rejected = append(rejected, rejectedRecord{
+				Line:   lineNo,
+				Reason: fmt.Sprintf("failed to parse issue from JSONL: %v", err),
+				Kind:   rejectParse,
+				raw:    line,
+			})
+			continue
 		}
 		if issue.Status == "tombstone" {
 			continue
@@ -314,18 +461,19 @@ func parseImportRecords(r io.Reader) ([]*types.Issue, []memoryRecord, error) {
 		applyImportWispPlane(peek, &issue)
 		issue.SetDefaults()
 		issues = append(issues, &issue)
+		sources = append(sources, recordSource{Line: lineNo, Raw: line})
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
-	return issues, memories, nil
+	return issues, sources, memories, rejected, nil
 }
 
 // runImportRecordsClassic is the classic (embedded/direct store) import
 // pipeline over the parsed records: dedup, dry-run classification, memory
 // writes, the batch issue import, the final commit and the issue_prefix
 // reconciliation.
-func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string) error {
+func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memories []memoryRecord, source string, rejects importRejectOutcome) error {
 	// Dedup: skip issues whose title matches an existing open issue
 	dedupHits := 0
 	if importDedup && len(issues) > 0 {
@@ -333,9 +481,12 @@ func runImportRecordsClassic(ctx context.Context, issues []*types.Issue, memorie
 	}
 
 	result := importResultJSON{
-		Source:    source,
-		DedupHits: dedupHits,
-		DryRun:    importDryRun,
+		Source:           source,
+		DedupHits:        dedupHits,
+		DryRun:           importDryRun,
+		Invalid:          len(rejects.rejected),
+		InvalidRecords:   rejects.rejected,
+		RejectsWrittenTo: rejects.writtenTo,
 	}
 
 	if importDryRun {
