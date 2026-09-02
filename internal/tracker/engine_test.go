@@ -43,7 +43,13 @@ func newTestStore(t *testing.T) *dolt.DoltStore {
 	return store
 }
 
-func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
+// TestEnginePullRefusesUnlinkedLocalIDMatch pins the demotion of body-embedded
+// bead IDs to consistency hints: a converted issue that names an existing but
+// UNLINKED local bead (no external_ref binding it to this external issue) must
+// import as a brand-new bead with a generated ID, leaving the named bead
+// untouched. The embedded ID travels in the attacker-writable issue body, so
+// it may never adopt a bead or mint one with a chosen ID.
+func TestEnginePullRefusesUnlinkedLocalIDMatch(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
 	defer store.Close()
@@ -86,19 +92,34 @@ func TestEnginePullMatchesExistingIssueByLocalID(t *testing.T) {
 	}
 
 	engine := NewEngine(tracker, store, "test-actor")
+	engine.PullHooks = &PullHooks{
+		GenerateID: func(_ context.Context, issue *types.Issue) error {
+			if issue.ID == "" {
+				issue.ID = "bd-generated"
+			}
+			return nil
+		},
+	}
 	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
 	if err != nil {
 		t.Fatalf("Sync() error: %v", err)
 	}
-	if result.PullStats.Created != 0 || result.PullStats.Updated != 1 {
-		t.Fatalf("PullStats = %+v, want Created=0 Updated=1", result.PullStats)
+	if result.PullStats.Created != 1 || result.PullStats.Updated != 0 {
+		t.Fatalf("PullStats = %+v, want Created=1 Updated=0", result.PullStats)
 	}
-	updated, err := store.GetIssue(ctx, "bd-local")
+	untouched, err := store.GetIssue(ctx, "bd-local")
 	if err != nil {
-		t.Fatalf("GetIssue() error: %v", err)
+		t.Fatalf("GetIssue(bd-local) error: %v", err)
 	}
-	if updated.Title != "Remote title" || updated.Description != "Remote description" {
-		t.Fatalf("issue = %+v", updated)
+	if untouched.Title != "Local title" || untouched.Description != "Local description" || untouched.ExternalRef != nil {
+		t.Fatalf("unlinked bead was adopted or mutated: %+v", untouched)
+	}
+	created, err := store.GetIssue(ctx, "bd-generated")
+	if err != nil {
+		t.Fatalf("GetIssue(bd-generated) error: %v", err)
+	}
+	if created.Title != "Remote title" || created.ExternalRef == nil || *created.ExternalRef != "https://test.test/EXT-1" {
+		t.Fatalf("imported bead = %+v, want remote content linked to EXT-1", created)
 	}
 }
 
@@ -1232,8 +1253,8 @@ func TestEnginePushWithFormatDescription(t *testing.T) {
 	tracker := newMockTracker("test")
 	engine := NewEngine(tracker, store, "test-actor")
 	engine.PushHooks = &PushHooks{
-		FormatDescription: func(issue *types.Issue) string {
-			return issue.Description + "\n\n## Design\n" + issue.Design
+		FormatDescription: func(issue *types.Issue) (string, error) {
+			return issue.Description + "\n\n## Design\n" + issue.Design, nil
 		},
 	}
 

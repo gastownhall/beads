@@ -68,8 +68,12 @@ type PullHooks struct {
 type PushHooks struct {
 	// FormatDescription transforms the description before sending to tracker.
 	// Linear uses this for BuildLinearDescription (merging structured fields).
-	// If nil, issue.Description is used as-is.
-	FormatDescription func(issue *types.Issue) string
+	// If nil, issue.Description is used as-is. Returning an error skips that
+	// issue's push (warned, counted as an error, push hash left unrecorded):
+	// pushing a body rendered from incomplete inputs could destroy remote
+	// state (e.g. wipe an existing dependency tasklist) and then cache the
+	// wrong content as "pushed".
+	FormatDescription func(issue *types.Issue) (string, error)
 
 	// ContentEqual compares local and remote issues to skip unnecessary API calls.
 	// Returns true if content is identical (skip update). If nil, uses timestamp comparison.
@@ -457,9 +461,32 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 			stats.Skipped++
 			continue
 		}
-		if existing == nil {
-			if localID := strings.TrimSpace(conv.Issue.ID); localID != "" {
-				existing = localByID[localID]
+		// An ID embedded in the external issue body (e.g. the GitHub sync
+		// footer) is attacker-writable: issue authors control the body, and
+		// the footer format is public. Treat it as a consistency hint only.
+		// It may CONFIRM an established link — a local bead that already
+		// carries this exact external ref — but it must never mint a new bead
+		// with a chosen ID, adopt an unlinked bead, or repoint a bead linked
+		// elsewhere. Everything unconfirmed imports as new with a generated ID.
+		if localID := strings.TrimSpace(conv.Issue.ID); localID != "" {
+			candidate := localByID[localID]
+			establishedLink := candidate != nil && candidate.ExternalRef != nil &&
+				strings.TrimSpace(*candidate.ExternalRef) == strings.TrimSpace(ref)
+			switch {
+			case existing != nil && existing.ID == localID:
+				// Embedded ID agrees with the bead already linked to this
+				// external issue: pure confirmation, nothing to do.
+			case existing != nil:
+				e.warn("Embedded bead ID %s from %s does not match linked local issue %s; ignoring it",
+					localID, ref, existing.ID)
+				conv.Issue.ID = ""
+			case establishedLink:
+				// The named bead already points at this exact external issue
+				// via external_ref; the embedded ID merely confirms the link.
+				existing = candidate
+			default:
+				e.warn("Ignoring embedded bead ID %s from %s: not an established link", localID, ref)
+				conv.Issue.ID = "" // never reuse an unconfirmed ID for a new bead
 			}
 		}
 
@@ -971,8 +998,9 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	}
 
 	if batchTracker, ok := e.Tracker.(BatchPushTracker); ok {
-		pushIssues, skipped := e.collectBatchPushIssues(issues, opts, descendantSet, skipIDs, forceIDs)
+		pushIssues, skipped, errored := e.collectBatchPushIssues(issues, opts, descendantSet, skipIDs, forceIDs)
 		stats.Skipped += skipped
+		stats.Errors += errored
 		if len(pushIssues) == 0 {
 			return stats, nil
 		}
@@ -1048,6 +1076,26 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 		extRef := derefStr(issue.ExternalRef)
 		willCreate := extRef == "" || !e.Tracker.IsExternalRef(extRef)
 
+		// FormatDescription hook: apply to a copy so we don't mutate local data.
+		// A formatting failure skips this issue entirely: pushing a body built
+		// from incomplete inputs could clobber remote content, and recording a
+		// push hash for it would cache that wrong body as already-pushed. Run
+		// this before the dry-run branch too, so a preview reports the same
+		// skip a real run would, rather than a create/update the real run would
+		// never actually perform (gastownhall/beads#5065).
+		pushIssue := issue
+		if e.PushHooks != nil && e.PushHooks.FormatDescription != nil {
+			desc, err := e.PushHooks.FormatDescription(issue)
+			if err != nil {
+				e.warn("Failed to render %s for push, skipping: %v", issue.ID, err)
+				stats.Errors++
+				continue
+			}
+			copy := *issue
+			copy.Description = desc
+			pushIssue = &copy
+		}
+
 		if opts.DryRun {
 			if willCreate {
 				e.msg("[dry-run] Would create in %s: %s", e.Tracker.DisplayName(), ui.SanitizeForTerminal(issue.Title))
@@ -1061,14 +1109,6 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 				stats.Updated++
 			}
 			continue
-		}
-
-		// FormatDescription hook: apply to a copy so we don't mutate local data.
-		pushIssue := issue
-		if e.PushHooks != nil && e.PushHooks.FormatDescription != nil {
-			copy := *issue
-			copy.Description = e.PushHooks.FormatDescription(issue)
-			pushIssue = &copy
 		}
 
 		if willCreate {
@@ -1174,9 +1214,8 @@ func (e *Engine) doPush(ctx context.Context, opts SyncOptions, skipIDs, forceIDs
 	return stats, nil
 }
 
-func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, descendantSet, skipIDs, forceIDs map[string]bool) ([]*types.Issue, int) {
+func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions, descendantSet, skipIDs, forceIDs map[string]bool) (result []*types.Issue, skipped, errored int) {
 	pushIssues := make([]*types.Issue, 0, len(issues))
-	skipped := 0
 	for _, issue := range issues {
 		if descendantSet != nil && !descendantSet[issue.ID] {
 			skipped++
@@ -1201,18 +1240,30 @@ func (e *Engine) collectBatchPushIssues(issues []*types.Issue, opts SyncOptions,
 			skipped++
 			continue
 		}
-		pushIssues = append(pushIssues, e.formatPushIssue(issue))
+		formatted, err := e.formatPushIssue(issue)
+		if err != nil {
+			// Same contract as the per-issue loop: a formatting failure must
+			// not push a body built from incomplete inputs.
+			e.warn("Failed to render %s for push, skipping: %v", issue.ID, err)
+			errored++
+			continue
+		}
+		pushIssues = append(pushIssues, formatted)
 	}
-	return pushIssues, skipped
+	return pushIssues, skipped, errored
 }
 
-func (e *Engine) formatPushIssue(issue *types.Issue) *types.Issue {
+func (e *Engine) formatPushIssue(issue *types.Issue) (*types.Issue, error) {
 	if e.PushHooks == nil || e.PushHooks.FormatDescription == nil {
-		return issue
+		return issue, nil
+	}
+	desc, err := e.PushHooks.FormatDescription(issue)
+	if err != nil {
+		return nil, err
 	}
 	copy := *issue
-	copy.Description = e.PushHooks.FormatDescription(issue)
-	return &copy
+	copy.Description = desc
+	return &copy, nil
 }
 
 func (e *Engine) applyBatchPushResult(ctx context.Context, result *BatchPushResult) {
