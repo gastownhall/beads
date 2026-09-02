@@ -5,6 +5,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/uow"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -57,5 +58,60 @@ func TestUOWStorePropagatesProviderFailure(t *testing.T) {
 	_, err := store.GetConfig(context.Background(), "linear.team_id")
 	if !errors.Is(err, want) {
 		t.Fatalf("GetConfig error = %v, want %v", err, want)
+	}
+}
+
+type lifecycleStoreFake struct {
+	storage.Storage
+	labels []string
+}
+
+func (s *lifecycleStoreFake) RunInIssueLifecycleTransaction(ctx context.Context, _ string, fn func(storage.IssueLifecycleTransaction) error) error {
+	return fn(&lifecycleTxFake{store: s})
+}
+
+type lifecycleTxFake struct {
+	storage.Transaction
+	store *lifecycleStoreFake
+}
+
+func (tx *lifecycleTxFake) UpdateIssue(context.Context, string, map[string]interface{}, string) error {
+	return nil
+}
+func (tx *lifecycleTxFake) GetLabels(context.Context, string) ([]string, error) {
+	return append([]string(nil), tx.store.labels...), nil
+}
+func (tx *lifecycleTxFake) AddLabel(_ context.Context, _, label, _ string) error {
+	tx.store.labels = append(tx.store.labels, label)
+	return nil
+}
+func (tx *lifecycleTxFake) RemoveLabel(_ context.Context, _, label, _ string) error {
+	filtered := tx.store.labels[:0]
+	for _, existing := range tx.store.labels {
+		if existing != label {
+			filtered = append(filtered, existing)
+		}
+	}
+	tx.store.labels = filtered
+	return nil
+}
+func (tx *lifecycleTxFake) ReopenIssueWithResult(context.Context, string, string, string) (bool, error) {
+	return false, nil
+}
+
+func TestDirectStoreApplyIssueUpdateDistinguishesOmittedAndEmptyLabels(t *testing.T) {
+	underlying := &lifecycleStoreFake{labels: []string{"keep"}}
+	store := NewStore(underlying).(*directStore)
+	if err := store.ApplyIssueUpdate(context.Background(), "bd-1", nil, nil, "actor"); err != nil {
+		t.Fatal(err)
+	}
+	if len(underlying.labels) != 1 || underlying.labels[0] != "keep" {
+		t.Fatalf("nil labels changed state: %v", underlying.labels)
+	}
+	if err := store.ApplyIssueUpdate(context.Background(), "bd-1", nil, []string{}, "actor"); err != nil {
+		t.Fatal(err)
+	}
+	if len(underlying.labels) != 0 {
+		t.Fatalf("empty labels did not clear state: %v", underlying.labels)
 	}
 }
