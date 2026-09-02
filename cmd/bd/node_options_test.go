@@ -75,6 +75,16 @@ func TestScrubStaleNodeOptionsRequireValue(t *testing.T) {
 			want: "-r @babel/register",
 		},
 		{
+			name: "preserve short equals module specifier",
+			in:   "-r=ts-node/register --max-old-space-size=256",
+			want: "-r=ts-node/register --max-old-space-size=256",
+		},
+		{
+			name: "drop missing short equals filesystem path",
+			in:   "-r=" + missing + " --max-old-space-size=256",
+			want: "--max-old-space-size=256",
+		},
+		{
 			name: "preserve specifier while scrubbing missing path",
 			in:   "--require ts-node/register --require=" + missing,
 			want: "--require ts-node/register",
@@ -147,8 +157,8 @@ func TestNodeOptionsRequireIsFilesystemPath(t *testing.T) {
 		{target: "esm", want: false},
 		{target: "./gone.cjs", want: true},
 		{target: "../gone.cjs", want: true},
-		{target: `.\gone.cjs`, want: true},
-		{target: `..\gone.cjs`, want: true},
+		{target: `.\\gone.cjs`, want: true},
+		{target: `..\\gone.cjs`, want: true},
 		{target: filepath.Join(string(filepath.Separator), "tmp", "gone.cjs"), want: true},
 	}
 	for _, tt := range tests {
