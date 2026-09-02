@@ -26,21 +26,42 @@ var transformCapabilityMatrix = map[string]proxyCapabilityRule{
 	"supersede":     refused("proxy.transform.unsupported", "supersede is not supported in proxied-server mode"),
 }
 
+func lookupTransformCapability(cmd *cobra.Command) (TransformCapability, bool) {
+	path := cmd.CommandPath()
+	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
+	if path == "duplicates" {
+		auto, _ := cmd.Flags().GetBool("auto-merge")
+		dry, _ := cmd.Flags().GetBool("dry-run")
+		if auto && dry {
+			return TransformCapability{Path: path, Argument: "--auto-merge --dry-run", Outcome: ProxyOutcomeHonored}, true
+		}
+		if auto {
+			return TransformCapability{Path: path, Argument: "--auto-merge", Outcome: ProxyOutcomeRefused}, true
+		}
+		return TransformCapability{Path: path, Outcome: ProxyOutcomeHonored}, true
+	}
+	for _, row := range transformCapabilityRows {
+		if row.Path == path {
+			return row, true
+		}
+	}
+	return TransformCapability{}, false
+}
+
 func validateProxyTransformBeforeProvider(cmd *cobra.Command) error {
 	if cmd == nil {
 		return nil
 	}
 	path := cmd.CommandPath()
 	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
+	if row, ok := lookupTransformCapability(cmd); ok && row.Outcome == ProxyOutcomeRefused {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.transform.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
+	}
 	if rule, ok := transformCapabilityMatrix[path]; ok {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
 	if path == "duplicates" {
-		auto, _ := cmd.Flags().GetBool("auto-merge")
-		dry, _ := cmd.Flags().GetBool("dry-run")
-		if auto && !dry {
-			return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.transform.unsupported", Message: "duplicates --auto-merge is not supported in proxied-server mode", ExitCode: 1})
-		}
+		return nil
 	}
 	return nil
 }
