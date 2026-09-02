@@ -88,6 +88,7 @@ const (
 	idleWatcherMinInterval = 1 * time.Second
 	backendStopTimeout     = 5 * time.Minute
 	tcpKeepAlivePeriod     = 30 * time.Second
+	backendHealthInterval  = 100 * time.Millisecond
 )
 
 var errIdleTimeout = errors.New("idle timeout reached")
@@ -338,6 +339,20 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error {
+		t := time.NewTicker(backendHealthInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-t.C:
+				if !p.server.Running(gctx) {
+					return errors.New("database server exited")
+				}
+			}
+		}
+	})
 	g.Go(func() error { return p.acceptLoop(gctx) })
 
 	runErr := g.Wait()
