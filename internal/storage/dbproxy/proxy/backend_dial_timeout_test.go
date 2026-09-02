@@ -58,3 +58,45 @@ func TestHandleConnCanceledClientDialClosesAndDrains(t *testing.T) {
 		t.Fatalf("stats = %+v, want one failed dial and no handled conns", snapshot)
 	}
 }
+
+type tcpBlackholeBackend struct{ address string }
+
+func (b tcpBlackholeBackend) ID(context.Context) string                          { return "tcp-blackhole" }
+func (b tcpBlackholeBackend) DSN(context.Context, string, string, string) string { return b.address }
+func (b tcpBlackholeBackend) Start(context.Context) error                        { return nil }
+func (b tcpBlackholeBackend) Stop(context.Context) error                         { return nil }
+func (b tcpBlackholeBackend) Running(context.Context) bool                       { return true }
+func (b tcpBlackholeBackend) Dial(ctx context.Context) (net.Conn, error) {
+	d := net.Dialer{}
+	return d.DialContext(ctx, "tcp", b.address)
+}
+
+func TestHandleConnTCPBlackholeIsBounded(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() { conn, _ := listener.Accept(); accepted <- conn }()
+	p := NewProxyServer(ProxyOpts{Server: tcpBlackholeBackend{address: listener.Addr().String()}, Stats: &Stats{}})
+	p.logger = log.Default()
+	client, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	err = p.handleConn(ctx, client)
+	if conn := <-accepted; conn != nil {
+		_ = conn.Close()
+	}
+	if err == nil {
+		t.Fatal("blackhole connection unexpectedly completed without cancellation")
+	}
+	if time.Since(start) > time.Second {
+		t.Fatalf("blackhole dial exceeded bound")
+	}
+	if p.activeConns.Load() != 0 {
+		t.Fatal("active connection leaked")
+	}
+}
