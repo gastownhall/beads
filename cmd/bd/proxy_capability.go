@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -94,6 +95,46 @@ type ProxyCapabilityKey struct {
 type ProxyCapabilityRow struct {
 	ProxyCapabilityKey
 	Rule proxyCapabilityRule
+}
+
+var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
+	"doctor":           refused("proxy.doctor.unsupported", "doctor is not supported in proxied-server mode"),
+	"backup":           refused("proxy.backup.unsupported", "backup is not supported in proxied-server mode"),
+	"restore":          refused("proxy.restore.unsupported", "restore is not supported in proxied-server mode"),
+	"diff":             refused("proxy.diff.unsupported", "diff is not supported in proxied-server mode"),
+	"flatten":          refused("proxy.flatten.unsupported", "flatten is not supported in proxied-server mode"),
+	"migrate":          refused("proxy.migrate.unsupported", "migrate is not supported in proxied-server mode"),
+	"migrate-personal": refused("proxy.migrate.unsupported", "migrate-personal is not supported in proxied-server mode"),
+	"branch":           refused("proxy.branch.unsupported", "branch is not supported in proxied-server mode"),
+	"conflicts":        refused("proxy.conflicts.unsupported", "conflicts is not supported in proxied-server mode"),
+	"vc":               refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
+	"federation":       refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
+	"repo":             refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
+	"compact":          refused("proxy.compact.unsupported", "compact requires --dolt in proxied-server mode"),
+}
+
+// validateProxyMaintenanceBeforeProvider rejects known direct-only commands
+// before migrations, auto-start, or provider construction.
+func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
+	if cmd == nil {
+		return nil
+	}
+	name := cmd.Name()
+	if name == "compact" {
+		dolt, _ := cmd.Flags().GetBool("dolt")
+		if dolt {
+			return nil
+		}
+		rule := proxyMaintenanceRefusals["compact"]
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
+	}
+	if strings.Contains(cmd.CommandPath(), "gate discover") {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.gate.unsupported", Message: "gate discover is not supported in proxied-server mode", ExitCode: 1})
+	}
+	if rule, ok := proxyMaintenanceRefusals[name]; ok {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
+	}
+	return nil
 }
 
 // LookupProxyCapabilityFor returns the command/argument-specific rule. An
