@@ -141,6 +141,16 @@ func maybeAutoBackup(ctx context.Context) {
 		return
 	}
 
+	// Size cap: skip entirely once the destination has grown past
+	// backup.size-cap-mb (ga-y6gjv) — see backupSizeCapExceeded for why a
+	// cap, not an in-place prune, is the safe fix here.
+	if exceeded, size, err := backupSizeCapExceeded(dir); err != nil {
+		debug.Logf("backup: size cap check failed (non-fatal): %v\n", err)
+	} else if exceeded {
+		maybeWarnBackupSizeCap(dir, state, size)
+		return
+	}
+
 	// Throttle: skip if we backed up recently
 	interval := config.GetDuration("backup.interval")
 	if interval == 0 {
