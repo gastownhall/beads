@@ -1447,6 +1447,13 @@ var rootCmd = &cobra.Command{
 		if backendErr := validateConfiguredBackend(cfg, beadsDir); backendErr != nil {
 			return HandleError("%v", backendErr)
 		}
+		// Reject proxy capability combinations before any workspace side effect
+		// (version tracking, migration, auto-start, or provider construction).
+		if cfg != nil && cfg.IsDoltProxiedServerMode() {
+			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
+				return err
+			}
+		}
 		// The proxied provider cannot guarantee strict read-only semantics. Refuse
 		// before provider construction so no connection, migration, or mutation
 		// is attempted; expose the same stable capability code as other proxy
@@ -1724,9 +1731,6 @@ var rootCmd = &cobra.Command{
 		// root pre-run, before --dry-run/--inspect has had any effect. Proxied
 		// mode is where that is least visible, not where it is acceptable.
 		if proxiedServerMode {
-			if err := validateProxyCapabilitiesBeforeProvider(cmd); err != nil {
-				return err
-			}
 			p, err := newProxiedServerUOWProvider(rootCtx, beadsDir, databaseOverride,
 				rootProviderOptions(previewMode, useReadOnly)...)
 			if err != nil {
