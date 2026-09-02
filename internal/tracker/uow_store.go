@@ -2,6 +2,7 @@ package tracker
 
 import (
 	"context"
+	"reflect"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/domain"
@@ -13,13 +14,16 @@ import (
 // contract. Every operation uses a request-scoped unit of work; lifecycle
 // updates and label replacement remain one atomic transaction.
 func NewUOWStore(provider uow.UnitOfWorkProvider) Store {
-	if provider == nil {
+	if provider == nil || (reflect.ValueOf(provider).Kind() == reflect.Ptr && reflect.ValueOf(provider).IsNil()) {
 		return nil
 	}
 	return &uowStore{provider: provider}
 }
 
 type uowStore struct{ provider uow.UnitOfWorkProvider }
+
+var _ Store = (*uowStore)(nil)
+var _ IssueUpdater = (*uowStore)(nil)
 
 func (s *uowStore) GetConfig(ctx context.Context, key string) (string, error) {
 	return uow.RunTxRead(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (string, error) {
