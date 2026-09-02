@@ -942,8 +942,16 @@ func runLinearTeams(cmd *cobra.Command, args []string) error {
 	ctx := rootCtx
 
 	// Team discovery is API-only and must not initialize or probe a local
-	// beads store. Credentials are intentionally limited to env/YAML sources.
-	client, err := buildLinearClientAPIOnly(ctx, "")
+	// beads store. In proxied mode, read config through the existing UOW seam.
+	var configStore tracker.Store
+	var err error
+	if usesProxiedServer() {
+		configStore, err = trackerStoreForCommand(ctx)
+		if err != nil {
+			return HandleError("database not available: %v", err)
+		}
+	}
+	client, err := buildLinearClientAPIOnly(ctx, "", configStore)
 	if err != nil {
 		return HandleError("%v", err)
 	}
@@ -1196,7 +1204,7 @@ func buildLinearClient(ctx context.Context, teamID string) (*linear.Client, erro
 	return linear.NewClient(apiKey, teamID), nil
 }
 
-func buildLinearClientAPIOnly(_ context.Context, teamID string) (*linear.Client, error) {
+func buildLinearClientAPIOnly(ctx context.Context, teamID string, st tracker.Store) (*linear.Client, error) {
 	oauthClientID := os.Getenv("LINEAR_OAUTH_CLIENT_ID")
 	oauthClientSecret := os.Getenv("LINEAR_OAUTH_CLIENT_SECRET")
 	if oauthClientID == "" {
@@ -1215,7 +1223,13 @@ func buildLinearClientAPIOnly(_ context.Context, teamID string) (*linear.Client,
 	if apiKey == "" {
 		return nil, fmt.Errorf("Linear authentication not configured")
 	}
-	return linear.NewClient(apiKey, teamID), nil
+	client := linear.NewClient(apiKey, teamID)
+	if st != nil {
+		if endpoint, _ := st.GetConfig(ctx, "linear.api_endpoint"); endpoint != "" {
+			client = client.WithEndpoint(endpoint)
+		}
+	}
+	return client, nil
 }
 
 // storeConfigLoader adapts the store to the linear.ConfigLoader interface.

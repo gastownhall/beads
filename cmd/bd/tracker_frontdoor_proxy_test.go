@@ -104,7 +104,7 @@ func TestBuildLinearClientAPIOnlyDoesNotProbeLocalStore(t *testing.T) {
 	dbPath, store = "/definitely/missing/local/beads.db", nil
 	t.Cleanup(func() { dbPath, store = oldPath, oldStore })
 	t.Setenv("LINEAR_API_KEY", "api-key")
-	client, err := buildLinearClientAPIOnly(context.Background(), "")
+	client, err := buildLinearClientAPIOnly(context.Background(), "", nil)
 	if err != nil || client == nil {
 		t.Fatalf("API-only client: client=%v err=%v", client, err)
 	}
@@ -136,5 +136,17 @@ func TestRunLinearTeamsAPIOnlyDoesNotOpenLocalStore(t *testing.T) {
 	}
 	if !rt.called {
 		t.Fatal("expected Linear teams API request")
+	}
+}
+
+func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
+	t.Setenv("LINEAR_API_KEY", "api-key")
+	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
+	client, err := buildLinearClientAPIOnly(context.Background(), "", st)
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	if client == nil {
+		t.Fatal("nil client")
 	}
 }
