@@ -136,9 +136,72 @@ func printCycleReportForTest(t *testing.T, report issueops.CycleReport) {
 		jsonOutput = previousJSON
 	}()
 
-	if err := runDepCycles(); err != nil {
+	if err := runDepCycles(false); err != nil {
 		t.Fatalf("runDepCycles: %v", err)
 	}
+}
+
+// TestDepCyclesFlagRegistration pins the --include-tracks flag itself: it
+// exists on the command, is a bool, and defaults to false so an invocation
+// with no flag leaves the base (blocks/conditional-blocks-only) walk
+// unchanged.
+func TestDepCyclesFlagRegistration(t *testing.T) {
+	flag := depCyclesCmd.Flags().Lookup("include-tracks")
+	if flag == nil {
+		t.Fatal("depCyclesCmd has no --include-tracks flag")
+	}
+	if flag.Value.Type() != "bool" {
+		t.Errorf("--include-tracks is a %s, want bool", flag.Value.Type())
+	}
+	if flag.DefValue != "false" {
+		t.Errorf("--include-tracks defaults to %q, want \"false\"", flag.DefValue)
+	}
+}
+
+// TestRunDepCyclesThreadsIncludeTracks pins dep_cycles.go's one line of real
+// logic for this option: the includeTracks parameter lands on
+// DetectCyclesRequest.IncludeTracks unchanged, in both directions.
+func TestRunDepCyclesThreadsIncludeTracks(t *testing.T) {
+	for _, includeTracks := range []bool{false, true} {
+		recorder := &recordingCycleStore{}
+		previousStore := store
+		previousJSON := jsonOutput
+		store = recorder
+		jsonOutput = false
+		func() {
+			defer func() {
+				store = previousStore
+				jsonOutput = previousJSON
+			}()
+			if err := runDepCycles(includeTracks); err != nil {
+				t.Fatalf("runDepCycles(%v): %v", includeTracks, err)
+			}
+		}()
+
+		if recorder.gotRequest.IncludeTracks != includeTracks {
+			t.Errorf("runDepCycles(%v) called DetectCycles with IncludeTracks=%v",
+				includeTracks, recorder.gotRequest.IncludeTracks)
+		}
+	}
+}
+
+// recordingCycleStore is a store whose cycle detector remembers the last
+// request it was asked to detect, so the flag-threading test can look inside
+// runDepCycles rather than only at its rendered output.
+type recordingCycleStore struct {
+	storage.DoltStorage
+	gotRequest issueops.DetectCyclesRequest
+}
+
+func (s *recordingCycleStore) CycleDetector() (issueops.CycleDetector, error) {
+	return &recordingCycleDetector{store: s}, nil
+}
+
+type recordingCycleDetector struct{ store *recordingCycleStore }
+
+func (d *recordingCycleDetector) DetectCycles(_ context.Context, req issueops.DetectCyclesRequest) (issueops.CycleReport, error) {
+	d.store.gotRequest = req
+	return issueops.CycleReport{}, nil
 }
 
 // fixedCycleStore is a store whose only real method is the cycle accessor. It
