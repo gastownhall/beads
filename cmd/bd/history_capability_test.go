@@ -15,8 +15,13 @@ func TestHistoryCapabilityMatrixExactPaths(t *testing.T) {
 			t.Errorf("%q = %q, %v; want direct-only", path, got, ok)
 		}
 	}
-	if _, ok := LookupHistoryCapability("dolt remote remove"); ok {
-		t.Fatal("nested unknown path must not inherit parent capability")
+	if got, ok := LookupHistoryCapability("dolt remote remove"); !ok || got != HistoryProxySupported {
+		t.Fatalf("dolt remote remove = %q, %v; want proxy-supported", got, ok)
+	}
+	for _, path := range []string{"dolt remote add", "dolt remote list", "dolt remote reset-data"} {
+		if got, ok := LookupHistoryCapability(path); !ok || got != HistoryDirectOnly {
+			t.Errorf("%q = %q, %v; want direct-only", path, got, ok)
+		}
 	}
 }
 
