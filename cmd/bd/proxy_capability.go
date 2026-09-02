@@ -147,6 +147,9 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 	}
 	name := cmd.Name()
 	path := strings.TrimSpace(strings.TrimPrefix(cmd.CommandPath(), cmd.Root().Name()))
+	if class, ok := LookupHistoryCapability(path); ok && class == HistoryDirectOnly {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.history.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
+	}
 	if name == "compact" {
 		if cmd.Flags().Lookup("dolt") == nil {
 			return nil // root `bd compact` is the Dolt history command
@@ -162,9 +165,6 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
 	if strings.Contains(path, " ") {
-		if class, ok := LookupHistoryCapability(path); ok && class == HistoryDirectOnly {
-			return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.history.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
-		}
 		return nil
 	}
 	if rule, ok := proxyMaintenanceRefusals[name]; ok {
