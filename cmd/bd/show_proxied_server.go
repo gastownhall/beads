@@ -95,7 +95,7 @@ func runShowProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	in := gatherShowProxiedInput(cmd, args)
 
 	if in.watchMode {
-		return HandleErrorRespectJSON("watch mode not supported in proxied-server mode")
+		return HandleErrorRespectJSON("%v", AssertProxyCommandCapability("show", ProxyModeProxied, ProxyCapWatch))
 	}
 
 	uw, err := proxiedOpenReadUOW(ctx)
