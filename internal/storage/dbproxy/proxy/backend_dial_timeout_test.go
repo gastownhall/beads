@@ -37,3 +37,24 @@ func TestHandleConnBoundsBlockedBackendDial(t *testing.T) {
 	}
 	_, _ = io.Copy(io.Discard, peer)
 }
+
+func TestHandleConnCanceledClientDialClosesAndDrains(t *testing.T) {
+	stats := &Stats{}
+	p := NewProxyServer(ProxyOpts{Server: blockingBackend{}, Stats: stats})
+	p.logger = log.Default()
+	client, peer := net.Pipe()
+	defer peer.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := p.handleConn(ctx, client)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context canceled", err)
+	}
+	if got := p.activeConns.Load(); got != 0 {
+		t.Fatalf("active connections = %d, want 0", got)
+	}
+	snapshot := stats.Snapshot()
+	if snapshot.BackendDialAttempts != 1 || snapshot.BackendDialErrors != 1 || snapshot.HandledConns != 0 {
+		t.Fatalf("stats = %+v, want one failed dial and no handled conns", snapshot)
+	}
+}
