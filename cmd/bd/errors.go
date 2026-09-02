@@ -76,6 +76,36 @@ func buildJSONError(message, hint string) interface{} {
 	return inner
 }
 
+func buildJSONCapabilityError(e *ProxyCapabilityError) interface{} {
+	inner := map[string]interface{}{"error": e.Message, "code": e.Code}
+	if jsonEnvelopeEnabled() {
+		return map[string]interface{}{"schema_version": JSONSchemaVersion, "data": inner}
+	}
+	inner["schema_version"] = JSONSchemaVersion
+	return inner
+}
+
+// HandleProxyCapabilityError renders a stable capability refusal while
+// preserving the normal text/JSON front-door conventions.
+func HandleProxyCapabilityError(err error) error {
+	var capErr *ProxyCapabilityError
+	if !errors.As(err, &capErr) {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	code := capErr.ExitCode
+	if code == 0 {
+		code = 1
+	}
+	if jsonOutput {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		_ = enc.Encode(buildJSONCapabilityError(capErr))
+	} else {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", capErr.Message)
+	}
+	return &exitError{Code: code}
+}
+
 func jsonStderrError(message, hint string) {
 	encoder := json.NewEncoder(os.Stderr)
 	encoder.SetIndent("", "  ")
