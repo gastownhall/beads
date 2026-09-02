@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 
@@ -84,6 +86,30 @@ func TestProxyMaintenanceNestedPathsRefuseBeforeProvider(t *testing.T) {
 		if !strings.Contains(out, `"code":`) {
 			t.Errorf("%s produced no typed refusal: %s", path, out)
 		}
+	}
+}
+
+func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
+	root := &cobra.Command{Use: "bd"}
+	migrate := &cobra.Command{Use: "migrate"}
+	hooks := &cobra.Command{Use: "hooks"}
+	root.AddCommand(migrate)
+	migrate.AddCommand(hooks)
+	before := []byte("hooks-state")
+	path := t.TempDir() + "/.local_version"
+	if err := os.WriteFile(path, before, 0600); err != nil {
+		t.Fatal(err)
+	}
+	oldProvider := uowProvider
+	uowProvider = nil
+	t.Cleanup(func() { uowProvider = oldProvider })
+	_ = validateProxyMaintenanceBeforeProvider(hooks)
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, before) {
+		t.Fatalf("refusal mutated %s", path)
 	}
 }
 
