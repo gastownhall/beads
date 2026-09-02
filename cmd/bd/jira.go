@@ -124,7 +124,7 @@ func runJiraSync(cmd *cobra.Command, args []string) error {
 		return HandleErrorRespectJSON("database not available: %v", err)
 	}
 
-	if err := validateJiraConfig(); err != nil {
+	if err := validateJiraConfigForStore(trackerStore); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 
@@ -329,26 +329,29 @@ func runJiraStatus(cmd *cobra.Command, args []string) error {
 
 // validateJiraConfig checks that required Jira configuration is present.
 func validateJiraConfig() error {
-	if err := ensureStoreActive(); err != nil {
-		return fmt.Errorf("database not available: %w", err)
-	}
+	return validateJiraConfigForStore(tracker.NewStore(store))
+}
 
+func validateJiraConfigForStore(st tracker.Store) error {
 	ctx := rootCtx
-	jiraURL, _ := store.GetConfig(ctx, "jira.url")
+	if st == nil {
+		return fmt.Errorf("database not available")
+	}
+	jiraURL, _ := st.GetConfig(ctx, "jira.url")
 
 	if jiraURL == "" {
 		return fmt.Errorf("jira.url not configured\nRun: bd config set jira.url \"https://company.atlassian.net\"")
 	}
 
 	// Check for project configuration (singular or plural).
-	pluralProjects, _ := store.GetConfig(ctx, "jira.projects")
-	singularProject, _ := store.GetConfig(ctx, "jira.project")
+	pluralProjects, _ := st.GetConfig(ctx, "jira.projects")
+	singularProject, _ := st.GetConfig(ctx, "jira.project")
 	projectKeys := tracker.ResolveProjectIDs(nil, pluralProjects, singularProject)
 	if len(projectKeys) == 0 {
 		return fmt.Errorf("no Jira project configured\nRun: bd config set jira.project \"PROJ\"\nOr:  bd config set jira.projects \"PROJ1,PROJ2\"")
 	}
 
-	apiToken, _ := store.GetConfig(ctx, "jira.api_token")
+	apiToken, _ := st.GetConfig(ctx, "jira.api_token")
 	if apiToken == "" && os.Getenv("JIRA_API_TOKEN") == "" {
 		return fmt.Errorf("Jira API token not configured\nRun: bd config set jira.api_token \"YOUR_TOKEN\"\nOr: export JIRA_API_TOKEN=YOUR_TOKEN")
 	}
