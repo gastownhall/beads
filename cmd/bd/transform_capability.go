@@ -21,8 +21,13 @@ type TransformCapability struct {
 var transformCapabilityRows = []TransformCapability{
 	transformRefused("rename"),
 	transformRefused("rename-prefix"),
+	transformRefusedWithArgs("rename-prefix", "--dry-run"),
+	transformRefusedWithArgs("rename-prefix", "--repair"),
+	transformRefusedWithArgs("rename-prefix", "--dry-run --repair"),
 	transformRefused("duplicate"),
+	transformRefusedWithArgs("duplicate", "--of"),
 	transformRefused("supersede"),
+	transformRefusedWithArgs("supersede", "--with"),
 	{Path: "duplicates", Outcome: ProxyOutcomeHonored},
 	transformRefusedWithArgs("duplicates", "--auto-merge"),
 	{Path: "duplicates", Argument: "--auto-merge --dry-run", Outcome: ProxyOutcomeHonored},
@@ -51,7 +56,11 @@ func lookupTransformCapability(cmd *cobra.Command) (TransformCapability, bool) {
 	path := cmd.CommandPath()
 	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
 	var args []string
-	cmd.Flags().Visit(func(f *pflag.Flag) { args = append(args, "--"+f.Name) })
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if transformPolicyFlags[f.Name] {
+			args = append(args, "--"+f.Name)
+		}
+	})
 	sort.Strings(args)
 	arg := strings.Join(args, " ")
 	for _, row := range transformCapabilityRows {
@@ -60,6 +69,12 @@ func lookupTransformCapability(cmd *cobra.Command) (TransformCapability, bool) {
 		}
 	}
 	return TransformCapability{}, false
+}
+
+// Only flags that alter a transform's execution belong in the capability key.
+// Output, tracing, and other inherited root flags must not bypass a refusal.
+var transformPolicyFlags = map[string]bool{
+	"auto-merge": true, "dry-run": true, "repair": true, "of": true, "with": true,
 }
 
 func validateProxyTransformBeforeProvider(cmd *cobra.Command) error {
