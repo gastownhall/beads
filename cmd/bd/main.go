@@ -1459,6 +1459,9 @@ var rootCmd = &cobra.Command{
 			if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
 				return err
 			}
+			if err := validateProxyTransformBeforeProvider(cmd); err != nil {
+				return err
+			}
 		}
 		// The proxied provider cannot guarantee strict read-only semantics. Refuse
 		// before provider construction so no connection, migration, or mutation
