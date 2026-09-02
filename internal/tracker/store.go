@@ -31,6 +31,12 @@ type IssueUpdater interface {
 	ApplyIssueUpdate(context.Context, string, map[string]interface{}, []string, string) error
 }
 
+// ExternalRefHistoryStore is an optional capability used for precise
+// relink/conflict detection.
+type ExternalRefHistoryStore interface {
+	PreviousExternalRef(context.Context, string, time.Time) (string, bool, error)
+}
+
 // NewStore adapts a classic storage.Storage to the tracker contract. Values
 // already implementing Store are returned unchanged.
 func NewStore(value interface{}) Store {
@@ -44,19 +50,6 @@ func NewStore(value interface{}) Store {
 }
 
 type directStore struct{ storage.Storage }
-
-func (s *directStore) PreviousExternalRef(ctx context.Context, id string, at time.Time) (string, bool, error) {
-	q, ok := s.Storage.(storage.ExternalRefHistoryQuerier)
-	if !ok {
-		if dolt, dok := s.Storage.(storage.DoltStorage); dok {
-			q, ok = storage.UnwrapStore(dolt).(storage.ExternalRefHistoryQuerier)
-		}
-	}
-	if !ok {
-		return "", false, nil
-	}
-	return q.PreviousExternalRef(ctx, id, at)
-}
 
 func (s *directStore) ApplyIssueUpdate(ctx context.Context, id string, updates map[string]interface{}, labels []string, actor string) error {
 	dolt, ok := s.Storage.(storage.IssueLifecycleStore)
