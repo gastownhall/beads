@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -108,6 +109,74 @@ func TestProxyFormulaSwarmMergeSlotRefusals(t *testing.T) {
 			t.Fatalf("%s exit=%v, want 1", path, err)
 		}
 	}
+}
+
+func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
+	cases := []struct {
+		path, code, message string
+	}{
+		{"cook", "proxy.formula.unsupported", "cook is not supported in proxied-server mode"},
+		{"ship", "proxy.formula.unsupported", "ship is not supported in proxied-server mode"},
+		{"swarm create", "proxy.swarm.unsupported", "swarm create is not supported in proxied-server mode"},
+		{"merge-slot acquire", "proxy.merge_slot.unsupported", "merge-slot acquire is not supported in proxied-server mode"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
+			parts := strings.Split(tc.path, " ")
+			root := &cobra.Command{Use: "bd"}
+			cmd := &cobra.Command{Use: parts[0]}
+			root.AddCommand(cmd)
+			if tc.path == "cook" {
+				cmd.Flags().Bool("persist", false, "")
+				_ = cmd.Flags().Set("persist", "true")
+			}
+			for _, name := range parts[1:] {
+				child := &cobra.Command{Use: name}
+				cmd.AddCommand(child)
+				cmd = child
+			}
+			row, ok := lookupProxyMaintenanceRuleForTest(tc.path)
+			if !ok || row.Code != tc.code || row.Message != tc.message || row.ExitCode != 1 || row.Mutates {
+				t.Fatalf("row = %#v, ok=%v", row, ok)
+			}
+			var typed *ProxyCapabilityError = &ProxyCapabilityError{Code: row.Code, Message: row.Message, ExitCode: row.ExitCode, Mutates: row.Mutates}
+			if typed.Code != tc.code || typed.Message != tc.message || typed.ExitCode != 1 || typed.Mutates {
+				t.Fatalf("typed refusal = %#v", typed)
+			}
+			dir := t.TempDir()
+			before := []byte("unchanged\n")
+			for _, name := range []string{"issues.jsonl", "config.yaml", "events.jsonl"} {
+				if err := os.WriteFile(dir+"/"+name, before, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			oldProvider := uowProvider
+			uowProvider = nil
+			t.Cleanup(func() { uowProvider = oldProvider })
+			oldJSON := jsonOutput
+			jsonOutput = true
+			t.Cleanup(func() { jsonOutput = oldJSON })
+			out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
+			var got map[string]any
+			if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != tc.code || got["error"] != tc.message {
+				t.Fatalf("JSON refusal = %q (%v)", out, err)
+			}
+			if uowProvider != nil || commandDidWrite.Load() {
+				t.Fatal("refusal initialized provider or marked a write")
+			}
+			for _, name := range []string{"issues.jsonl", "config.yaml", "events.jsonl"} {
+				gotBytes, err := os.ReadFile(dir + "/" + name)
+				if err != nil || !bytes.Equal(gotBytes, before) {
+					t.Fatalf("%s mutated: %v", name, err)
+				}
+			}
+		})
+	}
+}
+
+func lookupProxyMaintenanceRuleForTest(path string) (proxyCapabilityRule, bool) {
+	rule, ok := proxyMaintenanceRefusals[path]
+	return rule, ok
 }
 
 func TestProxyMaintenanceRefusalLeavesFilesUntouched(t *testing.T) {
