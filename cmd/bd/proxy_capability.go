@@ -238,14 +238,15 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	if name == "ready" {
-		if claim, _ := cmd.Flags().GetBool("claim"); claim {
-			if _, _, err := resolveMaxRows(cmd); err != nil {
-				return err
-			}
-			return nil
+		maxRows, _, err := resolveMaxRows(cmd)
+		if err != nil {
+			return err
+		}
+		if maxRows > 0 {
+			return HandleProxyCapabilityError(AssertProxyCommandCapability(name, ProxyModeProxied, ProxyCapMaxRows))
 		}
 	}
-	if name == "ready" || name == "graph" || name == "find-duplicates" {
+	if name == "graph" || name == "find-duplicates" {
 		maxRows, _, err := resolveMaxRows(cmd)
 		if err != nil {
 			return err

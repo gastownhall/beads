@@ -43,6 +43,27 @@ func TestProxyCapabilityRowsCoverTopologies(t *testing.T) {
 	}
 }
 
+func TestProxyCapabilityCommandRows(t *testing.T) {
+	cases := []struct {
+		command, argument string
+		outcome           ProxyCapabilityOutcome
+	}{
+		{"list", "--max-rows", ProxyOutcomeHonored},
+		{"dep tree", "--max-rows", ProxyOutcomeHonored},
+		{"ready", "--max-rows", ProxyOutcomeRefused},
+		{"graph", "--max-rows", ProxyOutcomeRefused},
+		{"find-duplicates", "--max-rows", ProxyOutcomeRefused},
+		{"show", "--watch", ProxyOutcomeRefused},
+		{"list", "--watch", ProxyOutcomeHonored},
+	}
+	for _, tc := range cases {
+		rule, ok := LookupProxyCapabilityAt(tc.command, tc.argument, ProxyModeProxied, ProxyTopologyExternalTCP)
+		if !ok || rule.Outcome != tc.outcome {
+			t.Errorf("%s %s outcome=%q ok=%v, want %q", tc.command, tc.argument, rule.Outcome, ok, tc.outcome)
+		}
+	}
+}
+
 func TestProxyCapabilityRefusalFrontDoorTextBeforeProvider(t *testing.T) {
 	oldJSON := jsonOutput
 	jsonOutput = false
