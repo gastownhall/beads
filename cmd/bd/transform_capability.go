@@ -2,6 +2,8 @@ package main
 
 import (
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+	"sort"
 	"strings"
 )
 
@@ -29,19 +31,12 @@ var transformCapabilityMatrix = map[string]proxyCapabilityRule{
 func lookupTransformCapability(cmd *cobra.Command) (TransformCapability, bool) {
 	path := cmd.CommandPath()
 	path = strings.TrimSpace(strings.TrimPrefix(path, cmd.Root().Name()))
-	if path == "duplicates" {
-		auto, _ := cmd.Flags().GetBool("auto-merge")
-		dry, _ := cmd.Flags().GetBool("dry-run")
-		if auto && dry {
-			return TransformCapability{Path: path, Argument: "--auto-merge --dry-run", Outcome: ProxyOutcomeHonored}, true
-		}
-		if auto {
-			return TransformCapability{Path: path, Argument: "--auto-merge", Outcome: ProxyOutcomeRefused}, true
-		}
-		return TransformCapability{Path: path, Outcome: ProxyOutcomeHonored}, true
-	}
+	var args []string
+	cmd.Flags().Visit(func(f *pflag.Flag) { args = append(args, "--"+f.Name) })
+	sort.Strings(args)
+	arg := strings.Join(args, " ")
 	for _, row := range transformCapabilityRows {
-		if row.Path == path {
+		if row.Path == path && row.Argument == arg {
 			return row, true
 		}
 	}
