@@ -65,7 +65,9 @@ func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
 
 			// Stop only the upstream. The proxy remains alive and must surface a
 			// bounded transport failure; no local fallback is permitted.
-			require.NoError(t, bridge.Process.Kill())
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			require.NoError(t, upstream.Stop(ctx))
+			cancel()
 			_, stderr, err, timedOut := runProxiedDeadline(t, bd, p.dir, 3*time.Second, "show", sentinel.ID, "--json")
 			if timedOut {
 				t.Fatal("upstream outage command exceeded 3s bound")
@@ -77,7 +79,13 @@ func TestProxiedOutageReconnectAcceptanceMatrix(t *testing.T) {
 				t.Fatalf("outage error is not actionable transport refusal: %q", stderr)
 			}
 			// Restore and verify the exact sentinel survives the outage.
-			bridge = startOutageBridge(t, endpoint, upstream.Port, topology.socket)
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			require.NoError(t, upstream.Start(ctx))
+			newPort, err := upstream.CurrentPort(ctx)
+			cancel()
+			require.NoError(t, err)
+			require.NoError(t, bridge.Process.Kill())
+			bridge = startOutageBridge(t, endpoint, newPort, topology.socket)
 			var after *types.Issue
 			require.Eventually(t, func() bool {
 				stdout, _, runErr := bdProxiedRunBuffers(t, bd, p.dir, "show", sentinel.ID, "--json")
