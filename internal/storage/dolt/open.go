@@ -300,13 +300,23 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	if !applied && cfg.ServerUser == "" {
 		cfg.ServerUser = fileCfg.GetDoltServerUser()
 	}
+	// Resolve the server secret command (the connection password). Unlike the
+	// identity command above, this runs unconditionally: GetDoltServerPasswordForPort
+	// (env var + credentials file, below) already applies regardless of server mode, so
+	// the command rung mirrors that scope instead of gating on IsDoltServerMode(). It
+	// fails closed (see ApplyPasswordCommand) — a configured-but-failing command aborts
+	// the open rather than silently falling back to the static tier.
+	passwordApplied, err := ApplyPasswordCommand(ctx, fileCfg, cfg)
+	if err != nil {
+		return fmt.Errorf("resolving dolt password command: %w", err)
+	}
 	// Populate password and TLS the same way the CLI CRUD path does. Without
 	// this, callers that rely on NewFromConfigWithOptions (e.g. doctor's
 	// SharedStore) fail to reach externally-hosted Dolt servers that keep
 	// credentials in ~/.config/beads/credentials, while bd create/list/close
 	// succeed (bd-h5k7). GetDoltServerPasswordForPort checks BEADS_DOLT_PASSWORD
 	// env first, then credentials file keyed by [host:resolved-port].
-	if cfg.ServerPassword == "" {
+	if !passwordApplied && cfg.ServerPassword == "" {
 		cfg.ServerPassword = fileCfg.GetDoltServerPasswordForPort(cfg.ServerPort)
 	}
 	if !cfg.ServerTLS {

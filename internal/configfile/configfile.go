@@ -555,6 +555,21 @@ func (c *Config) GetDoltCredentialCommand() string {
 	return os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")
 }
 
+// GetDoltPasswordCommand returns the server secret-credential command:
+// BEADS_DOLT_PASSWORD_COMMAND. Empty means no command — the existing
+// BEADS_DOLT_PASSWORD / credentials-file ladder in GetDoltServerPasswordForPort
+// applies. Mirrors GetDoltCredentialCommand exactly, but for a KindSecret
+// credential (a password) rather than a KindIdentity token: the command's
+// stdout is read the same way (bare token, or a
+// {token,expirationTimestamp} / {access_token,expires_in} envelope), and it
+// is resolved by dolt.ApplyPasswordCommand into the connection password slot
+// instead of the username slot. Env-only for the same reason as the
+// credential command: a metadata-sourced command is arbitrary code run on
+// open, so persisting it waits on a workspace-trust gate.
+func (c *Config) GetDoltPasswordCommand() string {
+	return os.Getenv("BEADS_DOLT_PASSWORD_COMMAND")
+}
+
 // GetDoltDatabase returns the Dolt SQL database name.
 // Checks BEADS_DOLT_SERVER_DATABASE env var first, then config, then default.
 func (c *Config) GetDoltDatabase() string {
@@ -598,6 +613,12 @@ func (c *Config) GetDoltServerPassword() string {
 // This avoids a mismatch where metadata.json says port 3308 (tunnel) but the
 // doltserver port file says 3307 (local), causing the credentials file lookup
 // to use the wrong [host:port] section.
+//
+// This is the static/fallback tier only. BEADS_DOLT_PASSWORD_COMMAND
+// (GetDoltPasswordCommand) is a higher-priority rung resolved earlier, in the
+// canonical open path (dolt.ApplyPasswordCommand, called from
+// applyResolvedConfig) — mirroring how BEADS_DOLT_CREDENTIAL_COMMAND is
+// resolved by ApplyGatewayCredential rather than inside GetDoltServerUser.
 func (c *Config) GetDoltServerPasswordForPort(port int) string {
 	if p := os.Getenv("BEADS_DOLT_PASSWORD"); p != "" {
 		return p
