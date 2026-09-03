@@ -400,6 +400,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ParentID`. Programmatic callers that set them got unfiltered results back and
   no error — a full list where a scoped one was asked for.
 
+- **`bd init --force` can no longer silently recreate a missing server-side
+  database as empty** (be-5up5). `--force` is an alias for `--reinit-local`,
+  which skips the existing-data guard entirely, and the reinit path's own typed
+  confirmation keys on the issue count — which is 0 in exactly the case where
+  the database is missing. So `bd init --force` against a lost database created
+  a fresh empty one at the same name, with no prompt and no destroy token: the
+  2026-08-11 fleet-wide data-loss reflex, reached through the flag an operator
+  in a panic is most likely to try. The missing-database refusal now applies on
+  the reinit path too. `--force`/`--reinit-local` authorize destroying a
+  database that exists; only the explicit, per-invocation `--recreate-missing`
+  authorizes creating one where the configured database has gone missing.
+
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
