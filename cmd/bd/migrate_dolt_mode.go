@@ -550,6 +550,12 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		}
 		return nil
 	}
+	if err := os.MkdirAll(rootPath, 0o755); err != nil {
+		return HandleError("creating Dolt root %s: %v", rootPath, err)
+	}
+	if st, e := os.Stat(rootPath); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s does not exist or is not a directory", rootPath)
+	}
 
 	if j == nil {
 		sidecar := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
@@ -779,6 +785,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			fmt.Printf("Would remove %s\n", p)
 		}
 		return nil
+	}
+	if st, e := os.Stat(rootDir); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s does not exist or is not a directory", rootDir)
 	}
 
 	serverStateDir := beadsDir
