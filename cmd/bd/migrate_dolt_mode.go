@@ -242,7 +242,7 @@ func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, 
 				want = "false"
 			}
 		}
-		if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.ToLower(v) != want {
+		if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); !ok || strings.ToLower(v) != want {
 			return fmt.Errorf("shared-server YAML is %q, want %s for phase %s", v, want, j.Phase)
 		}
 	}
