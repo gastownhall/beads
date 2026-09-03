@@ -3,12 +3,49 @@ package dolt
 import (
 	"bytes"
 	"context"
-	"log"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/beads/internal/debug"
 )
+
+// captureRouteLog runs fn with the debug sink enabled and returns what it
+// wrote to stderr. logRouteDecision reports through debug.Logf, which is gated
+// on BD_DEBUG/-v and writes straight to os.Stderr, so both halves are needed.
+//
+// MUST NOT be used from a parallel test, and no test that calls it may add
+// t.Parallel: it swaps os.Stderr and flips debug's verbose flag, both of which
+// are process-global. Seven files in this package already call t.Parallel, so
+// this is a live hazard rather than a theoretical one.
+func captureRouteLog(t *testing.T, fn func()) string {
+	t.Helper()
+
+	debug.SetVerbose(true)
+	t.Cleanup(func() { debug.SetVerbose(false) })
+
+	origStderr := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	os.Stderr = w
+
+	fn()
+
+	_ = w.Close()
+	os.Stderr = origStderr
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, r); err != nil {
+		t.Fatalf("reading captured stderr: %v", err)
+	}
+	_ = r.Close()
+	return buf.String()
+}
 
 // TestPushPullLogSQLRouteForFileRemote is part of the RED coverage for
 // be-9i0yq.2 item 2: prepareCLIRouteForGitProtocol and its siblings
@@ -56,19 +93,21 @@ func TestPushPullLogSQLRouteForFileRemote(t *testing.T) {
 	store.remote = "origin"
 	store.branch = "main"
 
-	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(prevOutput)
-
-	if err := store.Push(ctx); err != nil {
-		t.Fatalf("Push over a file:// remote should succeed via the SQL route: %v", err)
+	var pushErr, pullErr error
+	logged := captureRouteLog(t, func() {
+		pushErr = store.Push(ctx)
+		if pushErr != nil {
+			return
+		}
+		pullErr = store.Pull(ctx)
+	})
+	if pushErr != nil {
+		t.Fatalf("Push over a file:// remote should succeed via the SQL route: %v", pushErr)
 	}
-	if err := store.Pull(ctx); err != nil {
-		t.Fatalf("Pull over a file:// remote should succeed via the SQL route: %v", err)
+	if pullErr != nil {
+		t.Fatalf("Pull over a file:// remote should succeed via the SQL route: %v", pullErr)
 	}
 
-	logged := logBuf.String()
 	if !strings.Contains(logged, "dolt push route: SQL") {
 		t.Fatalf("Push over a file:// (non-git-protocol) remote did not log taking the SQL route; got log:\n%s", logged)
 	}

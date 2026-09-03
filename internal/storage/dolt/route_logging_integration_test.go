@@ -3,9 +3,7 @@
 package dolt
 
 import (
-	"bytes"
 	"context"
-	"log"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -75,19 +73,20 @@ func TestPushPullLogCLIRouteForGitProtocolRemote(t *testing.T) {
 	store.remote = "origin"
 	store.branch = "main"
 
-	var logBuf bytes.Buffer
-	prevOutput := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(prevOutput)
-
-	if err := store.Push(ctx); err == nil {
+	// captureRouteLog (route_logging_test.go) swaps os.Stderr and debug's
+	// verbose flag, both process-global: this test must never gain t.Parallel.
+	var pushErr, pullErr error
+	logged := captureRouteLog(t, func() {
+		pushErr = store.Push(ctx)
+		pullErr = store.Pull(ctx)
+	})
+	if pushErr == nil {
 		t.Fatalf("Push against a nonexistent git+file:// target should fail (route logging is under test, not transfer success)")
 	}
-	if err := store.Pull(ctx); err == nil {
+	if pullErr == nil {
 		t.Fatalf("Pull against a nonexistent git+file:// target should fail (route logging is under test, not transfer success)")
 	}
 
-	logged := logBuf.String()
 	if !strings.Contains(logged, "dolt push route: CLI") {
 		t.Fatalf("Push over a git+file:// (git-protocol) remote did not log taking the CLI route; got log:\n%s", logged)
 	}
