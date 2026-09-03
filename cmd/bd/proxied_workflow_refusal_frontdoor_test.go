@@ -43,6 +43,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 		}
 		return "proxy.formula.unsupported"
 	}
+	expectedMessage := func(args []string) string { return args[0] + " is not supported in proxied-server mode" }
 	for _, args := range commands {
 		t.Run(strings.Join(args, "/"), func(t *testing.T) {
 			for _, jsonMode := range []bool{false, true} {
@@ -55,7 +56,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 					t.Fatalf("%v unexpectedly succeeded: %s", invoke, stdout)
 				}
 				out := strings.ToLower(stdout + stderr)
-				if !jsonMode && !strings.Contains(stderr, "not supported") {
+				if !jsonMode && !strings.Contains(stderr, expectedMessage(args)) {
 					t.Fatalf("%v refusal lacks stable proxy/unsupported shape: %s", invoke, out)
 				}
 				if jsonMode {
