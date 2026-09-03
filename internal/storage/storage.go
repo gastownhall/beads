@@ -85,6 +85,32 @@ const (
 	NotClaimableStatusFragment = ": status "
 )
 
+// ErrCredentialKeyMismatch is returned when a stored federation peer's password
+// cannot be decrypted with the local credential key. federation_peers rows
+// travel with the database, but the key file is machine-local and gitignored,
+// so a database pulled from another machine carries peer passwords this
+// machine's key cannot read. Callers errors.Is it to tell that local key
+// problem apart from an unreachable peer.
+var ErrCredentialKeyMismatch = errors.New("stored peer credentials cannot be decrypted with this machine's credential key")
+
+// CredentialKeyMismatchError wraps a federation password decrypt failure with
+// the ErrCredentialKeyMismatch sentinel, the machine-local nature of keyFile,
+// and the command that re-stores the password on this machine. Both backends
+// (dolt, embeddeddolt) call it with their own credentialKeyFile so the operator
+// reads one wording whichever store answered.
+//
+// The machine-local key is context, not an asserted cause: an AES-GCM open also
+// fails on a tampered or truncated blob and on a row still encrypted under the
+// pre-migration legacy key. Re-adding the peer is the fix in every one of those
+// cases, so the remediation holds even where the parenthetical does not.
+//
+// cause stays wrapped, so the raw cipher error remains readable and both the
+// sentinel and cause are reachable through errors.Is / errors.As.
+func CredentialKeyMismatchError(keyFile string, cause error) error {
+	return fmt.Errorf("%w (the key file %s is machine-local and does not replicate with the database); re-run 'bd federation add-peer <name> <url> --user <user>' on this machine: %w",
+		ErrCredentialKeyMismatch, keyFile, cause)
+}
+
 // CommentPageCursor is the resume position for a keyset page of an issue's
 // comments: the (created_at, id) of the last comment already returned. The zero
 // value starts a walk from the beginning of the thread.
