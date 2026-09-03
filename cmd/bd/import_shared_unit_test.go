@@ -786,3 +786,106 @@ func TestBulkLoadPoolReadTimeoutOnlyForImport(t *testing.T) {
 		t.Fatalf("nil cmd fallback = %v, want 0", got)
 	}
 }
+
+// wy-sbgucn (Fable review wy-03ne4j BLOCKER): dropping a tie row from the
+// write set also bypasses RestoreLeaseOnImportInTx, so the proof must cover
+// the ephemeral lease row too. A row is provably unchanged on the lease axis
+// only when the rewrite's restore would upsert nothing new (no incoming
+// lease, no live claim, or the local lease already equals the snapshot's) and
+// its reconcile would drop nothing (no local lease row, or a live claim that
+// keeps it). Every other shape stays in the write set.
+func TestFilterStaleImportIssuesResumeKeepsRowsNeedingLeaseReconciliation(t *testing.T) {
+	base := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	expires := base.Add(30 * time.Minute)
+	beat := base.Add(-time.Minute)
+	otherExpires := expires.Add(time.Hour)
+	otherBeat := beat.Add(-time.Minute)
+	claimed := func(id string, leaseExpires, heartbeat *time.Time, node string) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: "row " + id, UpdatedAt: base,
+			Status: types.StatusInProgress, Assignee: "plato",
+			LeaseExpiresAt: leaseExpires, HeartbeatAt: heartbeat, LeaseGrantedNode: node,
+		}
+	}
+	unassigned := func(id string, leaseExpires, heartbeat *time.Time) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: "row " + id, UpdatedAt: base, Status: types.StatusInProgress,
+			LeaseExpiresAt: leaseExpires, HeartbeatAt: heartbeat,
+		}
+	}
+	open := func(id string, leaseExpires, heartbeat *time.Time) *types.Issue {
+		return &types.Issue{
+			ID: id, Title: "row " + id, UpdatedAt: base, Status: types.StatusOpen,
+			LeaseExpiresAt: leaseExpires, HeartbeatAt: heartbeat,
+		}
+	}
+	incoming := []*types.Issue{
+		claimed("bd-lease-missing", &expires, &beat, "studio"), // restore would INSERT the lease row
+		claimed("bd-lease-equal", &expires, &beat, "studio"),   // lease row already identical
+		claimed("bd-lease-differs", &expires, &beat, "studio"), // local lease differs (expiry)
+		claimed("bd-lease-node", &expires, &beat, "studio"),    // local lease differs (granting node)
+		claimed("bd-lease-beat", &expires, &beat, "studio"),    // local lease differs (heartbeat only)
+		claimed("bd-lease-nobeat", &expires, nil, "studio"),    // snapshot heartbeat would be stamped live
+		claimed("bd-lease-local-only", nil, nil, ""),           // live claim keeps its local lease
+		open("bd-lease-orphan", nil, nil),                      // reconcile would DROP the orphaned lease row
+		unassigned("bd-lease-unassigned", nil, nil),            // in_progress but unassigned: the lease row is an orphan too
+		open("bd-lease-none", nil, nil),                        // nothing on either side
+		open("bd-lease-snapshot-open", &expires, &beat),        // restore only fires for a live claim
+	}
+	store := &fakeImportRelationStore{
+		fakeImportIssueLookupStore: fakeImportIssueLookupStore{issues: []*types.Issue{
+			claimed("bd-lease-missing", nil, nil, ""),
+			claimed("bd-lease-equal", &expires, &beat, "studio"),
+			claimed("bd-lease-differs", &otherExpires, &beat, "studio"),
+			claimed("bd-lease-node", &expires, &beat, "mini"),
+			claimed("bd-lease-beat", &expires, &otherBeat, "studio"),
+			claimed("bd-lease-nobeat", &expires, &beat, "studio"),
+			claimed("bd-lease-local-only", &expires, &beat, "studio"),
+			open("bd-lease-orphan", &expires, &beat),
+			unassigned("bd-lease-unassigned", &expires, &beat),
+			open("bd-lease-none", nil, nil),
+			open("bd-lease-snapshot-open", nil, nil),
+		}},
+	}
+
+	filtered, skippedIDs, plan, err := filterStaleImportIssues(context.Background(), store, incoming)
+	if err != nil {
+		t.Fatalf("filterStaleImportIssues: %v", err)
+	}
+	if len(skippedIDs) != 0 {
+		t.Fatalf("skippedIDs = %#v, want none (nothing is stale)", skippedIDs)
+	}
+	var kept []string
+	for _, issue := range filtered {
+		kept = append(kept, issue.ID)
+	}
+	wantKept := []string{"bd-lease-missing", "bd-lease-differs", "bd-lease-node", "bd-lease-beat", "bd-lease-nobeat", "bd-lease-orphan", "bd-lease-unassigned"}
+	if strings.Join(kept, ",") != strings.Join(wantKept, ",") {
+		t.Fatalf("write set = %v, want %v (every row whose lease row the rewrite would touch)", kept, wantKept)
+	}
+	wantUnchanged := []string{"bd-lease-equal", "bd-lease-local-only", "bd-lease-none", "bd-lease-snapshot-open"}
+	if strings.Join(plan.Unchanged, ",") != strings.Join(wantUnchanged, ",") {
+		t.Fatalf("plan.Unchanged = %v, want %v", plan.Unchanged, wantUnchanged)
+	}
+	if len(plan.TieKeptLocal) != 0 || len(plan.Updates) != 0 {
+		t.Fatalf("plan = %+v, want no tie conflicts or updates", plan)
+	}
+}
+
+// Lease timestamps are DATETIME(0) in the store: a sub-second component on
+// the snapshot side must not defeat the equality proof.
+func TestImportLeaseAlreadyReconciledComparesAtSecondGranularity(t *testing.T) {
+	base := time.Date(2026, 8, 31, 14, 0, 0, 0, time.UTC)
+	expires, beat := base.Add(30*time.Minute), base.Add(-time.Minute)
+	expiresSub, beatSub := expires.Add(400*time.Millisecond), beat.Add(999*time.Millisecond)
+	local := &types.Issue{ID: "bd-x", Status: types.StatusInProgress, Assignee: "plato", LeaseExpiresAt: &expires, HeartbeatAt: &beat, LeaseGrantedNode: "studio"}
+	incoming := &types.Issue{ID: "bd-x", Status: types.StatusInProgress, Assignee: "plato", LeaseExpiresAt: &expiresSub, HeartbeatAt: &beatSub, LeaseGrantedNode: "studio"}
+	if !importLeaseAlreadyReconciled(incoming, local) {
+		t.Fatalf("sub-second snapshot lease timestamps must still prove the lease row unchanged")
+	}
+	nextSecond := expires.Add(time.Second)
+	incoming.LeaseExpiresAt = &nextSecond
+	if importLeaseAlreadyReconciled(incoming, local) {
+		t.Fatalf("a lease expiry one second apart is a different lease row")
+	}
+}

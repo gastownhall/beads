@@ -29,7 +29,7 @@ type readyScopeField struct {
 // Four groups are deliberately ABSENT, because listing them here would refuse
 // requests that are answered correctly today:
 //
-//   - What the projection carries: IssueType, all five label forms, Assignee,
+//   - What the projection carries: Status/Statuses (GH#5832), IssueType, all five label forms, Assignee,
 //     NoAssignee, the exact Priority, ParentID, MolType, WispType,
 //     MetadataFields, HasMetadataKey, ExcludeTypes (and with it IncludeGates
 //     and IncludeInfra's type suppression), IncludeEphemeral (and with it
@@ -46,12 +46,15 @@ type readyScopeField struct {
 //     Refusing that would be refusing a correct answer over its cost, and the
 //     promise is already stated where a caller reads it (ListRequest.ReadyFlag).
 //
-//   - Status and AllFlag. The builder resolves both to "open" under ReadyFlag
-//     before the projection ever runs, so IssueFilter.Statuses is never
-//     populated on this path and there is nothing for the projection to drop.
-//     Ready work is open work; that override is pinned by the builder's golden
-//     file (internal/workapi/testdata/list_filter_golden.json,
-//     ready_flag_overrides_status).
+//   - AllFlag, and `--status all`. The builder resolves both to "open" under
+//     ReadyFlag before the projection ever runs (`all` is the no-filter
+//     spelling). An explicit --status is carried: BuildListFilter writes it
+//     onto IssueFilter and ReadyFilterFromIssueFilter copies Status/Statuses
+//     onto the ready-work filter, so `bd list --status X --ready` is the
+//     intersection rather than the unfiltered ready set (GH#5832). Status is
+//     therefore ABSENT from this drop set because it is honored, not because
+//     it is overridden. The default-open pin is the golden
+//     `ready_flag` case; the honor path is `ready_flag_honors_status`.
 //
 //   - NoPinnedFlag. Pinned is dropped by the projection, but the ready-work
 //     WHERE clause excludes pinned rows unconditionally

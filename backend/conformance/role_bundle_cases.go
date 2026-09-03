@@ -323,7 +323,7 @@ var roleContractCases = []roleContract{
 		func(b RoleContractBundle) func(t *testing.T) *ImporterFixture { return b.Importer },
 		RunImporterRejectsAStaleRowAndNamesIt,
 		RunImporterReportsTheAbsentTargetItDroppedOnce,
-		RunImporterReportsTheCrossPlaneEdgeItDropped,
+		RunImporterWiresTheCrossPlaneEdgeBetweenItsRows,
 		RunImporterReportsTheCycleEdgeItDropped,
 	),
 

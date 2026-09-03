@@ -340,7 +340,9 @@ type ListRequest struct {
 	// narrower filter vocabulary than this request can describe, and only part
 	// of the request reaches it.
 	//
-	// WHAT IT CARRIES: IssueType, all five label forms, Assignee, NoAssignee,
+	// WHAT IT CARRIES: Status/Statuses (an explicit --status is the
+	// intersection; AllFlag and `--status all` still take the open default),
+	// IssueType, all five label forms, Assignee, NoAssignee,
 	// the exact Priority, ParentID, MolType, WispType, MetadataFields,
 	// HasMetadataKey, the type exclusions (ExcludeTypes, and with them
 	// IncludeGates and IncludeInfra), IncludeEphemeral — the ready query has an
@@ -348,8 +350,7 @@ type ListRequest struct {
 	// IncludeInfra's plane half crosses with it — Limit, Offset and the MaxRows
 	// cap with its attribution. SortBy and Reverse
 	// still apply, because the display order is applied to the page after the
-	// query rather than inside it. Status and AllFlag are resolved to "open"
-	// and have no further effect: ready work is open work.
+	// query rather than inside it.
 	//
 	// WHAT IT REFUSES: every other filter here is one the ready query cannot
 	// carry, so combining it with ReadyFlag returns ErrValidation naming the

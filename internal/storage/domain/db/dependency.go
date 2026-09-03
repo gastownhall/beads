@@ -84,6 +84,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		// on itself") instead of appending the sentinel text.
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
+	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
+		return errors.New("external capability dependencies cannot use parent-child edges")
+	}
 
 	metadata := dep.Metadata
 	if metadata == "" {
@@ -968,6 +971,14 @@ func (r *dependencySQLRepositoryImpl) GetDependencyRecordsForIssues(ctx context.
 	out, err := issueops.GetDependencyRecordsForIssuesInTx(ctx, r.runner, issueIDs)
 	if err != nil {
 		return nil, fmt.Errorf("db: DependencySQLRepository.GetDependencyRecordsForIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (r *dependencySQLRepositoryImpl) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	out, err := issueops.GetExternalBlockingDependencyRecordsInTx(ctx, r.runner)
+	if err != nil {
+		return nil, fmt.Errorf("db: DependencySQLRepository.GetExternalBlockingDependencyRecords: %w", err)
 	}
 	return out, nil
 }

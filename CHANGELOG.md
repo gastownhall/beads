@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd count` supports repeatable `--metadata-field key=value` filters**
+  ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
+  count the same metadata-scoped set `bd list` returns without fetching every
+  row.
+
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
@@ -2775,6 +2780,27 @@ remote-migrate gate from a blunt block into a state-aware one.
   ([#4516](https://github.com/gastownhall/beads/issues/4516)).
 
 ### Fixed
+
+- **Explicit external capability dependencies now block embedded ready work
+  and appear in dependency trees.** References such as
+  `external:payments:checkout` were stored in `depends_on_external` but then
+  dropped by local-issue hydration, so their source still appeared in
+  `bd ready` and `bd dep tree` omitted the edge. Beads now resolves configured
+  foreign projects read-only at query time, excludes unsatisfied sources
+  before ready pagination and atomic claim selection, includes the refs in
+  blocked output, and renders them as synthetic blocked/closed tree leaves.
+
+- **`--label-any` is no longer silently dropped by `bd ready` and
+  `bd ready --claim`.** The ready-work WHERE builder emitted clauses for
+  `--label` and `--exclude-label` but none for `--label-any`, so the OR-set
+  filter was ignored on the ready/claim path (with or without `--parent`) on
+  every backend — while `bd list`/`bd search` honored it. On an *atomic claim*
+  this was dangerous rather than merely wrong: a worker fencing itself to its
+  own lane (`bd ready --claim --label-any lane-a --parent epic-1`) would
+  happily claim another lane's issue and believe it was fenced. `--label-any`
+  now emits an OR-set membership clause that AND-combines with `--label`,
+  `--exclude-label`, and `--parent`, exactly as the flag help promises; an
+  exhausted lane now claims nothing instead of falling back to unfenced work.
 
 - **A failed v53 migration no longer traps the database, and the v53 repair
   now covers `wisp_dependencies` split-column drift.** rc.2 repaired the

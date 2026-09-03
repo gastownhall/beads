@@ -95,7 +95,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 	if in.markdownFile != "" {
 		if len(args) > 0 {
-			return in, HandleError("cannot specify both title and --file flag")
+			return in, HandleError("cannot specify both title and --file flag; for a single issue's description from a file, use --body-file")
 		}
 		if in.dryRun {
 			return in, HandleError("--dry-run is not supported with --file flag")

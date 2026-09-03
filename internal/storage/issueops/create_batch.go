@@ -187,7 +187,7 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 }
 
 // CrossPlaneBatchEdgeError is the refusal the store-backed body raises from
-// filterCreateIssuesMixedBucketDependencies, spelled here so the unit-of-work
+// validateCreateIssuesMixedBucketDependencies, spelled here so the unit-of-work
 // body can raise the identical one before it starts writing.
 func CrossPlaneBatchEdgeError(sourceID, targetID string) error {
 	return fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist%.0w",

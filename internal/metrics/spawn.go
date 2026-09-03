@@ -148,7 +148,7 @@ func hasQueuedEvents(dir string, now time.Time) bool {
 // stamps it, so it can make a post-throttle window prune-only and delay (worst
 // case, if disabled traffic dominates, starve) the enabled stream's uploads.
 // This is design-tolerated latency, not a data-safety issue: enabled and
-// disabled children run the identical PruneQueue(dir, now), so a disabled prune
+// disabled children run the identical PruneQueue(ctx, dir, now), so a disabled prune
 // deletes exactly what an enabled one would; only upload cadence is affected,
 // which the 7d TTL / 5-min batching budget already absorbs.
 func touchFlushMarker(dir string) {
@@ -189,10 +189,33 @@ func MaybeSpawnFlusher() {
 	// env + user-global config (see resolveMetricsEndpoint in cmd/bd) and mark
 	// the child as the flusher so it cannot recurse.
 	cmd.Env = flusherChildEnv(os.Environ(), Endpoint())
-	if err := cmd.Start(); err != nil {
+	if _, err := startDetached(cmd); err != nil {
 		return
 	}
-	_ = cmd.Process.Release()
+}
+
+// startDetached starts cmd and reaps it in a background goroutine. The
+// returned pid is captured before any handle release so callers can observe
+// the child even if a future change clears cmd.Process.Pid.
+//
+// os/exec requires Wait after a successful Start. The previous
+// cmd.Process.Release() path dropped the Go handle without waitpid, so an
+// exited child stayed a zombie for the parent's remaining lifetime. In
+// current shipped code every flusher spawn happens in a process-exit tail
+// (see CloseAndFlush callers), so that window is typically milliseconds —
+// but any long-lived caller added later would accumulate zombies
+// unboundedly. This addresses the missing-reap half of GH#5900's
+// hypothesis only; the live, CPU-consuming children reported there are a
+// separate concern. A parent that exits before Wait completes leaves the
+// child to init, which reaps it. Either way the child is never left as Z
+// under this process.
+func startDetached(cmd *exec.Cmd) (int, error) {
+	if err := cmd.Start(); err != nil {
+		return 0, err
+	}
+	pid := cmd.Process.Pid
+	go func() { _ = cmd.Wait() }()
+	return pid, nil
 }
 
 // flusherChildEnv returns a copy of env with the metrics endpoint pinned to

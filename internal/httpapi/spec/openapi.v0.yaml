@@ -1945,6 +1945,17 @@ paths:
           schema:
             type: boolean
             default: false
+        - name: metadata_field
+          in: query
+          description: >-
+            Top-level metadata equality filter as `key=value`, split on the
+            first `=`. Repeatable. An invalid key is a 400.
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
         - name: include_infra
           in: query
           description: >-
@@ -2011,15 +2022,16 @@ paths:
           description: >-
             Invalid request: an unknown query parameter, a repeated
             single-valued one, a malformed boolean, integer or RFC 3339 instant,
-            or a `group_by` outside the closed set.
+            a malformed `metadata_field`, or a `group_by` outside the closed
+            set.
 
 
-            EVERY REFUSAL HERE IS THE TRANSPORT'S. Unlike the listings, this
-            operation has no predicate its library surface can turn down: an
-            unrecognized `status` or `type` matches nothing and answers `0`, and
-            the one refusal the count role does make — an unknown bucketing
-            dimension — is refused at the edge above, so it never reaches the
-            role at all.
+            A malformed `metadata_field` shape and an unknown `group_by` are
+            transport refusals. An invalid metadata key passes query decoding,
+            then `BuildCountFilter` rejects it and `failReadErr` classifies the
+            role's error as a `400` on `metadata_field`. An unrecognized
+            `status` or `type` is not a refusal; it matches nothing and answers
+            `0`.
           x-bd-codes: [invalid_argument]
           content:
             application/problem+json:
