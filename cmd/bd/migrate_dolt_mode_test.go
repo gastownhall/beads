@@ -290,9 +290,74 @@ func TestMigrateFromProxiedToServer_RejectsSharedRooted(t *testing.T) {
 
 func TestMigrateToProxiedServer_AlreadyProxiedIsNoop(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "dolt")}))
 	require.NoError(t, runMigrateToProxiedServer(false, 0, false))
 
 	cfg, err := configfile.Load(beadsDir)
 	require.NoError(t, err)
 	assert.True(t, cfg.IsDoltProxiedServerMode())
+}
+
+func TestMigrateToProxiedServer_RetryAfterCheckpointFault(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(migrateTargetConfigured))
+	require.Error(t, runMigrateToProxiedServer(false, 0, false))
+	j, err := loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, j)
+	assert.Equal(t, migrateTargetConfigured, j.Phase)
+	t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+	require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+	j, err = loadMigrateJournal(beadsDir)
+	assert.NoError(t, err)
+	assert.Nil(t, j, "successful migration removes its journal")
+}
+
+func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	path := migrateJournalPath(beadsDir)
+	require.NoError(t, os.WriteFile(path, []byte(`{"version":1,"source_mode":"server","target_mode":"proxied-server","phase":"surprise","attempt":1}`), 0o600))
+	_, err := loadMigrateJournal(beadsDir)
+	require.Error(t, err)
+}
+
+func TestMigrateToProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+		t.Run(string(phase), func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
+			require.Error(t, runMigrateToProxiedServer(false, 0, false))
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			require.NotNil(t, j)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+			require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+			j, err = loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j)
+		})
+	}
+}
+
+func TestMigrateFromProxiedServer_MalformedSidecarFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	require.NoError(t, os.WriteFile(configfile.ProxiedServerClientInfoPath(beadsDir), []byte("{bad"), 0o600))
+	require.Error(t, runMigrateFromProxiedServer(false, false))
+	data, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+	require.NoError(t, err)
+	assert.Contains(t, string(data), configfile.DoltModeProxiedServer)
+}
+
+func TestMigrateFromProxiedServer_JournalPreservesExternalSidecar(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	root := filepath.Join(beadsDir, "dolt")
+	ext := &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307, User: "alice"}
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root, External: ext}))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+	t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(migratePrepared))
+	require.Error(t, runMigrateFromProxiedServer(false, false))
+	j, err := loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, j.Sidecar)
+	assert.Equal(t, ext, j.Sidecar.External)
 }
