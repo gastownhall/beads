@@ -116,6 +116,55 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 }
 
 // =============================================================================
+// setupTwoProjectStores context budgeting
+// =============================================================================
+
+// TestStoreOpenContext_FreshBudgetPerCall guards against setupTwoProjectStores
+// reintroducing a single context.WithTimeout shared across both cold store
+// opens. When both opens shared one deadline, store A consuming most of the
+// budget under host load left store B with only the leftover slice, failing
+// with "context deadline exceeded" (be-gvnsq, ~39% of runs under load).
+// storeOpenContext must hand each store its own full testTimeout budget,
+// unaffected by time already spent on the other store's open.
+func TestStoreOpenContext_FreshBudgetPerCall(t *testing.T) {
+	start := time.Now()
+	ctx1, cancel1 := storeOpenContext()
+	defer cancel1()
+	deadline1, ok := ctx1.Deadline()
+	if !ok {
+		t.Fatal("storeOpenContext: expected a context with a deadline")
+	}
+	if got := deadline1.Sub(start); got < testTimeout-time.Second || got > testTimeout+time.Second {
+		t.Fatalf("storeOpenContext: first call's budget = %v, want ~%v", got, testTimeout)
+	}
+
+	// Simulate store A's open consuming a meaningful slice of its budget
+	// before store B's context is created.
+	const simulatedStoreAOpen = 500 * time.Millisecond
+	time.Sleep(simulatedStoreAOpen)
+
+	ctx2, cancel2 := storeOpenContext()
+	defer cancel2()
+	deadline2, ok := ctx2.Deadline()
+	if !ok {
+		t.Fatal("storeOpenContext: expected a context with a deadline")
+	}
+
+	// The whole point of giving each store its own context: store B's budget
+	// must not be drained by time store A already spent. If both opens
+	// shared one context, deadline2 would equal deadline1 exactly, leaving
+	// store B only testTimeout-simulatedStoreAOpen remaining.
+	if deadline2.Equal(deadline1) {
+		t.Fatal("storeOpenContext: second call returned the same deadline as the first — " +
+			"store opens are sharing one context instead of each getting its own")
+	}
+	if remaining := time.Until(deadline2); remaining < testTimeout-time.Second {
+		t.Fatalf("storeOpenContext: second call's remaining budget = %v, want ~%v — "+
+			"it was reduced by time already spent on the first call", remaining, testTimeout)
+	}
+}
+
+// =============================================================================
 // Test 1: Basic Read Isolation — Different Prefixes
 // =============================================================================
 
