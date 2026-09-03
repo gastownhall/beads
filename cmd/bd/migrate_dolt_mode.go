@@ -247,8 +247,13 @@ func validateDoltRoot(root string) error {
 	if err != nil {
 		return fmt.Errorf("read Dolt identity: %w", err)
 	}
-	var obj map[string]interface{}
-	if err := json.Unmarshal(b, &obj); err != nil || obj == nil {
+	var obj struct {
+		Head     string                 `json:"head"`
+		Remotes  map[string]interface{} `json:"remotes"`
+		Backups  map[string]interface{} `json:"backups"`
+		Branches map[string]interface{} `json:"branches"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil || obj.Head == "" || !strings.HasPrefix(obj.Head, "refs/heads/") || obj.Remotes == nil || obj.Backups == nil || obj.Branches == nil {
 		return fmt.Errorf("invalid Dolt identity repo_state.json")
 	}
 	return nil
