@@ -44,6 +44,49 @@ import (
 // backend has independently closed the row_lock partial-coverage gap the
 // architecture doc's own §10 risk table names. That is deliberate — see the
 // function's own doc comment — not a bug to relax the assertion around.
+//
+// DEFERRALS RECORDED HERE, NOT ACTED ON IN PHASE 0 (bee-ghosttrack's PR
+// #6147 round-1 review; kept as ONE note so a later phase does not have to
+// reconstruct these from PR comment history):
+//
+//  - UNRETAINED AND DISCLOSURE-GATING ARE A FUTURE AUTHORIZATION AXIS, NOT A
+//    SIXTH Restriction VALUE. R11's bounded-window edge (an Address old
+//    enough to have fallen outside a retention window, distinct from Gone)
+//    and disclosure-gating (a store that presents a Gone or Unretained
+//    Address as Unknown to a caller not authorized to learn it existed at
+//    all) both layer an AUTHORIZATION dimension over the five states this
+//    file already defines — WHO is asking, not WHAT the store knows. Adding
+//    either as a sixth Restriction constant would conflate those two
+//    dimensions; a later phase should model authorization as an orthogonal
+//    axis instead.
+//  - INVARIANT-DECLARATION DISCOVERABILITY: nothing in this suite lets a
+//    caller enumerate which store invariants EnforceCrossRecordInvariant
+//    knows about ahead of a refusal — InvariantRefusal.InvariantName is
+//    only ever observed reactively. Deferred to whatever phase gives
+//    invariants a first-class registry.
+//  - LEASE TTL SELF-EXPIRY: LeaseHandle carries ExpiresAt
+//    (cross_record_invariant_contract.go) but nothing in this suite
+//    exercises a lease actually expiring on its own — only explicit
+//    Release. Deferred until a real lease primitive exists to observe
+//    timing against.
+//  - R20-j's DURABILITY IS NOT PROVEN ACROSS A RESTART in this suite —
+//    RunAStoreThatRemovesStateStillAnswersGoneDurably (retention_epoch_
+//    contract.go) reads twice in the same process, which cannot
+//    distinguish real durability from an in-memory cache that merely
+//    outlives two calls. Deferred to the E2E tier, which can actually
+//    restart a backend between reads.
+//  - ERASURE'S GONE-RECORD TOKEN RETENTION (R5.1 machinery) is out of
+//    scope here: RunErasureMintsACorrectedVersionRatherThanEditingInPlace
+//    (retention_epoch_contract.go) checks that the original resolves
+//    GoneErasure and the correction resolves Live, not what token or
+//    tombstone content backs that GoneErasure answer. Deferred to the
+//    later phase that specifies R5.1's erasure-record shape.
+//
+// THE "_attribution" PATCH-KEY CONVENTION (expectedRevisionAttributionPatch,
+// this file) IS THE CANONICAL WAY TO THREAD A ChangeAttribution THROUGH A
+// PerRecordCASWrite's generic patch parameter. Phase 3's hook documentation
+// should point implementers at this convention explicitly, so no backend
+// invents a second one.
 
 // Address opaquely identifies one Version. It names no physical column — per
 // be-hs42e.1 §5, this is conceptual vocabulary that any future backend's hook
@@ -118,6 +161,17 @@ type ExpectedRevisionResult struct {
 // Refusal is R17's typed, machine-readable outcome for a write that named a
 // version no longer current — never a generic error, never indistinguishable
 // from an accepted write (R17-c/d1).
+//
+// THE FIXTURE KIT IS THE TRANSLATION BOUNDARY, NOT A SHAPE MANDATE ON REAL
+// BACKENDS: R17 itself permits either of two shipped refusal shapes — a
+// (result, nil-error) pair carrying a populated Refusal, or a typed native
+// error a backend already returns for this case. ExpectedRevisionFixture's
+// CompareAndSetVersion hook normalizes whichever shape a real backend ships
+// to this ONE Refusal-populated-result shape for the suite to assert
+// against uniformly. Nothing here should be read as banning a native
+// typed-error refusal shape at the backend level — only as saying the
+// fixture adapter that wires a backend into this suite must translate it
+// into this shape before handing it back.
 type Refusal struct {
 	// RefusingVersion is the Address that was actually current when the
 	// write was evaluated (R17-a).
