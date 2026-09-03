@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -321,6 +322,69 @@ func seedInitWorkspaceIdentity(
 	return nil
 }
 
+// resolveUserHomeDir returns the user's home directory.
+//
+// It prefers the OS account database over $HOME so the guard keys off the real
+// account home even when $HOME has been repointed — which happens constantly in
+// this repo's own tests, and in any sandbox that fakes a home. Both sources are
+// best-effort: in a CGO-free build user.Current() falls back to os.UserHomeDir()
+// (i.e. $HOME on Unix) itself, so this is a preference, not a guarantee of
+// $HOME-independence. Mirrors the home resolution in internal/beads'
+// isPathInSafeBoundary.
+//
+// A package var so tests can stub it.
+var resolveUserHomeDir = func() string {
+	if u, err := user.Current(); err == nil && u.HomeDir != "" {
+		return u.HomeDir
+	}
+	home, _ := os.UserHomeDir()
+	return home
+}
+
+// isUserHomeDir reports whether dir is the user's home directory (path-boundary
+// comparison, symlink/case tolerant). Used to guard `bd init` against turning
+// $HOME into a git repo (GH#4635).
+func isUserHomeDir(dir string) bool {
+	home := resolveUserHomeDir()
+	return home != "" && utils.PathsEqual(dir, home)
+}
+
+// guardInitInHomeDir refuses `bd init` directly in the user's home directory
+// when it is not already a git repo and no explicit BEADS_DIR was given.
+//
+// `bd init` would otherwise `git init` the home directory and write agent
+// scaffolding (CLAUDE.md, AGENTS.md, .gitignore, .agents/, .codex/,
+// .claude/settings.json) there, potentially clobbering existing files — a
+// silent footgun, especially under --non-interactive, which auto-engages
+// whenever stdin is not a TTY, i.e. whenever an agent runs init (GH#4635). A
+// real project is virtually never the home directory itself.
+//
+// This runs as the first thing in init's RunE, ahead of every path that has an
+// effect: the proxied dispatch (runInitProxiedServer -> EnsureGitRepo -> git
+// init), the --reinit-local/--force pre-checks (countExistingIssues opens a
+// real store, which creates the data directory and can run migrations), and
+// the mode globals RunE sets on itself. A guard placed after any of those
+// refuses only after the damage it exists to prevent.
+//
+// Fail-open by construction: an unresolvable home, an explicit BEADS_DIR, or an
+// already-tracked home all mean "not the case this guards", and init proceeds.
+func guardInitInHomeDir() error {
+	if os.Getenv("BEADS_DIR") != "" {
+		return nil
+	}
+	if isGitRepo() {
+		return nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil || !isUserHomeDir(cwd) {
+		return nil
+	}
+	return fmt.Errorf("refusing to 'bd init' directly in your home directory (%s):\n"+
+		"  this would turn it into a git repository and scaffold agent files here,\n"+
+		"  overwriting any existing ones. cd into a project directory and re-run, or set\n"+
+		"  BEADS_DIR to an explicit location if you really mean to initialize here", cwd)
+}
+
 var initCmd = &cobra.Command{
 	Use:           "init",
 	GroupID:       "setup",
@@ -361,6 +425,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
   • --contributor and --team flags are rejected (wizards require interaction)
   Also auto-detected when stdin is not a terminal or CI=true is set.`,
 	RunE: func(cmd *cobra.Command, _ []string) (retErr error) {
+		// First, before anything with an effect: never turn $HOME into a git
+		// repo (GH#4635). See guardInitInHomeDir for why the position matters.
+		if err := guardInitInHomeDir(); err != nil {
+			return err
+		}
+
 		prefix, _ := cmd.Flags().GetString("prefix")
 		quiet, _ := cmd.Flags().GetBool("quiet")
 		contributor, _ := cmd.Flags().GetBool("contributor")
