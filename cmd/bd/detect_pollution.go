@@ -30,61 +30,85 @@ func isTestIssue(title string) bool {
 	return testPrefixPattern.MatchString(strings.ToLower(title))
 }
 
+// detectTestPollution scores candidates that look like leaked test fixtures (GH#5025);
+// see the inline signal comments below for the corroboration policy.
 func detectTestPollution(issues []*types.Issue) []pollutionResult {
 	var results []pollutionResult
 	sequentialPattern := regexp.MustCompile(`^[a-z]+-\d+$`)
 
-	// Group issues by creation time to detect rapid succession
-	issuesByMinute := make(map[int64][]*types.Issue)
 	for _, issue := range issues {
-		minute := issue.CreatedAt.Unix() / 60
-		issuesByMinute[minute] = append(issuesByMinute[minute], issue)
-	}
+		if issue == nil {
+			continue
+		}
+		// Never flag closed issues or epics (destructive --clean must not touch real work).
+		if issue.Status == types.StatusClosed {
+			continue
+		}
+		if issue.IssueType == types.TypeEpic {
+			continue
+		}
 
-	for _, issue := range issues {
 		score := 0.0
 		var reasons []string
+		corroboration := false
 
 		title := strings.ToLower(issue.Title)
+		desc := strings.TrimSpace(issue.Description)
 
-		// Check for test prefixes (strong signal)
-		if testPrefixPattern.MatchString(title) {
-			score += 0.7
+		// Title prefix is a weak signal alone (0.4) — real bugs/infra use "test-*" names.
+		hasPrefix := testPrefixPattern.MatchString(title)
+		if hasPrefix {
+			score += 0.4
 			reasons = append(reasons, "Title starts with test prefix")
 		}
 
-		// Check for sequential numbering (medium signal)
-		if sequentialPattern.MatchString(issue.ID) && len(issue.Description) < 20 {
+		// Sequential bare ID + minimal description (corroborates fixture-style issues).
+		// NB: this pattern also matches ordinary "prefix-N" IDs from
+		// issue_id_mode=counter (internal/storage/issueops/helpers.go
+		// NextCounterIDTx) or an explicit `bd create --id bd-42`, so it must
+		// never be enough on its own without other test-specific signals.
+		if sequentialPattern.MatchString(issue.ID) && len(desc) < 20 {
 			score += 0.4
+			corroboration = true
 			reasons = append(reasons, "Sequential ID with minimal description")
 		}
 
-		// Check for generic/empty description (weak signal)
-		if len(strings.TrimSpace(issue.Description)) == 0 {
-			score += 0.2
+		// Empty / near-empty description (corroborates throwaway fixtures).
+		if len(desc) == 0 {
+			score += 0.4
+			corroboration = true
 			reasons = append(reasons, "No description")
-		} else if len(issue.Description) < 20 {
-			score += 0.1
+		} else if len(desc) < 20 {
+			// Bump applies only with a test-prefixed title (GH#5137): counter-mode
+			// "prefix-N" IDs alone must not push a real issue over threshold.
+			// Deliberately clears 0.7 on prefix+thin alone; see the boundary test.
+			weight := 0.2
+			if hasPrefix {
+				weight = 0.3
+			}
+			score += weight
+			corroboration = true
 			reasons = append(reasons, "Very short description")
 		}
 
-		// Check for rapid creation (created with many others in same minute)
-		minute := issue.CreatedAt.Unix() / 60
-		if len(issuesByMinute[minute]) >= 10 {
-			score += 0.3
-			reasons = append(reasons, fmt.Sprintf("Created with %d other issues in same minute", len(issuesByMinute[minute])-1))
-		}
-
-		// Check for generic test titles
+		// Explicit generic fixture titles (corroboration, not a standalone
+		// clean signal). Weighted at 0.3 rather than 0.5 (GH#5137 review):
+		// these are unanchored substring matches ("test issue" also appears
+		// inside legitimate titles like "Fix test issue detection
+		// regression"), so title-substring + empty-description alone
+		// (0.3 + 0.4 = 0.7) must land in the review-only band and never
+		// reach the 0.9 --clean cutoff without another corroborating signal
+		// (e.g. a test-prefixed title or a sequential/hash fixture ID).
 		if strings.Contains(title, "issue for testing") ||
 			strings.Contains(title, "test issue") ||
 			strings.Contains(title, "sample issue") {
-			score += 0.5
+			score += 0.3
+			corroboration = true
 			reasons = append(reasons, "Generic test title")
 		}
 
-		// Only include if score is above threshold
-		if score >= 0.7 {
+		// Threshold AND corroboration: prefix-only titled real work stays unflagged.
+		if score >= 0.7 && corroboration {
 			results = append(results, pollutionResult{
 				issue:   issue,
 				score:   score,
