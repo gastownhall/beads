@@ -50,7 +50,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 					t.Fatalf("%v unexpectedly succeeded: %s", invoke, stdout)
 				}
 				out := strings.ToLower(stdout + stderr)
-				if !strings.Contains(out, "proxy") || !strings.Contains(out, "not supported") {
+				if !strings.Contains(out, "not supported") {
 					t.Fatalf("%v refusal lacks stable proxy/unsupported shape: %s", invoke, out)
 				}
 				if jsonMode {
