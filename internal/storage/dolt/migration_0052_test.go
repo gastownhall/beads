@@ -244,12 +244,24 @@ func verifySampleIssues(t *testing.T, ctx context.Context, store *DoltStore, ids
 	}
 }
 
-// TestMigration0052_ExplainCapture prints EXPLAIN output for the two read
-// shapes D4v2 targets (bd stale's status+updated_at predicate, and bd ready's
-// deferred-parents defer_until predicate) so the PR description can cite the
-// planner's index usage — be-eei §8 guardrail 4. Not a pass/fail gate — the
-// `go test -v` output is the artifact and the reviewer validates it. Skipped
-// unless explicitly opted in to keep CI quiet.
+// TestMigration0052_ExplainCapture asserts that the planner actually picks the
+// D4v2 indexes for the two read shapes they exist for (bd stale's
+// status+updated_at predicate, and bd ready's deferred-parents defer_until
+// predicate), and prints the plans as the be-eei §8 guardrail 4 artifact.
+//
+// It began as a print-only diagnostic. Review of PR #5796 pointed out that the
+// PR body advertised "EXPLAIN-verified query-plan assertions" while the test
+// could not fail — it only t.Logf'd. Since the right index names demonstrably
+// do appear, asserting on them costs nothing and converts a one-shot artifact
+// into a standing planner-regression gate: if a future schema or Dolt upgrade
+// silently stops using idx_issues_status_updated_at, an index whose entire
+// justification is that these two queries use it, this now fails instead of
+// printing a plan nobody reads.
+//
+// Still skipped unless explicitly opted in, to keep CI quiet — which does mean
+// the gate only bites when someone runs it. That is the same bargain the
+// fixture cost already forced; the assertion is strictly better than the
+// t.Logf it replaces.
 //
 // The opt-in is an environment check rather than a short-mode skip: this is
 // a diagnostic-artifact boundary, not the runtime/stress/large-fixture case
@@ -277,6 +289,13 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 	cases := []struct {
 		label string
 		query string
+		// wantIndex is the substring Dolt's EXPLAIN FORMAT=TREE emits for the
+		// index this shape must use, e.g.
+		// "IndexedTableAccess(issues) index: [issues.status,issues.updated_at]".
+		// Matching the column list rather than the index NAME is deliberate:
+		// the plan names columns, not the index identifier, so this is the
+		// strongest claim the output actually supports.
+		wantIndex string
 	}{
 		{
 			// Target: idx_issues_status_updated_at. Matches the
@@ -284,16 +303,18 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 			// status IN (...) as the equality prefix, updated_at < cutoff
 			// as the range suffix, ORDER BY updated_at aligning with the
 			// suffix so no sort step.
-			label: "bd stale (status IN + updated_at < cutoff)",
-			query: "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL) ORDER BY updated_at ASC LIMIT 50",
+			label:     "bd stale (status IN + updated_at < cutoff)",
+			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL) ORDER BY updated_at ASC LIMIT 50",
+			wantIndex: "issues.status,issues.updated_at",
 		},
 		{
 			// Target: idx_issues_defer_until. Matches the
 			// getChildrenOfDeferredParentsInTx predicate
 			// (ready_work.go:279): defer_until IS NOT NULL skips the
 			// NULL-majority leaf, then range scan on defer_until > now.
-			label: "bd ready deferred-parents (defer_until IS NOT NULL AND defer_until > now)",
-			query: "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
+			label:     "bd ready deferred-parents (defer_until IS NOT NULL AND defer_until > now)",
+			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
+			wantIndex: "issues.defer_until",
 		},
 	}
 
@@ -304,18 +325,29 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 				t.Fatalf("EXPLAIN %q: %v", tc.label, err)
 			}
 			defer rows.Close()
-			t.Logf("\n=== EXPLAIN: %s ===", tc.label)
+			var planText strings.Builder
 			for rows.Next() {
 				var plan sql.NullString
 				if err := rows.Scan(&plan); err != nil {
 					t.Fatalf("scan: %v", err)
 				}
 				if plan.Valid {
-					t.Logf("%s", plan.String)
+					planText.WriteString(plan.String)
+					planText.WriteByte('\n')
 				}
 			}
 			if err := rows.Err(); err != nil {
 				t.Fatalf("rows: %v", err)
+			}
+
+			// The plan is the be-eei guardrail 4 artifact; log it either way so
+			// a failure reports what the planner actually chose instead of just
+			// that it was not what we wanted.
+			t.Logf("\n=== EXPLAIN: %s ===\n%s", tc.label, planText.String())
+
+			if !strings.Contains(planText.String(), tc.wantIndex) {
+				t.Errorf("planner did not use the D4v2 index for %s.\nwant plan to contain: %s\ngot plan:\n%s",
+					tc.label, tc.wantIndex, planText.String())
 			}
 		})
 	}
