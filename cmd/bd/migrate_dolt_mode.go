@@ -140,9 +140,16 @@ func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
 	if err = os.Rename(tmpName, migrateJournalPath(beadsDir)); err != nil {
 		return err
 	}
-	if d, e := os.Open(beadsDir); e == nil { // #nosec G304 -- beadsDir is the discovered workspace directory
-		_ = d.Sync()
+	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
+	if err != nil {
+		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	}
+	if err = d.Sync(); err != nil {
 		_ = d.Close()
+		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
 	}
 	return nil
 }
