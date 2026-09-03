@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 )
@@ -419,6 +420,39 @@ func TestMigrateProxiedToSharedServer_Reverse(t *testing.T) {
 
 	body, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
 	assert.Contains(t, string(body), "shared-server: true", "dolt.shared-server must be re-enabled")
+}
+
+func TestMigrateFromProxiedToSharedServer_AllCheckpointFaultsRetry(t *testing.T) {
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+		t.Run(string(phase), func(t *testing.T) {
+			sharedDir := t.TempDir()
+			t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+			root := filepath.Join(sharedDir, "dolt")
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
+			require.Error(t, runMigrateFromProxiedServer(false, true))
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			require.NotNil(t, j)
+			assert.Equal(t, phase, j.Phase)
+			assert.Equal(t, 1, j.Attempt)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+			require.NoError(t, runMigrateFromProxiedServer(false, true))
+			require.NoError(t, runMigrateFromProxiedServer(false, true))
+			cfg, _ := configfile.Load(beadsDir)
+			assert.True(t, cfg.IsDoltServerMode())
+			v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
+			assert.True(t, ok)
+			assert.Equal(t, "true", strings.ToLower(v))
+			_, err = os.Stat(configfile.ProxiedServerClientInfoPath(beadsDir))
+			assert.True(t, os.IsNotExist(err))
+		})
+	}
 }
 
 func TestMigrateProxiedToSharedServer_DryRunDoesNotCreateRoot(t *testing.T) {
