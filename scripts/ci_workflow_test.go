@@ -354,6 +354,48 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	}
 }
 
+// TestDoltTestcontainerStepsDisableRyuk pins TESTCONTAINERS_RYUK_DISABLED on
+// every CI step that starts a real Dolt testcontainer from a package
+// TestMain. testcontainers-go shares one Ryuk reaper per host; when a step
+// runs multiple such packages as concurrent test binaries (plain "go test"
+// parallelizes across packages), they race to attach to that shared reaper,
+// and a failed handshake from one process reaps a sibling's live container
+// mid-suite (be-2on). A GitHub Actions runner is destroyed after the job, so
+// the reaper buys nothing there and only costs this race.
+//
+// Steps that run under BEADS_TEST_SKIP=dolt (pr-core.sh's hermetic wrapper,
+// the sharded main-linux-integration-* jobs) never start a container at all
+// and are correctly excluded: internal/testutil's readiness check treats
+// BEADS_TEST_SKIP=dolt as an explicit opt-out before it ever reaches Docker.
+func TestDoltTestcontainerStepsDisableRyuk(t *testing.T) {
+	type doltContainerStep struct {
+		workflow string
+		job      string
+		step     string
+	}
+
+	steps := []doltContainerStep{
+		{"pr.yml", "test-domain-uow", "Test domain + uow + tracker"},
+		{"pr.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
+		{"main.yml", "test-domain-uow", "Test domain + uow + tracker"},
+		{"main.yml", "test-domain-uow", "Test doctor/fix (Dolt-backed, hard-require container)"},
+		// internal/storage/dolt, internal/molecules, internal/tracker, and
+		// cmd/bd all have TestMains that start a Dolt testcontainer
+		// unconditionally. This step's "./..." sweep runs them as concurrent
+		// package binaries on ubuntu-latest with no BEADS_TEST_SKIP=dolt
+		// guard, unlike pr-core.sh and the sharded main-linux-integration-*
+		// jobs.
+		{"main.yml", "test", "Test (with coverage + JUnit XML)"},
+	}
+
+	for _, tc := range steps {
+		t.Run(tc.workflow+"/"+tc.job+"/"+tc.step, func(t *testing.T) {
+			job := readCIWorkflow(t, tc.workflow).job(t, tc.job)
+			assertStepEnvValue(t, job, tc.step, "TESTCONTAINERS_RYUK_DISABLED", "true")
+		})
+	}
+}
+
 func TestPRPreflightPlatformsRunsTestScriptPrebuiltBinaryContract(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")
