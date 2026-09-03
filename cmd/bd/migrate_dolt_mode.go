@@ -550,6 +550,25 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
 		}
 	}
+	if j == nil {
+		// A sidecar without its migration journal is ambiguous state. Refuse
+		// to overwrite it: an externally-owned endpoint cannot be safely
+		// converted, and a mismatched local root may point at another repo.
+		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
+		if ierr != nil {
+			return HandleError("migration sidecar is unreadable: %v", ierr)
+		}
+		if info != nil {
+			if info.External != nil {
+				return HandleError("cannot migrate an externally hosted proxied Dolt endpoint; reconfigure the endpoint on its owner first")
+			}
+			resolvedSidecarRoot := info.ResolvedRootPath(beadsDir)
+			if resolvedSidecarRoot != "" && filepath.Clean(resolvedSidecarRoot) != filepath.Clean(rootPath) {
+				return HandleError("migration sidecar root %s does not match canonical %s", info.RootPath, rootPath)
+			}
+			return HandleError("migration sidecar exists without a recoverable journal; remove it only after verifying ownership")
+		}
+	}
 
 	serverDir := doltserver.ResolveServerDir(beadsDir)
 	if j != nil {
