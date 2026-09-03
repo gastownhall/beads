@@ -559,6 +559,12 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			return HandleError("migration sidecar is unreadable: %v", ierr)
 		}
 		if info != nil {
+			if info.External != nil || filepath.Clean(info.ResolvedRootPath(beadsDir)) != filepath.Clean(doltserver.DoltDirPath(beadsDir)) {
+				return HandleError("proxied sidecar does not match local migration target")
+			}
+			if running, _ := proxy.IsRunning(info.ResolvedRootPath(beadsDir)); running {
+				return HandleError("proxied server is still running")
+			}
 			fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
 			return nil
 		}
