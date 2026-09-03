@@ -1,0 +1,37 @@
+title: "[Governance]: "
+labels:
+  - governance
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This category is for discussions about the [Agentic Covenant](../../CODE_OF_CONDUCT.md),
+        contributor policies, and community governance.
+
+        We welcome feedback on how the Agentic Covenant works in practice — both from
+        this project and from projects that have adopted it.
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic area
+      options:
+        - Agentic Covenant feedback (general)
+        - Operator accountability
+        - Disclosure and attribution
+        - Rate limits and resource stewardship
+        - Agent operating standards
+        - Contributor protection
+        - Enforcement
+        - Adoption by other projects
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: discussion
+    attributes:
+      label: Discussion
+      description: Share your thoughts, experience, or proposal.
+    validations:
+      required: true
