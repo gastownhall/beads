@@ -1081,7 +1081,10 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 // process environment so retries cannot be misclassified by stale env state.
 func migrationSharedTopology(beadsDir string) (live, yaml bool, yamlSet bool, err error) {
 	live = doltserver.IsSharedServerMode()
-	raw, yamlSet := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
+	raw, yamlSet, readErr := config.WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server")
+	if readErr != nil {
+		return false, false, false, readErr
+	}
 	if !yamlSet {
 		return live, false, false, nil
 	}

@@ -364,6 +364,69 @@ func WorkspaceYamlValue(beadsDir, key string) (string, bool) {
 	return readYamlValueAtPath(filepath.Join(beadsDir, "config.yaml"), key)
 }
 
+// WorkspaceYamlValueStrict reads one dotted key from a workspace config.yaml
+// without conflating a malformed or unreadable file with an absent key. A
+// missing file or key returns present=false and no error; all other I/O and
+// YAML shape errors are returned to the caller.
+func WorkspaceYamlValueStrict(beadsDir, key string) (value string, present bool, err error) {
+	if beadsDir == "" {
+		return "", false, nil
+	}
+	data, err := os.ReadFile(filepath.Join(beadsDir, "config.yaml")) //nolint:gosec // beadsDir is caller-resolved workspace state
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("reading workspace config.yaml: %w", err)
+	}
+	var root map[string]interface{}
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return "", false, fmt.Errorf("parsing workspace config.yaml: %w", err)
+	}
+	if root == nil {
+		return "", false, nil
+	}
+	if raw, ok := root[key]; ok {
+		value, err := strictYamlScalarString(raw)
+		if err != nil {
+			return "", true, err
+		}
+		return value, true, nil
+	}
+	var node interface{} = root
+	parts := strings.Split(key, ".")
+	for i, part := range parts {
+		m, ok := node.(map[string]interface{})
+		if !ok {
+			return "", true, fmt.Errorf("workspace config key %q has a non-map parent", key)
+		}
+		node, ok = m[part]
+		if !ok {
+			return "", false, nil
+		}
+		if i == len(parts)-1 {
+			value, err := strictYamlScalarString(node)
+			if err != nil {
+				return "", true, err
+			}
+			return value, true, nil
+		}
+	}
+	return "", false, nil
+}
+
+func strictYamlScalarString(v interface{}) (string, error) {
+	if v == nil {
+		return "", fmt.Errorf("workspace config value is null")
+	}
+	switch v.(type) {
+	case map[string]interface{}, []interface{}:
+		return "", fmt.Errorf("workspace config value must be a scalar")
+	default:
+		return fmt.Sprintf("%v", v), nil
+	}
+}
+
 func readYamlValueAtPath(path, key string) (string, bool) {
 	data, err := os.ReadFile(path) //nolint:gosec // path is a resolved config.yaml path, not user input
 	if err != nil {
