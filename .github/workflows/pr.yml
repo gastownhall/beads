@@ -53,7 +53,7 @@ jobs:
           source ./.buildflags
           go_version="$(go version)"
           commit="$(git rev-parse HEAD)"
-          go build -tags "$BEADS_BUILD_TAGS" -o artifacts/bd-linux-gms-pure ./cmd/bd
+          go build -tags gms_pure_go -o artifacts/bd-linux-gms-pure ./cmd/bd
           chmod +x artifacts/bd-linux-gms-pure
           (
             cd artifacts
@@ -151,9 +151,8 @@ jobs:
         run: |
           echo "::warning title=Example build check skipped::checkout or Go setup failed, so examples/ could not be checked this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}). Advisory only; this does not block the merge."
 
-  # Fast check: every `go build|test|run|generate|install` invocation in
-  # tracked scripts/hooks/CI carries -tags=gms_pure_go. Prevents ICU-linkage
-  # regressions from re-entering the build (see engdocs/ICU-POLICY.md).
+  # Fast shell/Make guard for direct source-time build-tag declarations.
+  # Workflow `run` steps are checked structurally in the required policy wrapper.
   check-build-tags:
     name: Check build-tag policy
     runs-on: ubuntu-latest
