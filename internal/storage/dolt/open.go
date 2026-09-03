@@ -330,24 +330,46 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		}
 	}
 
-	// Pool per-I/O deadlines: caller override > env var > config.yaml > default
-	// (10s, see buildServerDSN). The default fast-fail is right for healthy
-	// local servers; overloaded shared-server deployments raise it so ordinary
-	// queries stop dying with "i/o timeout" under load (bd-vz0y9).
+	applyPoolTimeouts(cfg)
+
+	return nil
+}
+
+// applyPoolTimeouts fills the shared pool's per-I/O deadlines when the caller
+// left them unset: caller override > env var > config.yaml > default (10s, see
+// buildServerDSN). The default fast-fail is right for healthy local servers;
+// overloaded shared-server deployments raise it so ordinary queries stop dying
+// with "i/o timeout" under load (bd-vz0y9). It is idempotent, and it runs from
+// New (applyConfigDefaults) so every DoltStore open honors the knob — the CLI's own
+// store open and bd serve's provider hand-build their Config and never pass
+// through applyResolvedConfig, which is how the knob shipped in #5089 stayed
+// inert for every bd command in server mode (gastownhall/beads#6144).
+func applyPoolTimeouts(cfg *Config) {
 	if cfg.PoolReadTimeout == 0 {
 		cfg.PoolReadTimeout = timeoutFromEnv("BEADS_DOLT_POOL_READ_TIMEOUT", 0)
 	}
 	if cfg.PoolReadTimeout == 0 {
-		cfg.PoolReadTimeout = parseTimeout(config.GetString("dolt.pool-read-timeout"), 0)
+		cfg.PoolReadTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-read-timeout"), 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
 		cfg.PoolWriteTimeout = timeoutFromEnv("BEADS_DOLT_POOL_WRITE_TIMEOUT", 0)
 	}
 	if cfg.PoolWriteTimeout == 0 {
-		cfg.PoolWriteTimeout = parseTimeout(config.GetString("dolt.pool-write-timeout"), 0)
+		cfg.PoolWriteTimeout = parseTimeout(poolTimeoutFromConfig(cfg, "dolt.pool-write-timeout"), 0)
 	}
+}
 
-	return nil
+// poolTimeoutFromConfig reads a pool-deadline key from the initialized config
+// and, like the auto-start ladder above, falls back to the .beads directory's
+// own config.yaml for library consumers that never called config.Initialize.
+func poolTimeoutFromConfig(cfg *Config, key string) string {
+	if v := config.GetString(key); v != "" {
+		return v
+	}
+	if cfg.BeadsDir == "" {
+		return ""
+	}
+	return config.GetStringFromDir(cfg.BeadsDir, key)
 }
 
 // applyCentralConfigDefaults loads the central server config from
