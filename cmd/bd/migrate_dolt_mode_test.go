@@ -352,6 +352,30 @@ func TestMigrateSharedToProxiedServer_RootsAtSharedDir(t *testing.T) {
 	assert.NotContains(t, string(body), "shared-server: true", "dolt.shared-server must be turned off")
 }
 
+func TestMigrateSharedToProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+		t.Run(string(phase), func(t *testing.T) {
+			sharedDir := t.TempDir()
+			t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+			root := filepath.Join(sharedDir, "dolt")
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
+			require.Error(t, runMigrateToProxiedServer(false, 0, true))
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			require.NotNil(t, j)
+			assert.Equal(t, phase, j.Phase)
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+			require.NoError(t, runMigrateToProxiedServer(false, 0, true))
+			require.NoError(t, runMigrateToProxiedServer(false, 0, true))
+		})
+	}
+}
+
 func TestMigrateSharedToProxiedServer_DryRunDoesNotCreateRoot(t *testing.T) {
 	sharedDir := t.TempDir()
 	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
