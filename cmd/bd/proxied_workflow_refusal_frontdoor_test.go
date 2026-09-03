@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,13 +30,30 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 	commands := [][]string{{"cook", formula, "--persist"}, {"ship", "refusal"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
 	for _, args := range commands {
 		t.Run(strings.Join(args, "/"), func(t *testing.T) {
-			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, append(args, "--json")...)
-			if err == nil {
-				t.Fatalf("%v unexpectedly succeeded: %s", args, stdout)
-			}
-			out := strings.ToLower(stdout + stderr)
-			if !strings.Contains(out, "proxy") || !strings.Contains(out, "unsupported") {
-				t.Fatalf("%v refusal lacks stable proxy/unsupported shape: %s", args, out)
+			for _, jsonMode := range []bool{false, true} {
+				invoke := append([]string(nil), args...)
+				if jsonMode {
+					invoke = append(invoke, "--json")
+				}
+				stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, invoke...)
+				if err == nil {
+					t.Fatalf("%v unexpectedly succeeded: %s", invoke, stdout)
+				}
+				out := strings.ToLower(stdout + stderr)
+				if !strings.Contains(out, "proxy") || !strings.Contains(out, "unsupported") {
+					t.Fatalf("%v refusal lacks stable proxy/unsupported shape: %s", invoke, out)
+				}
+				if jsonMode {
+					var payload struct {
+						Code    string `json:"code"`
+						Mutates bool   `json:"mutates"`
+					}
+					if err := json.Unmarshal([]byte(stdout), &payload); err == nil {
+						if !strings.HasPrefix(payload.Code, "proxy.") || payload.Mutates {
+							t.Fatalf("typed refusal = %+v", payload)
+						}
+					}
+				}
 			}
 		})
 	}
