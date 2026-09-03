@@ -66,3 +66,36 @@ func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
 		}
 	}
 }
+
+func TestHistoryNestedFrontDoorsRefuseAndSupportedPathsPass(t *testing.T) {
+	for _, path := range []string{"vc merge", "vc commit", "repo add", "conflicts resolve", "federation sync", "dolt remote remove"} {
+		parts := strings.Split(path, " ")
+		root := &cobra.Command{Use: "bd"}
+		cmd := &cobra.Command{Use: parts[0]}
+		root.AddCommand(cmd)
+		for _, part := range parts[1:] {
+			child := &cobra.Command{Use: part}
+			cmd.AddCommand(child)
+			cmd = child
+		}
+		err := validateProxyMaintenanceBeforeProvider(cmd)
+		if path == "dolt remote remove" {
+			if err != nil {
+				t.Fatalf("supported %s refused: %v", path, err)
+			}
+			continue
+		}
+		if err == nil {
+			t.Fatalf("direct-only %s unexpectedly allowed", path)
+		}
+		if code, ok := exitCodeFromError(err); !ok || code != 1 {
+			t.Fatalf("%s exit=%v, want 1", path, err)
+		}
+	}
+	root := &cobra.Command{Use: "bd"}
+	history := &cobra.Command{Use: "history"}
+	root.AddCommand(history)
+	if err := validateProxyMaintenanceBeforeProvider(history); err != nil {
+		t.Fatalf("history --events supported path refused: %v", err)
+	}
+}
