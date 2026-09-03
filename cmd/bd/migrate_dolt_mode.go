@@ -94,6 +94,9 @@ func loadMigrateJournal(beadsDir string) (*migrateJournal, error) {
 	if j.Sidecar == nil {
 		return nil, fmt.Errorf("invalid %s: missing sidecar topology", migrateJournalFileName)
 	}
+	if j.Sidecar.RootPath == "" || j.Sidecar.ResolvedRootPath(beadsDir) == "" {
+		return nil, fmt.Errorf("invalid %s: sidecar root_path is required", migrateJournalFileName)
+	}
 	if j.Ownership != "managed-local" && j.Ownership != "external" {
 		return nil, fmt.Errorf("invalid %s: unknown ownership %q", migrateJournalFileName, j.Ownership)
 	}
@@ -439,6 +442,9 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
+	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
+		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
+	}
 	if cfg.IsDoltProxiedServerMode() && j == nil {
 		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
 		if ierr != nil {
@@ -615,6 +621,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
+	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
+		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
+	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo
 	if j == nil {
 		sourceSidecar, err = configfile.LoadProxiedServerClientInfo(beadsDir)
@@ -664,6 +673,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if err != nil {
 			return HandleError("%v", err)
 		}
+	}
+	if sourceSidecar != nil && sourceSidecar.RootPath == "" {
+		sourceSidecar.RootPath = rootDir
 	}
 
 	sharedDolt, sharedErr := doltserver.SharedDoltDir()
