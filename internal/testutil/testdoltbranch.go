@@ -6,7 +6,9 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -152,6 +154,16 @@ func SetupSharedTestDB(port int, dbName string) (*sql.DB, error) {
 	if port == 3307 {
 		_ = db.Close()
 		return nil, fmt.Errorf("SetupSharedTestDB: REFUSED — port %d is production (Clown Shows #12-#18)", port)
+	}
+
+	// FIREWALL: refuse when the ambient BEADS_DOLT_SERVER_PORT disagrees
+	// with the port we were asked to use — proceeding would silently
+	// create the shared test DB against whichever server
+	// BEADS_DOLT_SERVER_PORT points at instead of our own testcontainer
+	// (be-33se).
+	if ambient := os.Getenv("BEADS_DOLT_SERVER_PORT"); ambient != "" && ambient != strconv.Itoa(port) {
+		_ = db.Close()
+		return nil, fmt.Errorf("SetupSharedTestDB: REFUSED — port %d disagrees with ambient BEADS_DOLT_SERVER_PORT=%s", port, ambient)
 	}
 
 	// Create the shared database

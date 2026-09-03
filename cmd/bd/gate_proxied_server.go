@@ -39,8 +39,21 @@ func (proxiedFreshReadGetter) GetIssue(ctx context.Context, id string) (*types.I
 	if err != nil {
 		return nil, err
 	}
-	defer uw.Close(ctx)
-	return uw.IssueUseCase().GetIssue(ctx, id)
+	issue, localErr := uw.IssueUseCase().GetIssue(ctx, id)
+	uw.Close(ctx)
+	if localErr == nil {
+		return issue, nil
+	}
+	if !gateProxiedNotFound(localErr) {
+		return nil, localErr
+	}
+
+	result, routeErr := resolveViaPrefixRouting(ctx, id)
+	if routeErr != nil {
+		return nil, localErr
+	}
+	defer result.Close()
+	return result.Issue, nil
 }
 
 func runGateCheckProxiedServer(cmd *cobra.Command, ctx context.Context) error {

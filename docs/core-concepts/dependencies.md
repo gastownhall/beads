@@ -152,11 +152,14 @@ cycles before committing.
 Dependencies can reference issues in other beads rigs:
 
 ```bash
-bd dep add local-issue external:other-project:remote-issue
+bd dep add local-issue external:other-project:checkout-ready
 ```
 
-External dependencies always block. When the remote issue closes,
-`bd ready` reflects the change (checked at query time).
+Configure the project path under `external_projects`, then label a target
+project issue `provides:checkout-ready`. The dependency blocks until an issue
+with that label is closed. `bd ready`, `bd blocked`, and `bd dep tree` resolve
+the capability at query time; an unconfigured or unavailable project remains
+blocking.
 
 ## Gates
 

@@ -86,8 +86,15 @@ func TestBuildSweepCandidateFilterSelectsOneClosedTier(t *testing.T) {
 			if filter.Status == nil || *filter.Status != types.StatusClosed {
 				t.Fatalf("filter.Status = %v, want closed", filter.Status)
 			}
-			if filter.Ephemeral == nil || *filter.Ephemeral != test.ephemeral {
-				t.Fatalf("filter.Ephemeral = %v, want %v", filter.Ephemeral, test.ephemeral)
+			if filter.EphemeralTier == nil || *filter.EphemeralTier != test.ephemeral {
+				t.Fatalf("filter.EphemeralTier = %v, want %v", filter.EphemeralTier, test.ephemeral)
+			}
+			// The tier field replaces the raw flag on purpose: an Ephemeral
+			// filter would (a) miss typed wisps minted without the flag and
+			// (b) route the candidate search to the wisps plane alone, hiding
+			// legacy typed wisps in the issues table.
+			if filter.Ephemeral != nil {
+				t.Fatalf("filter.Ephemeral = %v, want nil — the sweep selects by tier, not the raw flag", filter.Ephemeral)
 			}
 			if filter.ClosedBefore == nil || !filter.ClosedBefore.Equal(cutoff) {
 				t.Fatalf("filter.ClosedBefore = %v, want %v", filter.ClosedBefore, cutoff)

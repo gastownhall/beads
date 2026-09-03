@@ -146,6 +146,11 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 		if !issue.Ephemeral && !issue.NoHistory && infraTypes[string(issue.IssueType)] {
 			issue.Ephemeral = true
 		}
+		// A wisp_type is a claim of ephemerality, same as ExecuteCreate: a
+		// typed wisp minted without the flag escapes every TTL/GC/purge tier.
+		if !issue.Ephemeral && !issue.NoHistory && issue.WispType != "" {
+			issue.Ephemeral = true
+		}
 		if err := assignCreateIssueIDInTx(ctx, tx, batch, issue, attempt.Actor); err != nil {
 			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, ClassifyPublicCreateError(err))
 		}
@@ -182,7 +187,7 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 }
 
 // CrossPlaneBatchEdgeError is the refusal the store-backed body raises from
-// filterCreateIssuesMixedBucketDependencies, spelled here so the unit-of-work
+// validateCreateIssuesMixedBucketDependencies, spelled here so the unit-of-work
 // body can raise the identical one before it starts writing.
 func CrossPlaneBatchEdgeError(sourceID, targetID string) error {
 	return fmt.Errorf("mixed regular/wisp CreateIssues batch cannot include cross-bucket dependency %s -> %s; create the issues first, then add the in-batch dependency after both issues exist%.0w",

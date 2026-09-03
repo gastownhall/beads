@@ -79,7 +79,7 @@ func TestHelperMultiStore(t *testing.T) {
 		var inserted bool
 		for retry := 0; retry < 5; retry++ {
 			_, err := db.ExecContext(ctx,
-				"INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, 'open', 2, 'task', NOW(6), NOW(6))",
+				"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, '', '', '', '', 'open', 2, 'task', NOW(6), NOW(6))",
 				issueID, title,
 			)
 			if err == nil {
@@ -103,6 +103,11 @@ func TestHelperMultiStore(t *testing.T) {
 	prefix := fmt.Sprintf("mp-%s-%%", procID)
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues WHERE id LIKE ?", prefix).Scan(&count); err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: count: %v\n", err)
+		os.Exit(1)
+	}
+
+	if created != numOps || count != created {
+		fmt.Fprintf(os.Stderr, "FAIL proc=%s created=%d verified=%d numOps=%d\n", procID, created, count, numOps)
 		os.Exit(1)
 	}
 
@@ -174,7 +179,7 @@ func TestMultiStoreConcurrent_InProcess(t *testing.T) {
 				id := fmt.Sprintf("ms-%d-%d", idx, op)
 				title := fmt.Sprintf("Multi-store issue %d-%d", idx, op)
 				_, err := db.ExecContext(egCtx,
-					"INSERT INTO issues (id, title, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, 'open', 2, 'task', NOW(6), NOW(6))",
+					"INSERT INTO issues (id, title, description, design, acceptance_criteria, notes, status, priority, issue_type, created_at, updated_at) VALUES (?, ?, '', '', '', '', 'open', 2, 'task', NOW(6), NOW(6))",
 					id, title,
 				)
 				if err != nil {
