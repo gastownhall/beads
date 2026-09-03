@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -62,11 +63,12 @@ type searchProjection[T any] struct {
 	// of two independently-ordered legs before trimming to filter.Limit —
 	// without it, the trim keeps whichever leg happens to come first in
 	// the concatenation regardless of sort rank (be-x42v.4 round-5
-	// follow-up). nil for projections with no sortable payload to compare
-	// (idProjection scans bare IDs, no column data); safe today because no
-	// caller combines Limit>0 with a merged (non-SkipWisps) ID-only search
-	// — see the merge-trim call site for the fallback behavior if that
-	// changes.
+	// follow-up). A projection with no sortable payload beyond the id
+	// (idProjection scans bare IDs, no column data) can still order the one
+	// Go-side key — "id" IS its payload — and returns false for every other
+	// key, which leaves sort.SliceStable a no-op (concatenation order, the
+	// pre-existing behavior; still safe because no caller combines Limit>0
+	// with a merged non-SkipWisps ID-only search under a SQL-rendered sort).
 	less func(a, b T, sortBy string, sortDesc bool) bool
 }
 
@@ -107,6 +109,15 @@ var idProjection = searchProjection[string]{
 	},
 	id:      func(id string) string { return id },
 	hydrate: nil,
+	// The id is the whole payload, so the one Go-side sort key is orderable
+	// here; every SQL-rendered key compares false (stable no-op) — see the
+	// less field's doc.
+	less: func(a, b string, sortBy string, sortDesc bool) bool {
+		if !sqlbuild.IsGoSideSort(sortBy) {
+			return false
+		}
+		return sqlbuild.LessID(a, b, sortDesc)
+	},
 }
 
 // hydrateIssueLabelsAndDeps bulk-loads labels (and optionally dependencies)
@@ -145,6 +156,16 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 	return nil
 }
 
+// missingOptionalWispTable reports whether err is the absence of a wisp-plane
+// table a database may legitimately not have. A wisp search touches more than
+// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
+// wisp_labels, so a blanket table-not-exist check reports a broken database as
+// an empty wisp plane and silently drops live rows from the result.
+func missingOptionalWispTable(err error) bool {
+	name, ok := dberrors.MissingTableName(err)
+	return ok && sqlbuild.OptionalWispTable(name)
+}
+
 // searchInTx is the shared wisp-merge wrapper. Ephemeral routing, the
 // empty-wisps probe, the issues+wisps queries, and overlap detection live
 // here once. Both SearchIssuesInTx and SearchIssueIDsInTx use this body —
@@ -153,7 +174,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if err != nil && !isTableNotExistError(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
@@ -208,7 +229,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return results, nil
 		}
 		wispResults, wispErr := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if wispErr != nil && !isTableNotExistError(wispErr) {
+		if wispErr != nil && !missingOptionalWispTable(wispErr) {
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
@@ -274,6 +295,28 @@ func sortMergedResults[T any](results []T, less func(a, b T, sortBy string, sort
 	})
 }
 
+// goSideSortAndTrim establishes a Go-side sort key's order over one leg's
+// complete matching set, then applies the bound the query withheld
+// (EffectiveSearchLimit — the same number the SQL LIMIT would have carried, so
+// cap accounting downstream is unchanged). Ordering the leg BEFORE bounding it
+// is what makes the bound sound: a row in the true top-n is in its leg's
+// top-n. Byte order by id, matching sqlbuild.Less for this key and the
+// domain/db seam's sortGoSide/sortRowsGoSide; the natural-numeric display
+// order is applied later on the delivered page (workapi.CompareIssuesBy) —
+// this decides MEMBERSHIP, that decides DISPLAY. Hydration runs after, so
+// only rows that survive the bound are hydrated.
+func goSideSortAndTrim[T any](results []T, id func(T) string, sortDesc bool, bound int) []T {
+	if len(results) > 1 {
+		sort.SliceStable(results, func(i, j int) bool {
+			return sqlbuild.LessID(id(results[i]), id(results[j]), sortDesc)
+		})
+	}
+	if bound > 0 && len(results) > bound {
+		results = results[:bound]
+	}
+	return results
+}
+
 // trimToSearchLimit truncates results to filter.Limit (when set, Limit>0)
 // before the caller-facing MaxRows cap check runs. Every searchInTx exit
 // path routes results returned to the caller through this before
@@ -317,8 +360,16 @@ func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter 
 		whereSQL = "WHERE " + strings.Join(whereClauses, " AND ")
 	}
 
+	// A PAGE BOUND IS ONLY EVER PUSHED UNDER AN ORDER THE QUERY CAN EXPRESS
+	// (searchWindowFor's rule, mirrored here for the store-backed seam): a
+	// Go-side sort key renders no ORDER BY, and a LIMIT with no ORDER BY does
+	// not return the first n rows, it returns n rows. So under a Go-side sort
+	// the query scans the complete matching set, and the bound is applied
+	// below — after the order first exists (goSideSortAndTrim).
+	goSideSort := sqlbuild.IsGoSideSort(filter.SortBy)
+	eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows)
 	limitSQL := ""
-	if eff := EffectiveSearchLimit(filter.Limit, filter.MaxRows); eff > 0 {
+	if eff > 0 && !goSideSort {
 		limitSQL = fmt.Sprintf(" LIMIT %d", eff)
 	}
 
@@ -358,6 +409,10 @@ func searchTableInTxT[T any](ctx context.Context, tx DBTX, query string, filter 
 	_ = rows.Close()
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("search %s: rows: %w", tables.Main, err)
+	}
+
+	if goSideSort {
+		results = goSideSortAndTrim(results, proj.id, filter.SortDesc, eff)
 	}
 
 	if proj.hydrate != nil && len(results) > 0 {

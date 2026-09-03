@@ -1,6 +1,7 @@
 {
   "data": {
-    "error": "no issues found matching the provided IDs"
+    "error": "no issues found matching the provided IDs",
+    "hint": "some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check"
   },
   "schema_version": 1
 }

@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -1136,19 +1137,29 @@ func subprocessEnv(extra ...string) []string {
 func cleanEnv(env []string, keys ...string) []string {
 	drop := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		drop[key] = struct{}{}
+		drop[environmentKeyIdentity(key)] = struct{}{}
 	}
 	out := env[:0]
 	for _, e := range env {
 		key, _, ok := strings.Cut(e, "=")
 		if ok {
-			if _, skip := drop[key]; skip {
+			if _, skip := drop[environmentKeyIdentity(key)]; skip {
 				continue
 			}
 		}
 		out = append(out, e)
 	}
 	return out
+}
+
+// environmentKeyIdentity mirrors the key comparison used by os/exec when it
+// prepares a child environment. strings.ToLower is intentional: EqualFold
+// would collapse Unicode near-collisions that os/exec keeps distinct.
+func environmentKeyIdentity(key string) string {
+	if runtime.GOOS == "windows" {
+		return strings.ToLower(key)
+	}
+	return key
 }
 
 func tail(s string, max int) string {

@@ -3,6 +3,7 @@ package schema
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"regexp"
 	"strings"
@@ -76,6 +77,7 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 	defer conn.Close()
 
 	lockName := MigrationLockName("testdb")
+	expectConvergedFastPathMiss(mock, "testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
@@ -84,7 +86,7 @@ func TestMigrateUpWithLockUsesDatabaseScopedLockOnly(t *testing.T) {
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
-	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithDatabaseSelector(testDatabaseSelector))
 	if err != nil {
 		t.Fatalf("MigrateUpWithLock() error = %v", err)
 	}
@@ -111,6 +113,7 @@ func TestMigrateUpWithLockPreparationErrorReleasesAndJoinsReleaseFailure(t *test
 	defer conn.Close()
 
 	lockName := MigrationLockName("testdb")
+	expectConvergedFastPathMiss(mock, "testdb")
 	preparationErr := errors.New("bootstrap preparation failed")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
@@ -120,7 +123,7 @@ func TestMigrateUpWithLockPreparationErrorReleasesAndJoinsReleaseFailure(t *test
 		WillReturnError(errors.New("release failed"))
 
 	called := 0
-	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithLockedPreparation("tcp:test", func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithDatabaseSelector(testDatabaseSelector), WithLockedPreparation("tcp:test", func(context.Context, *sql.Conn) (*FreshBootstrapHealCapability, error) {
 		called++
 		return nil, preparationErr
 	}))
@@ -132,6 +135,81 @@ func TestMigrateUpWithLockPreparationErrorReleasesAndJoinsReleaseFailure(t *test
 	}
 	if !errors.Is(err, preparationErr) {
 		t.Fatalf("MigrateUpWithLock() error = %v, want preparation error", err)
+	}
+	if !errors.Is(err, ErrMigrationLockRelease) || !IsMigrationLockError(err) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want classifiable release failure", err)
+	}
+	if err := mock.ExpectationsWereMet(); err != nil {
+		t.Fatalf("unmet SQL expectations: %v", err)
+	}
+}
+
+// TestMigrateUpWithLockMigrationErrorNotMaskedByReleaseFailure covers the
+// sibling failure shape of the preparation-error case above: MigrateUp itself
+// fails AND the deferred lock release also fails. The combiner must not
+// introduce a separator newline between the two errors (for single-line
+// constituent errors like these fixtures the whole message stays on one
+// line), and the primary migration failure must lead, so a last-line-only
+// capture (`tail -1` in a triage script) cannot see only the generic release
+// wrapper. Classification is unchanged from the case above.
+func TestMigrateUpWithLockMigrationErrorNotMaskedByReleaseFailure(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	if err != nil {
+		t.Fatalf("create sql mock: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	conn, err := db.Conn(ctx)
+	if err != nil {
+		t.Fatalf("pin mock connection: %v", err)
+	}
+	defer conn.Close()
+
+	lockName := MigrationLockName("testdb")
+	expectConvergedFastPathMiss(mock, "testdb")
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
+		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
+		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
+	// MigrateUp's first statement fails with a structural error, standing in
+	// for a migration hard-failing on a malformed clone.
+	migrationCause := errors.New("column 'is_blocked' could not be found in any table in scope")
+	releaseCause := errors.New("driver: bad connection")
+	mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+		WillReturnError(migrationCause)
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT RELEASE_LOCK(?)")).
+		WithArgs(lockName).
+		WillReturnError(releaseCause)
+
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithDatabaseSelector(testDatabaseSelector))
+	if applied != 0 {
+		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
+	}
+	if err == nil {
+		t.Fatal("MigrateUpWithLock() error = nil, want the migration failure")
+	}
+
+	msg := err.Error()
+	if strings.Contains(msg, "\n") {
+		t.Fatalf("MigrateUpWithLock() error is multi-line, want one line so a last-line-only capture cannot drop the primary error: %q", msg)
+	}
+	primaryIdx := strings.Index(msg, "is_blocked")
+	releaseIdx := strings.Index(msg, "release migration lock")
+	if primaryIdx < 0 {
+		t.Fatalf("MigrateUpWithLock() error = %q, want the primary migration diagnostic present", msg)
+	}
+	if releaseIdx < 0 {
+		t.Fatalf("MigrateUpWithLock() error = %q, want the lock-release diagnostic present too", msg)
+	}
+	if primaryIdx > releaseIdx {
+		t.Fatalf("MigrateUpWithLock() error = %q, want the primary migration error printed before the lock-release error", msg)
+	}
+
+	if !errors.Is(err, migrationCause) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want errors.Is against the original migration cause", err)
+	}
+	if !errors.Is(err, releaseCause) {
+		t.Fatalf("MigrateUpWithLock() error = %v, want errors.Is against the original release cause", err)
 	}
 	if !errors.Is(err, ErrMigrationLockRelease) || !IsMigrationLockError(err) {
 		t.Fatalf("MigrateUpWithLock() error = %v, want classifiable release failure", err)
@@ -158,7 +236,9 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	expectIgnorePatternSeed(mock, LatestVersion())
 	// migrationWorkNeeded: both cursors at latest, both content_hash columns
 	// present, no custom backfill pending -> no work, MigrateUp short-circuits.
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
@@ -197,7 +277,9 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 
 	expectIgnorePatternSeedNoop(mock, LatestVersion())
 	// migrationWorkNeeded: no work, MigrateUp short-circuits.
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	expectContentHashColumnExists(mock)
@@ -217,36 +299,58 @@ func TestMigrateUpSkipsSeedCommitWhenNothingChanged(t *testing.T) {
 	}
 }
 
-// expectIgnorePatternSeed mocks the unconditional dolt_ignore pattern seed
-// MigrateUp runs before anything else, with every pattern actually inserted
-// (RowsAffected=1: an under-seeded database). mainVersion is what the seed's
-// cursor probe reports; version-gated patterns (events, >= 0062) are only
-// expected when it qualifies them.
-func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 1)
-}
-
-// expectIgnorePatternSeedNoop mocks the seed on a healthy database: every
-// INSERT IGNORE hits an existing row (RowsAffected=0), nothing changes.
-func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
-	expectIgnorePatternSeedRows(mock, mainVersion, 0)
-}
-
-func expectIgnorePatternSeedRows(mock sqlmock.Sqlmock, mainVersion int, rowsAffected int64) {
-	for _, pattern := range doltIgnorePatterns {
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
-			WithArgs(pattern).
-			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
-	}
-	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+// expectedIgnoreSeedCandidates is the pattern set the seed asserts at a given
+// main cursor: the canonical set plus the version-gated ones that qualify.
+func expectedIgnoreSeedCandidates(mainVersion int) []string {
+	candidates := append([]string(nil), doltIgnorePatterns...)
 	for _, gated := range versionGatedDoltIgnorePatterns {
 		if mainVersion < gated.minMainVersion {
 			continue
 		}
-		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
-			WithArgs(gated.pattern).
-			WillReturnResult(sqlmock.NewResult(0, rowsAffected))
+		candidates = append(candidates, gated.pattern)
 	}
+	return candidates
+}
+
+// expectIgnoreSeedProbe mocks the seed's read half: the cursor probe that
+// decides the version-gated patterns, then the single presence SELECT.
+// alreadyPresent is what dolt_ignore reports back.
+func expectIgnoreSeedProbe(mock sqlmock.Sqlmock, mainVersion int, alreadyPresent []string) {
+	expectCursorProbe(mock, "schema_migrations", true)
+	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", mainVersion)
+	args := make([]driver.Value, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
+	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
+		args = append(args, pattern)
+	}
+	rows := sqlmock.NewRows([]string{"pattern"})
+	for _, pattern := range alreadyPresent {
+		rows.AddRow(pattern)
+	}
+	mock.ExpectQuery(regexp.QuoteMeta("SELECT pattern FROM dolt_ignore WHERE pattern IN (")).
+		WithArgs(args...).
+		WillReturnRows(rows)
+}
+
+// expectIgnorePatternSeed mocks the dolt_ignore pattern seed MigrateUp runs
+// before anything else on an UNDER-SEEDED database: the probe finds nothing,
+// so every pattern is inserted (RowsAffected=1). mainVersion is what the
+// seed's cursor probe reports; version-gated patterns (events, >= 0062) are
+// only expected when it qualifies them.
+func expectIgnorePatternSeed(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnoreSeedProbe(mock, mainVersion, nil)
+	for _, pattern := range expectedIgnoreSeedCandidates(mainVersion) {
+		mock.ExpectExec(regexp.QuoteMeta("INSERT IGNORE INTO dolt_ignore VALUES (?, true)")).
+			WithArgs(pattern).
+			WillReturnResult(sqlmock.NewResult(0, 1))
+	}
+}
+
+// expectIgnorePatternSeedNoop mocks the seed on a healthy database: the probe
+// finds every pattern already registered, so NO statement is issued at all.
+// This is the shape a fenced wire client must produce — it holds no write
+// grant on dolt_ignore, so an INSERT here is an error, not a no-op.
+func expectIgnorePatternSeedNoop(mock sqlmock.Sqlmock, mainVersion int) {
+	expectIgnoreSeedProbe(mock, mainVersion, expectedIgnoreSeedCandidates(mainVersion))
 }
 
 func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
@@ -256,6 +360,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	latestIgnored := LatestIgnoredVersion()
 
 	expectIgnorePatternSeed(mock, latest-1)
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	expectDoltStatusRows(mock)
 	// The seed changed rows (expectIgnorePatternSeed reports RowsAffected=1),
@@ -272,10 +377,12 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// MigrateUp captures the pre-pass main cursor for the aux re-key
 	// watershed (bd-578h9.4) before the main migrations run.
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS schema_migrations").
 		WillReturnResult(sqlmock.NewResult(0, 0))
 	expectContentHashColumnExists(mock)
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", latest-1)
 	if latest == 53 {
 		// The v53 pre-repair probes the six rig/agent columns on issues and
@@ -319,6 +426,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	expectColumnExists(mock, false)
 	// rekeyAuxRowIDs reads the ignored cursor to see whether its clone-local
 	// marker is pending; at latest it is not, so the re-key no-ops.
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
 	mock.ExpectExec("(?s)^CREATE TABLE IF NOT EXISTS ignored_schema_migrations").
@@ -327,6 +435,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// The applier reads the ignored cursor through the guarded currentVersion
 	// (gh 5033), so a non-zero cursor is followed by the sentinel probes here
 	// too, not just in migrationWorkNeeded.
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", latestIgnored)
 	expectIgnoredSentinelProbes(mock, true)
 	expectDoltStatusRows(mock)
@@ -367,6 +476,20 @@ func expectScalar(mock sqlmock.Sqlmock, query, column string, value any) {
 		WillReturnRows(sqlmock.NewRows([]string{column}).AddRow(value))
 }
 
+// expectCursorProbe mocks the information_schema existence probe that
+// migrationSource.currentVersion issues before it ever reads the cursor
+// table. The probe was added by be-bv7x so a not-yet-created cursor table
+// never poisons the pooled Dolt session with a failing statement.
+func expectCursorProbe(mock sqlmock.Sqlmock, table string, exists bool) {
+	present := 0
+	if exists {
+		present = 1
+	}
+	mock.ExpectQuery(`SELECT COUNT\(\*\) FROM information_schema\.tables`).
+		WithArgs(table).
+		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(present))
+}
+
 func expectDoltStatusRows(mock sqlmock.Sqlmock) {
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnRows(sqlmock.NewRows([]string{"table_name", "staged"}))
@@ -395,6 +518,7 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 
 	expectIgnorePatternSeedNoop(mock, cursor)
 	// migrationWorkNeeded: main cursor behind -> work needed (short-circuits).
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 	// dirtyBeforeAll: `events` dirty (working set only, not staged).
 	expectDoltStatusDirtyEvents(mock)
@@ -406,6 +530,7 @@ func expectDirtyGuardRefusal(t *testing.T, mock sqlmock.Sqlmock) {
 		WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 	// pendingMigrationDirtyTables: cursor read, then pending 0062's SQL
 	// touches `events` -> DirtyTablesError.
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", cursor)
 }
 
@@ -457,6 +582,7 @@ func TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal(t *testing.T) {
 	defer conn.Close()
 
 	lockName := MigrationLockName("testdb")
+	expectConvergedFastPathMiss(mock, "testdb")
 	mock.ExpectQuery(regexp.QuoteMeta("SELECT GET_LOCK(?, ?)")).
 		WithArgs(lockName, migrationLockAcquireTimeoutSeconds).
 		WillReturnRows(sqlmock.NewRows([]string{"locked"}).AddRow(1))
@@ -465,7 +591,7 @@ func TestMigrateUpWithLockDirtyGuardStaysFatalWithoutHeal(t *testing.T) {
 		WithArgs(lockName).
 		WillReturnRows(sqlmock.NewRows([]string{"released"}).AddRow(1))
 
-	applied, err := MigrateUpWithLock(ctx, conn, "testdb")
+	applied, err := MigrateUpWithLock(ctx, conn, "testdb", WithDatabaseSelector(testDatabaseSelector))
 	if applied != 0 {
 		t.Fatalf("MigrateUpWithLock() applied = %d, want 0", applied)
 	}
@@ -531,7 +657,7 @@ func TestMigrateUpWithLockFreshBootstrapHealResetsAndRetries(t *testing.T) {
 // expectIgnoredSentinelProbes mocks the INFORMATION_SCHEMA lookups
 // currentVersion issues to confirm a non-zero ignored cursor against the
 // schema it claims (gh 5033). They fire only for a non-zero cursor, in
-// ignoredSource.sentinelTables order.
+// ignoredSource's table then column sentinel order.
 func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 	count := 0
 	if present {
@@ -540,6 +666,12 @@ func expectIgnoredSentinelProbes(mock sqlmock.Sqlmock, present bool) {
 	for range ignoredSource.sentinelTables {
 		mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.TABLES")).
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(count))
+	}
+	if present {
+		for range ignoredSource.sentinelColumns {
+			mock.ExpectQuery(regexp.QuoteMeta("FROM INFORMATION_SCHEMA.COLUMNS")).
+				WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
+		}
 	}
 }
 
@@ -686,6 +818,7 @@ func TestMigrateUpWithLockFreshBootstrapHealCapabilityIsOneShot(t *testing.T) {
 	// rerun repeats main's unconditional ignore-pattern seed before reaching
 	// migrationWorkNeeded, where the injected transient failure occurs.
 	expectIgnorePatternSeedNoop(mock, LatestVersion()-2)
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion()-2)
 	mock.ExpectQuery("(?s)SELECT s\\.table_name, s\\.staged\\s+FROM dolt_status s").
 		WillReturnError(errors.New("connection reset"))

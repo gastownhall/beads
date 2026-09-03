@@ -14,6 +14,27 @@ case "$ARCH" in
     aarch64|arm64) ARCH="arm64" ;;
 esac
 
+resolve_existing_path() {
+    # GNU realpath needs -e to require the target exist; BSD realpath (macOS)
+    # has no -e flag and rejects it outright, but already requires existence
+    # unconditionally by default — verified empirically to error + exit
+    # nonzero on a missing path, same as GNU's -e. Linux keeps the exact
+    # existing invocation; only Darwin takes the flagless path.
+    #
+    # That "Darwin" branch is really "not Linux", not "BSD realpath" — with
+    # Homebrew coreutils on PATH, `realpath` resolves to GNU realpath there
+    # too, and GNU's default (no -e) accepts a missing *final* component
+    # (rc 0), silently dropping the existence guarantee this function
+    # promises callers. Don't trust either realpath's default behavior for
+    # that guarantee; check it ourselves so it holds on both branches.
+    [ -e "$1" ] || return 1
+    if [ "$OS" = linux ]; then
+        realpath -e -- "$1"
+    else
+        realpath -- "$1"
+    fi
+}
+
 sha256_file() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum "$1" | awk '{print $1}'
@@ -53,11 +74,12 @@ verify_release_binary_version() (
         echo "ERROR: RELEASE_BINARY_VERSION_TIMEOUT must be a positive number of seconds" >&2
         return 1
     fi
-    if ! command -v timeout >/dev/null 2>&1; then
+    local timeout_bin
+    if ! timeout_bin=$(command -v timeout); then
         echo "ERROR: timeout is required to verify historical release binaries safely" >&2
         return 1
     fi
-    binary=$(realpath -e -- "$binary") || {
+    binary=$(resolve_existing_path "$binary") || {
         echo "ERROR: verified $version binary cannot be resolved" >&2
         return 1
     }
@@ -73,6 +95,12 @@ verify_release_binary_version() (
     mkdir -p "$probe_root/run" "$probe_root/home" "$probe_root/xdg-config" \
         "$probe_root/xdg-cache" "$probe_root/xdg-data" "$probe_root/xdg-state" "$probe_root/tmp" || return 1
 
+    # PATH stays the deliberately minimal /usr/bin:/bin below — invoke
+    # timeout by the absolute path resolved above instead of relying on it
+    # being found on that sandboxed PATH. On Linux it lives in /usr/bin
+    # anyway (no behavior change); macOS has no timeout(1) at all outside a
+    # package manager prefix (e.g. Homebrew's /opt/homebrew/bin), which the
+    # sandboxed PATH intentionally excludes.
     if ! output=$(cd "$probe_root/run" && env -i \
         PATH=/usr/bin:/bin \
         HOME="$probe_root/home" \
@@ -88,7 +116,7 @@ verify_release_binary_version() (
         BD_DISABLE_METRICS=1 \
         BD_DISABLE_EVENT_FLUSH=1 \
         BD_NON_INTERACTIVE=1 \
-        timeout --kill-after=5s "$probe_timeout" "$binary" version 2>&1); then
+        "$timeout_bin" --kill-after=5s "$probe_timeout" "$binary" version 2>&1); then
         echo "ERROR: verified $version binary does not run" >&2
         return 1
     fi
@@ -154,10 +182,15 @@ download_verified_release_binary() {
 build_verified_v091_source_binary() (
     local scratch module_json source_dir build_dir binary temporary toolchain_root toolchain_go toolchain
     scratch=$(mktemp -d) || return 1
+    # Canonicalize immediately: macOS's default TMPDIR (/var/folders/...) is
+    # itself reached through a symlink to /private/var/folders/..., so a
+    # later realpath'd descendant (source_dir below) would never prefix-match
+    # this raw, non-canonical form even though both name the same directory.
+    scratch=$(resolve_existing_path "$scratch") || return 1
     temporary=""
     trap 'rm -rf -- "$scratch"; [ -z "$temporary" ] || rm -f -- "$temporary"' EXIT
     toolchain_root=$(env GOTOOLCHAIN="$SOURCE_TAG_SQLITE_GO_TOOLCHAIN" go env GOROOT) || return 1
-    toolchain_go=$(realpath -e -- "$toolchain_root/bin/go") || return 1
+    toolchain_go=$(resolve_existing_path "$toolchain_root/bin/go") || return 1
     [ -x "$toolchain_go" ] || return 1
     toolchain=$(cd "$scratch" && env GOTOOLCHAIN=local "$toolchain_go" env GOVERSION) || return 1
     [ "$toolchain" = "$SOURCE_TAG_SQLITE_GO_TOOLCHAIN" ] || {
@@ -186,13 +219,13 @@ build_verified_v091_source_binary() (
         echo 'ERROR: v0.9.1 module provenance did not match the reviewed source tag' >&2
         return 1
     }
-    source_dir=$(realpath -e -- "$(jq -r .Dir <<< "$module_json")") || return 1
+    source_dir=$(resolve_existing_path "$(jq -r .Dir <<< "$module_json")") || return 1
     [ -d "$source_dir" ] && [ ! -L "$source_dir" ] &&
         [[ "$source_dir/" == "$scratch/mod/"* ]] || {
         echo 'ERROR: verified v0.9.1 module has no safe source directory' >&2
         return 1
     }
-    build_dir="$CACHE_DIR/verified-source/${SOURCE_TAG_SQLITE_VERSION}-${SOURCE_TAG_SQLITE_COMMIT}-${SOURCE_TAG_SQLITE_GO_TOOLCHAIN}-linux-amd64-cgo1"
+    build_dir="$CACHE_DIR/verified-source/${SOURCE_TAG_SQLITE_VERSION}-${SOURCE_TAG_SQLITE_COMMIT}-${SOURCE_TAG_SQLITE_GO_TOOLCHAIN}-${OS}-${ARCH}-cgo1"
     binary="$build_dir/bd"
     mkdir -p "$build_dir"
     cp -f "$source_dir/go.mod" "$scratch/source.mod" &&
@@ -201,9 +234,9 @@ build_verified_v091_source_binary() (
     temporary="$binary.tmp.$$"
     if ! (cd "$source_dir" && env GOFLAGS=-modcacherw GOWORK=off GOTOOLCHAIN=local \
         GOMODCACHE="$scratch/mod" GOSUMDB=sum.golang.org GONOSUMDB= GOPRIVATE= \
-        GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
+        GOOS="$OS" GOARCH="$ARCH" CGO_ENABLED=1 \
         "$toolchain_go" build -trimpath -modfile="$scratch/source.mod" -o "$temporary" ./cmd/bd); then
-        echo 'ERROR: could not build verified v0.9.1 source for linux/amd64 with CGO' >&2
+        echo "ERROR: could not build verified v0.9.1 source for $OS/$ARCH with CGO" >&2
         return 1
     fi
     chmod +x "$temporary" && mv -f "$temporary" "$binary" || return 1

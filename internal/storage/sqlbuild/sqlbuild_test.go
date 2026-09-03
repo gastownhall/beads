@@ -1,6 +1,7 @@
 package sqlbuild
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +71,21 @@ func TestLessMirrorsOrderBy(t *testing.T) {
 	d := &types.Issue{ID: "d", Priority: 1, CreatedAt: now}
 	if !Less(a, d, "", false) || Less(d, a, "", false) {
 		t.Error("full tie must break by id ASC")
+	}
+}
+
+// TestLessIDHonorsSortDesc pins the bd-jao3t half of the reversed-id bug:
+// Less ignored sortDesc for "id" (the one Go-side sort key), so every merge
+// sort that fed a reversed id page kept the byte-FIRST rows.
+func TestLessIDHonorsSortDesc(t *testing.T) {
+	a := &types.Issue{ID: "bd-001"}
+	b := &types.Issue{ID: "bd-002"}
+
+	if !Less(a, b, "id", false) || Less(b, a, "id", false) {
+		t.Error("id ascending must be byte order")
+	}
+	if !Less(b, a, "id", true) || Less(a, b, "id", true) {
+		t.Error("id descending must be reversed byte order, not the ascending order sortDesc used to be ignored into")
 	}
 }
 
@@ -144,6 +160,30 @@ func TestBuildReadyWorkWhereBatchesIDSets(t *testing.T) {
 	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
 	if len(args) != wantArgs {
 		t.Errorf("args = %d, want %d", len(args), wantArgs)
+	}
+}
+
+func TestBuildReadyWorkWhereAppliesPolicyIDExclusions(t *testing.T) {
+	t.Parallel()
+
+	ids := make([]string, QueryBatchSize+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("be-external-%d", i)
+	}
+	where, args, err := BuildReadyWorkWhere(
+		types.WorkFilter{ExcludeIDs: ids},
+		IssuesFilterTables,
+		ReadyWorkWhereInputs{},
+	)
+	if err != nil {
+		t.Fatalf("BuildReadyWorkWhere: %v", err)
+	}
+	if got := strings.Count(where, "id NOT IN ("); got != 2 {
+		t.Fatalf("external policy exclusions produced %d NOT IN clauses, want 2", got)
+	}
+	wantArgs := len(ids) + len(ReadyWorkExcludeTypes(nil))
+	if len(args) != wantArgs {
+		t.Fatalf("args = %d, want %d", len(args), wantArgs)
 	}
 }
 
@@ -381,9 +421,23 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 		{
 			name:            "SingularStatusWinsOverStatuses",
 			filter:          types.WorkFilter{Status: "open", Statuses: []types.Status{"blocked", "pinned"}},
-			wantClause:      "status = ?",
+			wantClause:      "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))",
 			rejectClause:    "status IN (?",
 			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "OpenIncludesCustomActiveCategory",
+			filter:          types.WorkFilter{Status: types.StatusOpen},
+			wantClause:      "status IN (SELECT name FROM custom_statuses WHERE category = 'active')",
+			rejectClause:    "status IN ('open', 'in_progress')",
+			wantLeadingArgs: []any{"open"},
+		},
+		{
+			name:            "NonOpenSingularStatusStaysExact",
+			filter:          types.WorkFilter{Status: types.StatusInProgress},
+			wantClause:      "status = ?",
+			rejectClause:    "custom_statuses",
+			wantLeadingArgs: []any{"in_progress"},
 		},
 		{
 			name:         "EmptyFilterLegacyDefault",
@@ -416,5 +470,24 @@ func TestBuildReadyWorkWhereStatusFilter(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestOptionalWispTable pins the set a wisp query may treat as "no wisps".
+// leases and wisp_labels are joined or hydrated by that query but are not the
+// wisp plane being absent, so tolerating them turns a broken database into an
+// empty result.
+func TestOptionalWispTable(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"wisps", "wisp_dependencies", "WISPS"} {
+		if !OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"leases", "wisp_labels", "issues", "labels", "", "wisp"} {
+		if OptionalWispTable(name) {
+			t.Errorf("OptionalWispTable(%q) = true, want false", name)
+		}
 	}
 }

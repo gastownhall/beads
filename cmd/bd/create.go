@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 	"github.com/steveyegge/beads/issueops"
 )
@@ -51,7 +52,7 @@ var createCmd = &cobra.Command{
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("create")
+		CheckReadonly("create") // also covers CheckMigrationFreeze (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("create")
 		defer func() {
@@ -179,6 +180,8 @@ var createCmd = &cobra.Command{
 		if len(labelAlias) > 0 {
 			labels = append(labels, labelAlias...)
 		}
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")
@@ -208,6 +211,18 @@ var createCmd = &cobra.Command{
 			}
 			wisp = true
 			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
+		}
+		// Reconcile the requested durable class with the effective wisp plane
+		// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
+		// contradicts --ephemeral/--no-history and is rejected, so the durable
+		// intent is preserved rather than silently collapsed into an
+		// effective-ephemeral record; a per-type config default yields to the
+		// explicit flag. versioned normalizes to the unset marker only after the
+		// check (C2.4).
+		var storageClassConflict bool
+		storageClass, storageClassConflict = reconcileStorageClassPlane(storageClass, storageClassFlag != "", wisp || noHistory)
+		if storageClassConflict {
+			return HandleError("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", storageClass)
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -413,7 +428,12 @@ var createCmd = &cobra.Command{
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+				// Auto-routed paths (routing.mode: auto, routing.default)
+				// come from config, not caller input, so they're always
+				// allowed to auto-vivify as before; only an explicit --repo
+				// flag value can be ambiguous.
+				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, allowCreate); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
@@ -687,13 +707,16 @@ type createIssueParams struct {
 	Metadata           json.RawMessage
 }
 
-// resolveStorageClass resolves the effective storage class at create time
+// resolveStorageClass resolves the requested storage class at create time
 // (Protocol v0.1 C1.3): the explicit --storage-class flag wins; otherwise the
 // per-type config default storage-class.<type> applies; otherwise unset.
-// Versioned normalizes to unset — the class marker is omitted when versioned
-// (C2.4), and both spell identical semantics (C1.2). Values are validated
-// wherever they came from: a bad flag is a usage error, a bad config value is
-// a config bug and fails just as loudly.
+// The parsed class is returned verbatim, including versioned. The caller must
+// normalize versioned to the unset marker (the marker is omitted when
+// versioned, C2.4) only AFTER plane-conflict validation, so an explicit durable
+// request paired with a wisp-plane flag is rejected rather than silently erased
+// into an effective-ephemeral row. Values are validated wherever they came
+// from: a bad flag is a usage error, a bad config value is a config bug and
+// fails just as loudly.
 func resolveStorageClass(explicit string, issueType types.IssueType) (types.StorageClass, error) {
 	raw := explicit
 	if raw == "" {
@@ -709,10 +732,31 @@ func resolveStorageClass(explicit string, issueType types.IssueType) (types.Stor
 		}
 		return "", err
 	}
-	if class == types.StorageClassVersioned {
-		return "", nil
-	}
 	return class, nil
+}
+
+// reconcileStorageClassPlane applies flag-over-config precedence between a
+// resolved storage class and the effective wisp plane (Protocol v0.1 §C1.3).
+// A wisp-plane record is ephemeral by construction, so a durable class
+// (versioned/unversioned) cannot ride on it. explicit reports whether the class
+// came from an explicit flag/field rather than a per-type config default:
+//   - explicit durable class + wisp plane -> conflict=true; the caller rejects
+//     it so the durable intent is preserved rather than silently collapsed into
+//     an effective-ephemeral record;
+//   - config-derived durable class + wisp plane -> cleared, yielding to the
+//     explicit --ephemeral/--no-history plane.
+//
+// versioned normalizes to the unset marker (C2.4) only after the check, so the
+// durable request survives long enough to be honored, rejected, or yielded. On
+// conflict the class is returned verbatim so the caller can name it in the error.
+func reconcileStorageClassPlane(class types.StorageClass, explicit, wispPlane bool) (types.StorageClass, bool) {
+	if class != "" && wispPlane {
+		if explicit {
+			return class, true
+		}
+		class = "" // config default yields to the explicit wisp-plane flag
+	}
+	return class.Normalize(), false
 }
 
 func buildCreateIssue(params createIssueParams) *types.Issue {
@@ -851,7 +895,7 @@ func createDepsAcceptedTypeList() string {
 }
 
 func init() {
-	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().StringP("file", "f", "", "Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file")
 	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
@@ -953,10 +997,23 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 	return store, nil
 }
 
+// isAmbiguousRepoTarget reports whether an explicit --repo value is a
+// bare/relative filesystem path (not absolute, not "~/"-prefixed). Such a
+// value silently resolves against the current working directory (see
+// routing.ExpandPath) rather than failing, so a misresolved value (e.g. a
+// typo) previously wrote a bead into a brand-new, disconnected database
+// instead of erroring (bd-8d3f).
+func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
+	return repoFlagChanged && !filepath.IsAbs(repoOverride) && !strings.HasPrefix(repoOverride, "~/")
+}
+
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
+//
+// When allowCreate is false, a target with no existing workspace is refused
+// instead of fabricated — see isAmbiguousRepoTarget.
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage, allowCreate bool) error {
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -964,6 +1021,10 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	// metadata.json is the canonical marker for an initialized beads dir.
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
+	}
+
+	if !allowCreate {
+		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", targetPath)
 	}
 
 	// Create .beads directory

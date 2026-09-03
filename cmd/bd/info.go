@@ -221,6 +221,26 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
+		Version: "1.2.2",
+		Date:    "2026-08-15",
+		Changes: []string{
+			"RELEASE: v1.2.2 re-releases the tested 1.1 line (identical code to v1.1.2) to supersede the accidental, untested v1.2.0/v1.2.1; 1.2.x-only features (leases, events journal, sync federation, HTTP API server, provenance) are not included.",
+			"RECOVERY: if v1.2.1 already migrated a database to schema v65, the v1.2.2 binary refuses with a schema version mismatch; see https://beads.gascity.com/recovery/accidental-1-2-1-release — recommended fix is rolling the schema_migrations cursor back to v53, stopgap is BD_IGNORE_SCHEMA_SKEW=1.",
+			"GO: go.mod retracts v1.2.1/v1.2.0/v1.1.1 so 'go install ...@latest' resolves to v1.2.2.",
+		},
+	},
+	{
+		Version: "1.2.1",
+		Date:    "2026-08-11",
+		Changes: []string{
+			"MIGRATION: first open with this binary runs migration 0062 (events -> dolt_ignored storage, bd-red8u): a one-time four-phase self-committing flip that removes per-event dolt commit churn. Expect one slower first invocation per clone; do not interrupt it.",
+			"NEW: `bd sync` — the federation loop (export, commit, pull, import, push) as one verb.",
+			"NEW: `--brief` on `bd list` / `bd ready --json` and the HTTP listings — omits free-form text fields (~93% smaller payloads on large stores); fields are omitted without a marker, so only the caller that passed the flag knows rows are partial.",
+			"BEHAVIOR: expired dated defers now AUTO-WAKE on ready-front reads and claims (#5386) — a lapsed `--defer` no longer hides an issue forever; stale defers surface on the next `bd ready`.",
+			"PERF: telemetry no longer costs startup time on every invocation (#5646), and the queued-events dir is bounded (7d TTL + drop-oldest caps, #5660) — a backlogged ~/.beads/eventsData self-prunes.",
+		},
+	},
+	{
 		Version: "1.1.2",
 		Date:    "2026-07-26",
 		Changes: []string{
