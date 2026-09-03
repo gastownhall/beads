@@ -1205,6 +1205,22 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
+		// be-bgc2x: the store-requiring path must honor the same explicit env
+		// targets selectedNoDBBeadsDir honors on the no-DB path, or `bd where`
+		// and `bd list` disagree about which workspace is selected. Resolve them
+		// BEFORE the ambient discovery block below: that block's
+		// prepareSelectedCommandContext sets BEADS_DIR, which makes
+		// beads.FindDatabasePath() take its BEADS_DIR branch and return early,
+		// so its BEADS_DB branch is never reached (and it has no BD_DB branch).
+		if dbPath == "" {
+			for _, key := range []string{"BEADS_DB", "BD_DB"} {
+				if envTarget := os.Getenv(key); envTarget != "" {
+					dbPath = utils.CanonicalizePath(envTarget)
+					break
+				}
+			}
+		}
+
 		// Capture redirect info BEFORE FindDatabasePath() follows the redirect.
 		// When .beads/redirect points to a shared directory with a different
 		// dolt_database, the source's database name would be lost. Capture it
