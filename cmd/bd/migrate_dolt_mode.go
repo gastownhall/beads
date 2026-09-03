@@ -260,7 +260,7 @@ func validateDoltRoot(root string) error {
 		Backups  map[string]interface{} `json:"backups"`
 		Branches map[string]interface{} `json:"branches"`
 	}
-	if err := json.Unmarshal(b, &obj); err != nil || obj.Head == "" || !strings.HasPrefix(obj.Head, "refs/heads/") || obj.Remotes == nil || obj.Backups == nil || obj.Branches == nil {
+	if err := json.Unmarshal(b, &obj); err != nil || obj.Head == "" || !strings.HasPrefix(obj.Head, "refs/heads/") || strings.TrimPrefix(obj.Head, "refs/heads/") == "" || obj.Remotes == nil || obj.Backups == nil || obj.Branches == nil {
 		return fmt.Errorf("invalid Dolt identity repo_state.json")
 	}
 	return nil
