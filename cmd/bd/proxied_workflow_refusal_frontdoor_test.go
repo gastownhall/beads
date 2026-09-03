@@ -28,6 +28,15 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 		t.Fatalf("read config before refusal: %v", err)
 	}
 	commands := [][]string{{"cook", formula, "--persist"}, {"ship", "refusal"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
+	expectedCode := func(args []string) string {
+		if args[0] == "swarm" {
+			return "proxy.swarm.unsupported"
+		}
+		if args[0] == "merge-slot" {
+			return "proxy.merge_slot.unsupported"
+		}
+		return "proxy.formula.unsupported"
+	}
 	for _, args := range commands {
 		t.Run(strings.Join(args, "/"), func(t *testing.T) {
 			for _, jsonMode := range []bool{false, true} {
@@ -40,7 +49,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 					t.Fatalf("%v unexpectedly succeeded: %s", invoke, stdout)
 				}
 				out := strings.ToLower(stdout + stderr)
-				if !strings.Contains(out, "proxy") || !strings.Contains(out, "unsupported") {
+				if !strings.Contains(out, "proxy") || !strings.Contains(out, "not supported") {
 					t.Fatalf("%v refusal lacks stable proxy/unsupported shape: %s", invoke, out)
 				}
 				if jsonMode {
@@ -48,10 +57,11 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 						Code    string `json:"code"`
 						Mutates bool   `json:"mutates"`
 					}
-					if err := json.Unmarshal([]byte(stdout), &payload); err == nil {
-						if !strings.HasPrefix(payload.Code, "proxy.") || payload.Mutates {
-							t.Fatalf("typed refusal = %+v", payload)
-						}
+					if err := json.Unmarshal([]byte(stdout), &payload); err != nil {
+						t.Fatalf("invalid refusal JSON: %v", err)
+					}
+					if payload.Code != expectedCode(args) || payload.Mutates {
+						t.Fatalf("typed refusal = %+v", payload)
 					}
 				}
 			}
