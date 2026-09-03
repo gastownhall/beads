@@ -40,8 +40,23 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	if out, err = runBDExecWithBinary(t, bd, dir, env, "migrate", "from-server-to-proxied-server"); err != nil {
 		t.Fatalf("forward migration: %v\n%s", err, out)
 	}
+	metaProxy, _ := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
+	if !strings.Contains(string(metaProxy), `"dolt_mode":"proxied-server"`) {
+		t.Fatal("forward did not persist proxied mode")
+	}
+	info, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
+	if err != nil || len(info) == 0 {
+		t.Fatalf("missing proxied sidecar: %v", err)
+	}
 	if !strings.Contains(out, "Switched to proxied-server mode") {
 		t.Fatalf("unexpected forward output: %s", out)
+	}
+	list, err := runBDExecWithBinary(t, bd, dir, env, "list", "--json")
+	if err != nil || !json.Valid([]byte(list)) || !strings.Contains(list, created.ID) {
+		t.Fatalf("proxied list JSON: %v\n%s", err, list)
+	}
+	if out, err = runBDExecWithBinary(t, bd, dir, env, "update", created.ID, "--title", "front-door sentinel updated"); err != nil {
+		t.Fatalf("proxied update: %v\n%s", err, out)
 	}
 	sidecarBefore, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
 	if err != nil {
@@ -70,7 +85,7 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("show sentinel: %v\n%s", err, show)
 	}
-	if !json.Valid([]byte(show)) || !strings.Contains(show, "front-door sentinel") {
+	if !json.Valid([]byte(show)) || !strings.Contains(show, "front-door sentinel updated") {
 		t.Fatalf("sentinel missing or invalid JSON: %s", show)
 	}
 	meta, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
@@ -79,6 +94,10 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	}
 	if _, err = os.Stat(filepath.Join(dir, ".beads", "proxied_server_client_info.json")); !os.IsNotExist(err) {
 		t.Fatal("sidecar remains after reverse")
+	}
+	list, err = runBDExecWithBinary(t, bd, dir, env, "list", "--json")
+	if err != nil || !json.Valid([]byte(list)) || !strings.Contains(list, "front-door sentinel updated") {
+		t.Fatalf("direct list JSON: %v\n%s", err, list)
 	}
 }
 
