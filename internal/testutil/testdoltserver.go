@@ -314,16 +314,52 @@ func ensureSharedContainer() {
 	})
 }
 
+// checkDoltFn is the readiness probe used by EnsureDoltContainerForTestMain.
+// It is a variable purely so the fail-closed regression test can force a
+// not-ready state deterministically -- without a Docker daemon, and without
+// starting the shared singleton container just to observe the failure path.
+// Production code never reassigns it. The direct checkDolt() calls in the
+// t.Skip paths above and below are deliberately left alone: they gate a skip,
+// not the fail-closed behavior this seam exists to test.
+var checkDoltFn = checkDolt
+
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
-// Sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
+// On success it sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
+//
+// On ANY failure -- Docker missing, image missing or wrong version, or an
+// explicit BEADS_TEST_SKIP=dolt opt-out -- it instead clears both variables
+// (see neutralizeAmbientDoltPort) and returns an error. Callers that warn and
+// run the suite anyway therefore cannot resolve a store onto an ambient
+// server.
 func EnsureDoltContainerForTestMain() error {
-	if state := checkDolt(); state != doltReady {
+	if state := checkDoltFn(); state != doltReady {
+		neutralizeAmbientDoltPort()
 		return fmt.Errorf("%s", state)
 	}
 
 	ensureSharedContainer()
+	if doltServerErr != nil {
+		neutralizeAmbientDoltPort()
+	}
 	return doltServerErr
+}
+
+// neutralizeAmbientDoltPort clears the inherited connection-port variables so
+// that a TestMain which warns-and-continues without a container cannot resolve
+// a store onto whatever server the ambient environment names -- in a gc-managed
+// city, the production one (gm-2g3g5r). With no port resolvable,
+// applyConfigDefaults' BEADS_TEST_MODE guard forces port 1 and stores fail
+// closed instead of silently creating testdb_* on production.
+//
+// This fires on EVERY not-ready state, not only "Docker unavailable": a
+// missing or wrong-version image and an explicit BEADS_TEST_SKIP=dolt opt-out
+// clear the ambient port too. That is deliberate. The invariant is about the
+// absence of a test container, not about the reason for it -- an opted-out run
+// has no more business reaching a shared server than a Docker-less one does.
+func neutralizeAmbientDoltPort() {
+	_ = os.Unsetenv("BEADS_DOLT_SERVER_PORT")
+	_ = os.Unsetenv("BEADS_DOLT_PORT")
 }
 
 // RequireDoltContainer ensures a shared Dolt container is running. Skips the
