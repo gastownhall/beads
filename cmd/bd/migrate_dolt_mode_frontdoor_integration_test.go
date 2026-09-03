@@ -101,6 +101,11 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 			t.Fatalf("stop proxied server: %v\n%s", err, out)
 		}
 	}
+	// The proxy can supervise a Dolt child whose status text is stale; stop is
+	// idempotent and its "not running" result is safe to ignore.
+	if out, err = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop"); err != nil && !strings.Contains(strings.ToLower(out), "not running") {
+		t.Fatalf("stop before reverse: %v\n%s", err, out)
+	}
 	sidecarBefore, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
 	if err != nil {
 		t.Fatal(err)
