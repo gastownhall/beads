@@ -3,6 +3,7 @@ package dolt
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"time"
 
@@ -13,9 +14,15 @@ import (
 )
 
 // History returns the complete version history for an issue.
+//
+// Uses withReadTxLongTimeout rather than withReadTx: the underlying
+// dolt_history_issues scan can take several seconds to tens of seconds on
+// issues with many revisions, which exceeds the shared pool's 10s
+// ReadTimeout and otherwise surfaces as an intermittent MySQL i/o timeout
+// (ga-ahnxx).
 func (s *DoltStore) History(ctx context.Context, issueID string) ([]*storage.HistoryEntry, error) {
 	var result []*storage.HistoryEntry
-	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+	err := s.withReadTxLongTimeout(ctx, func(tx *sql.Tx) error {
 		var err error
 		result, err = issueops.HistoryInTx(ctx, tx, issueID)
 		if err != nil {
@@ -61,6 +68,93 @@ func (s *DoltStore) PreviousExternalRef(ctx context.Context, issueID string, asO
 	return ref, found, err
 }
 
+// ChangedIssueIDs returns the set of issue IDs whose data differs between
+// fromCommit and toCommit, derived from dolt_diff over the issues, labels,
+// dependencies, and comments tables. An issue is reported under Removed
+// only when the issues-table row itself was deleted; label/dep/comment row
+// deletions for surviving issues fall under Upserted.
+//
+// Implements storage.DiffStore.
+func (s *DoltStore) ChangedIssueIDs(ctx context.Context, fromCommit, toCommit string) (storage.ChangedIssueIDs, error) {
+	var out storage.ChangedIssueIDs
+	if fromCommit == "" || toCommit == "" {
+		return out, fmt.Errorf("ChangedIssueIDs: fromCommit and toCommit required")
+	}
+	// Dolt's dolt_diff() table function does not accept prepared-statement
+	// bind parameters — its arguments must be SQL string literals. That
+	// makes us inline the commit hashes into the query, so validate them
+	// aggressively to keep the path free of injection risk.
+	if !isSafeCommitRef(fromCommit) {
+		return out, fmt.Errorf("ChangedIssueIDs: fromCommit %q is not a valid commit ref", fromCommit)
+	}
+	if !isSafeCommitRef(toCommit) {
+		return out, fmt.Errorf("ChangedIssueIDs: toCommit %q is not a valid commit ref", toCommit)
+	}
+
+	// dolt_diff returns from_<col>/to_<col> for every column plus diff_type.
+	// COALESCE(to_id, from_id) extracts the row's identifying value regardless
+	// of whether the row was added, modified, or removed.
+	//
+	// We UNION results from the four tables that contribute to auto-export's
+	// per-issue JSON record. Any change to any of them means the issue's
+	// export representation has changed.
+	//
+	//nolint:gosec // G201: fromCommit/toCommit are constrained to [A-Za-z0-9]
+	// by isSafeCommitRef above; dolt_diff() does not accept bind parameters.
+	q := fmt.Sprintf(`
+		SELECT id, MAX(is_removed) AS is_removed
+		FROM (
+			SELECT COALESCE(to_id, from_id) AS id,
+			       CASE WHEN diff_type = 'removed' THEN 1 ELSE 0 END AS is_removed
+			FROM dolt_diff('%[1]s', '%[2]s', 'issues')
+			UNION ALL
+			SELECT COALESCE(to_issue_id, from_issue_id) AS id, 0 AS is_removed
+			FROM dolt_diff('%[1]s', '%[2]s', 'labels')
+			UNION ALL
+			SELECT COALESCE(to_issue_id, from_issue_id) AS id, 0 AS is_removed
+			FROM dolt_diff('%[1]s', '%[2]s', 'dependencies')
+			UNION ALL
+			SELECT COALESCE(to_issue_id, from_issue_id) AS id, 0 AS is_removed
+			FROM dolt_diff('%[1]s', '%[2]s', 'comments')
+		) AS u
+		WHERE id IS NOT NULL AND id <> ''
+		GROUP BY id
+	`, fromCommit, toCommit)
+	rows, err := s.db.QueryContext(ctx, q)
+	if err != nil {
+		return out, fmt.Errorf("dolt_diff query: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id string
+		var removed int
+		if err := rows.Scan(&id, &removed); err != nil {
+			return out, fmt.Errorf("scan dolt_diff row: %w", err)
+		}
+		// MAX(is_removed) resolves an id that surfaces from more than one of
+		// the four unioned sub-selects (e.g. its own row is untouched but a
+		// comment on it changed) — only the 'issues' sub-select ever
+		// contributes is_removed=1, so MAX just lets that value win over the
+		// label/dependency/comment sub-selects' hardcoded 0. It is not
+		// resolving a remove-then-readd within the range: dolt_diff(from,
+		// to, table) diffs exactly those two snapshots rather than walking
+		// intermediate commits, so a single call can never emit both a 0 and
+		// a 1 row for the same id. An issue present at toCommit — even if it
+		// was deleted and re-added somewhere between fromCommit and
+		// toCommit — always reports is_removed=0 here.
+		if removed == 1 {
+			out.Removed = append(out.Removed, id)
+		} else {
+			out.Upserted = append(out.Upserted, id)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, fmt.Errorf("iterate dolt_diff rows: %w", err)
+	}
+	return out, nil
+}
+
 // ListBranches returns the names of all branches.
 // Implements storage.VersionedStorage.
 func (s *DoltStore) ListBranches(ctx context.Context) ([]string, error) {
@@ -98,8 +192,70 @@ func (s *DoltStore) GetConflicts(ctx context.Context) ([]storage.Conflict, error
 	return versioncontrolops.GetConflicts(ctx, s.db)
 }
 
+// The CLI reaches these two methods through storage.UnwrapStore, so the
+// assertion must keep holding on the concrete store.
+var _ storage.ConflictInspector = (*DoltStore)(nil)
+
+// GetConflictRows returns the live conflicted rows of table, per field.
+// Implements storage.ConflictInspector (backs `bd conflicts list|show`).
+func (s *DoltStore) GetConflictRows(ctx context.Context, table string) ([]storage.ConflictRow, error) {
+	return versioncontrolops.GetConflictRows(ctx, s.db, table)
+}
+
+// The CLI reaches this through storage.UnwrapStore too.
+var _ storage.MergeBlockerInspector = (*DoltStore)(nil)
+
+// GetMergeBlockers reports schema conflicts, constraint violations, and
+// whether a merge is open. Implements storage.MergeBlockerInspector.
+func (s *DoltStore) GetMergeBlockers(ctx context.Context) (storage.MergeBlockers, error) {
+	return versioncontrolops.GetMergeBlockers(ctx, s.db)
+}
+
+// ResolveConflictRows resolves individual conflicted rows of table by key.
+// Implements storage.ConflictInspector (backs `bd conflicts resolve <id>`).
+//
+// It runs on a pinned connection, not the pool: the resolution sets dolt's
+// conflict-tolerance session flags, and on *sql.DB a follow-up statement could
+// land on a different connection that never saw them.
+// The flags it sets are session-scoped, so they are reset before the
+// connection goes back to the pool; if the reset fails the connection is
+// discarded rather than returned dirty (the discipline
+// autoResolveConflictsAfterCLIPull already follows, store.go:3323).
+func (s *DoltStore) ResolveConflictRows(ctx context.Context, table string, keys []string, strategy string) (int, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("acquire connection for conflict resolution: %w", err)
+	}
+	defer func() {
+		if _, err := conn.ExecContext(ctx,
+			"SET @@dolt_allow_commit_conflicts = 0, @@dolt_force_transaction_commit = 0"); err != nil {
+			_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+		}
+		_ = conn.Close()
+	}()
+	return versioncontrolops.ResolveConflictRows(ctx, conn, table, keys, strategy)
+}
+
 // CommitExists checks whether a commit hash exists in the repository.
 // Returns false for empty strings, malformed input, or non-existent commits.
 func (s *DoltStore) CommitExists(ctx context.Context, commitHash string) (bool, error) {
 	return versioncontrolops.CommitExists(ctx, s.db, commitHash)
+}
+
+// isSafeCommitRef reports whether s may be inlined into a dolt_diff()
+// SQL literal without exposing an injection surface. Dolt commit hashes
+// are ASCII base32 (a-z + digits); we also allow an explicit-length cap
+// to catch accidental truncation or giant inputs.
+func isSafeCommitRef(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
 }

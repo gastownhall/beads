@@ -18,22 +18,142 @@ import (
 // is the only path that heals affected databases without touching shipped
 // SQL. Precedent: ensureContentHashColumn, the aux row-id backfill.
 
+// repairKey identifies a pre-migration repair by its migration source cursor
+// table and the pending version it runs before.
+type repairKey struct {
+	cursorTable string
+	version     int
+}
+
+// preMigrationRepairs is the registry of repairs that must run immediately
+// before a specific migration file is applied. It is keyed rather than a switch
+// so TestFrozenNonIdempotentMigrationsHaveRepairs can assert that every shipped
+// migration whose frozen body cannot replay on its own (0040/0041, which write
+// dolt_nonlocal_tables and self-commit) has a repair registered here.
+var preMigrationRepairs = map[repairKey]func(context.Context, DBConn) error{
+	{"schema_migrations", 40}:         repairPartial0040NonlocalInsert,
+	{"schema_migrations", 41}:         repairPartial0041NonlocalDelete,
+	{"schema_migrations", 47}:         ensureWispTablesForMixedBlockedRecompute,
+	{"schema_migrations", 53}:         repairV53RigAndSplitTargets,
+	{"schema_migrations", 58}:         repairWispDependenciesForwardShape,
+	{"ignored_schema_migrations", 7}:  ensureWispIsBlockedForRecompute,
+	{"ignored_schema_migrations", 15}: ensureWispIsBlockedForRecompute,
+}
+
 // preMigrationRepair dispatches any repair registered for (source, version).
 func (m migrationSource) preMigrationRepair(ctx context.Context, db DBConn, version int) error {
-	if m.cursorTable != "schema_migrations" {
+	if repair, ok := preMigrationRepairs[repairKey{m.cursorTable, version}]; ok {
+		return repair(ctx, db)
+	}
+	return nil
+}
+
+// repairV53RigAndSplitTargets is the pre-0053 repair: it backfills the issues
+// rig/agent columns (#4502), the wisp_dependencies split-target columns
+// (#4555), and the dependencies id column that 0053 reads.
+func repairV53RigAndSplitTargets(ctx context.Context, db DBConn) error {
+	if err := ensureIssuesRigColumns(ctx, db); err != nil {
+		return err
+	}
+	if err := ensureWispDependenciesSplitTargets(ctx, db); err != nil {
+		return err
+	}
+	return ensureDependenciesIDColumn(ctx, db)
+}
+
+// The four dolt_nonlocal_tables rows migration 0040 inserts (and migration 0041
+// clears). Kept as a single source of truth for the version-40/41 replay
+// repairs, which normalise the table to the exact state each shipped
+// (content-hashed, un-editable) migration body expects before it runs.
+const nonlocalTablesName = "dolt_nonlocal_tables"
+const nonlocalFrozenRowsInList = "('wisps', 'wisp_*', 'repo_mtimes', 'local_metadata')"
+const nonlocalFrozenRowsValues = "('wisps', 'main', 'immediate'), ('wisp_*', 'main', 'immediate'), " +
+	"('repo_mtimes', 'main', 'immediate'), ('local_metadata', 'main', 'immediate')"
+
+// commitNonlocalRepair commits a version-40/41 repair's edit to
+// dolt_nonlocal_tables, staging that table BY NAME rather than with
+// DOLT_COMMIT('-Am', ...). The scoping is load-bearing: on the bounded-migrate
+// path (upTo != 0, where per-step commit is off) migrations 1..upTo sit
+// uncommitted in the working set while the repair runs, and an "add all"
+// commit here would sweep all of them into a repair-labeled commit. Staging
+// only the table the repair touched leaves the rest of the working set exactly
+// as the pass expects to find it. --skip-empty keeps the commit a clean no-op
+// if the edit staged nothing.
+func commitNonlocalRepair(ctx context.Context, db DBConn, message string) error {
+	if err := DrainCall(ctx, db, "CALL DOLT_ADD(?)", nonlocalTablesName); err != nil {
+		return fmt.Errorf("staging %s: %w", nonlocalTablesName, err)
+	}
+	return DrainCall(ctx, db, "CALL DOLT_COMMIT('-m', ?, '--skip-empty')", message)
+}
+
+// anyNonlocalFrozenRowPresent reports whether any of 0040's four
+// dolt_nonlocal_tables rows currently exists (in the working set), the signal
+// the version-40/41 repairs use to decide whether a heal is needed. Guarding on
+// it keeps both repairs a strict no-op on the common (non-partial) path, so a
+// fresh init reaches 0040/0041 having done no repair work at all — the repairs
+// only ever touch a database that actually took the partial-apply brick.
+func anyNonlocalFrozenRowPresent(ctx context.Context, db DBConn) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM dolt_nonlocal_tables WHERE table_name IN "+nonlocalFrozenRowsInList).Scan(&count); err != nil {
+		return false, fmt.Errorf("counting nonlocal frozen rows: %w", err)
+	}
+	return count > 0, nil
+}
+
+// repairPartial0040NonlocalInsert heals a partially-applied migration 0040 so
+// its shipped body can replay. 0040 bare-INSERTs four dolt_nonlocal_tables rows,
+// each paired with its own CALL DOLT_COMMIT. Over a shared sql-server a transient
+// ("busy buffer" -> "bad connection") can leave some rows committed while the
+// schema_migrations version row never records, so the init retry loop re-runs
+// 0040 from the top and the bare INSERT dies on "duplicate primary key given:
+// [wisps]", bricking the database. 0040 is a shipped, content-hashed migration
+// and cannot be edited (see the file header), so instead clear any of those four
+// rows before the replay and commit the removal, leaving 0040's INSERT+COMMIT
+// pairs a clean, real diff. No-op when 0040 never partially applied.
+func repairPartial0040NonlocalInsert(ctx context.Context, db DBConn) error {
+	present, err := anyNonlocalFrozenRowPresent(ctx, db)
+	if err != nil {
+		return err
+	}
+	if !present {
 		return nil
 	}
-	switch version {
-	case 47:
-		return ensureWispTablesForMixedBlockedRecompute(ctx, db)
-	case 53:
-		if err := ensureIssuesRigColumns(ctx, db); err != nil {
-			return err
-		}
-		if err := ensureWispDependenciesSplitTargets(ctx, db); err != nil {
-			return err
-		}
-		return ensureDependenciesIDColumn(ctx, db)
+	if _, err := db.ExecContext(ctx,
+		"DELETE FROM dolt_nonlocal_tables WHERE table_name IN "+nonlocalFrozenRowsInList); err != nil {
+		return fmt.Errorf("clearing partial 0040 nonlocal rows: %w", err)
+	}
+	if err := commitNonlocalRepair(ctx, db,
+		"repair: clear partial 0040 nonlocal rows before replay"); err != nil {
+		return fmt.Errorf("committing 0040 nonlocal repair: %w", err)
+	}
+	return nil
+}
+
+// repairPartial0041NonlocalDelete heals a partially-applied migration 0041 so
+// its shipped body can replay. 0041 begins by clearing dolt_nonlocal_tables and
+// committing ("disable nonlocal tables for fk migrations"). If a transient
+// interrupts 0041 after that commit but before its version row records, the
+// retry re-runs 0041 against an already-empty table: the DELETE stages nothing
+// and the paired DOLT_COMMIT (no --skip-empty in the shipped bytes) fails with
+// "nothing to commit". Restore the pre-0041 invariant — the four rows 0040
+// leaves — so the frozen DELETE+COMMIT has a real diff again. No-op when those
+// rows are already present (the common path).
+func repairPartial0041NonlocalDelete(ctx context.Context, db DBConn) error {
+	present, err := anyNonlocalFrozenRowPresent(ctx, db)
+	if err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx,
+		"INSERT IGNORE INTO dolt_nonlocal_tables (table_name, target_ref, options) VALUES "+nonlocalFrozenRowsValues); err != nil {
+		return fmt.Errorf("restoring pre-0041 nonlocal rows: %w", err)
+	}
+	if err := commitNonlocalRepair(ctx, db,
+		"repair: restore pre-0041 nonlocal rows before replay"); err != nil {
+		return fmt.Errorf("committing 0041 nonlocal repair: %w", err)
 	}
 	return nil
 }
@@ -99,6 +219,84 @@ func ensureWispTablesForMixedBlockedRecompute(ctx context.Context, db DBConn) er
 	}
 
 	return ensureWispDependenciesSplitTargets(ctx, db)
+}
+
+// ensureWispIsBlockedForRecompute repairs a drift shape in ignored/0006's own
+// guard: it no-ops (SELECT 1) when wisps does not exist yet at the moment it
+// runs, and once the ignored cursor advances past 6 that migration is never
+// pending again (pending = version > MAX(cursor); a missing low-numbered row
+// does not lower the high-water mark). wisps can be materialized without
+// is_blocked several ways -- ignored/0001's own CREATE-then-RENAME leaves an
+// existing wisps table untouched, and the main-side 0047 repair above
+// creates wisps at the wispsTableDDLForMigration0047 shape, which has no
+// is_blocked column, whenever the main pass reaches version 47 with wisps
+// entirely missing. Whichever path, a clone that ends up there permanently
+// lacks the column, and BOTH ignored/0007 and ignored/0015's frozen
+// recomputes (each an UPDATE against wisps.is_blocked) hard-fail with
+// "column 'is_blocked' could not be found in any table in scope", masking
+// the real defect behind a generic-looking SQL error.
+//
+// A cursor-6 clone is the sharper case: it reaches 0007 first, and 0007's
+// hard-fail aborts the pass before any later file -- including 0015 -- ever
+// runs. Registering this repair only at {ignored_schema_migrations, 15}
+// left such a clone permanently unrecoverable: every pass re-hits 0007's
+// hard-fail before it can advance far enough to reach the version-15 entry
+// at all. Both 0007 and 0015's shipped bodies are frozen and content-hashed
+// like the repairs above, so neither can be fixed forward with a new
+// migration either. Registering this same function at BOTH
+// {ignored_schema_migrations, 7} and {ignored_schema_migrations, 15} runs it
+// immediately before either frozen file's own SQL, self-healing a clone
+// stuck at either cursor position. The repair is idempotent -- each of its
+// two steps re-probes the live schema and no-ops once its target already
+// exists -- so hitting it twice in one pass (once before 0007, again before
+// 0015) or on a later already-healed pass merely re-confirms the column and
+// index are present rather than re-adding them. It mirrors ignored/0006's
+// own two statements so a clone that never ran 0006 to completion still
+// ends up in the shape 0006 would have produced.
+func ensureWispIsBlockedForRecompute(ctx context.Context, db DBConn) error {
+	hasWisps, err := schemaTableExists(ctx, db, "wisps")
+	if err != nil {
+		return fmt.Errorf("checking wisps table: %w", err)
+	}
+	if !hasWisps {
+		return nil
+	}
+	if err := ensureWispIsBlockedColumn(ctx, db); err != nil {
+		return err
+	}
+	return ensureWispIsBlockedIndex(ctx, db)
+}
+
+// ensureWispIsBlockedColumn is ignored/0006's ADD COLUMN statement,
+// translated to Go for a clone that reached this repair without it.
+func ensureWispIsBlockedColumn(ctx context.Context, db DBConn) error {
+	hasColumn, err := schemaColumnExists(ctx, db, "wisps", "is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking wisps.is_blocked column: %w", err)
+	}
+	if hasColumn {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "ALTER TABLE wisps ADD COLUMN is_blocked TINYINT(1) NOT NULL DEFAULT 0"); err != nil {
+		return fmt.Errorf("adding wisps.is_blocked: %w", err)
+	}
+	return nil
+}
+
+// ensureWispIsBlockedIndex is ignored/0006's CREATE INDEX statement,
+// translated to Go alongside ensureWispIsBlockedColumn above.
+func ensureWispIsBlockedIndex(ctx context.Context, db DBConn) error {
+	hasIndex, err := schemaIndexExists(ctx, db, "wisps", "idx_wisps_is_blocked")
+	if err != nil {
+		return fmt.Errorf("checking idx_wisps_is_blocked index: %w", err)
+	}
+	if hasIndex {
+		return nil
+	}
+	if _, err := db.ExecContext(ctx, "CREATE INDEX idx_wisps_is_blocked ON wisps(is_blocked, status)"); err != nil {
+		return fmt.Errorf("creating idx_wisps_is_blocked: %w", err)
+	}
+	return nil
 }
 
 // wispsTableDDLForMigration0047 is 0020_create_wisps.up.sql's shape plus every
@@ -505,6 +703,48 @@ func schemaHasPrimaryKey(ctx context.Context, db DBConn, table string) (bool, er
 		return false, err
 	}
 	return count > 0, nil
+}
+
+// schemaIndexExists reports whether table carries an index (or unique key) of
+// the given name. STATISTICS rather than TABLE_CONSTRAINTS because plain
+// secondary indexes are not constraints and never appear in the latter.
+func schemaIndexExists(ctx context.Context, db DBConn, table, index string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM INFORMATION_SCHEMA.STATISTICS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = ?
+	`, table, index).Scan(&count); err != nil {
+		return false, fmt.Errorf("checking index %s on %s: %w", index, table, err)
+	}
+	return count > 0, nil
+}
+
+// schemaConstraintExists reports whether table carries a named constraint --
+// foreign key or check. Unlike schemaHasPrimaryKey it asks about one specific
+// name, which is what an add-if-absent step needs.
+func schemaConstraintExists(ctx context.Context, db DBConn, table, constraint string) (bool, error) {
+	var count int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND CONSTRAINT_NAME = ?
+	`, table, constraint).Scan(&count); err != nil {
+		return false, fmt.Errorf("checking constraint %s on %s: %w", constraint, table, err)
+	}
+	return count > 0, nil
+}
+
+// schemaShowCreateTable returns a table's CREATE statement. It is the only
+// place Dolt exposes generated-column shape: INFORMATION_SCHEMA.COLUMNS returns
+// EXTRA and GENERATION_EXPRESSION empty for a generated column, and IS_GENERATED
+// does not exist there at all.
+func schemaShowCreateTable(ctx context.Context, db DBConn, table string) (string, error) {
+	var name, ddl string
+	// table is a package constant, never caller input; SHOW CREATE TABLE takes
+	// no placeholders.
+	if err := db.QueryRowContext(ctx, "SHOW CREATE TABLE `"+table+"`").Scan(&name, &ddl); err != nil {
+		return "", fmt.Errorf("reading SHOW CREATE TABLE %s: %w", table, err)
+	}
+	return ddl, nil
 }
 
 // schemaColumnInPrimaryKey reports whether column is (one of) table's PRIMARY

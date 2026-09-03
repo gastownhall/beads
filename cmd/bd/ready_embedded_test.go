@@ -203,6 +203,77 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 	})
 
+	// ===== Label Any =====
+
+	readyIDs := func(t *testing.T, args ...string) ([]string, string) {
+		t.Helper()
+		cmd := exec.Command(bd, args...)
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd %s failed: %v\nstdout:\n%s\nstderr:\n%s",
+				strings.Join(args, " "), err, stdout.String(), stderr.String())
+		}
+		var issues []types.IssueWithCounts
+		if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &issues); err != nil {
+			t.Fatalf("parse JSON: %v\n%s", err, stdout.String())
+		}
+		ids := make([]string, 0, len(issues))
+		for _, issue := range issues {
+			ids = append(ids, issue.ID)
+		}
+		return ids, stdout.String()
+	}
+
+	t.Run("ready_label_any", func(t *testing.T) {
+		laneA := bdCreate(t, bd, dir, "Lane A work", "--type", "task", "--label", "lany:lane-a")
+		bdCreate(t, bd, dir, "Lane B work", "--type", "task", "--label", "lany:lane-b")
+		laneC := bdCreate(t, bd, dir, "Lane C work", "--type", "task", "--label", "lany:lane-c")
+
+		ids, raw := readyIDs(t, "ready", "--json", "--label-any", "lany:lane-a,lany:lane-c")
+
+		want := map[string]bool{laneA.ID: true, laneC.ID: true}
+		if len(ids) != len(want) {
+			t.Fatalf("--label-any returned %d issues, want %d — an unfiltered ready set means the OR-set clause was dropped: %s",
+				len(ids), len(want), raw)
+		}
+		for _, id := range ids {
+			if !want[id] {
+				t.Fatalf("--label-any returned %s, which carries neither requested label: %s", id, raw)
+			}
+		}
+	})
+
+	t.Run("ready_label_any_intersects_with_label", func(t *testing.T) {
+		both := bdCreate(t, bd, dir, "Tiered lane A work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Untiered lane A work", "--type", "task", "--label", "lmix:lane-a")
+		bdCreate(t, bd, dir, "Tiered lane B work", "--type", "task",
+			"--label", "lmix:tier", "--label", "lmix:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--json",
+			"--label", "lmix:tier", "--label-any", "lmix:lane-a,lmix:lane-c")
+
+		if len(ids) != 1 || ids[0] != both.ID {
+			t.Fatalf("--label with --label-any returned %v, want only %s (AND-set and OR-set must both apply): %s",
+				ids, both.ID, raw)
+		}
+	})
+
+	t.Run("ready_claim_label_any_fences_to_its_lane", func(t *testing.T) {
+		// An exhausted lane must claim nothing. If --label-any is dropped here
+		// the claim silently takes unfenced work while the caller believes it
+		// is fenced to its own lane.
+		bdCreate(t, bd, dir, "Fence lane B work", "--type", "task", "--label", "lfence:lane-b")
+
+		ids, raw := readyIDs(t, "ready", "--claim", "--json", "--label-any", "lfence:lane-a")
+
+		if len(ids) != 0 {
+			t.Fatalf("--claim --label-any on an empty lane claimed %v, want nothing: %s", ids, raw)
+		}
+	})
+
 	// ===== -C flag =====
 
 	t.Run("ready_with_C_flag", func(t *testing.T) {
@@ -268,6 +339,49 @@ func TestEmbeddedReady(t *testing.T) {
 		}
 		if !strings.Contains(string(out), "--offset is only supported under --proxied-server") {
 			t.Errorf("expected '--offset is only supported under --proxied-server' error, got: %s", out)
+		}
+	})
+
+	// Only the proxied route pages, so only it validates --offset. Outside
+	// proxied mode a negative value has always been ignored, not rejected:
+	// the RunE rejects --offset > 0 as proxied-only and never reads the flag
+	// again. Pinned live because the shared flag gatherer is one edit away
+	// from turning it into an exit-1 usage error.
+	// The cap is resolved before the sort policy is validated, so a typo'd
+	// BEADS_MAX_ROWS still tells the user their cap is being ignored even
+	// though the command is about to fail for an unrelated reason. Pinned
+	// live: the warning is a side effect of resolving, so it disappears the
+	// moment the resolution moves later in the sequence.
+	t.Run("malformed_max_rows_env_warns_before_the_sort_error", func(t *testing.T) {
+		cmd := exec.Command(bd, "ready", "--sort", "bogus")
+		cmd.Dir = dir
+		cmd.Env = append(bdEnv(dir), "BEADS_MAX_ROWS=bogus")
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err == nil {
+			t.Fatalf("bd ready --sort bogus should have failed; stdout:\n%s\nstderr:\n%s", stdout.String(), stderr.String())
+		}
+		warning := strings.Index(stderr.String(), "BEADS_MAX_ROWS=\"bogus\" is not a non-negative integer")
+		sortErr := strings.Index(stderr.String(), "invalid sort policy")
+		switch {
+		case warning < 0:
+			t.Errorf("expected the BEADS_MAX_ROWS warning, got stderr:\n%s", stderr.String())
+		case sortErr < 0:
+			t.Errorf("expected the sort-policy error, got stderr:\n%s", stderr.String())
+		case warning > sortErr:
+			t.Errorf("warning must precede the sort error, got stderr:\n%s", stderr.String())
+		}
+	})
+
+	t.Run("negative_offset_ignored_outside_proxied", func(t *testing.T) {
+		cmd := exec.Command(bd, "ready", "--offset", "-1")
+		cmd.Dir = dir
+		cmd.Env = bdEnv(dir)
+		stdout, stderr, err := runCommandBuffers(t, cmd)
+		if err != nil {
+			t.Fatalf("bd ready --offset -1 in embedded mode should have listed ready work: %v\nstdout:\n%s\nstderr:\n%s", err, stdout.String(), stderr.String())
+		}
+		if !strings.Contains(stdout.String(), "Ready test issue") {
+			t.Errorf("expected ready work in output, got: %s", stdout.String())
 		}
 	})
 }

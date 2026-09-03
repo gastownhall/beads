@@ -245,16 +245,41 @@ It runs in both server and embedded modes.
 
 ## Cross-era Upgrades
 
-If you're upgrading from a much older version of bd, your project may use a different storage backend. bd has gone through several storage eras:
+If you're upgrading from a much older version of bd, inspect the storage layout
+and metadata before running the current binary. A `.beads/dolt/` directory alone
+does not identify a legacy workspace: supported current server mode uses that
+directory too. Current `bd` evaluates explicit server metadata, the presence of
+that local root, and the bounded `.local_version` witness together. An explicit
+server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 
-Identify your installation's era by what lives under `.beads/`:
-
-| Era | Storage layout |
+| Storage layout | Upgrade path |
 |---|---|
-| SQLite (pre-Dolt, up to ~v0.50) | `.beads/beads.db` |
-| Dolt server | `.beads/dolt/` |
-| Embedded Dolt (the default since its introduction) | `.beads/embeddeddolt/` |
-### From v0.63.3+ (current era)
+| Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
+| Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness whose major version is 1 or newer | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
+| Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
+| `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
+| One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
+
+The witness is whatever `bd` held in its own version string when it last touched
+the workspace, so it may be a plain release, a release candidate, a build
+carrying metadata, or a Go pseudo-version; all of those are read as the version
+they name. A witness that is present but unreadable is not treated as a legacy
+marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
+rather than refusing every command. A *missing* witness stays ambiguous and is
+still refused.
+
+Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
+opening storage or rewriting metadata. This is intentional: preserve the source
+and complete the matching explicit migration below.
+
+PostgreSQL and MySQL are removed backends, not supported cross-era upgrade
+paths. Current `bd` refuses metadata that selects either backend, and the sealed
+bridge below accepts SQLite sources only.
+
+### `.beads/embeddeddolt/`: direct upgrade
 
 Upgrade the binary and run:
 
@@ -281,68 +306,83 @@ bd dolt push
 Commit the resulting `.beads/config.yaml` change so other clones can run
 `bd bootstrap` or `bd dolt pull`.
 
-### From v0.59–v0.63.2 (old embedded)
+### Historical Dolt server mode: explicit migration
 
-Direct upgrade works automatically:
+Do not run current `bd init --force` when `.beads/dolt/` has missing metadata
+or persisted `dolt_mode` is blank/`embedded`. Those old embedded layouts are
+never current embedded storage. The same explicit path applies when metadata
+selects `backend: dolt`, `dolt_mode: server` and `.local_version` records
+v0.55.4 through v0.62.0.
 
-```bash
-# Just use the new binary — it handles the conversion
-bd list
-```
+First take a native snapshot while every writer is stopped. Restore that
+snapshot to a disposable workspace, export it with the verified historical
+binary, then import the export into a fresh current project. Keep the original
+and snapshot unchanged until the cutover has been reviewed. The SQLite
+sealed-copy helper below does not start or manage a Dolt SQL server.
 
-### From v0.50–v0.58 (Dolt server era)
+Explicit server metadata with a v0.55.4–v0.62.0 witness is always refused,
+including when there is no local `.beads/dolt/` root. When that root does exist,
+the guard admits explicit server mode only with a syntactically valid witness
+whose major version is 1 or newer; a missing, malformed, or pre-v1 witness fails
+closed. Without the local root, a missing, malformed, or non-historical witness
+is admitted only as a compatibility layout.
 
-The old binary used an external Dolt SQL server. The new binary uses an embedded engine.
+The configured shared-server compatibility path applies only when persisted
+metadata is missing or leaves `dolt_mode` blank/`embedded`; it does not override
+an explicit server selection with a local root. Compatibility admission cannot
+prove that a workspace is modern. If you know it was created by v0.55.4 through
+v0.62.0, use this explicit bridge even when its witness was lost or damaged.
+Otherwise, follow the normal `bd migrate --dry-run` and `bd migrate` flow for
+an admitted server workspace.
 
-```bash
-# 1. Export your data while the old binary still works
-bd list --json -n 0 --all > .beads/issues.jsonl
-
-# 2. Stop the Dolt server
-# stop the dolt sql-server process (kill its PID; there is no --stop flag)
-
-# 3. Remove stale server metadata and old storage directories
-rm -f .beads/metadata.json .beads/config.json
-rm -rf .beads/dolt .beads/embeddeddolt
-
-# 4. Initialize with the new binary
-bd init --from-jsonl --quiet
-
-# 5. Verify
-bd list --all
-```
-
-### From v0.30–v0.50 (SQLite era)
+### One `.beads/*.db` file: sealed SQLite bridge
 
 The old binary stored data in SQLite. The new binary uses Dolt.
 
-**Recommended: use the migration script** (requires `sqlite3` and `jq`):
+**Recommended: use the sealed-copy bridge** (requires `jq`):
+
+Stop every process that can write the old workspace before starting.
+Run this from a source checkout at the exact commit you intend to run; installed
+binaries do not include repository scripts. Record that commit with
+`git rev-parse HEAD` before executing the script. Download the old `bd` asset
+only from the official `gastownhall/beads` release and verify the asset with its
+published SHA-256:
 
 ```bash
-# Download the script from the beads repo
-curl -fsSLO https://raw.githubusercontent.com/gastownhall/beads/main/scripts/migrate-sqlite-to-current.sh
-chmod +x migrate-sqlite-to-current.sh
-
-# Run it in your project directory
-./migrate-sqlite-to-current.sh
+sha256sum -c checksums.txt --ignore-missing
 ```
 
-The script exports issues, dependencies, and labels from SQLite, handles type normalization, and imports everything into the new Dolt backend.
-
-**Alternative: manual export with the old binary.** Old binaries are always available on [GitHub Releases](https://github.com/gastownhall/beads/releases). Download the version that matches your project, then:
+On macOS or BSD, use `shasum -a 256` on the downloaded archive and compare
+the result with that archive's entry in `checksums.txt`.
 
 ```bash
-# 1. Export with the old binary
-./bd-old list --json -n 0 --all > .beads/issues.jsonl
-
-# 2. Import with the current binary
-bd init --from-jsonl --quiet
-
-# 3. Verify
-bd list --all
+scripts/migrate-legacy-to-current.sh \
+  --source /absolute/path/to/old-project \
+  --destination /absolute/path/to/old-project-cutover \
+  --source-version v0.50.3 \
+  --old-bd /absolute/path/to/verified-old-bd \
+  --new-bd /absolute/path/to/current-bd \
+  --prefix beads
 ```
 
-> **Note:** The manual export preserves issue content but not dependencies or labels. Use the migration script for a more complete transfer.
+For a source older than v0.49.6, also supply an authenticated v0.49.6 binary:
+
+```bash
+scripts/migrate-legacy-to-current.sh \
+  --source /absolute/path/to/old-project \
+  --destination /absolute/path/to/old-project-cutover \
+  --source-version v0.17.0 \
+  --old-bd /absolute/path/to/verified-old-bd \
+  --canonicalizer-bd /absolute/path/to/verified-v0.49.6-bd \
+  --new-bd /absolute/path/to/current-bd \
+  --prefix beads
+```
+
+Verify the historical binary against its official release checksum before
+running the bridge. The script verifies each binary's reported version, rejects
+Dolt and ambiguous layouts, retains a sealed source copy, and compares the
+candidate export with the canonical historical export. Activate the cutover
+manually only after reviewing those retained artifacts.
 
 ## Troubleshooting Upgrades
 

@@ -2,7 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/beads/internal/formula"
 	"github.com/steveyegge/beads/internal/types"
@@ -11,6 +17,144 @@ import (
 // =============================================================================
 // Cook Tests (gt-8tmz.23: Compile-time vs Runtime Cooking)
 // =============================================================================
+
+func TestRunCookRejectsInvalidEnumVariable(t *testing.T) {
+	formulaDir := t.TempDir()
+	formulaPath := filepath.Join(formulaDir, "enum-validation.formula.toml")
+	formulaTOML := `formula = "enum-validation"
+version = 1
+type = "workflow"
+
+[vars.policy]
+required = true
+enum = ["merge-completes", "tracking-only"]
+
+[[steps]]
+id = "publish"
+title = "Publish with {{policy}}"
+`
+	if err := os.WriteFile(formulaPath, []byte(formulaTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name        string
+		formulaArg  string
+		searchPaths []string
+	}{
+		{
+			name:       "exact path",
+			formulaArg: formulaPath,
+		},
+		{
+			name:        "registry name",
+			formulaArg:  "enum-validation",
+			searchPaths: []string{formulaDir},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := newCookValidationTestCommand(tt.searchPaths, "policy=merge-comtes")
+			stdout, stderr, err := runCookCapturingOutput(t, cmd, tt.formulaArg)
+			if err == nil {
+				t.Fatal("runCook accepted a value outside the declared enum")
+			}
+			if stdout != "" {
+				t.Fatalf("runCook stdout = %q, want no dry-run output after validation failure", stdout)
+			}
+			if !strings.Contains(stderr, `variable "policy": value "merge-comtes" not in allowed values [merge-completes tracking-only]`) {
+				t.Fatalf("runCook stderr = %q", stderr)
+			}
+
+			cmd = newCookValidationTestCommand(tt.searchPaths, "policy=merge-completes")
+			stdout, stderr, err = runCookCapturingOutput(t, cmd, tt.formulaArg)
+			if err != nil {
+				t.Fatalf("runCook rejected a declared enum value: %v; stderr = %q", err, stderr)
+			}
+			if stderr != "" {
+				t.Fatalf("runCook stderr = %q, want no error output for a declared enum value", stderr)
+			}
+			if !strings.Contains(stdout, "Dry run: would cook formula enum-validation") {
+				t.Fatalf("runCook stdout = %q, want the captured dry-run preview", stdout)
+			}
+		})
+	}
+}
+
+func runCookCapturingOutput(t *testing.T, cmd *cobra.Command, formulaArg string) (string, string, error) {
+	t.Helper()
+
+	stdioMutex.Lock()
+	defer stdioMutex.Unlock()
+
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("create stdout pipe: %v", err)
+	}
+	defer stdoutReader.Close()
+
+	stderrReader, stderrWriter, err := os.Pipe()
+	if err != nil {
+		_ = stdoutReader.Close()
+		_ = stdoutWriter.Close()
+		t.Fatalf("create stderr pipe: %v", err)
+	}
+	defer stderrReader.Close()
+
+	type captureResult struct {
+		output string
+		err    error
+	}
+	drain := func(reader *os.File) <-chan captureResult {
+		done := make(chan captureResult, 1)
+		go func() {
+			output, readErr := io.ReadAll(reader)
+			done <- captureResult{output: string(output), err: readErr}
+		}()
+		return done
+	}
+	stdoutDone := drain(stdoutReader)
+	stderrDone := drain(stderrReader)
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	os.Stdout = stdoutWriter
+	os.Stderr = stderrWriter
+
+	runErr := func() error {
+		defer func() {
+			os.Stdout = oldStdout
+			os.Stderr = oldStderr
+			_ = stdoutWriter.Close()
+			_ = stderrWriter.Close()
+		}()
+		return runCook(cmd, []string{formulaArg})
+	}()
+
+	stdout := <-stdoutDone
+	stderr := <-stderrDone
+	if stdout.err != nil {
+		t.Fatalf("read stdout: %v", stdout.err)
+	}
+	if stderr.err != nil {
+		t.Fatalf("read stderr: %v", stderr.err)
+	}
+
+	return stdout.output, stderr.output, runErr
+}
+
+func newCookValidationTestCommand(searchPaths []string, variable string) *cobra.Command {
+	cmd := &cobra.Command{}
+	cmd.Flags().Bool("dry-run", true, "")
+	cmd.Flags().Bool("persist", false, "")
+	cmd.Flags().Bool("force", false, "")
+	cmd.Flags().StringSlice("search-path", searchPaths, "")
+	cmd.Flags().String("prefix", "", "")
+	cmd.Flags().StringArray("var", []string{variable}, "")
+	cmd.Flags().String("mode", "", "")
+	return cmd
+}
 
 // TestSubstituteFormulaVars tests variable substitution in formulas
 func TestSubstituteFormulaVars(t *testing.T) {
@@ -126,6 +270,7 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 					ID:      "{{legacy_id}}",
 					AwaitID: "{{pr}}",
 					Timeout: "{{timeout}}",
+					Repo:    "{{repo}}",
 				},
 			},
 		},
@@ -136,6 +281,7 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 		"legacy_id": "legacy-42",
 		"pr":        "https://github.com/org/repo/pull/123",
 		"timeout":   "1h",
+		"repo":      "srobroek/agentic-packages",
 	})
 
 	gate := f.Steps[0].Gate
@@ -150,6 +296,9 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 	}
 	if gate.Timeout != "1h" {
 		t.Errorf("Gate.Timeout = %q, want 1h", gate.Timeout)
+	}
+	if gate.Repo != "srobroek/agentic-packages" {
+		t.Errorf("Gate.Repo = %q, want srobroek/agentic-packages", gate.Repo)
 	}
 }
 
@@ -351,6 +500,80 @@ func TestCreateGateIssue(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestCreateGateIssue_Repo covers SF2: a formula gate's `repo` field must be
+// propagated onto the created gate issue's metadata, matching the
+// declarative `metadata.repo` selector documented for ad-hoc gates.
+func TestCreateGateIssue_Repo(t *testing.T) {
+	t.Run("propagates_repo_to_metadata", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "await-ci",
+			Title: "Wait for CI",
+			Gate: &formula.Gate{
+				Type: "gh:run",
+				ID:   "release.yml",
+				Repo: "srobroek/agentic-packages",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+
+		var metadata struct {
+			Repo string `json:"repo"`
+		}
+		if err := json.Unmarshal(gateIssue.Metadata, &metadata); err != nil {
+			t.Fatalf("gateIssue.Metadata = %s, not valid JSON: %v", gateIssue.Metadata, err)
+		}
+		if metadata.Repo != "srobroek/agentic-packages" {
+			t.Errorf("metadata.repo = %q, want %q", metadata.Repo, "srobroek/agentic-packages")
+		}
+	})
+
+	t.Run("no_repo_no_metadata", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "await-ci",
+			Title: "Wait for CI",
+			Gate: &formula.Gate{
+				Type: "gh:run",
+				ID:   "release.yml",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+		if len(gateIssue.Metadata) != 0 {
+			t.Errorf("gateIssue.Metadata = %s, want empty", gateIssue.Metadata)
+		}
+	})
+
+	// Non-gh:* gate types (SF4): `repo` on a human/timer/bead gate step is
+	// unrelated, ordinary metadata, not a GitHub repo selector - it must not
+	// be written to gateIssue.Metadata, matching repoMetadataForGate's
+	// isGitHubGateType restriction for ad-hoc gate creation.
+	t.Run("non_github_gate_type_ignores_repo", func(t *testing.T) {
+		step := &formula.Step{
+			ID:    "human-approval",
+			Title: "Wait for approval",
+			Gate: &formula.Gate{
+				Type: "human",
+				Repo: "srobroek/agentic-packages",
+			},
+		}
+
+		gateIssue := createGateIssue(step, "mol-release")
+		if gateIssue == nil {
+			t.Fatal("createGateIssue returned nil")
+		}
+		if len(gateIssue.Metadata) != 0 {
+			t.Errorf("gateIssue.Metadata = %s, want empty (non-gh:* gate type must not get metadata.repo)", gateIssue.Metadata)
+		}
+	})
 }
 
 // TestCreateGateIssue_NilGate tests that nil Gate returns nil
@@ -749,5 +972,68 @@ func TestCookFormulaToSubgraph_StepMetadata(t *testing.T) {
 	}
 	if got := decoded["origin"]; got != "repro" {
 		t.Errorf("Metadata[origin] = %v, want \"repro\"", got)
+	}
+}
+
+// TestProcessStepToIssueParentType verifies that a parent step's declared
+// type is honored; only a step with children and no declared type defaults
+// to epic (GH#5443).
+func TestProcessStepToIssueParentType(t *testing.T) {
+	tests := []struct {
+		name     string
+		stepType string
+		want     types.IssueType
+	}{
+		{"undeclared parent defaults to epic", "", types.TypeEpic},
+		{"declared built-in type kept on parent", "decision", types.TypeDecision},
+		{"declared custom type kept on parent", "duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			step := &formula.Step{
+				ID:       "parent",
+				Title:    "parent step",
+				Type:     tt.stepType,
+				Children: []*formula.Step{{ID: "c", Title: "child step"}},
+			}
+			issue := processStepToIssue(step, "f")
+			if issue.IssueType != tt.want {
+				t.Errorf("IssueType = %q, want %q", issue.IssueType, tt.want)
+			}
+		})
+	}
+}
+
+func TestStepTypeToIssueType(t *testing.T) {
+	tests := []struct {
+		stepType string
+		want     types.IssueType
+	}{
+		// Core work types pass through.
+		{"task", types.TypeTask},
+		{"bug", types.TypeBug},
+		{"feature", types.TypeFeature},
+		{"epic", types.TypeEpic},
+		{"chore", types.TypeChore},
+		// Empty (or whitespace-only) defaults to task; surrounding
+		// whitespace is trimmed rather than becoming part of the type.
+		{"", types.TypeTask},
+		{"   ", types.TypeTask},
+		{" bug ", types.TypeBug},
+		// Other built-in types pass through instead of collapsing to task.
+		{"decision", types.TypeDecision},
+		{"spike", types.TypeSpike},
+		{"story", types.TypeStory},
+		// Aliases normalize to their canonical form.
+		{"enhancement", types.TypeFeature},
+		// Non-built-in types pass through; at pour/cook time,
+		// flattenUnregisteredIssueTypes degrades them to task unless they
+		// are already registered in types.custom.
+		{"duty", types.IssueType("duty")},
+	}
+	for _, tt := range tests {
+		if got := stepTypeToIssueType(tt.stepType); got != tt.want {
+			t.Errorf("stepTypeToIssueType(%q) = %q, want %q", tt.stepType, got, tt.want)
+		}
 	}
 }

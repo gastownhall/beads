@@ -33,11 +33,12 @@ var setupCmd = &cobra.Command{
 	Long: `Setup integration files for AI editors and coding assistants.
 
 Recipes define where beads workflow instructions are written. Built-in recipes
-include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, windsurf, cody, and kilocode.
+include cursor, claude, copilot, gemini, aider, factory, codex, mux, opencode, junie, kiro, windsurf, cody, and kilocode.
 
 Examples:
   bd setup cursor          # Install Cursor IDE integration (rules + agent hooks)
   bd setup cursor --global # Install global Cursor hooks (~/.cursor/hooks.json)
+  bd setup kiro            # Install Kiro steering guidance
   bd setup codex           # Install Codex skill + AGENTS.md guidance + native hooks
   bd setup codex --global  # Install global Codex skill + guidance + native hooks
   bd setup copilot         # Install Copilot CLI plugin + repository instructions

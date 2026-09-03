@@ -110,7 +110,9 @@ Embedded Dolt tests are split out from the PR/core matrix:
   coverage.
 - `build-embedded` prebuilds `/tmp/bd-embedded-test`,
   `/tmp/embeddeddolt-test`, and `/tmp/bd-cmd-test`.
-- `test-embedded-storage` runs the embedded storage test binary with
+- `test-embedded-storage` shards `internal/storage/embeddeddolt` `Test*`
+  (excluding `TestConformance`) across 5 jobs using
+  `.github/scripts/embedded-storage-test-shard.sh`, with
   `BEADS_TEST_EMBEDDED_DOLT=1`.
 - `test-embedded-cmd` shards `cmd/bd` `TestEmbedded*` across 20 jobs using
   `.github/scripts/embedded-test-shard.sh`.
@@ -178,7 +180,7 @@ Key jobs preserved by display name:
   `PR Lint (wrapper timing)`.
 - `Package Gate (MCP)`, `Package Gate (npm)`, and `Package Gate (website)`.
 - `Test (storage domain + uow)`.
-- `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage)`, and
+- `Build (Embedded Dolt)`, `Test (Embedded Dolt Storage N/5)`, and
   `Test (Embedded Dolt Cmd N/20)`.
 - Aggregate required-check candidates: `PR / CI Gate / Required` and
   `PR Risk / CI Gate / Required`.

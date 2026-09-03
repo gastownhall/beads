@@ -9,7 +9,6 @@ Updates all issue IDs and all text references across all fields.
 
 ## Prefix Rules
 
-- Max length: 8 characters
 - Allowed: lowercase letters, numbers, hyphens
 - Must start with a letter
 - Must end with a hyphen (e.g., 'kw-', 'work-')

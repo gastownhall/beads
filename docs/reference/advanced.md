@@ -30,7 +30,7 @@ bd rename-prefix kw-            # Every knowledge-work-* ID becomes kw-*
 ```
 
 The rename updates all issue IDs and all text references across all fields.
-Prefixes are at most 8 characters of lowercase letters, numbers, and hyphens,
+Prefixes are lowercase letters, numbers, and hyphens,
 must start with a letter, and must end with a hyphen. If a corrupted database
 contains issues with multiple prefixes, `bd rename-prefix <prefix> --repair`
 consolidates them. See [bd rename-prefix](/cli-reference/rename-prefix).
@@ -164,8 +164,10 @@ only if you are maintaining a SQLite-backed extension.
 ## Audit Data
 
 Beads records issue lifecycle events in the database for audit and recovery
-workflows. There is no standalone `bd events` command; inspect current issue
-state through JSON output, or query the audit tables directly when needed:
+workflows. This is the human-facing history — for the machine-facing feed of
+committed mutations, see the [Events Journal](/reference/events-journal).
+Inspect current issue state through JSON output, or query the audit tables
+directly when needed:
 
 ```bash
 # Current issue state

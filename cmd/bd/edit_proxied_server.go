@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,7 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/workapi"
 )
 
 func runEditProxiedServer(cmd *cobra.Command, ctx context.Context, args []string) error {
@@ -31,14 +34,13 @@ func runEditProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 	if err != nil {
 		return err
 	}
-	issue, _, err := proxiedGetIssueOrWisp(ctx, uw, id)
+	issue, _, err := workapi.GetIssueOrWisp(ctx, workapi.NewUOWDetailSource(uw), id)
 	if err != nil {
 		uw.Close(ctx)
+		if errors.Is(err, storage.ErrNotFound) {
+			return HandleErrorRespectJSON("issue %s not found", id)
+		}
 		return HandleErrorRespectJSON("resolving %s: %v", id, err)
-	}
-	if issue == nil {
-		uw.Close(ctx)
-		return HandleErrorRespectJSON("issue %s not found", id)
 	}
 	uw.Close(ctx)
 	id = issue.ID
@@ -119,7 +121,7 @@ func runEditProxiedServer(cmd *cobra.Command, ctx context.Context, args []string
 		return HandleErrorRespectJSON("title cannot be empty")
 	}
 
-	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: edit "+id, map[string]any{fieldToEdit: newValue})
+	updated, err := proxiedUpdateIssueFields(ctx, id, "bd: edit "+id, map[string]any{fieldToEdit: newValue}, false)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Your edits are preserved in: %s\n", tmpPath) //nolint:gosec // G705: stderr, not a browser context
 		return HandleErrorRespectJSON("updating issue: %v", err)

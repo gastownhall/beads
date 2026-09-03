@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -52,8 +53,15 @@ Grammar (one command per line):
   dep remove <from-id> <to-id>
   #comment  (blank lines and '# ...' comments are ignored)
 
-Supported 'update' keys: status, priority, title, assignee
+Supported 'update' keys: status, priority, title, assignee, force
 Supported dependency types: see 'bd dep add --help' (default: blocks)
+
+'force' is not a field. An update whose status moves the issue into closed
+(or a configured done status) is refused when it still has open children or
+a live blocker, the same as 'bd close'; 'force=true' overrides that refusal.
+Because the batch is one transaction, an unforced refusal rolls back EVERY
+operation in the batch, not just the offending line. Note the asymmetry with
+'close <id>', which does not apply that policy at all.
 
 Tokens are whitespace-separated. Double-quoted strings ("like this") may
 contain spaces; use \" to embed a quote and \\ for a backslash.
@@ -78,9 +86,6 @@ normal 'bd' subcommands for interactive/read operations.`,
 	SilenceUsage:  true,
 	SilenceErrors: false,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if usesProxiedServer() {
-			return HandleErrorRespectJSON("batch is not supported in proxied-server mode")
-		}
 		CheckReadonly("batch")
 
 		evt := metrics.NewCommandEvent("batch")
@@ -90,7 +95,8 @@ normal 'bd' subcommands for interactive/read operations.`,
 			}
 		}()
 
-		if store == nil {
+		proxied := usesProxiedServer()
+		if !proxied && store == nil {
 			return fmt.Errorf("no database connection available (%s)", diagHint())
 		}
 
@@ -159,17 +165,26 @@ normal 'bd' subcommands for interactive/read operations.`,
 			ctx = context.Background()
 		}
 
-		results := make([]batchOpResult, 0, len(ops))
-		err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
-			for _, op := range ops {
-				res, rerr := runBatchOp(ctx, tx, op)
-				if rerr != nil {
-					return fmt.Errorf("line %d (%s): %w", op.line, op.raw, rerr)
+		// One transaction, one commit message, whole-batch rollback on the first
+		// failing line — the contract is the same on both backends; only the
+		// transaction primitive differs (uow.RunTx there, transact here), and
+		// both wrap a per-op dispatch that shares this file's parser.
+		var results []batchOpResult
+		if proxied {
+			results, err = runBatchProxiedServer(ctx, ops, commitMsg)
+		} else {
+			results = make([]batchOpResult, 0, len(ops))
+			err = transact(ctx, store, commitMsg, func(tx storage.Transaction) error {
+				for _, op := range ops {
+					res, rerr := runBatchOp(ctx, tx, op)
+					if rerr != nil {
+						return fmt.Errorf("line %d (%s): %w", op.line, op.raw, rerr)
+					}
+					results = append(results, res)
 				}
-				results = append(results, res)
-			}
-			return nil
-		})
+				return nil
+			})
+		}
 		if err != nil {
 			if jsonOutput {
 				if jerr := outputJSONError(err, "batch_error"); jerr != nil {
@@ -475,8 +490,17 @@ func parseUpdateKVs(kvs []string) (map[string]interface{}, error) {
 			updates["title"] = value
 		case "assignee":
 			updates["assignee"] = value
+		case "force":
+			// Not a field: the override for close policy on a status that
+			// crosses into done, spelled as a token because a batch script has
+			// no flags. The write funnel pops it before validating fields.
+			force, err := strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("update: invalid force %q: %w", value, err)
+			}
+			updates[issueops.OpForceClosePolicy] = force
 		default:
-			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee)", key)
+			return nil, fmt.Errorf("update: unsupported key %q (allowed: status, priority, title, assignee, force)", key)
 		}
 	}
 	return updates, nil

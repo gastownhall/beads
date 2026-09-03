@@ -68,7 +68,7 @@ Examples:
 		}
 
 		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most %d characters", depType, types.MaxDependencyTypeLen)
 		}
 
 		dep := &types.Dependency{

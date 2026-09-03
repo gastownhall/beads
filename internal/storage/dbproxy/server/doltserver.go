@@ -22,6 +22,8 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/procid"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/identity"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/pidfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
@@ -252,7 +254,9 @@ func (s *DoltServer) Start(ctx context.Context) error {
 		cmd.Stderr = s.logFile
 	}
 
-	cmd.Env = os.Environ()
+	// The proxied server runs CALL DOLT_PUSH/FETCH in-process; see
+	// doltserver.ServerSpawnEnv for the guards it needs (GH#4272).
+	cmd.Env = doltserver.ServerSpawnEnv()
 
 	if err := cmd.Start(); err != nil {
 		s.eg, s.egCtx, s.cancel = nil, nil, nil
@@ -262,10 +266,32 @@ func (s *DoltServer) Start(ctx context.Context) error {
 	}
 
 	s.pid = cmd.Process.Pid
+	birth, err := procid.Capture(s.pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
+		cancel()
+		lock.Unlock()
+		return fmt.Errorf("server: DoltServer.Start: capture child birth identity: %w", err)
+	}
+	rootID, err := identity.RootID(s.rootDir)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
+		s.eg, s.egCtx, s.cancel, s.pid = nil, nil, nil, 0
+		cancel()
+		lock.Unlock()
+		return fmt.Errorf("server: DoltServer.Start: resolve proxy root identity: %w", err)
+	}
 
 	if err := pidfile.Write(s.rootDir, PIDFileName, pidfile.PidFile{
-		Pid:  s.pid,
-		Port: s.config.Port(),
+		Pid:    s.pid,
+		Port:   s.config.Port(),
+		Schema: pidfile.SchemaV2,
+		Kind:   pidfile.KindDoltBackend,
+		Birth:  string(birth),
+		RootID: rootID,
 	}); err != nil {
 		_ = cmd.Process.Kill()
 		_, _ = cmd.Process.Wait()

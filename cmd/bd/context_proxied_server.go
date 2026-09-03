@@ -44,24 +44,42 @@ func contextProxiedError(format string, args ...any) error {
 	return HandleError(format, args...)
 }
 
+// contextInfoView projects a workspace snapshot onto what `bd context` prints
+// and marshals. BOTH routes reach it — the proxied one above and the direct
+// one in context_cmd.go — so there is one answer to "what does bd context
+// say", assembled once.
+//
+// The workspace identity half comes from domain.PublishedContext, the same
+// projection GET /v0/beads/context serves, so the two surfaces cannot name the
+// same workspace differently.
+//
+// Everything below that call is LOCAL-ONLY and deliberately so, which is why
+// it is written out here rather than added to the shared projection. These are
+// operator diagnostics printed to the terminal of whoever owns the workspace:
+// the redirect and worktree flags, the absolute host paths, the database bind
+// endpoint, the role, and the sync remote — which is exactly the member the
+// shared projection has no room for, because a remote URL routinely embeds a
+// credential and an HTTP client is not the person who configured it.
 func contextInfoView(d domain.ContextInfo) ContextInfo {
+	published := domain.PublishedContext(d)
 	return ContextInfo{
-		BeadsDir:      d.BeadsDir,
-		RepoRoot:      d.RepoRoot,
+		BdVersion: published.BdVersion,
+		Backend:   published.Backend,
+		DoltMode:  published.DoltMode,
+		Database:  published.Database,
+		BeadsDir:  published.BeadsDir,
+		RepoRoot:  published.RepoRoot,
+		ProjectID: published.ProjectID,
+
 		CWDRepoRoot:   d.CWDRepoRoot,
 		IsRedirected:  d.IsRedirected,
 		IsWorktree:    d.IsWorktree,
-		Backend:       d.Backend,
-		DoltMode:      d.DoltMode,
 		ServerHost:    d.ServerHost,
 		ServerPort:    d.ServerPort,
 		ProxiedDir:    d.ProxiedDir,
-		Database:      d.Database,
 		DataDir:       d.DataDir,
-		ProjectID:     d.ProjectID,
+		Role:          d.Role,
 		SyncRemote:    d.SyncRemote,
 		SyncGitRemote: d.SyncRemote,
-		Role:          d.Role,
-		BdVersion:     d.BdVersion,
 	}
 }

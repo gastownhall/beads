@@ -1,6 +1,40 @@
 package issueops
 
-import "fmt"
+import (
+	"fmt"
+
+	publicops "github.com/steveyegge/beads/issueops"
+)
+
+// MissingDependencySource builds the refusal for an edge whose SOURCE names no
+// row this database holds.
+//
+// Every write plumbing that can observe the absence mints its refusal here or
+// in the target twin below: the in-transaction store body, the cross-tier
+// target precheck, and the domain repository's classification of a foreign-key
+// refusal. That is what makes the message identical across them as well as the
+// type.
+func MissingDependencySource(issueID, dependsOnID string) error {
+	return &publicops.DependencyEndpointNotFoundError{
+		IssueID:     issueID,
+		DependsOnID: dependsOnID,
+		MissingID:   issueID,
+		Err:         publicops.ErrDependencySourceNotFound,
+	}
+}
+
+// MissingDependencyTarget builds the refusal for an edge whose TARGET names no
+// row this database holds and whose absence this database can see. Callers
+// decide that second half — an "external:" reference and another repository's
+// id never reach here.
+func MissingDependencyTarget(issueID, dependsOnID string) error {
+	return &publicops.DependencyEndpointNotFoundError{
+		IssueID:     issueID,
+		DependsOnID: dependsOnID,
+		MissingID:   dependsOnID,
+		Err:         publicops.ErrDependencyTargetNotFound,
+	}
+}
 
 // ErrTooManyRows is returned by SearchIssuesInTx (and equivalent paths in
 // other backends) when a search would yield more rows than the caller's

@@ -23,11 +23,11 @@ func TestHandleSchemaSkewJSON_Shape(t *testing.T) {
 		t.Fatal(pipeErr)
 	}
 	os.Stderr = w
+	defer func() { os.Stderr = origStderr }()
 
 	handleSchemaSkewJSON(skew)
 
 	_ = w.Close()
-	os.Stderr = origStderr
 
 	var buf bytes.Buffer
 	if _, err := io.Copy(&buf, r); err != nil {
@@ -89,6 +89,14 @@ func TestIgnoreSchemaSkewFlagRegistered(t *testing.T) {
 // sets BD_IGNORE_SCHEMA_SKEW=1 when --ignore-schema-skew is true, so all
 // store-open paths see the escape hatch uniformly (not just checkSchemaSkew).
 func TestIgnoreSchemaSkewFlagPropagatesEnvVar(t *testing.T) {
+	// Isolate CWD and BEADS_DIR before invoking PersistentPreRunE below.
+	// Without this, selectedNoDBBeadsDir falls through to FindBeadsDir(),
+	// which auto-detects a real .beads dir from the ambient working
+	// directory (e.g. the shared .beads of a git worktree's main
+	// checkout) and leaks it into BEADS_DIR for the rest of the test
+	// binary — corrupting later tests that assume BEADS_DIR is unset.
+	t.Chdir(t.TempDir())
+	t.Setenv("BEADS_DIR", "")
 	t.Setenv("BD_IGNORE_SCHEMA_SKEW", "")
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")

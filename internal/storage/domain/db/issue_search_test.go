@@ -16,7 +16,7 @@ func (s *testSuite) TestIssueSearchAcrossIssuesAndWisps() {
 	s.Run("FilterByLabelAppliesAcrossTables", s.searchAcrossLabelFilter)
 	s.Run("LabelHydrationOnResults", s.searchAcrossLabelHydration)
 	s.Run("LimitRespectedPerTable", s.searchAcrossLimitRespected)
-	s.Run("CollisionAcrossTablesIsError", s.searchAcrossCollisionError)
+	s.Run("CollisionAcrossTablesKeepsTheWispCopy", s.searchAcrossCollisionKeepsTheWispCopy)
 	s.Run("SkipLabelsLeavesLabelsNil", s.searchAcrossSkipLabels)
 }
 
@@ -146,7 +146,17 @@ func (s *testSuite) searchAcrossLimitRespected() {
 	s.Len(out.Items, 3)
 }
 
-func (s *testSuite) searchAcrossCollisionError() {
+// searchAcrossCollisionKeepsTheWispCopy pins what a CROSS-PLANE DUPLICATE answers with. One id resident in both
+// tables is corruption — no local write path can produce it, only replication —
+// and this read used to fail the whole query over it, which left a store with
+// one bad id unable to answer any question about the others.
+//
+// The canonical copy is the WISPS one, and the read answers with it. That is
+// the verdict the per-table seam has always reached (issueops, be-iabdi) and
+// the one `bd doctor --check=validate --fix` acts on: it deletes the stale
+// ISSUES copy, the same row this drops. scanIDSrcPage carries the full
+// argument.
+func (s *testSuite) searchAcrossCollisionKeepsTheWispCopy() {
 	r := s.issueRepo()
 	const id = "bd-srx-collision-1"
 	s.Require().NoError(r.Insert(s.Ctx(), newTestIssue(id, "perm"), "tester", domain.InsertIssueOpts{}))
@@ -155,10 +165,12 @@ func (s *testSuite) searchAcrossCollisionError() {
 	w.Ephemeral = true
 	s.Require().NoError(r.Insert(s.Ctx(), w, "tester", domain.InsertIssueOpts{UseWispsTable: true}))
 
-	_, err := r.SearchAcrossIssuesAndWisps(s.Ctx(), "",
+	out, err := r.SearchAcrossIssuesAndWisps(s.Ctx(), "",
 		types.IssueFilter{IDPrefix: "bd-srx-collision-"})
-	s.Require().Error(err)
-	s.Contains(err.Error(), "exists in both issues and wisps")
+	s.Require().NoError(err)
+	s.Require().Len(out.Items, 1, "the id must come back once, not once per plane")
+	s.Equal(id, out.Items[0].ID)
+	s.Equal("wisp", out.Items[0].Title, "the wisps copy is canonical; the issues copy is the stale one")
 }
 
 func (s *testSuite) searchAcrossSkipLabels() {

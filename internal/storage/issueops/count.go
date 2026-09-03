@@ -16,7 +16,7 @@ import (
 func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.IssueFilter) (int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCount, err := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
-		if err != nil && !isTableNotExistError(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return 0, fmt.Errorf("count wisps (ephemeral filter): %w", err)
 		}
 		if wispCount > 0 {
@@ -49,11 +49,19 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 
 	// Merge wisps count when caller hasn't opted out (same semantics as SearchIssuesInTx).
 	// Issues and wisps are always in separate tables (PromoteFromEphemeral deletes the
-	// wisps row), so the two counts don't double-count. count trusts that disjoint-table
-	// invariant; SearchIssuesInTx is the corruption detector — it errors loudly if an ID
-	// appears in both tables ("id %q exists in both issues and wisps").
+	// wisps row), so the two counts don't double-count.
+	//
+	// This count TRUSTS that disjoint-table invariant and no read enforces it:
+	// SearchIssuesInTx used to be described here as the corruption detector, and
+	// it is not one — it collapses a cross-table duplicate to the canonical wisp
+	// row and answers (be-iabdi), as the union seam now does too. So a store
+	// holding one dual-resident id counts it TWICE here while the listing shows
+	// it once. `bd doctor`'s Cross-Table Duplicates check is the detector, and
+	// `--check=validate --fix` the repair. (There is no `--check=cross-table`
+	// selector: the four the flag accepts are artifacts, conventions, pollution
+	// and validate, and the cross-table check runs in the default sweep.)
 	wispCount, wispErr := countTableInTx(ctx, tx, query, filter, WispsFilterTables)
-	if wispErr != nil && !isTableNotExistError(wispErr) {
+	if wispErr != nil && !missingOptionalWispTable(wispErr) {
 		return 0, fmt.Errorf("count wisps (merge): %w", wispErr)
 	}
 	return count + wispCount, nil
@@ -69,7 +77,7 @@ func CountIssuesInTx(ctx context.Context, tx DBTX, query string, filter types.Is
 func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilter, groupBy string) (map[string]int, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		wispCounts, err := countGroupForTablesInTx(ctx, tx, filter, groupBy, WispsFilterTables)
-		if err != nil && !isTableNotExistError(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return nil, fmt.Errorf("count wisps by %s (ephemeral filter): %w", groupBy, err)
 		}
 		total := 0
@@ -105,7 +113,7 @@ func CountIssuesByGroupInTx(ctx context.Context, tx DBTX, filter types.IssueFilt
 	// Merge wisps counts when the caller hasn't opted out (same semantics as
 	// CountIssuesInTx / SearchIssuesInTx; the two tables never share an ID).
 	wispCounts, wispErr := countGroupForTablesInTx(ctx, tx, filter, groupBy, WispsFilterTables)
-	if wispErr != nil && !isTableNotExistError(wispErr) {
+	if wispErr != nil && !missingOptionalWispTable(wispErr) {
 		return nil, fmt.Errorf("count wisps by %s (merge): %w", groupBy, wispErr)
 	}
 	for k, v := range wispCounts {

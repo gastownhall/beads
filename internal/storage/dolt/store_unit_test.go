@@ -9,6 +9,7 @@ import (
 	"time"
 
 	mysql "github.com/go-sql-driver/mysql"
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
@@ -356,11 +357,19 @@ func TestApplyConfigDefaults_TestModeBlocksProdPort_EvenWithTestServerOptIn(t *t
 	}
 }
 
-// TestApplyConfigDefaults_EnvOverridesConfig verifies that BEADS_DOLT_PORT
-// overrides a port already set by metadata.json, even outside test mode.
-// This is the fix for hq-27t (test pollution): callers like the orchestrator set
-// BEADS_DOLT_PORT to route bd to a test server instead of production.
-func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
+// TestApplyConfigDefaults_ExplicitPortOverridesEnv verifies that a
+// caller-preset, already-nonzero cfg.ServerPort wins over
+// BEADS_DOLT_PORT/BEADS_DOLT_SERVER_PORT, and that the resulting
+// ServerPortSource is PortSourceCallerExplicit (authoritative) so
+// newServerMode's auto-start fail-closed check (GH#4052) still protects it.
+//
+// Until be-wf9a.1, BEADS_DOLT_PORT unconditionally clobbered any pre-set
+// ServerPort here (formerly asserted by this same test under the name
+// TestApplyConfigDefaults_EnvOverridesConfig, added for hq-27t). That let an
+// ambient orchestrator env var silently override an explicit caller
+// assertion (e.g. `bd init --server-port`); this test now asserts the fixed,
+// correct precedence instead.
+func TestApplyConfigDefaults_ExplicitPortOverridesEnv(t *testing.T) {
 	origTestMode := os.Getenv("BEADS_TEST_MODE")
 	origPort := os.Getenv("BEADS_DOLT_PORT")
 	defer func() {
@@ -380,13 +389,90 @@ func TestApplyConfigDefaults_EnvOverridesConfig(t *testing.T) {
 	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
 	os.Setenv("BEADS_DOLT_PORT", "19999")
 
-	// Simulate metadata.json having set port to production default
+	// Caller (e.g. `bd init --server-port`) preset an explicit port before
+	// applyConfigDefaults runs.
 	cfg := &Config{ServerPort: DefaultSQLPort}
 	applyConfigDefaults(cfg)
 
-	if cfg.ServerPort != 19999 {
-		t.Errorf("expected BEADS_DOLT_PORT=19999 to override config port %d, got %d",
+	if cfg.ServerPort != DefaultSQLPort {
+		t.Errorf("expected explicit ServerPort=%d to win over BEADS_DOLT_PORT=19999, got %d",
 			DefaultSQLPort, cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+		t.Errorf("expected ServerPortSource=%q, got %q",
+			doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
+	}
+	if !cfg.ServerPortSource.IsAuthoritative() {
+		t.Errorf("expected PortSourceCallerExplicit to be authoritative (GH#4052 fail-closed guard)")
+	}
+}
+
+// TestApplyConfigDefaults_EnvWinsWhenExplicitUnset verifies that when no
+// caller has preset ServerPort (it is still the zero value), BEADS_DOLT_PORT
+// resolves it — unchanged from before be-wf9a.1.
+func TestApplyConfigDefaults_EnvWinsWhenExplicitUnset(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
+	os.Setenv("BEADS_DOLT_PORT", "19999")
+
+	cfg := &Config{} // ServerPort left unset (0)
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 19999 {
+		t.Errorf("expected BEADS_DOLT_PORT=19999 to resolve unset config port, got %d", cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceEnv {
+		t.Errorf("expected ServerPortSource=%q, got %q", doltserver.PortSourceEnv, cfg.ServerPortSource)
+	}
+}
+
+// TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset verifies that an
+// explicit ServerPort survives when no env var is set — unchanged from
+// before be-wf9a.1 — and is stamped PortSourceCallerExplicit (authoritative).
+func TestApplyConfigDefaults_ExplicitPortPreservedWhenEnvUnset(t *testing.T) {
+	origTestMode := os.Getenv("BEADS_TEST_MODE")
+	origPort := os.Getenv("BEADS_DOLT_PORT")
+	defer func() {
+		if origTestMode == "" {
+			os.Unsetenv("BEADS_TEST_MODE")
+		} else {
+			os.Setenv("BEADS_TEST_MODE", origTestMode)
+		}
+		if origPort == "" {
+			os.Unsetenv("BEADS_DOLT_PORT")
+		} else {
+			os.Setenv("BEADS_DOLT_PORT", origPort)
+		}
+	}()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "") // clear new primary port env so legacy path runs
+	os.Unsetenv("BEADS_TEST_MODE")         // NOT in test mode
+	os.Unsetenv("BEADS_DOLT_PORT")
+
+	cfg := &Config{ServerPort: 25432}
+	applyConfigDefaults(cfg)
+
+	if cfg.ServerPort != 25432 {
+		t.Errorf("expected explicit ServerPort=25432 to survive with no env set, got %d", cfg.ServerPort)
+	}
+	if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+		t.Errorf("expected ServerPortSource=%q, got %q",
+			doltserver.PortSourceCallerExplicit, cfg.ServerPortSource)
 	}
 }
 
@@ -564,6 +650,72 @@ func TestExecWithLongTimeoutDSNRewrite(t *testing.T) {
 	}
 }
 
+// TestBuildServerDSN_PoolTimeouts verifies the shared pool's per-I/O deadlines:
+// 10s defaults when unset, and Config.PoolReadTimeout/PoolWriteTimeout
+// overrides carried through to the DSN (bd-vz0y9).
+func TestBuildServerDSN_PoolTimeouts(t *testing.T) {
+	tests := []struct {
+		name         string
+		readTimeout  time.Duration
+		writeTimeout time.Duration
+		wantRead     time.Duration
+		wantWrite    time.Duration
+	}{
+		{"defaults when unset", 0, 0, 10 * time.Second, 10 * time.Second},
+		{"read override only", 90 * time.Second, 0, 90 * time.Second, 10 * time.Second},
+		{"write override only", 0, 45 * time.Second, 10 * time.Second, 45 * time.Second},
+		{"both overridden", 2 * time.Minute, 30 * time.Second, 2 * time.Minute, 30 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				ServerUser:       "root",
+				ServerHost:       "127.0.0.1",
+				ServerPort:       3307,
+				Database:         "testdb",
+				PoolReadTimeout:  tt.readTimeout,
+				PoolWriteTimeout: tt.writeTimeout,
+			}
+			parsed, err := mysql.ParseDSN(buildServerDSN(cfg, cfg.Database))
+			if err != nil {
+				t.Fatalf("failed to parse DSN: %v", err)
+			}
+			if parsed.ReadTimeout != tt.wantRead {
+				t.Errorf("expected readTimeout=%v, got %v", tt.wantRead, parsed.ReadTimeout)
+			}
+			if parsed.WriteTimeout != tt.wantWrite {
+				t.Errorf("expected writeTimeout=%v, got %v", tt.wantWrite, parsed.WriteTimeout)
+			}
+		})
+	}
+}
+
+// TestParseTimeout verifies the shared duration-setting parser: ParseDuration
+// strings, bare seconds, and fallback on empty/invalid/non-positive input.
+func TestParseTimeout(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want time.Duration
+	}{
+		{"", 0},
+		{"30s", 30 * time.Second},
+		{"2m", 2 * time.Minute},
+		{"90", 90 * time.Second},
+		{" 45 ", 45 * time.Second},
+		{"bogus", 0},
+		{"-5s", 0},
+		{"0", 0},
+	}
+	for _, tt := range tests {
+		if got := parseTimeout(tt.raw, 0); got != tt.want {
+			t.Errorf("parseTimeout(%q, 0) = %v, want %v", tt.raw, got, tt.want)
+		}
+	}
+	if got := parseTimeout("bogus", 7*time.Second); got != 7*time.Second {
+		t.Errorf("parseTimeout(bogus, 7s) = %v, want fallback 7s", got)
+	}
+}
+
 // TestBuildServerDSN_SpecialCharacterPassword verifies that passwords with
 // characters that collide with DSN delimiters (@ : / ? & < > etc.) are
 // properly escaped by FormatDSN. This was a real bug — passwords from Secret
@@ -646,4 +798,31 @@ func TestShouldStopAutoStartedServerOnClose(t *testing.T) {
 			t.Fatal("expected test database names to keep auto-start cleanup enabled")
 		}
 	})
+}
+
+// wy-sbgucn: PoolReadTimeoutFallback replaces the built-in 10s pool read
+// deadline only when nothing set PoolReadTimeout; an explicit setting wins.
+func TestBuildServerDSN_PoolReadTimeoutFallback(t *testing.T) {
+	base := &Config{ServerHost: "127.0.0.1", ServerPort: 13390, ServerUser: "root", Database: "wy"}
+	parse := func(cfg *Config) time.Duration {
+		t.Helper()
+		parsed, err := mysql.ParseDSN(buildServerDSN(cfg, cfg.Database))
+		if err != nil {
+			t.Fatalf("ParseDSN: %v", err)
+		}
+		return parsed.ReadTimeout
+	}
+	if got := parse(base); got != defaultPoolReadTimeout {
+		t.Fatalf("no settings: ReadTimeout = %v, want built-in %v", got, defaultPoolReadTimeout)
+	}
+	fb := *base
+	fb.PoolReadTimeoutFallback = 5 * time.Minute
+	if got := parse(&fb); got != 5*time.Minute {
+		t.Fatalf("fallback only: ReadTimeout = %v, want 5m", got)
+	}
+	explicit := fb
+	explicit.PoolReadTimeout = 20 * time.Second
+	if got := parse(&explicit); got != 20*time.Second {
+		t.Fatalf("explicit + fallback: ReadTimeout = %v, want the explicit 20s", got)
+	}
 }

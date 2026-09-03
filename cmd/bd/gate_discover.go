@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +48,10 @@ queries recent GitHub workflow runs, and matches them using heuristics:
 
 Once matched, the gate's await_id is updated with the GitHub run ID, enabling
 subsequent polling to check the run's status.
+
+A gate whose metadata.repo targets another repository is only matched
+against runs queried from that repository, never against the current
+repository's runs of a same-named workflow.
 
 Examples:
   bd gate discover           # Auto-discover run IDs for all matching gates
@@ -97,53 +103,60 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("%s Found %d gate(s) awaiting run ID discovery\n\n", ui.RenderAccent("🔍"), len(gates))
 
-	if branchFilter == "" {
+	// userSpecifiedBranch must be captured BEFORE the auto-detect fallback
+	// below overwrites branchFilter with the local branch - otherwise
+	// branchFilterForRepo can never tell "the user explicitly asked to
+	// filter by this branch" apart from "this is just the local branch we
+	// defaulted to", and an explicit `--branch` is dropped for every
+	// cross-repo gate exactly like the un-requested auto-detected one is.
+	userSpecifiedBranch := branchFilter != ""
+	if !userSpecifiedBranch {
 		branchFilter = getGitBranchForGateDiscovery()
 	}
 
-	runs, err := queryGitHubRuns(branchFilter, limit)
-	if err != nil {
-		return HandleError("querying GitHub runs: %v", err)
-	}
+	// Scope run discovery per gate's own repo selector (SF1): a gate whose
+	// metadata targets another repository must only be matched against runs
+	// queried FROM that repository, never against a same-named workflow run
+	// from the current repo. matchGatesToRuns groups gates by their
+	// validated repo and issues one query per distinct repo.
+	matches := matchGatesToRuns(gates, maxAge, func(repo, workflowHint string) ([]GHWorkflowRun, error) {
+		return queryGitHubRunsInRepo(branchFilterForRepo(branchFilter, repo, userSpecifiedBranch), limit, repo, workflowHint)
+	})
 
-	if len(runs) == 0 {
-		fmt.Println("No recent workflow runs found on GitHub")
-		return nil
-	}
-
-	fmt.Printf("Found %d recent workflow run(s) on branch '%s'\n\n", len(runs), branchFilter)
-
-	// Step 3: Match runs to gates
+	// Step 3/4: report matches (and, outside dry-run, persist them)
 	matchCount := 0
-	for _, gate := range gates {
-		match := matchGateToRun(gate, runs, maxAge)
-		if match == nil {
+	for _, m := range matches {
+		if m.err != nil {
+			fmt.Fprintf(os.Stderr, "  %s %s - %v\n",
+				ui.RenderFail("✗"), ui.RenderID(m.gate.ID), m.err)
+			continue
+		}
+		if m.run == nil {
 			if jsonOutput {
 				continue
 			}
 			fmt.Printf("  %s %s - no matching run found\n",
-				ui.RenderFail("✗"), ui.RenderID(gate.ID))
+				ui.RenderFail("✗"), ui.RenderID(m.gate.ID))
 			continue
 		}
 
 		matchCount++
-		runIDStr := strconv.FormatInt(match.DatabaseID, 10)
+		runIDStr := strconv.FormatInt(m.run.DatabaseID, 10)
 
 		if dryRun {
 			fmt.Printf("  %s %s → run %s (%s) [dry-run]\n",
-				ui.RenderPass("✓"), ui.RenderID(gate.ID), runIDStr, match.Status)
+				ui.RenderPass("✓"), ui.RenderID(m.gate.ID), runIDStr, m.run.Status)
 			continue
 		}
 
-		// Step 4: Update gate with discovered run ID
-		if err := updateGateAwaitID(ctx, gate.ID, runIDStr); err != nil {
+		if err := updateGateAwaitID(ctx, m.gate.ID, runIDStr); err != nil {
 			fmt.Fprintf(os.Stderr, "  %s %s - update failed: %v\n",
-				ui.RenderFail("✗"), ui.RenderID(gate.ID), err)
+				ui.RenderFail("✗"), ui.RenderID(m.gate.ID), err)
 			continue
 		}
 
 		fmt.Printf("  %s %s → run %s (%s)\n",
-			ui.RenderPass("✓"), ui.RenderID(gate.ID), runIDStr, match.Status)
+			ui.RenderPass("✓"), ui.RenderID(m.gate.ID), runIDStr, m.run.Status)
 	}
 
 	fmt.Println()
@@ -152,7 +165,159 @@ func runGateDiscover(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Printf("Updated %d gate(s) with discovered run IDs.\n", matchCount)
 	}
+
+	// A GitHub query failure (gh missing, unauthenticated, rate limited, ...)
+	// is fatal, matching pre-multi-repo behavior: before per-repo scoping,
+	// any query error returned HandleError immediately. Per-gate detail was
+	// already reported above; report a summary here and exit non-zero so a
+	// wholly-failed discovery is never mistaken for "0 gates matched".
+	if failures := gateDiscoveryQueryFailures(matches); len(failures) > 0 {
+		repos := make([]string, 0, len(failures))
+		for repo := range failures {
+			repos = append(repos, repo)
+		}
+		sort.Strings(repos)
+		details := make([]string, 0, len(repos))
+		for _, repo := range repos {
+			label := repo
+			if label == "" {
+				label = "current repo"
+			}
+			details = append(details, fmt.Sprintf("%s: %v", label, failures[repo]))
+		}
+		return HandleError("querying GitHub runs failed for %d repo(s): %s", len(failures), strings.Join(details, "; "))
+	}
+
 	return nil
+}
+
+// gateDiscoveryMatch pairs a gate with the run matched for it, or an error
+// explaining why it could not be matched (invalid repo metadata, or the
+// GitHub query for its repo failed).
+type gateDiscoveryMatch struct {
+	gate *types.Issue
+	run  *GHWorkflowRun
+	err  error
+}
+
+// gateQueryError wraps a failed GitHub query for a specific repo. It is
+// distinguished from other gateDiscoveryMatch errors (e.g. invalid repo
+// metadata) so runGateDiscover can tell "we couldn't even ask GitHub"
+// (gh missing, unauthenticated, rate limited, ...) apart from a per-gate
+// data problem: a wholly-failed discovery must exit non-zero, matching the
+// pre-multi-repo behavior where a query failure was fatal.
+type gateQueryError struct {
+	repo string
+	err  error
+}
+
+func (e *gateQueryError) Error() string { return e.err.Error() }
+func (e *gateQueryError) Unwrap() error { return e.err }
+
+// gateDiscoveryQueryFailures returns the distinct repos whose GitHub query
+// failed among matches, keyed by repo ("" meaning the current repository)
+// with the query error that repo produced.
+func gateDiscoveryQueryFailures(matches []gateDiscoveryMatch) map[string]error {
+	failures := make(map[string]error)
+	for _, m := range matches {
+		var qe *gateQueryError
+		if errors.As(m.err, &qe) {
+			failures[qe.repo] = qe.err
+		}
+	}
+	return failures
+}
+
+// branchFilterForRepo returns the branch filter to use when querying a gate's
+// repo. It always applies the branch filter to the current repo (repo ==
+// ""). For a foreign repo it drops an auto-detected local branch - a
+// cross-repo gate's target branch has no relationship to the branch checked
+// out locally, so `gh run list --repo <other> --branch <local-branch>` would
+// filter out every run in that repo and the gate would never be discoverable
+// (this was the cross-repo-discovery-is-inert bug) - but keeps a branch the
+// user explicitly passed via `--branch`: an explicit filter is a deliberate
+// instruction about the TARGET repo's branch, not a guess about the local
+// checkout, and dropping it silently for cross-repo gates would make
+// `bd gate discover --branch main` appear to work while doing nothing.
+func branchFilterForRepo(localBranchFilter, repo string, userSpecified bool) string {
+	if repo != "" && !userSpecified {
+		return ""
+	}
+	return localBranchFilter
+}
+
+// matchGatesToRuns scopes run discovery per gate's own repo selector (SF1).
+// Gates are grouped by their validated metadata.repo (via githubRepoFromIssue;
+// "" means the current repository), and queryRuns is called at most once per
+// distinct (repo, workflow hint) pair among the given gates. A gate is only
+// ever matched against runs queried from ITS repo - never against another
+// repo's runs of a same-named workflow, which would otherwise persist the
+// wrong await_id permanently (the persisted ID pins the gate).
+//
+// queryRuns receives a workflowHint - the gate's AwaitID workflow name hint,
+// non-empty only for a foreign (cross-repo) query - so it can narrow the
+// `gh run list` call with --workflow. Without that narrowing, a busy foreign
+// repo's unfiltered recent-run list (capped by --limit) might never surface
+// the specific workflow a gate is waiting on. The current repo's query is
+// never narrowed this way (workflowHint is always "" for it), matching
+// pre-existing `bd gate discover` behavior for local gates.
+func matchGatesToRuns(gates []*types.Issue, maxAge time.Duration, queryRuns func(repo, workflowHint string) ([]GHWorkflowRun, error)) []gateDiscoveryMatch {
+	runsByKey := make(map[string][]GHWorkflowRun)
+	queryErrByKey := make(map[string]error)
+	results := make([]gateDiscoveryMatch, 0, len(gates))
+
+	for _, gate := range gates {
+		repo, repoErr := githubRepoFromIssue(gate)
+		if repoErr != nil {
+			results = append(results, gateDiscoveryMatch{gate: gate, err: fmt.Errorf("invalid repo metadata: %w", repoErr)})
+			continue
+		}
+
+		foreign := repo != ""
+		hint := getWorkflowNameHint(gate)
+
+		// Cross-repo discovery requires a workflow hint. With local-commit/
+		// local-branch heuristics neutralized for a foreign repo (see
+		// matchGateToRun), a hintless gate could only ever score on time
+		// proximity alone and risk pinning the wrong run in another
+		// repository permanently. Skip the query entirely rather than spend
+		// a GitHub API call on a gate that can never match.
+		if foreign && hint == "" {
+			results = append(results, gateDiscoveryMatch{gate: gate})
+			continue
+		}
+
+		queryHint := ""
+		key := repo
+		if foreign {
+			queryHint = hint
+			key = repo + "\x1f" + hint
+		}
+
+		runs, cached := runsByKey[key]
+		if !cached {
+			if qErr, queried := queryErrByKey[key]; queried {
+				results = append(results, gateDiscoveryMatch{gate: gate, err: &gateQueryError{repo: repo, err: qErr}})
+				continue
+			}
+			queried, err := queryRuns(repo, queryHint)
+			if err != nil {
+				queryErrByKey[key] = err
+				results = append(results, gateDiscoveryMatch{gate: gate, err: &gateQueryError{repo: repo, err: err}})
+				continue
+			}
+			runsByKey[key] = queried
+			runs = queried
+		}
+
+		// A gate's local-commit/local-branch heuristics only make sense
+		// against the current repo's runs; a foreign repo (repo != "") never
+		// shares a commit SHA or branch name with the local checkout, so
+		// those heuristics are neutralized for it (see matchGateToRun).
+		results = append(results, gateDiscoveryMatch{gate: gate, run: matchGateToRun(gate, runs, maxAge, foreign)})
+	}
+
+	return results
 }
 
 // isNumericRunID returns true if the string looks like a GitHub numeric run ID.
@@ -264,14 +429,23 @@ func getGitCommitForGateDiscovery() string {
 	return strings.TrimSpace(string(output))
 }
 
-// queryGitHubRuns queries recent workflow runs from GitHub using gh CLI
-func queryGitHubRuns(branch string, limit int) ([]GHWorkflowRun, error) {
-	// Check if gh CLI is available
+// queryGitHubRunsInRepo queries recent workflow runs from GitHub using gh
+// CLI, scoped to repo ("" means the current repository) and optionally
+// narrowed to a single workflow (workflow == "" queries all workflows). This
+// is the query path for `bd gate discover`'s branch/heuristic matching (SF1)
+// - distinct from queryGitHubRunsForWorkflowInRepo in gate.go, which filters
+// by a specific --workflow name for the direct await_id discovery used by
+// `bd gate check`. matchGatesToRuns only ever passes a non-empty workflow for
+// a foreign repo, to recover the visibility --limit would otherwise cost an
+// unfiltered cross-repo query (see matchGatesToRuns).
+func queryGitHubRunsInRepo(branch string, limit int, repo string, workflow string) ([]GHWorkflowRun, error) {
 	if _, err := exec.LookPath("gh"); err != nil {
 		return nil, fmt.Errorf("gh CLI not found: install from https://cli.github.com")
 	}
+	return queryGitHubRunsInRepoWithRunner(branch, limit, repo, workflow, runGHCommand)
+}
 
-	// Build gh run list command with JSON output
+func queryGitHubRunsInRepoWithRunner(branch string, limit int, repo string, workflow string, runGH ghCommandRunner) ([]GHWorkflowRun, error) {
 	args := []string{
 		"run", "list",
 		"--json", "databaseId,displayTitle,headBranch,headSha,name,status,conclusion,createdAt,updatedAt,workflowName,url",
@@ -281,12 +455,17 @@ func queryGitHubRuns(branch string, limit int) ([]GHWorkflowRun, error) {
 	if branch != "" {
 		args = append(args, "--branch", branch)
 	}
+	if repo != "" {
+		args = append(args, "--repo", repo)
+	}
+	if workflow != "" {
+		args = append(args, "--workflow", workflow)
+	}
 
-	cmd := exec.Command("gh", args...)
-	output, err := cmd.Output()
+	output, stderr, err := runGH(args...)
 	if err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			return nil, fmt.Errorf("gh run list failed: %s", string(exitErr.Stderr))
+		if len(stderr) > 0 {
+			return nil, fmt.Errorf("gh run list failed: %s", string(stderr))
 		}
 		return nil, fmt.Errorf("gh run list: %w", err)
 	}
@@ -301,11 +480,31 @@ func queryGitHubRuns(branch string, limit int) ([]GHWorkflowRun, error) {
 
 // matchGateToRun finds the best matching run for a gate using heuristics.
 // If the gate has a workflow name hint in AwaitID, only runs matching that workflow are considered.
-func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duration) *GHWorkflowRun {
-	now := time.Now()
-	currentCommit := getGitCommitForGateDiscovery()
-	currentBranch := getGitBranchForGateDiscovery()
+//
+// foreignRepo must be true when runs were queried from a repo other than the
+// current one (SF1: a gate whose metadata.repo targets another repository).
+// In that case the local commit SHA and branch name are meaningless - they
+// describe the current checkout, not the foreign repo - so the commit/branch
+// heuristics are skipped entirely rather than comparing against them anyway.
+func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duration, foreignRepo bool) *GHWorkflowRun {
 	workflowHint := getWorkflowNameHint(gate)
+
+	// Cross-repo discovery requires a workflow hint. With the commit/branch
+	// heuristics below neutralized for a foreign repo, a hintless gate could
+	// otherwise reach bestScore >= 30 on time proximity (+ in-progress/queued
+	// status) alone and pin the wrong run in another repository permanently -
+	// matchGatesToRuns already skips the query for this case, but guard here
+	// too so any other caller gets the same safety.
+	if foreignRepo && workflowHint == "" {
+		return nil
+	}
+
+	now := time.Now()
+	var currentCommit, currentBranch string
+	if !foreignRepo {
+		currentCommit = getGitCommitForGateDiscovery()
+		currentBranch = getGitBranchForGateDiscovery()
+	}
 
 	var bestMatch *GHWorkflowRun
 	var bestScore int
@@ -330,13 +529,18 @@ func matchGateToRun(gate *types.Issue, runs []GHWorkflowRun, maxAge time.Duratio
 			score += 200
 		}
 
-		// Heuristic 1: Commit SHA match (strongest signal after workflow match)
+		// Heuristic 1: Commit SHA match (strongest signal after workflow
+		// match). Skipped for a foreign repo (currentCommit is "" there).
 		if currentCommit != "" && run.HeadSha == currentCommit {
 			score += 100
 		}
 
-		// Heuristic 2: Branch match
-		if run.HeadBranch == currentBranch {
+		// Heuristic 2: Branch match. Skipped for a foreign repo (see
+		// Heuristic 1) and mirrors its currentCommit != "" guard: if local
+		// branch detection failed, currentBranch is "" and a run with an
+		// empty HeadBranch (if GitHub ever returns one) must not
+		// accidentally "match" it.
+		if !foreignRepo && currentBranch != "" && run.HeadBranch == currentBranch {
 			score += 50
 		}
 

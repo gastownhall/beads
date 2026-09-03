@@ -2,6 +2,7 @@
   "data": {
     "depends_on_id": "corpus-dep",
     "issue_id": "corpus-root",
+    "removed": true,
     "status": "removed"
   },
   "schema_version": 1

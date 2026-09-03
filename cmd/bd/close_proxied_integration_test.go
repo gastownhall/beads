@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -386,6 +387,47 @@ func TestProxiedServerClose(t *testing.T) {
 		}
 	})
 
+	// ga-ktn9pe.4.8: twin of TestEmbeddedClose/close_boolean_pinned_reclose_is_idempotent.
+	// Both close paths must agree — a fix on one only is the divergence class #5217
+	// just closed.
+	t.Run("close_boolean_pinned_reclose_is_idempotent", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "cbpr")
+		plan := `{"nodes": [{"key": "p", "title": "Boolean pinned", "type": "task", "pinned": true}]}`
+		planFile := filepath.Join(p.dir, "boolean-pinned-plan.json")
+		if err := os.WriteFile(planFile, []byte(plan), 0644); err != nil {
+			t.Fatal(err)
+		}
+		out, err := bdProxiedRun(t, bd, p.dir, "create", "--graph", planFile, "--json")
+		if err != nil {
+			t.Fatalf("bd create --graph failed: %v\n%s", err, out)
+		}
+		var created GraphApplyResult
+		if err := json.Unmarshal(out, &created); err != nil {
+			t.Fatalf("parse graph result: %v\nstdout:\n%s", err, out)
+		}
+		id := created.IDs["p"]
+		if id == "" {
+			t.Fatalf("expected an ID for key p, got %#v", created.IDs)
+		}
+		if seeded := bdProxiedShow(t, bd, p.dir, id); !seeded.Pinned {
+			t.Fatalf("precondition: expected pinned=true on the seeded bead, got %+v", seeded)
+		}
+
+		bdProxiedClose(t, bd, p.dir, id, "--force")
+		// No --force on the retry. Pre-fix this exited nonzero with the pinned
+		// refusal, so bdProxiedClose's t.Fatalf is the red assertion.
+		bdProxiedClose(t, bd, p.dir, id)
+
+		got := bdProxiedShow(t, bd, p.dir, id)
+		if got.Status != types.StatusClosed {
+			t.Errorf("status: got %q, want closed", got.Status)
+		}
+		if !got.Pinned {
+			t.Error("expected the pin to survive the close: it is what protects the row from bd gc/purge/cleanup")
+		}
+	})
+
 	t.Run("close_epic_open_children_refuses", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "ceor")
@@ -739,12 +781,15 @@ func TestProxiedServerClose2(t *testing.T) {
 		p := newSharedProxiedProjectWithHooks(t, bd, "hfc", map[string]string{"on_close": script})
 		issue := bdProxiedCreate(t, bd, p.dir, "Hook fire")
 		bdProxiedClose(t, bd, p.dir, issue.ID)
-		data, err := os.ReadFile(marker)
+		// Polled, not read once: hooks fire fire-and-forget off the write
+		// plumbing now, so the marker appears shortly AFTER the command exits
+		// rather than during it.
+		data, err := waitForMarker(marker, 5*time.Second)
 		if err != nil {
-			t.Fatalf("hook marker not written: %v", err)
+			t.Fatalf("on_close hook did not fire within timeout: %v", err)
 		}
-		if !strings.Contains(string(data), issue.ID) {
-			t.Errorf("hook marker missing issue ID; got: %q", string(data))
+		if !strings.Contains(data, issue.ID) {
+			t.Errorf("hook marker missing issue ID; got: %q", data)
 		}
 	})
 }

@@ -14,11 +14,55 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/storage"
-	"github.com/steveyegge/beads/internal/storage/domain"
-	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// addDependencyEdgesDirect asserts edges through the DependencyEditor role on
+// st — the store that owns the source issue.
+//
+// It is addDependencyEdgesProxied's twin, and reaches the role the same way:
+// through the ACCESSOR, never a constructor, because the accessor is where each
+// storage decorator adds its layer. Built per write site rather than once per
+// command, for the reason writeOps gives — a routed source hands back an editor
+// carrying its own stack.
+//
+// skipPerEdgeCycleCheck is a separate argument from the --no-cycle-check flag
+// for the reason the proxied twin states: only the bulk path trades the
+// per-edge probe away.
+func addDependencyEdgesDirect(ctx context.Context, st storage.DoltStorage, edges []issueops.DependencyEdge, skipPerEdgeCycleCheck bool) error {
+	editor, err := st.DependencyEditor()
+	if err != nil {
+		return err
+	}
+	_, err = editor.AddDependencies(ctx, issueops.AddDependenciesRequest{
+		Actor:                 actor,
+		Edges:                 edges,
+		SkipPerEdgeCycleCheck: skipPerEdgeCycleCheck,
+	})
+	return err
+}
+
+// exactDependencyTarget returns the depends_on_id of a raw dependency edge on
+// issueID that equals rawTarget exactly. Used by `bd dep remove` so a bare
+// slug that was stored verbatim (pre-GH#5005 create --deps bug) is removed
+// instead of being resolved to a different, fully-qualified good edge.
+func exactDependencyTarget(ctx context.Context, st storage.DependencyQueryStore, issueID, rawTarget string) (string, bool) {
+	if st == nil || rawTarget == "" {
+		return "", false
+	}
+	records, err := st.GetDependencyRecords(ctx, issueID)
+	if err != nil {
+		return "", false
+	}
+	for _, r := range records {
+		if r != nil && r.DependsOnID == rawTarget {
+			return rawTarget, true
+		}
+	}
+	return "", false
+}
 
 // resolveIDWithRouting resolves a partial issue ID using prefix-based routing.
 // It returns the resolved full ID and the store that contains the issue.
@@ -98,38 +142,6 @@ func isDisallowedHierarchicalDependency(fromID, toID string, depType types.Depen
 	return depType != types.DepParentChild || toID != immediateParent
 }
 
-// warnIfCyclesExist checks for dependency cycles and prints a warning if found.
-func warnIfCyclesExist(s storage.DoltStorage) {
-	if s == nil {
-		return // Skip cycle check if store is not available
-	}
-	cycles, err := s.DetectCycles(rootCtx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: Failed to check for cycles: %v\n", err)
-		return
-	}
-	if len(cycles) == 0 {
-		return
-	}
-	fmt.Fprintf(os.Stderr, "\n%s Warning: Dependency cycle detected!\n", ui.RenderWarn("⚠"))
-	fmt.Fprintf(os.Stderr, "This can hide issues from the ready work list and cause confusion.\n\n")
-	fmt.Fprintf(os.Stderr, "Cycle path:\n")
-	for _, cycle := range cycles {
-		for j, issue := range cycle {
-			if j == 0 {
-				fmt.Fprintf(os.Stderr, "  %s", issue.ID)
-			} else {
-				fmt.Fprintf(os.Stderr, " → %s", issue.ID)
-			}
-		}
-		if len(cycle) > 0 {
-			fmt.Fprintf(os.Stderr, " → %s", cycle[0].ID)
-		}
-		fmt.Fprintf(os.Stderr, "\n")
-	}
-	fmt.Fprintf(os.Stderr, "\nRun 'bd dep cycles' for detailed analysis.\n\n")
-}
-
 var depCmd = &cobra.Command{
 	Use:     "dep [issue-id]",
 	GroupID: "deps",
@@ -198,13 +210,12 @@ Examples:
 				return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 			}
 
-			dep := &types.Dependency{
-				IssueID:     fromID,
-				DependsOnID: toID,
-				Type:        types.DependencyType(depType),
+			opsCtx, err := issueOpsContext(ctx)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
-
-			if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+			edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: types.DependencyType(depType)}
+			if err := addDependencyEdgesDirect(opsCtx, fromStore, []issueops.DependencyEdge{edge}, false); err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
 
@@ -263,6 +274,11 @@ object with "from" and "to" fields, and may include "type". The aliases
 External references are stored as-is and resolved at query time using
 the external_projects config. They block the issue until the capability
 is "shipped" in the target project.
+
+With no -t/--type the edge is created as type=blocks, which excludes the
+dependent from bd ready. When stderr is an interactive terminal, an advisory
+note says so once per command; it is silent for scripted and agent callers
+(non-TTY stderr) and can be turned off with --quiet or BD_NO_DEP_TYPE_WARNING=1.
 
 Examples:
   bd dep add bd-42 bd-41                              # Positional args
@@ -378,22 +394,21 @@ Examples:
 			}
 		}
 
-		dt := types.DependencyType(depType)
+		dt := canonicalDependencyType(types.DependencyType(depType))
 		if isDisallowedHierarchicalDependency(fromID, toID, dt) {
 			return HandleErrorRespectJSON("cannot add dependency: %s is already a child of %s. Children inherit dependency on parent completion via hierarchy. Adding an explicit dependency would create a deadlock", fromID, toID)
 		}
 
-		if !dt.IsValid() {
-			return HandleErrorRespectJSON("invalid dependency type %q: must be non-empty and at most 50 characters", depType)
+		if err := validateDependencyType(dt); err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
 
-		dep := &types.Dependency{
-			IssueID:     fromID,
-			DependsOnID: toID,
-			Type:        dt,
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
 		}
-
-		if err := fromStore.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{EmitEvent: true}); err != nil {
+		edge := issueops.DependencyEdge{IssueID: fromID, DependsOnID: toID, Type: dt}
+		if err := addDependencyEdgesDirect(opsCtx, fromStore, []issueops.DependencyEdge{edge}, false); err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -409,19 +424,71 @@ Examples:
 			return HandleErrorRespectJSON("failed to commit: %v", err)
 		}
 
+		explicit := cmd.Flags().Changed("type") || cmd.Flags().Changed("blocked-by") || cmd.Flags().Changed("depends-on")
+		warnImplicitBlocksDefault(dt, explicit)
+
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
 				"status":        "added",
 				"issue_id":      fromID,
 				"depends_on_id": toID,
-				"type":          depType,
+				"type":          string(dt),
 			})
 		}
 
-		fmt.Printf("%s Added dependency: %s depends on %s (%s)\n",
-			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), formatFeedbackIDParen(toID, lookupTitle(toID)), depType)
+		fmt.Printf("%s Added dependency: %s %s %s (%s)\n",
+			ui.RenderPass("✓"), formatFeedbackIDParen(fromID, lookupTitle(fromID)), depRelationFor(dt).phrase, formatFeedbackIDParen(toID, lookupTitle(toID)), dt)
 		return nil
 	},
+}
+
+// warnImplicitBlocksDefault is the D1 guard: when a dep add edge is created
+// with the implicit type=blocks default it warns on stderr. A silent blocks
+// edge drops the dependent from bd ready, which is not what an operator
+// usually means when wiring a structural parent/child link. An explicit
+// choice never warns: -t (including an explicit -t blocks), and the
+// --blocked-by/--depends-on aliases, whose names already express the
+// blocking relationship. Non-blocks defaults do not warn either.
+//
+// The warning is advisory and fires on the documented-default majority path,
+// so it is scoped to an interactive operator: it is emitted only when stderr
+// is a TTY, and it honors the global --quiet flag and BD_NO_DEP_TYPE_WARNING.
+// Scripted and agent callers — whose stderr is a pipe or a log file — never
+// see it, so it cannot train them to ignore stderr.
+func warnImplicitBlocksDefault(dt types.DependencyType, explicit bool) {
+	if !shouldWarnImplicitBlocksDefault(dt, explicit, quietFlag, os.Getenv("BD_NO_DEP_TYPE_WARNING"), ui.IsStderrTerminal()) {
+		return
+	}
+	emitImplicitBlocksDefaultWarning()
+}
+
+// shouldWarnImplicitBlocksDefault is the testable predicate behind
+// warnImplicitBlocksDefault. It takes the quiet flag, the suppression env
+// value and the stderr TTY result as parameters so tests can cover every
+// combination without a real terminal — the same shape as
+// ui.shouldUseHyperlinks.
+func shouldWarnImplicitBlocksDefault(dt types.DependencyType, explicit, quiet bool, noWarnEnv string, stderrIsTerminal bool) bool {
+	if explicit || dt != types.DepBlocks {
+		return false
+	}
+	// --quiet is documented as "Suppress non-essential output (errors only)",
+	// and the other non-error stderr notices in this package (tips.go,
+	// metrics.go, routing_read.go) respect it the same way.
+	if quiet {
+		return false
+	}
+	// Explicit opt-out for operators who have internalized the default,
+	// following the BD_NO_EMOJI / BD_NO_COLOR precedent.
+	if noWarnEnv != "" {
+		return false
+	}
+	return stderrIsTerminal
+}
+
+// emitImplicitBlocksDefaultWarning writes the D1 warning. Split from the gate
+// so the message text can be asserted under a captured (non-TTY) stderr.
+func emitImplicitBlocksDefaultWarning() {
+	fmt.Fprintf(os.Stderr, "warning: no -t/--type given; edge created as type=blocks — the dependent is excluded from bd ready until the edge resolves. Use -t parent-child for structural parent/child linkage (silence with --quiet or BD_NO_DEP_TYPE_WARNING=1)\n") //nolint:gosec // G705: stderr, not a browser context
 }
 
 type bulkDepInput struct {
@@ -432,36 +499,18 @@ type bulkDepInput struct {
 	DependsOnID string `json:"depends_on_id"`
 }
 
-// newCycleThroughEdges runs a whole-graph cycle check inside the bulk-add
-// transaction and returns a rendered scheduling-cycle path when a cycle actually
-// traverses one of the edges being added, or "" when none does. Endpoint
-// membership is not enough: an issue sitting in a pre-existing committed
-// cycle must not block unrelated bulk wiring that merely touches it
-// (bd-578h9.9). Only blocks, conditional-blocks, and parent-child edges
-// participate. A failed check returns an error — the bulk add must roll back
-// rather than commit unverified edges (bd-6dnrw.8).
-func newCycleThroughEdges(ctx context.Context, tx storage.Transaction, edges []bulkDepEdge) (string, error) {
-	pairs := make([][2]string, 0, len(edges))
-	for _, edge := range edges {
-		if edge.Type != types.DepBlocks && edge.Type != types.DepConditionalBlocks && edge.Type != types.DepParentChild {
-			continue
-		}
-		pairs = append(pairs, [2]string{edge.IssueID, edge.DependsOnID})
-	}
-	if len(pairs) == 0 {
-		return "", nil
-	}
-	return tx.CycleThroughEdges(ctx, pairs)
-}
-
 type bulkDepEdge struct {
 	Line        int
 	IssueID     string
 	DependsOnID string
 	Type        types.DependencyType
-	Store       storage.DoltStorage
-	StoreKey    string
-	Cleanups    []func()
+	// Defaulted is true when the line carried no "type" and fell back to
+	// the command-line default (D1 guard: the implicit default is what the
+	// stderr warning targets; explicit per-line types are the user's choice).
+	Defaulted bool
+	Store     storage.DoltStorage
+	StoreKey  string
+	Cleanups  []func()
 }
 
 func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) error {
@@ -494,15 +543,41 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	noCycleCheck, _ := cmd.Flags().GetBool("no-cycle-check")
-	commitMsg := fmt.Sprintf("dependency: add %d edges", len(resolved))
-	if err := transact(rootCtx, targetStore, commitMsg, func(tx storage.Transaction) error {
-		return addBulkDependenciesInTx(rootCtx, tx, resolved, noCycleCheck, actor)
-	}); err != nil {
+	depEdges := make([]issueops.DependencyEdge, 0, len(resolved))
+	for _, edge := range resolved {
+		depEdges = append(depEdges, issueops.DependencyEdge{
+			IssueID:     edge.IssueID,
+			DependsOnID: edge.DependsOnID,
+			Type:        edge.Type,
+		})
+	}
+
+	// One request, one transaction, one history entry. The role's
+	// all-or-nothing contract is what the hand-rolled bulk transaction used to
+	// spell out here, down to the parent-child-first ordering and the
+	// whole-graph gate that runs even when the per-edge probe is off — so the
+	// request replaces it rather than wrapping it. The version commit comes
+	// with the role, which is why there is no transact() and no
+	// commitPendingIfEmbedded around this call.
+	opsCtx, err := issueOpsContext(rootCtx)
+	if err != nil {
+		return err
+	}
+	if err := addDependencyEdgesDirect(opsCtx, targetStore, depEdges, noCycleCheck); err != nil {
 		return err
 	}
 
 	if !noCycleCheck {
 		warnIfCyclesExist(targetStore)
+	}
+
+	if !cmd.Flags().Changed("type") {
+		for _, edge := range resolved {
+			if edge.Defaulted && edge.Type == types.DepBlocks {
+				warnImplicitBlocksDefault(edge.Type, false)
+				break
+			}
+		}
 	}
 
 	if jsonOutput {
@@ -522,37 +597,6 @@ func addBulkDependencies(cmd *cobra.Command, file string, defaultType string) er
 	}
 
 	fmt.Printf("%s Added %d dependencies\n", ui.RenderPass("✓"), len(resolved))
-	return nil
-}
-
-func addBulkDependenciesInTx(ctx context.Context, tx storage.Transaction, edges []bulkDepEdge, noCycleCheck bool, actor string) error {
-	// Make the complete planned hierarchy visible before validating any
-	// blocking edge, independent of input-file order.
-	for phase := 0; phase < 2; phase++ {
-		parentPhase := phase == 0
-		for _, edge := range edges {
-			if (edge.Type == types.DepParentChild) != parentPhase {
-				continue
-			}
-			dep := &types.Dependency{IssueID: edge.IssueID, DependsOnID: edge.DependsOnID, Type: edge.Type}
-			if err := tx.AddDependencyWithOptions(ctx, dep, actor, storage.DependencyAddOptions{SkipCycleCheck: noCycleCheck, EmitEvent: true}); err != nil {
-				return fmt.Errorf("line %d: %w", edge.Line, err)
-			}
-		}
-	}
-	// Always merge both transaction snapshots before commit. Per-edge checks
-	// cannot see uncommitted paths split across regular and wisp storage.
-	cyclePath, cycleErr := newCycleThroughEdges(ctx, tx, edges)
-	if cycleErr != nil {
-		return fmt.Errorf("final cycle check failed (no edges added): %w", cycleErr)
-	}
-	if cyclePath != "" {
-		// Type this rejection so callers can errors.Is(err, domain.ErrDependencyCycle),
-		// matching the proxied/domain bulk final gate. NewCycleError renders the
-		// message verbatim (no sentinel text appended), so the user-facing string
-		// is unchanged.
-		return domain.NewCycleError("dependency cycle would be created: %s (no edges added; run 'bd dep cycles' for analysis)", cyclePath)
-	}
 	return nil
 }
 
@@ -598,7 +642,8 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			to = strings.TrimSpace(in.DependsOnID)
 		}
 		depType := strings.TrimSpace(in.Type)
-		if depType == "" {
+		defaulted := depType == ""
+		if defaulted {
 			depType = defaultType
 		}
 
@@ -608,11 +653,12 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 		if to == "" {
 			errs = append(errs, fmt.Sprintf("line %d: missing to", lineNo))
 		}
-		dt := types.DependencyType(depType)
-		if !dt.IsValid() {
-			errs = append(errs, fmt.Sprintf("line %d: invalid dependency type %q: must be non-empty and at most 50 characters", lineNo, depType))
+		dt := canonicalDependencyType(types.DependencyType(depType))
+		typeErr := validateDependencyType(dt)
+		if typeErr != nil {
+			errs = append(errs, fmt.Sprintf("line %d: %v", lineNo, typeErr))
 		}
-		if from == "" || to == "" || !dt.IsValid() {
+		if from == "" || to == "" || typeErr != nil {
 			continue
 		}
 
@@ -621,6 +667,7 @@ func readBulkDepEdges(file string, defaultType string) ([]bulkDepEdge, error) {
 			IssueID:     from,
 			DependsOnID: to,
 			Type:        dt,
+			Defaulted:   defaulted,
 		})
 	}
 	if err := scanner.Err(); err != nil {
@@ -712,6 +759,143 @@ func dependencyStoreKey(s storage.DoltStorage) string {
 	return fmt.Sprintf("instance:%p", s)
 }
 
+// depListAnchor is one resolved `bd dep list` argument: the canonical id, the
+// store that actually holds it, and the routing handle that has to be closed.
+type depListAnchor struct {
+	fullID string
+	store  storage.DoltStorage
+	result *RoutedResult
+}
+
+// readDepListEdges asks each anchor's OWN store for its stored edges and
+// reassembles the answers into the order the arguments named.
+//
+// The grouping is what keeps the answer on ONE shape: a failure is a failure, a
+// split batch is N role calls merged back into one answer, and the caller's
+// argument count picks the shape (see batchMode at the call site). `bd dep list
+// a b c --json` documents an array of dependency records, not of issues.
+func readDepListEdges(ctx context.Context, anchors []depListAnchor, typeFilter string) ([]issueops.AnchorEdges, error) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+
+	// Grouped by store IDENTITY, not by the store's workspace path: two handles
+	// onto the same database are still two connections, and asking one of them
+	// for the other's ids would answer that every one of them is missing.
+	byStore := map[storage.DoltStorage][]string{}
+	var order []storage.DoltStorage
+	for _, anchor := range anchors {
+		if _, seen := byStore[anchor.store]; !seen {
+			order = append(order, anchor.store)
+		}
+		byStore[anchor.store] = append(byStore[anchor.store], anchor.fullID)
+	}
+
+	answered := make(map[string]issueops.AnchorEdges, len(anchors))
+	for _, st := range order {
+		reader, err := st.EdgeReader()
+		if err != nil {
+			return nil, err
+		}
+		result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: byStore[st], Types: depTypes})
+		if err != nil {
+			return nil, err
+		}
+		for _, anchor := range result.Anchors {
+			answered[anchor.ID] = anchor
+		}
+	}
+
+	out := make([]issueops.AnchorEdges, 0, len(anchors))
+	seen := make(map[string]struct{}, len(anchors))
+	for _, anchor := range anchors {
+		if _, dup := seen[anchor.fullID]; dup {
+			continue
+		}
+		seen[anchor.fullID] = struct{}{}
+		out = append(out, answered[anchor.fullID])
+	}
+	return out, nil
+}
+
+// printDepListEdges renders the role's per-anchor answer, and is shared by both
+// routes so the two cannot drift apart in what they print.
+//
+// A GHOST ANCHOR goes to stderr in both modes. Keeping it off stdout is what
+// leaves `--json` a flat array of dependency records, which is the shape the
+// command documents.
+func printDepListEdges(anchors []issueops.AnchorEdges) error {
+	for _, anchor := range anchors {
+		if anchor.Missing {
+			fmt.Fprintf(os.Stderr, "warning: no issue found: %s (skipped)\n", anchor.ID)
+		}
+	}
+	if jsonOutput {
+		out := []*types.Dependency{}
+		for _, anchor := range anchors {
+			out = append(out, anchor.Edges...)
+		}
+		return outputJSON(out)
+	}
+	for _, anchor := range anchors {
+		if anchor.Missing {
+			continue
+		}
+		if len(anchor.Edges) == 0 {
+			fmt.Printf("\n%s has no dependencies\n", anchor.ID)
+			continue
+		}
+		fmt.Printf("\n%s Dependencies of %s:\n\n", ui.RenderAccent("📋"), anchor.ID)
+		for _, dep := range anchor.Edges {
+			fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// warnDroppedDepEdges prints a stderr-only notice for every stored "down"
+// dependency edge of anchorID that shown (the Relations role's answer) left
+// out because its target has no row in this database — i.e. a cross-repo or
+// `external:` target (bd-mtla: `bd link` across databases reports success
+// and writes the row, but the single-id `bd dep list <id>` a caller runs
+// right after has no way to tell that from no dependency existing at all).
+//
+// It never writes to stdout, so the documented `bd dep list <id>` and
+// `--json` shapes for the common (fully-local) case are unchanged; a script
+// parsing stdout sees nothing new. A best-effort read: an error here is
+// swallowed rather than surfaced, since the command's actual answer was
+// already produced successfully by the Relations role above.
+func warnDroppedDepEdges(ctx context.Context, reader issueops.EdgeReader, anchorID, typeFilter string, shown []*issueops.RelatedIssue) {
+	var depTypes []types.DependencyType
+	if typeFilter != "" {
+		depTypes = []types.DependencyType{types.DependencyType(typeFilter)}
+	}
+	result, err := reader.ReadEdges(ctx, issueops.EdgeReadRequest{IDs: []string{anchorID}, Types: depTypes})
+	if err != nil || len(result.Anchors) != 1 {
+		return
+	}
+	known := make(map[string]struct{}, len(shown))
+	for _, iss := range shown {
+		known[iss.ID] = struct{}{}
+	}
+	var dropped []*types.Dependency
+	for _, dep := range result.Anchors[0].Edges {
+		if _, ok := known[dep.DependsOnID]; !ok {
+			dropped = append(dropped, dep)
+		}
+	}
+	if len(dropped) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s has %d additional dependency edge(s) whose target has no row in this database (cross-repo/external) and are not shown above:\n", anchorID, len(dropped))
+	for _, dep := range dropped {
+		fmt.Fprintf(os.Stderr, "  %s via %s\n", dep.DependsOnID, dep.Type)
+	}
+	fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", anchorID, anchorID)
+}
+
 var depListCmd = &cobra.Command{
 	Use:   "list [issue-id...]",
 	Short: "List dependencies or dependents of one or more issues",
@@ -753,12 +937,7 @@ Examples:
 			direction = "down"
 		}
 
-		type resolvedID struct {
-			fullID string
-			store  storage.DoltStorage
-			result *RoutedResult
-		}
-		var resolved []resolvedID
+		var resolved []depListAnchor
 		batchMode := len(args) > 1
 		for _, arg := range args {
 			routedResult, err := resolveAndGetIssueWithRouting(ctx, store, arg)
@@ -780,7 +959,7 @@ Examples:
 			if routedResult.Routed && routedResult.Store != nil {
 				depStore = routedResult.Store
 			}
-			resolved = append(resolved, resolvedID{
+			resolved = append(resolved, depListAnchor{
 				fullID: routedResult.ResolvedID,
 				store:  depStore,
 				result: routedResult,
@@ -801,83 +980,74 @@ Examples:
 			}
 		}()
 
-		if len(resolved) > 1 && direction == "down" {
-			allSameStore := true
-			firstStore := resolved[0].store
-			for _, r := range resolved[1:] {
-				if r.store != firstStore {
-					allSameStore = false
-					break
-				}
-			}
-			if allSameStore {
-				ids := make([]string, len(resolved))
-				for i, r := range resolved {
-					ids[i] = r.fullID
-				}
-				depMap, err := firstStore.GetDependencyRecordsForIssues(ctx, ids)
-				if err == nil {
-					var allDeps []*types.Dependency
-					for _, id := range ids {
-						for _, dep := range depMap[id] {
-							if typeFilter == "" || string(dep.Type) == typeFilter {
-								allDeps = append(allDeps, dep)
-							}
-						}
-					}
-					if jsonOutput {
-						if allDeps == nil {
-							allDeps = []*types.Dependency{}
-						}
-						return outputJSON(allDeps)
-					}
-					for _, id := range ids {
-						deps := depMap[id]
-						if len(deps) == 0 {
-							fmt.Printf("\n%s has no dependencies\n", id)
-							continue
-						}
-						fmt.Printf("\n%s %s depends on:\n\n", ui.RenderAccent("📋"), id)
-						for _, dep := range deps {
-							if typeFilter != "" && string(dep.Type) != typeFilter {
-								continue
-							}
-							fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
-						}
-					}
-					fmt.Println()
-					return nil
-				}
-			}
-		}
-
-		var allIssues []*types.IssueWithDependencyMetadata
-		for _, r := range resolved {
-			var issues []*types.IssueWithDependencyMetadata
-			var err error
-			if direction == "up" {
-				issues, err = r.store.GetDependentsWithMetadata(ctx, r.fullID)
-			} else {
-				issues, err = r.store.GetDependenciesWithMetadata(ctx, r.fullID)
-			}
+		// The multi-id edge listing is on the EdgeReader role, not Relations:
+		// Relations is anchored on ONE issue, answers with the issues on the far
+		// end of its edges rather than the edges themselves, and drops every
+		// edge whose target this database has no row for.
+		//
+		// The accessor is taken PER STORE rather than once for the command: a
+		// routed anchor answers from its own store, carrying its own decorator
+		// stack.
+		//
+		// The shape is chosen on batchMode — the count the CALLER TYPED — and
+		// not on len(resolved). Those differ exactly when an anchor did not
+		// resolve, and the help text promises the records shape "with --json
+		// ... across all requested issues", so a skipped anchor must not
+		// silently change what a script is parsing.
+		if batchMode && direction == "down" {
+			anchors, err := readDepListEdges(ctx, resolved, typeFilter)
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
-			if typeFilter != "" {
-				var filtered []*types.IssueWithDependencyMetadata
-				for _, iss := range issues {
-					if string(iss.DependencyType) == typeFilter {
-						filtered = append(filtered, iss)
-					}
-				}
-				issues = filtered
+			return printDepListEdges(anchors)
+		}
+
+		// The neighbor query is on the Relations role: one call per anchor, each
+		// with an explicit direction, because the role refuses to guess one. The
+		// accessor is taken per resolved anchor rather than once for the command
+		// — a routed anchor answers from its own store, carrying its own
+		// decorator stack.
+		request := issueops.RelatedRequest{Direction: issueops.RelationOut}
+		if direction == "up" {
+			request.Direction = issueops.RelationIn
+		}
+		if typeFilter != "" {
+			request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
+		}
+
+		var allIssues []*issueops.RelatedIssue
+		for _, r := range resolved {
+			rel, err := r.store.IssueRelations()
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			request.ID = r.fullID
+			issues, err := rel.Related(ctx, request)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
 			}
 			allIssues = append(allIssues, issues...)
 		}
 
+		// Relations silently drops "down" edges whose target has no row in
+		// this database (the doc comment above the batch branch says so).
+		// EdgeReader doesn't have that gap, and batchMode&&"down" already
+		// used it above, so this is reached for "down" only when there is
+		// exactly one resolved anchor — warn on stderr (never stdout/--json,
+		// so the documented single-id shape and any script parsing it are
+		// untouched) naming any edge Relations left out, so a `bd link`
+		// across databases doesn't look indistinguishable from no link at
+		// all (bd-mtla). "up" has the same gap but no inbound EdgeReader
+		// role exists to detect it from here — tracked separately.
+		if direction == "down" && len(resolved) == 1 {
+			if reader, err := resolved[0].store.EdgeReader(); err == nil {
+				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+			}
+		}
+
 		if jsonOutput {
 			if allIssues == nil {
-				allIssues = []*types.IssueWithDependencyMetadata{}
+				allIssues = []*issueops.RelatedIssue{}
 			}
 			return outputJSON(allIssues)
 		}
@@ -958,6 +1128,12 @@ var depRemoveCmd = &cobra.Command{
 			if err := validateExternalRef(toID); err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
+		} else if exact, ok := exactDependencyTarget(ctx, fromStore, fromID, args[1]); ok {
+			// Prefer an exact depends_on_id match against raw edge records
+			// before partial-ID resolution (GH#5005). Otherwise
+			// `bd dep remove X 8vezf` resolves to the qualified good edge and
+			// deletes it while leaving a dangling bare-id row behind.
+			toID = exact
 		} else {
 			var toCleanup func()
 			toID, _, toCleanup, err = resolveIDWithRouting(ctx, store, args[1])
@@ -977,9 +1153,24 @@ var depRemoveCmd = &cobra.Command{
 		fullFromID := fromID
 		fullToID := toID
 
-		// Explicit dep verb: record a dependency_removed history event (parity
-		// with bd dep add's EmitEvent and the proxied bd dep remove path).
-		if err := fromStore.RemoveDependencyWithOptions(ctx, fullFromID, fullToID, actor, storage.DependencyRemoveOptions{EmitEvent: true}); err != nil {
+		// Explicit dep verb: the role records a dependency_removed history entry
+		// for a genuine removal, matching bd dep add's edge event and the
+		// proxied bd dep remove path.
+		//
+		editor, err := fromStore.DependencyEditor()
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		result, err := editor.RemoveDependency(opsCtx, issueops.RemoveDependencyRequest{
+			Actor:       actor,
+			IssueID:     fullFromID,
+			DependsOnID: fullToID,
+		})
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
 
@@ -991,14 +1182,24 @@ var depRemoveCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
+			status := "removed"
+			if !result.Removed {
+				status = "not_found"
+			}
 			return outputJSON(map[string]interface{}{
-				"status":        "removed",
+				"status":        status,
+				"removed":       result.Removed,
 				"issue_id":      fullFromID,
 				"depends_on_id": fullToID,
 			})
 		}
+		if !result.Removed {
+			fmt.Printf("No dependency found: %s → %s\n",
+				formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
+			return nil
+		}
 
-		fmt.Printf("%s Removed dependency: %s no longer depends on %s\n",
+		fmt.Printf("%s Removed dependency: %s → %s\n",
 			ui.RenderPass("✓"), formatFeedbackIDParen(fullFromID, lookupTitle(fullFromID)), formatFeedbackIDParen(fullToID, lookupTitle(fullToID)))
 		return nil
 	},
@@ -1020,9 +1221,14 @@ Examples:
   bd dep tree gt-0iqq --status=open      # Only show open issues
   bd dep tree gt-0iqq --depth=3          # Limit to 3 levels deep
 
+A node reached by two paths is shown ONCE, under the first path that got
+there, and a cycle simply ends the descent. --show-all-paths is a deprecated
+no-op; use 'bd dep cycles' to find circular dependencies.
+
 --max-rows / BEADS_MAX_ROWS caveat: the tree walk has no query filter to
 thread the cap through, so the full tree is always built first and the
-node count is checked afterward (post-hoc), not during the walk.`,
+node count is checked afterward (post-hoc), not during the walk. The cap is
+honored on the --proxied-server route too, which it was not before.`,
 	Args:          cobra.ExactArgs(1),
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -1034,125 +1240,9 @@ node count is checked afterward (post-hoc), not during the walk.`,
 			}
 		}()
 
-		if usesProxiedServer() {
-			if err := rejectMaxRowsUnderProxiedServer(cmd); err != nil {
-				return err
-			}
-			return runDepTreeProxiedServer(cmd, rootCtx, args)
-		}
-
-		ctx := rootCtx
-
-		fullID, treeStore, treeCleanup, err := resolveIDWithRouting(ctx, store, args[0])
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-		defer treeCleanup()
-
-		showAllPaths, _ := cmd.Flags().GetBool("show-all-paths")
-		maxDepth, _ := cmd.Flags().GetInt("max-depth")
-		reverse, _ := cmd.Flags().GetBool("reverse")
-		direction, _ := cmd.Flags().GetString("direction")
-		statusFilter, _ := cmd.Flags().GetString("status")
-		formatStr, _ := cmd.Flags().GetString("format")
-		if strings.EqualFold(formatStr, "json") {
-			jsonOutput = true
-			formatStr = ""
-		}
-
-		if direction == "" && reverse {
-			direction = "up"
-		} else if direction == "" {
-			direction = "down"
-		}
-
-		if direction != "down" && direction != "up" && direction != "both" {
-			return HandleErrorRespectJSON("--direction must be 'down', 'up', or 'both'")
-		}
-
-		if maxDepth < 1 {
-			return HandleErrorRespectJSON("--max-depth must be >= 1")
-		}
-
-		var tree []*types.TreeNode
-
-		if direction == "both" {
-			downTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, false)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-
-			upTree, err := treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, true)
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-
-			tree = mergeBidirectionalTrees(downTree, upTree, fullID)
-		} else {
-			tree, err = treeStore.GetDependencyTree(ctx, fullID, maxDepth, showAllPaths, direction == "up")
-			if err != nil {
-				return HandleErrorRespectJSON("%v", err)
-			}
-		}
-
-		if statusFilter != "" {
-			tree = filterTreeByStatus(tree, types.Status(statusFilter))
-		}
-
-		// Apply defensive row cap (be-x42v) on the final tree-node count.
-		// Tree walks have no IssueFilter to thread through, so the cap is
-		// enforced at the CLI layer instead of in storage.
-		treeMaxRows, treeMaxRowsSource, err := resolveMaxRows(cmd)
-		if err != nil {
-			return err
-		}
-		if treeMaxRows > 0 && len(tree) > treeMaxRows {
-			if capErr := handleMaxRowsError(&issueops.ErrTooManyRows{
-				Found:  len(tree),
-				Cap:    treeMaxRows,
-				Source: treeMaxRowsSource,
-			}); capErr != nil {
-				return capErr
-			}
-		}
-
-		// Handle format presets (json handled earlier, near flag read)
-		if formatStr == "mermaid" {
-			outputMermaidTree(tree, args[0])
-			return nil
-		}
-
-		if jsonOutput {
-			if tree == nil {
-				tree = []*types.TreeNode{}
-			}
-			return outputJSON(tree)
-		}
-
-		if len(tree) == 0 {
-			switch direction {
-			case "up":
-				fmt.Printf("\n%s has no dependents\n", fullID)
-			case "both":
-				fmt.Printf("\n%s has no dependencies or dependents\n", fullID)
-			default:
-				fmt.Printf("\n%s has no dependencies\n", fullID)
-			}
-			return nil
-		}
-
-		switch direction {
-		case "up":
-			fmt.Printf("\n%s Dependent tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		case "both":
-			fmt.Printf("\n%s Full dependency graph for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		default:
-			fmt.Printf("\n%s Dependency tree for %s:\n\n", ui.RenderAccent("🌲"), fullID)
-		}
-
-		renderTree(tree, maxDepth, direction)
-		fmt.Println()
-		return nil
+		// Both routes, one body: which accessor answers and how the root id is
+		// resolved are both inside resolveTreeTarget.
+		return runDepTree(cmd, rootCtx, args)
 	},
 }
 
@@ -1169,37 +1259,9 @@ var depCyclesCmd = &cobra.Command{
 			}
 		}()
 
-		if usesProxiedServer() {
-			return runDepCyclesProxiedServer(cmd, rootCtx)
-		}
-
-		ctx := rootCtx
-		cycles, err := store.DetectCycles(ctx)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
-		}
-
-		if jsonOutput {
-			if cycles == nil {
-				cycles = [][]*types.Issue{}
-			}
-			return outputJSON(cycles)
-		}
-
-		if len(cycles) == 0 {
-			fmt.Printf("\n%s No dependency cycles detected\n\n", ui.RenderPass("✓"))
-			return nil
-		}
-
-		fmt.Printf("\n%s Found %d dependency cycles:\n\n", ui.RenderFail("⚠"), len(cycles))
-		for i, cycle := range cycles {
-			fmt.Printf("%d. Cycle involving:\n", i+1)
-			for _, issue := range cycle {
-				fmt.Printf("   - %s: %s\n", issue.ID, issue.Title)
-			}
-			fmt.Println()
-		}
-		return nil
+		// Both routes, one body: the only difference between them is which
+		// accessor answers, and that is inside openCycleDetector.
+		return runDepCycles()
 	},
 }
 
@@ -1428,103 +1490,6 @@ func formatTreeNode(node *types.TreeNode, isBlocked bool) string {
 	return line
 }
 
-// filterTreeByStatus filters the tree to only include nodes with the given status
-// Note: keeps parent chain to maintain tree structure
-func filterTreeByStatus(tree []*types.TreeNode, status types.Status) []*types.TreeNode {
-	if len(tree) == 0 {
-		return tree
-	}
-
-	// First pass: identify which nodes match the status
-	matches := make(map[string]bool)
-	for _, node := range tree {
-		if node.Status == status {
-			matches[node.ID] = true
-		}
-	}
-
-	// If no matches, return empty
-	if len(matches) == 0 {
-		return []*types.TreeNode{}
-	}
-
-	// Second pass: keep matching nodes and their ancestors
-	// Build parent map
-	parentOf := make(map[string]string)
-	for _, node := range tree {
-		if node.ParentID != "" && node.ParentID != node.ID {
-			parentOf[node.ID] = node.ParentID
-		}
-	}
-
-	// Mark all ancestors of matching nodes
-	keep := make(map[string]bool)
-	for id := range matches {
-		keep[id] = true
-		// Walk up to root
-		current := id
-		for {
-			parent, ok := parentOf[current]
-			if !ok || parent == current {
-				break
-			}
-			keep[parent] = true
-			current = parent
-		}
-	}
-
-	// Filter the tree
-	var filtered []*types.TreeNode
-	for _, node := range tree {
-		if keep[node.ID] {
-			filtered = append(filtered, node)
-		}
-	}
-
-	return filtered
-}
-
-// mergeBidirectionalTrees merges up and down trees into a single visualization
-// The root appears once, with dependencies shown below and dependents shown above
-func mergeBidirectionalTrees(downTree, upTree []*types.TreeNode, rootID string) []*types.TreeNode {
-	// For bidirectional display, we show the down tree (dependencies) as the main tree
-	// and add a visual separator with the up tree (dependents)
-	//
-	// For simplicity, we'll just return the down tree for now
-	// A more sophisticated implementation would show both with visual separation
-
-	// Find root in each tree
-	var result []*types.TreeNode
-
-	// Add dependents section if any (excluding root)
-	hasUpNodes := false
-	for _, node := range upTree {
-		if node.ID != rootID {
-			hasUpNodes = true
-			break
-		}
-	}
-
-	if hasUpNodes {
-		// Add a header node for dependents section
-		// We'll mark these with negative depth for visual distinction
-		for _, node := range upTree {
-			if node.ID == rootID {
-				continue // Skip root, we'll add it once from down tree
-			}
-			// Clone node and mark it as "up" direction
-			upNode := *node
-			upNode.Depth = node.Depth // Keep original depth
-			result = append(result, &upNode)
-		}
-	}
-
-	// Add the down tree (dependencies)
-	result = append(result, downTree...)
-
-	return result
-}
-
 // validateExternalRef validates the format of an external dependency reference.
 // Valid format: external:<project>:<capability>
 func validateExternalRef(ref string) error {
@@ -1573,20 +1538,26 @@ func init() {
 	depCmd.Flags().StringP("blocks", "b", "", "Issue ID that this issue blocks (shorthand for: bd dep add <blocked> <blocker>)")
 	depCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
 
-	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes)")
+	depAddCmd.Flags().StringP("type", "t", "blocks", "Dependency type (blocks|tracks|related|parent-child|discovered-from|until|caused-by|validates|relates-to|supersedes); 'blocked-by' and 'depends-on' are accepted as aliases for 'blocks'")
 	depAddCmd.Flags().String("blocked-by", "", "Issue ID that blocks the first issue (alternative to positional arg)")
 	depAddCmd.Flags().String("depends-on", "", "Issue ID that the first issue depends on (alias for --blocked-by)")
 	depAddCmd.Flags().String("file", "", "Read dependency edges from JSONL file, or '-' for stdin")
 	depAddCmd.Flags().Bool("no-cycle-check", false, "Skip per-edge cycle checks for speed (bulk wiring); bulk --file adds still run one final whole-graph check before commit")
 
-	depTreeCmd.Flags().Bool("show-all-paths", false, "Show all paths to nodes (no deduplication for diamond dependencies)")
+	// DEPRECATED NO-OP, and it always was one: nothing has ever read this flag,
+	// so a diamond has always been rendered under one parent only. The role's
+	// contract states the first-visit rule as a promise
+	// (issueops/treewalker.go, TreeResult.Nodes) and this flag stays accepted so
+	// no script breaks. Same story as TreeNode.Truncated.
+	depTreeCmd.Flags().Bool("show-all-paths", false, "Deprecated no-op: accepted and ignored. A node reached by two paths is shown once, under the first.")
 	depTreeCmd.Flags().IntP("max-depth", "d", 50, "Maximum tree depth to display (safety limit)")
 	depTreeCmd.Flags().Bool("reverse", false, "Show dependent tree (deprecated: use --direction=up)")
 	depTreeCmd.Flags().String("direction", "", "Tree direction: 'down' (dependencies), 'up' (dependents), or 'both'")
 	depTreeCmd.Flags().String("status", "", "Filter to only show issues with this status (open, in_progress, blocked, deferred, closed)")
 	depTreeCmd.Flags().String("format", "", "Output format: 'mermaid' for Mermaid.js flowchart")
-	// Defensive row cap (be-x42v): applied to TreeNode count after the tree is built.
-	addMaxRowsFlag(depTreeCmd)
+	// Defensive row cap (be-x42v): applied to the node count after the walk, by
+	// the role, on BOTH routes — hence the routed variant of the flag.
+	addRoutedMaxRowsFlag(depTreeCmd)
 	// Note: --type flag intentionally omitted from depTreeCmd — TreeNode lacks
 	// dependency type info so filtering is not possible. Use 'bd dep list --type' instead.
 

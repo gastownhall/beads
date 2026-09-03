@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -181,4 +182,47 @@ func TestBuildProxiedServerClientInfo(t *testing.T) {
 		assert.Equal(t, 3306, loaded.External.Port)
 		assert.True(t, loaded.External.TLSRequired)
 	})
+}
+
+func TestComposeProxiedServerMetadataJSON_TeamServer(t *testing.T) {
+	t.Run("team-server flag is persisted and round-trips", func(t *testing.T) {
+		body, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
+			dbName:     "beads_team",
+			projectID:  "proj-1",
+			teamServer: true,
+		})
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"dolt_team_server": true`)
+
+		var cfg configfile.Config
+		require.NoError(t, json.Unmarshal(body, &cfg))
+		assert.True(t, cfg.DoltTeamServer)
+		assert.True(t, cfg.IsTeamServerManaged())
+	})
+
+	t.Run("default omits the field and is not team-server managed", func(t *testing.T) {
+		body, err := composeProxiedServerMetadataJSON(proxiedMetadataInputs{
+			dbName:    "beads_team",
+			projectID: "proj-1",
+		})
+		require.NoError(t, err)
+		assert.NotContains(t, string(body), "dolt_team_server")
+
+		var cfg configfile.Config
+		require.NoError(t, json.Unmarshal(body, &cfg))
+		assert.False(t, cfg.IsTeamServerManaged())
+	})
+}
+
+func TestIsTeamServerManaged_RequiresProxiedServerMode(t *testing.T) {
+	cfg := configfile.Config{
+		Backend:        configfile.BackendDolt,
+		DoltMode:       configfile.DoltModeServer,
+		DoltTeamServer: true,
+	}
+	assert.False(t, cfg.IsTeamServerManaged(),
+		"team-server semantics are defined for proxied-server mode only")
+
+	cfg.DoltMode = configfile.DoltModeProxiedServer
+	assert.True(t, cfg.IsTeamServerManaged())
 }
