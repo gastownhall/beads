@@ -149,6 +149,34 @@ func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
 	require.NoError(t, assetErr, "dry-run must not delete assets")
 }
 
+func TestMigrateToProxiedServer_AlreadyProxiedRejectsStaleControl(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+	touchFile(t, filepath.Join(root, "proxy.log"))
+	before := snapshotMigrationTree(t, beadsDir, root)
+	require.Error(t, runMigrateToProxiedServer(false, 0, false))
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
+}
+
+func TestMigrateToProxiedServer_AlreadyProxiedRejectsBadSidecar(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info *configfile.ProxiedServerClientInfo
+	}{
+		{"external", &configfile.ProxiedServerClientInfo{RootPath: "/tmp/ext", External: &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}}},
+		{"mismatch", &configfile.ProxiedServerClientInfo{RootPath: "/tmp/other"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, tc.info))
+			before := snapshotMigrationTree(t, beadsDir)
+			require.Error(t, runMigrateToProxiedServer(false, 0, false))
+			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+		})
+	}
+}
+
 func TestMigrateToProxiedServer_StaleSidecarFailsClosed(t *testing.T) {
 	rootCases := []struct {
 		name string
