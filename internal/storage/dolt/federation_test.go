@@ -86,8 +86,8 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 	// instead of sequentially fixes that without touching the deadline.
 	alphaDir := filepath.Join(baseDir, "town-alpha")
 	betaDir := filepath.Join(baseDir, "town-beta")
-	alphaDB := uniqueTestDBName(t)
-	betaDB := uniqueTestDBName(t)
+	alphaDB := federationDBName(t, "alpha")
+	betaDB := federationDBName(t, "beta")
 
 	type setupResult struct {
 		store   *DoltStore
@@ -231,12 +231,7 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get starting branch: %v", err)
 	}
-
-	start, err := store.CurrentBranch(ctx)
-	if err != nil {
-		t.Fatalf("failed to get starting branch: %v", err)
-	}
-	t.Logf("running on isolated branch %s", start)
+	t.Logf("running on isolated branch %s", startBranch)
 
 	// feature-branch must be unique per test: this store's underlying
 	// database is shared with every other test in the package (see
@@ -329,7 +324,7 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if len(conflicts) > 0 {
 		t.Logf("Merge produced %d conflicts", len(conflicts))
 	}
-	t.Logf("✓ Merged %s into %s", featureBranch, start)
+	t.Logf("✓ Merged %s into %s", featureBranch, startBranch)
 
 	// Verify merge result
 	mergedIssue, err := store.GetIssue(ctx, "vc-001")
@@ -1612,9 +1607,19 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 // setupFederationStore is the single-goroutine convenience wrapper around
 // newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
 // that don't need concurrent town setup and can use t.Fatalf directly.
+// federationDBName gives a town a database name that is unique per run AND
+// still says which town it is. uniqueTestDBName alone is "testdb_<hex>", so
+// alpha and beta were indistinguishable in SHOW DATABASES and in any
+// server-side hunt for leaked test databases -- the per-run uniqueness that
+// makes -count=2 and concurrent binaries safe should not cost that.
+func federationDBName(t *testing.T, town string) string {
+	t.Helper()
+	return uniqueTestDBName(t) + "_" + town
+}
+
 func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
 	t.Helper()
-	store, cleanup, err := newFederationStore(ctx, path, uniqueTestDBName(t), prefix)
+	store, cleanup, err := newFederationStore(ctx, path, federationDBName(t, prefix), prefix)
 	if err != nil {
 		t.Fatalf("%v", err)
 	}
