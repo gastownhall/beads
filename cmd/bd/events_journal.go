@@ -146,7 +146,7 @@ func shouldAutoPruneEventsJournal(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return false
 	}
-	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || isReadOnlyCommand(cmd.Name()) {
+	if !runsPostCommandMaintenance(cmd.Name(), readonlyMode) || commandIsEffectivelyReadOnly(cmd.Name()) {
 		return false
 	}
 	if isPreviewCommand(cmd) || isEventsJournalCommand(cmd) {

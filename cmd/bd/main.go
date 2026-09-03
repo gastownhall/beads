@@ -105,6 +105,13 @@ var (
 	// Thread-safe via atomic.Bool to avoid data races in concurrent flush operations.
 	commandDidWrite atomic.Bool
 
+	// sqlOpenedReadOnly is set when `bd sql` was classified read-only at
+	// store-open time (GH#4121). The post-run maintenance gates key on the
+	// static readOnlyCommands set, which `sql` is deliberately absent from;
+	// this flag carries the dynamic classification to them so a read-only
+	// query does not trigger auto-export, auto-push, or journal pruning.
+	sqlOpenedReadOnly atomic.Bool
+
 	// commandMayEmptyJSONLExport is set by destructive maintenance commands
 	// after they actually delete rows, allowing post-run auto-export to record
 	// an intentional empty JSONL artifact instead of treating it as ambiguous.
@@ -886,6 +893,11 @@ var rootCmd = &cobra.Command{
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) (retErr error) {
 		applyNoColorFlag()
 
+		// Reset the dynamic sql read-only flag before anything can return
+		// early: in-process command reuse must never see a stale true on a
+		// later write command (it would skip auto-export/push/prune).
+		sqlOpenedReadOnly.Store(false)
+
 		// Initialize CommandContext to hold runtime state (replaces scattered globals)
 		initCommandContext()
 
@@ -1380,6 +1392,19 @@ var rootCmd = &cobra.Command{
 		previewMode := isPreviewCommand(cmd)
 		policy := effectiveRootStorePolicy(cmd.Name(), readonlyMode)
 		useReadOnly := policy.readOnly || previewMode
+
+		// `bd sql` with a single provably read-only statement opens the store
+		// read-only, matching the readOnlyCommands classification (GH#4121).
+		// The classifier is conservative: writes, multi-statement batches, and
+		// anything unrecognized keep the writable open, so write SQL behavior
+		// (including CheckReadonly) is unchanged. Proxied-server mode is
+		// unaffected in practice: its sql path runs through the UOW provider,
+		// not this store, and ReadOnly here matches what classified read
+		// commands like `bd list` already pass in that mode.
+		if sqlCommandWantsReadOnlyStore(cmd.Name(), args) {
+			useReadOnly = true
+			sqlOpenedReadOnly.Store(true)
+		}
 
 		// dc-6jaq: consult the MIGRATION-FREEZE sentinel here, before any of
 		// this hook's own store-touching side effects — trackBdVersion below
@@ -1891,7 +1916,7 @@ var rootCmd = &cobra.Command{
 				// Auto-push: push to Dolt remote if enabled and due.
 				// Skip for read-only commands to avoid unnecessary network operations
 				// and metadata writes on commands like bd list/show/ready (GH#2191).
-				if !isReadOnlyCommand(cmd.Name()) {
+				if !commandIsEffectivelyReadOnly(cmd.Name()) {
 					runPostRunAutoPush(rootCtx)
 				}
 
@@ -1990,7 +2015,15 @@ func shouldRunPostCommandAutoExport(cmd *cobra.Command) bool {
 	if cmd == nil {
 		return true
 	}
-	return !isReadOnlyCommand(cmd.Name())
+	return !commandIsEffectivelyReadOnly(cmd.Name())
+}
+
+// commandIsEffectivelyReadOnly extends the static readOnlyCommands
+// classification with the dynamic per-invocation one: `bd sql` joins the
+// read-only set only when its statement was classified read-only at
+// store-open time (GH#4121).
+func commandIsEffectivelyReadOnly(cmdName string) bool {
+	return isReadOnlyCommand(cmdName) || sqlOpenedReadOnly.Load()
 }
 
 func shouldRunAutoImportJSONL(cmd *cobra.Command, s storage.DoltStorage, useReadOnly, globalFlag, serverMode bool) bool {
