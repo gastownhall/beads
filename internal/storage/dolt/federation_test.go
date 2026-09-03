@@ -43,11 +43,30 @@ import (
 //
 // See HOP docs: architecture/FEDERATION.md for full federation spec.
 
+// federationIsolationTimeout bounds TestFederationDatabaseIsolation's alpha/beta
+// store setup. It replaces a fixed 2*time.Minute context.WithTimeout that
+// reproducibly failed under ambient multi-agent host contention on this shared
+// rig (be-8zggi round 2: 6/6 failures, ~120s "context deadline exceeded"
+// creating the alpha store, at load average up to 143.96 with 30 concurrent
+// dolt sql-server processes) even though the same setup completes in well
+// under 10s in isolation (round 2's probe measured ~6.1s concurrent; round 3's
+// baseline measured 7.78s end-to-end). Round 2's base-ref comparison ruled out
+// migration-cost growth as the cause -- the pre-fix code failed identically
+// under the same conditions -- so this is sized for contention headroom, not
+// a bigger cold-init budget. In-package precedent: concurrent_test.go's
+// concurrentTestTimeout (60s, "longer than regular tests to allow for
+// contention") and initschema_idempotent_test.go's 3*time.Minute budget for a
+// single cold schema-init. This test pays that same per-town cold-init cost
+// twice, concurrently, so 5 minutes keeps comfortable headroom above both the
+// single-init precedent and the >=4-minute floor
+// TestFederationIsolationTimeoutHasContentionHeadroom enforces.
+const federationIsolationTimeout = 5 * time.Minute
+
 // TestFederationDatabaseIsolation verifies that two DoltStores have isolated databases
 func TestFederationDatabaseIsolation(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), federationIsolationTimeout)
 	defer cancel()
 
 	baseDir, err := os.MkdirTemp("", "federation-isolation-*")
@@ -56,15 +75,50 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 	}
 	defer os.RemoveAll(baseDir)
 
-	// Setup Town Alpha
+	// Alpha and beta are independent databases (see newFederationStore) with
+	// no setup dependency on each other. Unlike most of this package's tests,
+	// which reuse TestMain's single pre-migrated shared database via
+	// branch-per-test isolation, each town here pays its own full cold
+	// schema/migration chain. As that chain has grown, two sequential cold
+	// inits plus the test body's own work stopped reliably fitting inside
+	// this ctx's budget (be-8zggi round 2: reproduced 2/2 as context deadline
+	// exceeded creating the alpha store). Running the two chains concurrently
+	// instead of sequentially fixes that without touching the deadline.
 	alphaDir := filepath.Join(baseDir, "town-alpha")
-	alphaStore, alphaCleanup := setupFederationStore(t, ctx, alphaDir, "alpha")
-	defer alphaCleanup()
-
-	// Setup Town Beta
 	betaDir := filepath.Join(baseDir, "town-beta")
-	betaStore, betaCleanup := setupFederationStore(t, ctx, betaDir, "beta")
-	defer betaCleanup()
+	alphaDB := federationDBName(t, "alpha")
+	betaDB := federationDBName(t, "beta")
+
+	type setupResult struct {
+		store   *DoltStore
+		cleanup func()
+		err     error
+	}
+	alphaCh := make(chan setupResult, 1)
+	betaCh := make(chan setupResult, 1)
+	go func() {
+		store, cleanup, err := newFederationStore(ctx, alphaDir, alphaDB, "alpha")
+		alphaCh <- setupResult{store, cleanup, err}
+	}()
+	go func() {
+		store, cleanup, err := newFederationStore(ctx, betaDir, betaDB, "beta")
+		betaCh <- setupResult{store, cleanup, err}
+	}()
+	alphaRes, betaRes := <-alphaCh, <-betaCh
+
+	if alphaRes.store != nil {
+		defer alphaRes.cleanup()
+	}
+	if betaRes.store != nil {
+		defer betaRes.cleanup()
+	}
+	if alphaRes.err != nil {
+		t.Fatalf("failed to create alpha store: %v", alphaRes.err)
+	}
+	if betaRes.err != nil {
+		t.Fatalf("failed to create beta store: %v", betaRes.err)
+	}
+	alphaStore, betaStore := alphaRes.store, betaRes.store
 
 	t.Logf("Alpha path: %s", alphaStore.Path())
 	t.Logf("Beta path: %s", betaStore.Path())
@@ -136,6 +190,26 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 	t.Logf("✓ Beta sees beta-001: %q", betaCheck.Title)
 }
 
+// TestFederationIsolationTimeoutHasContentionHeadroom guards
+// federationIsolationTimeout against being reflexively shrunk back toward the
+// fixed 2*time.Minute deadline it replaced in TestFederationDatabaseIsolation.
+// That fixed deadline reproducibly failed under ambient multi-agent host
+// contention on this shared rig (be-8zggi round 2: 6/6 failures, ~120s
+// "context deadline exceeded" creating the alpha store, at load average up to
+// 143.96 with 30 concurrent dolt sql-server processes) even though the same
+// setup completes in well under 10s in isolation -- round 2's own base-ref
+// comparison proved this was contention, not cost growth (the pre-fix code
+// failed identically under the same conditions). The replacement must keep
+// real headroom for contention recurring, not just re-fit whatever load
+// happens to exist right now, so the floor is 2x the deadline it replaced.
+func TestFederationIsolationTimeoutHasContentionHeadroom(t *testing.T) {
+	const replacedDeadline = 2 * time.Minute
+	if federationIsolationTimeout < 2*replacedDeadline {
+		t.Fatalf("federationIsolationTimeout = %s, want >= %s (2x the fixed %s context.WithTimeout deadline it replaced in TestFederationDatabaseIsolation, so the budget has real headroom for ambient host contention instead of just re-fitting current load — see be-8zggi round 2)",
+			federationIsolationTimeout, 2*replacedDeadline, replacedDeadline)
+	}
+}
+
 // TestFederationVersionControlAPIs tests the Dolt version control operations
 // needed for federation (branch, commit, merge)
 func TestFederationVersionControlAPIs(t *testing.T) {
@@ -157,6 +231,26 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get starting branch: %v", err)
 	}
+	t.Logf("running on isolated branch %s", startBranch)
+
+	// feature-branch must be unique per test: this store's underlying
+	// database is shared with every other test in the package (see
+	// setupTestStore), so a hardcoded name collides under t.Parallel.
+	featureBranch := "feature-branch-" + uniqueTestDBName(t)
+	defer func() {
+		// Runs before the outer `defer cleanup()` (LIFO), so the store
+		// connection is still open here.
+		_ = store.DeleteBranch(ctx, featureBranch)
+		branches, err := store.ListBranches(ctx)
+		if err != nil {
+			return
+		}
+		for _, b := range branches {
+			if b == featureBranch {
+				t.Errorf("feature branch %s was not cleaned up", featureBranch)
+			}
+		}
+	}()
 
 	// Create initial issue
 	issue := &types.Issue{
@@ -176,13 +270,13 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	}
 
 	// Test branch creation
-	if err := store.Branch(ctx, "feature-branch"); err != nil {
+	if err := store.Branch(ctx, featureBranch); err != nil {
 		t.Fatalf("failed to create branch: %v", err)
 	}
-	t.Log("✓ Created feature-branch")
+	t.Logf("✓ Created %s", featureBranch)
 
 	// Test checkout
-	if err := store.Checkout(ctx, "feature-branch"); err != nil {
+	if err := store.Checkout(ctx, featureBranch); err != nil {
 		t.Fatalf("failed to checkout: %v", err)
 	}
 
@@ -191,8 +285,8 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get current branch: %v", err)
 	}
-	if branch != "feature-branch" {
-		t.Errorf("expected feature-branch, got %s", branch)
+	if branch != featureBranch {
+		t.Errorf("expected %s, got %s", featureBranch, branch)
 	}
 	t.Logf("✓ Checked out to %s", branch)
 
@@ -222,15 +316,15 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	}
 	t.Log("✓ Original branch unchanged")
 
-	// Merge feature branch
-	conflicts, err := store.Merge(ctx, "feature-branch")
+	// Merge feature branch into the isolated starting branch
+	conflicts, err := store.Merge(ctx, featureBranch)
 	if err != nil {
 		t.Fatalf("failed to merge: %v", err)
 	}
 	if len(conflicts) > 0 {
 		t.Logf("Merge produced %d conflicts", len(conflicts))
 	}
-	t.Log("✓ Merged feature-branch into main")
+	t.Logf("✓ Merged %s into %s", featureBranch, startBranch)
 
 	// Verify merge result
 	mergedIssue, err := store.GetIssue(ctx, "vc-001")
@@ -1510,10 +1604,40 @@ func TestFilteredPushStagingBranchCleanupOnError(t *testing.T) {
 	}
 }
 
-// setupFederationStore creates a Dolt store for federation testing
+// setupFederationStore is the single-goroutine convenience wrapper around
+// newFederationStore for callers (e.g. pull_branch_tracking_integration_test.go)
+// that don't need concurrent town setup and can use t.Fatalf directly.
+// federationDBName gives a town a database name that is unique per run AND
+// still says which town it is. uniqueTestDBName alone is "testdb_<hex>", so
+// alpha and beta were indistinguishable in SHOW DATABASES and in any
+// server-side hunt for leaked test databases -- the per-run uniqueness that
+// makes -count=2 and concurrent binaries safe should not cost that.
+func federationDBName(t *testing.T, town string) string {
+	t.Helper()
+	return uniqueTestDBName(t) + "_" + town
+}
+
 func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string) (*DoltStore, func()) {
 	t.Helper()
+	store, cleanup, err := newFederationStore(ctx, path, federationDBName(t, prefix), prefix)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	return store, cleanup
+}
 
+// newFederationStore creates a Dolt store for federation testing against the
+// given pre-generated database name. Each town gets its own database (not
+// just its own `path`): dolt.New has a single exit, newServerMode, where
+// cfg.Path is inert — every store in a test process talks to the same Dolt
+// server, so the database name is the only thing that actually isolates one
+// town's data from another's.
+//
+// Returns an error instead of calling t.Fatalf: TestFederationDatabaseIsolation
+// runs one of these per town concurrently (each pays a full cold
+// schema/migration chain), and testing.T's FailNow must only be called from
+// the goroutine running the test itself, not one it spawns.
+func newFederationStore(ctx context.Context, path, dbName, prefix string) (*DoltStore, func(), error) {
 	cfg := &Config{
 		Path:           path,
 		CommitterName:  "town-" + prefix,
@@ -1522,31 +1646,30 @@ func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string
 		// always connects in server mode, and TestMain runs one shared Dolt
 		// server for the whole test binary, so Path alone does not isolate
 		// two stores — Database does. A shared literal "beads" here let every
-		// town silently attach to the same database (be-3c78s).
-		Database:        "beads_test_federation_" + prefix,
+		// town silently attach to the same database (be-3c78s). The name is
+		// generated by the caller (uniqueTestDBName) so concurrent callers
+		// never race on the same one.
+		Database:        dbName,
 		CreateIfMissing: true, // test creates fresh database
 	}
 
 	store, err := New(ctx, cfg)
 	if err != nil {
-		t.Fatalf("failed to create %s store: %v", prefix, err)
+		return nil, nil, fmt.Errorf("failed to create %s store: %w", prefix, err)
 	}
 
 	// Set up issue prefix
 	if err := store.SetConfig(ctx, "issue_prefix", prefix); err != nil {
 		store.Close()
-		t.Fatalf("failed to set prefix for %s: %v", prefix, err)
+		return nil, nil, fmt.Errorf("failed to set prefix for %s: %w", prefix, err)
 	}
 
-	// Initial commit to establish main branch
-	if err := store.Commit(ctx, "Initialize "+prefix+" town"); err != nil {
-		// Ignore if nothing to commit
-		t.Logf("Initial commit for %s: %v", prefix, err)
-	}
+	// Initial commit to establish main branch; ignore if nothing to commit.
+	_ = store.Commit(ctx, "Initialize "+prefix+" town")
 
 	cleanup := func() {
 		store.Close()
 	}
 
-	return store, cleanup
+	return store, cleanup, nil
 }
