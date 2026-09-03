@@ -400,6 +400,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ParentID`. Programmatic callers that set them got unfiltered results back and
   no error — a full list where a scoped one was asked for.
 
+- **The store-requiring command path ignored `BEADS_DB`/`BD_DB` and silently
+  read the ambient workspace instead** (be-git2o). `selectedNoDBBeadsDir`
+  already resolved an explicit `BEADS_DB`/`BD_DB` target on the no-DB path,
+  but the store-requiring path left `dbPath` empty until the ambient
+  discovery block ran `prepareSelectedCommandContext`, which sets
+  `BEADS_DIR`. `beads.FindDatabasePath()` takes its `BEADS_DIR` branch first
+  and returns early, so its own `BEADS_DB` handling was never reached — and
+  it has no `BD_DB` handling at all. `bd where` and `bd list` could therefore
+  disagree about which workspace was selected: `where` honored the explicit
+  target, `list` silently read whatever `.beads` directory the ambient
+  workspace resolved to. Both variables are now resolved before ambient
+  discovery runs, matching the no-DB path.
+
 ### Documentation
 
 - **The heartbeat/re-home invariant and the two states it can strand are now
