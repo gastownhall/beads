@@ -566,3 +566,37 @@ func TestBuildIssueFilterClauses_CombinedFilters(t *testing.T) {
 		t.Errorf("expected 6 args, got %d", len(args))
 	}
 }
+
+func TestBuildIssueFilterClauses_EphemeralTierFilter(t *testing.T) {
+	t.Parallel()
+
+	// The tier discriminator, not the raw flag: ephemeral-tier admits typed
+	// wisps whose minting never set the ephemeral flag, and the durable tier
+	// excludes them — on the operation where the boundary decides which rows
+	// are deleted (bd purge / bd prune).
+	for _, tt := range []struct {
+		name string
+		tier bool
+		want string
+	}{
+		{"ephemeral tier", true, "(ephemeral = 1 OR (wisp_type IS NOT NULL AND wisp_type <> ''))"},
+		{"durable tier", false, "((ephemeral = 0 OR ephemeral IS NULL) AND (wisp_type = '' OR wisp_type IS NULL))"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tier := tt.tier
+			clauses, args, err := BuildIssueFilterClauses("", types.IssueFilter{EphemeralTier: &tier}, IssuesFilterTables)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(clauses) != 1 {
+				t.Fatalf("expected 1 clause, got %d: %v", len(clauses), clauses)
+			}
+			if clauses[0] != tt.want {
+				t.Errorf("clause = %q, want %q", clauses[0], tt.want)
+			}
+			if len(args) != 0 {
+				t.Errorf("expected no args, got %d: %v", len(args), args)
+			}
+		})
+	}
+}

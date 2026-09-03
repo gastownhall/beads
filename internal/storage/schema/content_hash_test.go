@@ -109,7 +109,9 @@ func TestMigrationWorkNeededAddsContentHashColumnOnUpToDateDB(t *testing.T) {
 	defer db.Close()
 
 	// Both sources are already at their latest version...
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	// ...but schema_migrations predates the content_hash column.
@@ -139,7 +141,9 @@ func TestMigrationWorkNotNeededWhenContentHashColumnsPresent(t *testing.T) {
 	}
 	defer db.Close()
 
+	expectCursorProbe(mock, "schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations", "version", LatestVersion())
+	expectCursorProbe(mock, "ignored_schema_migrations", true)
 	expectScalar(mock, "SELECT COALESCE(MAX(version), 0) FROM ignored_schema_migrations", "version", LatestIgnoredVersion())
 	expectIgnoredSentinelProbes(mock, true)
 	mock.ExpectQuery(`SHOW COLUMNS FROM schema_migrations LIKE 'content_hash'`).

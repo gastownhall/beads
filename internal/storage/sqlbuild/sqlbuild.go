@@ -27,6 +27,14 @@ var (
 	WispsFilterTables  = FilterTables{Main: "wisps", Labels: "wisp_labels", Dependencies: "wisp_dependencies", Comments: "wisp_comments"}
 )
 
+// OptionalWispTable reports whether name is a wisp-plane table a database may
+// legitimately not have, which is the set a wisp query may treat as "no wisps"
+// rather than a failure. Both stacks read it so the two cannot disagree about
+// what a missing table means.
+func OptionalWispTable(name string) bool {
+	return strings.EqualFold(name, "wisps") || strings.EqualFold(name, "wisp_dependencies")
+}
+
 // DepTargetExpr resolves a dependency row's target across the three
 // mutually-exclusive target columns.
 const DepTargetExpr = "COALESCE(depends_on_issue_id, depends_on_wisp_id, depends_on_external)"
