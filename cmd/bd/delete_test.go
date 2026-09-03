@@ -5,104 +5,91 @@ package main
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
+	"github.com/steveyegge/beads/issueops"
 )
 
-func TestReadIssueIDsFromFile(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "bd-test-delete-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
+func TestDeletePreviewJSONIsPayloadBlind(t *testing.T) {
+	ensureCleanGlobalState(t)
+	oldQuiet := quietFlag
+	quietFlag = false
+	t.Cleanup(func() { quietFlag = oldQuiet })
+
+	issues := map[string]*types.Issue{
+		"test-delete-1": {
+			ID:          "test-delete-1",
+			Title:       "sensitive title must not appear",
+			Description: "sensitive payload must not appear",
+		},
 	}
-	defer os.RemoveAll(tmpDir)
+	result := &issueops.DeleteResult{Deleted: 1, Dependencies: 2}
 
-	t.Run("read valid IDs from file", func(t *testing.T) {
-		testFile := filepath.Join(tmpDir, "ids.txt")
-		content := "bd-1\nbd-2\nbd-3\n"
-		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to write test file: %v", err)
-		}
-
-		ids, err := readIssueIDsFromFile(testFile)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		if len(ids) != 3 {
-			t.Errorf("Expected 3 IDs, got %d", len(ids))
-		}
-
-		expected := []string{"bd-1", "bd-2", "bd-3"}
-		for i, id := range ids {
-			if id != expected[i] {
-				t.Errorf("Expected ID %s at position %d, got %s", expected[i], i, id)
-			}
-		}
+	out := captureStdout(t, func() error {
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, true)
 	})
 
-	t.Run("skip empty lines and comments", func(t *testing.T) {
-		testFile := filepath.Join(tmpDir, "ids_with_comments.txt")
-		content := "bd-1\n\n# This is a comment\nbd-2\n  \nbd-3\n"
-		if err := os.WriteFile(testFile, []byte(content), 0644); err != nil {
-			t.Fatalf("Failed to write test file: %v", err)
+	for _, secret := range []string{"sensitive title", "sensitive payload"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("JSON preview leaked %q: %s", secret, out)
 		}
+	}
+	for _, required := range []string{"\"issue_ids\"", "\"would_delete\"", "\"dry_run\""} {
+		if !strings.Contains(out, required) {
+			t.Errorf("JSON preview missing %s: %s", required, out)
+		}
+	}
 
-		ids, err := readIssueIDsFromFile(testFile)
-		if err != nil {
-			t.Fatalf("Unexpected error: %v", err)
-		}
-
-		if len(ids) != 3 {
-			t.Errorf("Expected 3 IDs (skipping comments/empty), got %d", len(ids))
-		}
+	quietFlag = true
+	quietOut := captureStdout(t, func() error {
+		return outputDeletionPreview([]string{"test-delete-1"}, issues, false, true, result, nil, false)
 	})
-
-	t.Run("handle non-existent file", func(t *testing.T) {
-		_, err := readIssueIDsFromFile(filepath.Join(tmpDir, "nonexistent.txt"))
-		if err == nil {
-			t.Error("Expected error for non-existent file")
-		}
-	})
+	if quietOut != "" {
+		t.Fatalf("quiet preview produced output: %s", quietOut)
+	}
 }
 
-func TestUniqueStrings(t *testing.T) {
-	t.Run("remove duplicates", func(t *testing.T) {
-		input := []string{"a", "b", "a", "c", "b", "d"}
-		result := uniqueStrings(input)
+func TestDeleteBatchDryRunHonorsForce(t *testing.T) {
+	tmpDir := t.TempDir()
+	s := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
+	ctx := context.Background()
 
-		if len(result) != 4 {
-			t.Errorf("Expected 4 unique strings, got %d", len(result))
-		}
+	parent := &types.Issue{Title: "parent", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	child := &types.Issue{Title: "child", Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask}
+	if err := s.CreateIssue(ctx, parent, "test"); err != nil {
+		t.Fatalf("create parent: %v", err)
+	}
+	if err := s.CreateIssue(ctx, child, "test"); err != nil {
+		t.Fatalf("create child: %v", err)
+	}
+	if err := s.AddDependency(ctx, &types.Dependency{IssueID: child.ID, DependsOnID: parent.ID, Type: types.DepBlocks}, "test"); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
 
-		// Verify all unique values are present
-		seen := make(map[string]bool)
-		for _, s := range result {
-			if seen[s] {
-				t.Errorf("Duplicate found in result: %s", s)
-			}
-			seen[s] = true
-		}
-	})
+	oldStore, oldRootCtx, oldJSON, oldQuiet := store, rootCtx, jsonOutput, quietFlag
+	store, rootCtx, jsonOutput, quietFlag = s, ctx, false, true
+	t.Cleanup(func() { store, rootCtx, jsonOutput, quietFlag = oldStore, oldRootCtx, oldJSON, oldQuiet })
 
-	t.Run("handle empty input", func(t *testing.T) {
-		result := uniqueStrings([]string{})
-		if len(result) != 0 {
-			t.Errorf("Expected empty result, got %d items", len(result))
-		}
-	})
-
-	t.Run("handle all unique", func(t *testing.T) {
-		input := []string{"a", "b", "c"}
-		result := uniqueStrings(input)
-
-		if len(result) != 3 {
-			t.Errorf("Expected 3 items, got %d", len(result))
-		}
-	})
+	if err := deleteBatch(nil, []string{parent.ID}, true, true, false, false, false); err != nil {
+		t.Fatalf("forced dry-run rejected a dependent issue: %v", err)
+	}
+	if issue, err := s.GetIssue(ctx, parent.ID); err != nil || issue == nil {
+		t.Fatalf("forced dry-run deleted parent: issue=%v err=%v", issue, err)
+	}
+	if issue, err := s.GetIssue(ctx, child.ID); err != nil || issue == nil {
+		t.Fatalf("forced dry-run deleted child: issue=%v err=%v", issue, err)
+	}
+	deps, err := s.GetDependencies(ctx, child.ID)
+	if err != nil {
+		t.Fatalf("get dependencies after dry-run: %v", err)
+	}
+	if len(deps) != 1 {
+		t.Fatalf("forced dry-run changed dependencies: got %d, want 1", len(deps))
+	}
 }
 
 func TestBulkDeleteNoResurrection(t *testing.T) {

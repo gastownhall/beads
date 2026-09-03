@@ -57,13 +57,12 @@ func formatPrettyIssue(issue *types.Issue) string {
 	}
 
 	// Format: STATUS_ICON ID PRIORITY [Type] Title
-	// Priority uses ● icon with color, no brackets needed
 	// Closed issues: entire line is muted
 	if issue.Status == types.StatusClosed {
 		return fmt.Sprintf("%s %s %s %s%s",
 			statusIcon,
 			ui.RenderMuted(issue.ID),
-			ui.RenderMuted(fmt.Sprintf("● P%d", issue.Priority)),
+			ui.RenderMuted(fmt.Sprintf("P%d", issue.Priority)),
 			ui.RenderMuted(string(issue.IssueType)),
 			ui.RenderMuted(" "+issue.Title))
 	}
@@ -103,7 +102,15 @@ func formatIssueLong(buf *strings.Builder, issue *types.Issue, labels []string, 
 	if issue.Assignee != "" {
 		buf.WriteString(fmt.Sprintf("  Assignee: %s\n", issue.Assignee))
 	}
-	if desc := strings.TrimSpace(issue.Description); desc != "" {
+	// This is the one text rendering in the tree that prints a field --brief
+	// drops, so it is the one that has to say so. Keyed off the ROW, not off
+	// the flag: IsLitePartial travels with the issue, so a row that arrived
+	// projected reads the same here whichever door set it. Without this the
+	// listing is indistinguishable from one whose issues have no description,
+	// which is the ambiguity the flag is otherwise careful to avoid.
+	if issue.IsLitePartial {
+		buf.WriteString("  Description: (omitted by --brief)\n")
+	} else if desc := strings.TrimSpace(issue.Description); desc != "" {
 		buf.WriteString("  Description:\n")
 		for _, line := range strings.Split(desc, "\n") {
 			buf.WriteString(fmt.Sprintf("    %s\n", line))

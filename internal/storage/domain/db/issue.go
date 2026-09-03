@@ -16,6 +16,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
+	publicops "github.com/steveyegge/beads/issueops"
 )
 
 func NewIssueSQLRepository(runner Runner) domain.IssueSQLRepository {
@@ -37,7 +38,7 @@ var _ domain.IssueSQLRepository = (*issueSQLRepositoryImpl)(nil)
 const issueSelectColumns = sqlbuild.IssueSelectColumns
 
 var allowedUpdateFields = map[string]struct{}{
-	"status": {}, "priority": {}, "title": {}, "assignee": {},
+	"status": {}, "priority": {}, "title": {}, "assignee": {}, "owner": {},
 	"description": {}, "design": {}, "acceptance_criteria": {}, "notes": {},
 	"issue_type": {}, "estimated_minutes": {}, "external_ref": {}, "spec_id": {},
 	"started_at": {}, "closed_at": {}, "close_reason": {}, "closed_by_session": {},
@@ -66,14 +67,33 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}
 
 	table := pickIssueTable(opts.UseWispsTable)
+	if opts.CreateOnly {
+		if err := issueops.EnsureIssueIDAvailableInTx(ctx, r.runner, issue.ID); err != nil {
+			return err
+		}
+		if err := issueops.InsertIssueStrictInTx(ctx, r.runner, table, issue); err != nil {
+			return err
+		}
+		if err := r.events.Record(ctx, domain.Event{
+			IssueID: issue.ID,
+			Type:    types.EventCreated,
+			Actor:   actor,
+		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+			return err
+		}
+		return issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor)
+	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
 	}
-	return r.events.Record(ctx, domain.Event{
+	if err := r.events.Record(ctx, domain.Event{
 		IssueID: issue.ID,
 		Type:    types.EventCreated,
 		Actor:   actor,
-	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable})
+	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
+		return err
+	}
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor)
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -85,6 +105,33 @@ func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*type
 	return nil
 }
 
+// PromoteFromEphemeral promotes an active wisp into the Dolt-versioned issues
+// plane in place: same id, wisp_type retained, labels/dependencies/events/
+// comments carried across to the permanent tables, inbound wisp-targeted
+// dependency edges retargeted, and blocked state recomputed. It delegates to
+// the exact issueops implementation the classic (direct/embedded) route runs,
+// so the two modes cannot drift. The issueops error is returned unwrapped on
+// purpose: the CLI surfaces it verbatim ("wisp <id> not found"), and that
+// text is part of the classic error contract.
+func (r *issueSQLRepositoryImpl) PromoteFromEphemeral(ctx context.Context, id, actor string) error {
+	if id == "" {
+		return errors.New("db: PromoteFromEphemeral: id must not be empty")
+	}
+	return issueops.PromoteFromEphemeralInTx(ctx, r.runner, id, actor)
+}
+
+func (r *issueSQLRepositoryImpl) MovePersistence(ctx context.Context, id string, mode types.PersistenceMode, actor string) (bool, error) {
+	issue, err := issueops.GetIssueInTx(ctx, r.runner, id)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: get issue: %w", id, err)
+	}
+	result, err := issueops.MoveIssuePersistenceInTx(ctx, r.runner, issue, mode, actor)
+	if err != nil {
+		return false, fmt.Errorf("db: MovePersistence %s: %w", id, err)
+	}
+	return result.Changed, nil
+}
+
 func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates map[string]any, actor string, opts domain.IssueTableOpts) error {
 	if id == "" {
 		return errors.New("db: Update: id must not be empty")
@@ -92,6 +139,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	if len(updates) == 0 {
 		return nil
 	}
+	updates = cloneUpdateFields(updates)
+	// Pop the close-policy override before anything reads the map as a set of
+	// columns, mirroring issueops.updateIssueInTx. The no-op filter below keeps
+	// unrecognized keys, so a surviving override would reach the field
+	// allowlist and be refused by name.
+	forceClosePolicy := issueops.PopForceClosePolicy(updates)
 
 	// Bound the VARCHAR(255) assignment columns before touching SQL, mirroring
 	// issueops.updateIssueInTx: an over-length assignee/owner aborts with a typed
@@ -108,27 +161,17 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	table := pickIssueTable(opts.UseWispsTable)
 
-	_, statusChanging := updates["status"]
 	mergeOps := issueops.HasMergeOps(updates)
 
-	// When the status changes we need the prior row to reproduce the embedded
-	// lifecycle side effects (issueops.updateIssueInTx): closed_at is set on
-	// close and cleared on reopen, started_at is set on the in_progress
-	// transition, the audit event type is derived from the transition, and
-	// is_blocked is recomputed for neighbors. Read the full old issue once so
-	// all four use the same snapshot; the ErrNoRows contract is preserved.
-	// Merge operations (metadata edits, note appends) need the same read: they
-	// are resolved against the row as seen by THIS unit-of-work transaction.
-	var oldIssue *types.Issue
-	if statusChanging || mergeOps {
-		var err error
-		oldIssue, err = r.Get(ctx, id, opts)
-		if err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
-			}
-			return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
+	// Read the prior row once. Status and merge updates need it for their
+	// transaction-local resolution, and every update uses it to suppress true
+	// no-ops before changing row_lock or recording an event.
+	oldIssue, err := r.Get(ctx, id, opts)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
 		}
+		return fmt.Errorf("db: Update %s: read old issue: %w", id, err)
 	}
 
 	// Resolve read-merge-write operation keys (issueops.OpMergeMetadata,
@@ -149,6 +192,46 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 		updates = resolved
 	}
 
+	// closed_at coherence parity with issueops.updateIssueInTx: an explicit
+	// closed_at must agree with the status this update lands, checked against
+	// the row this unit of work already read and ahead of the close-policy gate
+	// so a refusal writes nothing at all. It runs on the merge-resolved map
+	// BEFORE the no-op filter for the same reason it does there — the guard
+	// reads the caller's intent, and a closed_at equal to the stored value is
+	// still a request to keep the column, not an absent key.
+	if err := issueops.ValidateClosedAtCoherence(oldIssue, updates); err != nil {
+		return fmt.Errorf("db: Update %s: %w", id, err)
+	}
+
+	filteredUpdates, err := issueops.DiscardNoopIssueUpdates(oldIssue, updates)
+	if err != nil {
+		return fmt.Errorf("db: Update %s: compare updates: %w", id, err)
+	}
+	updates = filteredUpdates
+	if len(updates) == 0 {
+		return nil
+	}
+	// A status that matched the row was already dropped as a no-op, so the
+	// lifecycle side effects below only fire on a real transition.
+	_, statusChanging := updates["status"]
+
+	// Close-policy parity with issueops.updateIssueInTx: a status that crosses
+	// into the done category is a close by another name and answers to close
+	// policy. A refusal returns before any write and aborts the caller's unit of
+	// work. The wrap keeps the sentinels matchable, so a caller distinguishes
+	// these refusals here exactly as it does on the close path.
+	if statusChanging {
+		crossing, err := issueops.CrossesIntoDoneCategoryInTx(ctx, r.runner, oldIssue.Status, updates)
+		if err != nil {
+			return fmt.Errorf("db: Update %s: %w", id, err)
+		}
+		if crossing {
+			if _, err := issueops.EnforceClosePolicyInTx(ctx, r.runner, id, forceClosePolicy); err != nil {
+				return fmt.Errorf("db: Update %s: %w", id, err)
+			}
+		}
+	}
+
 	setClauses := make([]string, 0, len(updates)+3)
 	args := make([]any, 0, len(updates)+4)
 	for key, value := range updates {
@@ -167,11 +250,12 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 
 	// Lifecycle parity with issueops.updateIssueInTx: auto-manage closed_at and
 	// started_at from the status transition unless the caller set them
-	// explicitly. Both helpers no-op when the status is unchanged.
+	// explicitly.
 	if statusChanging {
 		setClauses, args = issueops.ManageClosedAt(oldIssue, updates, setClauses, args)
 		setClauses, args = issueops.ManageStartedAt(oldIssue, updates, setClauses, args)
 	}
+	clearLease := issueops.ManageLeaseOnUpdate(oldIssue, updates)
 
 	// Rewrite row_lock on every generic update, mirroring the classic
 	// issueops.updateIssueInTx invariant (update.go): a concurrent
@@ -197,6 +281,11 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	}
 	if rows == 0 {
 		return fmt.Errorf("db: Update %s: %w", id, sql.ErrNoRows)
+	}
+	if clearLease && !opts.UseWispsTable {
+		if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
+			return fmt.Errorf("db: Update %s: clear lease: %w", id, err)
+		}
 	}
 
 	// Event-type parity: embedded records EventClosed / EventReopened /
@@ -236,7 +325,57 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 			}
 		}
 	}
-	return nil
+	// Snapshot only after all derived blocked-state maintenance has completed.
+	// The no-op early returns above wrote nothing and journal nothing.
+	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id, actor)
+}
+
+// CompareAndSetMetadataKey runs the SHARED compare-and-set body, unwrapped.
+//
+// It is the whole of this leg's implementation, and that is the point: the two
+// store backends wrap the same function in their own transaction, so the third
+// leg is a wrapper check rather than an independent vote — which is what the
+// conformance contract's header says.
+//
+// It does NOT wrap the error the way its siblings above do, for the reason
+// WalkDependencyTree gives: the body publishes storage.ErrNotFound and
+// storage.ErrValidation as the role's own vocabulary, both classified by
+// errors.Is at every front door, and a "db: ..." prefix would put this
+// repository's name into a message the direct route never shows a user.
+func (r *issueSQLRepositoryImpl) CompareAndSetMetadataKey(ctx context.Context, plan storage.CompareAndSetKeyPlan) (publicops.CompareAndSetKeyResult, bool, error) {
+	result, write, err := issueops.CompareAndSetMetadataKeyInTx(ctx, r.runner, plan)
+	return result, write.Wrote, err
+}
+
+// ReleaseIssue runs the SHARED claim-release body, unwrapped.
+//
+// It is the whole of this leg's implementation, and that is the point: the two
+// store backends wrap the same function in their own transaction, so the third
+// leg is a wrapper check rather than an independent vote — which is what the
+// conformance contract's header says.
+//
+// It reports the body's Wrote — "a row was written" — and NOT the durable table
+// set beside it, which is the half of ReleaseWrite the two STORE legs want. The
+// difference is load-bearing on this leg and it cost a red test to find: an
+// ephemeral release writes a wisp row and changes no versioned table, and this
+// leg's commit message is what commits the SQL transaction as well as what
+// versions it, so reporting the table set here composes no message and rolls the
+// release back — the wisp comes out still claimed. The version-control layer
+// below already demotes a commit with nothing pending to a plain SQL COMMIT, so
+// answering the row fact costs no spurious history entry.
+//
+// It does NOT wrap the error, for the reason CompareAndSetMetadataKey gives.
+func (r *issueSQLRepositoryImpl) ReleaseIssue(ctx context.Context, req publicops.ReleaseRequest) (publicops.ReleaseResult, bool, error) {
+	result, write, err := issueops.ReleaseIssueInTx(ctx, r.runner, req)
+	return result, write.Wrote, err
+}
+
+func cloneUpdateFields(updates map[string]any) map[string]any {
+	cloned := make(map[string]any, len(updates))
+	for key, value := range updates {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func coerceStatus(v any) types.Status {
@@ -285,12 +424,15 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 	if err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: resolve claim pools: %w", id, err)
 	}
-	assigneePredicate := "assignee = '' OR assignee IS NULL OR assignee = ?"
-	assigneeArgs := []any{actor}
-	for _, pool := range pools {
-		assigneePredicate += " OR assignee = ?"
-		assigneeArgs = append(assigneeArgs, pool)
-	}
+
+	// Claimability of the assignee slot, judged in Go against oldIssue rather
+	// than as a spelling-sensitive SQL predicate (ga-v2k49, mirroring the
+	// same-day fix to issueops.ClaimIssueInTx — this dual must stay in
+	// lockstep, per the comment above): empty/unassigned, already this actor
+	// — including a spelling difference across layers (ga-wzl83) — or a
+	// claim-pool alias. issueops.ActorMatches is the exported form of the
+	// primary path's package-local actorMatches, kept for exactly this dual.
+	assigneeOK := oldIssue.Assignee == "" || issueops.ActorMatches(oldIssue.Assignee, actor) || slices.Contains(pools, oldIssue.Assignee)
 
 	// Same lockstep for the source statuses (bd-pq7m2): claimable from "open"
 	// plus custom active-category statuses, like the primary path — not a
@@ -306,36 +448,46 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		statusArgs = append(statusArgs, st)
 	}
 
-	var res sql.Result
-	if startedWasZero {
-		args := append([]any{actor, now, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
-			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
-	} else {
-		args := append([]any{actor, now}, rowLockArgs...)
-		args = append(args, id)
-		args = append(args, statusArgs...)
-		args = append(args, assigneeArgs...)
-		//nolint:gosec // G201: table is one of two hardcoded constants
-		res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
-			UPDATE %s
-			SET assignee = ?, status = 'in_progress', updated_at = ?, %s
-			WHERE id = ? AND (%s) AND (%s)
-		`, table, rowLockClause, statusPredicate, assigneePredicate), args...)
-	}
-	if err != nil {
-		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
-	}
-	rows, err := res.RowsAffected()
-	if err != nil {
-		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: rows affected: %w", id, err)
+	// Conditional UPDATE, attempted only while assigneeOK — otherwise there
+	// is nothing this actor could win, so skip straight to the rows==0
+	// disambiguation below (matches the primary path's ga-v2k49 fix). CASed
+	// on row_lock rather than re-checking assignee in SQL: row_lock is
+	// rewritten by every path that mutates status/assignee/started_at (see
+	// the freshRowLock invariant in issueops/lease.go), so requiring it to
+	// still equal oldIssue.RowVersion detects a race exactly as precisely as
+	// the old assignee predicate did, without embedding a spelling-sensitive
+	// string comparison in SQL.
+	var rows int64
+	if assigneeOK {
+		var res sql.Result
+		if startedWasZero {
+			args := append([]any{actor, now, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			//nolint:gosec // G201: table is one of two hardcoded constants
+			res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, started_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND (%s)
+			`, table, rowLockClause, statusPredicate), args...)
+		} else {
+			args := append([]any{actor, now}, rowLockArgs...)
+			args = append(args, id, oldIssue.RowVersion)
+			args = append(args, statusArgs...)
+			//nolint:gosec // G201: table is one of two hardcoded constants
+			res, err = r.runner.ExecContext(ctx, fmt.Sprintf(`
+				UPDATE %s
+				SET assignee = ?, status = 'in_progress', updated_at = ?, %s
+				WHERE id = ? AND row_lock = ? AND (%s)
+			`, table, rowLockClause, statusPredicate), args...)
+		}
+		if err != nil {
+			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: %w", id, err)
+		}
+		rows, err = res.RowsAffected()
+		if err != nil {
+			return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: rows affected: %w", id, err)
+		}
 	}
 
 	if rows == 0 {
@@ -380,6 +532,11 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		NewValue: string(newData),
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
+	}
+	// A claim changes assignee and status; the lost-CAS path returns above
+	// without writing and journals nothing.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id, actor); err != nil {
+		return domain.ClaimRowResult{}, err
 	}
 
 	return domain.ClaimRowResult{
@@ -614,7 +771,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			event_kind, actor, target, payload,
 			await_type, await_id, timeout_ns, waiters,
 			due_at, defer_until, metadata,
-			row_lock
+			row_lock, storage_class
 		) VALUES (
 			?, ?, ?, ?, ?, ?, ?,
 			?, ?, ?, ?, ?,
@@ -625,7 +782,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 			?, ?, ?, ?,
 			?, ?, ?, ?,
 			?, ?, ?,
-			?
+			?, ?
 		)
 		ON DUPLICATE KEY UPDATE
 			content_hash = VALUES(content_hash),
@@ -657,7 +814,7 @@ func insertIssueRow(ctx context.Context, runner Runner, table string, issue *typ
 		issue.EventKind, issue.Actor, issue.Target, issue.Payload,
 		issue.AwaitType, issue.AwaitID, issue.Timeout.Nanoseconds(), formatJSONStringArray(issue.Waiters),
 		issue.DueAt, issue.DeferUntil, jsonMetadata(issue.Metadata),
-		issueops.FreshRowLock(),
+		issueops.FreshRowLock(), nullString(string(issue.StorageClass.Normalize())),
 	)
 	if err != nil {
 		return fmt.Errorf("db: insert into %s: %w", table, err)
@@ -758,6 +915,12 @@ func normalizeUpdateValue(key string, value any) any {
 		case []byte:
 			return string(v)
 		}
+	case "waiters":
+		// The column is TEXT holding a JSON array; the embedded path
+		// (issueops.updateIssueInTx) marshals unconditionally, and a raw
+		// []string would be refused by the SQL driver here.
+		waitersJSON, _ := json.Marshal(value)
+		return string(waitersJSON)
 	}
 	return value
 }
@@ -768,6 +931,10 @@ func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWisps(ctx context.Context,
 
 func (r *issueSQLRepositoryImpl) SearchAcrossIssuesAndWispsWithCounts(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchCountsPage, error) {
 	return r.searchAcrossIssuesAndWispsWithCounts(ctx, query, filter)
+}
+
+func (r *issueSQLRepositoryImpl) SearchIssueIDs(ctx context.Context, query string, filter types.IssueFilter) ([]string, error) {
+	return issueops.SearchIssueIDsInTx(ctx, r.runner, query, filter)
 }
 
 func (r *issueSQLRepositoryImpl) GetReadyWork(ctx context.Context, filter types.WorkFilter) (domain.SearchPage, error) {
@@ -782,6 +949,11 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	table := "issues"
 	if opts.UseWispsTable {
 		table = "wisps"
+	}
+	// Edges are journaled before the row goes, while its snapshot can still be
+	// read.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, []string{id}); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.Delete %s: journal dependency removals: %w", id, err)
 	}
 	//nolint:gosec // G201: table is a hardcoded constant.
 	res, err := r.runner.ExecContext(ctx, fmt.Sprintf("DELETE FROM %s WHERE id = ?", table), id)
@@ -799,7 +971,9 @@ func (r *issueSQLRepositoryImpl) Delete(ctx context.Context, id string, opts dom
 	if err := issueops.DeleteLeaseInTx(ctx, r.runner, id); err != nil {
 		return err
 	}
-	return nil
+	// The rows==0 return above keeps this actually-deleted-only. The repository
+	// Delete surface carries no actor, so the row records none.
+	return issueops.RecordDeleteInTx(ctx, r.runner, id, "")
 }
 
 func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts) (int, error) {
@@ -809,6 +983,19 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 	table := "issues"
 	if opts.UseWispsTable {
 		table = "wisps"
+	}
+	// Resolve WHICH ids this delete actually removes before the batched DELETE
+	// runs: afterwards the rows are gone, and RowsAffected reports a count, not
+	// a set. A journal record for an id that was already absent would tell a
+	// consumer to drop a bead this transaction never touched.
+	actualIDs, err := issueops.ExistingIssueIDsInTableInTx(ctx, r.runner, table, ids)
+	if err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs resolve existing ids: %w", err)
+	}
+	// Edges are journaled before the rows go, while their source snapshots can
+	// still be read.
+	if err := issueops.RecordDependencyRemovalsForIssuesInTx(ctx, r.runner, actualIDs); err != nil {
+		return 0, fmt.Errorf("db: IssueSQLRepository.DeleteByIDs journal dependency removals: %w", err)
 	}
 	total := 0
 	for start := 0; start < len(ids); start += deleteBatchSize {
@@ -845,6 +1032,12 @@ func (r *issueSQLRepositoryImpl) DeleteByIDs(ctx context.Context, ids []string, 
 			}
 		}
 	}
+	// The repository DeleteByIDs surface carries no actor, so the rows record none.
+	for _, id := range actualIDs {
+		if err := issueops.RecordDeleteInTx(ctx, r.runner, id, ""); err != nil {
+			return total, err
+		}
+	}
 	return total, nil
 }
 
@@ -862,6 +1055,10 @@ func (r *issueSQLRepositoryImpl) FindAllDependents(ctx context.Context, ids []st
 		out = append(out, id)
 	}
 	return out, nil
+}
+
+func (r *issueSQLRepositoryImpl) FindWispDependentsRecursive(ctx context.Context, ids []string) (map[string]bool, error) {
+	return issueops.FindWispDependentsRecursiveInTx(ctx, r.runner, ids)
 }
 
 func (r *issueSQLRepositoryImpl) AffectedByDeletion(ctx context.Context, issueIDs, wispIDs []string) ([]string, []string, error) {
@@ -888,13 +1085,26 @@ func (r *issueSQLRepositoryImpl) Close(ctx context.Context, id string, params do
 	}, nil
 }
 
+func (r *issueSQLRepositoryImpl) CloseChecked(ctx context.Context, id string, params domain.CloseRowParams, actor string, force bool) (domain.CloseRowResult, error) {
+	res, err := issueops.CloseIssueCheckedInTx(ctx, r.runner, id, params.Reason, actor, params.Session, force, nil)
+	if err != nil {
+		return domain.CloseRowResult{}, fmt.Errorf("db: IssueSQLRepository.CloseChecked %s: %w", id, err)
+	}
+	return domain.CloseRowResult{
+		Updated:       !res.AlreadyClosed,
+		AlreadyClosed: res.AlreadyClosed,
+		IsWisp:        res.IsWisp,
+		OpenChildren:  res.OpenChildren,
+	}, nil
+}
+
 func (r *issueSQLRepositoryImpl) Reopen(ctx context.Context, id string, params domain.ReopenRowParams, actor string, opts domain.IssueTableOpts) (domain.ReopenRowResult, error) {
 	res, err := issueops.ReopenIssueInTx(ctx, r.runner, id, params.Reason, actor)
 	if err != nil {
 		return domain.ReopenRowResult{}, fmt.Errorf("db: IssueSQLRepository.Reopen %s: %w", id, err)
 	}
 	return domain.ReopenRowResult{
-		Updated:     !res.AlreadyOpen,
+		Updated:     res.Changed,
 		AlreadyOpen: res.AlreadyOpen,
 		IsWisp:      res.IsWisp,
 	}, nil
@@ -1006,6 +1216,53 @@ func (r *issueSQLRepositoryImpl) UnclaimIssue(ctx context.Context, id, actor str
 		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssue: %w", err)
 	}
 	return nil
+}
+
+// UnclaimIssueIfAssignee runs the classic compare-and-swap release against this
+// runner. Like UnclaimIssue it takes no IssueTableOpts: issueops routes the
+// write to the issues or wisps tables from the row itself, so a wisp's claim is
+// released against the wisp tables on both backends. The mismatch verdict
+// (storage.ErrAssigneeMismatch, nothing written) is produced by the shared
+// helper, not restated here.
+func (r *issueSQLRepositoryImpl) UnclaimIssueIfAssignee(ctx context.Context, id, actor, expectedAssignee string) error {
+	if err := issueops.UnclaimIssueIfAssigneeInTx(ctx, r.runner, id, actor, expectedAssignee); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.UnclaimIssueIfAssignee: %w", err)
+	}
+	return nil
+}
+
+// HeartbeatIssue refreshes the lease on an issue actor holds in_progress,
+// mirroring DoltStore.HeartbeatIssue: wisps are ephemeral and never leased,
+// and the SQL work is the classic issueops.HeartbeatIssueInTx — same clock
+// (time.Now().UTC()), same TTL resolution (issueops.LeaseTTL), and the same
+// only-current-owner classification (storage.ErrAlreadyClaimed /
+// ErrNotClaimable) — so classic `bd reclaim` staleness semantics see proxied
+// heartbeats identically. Deliberately NO Dolt commit: the leases table is
+// dolt_ignored (bd-lrgn1), and the cmd layer commits this transaction with
+// uow.RunTxEphemeral (plain SQL COMMIT, nothing in dolt_log).
+func (r *issueSQLRepositoryImpl) HeartbeatIssue(ctx context.Context, id, actor string) error {
+	if issueops.IsActiveWispInTx(ctx, r.runner, id) {
+		return fmt.Errorf("db: IssueSQLRepository.HeartbeatIssue: %w: %s is ephemeral", storage.ErrNotClaimable, id)
+	}
+	if err := issueops.HeartbeatIssueInTx(ctx, r.runner, id, actor); err != nil {
+		return fmt.Errorf("db: IssueSQLRepository.HeartbeatIssue: %w", err)
+	}
+	return nil
+}
+
+// WakeExpiredDefers runs the shared lazy defer-wake body against this
+// repository's runner (the same DBTX-shaped seam ReclaimExpiredLeases uses)
+// and reports how many rows woke per table. The issues count decides whether
+// the transaction's owner mints a dolt commit; the wisps count decides
+// whether it must still issue a plain SQL commit — wisp tables are
+// dolt_ignored, so a wisp-only wake mints no version commit, but a caller
+// that treats it as "nothing happened" rolls the wisp writes back.
+func (r *issueSQLRepositoryImpl) WakeExpiredDefers(ctx context.Context) (issues, wisps int, err error) {
+	out, err := issueops.WakeExpiredDefersInTx(ctx, r.runner)
+	if err != nil {
+		return 0, 0, fmt.Errorf("db: IssueSQLRepository.WakeExpiredDefers: %w", err)
+	}
+	return len(out.Issues), len(out.Wisps), nil
 }
 
 func (r *issueSQLRepositoryImpl) ReclaimExpiredLeases(ctx context.Context, olderThan time.Duration, filter types.ReclaimFilter, actor string) ([]types.ReclaimedLease, error) {

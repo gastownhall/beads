@@ -17,6 +17,13 @@ data between independent teams or locations. Key benefits:
 - **Flexible infrastructure**: Works with DoltHub, S3, GCS, local paths, or SSH
 - **Data sovereignty**: Configurable tiers for compliance (GDPR, regional laws)
 
+<Note>
+Just want two machines sharing one database through a bucket you own? The
+[Bucket Federation Quickstart](/multi-agent/bucket-federation) walks that path
+end to end — bucket, seed push, second replica, sync cadence — with measured
+timings and the failure modes.
+</Note>
+
 ## Prerequisites
 
 1. **Dolt backend**: Federation requires the Dolt storage backend (the only supported backend)
@@ -181,6 +188,102 @@ them. This enables proper attribution and trust chains across organizations.
 
 Remote connectivity is validated on first push/pull operation, not when adding
 the peer. This allows configuring remotes before infrastructure is ready.
+
+### Leases are per-replica
+
+A claim lease (`bd ready --claim` + `bd heartbeat`, reaped by `bd reclaim`) is
+only meaningful on the replica that granted it. The `leases` table is
+clone-local and never replicates; what crosses the bridge is the claim's
+*visibility* — `status`/`assignee` on the issue row — and that is stale on
+every other replica by up to one sync interval.
+
+Two rules follow, and a federated deployment owes both:
+
+1. **Grace window > sync interval, and lease TTL > sync interval.** A TTL or
+   `bd reclaim --older-than` grace shorter than the cadence at which replicas
+   exchange state is meaningless across the bridge: the remote view is a full
+   interval old by construction, so a reaper over there would be judging
+   liveness from data older than the lease itself. `bd reclaim` defaults its
+   grace to 2× the lease TTL; raise the TTL (or the grace) above your sync
+   interval, never shrink the interval to fit them.
+2. **Reclaim belongs to the granting replica.** Each lease records the replica
+   that granted it, and `bd reclaim` skips a lease granted elsewhere, naming
+   it on stderr. Reap dead workers on the machine that hired them.
+
+The guard is **opt-in**: it arms only where you name this replica.
+
+```bash
+export BEADS_NODE_ID=mini          # per-machine; or `bd config set node_id mini`
+```
+
+Two rules about what to name, both load-bearing:
+
+- **`node_id` names the STORE, not the host.** One value per beads *database*.
+  Hosts that are clients of the *same* dolt sql-server (`BEADS_DOLT_SERVER_HOST`,
+  a systemd/Docker server, Hosted Dolt, a VPS) are **one replica** no matter how
+  many machines they are — give them all the same value, or leave it unset. Give
+  them distinct ids and you rebuild the very fail-closed regression described
+  below: a supervisor would match no worker's lease and reclaim 0 forever. Name a
+  replica only where there is a real sync interval between it and the others.
+- **`node_id` is per-machine, so it must never be committed.** The project
+  `.beads/config.yaml` is a git-**tracked** file. A `node_id` committed there
+  propagates one machine's identity to every clone that pulls it, and then every
+  comparison matches: the guard is fully *armed* and fully *inert*, and `laptop`
+  reaps `mini`'s leases exactly as if they were local — the precise hazard this
+  feature exists to close, now happening while you believe you are protected.
+  That is worse than not setting it at all. `bd config set node_id` therefore
+  writes the **user-global** `~/.config/bd/config.yaml`, alongside the other
+  per-machine state (`sync-state.json`, `push-state.json`, `redirect`). Use the
+  env var or that command; never hand-add `node_id` to `.beads/config.yaml`.
+
+There is deliberately no hostname fallback. The hostname answers the wrong
+question — it names the client *process's* machine, not the store — and
+guessing gets it wrong in the topologies that most need automated reclaim:
+with a shared or remote dolt sql-server (`BEADS_DOLT_SERVER_HOST`, Hosted
+Dolt, a VPS) many hosts are clients of ONE store with no sync interval
+between them, so a per-hostname identity would stop a supervisor reaping any
+worker's lease at all; in a container the hostname is a per-run container ID;
+on macOS the transient hostname follows the network. Each of those would
+strand work on a deployment with no federation at all — a worse failure than
+the one this guard prevents.
+
+So an unset identity degrades to the old behavior (every lease treated as
+local) rather than failing closed: an upgrade, and any single-store
+deployment, can never strand a lease the reaper could previously recover.
+Leases granted before this feature landed likewise carry no replica and stay
+reclaimable until a heartbeat re-stamps them with a configured node.
+
+`bd reclaim --any-replica` disarms the guard. It is for a replica that is
+permanently gone (or a node that was renamed and now sees its own old leases
+as foreign) — not a normal setting, since only the granting machine has a
+first-hand view of whether the holder is alive.
+
+**A heartbeat proves the holder is alive; it does not move the lease.** An
+ordinary heartbeat only *backfills* the granting replica when it is still empty
+— it does not overwrite a row that positively names one. So a lease normally
+keeps its granting replica for life, and states like these strand one where a
+local heartbeat is keeping it alive:
+
+- a replica that was **renamed** (`mini` → `mini2`) heartbeats its own leases,
+  which now read foreign forever;
+- a foreign lease that arrived through the JSONL interchange, whose holder name
+  also exists locally, gets heartbeated here but stays labelled with the remote
+  node;
+- an import that lands on an already-**expired** local lease row takes the whole
+  row from the snapshot, granting replica included — so this node's own stale
+  lease can come back labelled with a remote one.
+
+(The one path that moves a lease the other way is a heartbeat whose holder is a
+different *spelling* of the lease row's holder: it re-arms through the upsert,
+which stamps this node.)
+
+Recover a stranded lease with `bd reclaim --any-replica`, once you have
+confirmed the granting replica is not still reaping — that confirmation is the
+whole point of the guard, so prefer the narrow forms:
+`bd reclaim --any-replica --id <id>` for one issue, or `bd unclaim --force
+<id>`; the bare global form reverts *every* foreign stale lease, live peers
+included. `bd reclaim` names what it declined on stderr — one summary line per
+run, with `bd -v` expanding it to the first 20 leases individually.
 
 ## Planned Features
 

@@ -49,7 +49,7 @@ actively referenced. This is permanent graceful decay - original content is disc
 Modes:
   - Analyze: Export candidates for agent review (no API key needed)
   - Apply: Accept agent-provided summary (no API key needed)
-  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY or ai.api_key, legacy)
+  - Auto: AI-powered compaction (requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key)
   - Dolt: Run Dolt garbage collection (for Dolt-backend repositories)
 
 Tiers:
@@ -73,10 +73,11 @@ Examples:
   bd compact --apply --id bd-42 --summary summary.txt
   bd compact --apply --id bd-42 --summary - < summary.txt
 
-  # Legacy AI-powered workflow
+  # AI-powered workflow
   bd compact --auto --dry-run              # Preview candidates
   bd compact --auto --all                  # Compact all eligible issues
   bd compact --auto --id bd-42             # Compact specific issue
+  MINIMAX_API_KEY=... bd compact --auto --all
 
   # Statistics
   bd compact --stats                       # Show statistics
@@ -172,12 +173,9 @@ Examples:
 			}
 
 			// Direct mode
-			apiKey := os.Getenv("ANTHROPIC_API_KEY")
-			if apiKey == "" {
-				apiKey = config.GetString("ai.api_key")
-			}
+			apiKey, _ := config.ResolveAIAPIKey("")
 			if apiKey == "" && !compactDryRun {
-				return HandleError("--auto mode requires ANTHROPIC_API_KEY environment variable or ai.api_key in config")
+				return HandleError("--auto mode requires ANTHROPIC_API_KEY, MINIMAX_API_KEY, or ai.api_key in config")
 			}
 
 			compactCfg := &compact.Config{
@@ -957,7 +955,7 @@ func init() {
 	// New mode flags
 	compactCmd.Flags().BoolVar(&compactAnalyze, "analyze", false, "Analyze mode: export candidates for agent review")
 	compactCmd.Flags().BoolVar(&compactApply, "apply", false, "Apply mode: accept agent-provided summary")
-	compactCmd.Flags().BoolVar(&compactAuto, "auto", false, "Auto mode: AI-powered compaction (legacy)")
+	compactCmd.Flags().BoolVar(&compactAuto, "auto", false, "Auto mode: AI-powered compaction")
 	compactCmd.Flags().StringVar(&compactSummary, "summary", "", "Path to summary file (use '-' for stdin)")
 	compactCmd.Flags().StringVar(&compactActor, "actor", "agent", "Actor name for audit trail")
 	compactCmd.Flags().IntVar(&compactLimit, "limit", 0, "Limit number of candidates (0 = no limit)")

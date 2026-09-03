@@ -28,8 +28,21 @@ build_skip_pattern() {
     echo "$pattern"
 }
 
-# Default values
-TIMEOUT="${TEST_TIMEOUT:-3m}"
+# Default values.
+#
+# TIMEOUT is go test's PER-PACKAGE deadline — a hang backstop, not a
+# performance budget: it costs nothing while packages pass. The floor is set
+# by cmd/bd, the slowest package: measured 2026-07-26 on a busy darwin fleet
+# box (wy-4mtr0), its default suite is ~1090s of test time across ~1490 tests
+# (mostly serial — subprocess tests that spawn bd + embedded Dolt per
+# invocation, largely t.Setenv-bound so they cannot t.Parallel), giving
+# ~18min wall WITH the prebuilt-binary fast path below already removing the
+# in-test `go build` steps. 3m could never fit that, which made every
+# full-suite run FAIL with a package deadline panic naming no failing test.
+# 25m holds the measurement plus fleet-load headroom (the passing full-suite
+# acceptance run clocked cmd/bd at 870s under -p 4 package concurrency).
+# Raise via TEST_TIMEOUT; don't lower it below cmd/bd's measured runtime.
+TIMEOUT="${TEST_TIMEOUT:-25m}"
 GO_TEST_PKG_PARALLEL="${GO_TEST_PKG_PARALLEL:-4}"
 GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 SKIP_PATTERN=$(build_skip_pattern)
@@ -74,6 +87,36 @@ done
 # Default to all packages if none specified
 if [[ ${#PACKAGES[@]} -eq 0 ]]; then
     PACKAGES=("./...")
+fi
+
+# Prebuild bd once for subprocess-style tests (wy-4mtr0). cmd/bd has a dozen
+# test helpers that otherwise each `go build` the full bd binary inside the
+# test run — on a busy machine those link steps alone can blow the package
+# deadline, and one helper used to silently fall back to a stale repo-root
+# ./bd. CI already exports BEADS_TEST_BD_BINARY from a prebuilt artifact
+# (.github/workflows/main.yml); this gives the local runner the same fast
+# path. A caller-supplied BEADS_TEST_BD_BINARY always wins; skipped when the
+# requested packages cannot include cmd/bd.
+if [[ -z "${BEADS_TEST_BD_BINARY:-}" ]]; then
+    case " ${PACKAGES[*]} " in
+        # Any recursive pattern (./..., ./cmd/...) can expand to cmd/bd.
+        *"..."* | *"cmd/bd"*)
+            if [[ -n "${BEADS_TEST_ENV_ROOT:-}" ]]; then
+                PREBUILT_BD_DIR="$BEADS_TEST_ENV_ROOT/prebuilt-bd"
+            else
+                PREBUILT_BD_DIR=$(mktemp -d "${TMPDIR:-/tmp}/beads-prebuilt-bd-XXXXXX")
+            fi
+            mkdir -p "$PREBUILT_BD_DIR"
+            echo "Prebuilding bd for subprocess tests..." >&2
+            PREBUILT_BD_BIN="$PREBUILT_BD_DIR/bd$(go env GOEXE)"
+            if go build -o "$PREBUILT_BD_BIN" "$REPO_ROOT/cmd/bd"; then
+                export BEADS_TEST_BD_BINARY="$PREBUILT_BD_BIN"
+                echo "Prebuilt bd: $BEADS_TEST_BD_BINARY" >&2
+            else
+                echo "WARN: bd prebuild failed; tests will build their own binaries" >&2
+            fi
+            ;;
+    esac
 fi
 
 # Optional: start a single shared Dolt test server for all packages.

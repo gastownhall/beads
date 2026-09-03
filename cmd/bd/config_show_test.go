@@ -308,6 +308,41 @@ func TestCollectViperEntriesWithEnvOverride(t *testing.T) {
 	t.Error("expected actor key in Viper entries")
 }
 
+// TestCollectViperEntriesActorPrecedenceOverBDActor is a regression test for
+// GH#4645: `bd config show` must report the same actor value AND provenance
+// that mutations actually use (resolveConfiguredActor in main.go), not the
+// deprecated BD_ACTOR that viper's AutomaticEnv binds ahead of any explicit
+// binding. With both env vars set, the entry must show BEADS_ACTOR's value
+// with "env: BEADS_ACTOR" provenance, never BD_ACTOR's.
+func TestCollectViperEntriesActorPrecedenceOverBDActor(t *testing.T) {
+	t.Setenv("BD_ACTOR", "from-bd-actor")
+	t.Setenv("BEADS_ACTOR", "from-beads-actor")
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize() failed: %v", err)
+	}
+	defer func() {
+		config.ResetForTesting()
+		_ = config.Initialize()
+	}()
+
+	entries := collectViperEntries()
+
+	for _, e := range entries {
+		if e.Key == "actor" {
+			if e.Value != "from-beads-actor" {
+				t.Errorf("actor value = %q, want %q (BEADS_ACTOR must win)", e.Value, "from-beads-actor")
+			}
+			if e.Source != "env: BEADS_ACTOR" {
+				t.Errorf("actor source = %q, want %q", e.Source, "env: BEADS_ACTOR")
+			}
+			return
+		}
+	}
+	t.Error("expected actor key in Viper entries")
+}
+
 // TestCollectViperEntriesMetricsUserGlobalProvenance verifies that user-global
 // metrics.* keys report the user-global value AND the user-global config path as
 // their source, even when a project .beads/config.yaml sets a conflicting value
@@ -374,7 +409,10 @@ func TestCollectViperEntriesMetricsUserGlobalProvenance(t *testing.T) {
 	}
 	// Source is the explicit user-global path, matching `bd config get`, not the
 	// generic project "config.yaml" label.
-	wantSource := config.UserConfigYamlPath()
+	wantSource, err := config.UserConfigYamlPath()
+	if err != nil {
+		t.Fatalf("resolve user config path: %v", err)
+	}
 	if entry.Source != wantSource {
 		t.Errorf("metrics.disabled source = %q, want %q (user-global path)", entry.Source, wantSource)
 	}

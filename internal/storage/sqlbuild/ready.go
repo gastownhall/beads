@@ -83,11 +83,33 @@ type ReadyWorkWhereInputs struct {
 // BuildReadyWorkWhere renders the full ready-work WHERE clause for one table
 // family. Both stacks must keep ready semantics identical (Seam A parity
 // suite); all ready predicates live here.
+//
+// Invariant: every clause must reference only main-table columns or correlated
+// subqueries keyed by id — never the counts mega-query's aggregate aliases
+// (labels_json, dep_count, rdep_count, comment_count, parent_id, deps_json).
+// SearchCountsSQL renders this WHERE inside a pre-join subquery where those
+// aliases are out of scope. See the SearchCountsSQL doc comment for why a
+// violation fails loud.
 func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyWorkWhereInputs) (string, []any, error) {
 	var statusClause string
-	if filter.Status != "" {
-		statusClause = "status = ?"
-	} else {
+	var args []any
+	switch {
+	case filter.Status != "":
+		// Singular StatusOpen is the `bd ready` pin and means the ready-
+		// eligible set: built-in open plus category-active custom statuses,
+		// matching the ready_issues view since migration 0025 (GH#5831).
+		// Any other singular status stays exact.
+		if filter.Status == types.StatusOpen {
+			statusClause = "(status = ? OR status IN (SELECT name FROM custom_statuses WHERE category = 'active'))"
+		} else {
+			statusClause = "status = ?"
+		}
+		args = append(args, string(filter.Status))
+	case len(filter.Statuses) > 0:
+		ph, statusArgs := InPlaceholders(filter.Statuses)
+		statusClause = fmt.Sprintf("status IN (%s)", ph)
+		args = append(args, statusArgs...)
+	default:
 		statusClause = "status IN ('open', 'in_progress')"
 	}
 	whereClauses := []string{
@@ -97,10 +119,6 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 	}
 	if !filter.IncludeEphemeral {
 		whereClauses = append(whereClauses, "(ephemeral = 0 OR ephemeral IS NULL)")
-	}
-	var args []any
-	if filter.Status != "" {
-		args = append(args, string(filter.Status))
 	}
 
 	if filter.Priority != nil {
@@ -134,6 +152,15 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
 		}
 	}
+	for start := 0; start < len(filter.ExcludeIDs); start += QueryBatchSize {
+		end := start + QueryBatchSize
+		if end > len(filter.ExcludeIDs) {
+			end = len(filter.ExcludeIDs)
+		}
+		placeholders, batchArgs := InPlaceholders(filter.ExcludeIDs[start:end])
+		args = append(args, batchArgs...)
+		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (%s)", placeholders))
+	}
 
 	if len(filter.Labels) > 0 {
 		for _, label := range filter.Labels {
@@ -161,6 +188,14 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 			args = append(args, label)
 		}
 		whereClauses = append(whereClauses, fmt.Sprintf("id NOT IN (SELECT issue_id FROM %s WHERE label IN (%s))", tables.Labels, strings.Join(placeholders, ", ")))
+	}
+	if filter.LabelPattern != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label LIKE ? ESCAPE '|')", tables.Labels))
+		args = append(args, globToLikePattern(filter.LabelPattern))
+	}
+	if filter.LabelRegex != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("id IN (SELECT issue_id FROM %s WHERE label REGEXP ?)", tables.Labels))
+		args = append(args, filter.LabelRegex)
 	}
 
 	// Parent filtering: return all transitive descendants of parentID.

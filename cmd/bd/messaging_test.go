@@ -143,7 +143,7 @@ func TestMessagingSuite(t *testing.T) {
 		t.Fatalf("AddDep(duplicates): %v", err)
 	}
 	// Close the duplicate
-	if err := testStore.UpdateIssue(ctx, dup.ID, map[string]interface{}{"status": types.StatusClosed}, "test"); err != nil {
+	if err := testStore.CloseIssue(ctx, dup.ID, "duplicate", "test", ""); err != nil {
 		t.Fatalf("Close dup: %v", err)
 	}
 
@@ -174,10 +174,8 @@ func TestMessagingSuite(t *testing.T) {
 		}
 
 		// Close (ack)
-		if err := testStore.UpdateIssue(ctx, lifecycleMsg.ID, map[string]interface{}{
-			"status": types.StatusClosed,
-		}, "test"); err != nil {
-			t.Fatalf("UpdateIssue (close): %v", err)
+		if err := testStore.CloseIssue(ctx, lifecycleMsg.ID, "acknowledged", "test", ""); err != nil {
+			t.Fatalf("CloseIssue (ack): %v", err)
 		}
 		acked, err := testStore.GetIssue(ctx, lifecycleMsg.ID)
 		if err != nil {

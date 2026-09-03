@@ -219,4 +219,25 @@ func TestEmbeddedUnclaim(t *testing.T) {
 			t.Errorf("expected status open after --force unclaim, got %s", got.Status)
 		}
 	})
+
+	// The owner may release its own claim under a different spelling of its own
+	// identity (ga-5ksp5): dot vs underscore separator is the same Gas Town
+	// identity at two different layers, and both the Go-side ownership
+	// precheck and the SQL CAS predicate must recognize that — not just the
+	// former, or the UPDATE would silently affect zero rows and the release
+	// would fail even though the Go precheck said it should succeed.
+	t.Run("unclaim_owner_different_spelling_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Owner spelling variant", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--claim", "--actor", "gastown.mayor")
+
+		bdUnclaim(t, bd, dir, issue.ID, "--actor", "gastown_mayor")
+
+		got := bdShow(t, bd, dir, issue.ID)
+		if got.Assignee != "" {
+			t.Errorf("expected assignee to be cleared after same-identity unclaim, got %q", got.Assignee)
+		}
+		if got.Status != types.StatusOpen {
+			t.Errorf("expected status open after same-identity unclaim, got %s", got.Status)
+		}
+	})
 }

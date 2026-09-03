@@ -23,19 +23,36 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
+	"github.com/steveyegge/beads/issueops"
 )
+
+// validateCreateArgs runs as cobra's Args validation, which executes before
+// PersistentPreRunE opens the store or runs migrations. It reuses
+// resolveTitle — the same shared validator gatherCreateInput calls for the
+// proxied-server create path — so a whitespace-only title (GH#4771) is
+// rejected identically for both backends, and before any invocation that is
+// guaranteed to fail wastes a store open/migration.
+func validateCreateArgs(cmd *cobra.Command, args []string) error {
+	markdownFile, _ := cmd.Flags().GetString("file")
+	graphFile, _ := cmd.Flags().GetString("graph")
+	titleFlag, _ := cmd.Flags().GetString("title")
+
+	_, err := resolveTitle(args, titleFlag, markdownFile, graphFile)
+	return err
+}
 
 var createCmd = &cobra.Command{
 	Use:           "create [title]",
 	GroupID:       "issues",
 	Aliases:       []string{"new"},
 	Short:         "Create a new issue (or batch from markdown/graph JSON)",
-	Args:          cobra.MinimumNArgs(0),
+	Args:          cobra.MatchAll(cobra.MaximumNArgs(1), validateCreateArgs),
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		CheckReadonly("create")
+		CheckReadonly("create") // also covers CheckMigrationFreeze (dc-6jaq)
 
 		evt := metrics.NewCommandEvent("create")
 		defer func() {
@@ -55,17 +72,16 @@ var createCmd = &cobra.Command{
 		graphFile, _ := cmd.Flags().GetString("graph")
 
 		if file != "" {
-			if graphFile != "" {
-				return HandleError("cannot specify both --file and --graph")
+			// gatherCreateInput repeats the --file argument checks and applies
+			// the plan-wide flags this route used to accept and ignore
+			// (--ephemeral, --no-history, --mol-type, --validate). It is the
+			// same input the proxied route reads, which is what lets both build
+			// one issueops.CreateBatchRequest.
+			in, err := gatherCreateInput(cmd, args)
+			if err != nil {
+				return err
 			}
-			if len(args) > 0 {
-				return HandleError("cannot specify both title and --file flag")
-			}
-			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			if dryRun {
-				return HandleError("--dry-run is not supported with --file flag")
-			}
-			return createIssuesFromMarkdown(cmd, file)
+			return createIssuesFromMarkdown(rootCtx, in)
 		}
 
 		if graphFile != "" {
@@ -77,26 +93,16 @@ var createCmd = &cobra.Command{
 			if err := graphOpts.Validate(); err != nil {
 				return HandleError("invalid graph options: %v", err)
 			}
+			if err := rejectSingleIssueFlagsForGraph(cmd); err != nil {
+				return err
+			}
 			return createIssuesFromGraph(graphFile, graphDryRun, graphOpts)
 		}
 
 		titleFlag, _ := cmd.Flags().GetString("title")
-		var title string
-
-		if len(args) > 0 && titleFlag != "" {
-			if args[0] != titleFlag {
-				return HandleError("cannot specify different titles as both positional argument and --title flag\n  Positional: %q\n  --title:    %q", args[0], titleFlag)
-			}
-			title = args[0]
-		} else if len(args) > 0 {
-			if strings.HasPrefix(args[0], "-") {
-				return HandleError("title %q looks like a flag (starts with '-').\n  Run 'bd create --help' for available options.\n  To use this title anyway, pass it explicitly: bd create --title=%q", args[0], args[0])
-			}
-			title = args[0]
-		} else if titleFlag != "" {
-			title = titleFlag
-		} else {
-			return HandleError("title required (or use --file to create from markdown)")
+		title, err := resolveTitle(args, titleFlag, "", "")
+		if err != nil {
+			return err
 		}
 
 		// Get silent flag
@@ -116,9 +122,12 @@ var createCmd = &cobra.Command{
 			}
 		}
 
-		description, _, err := getDescriptionFlag(cmd)
+		description, descriptionChanged, err := getDescriptionFlag(cmd)
 		if err != nil {
 			return err
+		}
+		if err := validateDescriptionUpdate(cmd, description, descriptionChanged); err != nil {
+			return HandleError("%v", err)
 		}
 
 		skills, _ := cmd.Flags().GetString("skills")
@@ -171,6 +180,8 @@ var createCmd = &cobra.Command{
 		if len(labelAlias) > 0 {
 			labels = append(labels, labelAlias...)
 		}
+		labels = utils.NormalizeLabels(labels)
+		warnLabelsContainingWhitespace(labels)
 
 		explicitID, _ := cmd.Flags().GetString("id")
 		parentID, _ := cmd.Flags().GetString("parent")
@@ -184,6 +195,34 @@ var createCmd = &cobra.Command{
 		noHistory, _ := cmd.Flags().GetBool("no-history")
 		if wisp && noHistory {
 			return HandleError("--ephemeral and --no-history are mutually exclusive")
+		}
+		storageClassFlag, _ := cmd.Flags().GetString("storage-class")
+		storageClass, err := resolveStorageClass(storageClassFlag, types.IssueType(issueType).Normalize())
+		if err != nil {
+			return HandleError("%v", err)
+		}
+		// --storage-class ephemeral is the spelled-out spelling of --ephemeral
+		// (Protocol v0.1 C1.4: the wisp plane is today's ephemeral-class
+		// implementation). It routes to the wisp path exactly like the flag;
+		// the --no-history mutual exclusion above still applies.
+		if storageClass == types.StorageClassEphemeral {
+			if noHistory {
+				return HandleError("--storage-class ephemeral and --no-history are mutually exclusive")
+			}
+			wisp = true
+			storageClass = "" // wisp-plane rows derive ephemeral class (C1.2); no marker cell needed
+		}
+		// Reconcile the requested durable class with the effective wisp plane
+		// (flag > config, Protocol v0.1 §C1.3): an explicit --storage-class
+		// contradicts --ephemeral/--no-history and is rejected, so the durable
+		// intent is preserved rather than silently collapsed into an
+		// effective-ephemeral record; a per-type config default yields to the
+		// explicit flag. versioned normalizes to the unset marker only after the
+		// check (C2.4).
+		var storageClassConflict bool
+		storageClass, storageClassConflict = reconcileStorageClassPlane(storageClass, storageClassFlag != "", wisp || noHistory)
+		if storageClassConflict {
+			return HandleError("--storage-class %s conflicts with --ephemeral/--no-history: wisp-plane records are storage class ephemeral", storageClass)
 		}
 		molTypeStr, _ := cmd.Flags().GetString("mol-type")
 		var molType types.MolType
@@ -232,7 +271,7 @@ var createCmd = &cobra.Command{
 			// Warn if defer date is in the past (user probably meant future)
 			if t.Before(time.Now()) && !silent && !debug.IsQuiet() {
 				fmt.Fprintf(os.Stderr, "%s Defer date %q is in the past. Issue will appear in bd ready immediately.\n",
-					ui.RenderWarn("!"), t.Format("2006-01-02 15:04"))
+					ui.RenderWarn("!"), t.Local().Format("2006-01-02 15:04"))
 				fmt.Fprintf(os.Stderr, "  Did you mean a future date? Use --defer=+1h or --defer=tomorrow\n")
 			}
 			deferUntil = &t
@@ -342,6 +381,7 @@ var createCmd = &cobra.Command{
 				EstimatedMinutes:   estimatedMinutes,
 				Ephemeral:          wisp,
 				NoHistory:          noHistory,
+				StorageClass:       storageClass,
 				CreatedBy:          getActorWithGit(),
 				Owner:              getOwner(),
 				Labels:             labels,
@@ -388,7 +428,12 @@ var createCmd = &cobra.Command{
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store); err != nil {
+				// Auto-routed paths (routing.mode: auto, routing.default)
+				// come from config, not caller input, so they're always
+				// allowed to auto-vivify as before; only an explicit --repo
+				// flag value can be ambiguous.
+				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, allowCreate); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
@@ -452,6 +497,18 @@ var createCmd = &cobra.Command{
 			return renderDryRun()
 		}
 
+		// Parse every requested dependency edge BEFORE reserving a child ID
+		// or creating anything so a malformed spec aborts with no burned
+		// child ID and no orphan issue behind it.
+		depSpecs, err := parseDepSpecs(deps)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate, cmd.Flags().Changed("waits-for-gate"))
+		if err != nil {
+			return HandleError("%v", err)
+		}
+
 		createCtx := rootCtx
 		if parentID != "" {
 			childID, err := store.GetNextChildID(rootCtx, parentID)
@@ -493,6 +550,7 @@ var createCmd = &cobra.Command{
 			EstimatedMinutes:   estimatedMinutes,
 			Ephemeral:          wisp,
 			NoHistory:          noHistory,
+			StorageClass:       storageClass,
 			CreatedBy:          getActorWithGit(),
 			Owner:              getOwner(),
 			Labels:             labels,
@@ -510,20 +568,20 @@ var createCmd = &cobra.Command{
 
 		ctx := createCtx
 
-		// Parse every requested dependency edge BEFORE creating anything so
-		// a malformed spec aborts with no orphan issue behind it.
-		depSpecs, err := parseDepSpecs(deps)
-		if err != nil {
-			return HandleErrorRespectJSON("%v", err)
+		// Resolve partial --deps targets the way `bd dep add` does, so a bare
+		// slug becomes a qualified id rather than a dangling edge, and an
+		// unknown target fails closed here instead of reaching the write.
+		resolvedDepSpecs, resolveErr := resolveDepSpecTargets(ctx, store, depSpecs)
+		if resolveErr != nil {
+			return HandleErrorRespectJSON("%v", resolveErr)
 		}
-		waitsForSpec, err := buildWaitsFor(waitsFor, waitsForGate)
-		if err != nil {
-			return HandleError("%v", err)
-		}
+		depSpecs = resolvedDepSpecs
 
 		// If a discovered-from dependency is present, inherit source_repo
-		// from the referenced parent issue.
-		if dfParent := discoveredFromParent(deps); dfParent != "" {
+		// from the referenced parent issue. Reuse the already-parsed specs
+		// (not the raw --deps strings) so this can't drift from parseDepSpec's
+		// normalization rules.
+		if dfParent := discoveredFromParentSpec(depSpecs); dfParent != "" {
 			parentIssue, err := store.GetIssue(ctx, dfParent)
 			if err == nil && parentIssue.SourceRepo != "" {
 				issue.SourceRepo = parentIssue.SourceRepo
@@ -531,20 +589,53 @@ var createCmd = &cobra.Command{
 			// If error getting parent or parent has no source_repo, continue with default
 		}
 
-		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
-		if err := createIssueWithDeps(ctx, store, issue, actor, edges); err != nil {
+		ops, err := writeOps(store)
+		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
+		opsCtx, err := issueOpsContext(ctx)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Label inheritance stays CLI-side (mergeCreateLabels above) because the
+		// dry-run preview needs it too; asking the facade to inherit as well
+		// would append the parent's labels a second time.
+		result, err := ops.Create(opsCtx, issueops.CreateRequest{
+			Actor:         actor,
+			Issue:         issue,
+			ParentID:      parentID,
+			Dependencies:  createDependencyRequests(depSpecs),
+			WaitsFor:      waitsForRequest(waitsForSpec),
+			ForceIDPrefix: forceCreate,
+			IDPrefix:      createIDPrefixOverride(),
+		})
+		if err != nil {
+			// RULING R1: an occupied --id is a refusal, not a silent full-row
+			// upsert reported as success.
+			if errors.Is(err, storage.ErrAlreadyExists) && explicitID != "" {
+				return HandleErrorRespectJSON("%s already exists; use bd update, or bd import for upsert semantics", explicitID)
+			}
+			return HandleErrorRespectJSON("%v", err)
+		}
+		// Every post-write read comes from the facade's result snapshot, never
+		// from the local struct: the facade clones its request, so the local
+		// struct still has no ID for an auto-minted create and no persisted
+		// timestamps. Dependencies and comments are dropped because `bd create`
+		// has never printed them.
+		created := result.Issue
+		created.Dependencies = nil
+		created.Comments = nil
 
+		edges := createDepEdges{parentID: parentID, specs: depSpecs, waitsFor: waitsForSpec}
 		if edges.empty() {
 			// Bare create: preserve the embedded-mode follow-up Dolt commit.
 			// The deps path commits inside its transaction instead.
-			shouldCommit, err := shouldCommitCreatePostWrites(issue, false)
+			shouldCommit, err := shouldCommitCreatePostWrites(created, false)
 			if err != nil {
 				return HandleError("dolt auto-commit failed: %v", err)
 			}
 			if shouldCommit {
-				commitMsg := fmt.Sprintf("bd: create %s", issue.ID)
+				commitMsg := fmt.Sprintf("bd: create %s", created.ID)
 				if err := store.Commit(ctx, commitMsg); err != nil && !isDoltNothingToCommit(err) {
 					WarnError("failed to commit: %v", err)
 				}
@@ -554,7 +645,7 @@ var createCmd = &cobra.Command{
 		if repoPath != "." && targetStore != nil {
 			if err := commitPendingIfEmbedded(ctx, targetStore, actor, doltAutoCommitParams{
 				Command:  "create",
-				IssueIDs: []string{issue.ID},
+				IssueIDs: []string{created.ID},
 			}); err != nil {
 				debug.Logf("warning: failed to commit routed repo: %v", err)
 			}
@@ -567,20 +658,20 @@ var createCmd = &cobra.Command{
 		}
 
 		if jsonOutput {
-			if err := outputJSON(issue); err != nil {
+			if err := outputJSON(created); err != nil {
 				return err
 			}
 		} else if silent {
-			fmt.Println(issue.ID)
+			fmt.Println(created.ID)
 		} else {
-			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(issue.ID, issue.Title))
-			debug.PrintNormal("  Priority: P%d\n", issue.Priority)
-			debug.PrintNormal("  Status: %s\n", issue.Status)
+			debug.PrintNormal("%s Created issue: %s\n", ui.RenderPass("✓"), formatFeedbackID(created.ID, created.Title))
+			debug.PrintNormal("  Priority: P%d\n", created.Priority)
+			debug.PrintNormal("  Status: %s\n", created.Status)
 
 			maybeShowTip(store)
 		}
 
-		SetLastTouchedID(issue.ID)
+		SetLastTouchedID(created.ID)
 		return nil
 	},
 }
@@ -600,6 +691,7 @@ type createIssueParams struct {
 	EstimatedMinutes   *int
 	Ephemeral          bool
 	NoHistory          bool
+	StorageClass       types.StorageClass
 	CreatedBy          string
 	Owner              string
 	Labels             []string
@@ -613,6 +705,58 @@ type createIssueParams struct {
 	DueAt              *time.Time
 	DeferUntil         *time.Time
 	Metadata           json.RawMessage
+}
+
+// resolveStorageClass resolves the requested storage class at create time
+// (Protocol v0.1 C1.3): the explicit --storage-class flag wins; otherwise the
+// per-type config default storage-class.<type> applies; otherwise unset.
+// The parsed class is returned verbatim, including versioned. The caller must
+// normalize versioned to the unset marker (the marker is omitted when
+// versioned, C2.4) only AFTER plane-conflict validation, so an explicit durable
+// request paired with a wisp-plane flag is rejected rather than silently erased
+// into an effective-ephemeral row. Values are validated wherever they came
+// from: a bad flag is a usage error, a bad config value is a config bug and
+// fails just as loudly.
+func resolveStorageClass(explicit string, issueType types.IssueType) (types.StorageClass, error) {
+	raw := explicit
+	if raw == "" {
+		raw = config.GetString("storage-class." + string(issueType))
+		if raw == "" {
+			return "", nil
+		}
+	}
+	class, err := types.ParseStorageClass(raw)
+	if err != nil {
+		if explicit == "" {
+			return "", fmt.Errorf("config storage-class.%s: %w", issueType, err)
+		}
+		return "", err
+	}
+	return class, nil
+}
+
+// reconcileStorageClassPlane applies flag-over-config precedence between a
+// resolved storage class and the effective wisp plane (Protocol v0.1 §C1.3).
+// A wisp-plane record is ephemeral by construction, so a durable class
+// (versioned/unversioned) cannot ride on it. explicit reports whether the class
+// came from an explicit flag/field rather than a per-type config default:
+//   - explicit durable class + wisp plane -> conflict=true; the caller rejects
+//     it so the durable intent is preserved rather than silently collapsed into
+//     an effective-ephemeral record;
+//   - config-derived durable class + wisp plane -> cleared, yielding to the
+//     explicit --ephemeral/--no-history plane.
+//
+// versioned normalizes to the unset marker (C2.4) only after the check, so the
+// durable request survives long enough to be honored, rejected, or yielded. On
+// conflict the class is returned verbatim so the caller can name it in the error.
+func reconcileStorageClassPlane(class types.StorageClass, explicit, wispPlane bool) (types.StorageClass, bool) {
+	if class != "" && wispPlane {
+		if explicit {
+			return class, true
+		}
+		class = "" // config default yields to the explicit wisp-plane flag
+	}
+	return class.Normalize(), false
 }
 
 func buildCreateIssue(params createIssueParams) *types.Issue {
@@ -644,6 +788,7 @@ func buildCreateIssue(params createIssueParams) *types.Issue {
 		EstimatedMinutes:   params.EstimatedMinutes,
 		Ephemeral:          params.Ephemeral,
 		NoHistory:          params.NoHistory,
+		StorageClass:       params.StorageClass,
 		CreatedBy:          params.CreatedBy,
 		Owner:              params.Owner,
 		Labels:             append([]string(nil), params.Labels...),
@@ -680,6 +825,22 @@ func mergeCreateLabels(labels, inheritedLabels []string) []string {
 		return nil
 	}
 	return merged
+}
+
+// createIDPrefixOverride is the prefix an explicit --id must match, when the
+// WORKSPACE knows better than the database does.
+//
+// config.yaml's `issue-prefix` wins over the database's, except under --global
+// where the shared database is authoritative (GH#4957, selectCreateIDPrefix).
+// Only a front door can read config.yaml — a shared server's database knows
+// only its own prefix — so both routes resolve it here and hand it to the role
+// as CreateRequest.IDPrefix. Empty means "the substrate's prefix is right",
+// which is the ordinary case.
+func createIDPrefixOverride() string {
+	if globalFlag {
+		return ""
+	}
+	return overlayYAMLPrefix("")
 }
 
 func selectCreateIDPrefix(global bool, yamlPrefix, storePrefix string) string {
@@ -721,17 +882,7 @@ func renderCreateDryRunPreview(issue *types.Issue, labels, deps []string) {
 }
 
 func shouldCommitCreatePostWrites(_ *types.Issue, _ bool) (bool, error) {
-	if isEmbeddedMode() {
-		if strings.TrimSpace(doltAutoCommit) == "" {
-			return true, nil
-		}
-		mode, err := getDoltAutoCommitMode()
-		if err != nil {
-			return false, err
-		}
-		return mode == doltAutoCommitOn, nil
-	}
-	return false, nil
+	return embeddedWritesCommitNow()
 }
 
 func createDepsAcceptedTypeList() string {
@@ -744,7 +895,7 @@ func createDepsAcceptedTypeList() string {
 }
 
 func init() {
-	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().StringP("file", "f", "", "Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file")
 	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")
@@ -762,7 +913,7 @@ func init() {
 	createCmd.Flags().String("id", "", "Explicit issue ID (e.g., 'bd-42' for partitioning)")
 	createCmd.Flags().String("parent", "", "Parent issue ID for hierarchical child (e.g., 'bd-a3f8e9')")
 	createCmd.Flags().Bool("no-inherit-labels", false, "Don't inherit labels from parent issue")
-	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies in format 'type:id' or 'id' (e.g., 'discovered-from:bd-20,blocks:bd-15' or 'bd-20')")
+	createCmd.Flags().StringSlice("deps", []string{}, "Dependencies as 'type:id' or bare 'id'. Bare 'id', 'depends-on:id', and 'blocked-by:id' all make THIS issue depend on id; 'blocks:id' reverses direction (id depends on this issue). E.g. 'blocked-by:bd-20,discovered-from:bd-15'")
 	createCmd.Flags().String("waits-for", "", "Spawner issue ID to wait for (creates waits-for dependency for fanout gate)")
 	createCmd.Flags().String("waits-for-gate", "all-children", "Gate type: all-children (wait for all) or any-children (wait for first)")
 	createCmd.Flags().Bool("force", false, "Force creation even if prefix doesn't match database prefix")
@@ -770,9 +921,11 @@ func init() {
 	createCmd.Flags().IntP("estimate", "e", 0, "Time estimate in minutes (e.g., 60 for 1 hour)")
 	createCmd.Flags().Bool("ephemeral", false, "Create as ephemeral (short-lived, subject to TTL compaction)")
 	createCmd.Flags().Bool("no-history", false, "Skip Dolt commit history without making GC-eligible (for permanent agent beads)")
+	createCmd.Flags().String("storage-class", "", "Storage class: versioned, unversioned, or ephemeral (default: storage-class.<type> config, else versioned)")
 	createCmd.Flags().String("mol-type", "", "Molecule type: swarm (multi-agent), patrol (recurring ops), work (default)")
 	createCmd.Flags().String("wisp-type", "", "Wisp type for TTL-based compaction: heartbeat, ping, patrol, gc_report, recovery, error, escalation")
 	createCmd.Flags().Bool("validate", false, "Validate description contains required sections for issue type")
+	createCmd.Flags().Bool("allow-empty-description", false, "Allow empty description input from stdin or file")
 	// Event-specific flags (only valid when --type=event)
 	createCmd.Flags().String("event-category", "", "Event category (e.g., patrol.muted, agent.started) (requires --type=event)")
 	createCmd.Flags().String("event-actor", "", "Entity URI who caused this event (requires --type=event)")
@@ -802,6 +955,16 @@ func formatTimeForRPC(t *time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
+// openDryRunTargetStore opens the store a `create --dry-run --repo <other>`
+// resolves --parent against. It is read-only on BOTH paths and must stay that
+// way: newDoltStoreFromConfig runs schema initialization on whatever it opens
+// and can rename a legacy hyphenated database and rewrite the target's
+// metadata.json on the way (GH#3231), so using it here would have a dry-run
+// mutate a repository the user only named as a lookup target — the same
+// migrate-at-open trap this preview policy exists to close, one repo over.
+// newPreviewStoreFromConfig is the non-mutating factory for a foreign
+// project (bd-6dnrw.32), relaxed for previews exactly as the root pre-run
+// relaxes the command's own store.
 func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltStorage, error) {
 	if remotecache.IsRemoteURL(repoPath) {
 		cache, err := remotecache.DefaultCache()
@@ -810,7 +973,7 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		}
 		// The dry-run parent lookup only reads from this cached remote store.
 		// Do not add writes here; dry-runs must not mutate cached remotes.
-		store, err := cache.OpenStore(ctx, repoPath, newDoltStoreFromConfig)
+		store, err := cache.OpenStore(ctx, repoPath, newPreviewStoreFromConfig)
 		if err != nil {
 			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", repoPath, err)
 		}
@@ -827,17 +990,30 @@ func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltSt
 		return nil, fmt.Errorf("failed to inspect target repo %s: %w", targetPath, err)
 	}
 
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open target store for dry-run: %w", err)
 	}
 	return store, nil
 }
 
+// isAmbiguousRepoTarget reports whether an explicit --repo value is a
+// bare/relative filesystem path (not absolute, not "~/"-prefixed). Such a
+// value silently resolves against the current working directory (see
+// routing.ExpandPath) rather than failing, so a misresolved value (e.g. a
+// typo) previously wrote a bead into a brand-new, disconnected database
+// instead of erroring (bd-8d3f).
+func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
+	return repoFlagChanged && !filepath.IsAbs(repoOverride) && !strings.HasPrefix(repoOverride, "~/")
+}
+
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage) error {
+//
+// When allowCreate is false, a target with no existing workspace is refused
+// instead of fabricated — see isAmbiguousRepoTarget.
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage, allowCreate bool) error {
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -845,6 +1021,10 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	// metadata.json is the canonical marker for an initialized beads dir.
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
+	}
+
+	if !allowCreate {
+		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", targetPath)
 	}
 
 	// Create .beads directory

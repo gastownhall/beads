@@ -105,9 +105,12 @@ func TestProxiedServerSearch(t *testing.T) {
 		}
 	})
 
-	t.Run("default_excludes_closed", func(t *testing.T) {
-		if searchResultIDs(bdProxiedSearchJSON(t, bd, p.dir, "sp-"))[closedTask.ID] {
-			t.Error("default search should exclude closed issues")
+	t.Run("default_includes_closed", func(t *testing.T) {
+		// bd-t5yex: "was this already filed/fixed?" is the dominant search
+		// query, so the default must not silently hide closed issues.
+		ids := searchResultIDs(bdProxiedSearchJSON(t, bd, p.dir, "sp-"))
+		if !ids[taskA.ID] || !ids[closedTask.ID] {
+			t.Error("default search should include open and closed issues")
 		}
 	})
 

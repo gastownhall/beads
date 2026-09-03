@@ -162,6 +162,49 @@ func loadMigrateModeConfig(beadsDir string) (*configfile.Config, error) {
 	return cfg, nil
 }
 
+// migrateGateDestRoot resolves the physical root the DESTINATION mode of a
+// dolt-mode migration will use, so the migration can gate it alongside the
+// source's roots. Both proxied-server migration directions keep the data
+// directory in place, so this is the shared dolt dir for --shared flows and
+// the per-project dolt data dir otherwise — resolved side-effect-free (no
+// mkdir) because gate planning must not create the tree it is guarding.
+func migrateGateDestRoot(shared bool, beadsDir string) (string, error) {
+	if shared {
+		return doltserver.SharedDoltPath()
+	}
+	return doltserver.DoltDirPath(beadsDir), nil
+}
+
+// acquireMigrateGates takes the workspace gate plus the physical-root gates
+// for BOTH the source mode's roots (via ResolvePhysicalRoots inside
+// acquireExclusiveWorkspaceGates) and the destination mode's root, all
+// EXCLUSIVE in one AcquireAll. It must run BEFORE acquireMigrateLock:
+// the normative lock ordering is workspace gate(s) → physical-root gate(s)
+// → migrate.lock → embedded .lock → proxy locks → dolt-server.lock.
+func acquireMigrateGates(beadsDir string, shared bool, reason string) (func(), error) {
+	destRoot, err := migrateGateDestRoot(shared, beadsDir)
+	if err != nil {
+		return nil, HandleError("failed to resolve migration destination root: %v", err)
+	}
+	// getRootContext(), not the rootCtx global: it honors the per-command
+	// context when globals are disabled, and normalizes the not-yet-set case
+	// to context.Background().
+	h, err := acquireExclusiveWorkspaceGates(getRootContext(), beadsDir, reason, destRoot)
+	if err != nil {
+		return nil, HandleErrorWithHint(
+			fmt.Sprintf("cannot migrate while other bd activity holds this workspace: %v", err),
+			"wait for running bd commands to finish, then retry")
+	}
+	return func() { _ = h.Release() }, nil
+}
+
+// acquireMigrateLock takes the legacy per-workspace migrate.lock. Known
+// hazard, deliberately left as-is: this lock file lives INSIDE .beads and is
+// removed on release, which is exactly the split-inode pattern the
+// workspacegate package documents as unsafe for operations that replace
+// directories. The workspace/physical-root gates acquired above (see
+// acquireMigrateGates) are the durable fence; replacing migrate.lock itself
+// is out of scope here (PR-B2+).
 func acquireMigrateLock(beadsDir string) (func(), error) {
 	lockPath := filepath.Join(beadsDir, migrateLockFileName)
 	lock, err := util.TryLock(lockPath)
@@ -190,6 +233,11 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		return err
 	}
 	if !dryRun {
+		releaseGates, err := acquireMigrateGates(beadsDir, shared, "bd migrate to proxied-server")
+		if err != nil {
+			return err
+		}
+		defer releaseGates()
 		releaseMigrateLock, err := acquireMigrateLock(beadsDir)
 		if err != nil {
 			return err
@@ -217,6 +265,13 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	} else {
 		if !cfg.IsDoltServerMode() {
 			return HandleError("repo is not in server mode (dolt_mode=%q); this command only migrates server-mode repos", cfg.GetDoltMode())
+		}
+		// This migration only re-points the proxy at the LOCAL Dolt root;
+		// it does not copy data. A workspace whose server mode comes from a
+		// remote host (GH#3545 inference or explicit config) would silently
+		// switch from the remote data to an empty/stale local database.
+		if host := cfg.GetDoltServerHost(); !configfile.IsLocalHostString(host) {
+			return HandleError("the configured Dolt server host is remote (%s); this migration only re-points the proxy at the local Dolt root and would abandon the remote data.\nMigrate on the server host itself, or clear dolt_server_host / dolt.host / BEADS_DOLT_SERVER_HOST first", host)
 		}
 		if doltserver.IsSharedServerMode() {
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
@@ -277,6 +332,11 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return err
 	}
 	if !dryRun {
+		releaseGates, err := acquireMigrateGates(beadsDir, shared, "bd migrate from proxied-server")
+		if err != nil {
+			return err
+		}
+		defer releaseGates()
 		releaseMigrateLock, err := acquireMigrateLock(beadsDir)
 		if err != nil {
 			return err
@@ -298,6 +358,12 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if !cfg.IsDoltProxiedServerMode() {
 		return HandleError("repo is not in proxied-server mode (dolt_mode=%q); this command only migrates proxied-server repos", cfg.GetDoltMode())
+	}
+	// Leaving proxied mode would make dolt_team_server inert and resume
+	// bd-driven schema migrations on the bts-owned database.
+	if cfg.DoltTeamServer {
+		return HandleErrorWithHint("workspace is team-server managed (dolt_team_server in metadata.json); the shared database's schema is owned by beads-team-server",
+			"if the database is no longer bts-managed, remove dolt_team_server from .beads/metadata.json first")
 	}
 
 	rootDir, err := resolveProxiedServerRootPath(beadsDir)

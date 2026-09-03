@@ -165,6 +165,42 @@ func TestProxiedServerSetState(t *testing.T) {
 		if strings.TrimSpace(val) != "muted" {
 			t.Errorf("wisp state value = %q, want muted", strings.TrimSpace(val))
 		}
+
+		// ASSERT AT THE TABLE, not only through the reader. The reader answers
+		// from whichever plane the write chose, so a write and a read that get
+		// the same boolean backwards together still agree with each other and
+		// the check above passes. This is the assertion that does not: a wisp's
+		// state label belongs in wisp_labels and the durable table stays empty.
+		db := openProxiedDB(t, p)
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", wisp.ID, "patrol:muted"); n != 1 {
+			t.Errorf("wisp_labels rows for patrol:muted = %d, want 1", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", wisp.ID); n != 0 {
+			t.Errorf("durable labels rows for a wisp = %d, want 0", n)
+		}
+	})
+
+	t.Run("state_change_on_wisp_swaps_in_place", func(t *testing.T) {
+		wisp := bdProxiedCreate(t, bd, p.dir, "Wisp set-state swap", "--ephemeral")
+
+		for _, spec := range []string{"phase=planning", "phase=running"} {
+			if out, err := bdProxiedRun(t, bd, p.dir, "set-state", wisp.ID, spec, "--json"); err != nil {
+				t.Fatalf("set-state %s on wisp: %v\n%s", spec, err, out)
+			}
+		}
+
+		// The swap is one edit: the old label must be gone and the new one
+		// present, both in the ephemeral plane, with nothing left durable.
+		db := openProxiedDB(t, p)
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label LIKE 'phase:%'", wisp.ID); n != 1 {
+			t.Errorf("wisp_labels phase rows = %d, want exactly 1 after a swap", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM wisp_labels WHERE issue_id = ? AND label = ?", wisp.ID, "phase:running"); n != 1 {
+			t.Errorf("wisp_labels rows for phase:running = %d, want 1", n)
+		}
+		if n := countRows(t, db, "SELECT COUNT(*) FROM labels WHERE issue_id = ?", wisp.ID); n != 0 {
+			t.Errorf("durable labels rows for a wisp = %d, want 0", n)
+		}
 	})
 }
 

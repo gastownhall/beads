@@ -153,7 +153,7 @@ func TestParseNaturalLanguage(t *testing.T) {
 // TestParseRelativeTime tests the layered parsing function.
 func TestParseRelativeTime(t *testing.T) {
 	// Fixed reference time: Wednesday, January 15, 2025, 10:00:00 AM
-	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.Local)
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
 
 	tests := []struct {
 		name      string
@@ -263,7 +263,7 @@ func TestParseRelativeTime(t *testing.T) {
 
 // TestParseRelativeTime_LayerPrecedence verifies that layers are tried in order.
 func TestParseRelativeTime_LayerPrecedence(t *testing.T) {
-	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.Local)
+	now := time.Date(2025, 1, 15, 10, 0, 0, 0, time.UTC)
 
 	// "+1d" is valid compact duration, should NOT be parsed as NLP
 	t1, err := ParseRelativeTime("+1d", now)
@@ -283,5 +283,37 @@ func TestParseRelativeTime_LayerPrecedence(t *testing.T) {
 	}
 	if t2.Day() != 20 || t2.Month() != time.January || t2.Year() != 2025 {
 		t.Errorf("ParseRelativeTime(\"2025-01-20\") = %v, want Jan 20, 2025", t2)
+	}
+}
+
+func TestParseRelativeTimeNormalizesToUTC(t *testing.T) {
+	loc := time.FixedZone("UTC-6", -6*60*60)
+	now := time.Date(2026, 7, 31, 21, 40, 15, 0, loc)
+
+	tests := []struct {
+		input string
+		want  time.Time
+	}{
+		{input: "+1h", want: time.Date(2026, 8, 1, 4, 40, 15, 0, time.UTC)},
+		{input: "2026-08-01", want: time.Date(2026, 8, 1, 6, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01 09:00:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "2026-08-01T09:00:00-06:00", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+		{input: "tomorrow at 9am", want: time.Date(2026, 8, 1, 15, 0, 0, 0, time.UTC)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got, err := ParseRelativeTime(tt.input, now)
+			if err != nil {
+				t.Fatalf("ParseRelativeTime(%q) failed: %v", tt.input, err)
+			}
+			if !got.Equal(tt.want) {
+				t.Errorf("ParseRelativeTime(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+			if got.Location() != time.UTC {
+				t.Errorf("ParseRelativeTime(%q) location = %v, want UTC", tt.input, got.Location())
+			}
+		})
 	}
 }

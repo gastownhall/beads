@@ -44,7 +44,8 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
+.PHONY: api-gen api-check
 
 # Default target
 all: build
@@ -53,6 +54,9 @@ BUILD_DIR := .
 GIT_BUILD := $(shell git rev-parse --short HEAD)
 ifeq ($(OS),Windows_NT)
 INSTALL_DIR := $(USERPROFILE)/.local/bin
+WINDOWS_MINGW_BIN ?= /c/ProgramData/mingw64/mingw64/bin
+WINDOWS_MINGW_GCC := $(WINDOWS_MINGW_BIN)/gcc.exe
+WINDOWS_CGO_BINS ?= $(WINDOWS_MINGW_BIN) /c/msys64/clangarm64/bin /c/msys64/ucrt64/bin /c/msys64/mingw64/bin /c/msys64/clang64/bin
 else
 INSTALL_DIR := $(HOME)/.local/bin
 endif
@@ -63,7 +67,9 @@ endif
 # Windows notes:
 #   - ICU is NOT required. go-icu-regex has a pure-Go fallback (regex_windows.go)
 #     and gms_pure_go tag tells go-mysql-server to use pure-Go regex too.
-#   - CGO_ENABLED=1 needs a C compiler (MinGW/MSYS2) but does NOT need ICU.
+#   - CGO_ENABLED=1 needs a GCC-compatible Windows CGO compiler but does NOT
+#     need ICU. Supported local toolchains include MinGW-w64/MSYS2 gcc and
+#     MSYS2 clang/LLVM targeting windows-gnu.
 export CGO_ENABLED := 1
 
 # When go.mod requires a newer Go version than the locally installed one,
@@ -87,7 +93,31 @@ REGRESSION_TIMEOUT ?= 20m
 build:
 	@echo "Building bd..."
 ifeq ($(OS),Windows_NT)
-	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd
+	@if [ -n "$$CC" ]; then \
+		echo "Using CC=$$CC"; \
+		go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v gcc >/dev/null 2>&1; then \
+		CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	elif command -v clang >/dev/null 2>&1 && clang -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+		CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+	else \
+		for bin in $(WINDOWS_CGO_BINS); do \
+			if [ -x "$$bin/gcc.exe" ]; then \
+				echo "Using Windows CGO gcc from $$bin"; \
+				PATH="$$bin:$$PATH" CC=gcc go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+			if [ -x "$$bin/clang.exe" ] && "$$bin/clang.exe" -dumpmachine 2>/dev/null | grep -qi 'windows.*gnu'; then \
+				echo "Using Windows CGO clang from $$bin"; \
+				PATH="$$bin:$$PATH" CC=clang go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd.exe ./cmd/bd; \
+				exit $$?; \
+			fi; \
+		done; \
+		echo "ERROR: Windows CGO builds require a GCC-compatible compiler." >&2; \
+		echo "       Install MinGW-w64/MSYS2 gcc or MSYS2 clang/LLVM targeting windows-gnu." >&2; \
+		echo "       Put it on PATH, set CC, or set WINDOWS_CGO_BINS=/path/to/toolchain/bin." >&2; \
+		exit 1; \
+	fi
 else
 	go build -tags "$(BUILD_TAGS)" -ldflags="-X main.Build=$(GIT_BUILD)" -o $(BUILD_DIR)/bd ./cmd/bd
 ifeq ($(shell uname),Darwin)
@@ -160,6 +190,53 @@ ci-pr-policy:
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
 
+# Opt-in architecture experiment. Install gocyclo v0.6.0 first;
+# report is advisory while check exercises the local baseline guard.
+ci-complexity:
+	@./scripts/ci/complexity.sh report
+
+ci-complexity-diff:
+	@./scripts/ci/complexity.sh diff
+
+ci-complexity-check:
+	@./scripts/ci/complexity.sh check
+
+# The generated half of the wire contract. The document is hand-written and is
+# the source of truth; this file is its output.
+API_GEN_FILE := internal/httpapi/apigen/types.gen.go
+
+# Regenerate the wire types from internal/httpapi/spec/openapi.v0.yaml.
+api-gen:
+	go generate -tags "$(BUILD_TAGS)" ./internal/httpapi/apigen
+
+# Two-part spec drift gate: regenerate and fail if regeneration CHANGED
+# anything, then run the spec tests. Runs in the PR workflow's policy job
+# (scripts/ci/pr-policy.sh), on every pull request, never only on
+# push-to-main.
+#
+# The drift question is "do the checked-out types already match the checked-out
+# spec", so the comparison is before-vs-after regeneration rather than
+# working-tree-vs-HEAD. A `git status` check answers a different question: a
+# contributor mid-edit has a dirty spec AND a dirty generated file and is
+# perfectly in sync, and calling that drift sends them to run a command that
+# changes nothing.
+#
+# The test leg runs the whole package with no -run filter on purpose. A
+# hand-maintained list of test names degrades silently: rename one and `go test
+# -run` matches nothing, prints "no tests to run" and exits 0, so the step still
+# reports success while enforcing nothing.
+api-check:
+	@pre=$$(git hash-object $(API_GEN_FILE)) || exit 1; \
+	$(MAKE) --no-print-directory api-gen || exit 1; \
+	post=$$(git hash-object $(API_GEN_FILE)) || exit 1; \
+	if [ "$$pre" != "$$post" ]; then \
+		git --no-pager diff -- $(API_GEN_FILE); \
+		echo "openapi drift: $(API_GEN_FILE) is stale for the current spec (regenerating it changed it)."; \
+		echo "run 'make api-gen' and commit the result."; \
+		exit 1; \
+	fi
+	go test -tags "$(BUILD_TAGS)" ./internal/httpapi/... -count=1
+
 ci-package-mcp:
 	@./scripts/ci/package-mcp.sh
 
@@ -189,10 +266,9 @@ test-cross-version: build
 	@echo "Running cross-version smoke tests..."
 	@CANDIDATE_BIN=./bd ./scripts/cross-version-smoke-test.sh
 
-# Run migration test harness (rich dataset, fidelity checks, recipe discovery).
-# Tests direct and stepping-stone upgrade paths from all storage eras.
-# Direct only: ./scripts/migration-test/run.sh --direct-only
-# Single version: ./scripts/migration-test/run.sh v0.49.6
+# Run the authenticated historical upgrade corpus with strict fidelity checks.
+# All qualified versions: ./scripts/migration-test/run.sh
+# Single version: ./scripts/migration-test/run.sh --version v0.49.6
 test-migration: build
 	@echo "Running migration test harness..."
 	@CANDIDATE_BIN=./bd ./scripts/migration-test/run.sh
@@ -237,21 +313,32 @@ ifndef SKIP_UPDATE_CHECK
 	fi
 endif
 
-# Install bd to ~/.local/bin (builds, signs on macOS, and copies)
+# Install bd to ~/.local/bin (builds, signs on macOS, then renames into place)
 # Also creates 'beads' symlink as an alias for bd
 # Use install-force to skip the origin/main update check
+#
+# The install stages to a temp name inside INSTALL_DIR and rename(2)s over the
+# final path: the live path must never hold a partial binary. A plain cp onto
+# bd leaves a truncated (on macOS: signature-invalid) binary for the whole
+# ~200MB copy, and any bd exec'd in that window dies at exec with rc 137 and
+# zero bytes of output — indistinguishable from an empty result set to callers.
+# The old rm-first shape added an ENOENT window on top. Same treatment for the
+# beads symlink.
+#
+# EXCEPTION — native Windows keeps the rm-first + cp shape: under Git for
+# Windows' bash the staged tmp+rename leaves no bd.exe at the destination even
+# though cp && mv exit 0 (caught by pr.yml's spaced-USERPROFILE install proof;
+# root cause untraced). Restore Windows atomicity only with that proof green.
 install install-force: build
-	@mkdir -p $(INSTALL_DIR)
+	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
-	@rm -f $(INSTALL_DIR)/bd $(INSTALL_DIR)/bd.exe
-	@cp $(BUILD_DIR)/bd.exe $(INSTALL_DIR)/bd.exe
+	@rm -f "$(INSTALL_DIR)/bd" "$(INSTALL_DIR)/bd.exe"
+	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/bd.exe"
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
-	@rm -f $(INSTALL_DIR)/bd
-	@cp $(BUILD_DIR)/bd $(INSTALL_DIR)/bd
+	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"
 	@echo "Installed bd to $(INSTALL_DIR)/bd"
-	@rm -f $(INSTALL_DIR)/beads
-	@ln -s bd $(INSTALL_DIR)/beads
+	@ln -sfn bd "$(INSTALL_DIR)/.beads.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.beads.install.tmp.$$$$" "$(INSTALL_DIR)/beads"
 	@echo "Created 'beads' alias -> bd"
 endif
 	@git config core.hooksPath .githooks 2>/dev/null && echo "Configured git hooks (.githooks/)" || true
@@ -266,16 +353,7 @@ fmt:
 
 # Check that all Go files are properly formatted (for CI)
 fmt-check:
-	@echo "Checking Go formatting..."
-	@UNFORMATTED=$$(gofmt -l .); \
-	if [ -n "$$UNFORMATTED" ]; then \
-		echo "The following files are not properly formatted:"; \
-		echo "$$UNFORMATTED"; \
-		echo ""; \
-		echo "Run 'make fmt' to fix formatting"; \
-		exit 1; \
-	fi
-	@echo "All Go files are properly formatted"
+	@./scripts/ci/fmt-check.sh
 
 # Validate documentation references against actual CLI flags
 check-docs:
@@ -343,12 +421,15 @@ help:
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-complexity - Report production cyclomatic complexity (advisory)"
+	@echo "  make ci-complexity-diff - Compare complexity with COMPLEXITY_BASE_REF"
+	@echo "  make ci-complexity-check - Check complexity against the local baseline"
 	@echo "  make ci-package-mcp - Run MCP Python package gate"
 	@echo "  make ci-package-npm - Run npm package gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"
 	@echo "  make test-upgrade  - Run upgrade smoke tests (release stability gate)"
 	@echo "  make test-cross-version - Run cross-version smoke tests (last 30 tags)"
-	@echo "  make test-migration - Run migration test harness (fidelity checks, recipes)"
+	@echo "  make test-migration - Run authenticated historical upgrade tests"
 	@echo "  make bench        - Run performance benchmarks (generates CPU profiles)"
 	@echo "  make bench-quick  - Run quick benchmarks (shorter benchtime)"
 	@echo "  make install      - Install bd to ~/.local/bin (with codesign on macOS, includes 'beads' alias)"
@@ -356,6 +437,8 @@ help:
 	@echo "  make fmt          - Format all Go files with gofmt"
 	@echo "  make fmt-check    - Check Go formatting (for CI)"
 	@echo "  make check-docs   - Validate docs against CLI flags"
+	@echo "  make api-gen      - Regenerate HTTP API types from the OpenAPI spec"
+	@echo "  make api-check    - OpenAPI drift gate (regenerate, diff-or-fail, spec tests)"
 	@echo "  make clean        - Remove build artifacts and profile files"
 	@echo "  make clean-test-tmp - Sweep orphaned cmd/bd test temp dirs from \$$TMPDIR"
 	@echo "  make help         - Show this help message"

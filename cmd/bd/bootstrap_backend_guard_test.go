@@ -212,10 +212,12 @@ func TestBootstrapDoesNotConvertExistingSQLiteWorkspace(t *testing.T) {
 			}
 
 			message := strings.ToLower(string(out))
-			if !strings.Contains(message, "sqlite") {
-				t.Errorf("bd %s should name the rejected backend:\n%s", strings.Join(args, " "), out)
-			}
-			for _, want := range removedBackendWantSubstrings(configfile.BackendSQLite) {
+			for _, want := range []string{
+				"historical sqlite workspace",
+				"explicit migration is required",
+				"preserve .beads unchanged",
+				"cross-era-upgrades",
+			} {
 				if !strings.Contains(message, want) {
 					t.Errorf("bd %s error missing %q:\n%s", strings.Join(args, " "), want, out)
 				}

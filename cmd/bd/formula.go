@@ -418,10 +418,7 @@ func truncateDescription(desc string, maxLen int) string {
 	if idx := strings.Index(desc, "\n"); idx >= 0 {
 		desc = desc[:idx]
 	}
-	if len(desc) > maxLen {
-		return desc[:maxLen-3] + "..."
-	}
-	return desc
+	return truncate(desc, maxLen)
 }
 
 // getTypeIcon returns an icon for the formula type.
