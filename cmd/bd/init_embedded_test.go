@@ -53,6 +53,16 @@ func buildEmbeddedBD(t *testing.T) string {
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
 		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
+		// A trimmed test binary (-trimpath) reports an import path here, not a
+		// filesystem path; chdir-ing into it would fail with a baffling error,
+		// so refuse with guidance instead. runtime.Caller keeps the tests
+		// cwd-independent in the normal untrimmed case.
+		_, sourceFile, _, ok := runtime.Caller(0)
+		if !ok || !filepath.IsAbs(sourceFile) {
+			embeddedBDErr = fmt.Errorf("cannot resolve the cmd/bd source directory from a trimmed test binary; set BEADS_TEST_BD_BINARY to a pre-built bd or build the tests without -trimpath")
+			return
+		}
+		cmd.Dir = filepath.Dir(sourceFile)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
