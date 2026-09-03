@@ -495,30 +495,38 @@ func TestMigrateExternalJournalAlwaysFailsClosed_TCPAndUnixForwardReverse(t *tes
 				t.Run(ep.name+"/"+string(phase), func(t *testing.T) {
 					beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 					root := filepath.Join(beadsDir, "dolt")
-					if reverse {
-						writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "myproj")
-					}
 					want := configfile.DoltModeServer
 					src := configfile.DoltModeServer
 					target := configfile.DoltModeProxiedServer
 					if reverse {
 						src, target = configfile.DoltModeProxiedServer, configfile.DoltModeServer
-						writeMetadataConfig(t, beadsDir, src, "myproj")
+						want = configfile.DoltModeProxiedServer
 					}
+					// A prepared journal may legitimately coexist with either
+					// source or target metadata. Later phases require target
+					// metadata so validation reaches the ownership refusal.
+					metadataMode := src
+					if phase != migratePrepared {
+						metadataMode = target
+					}
+					want = metadataMode
+					writeMetadataConfig(t, beadsDir, metadataMode, "myproj")
 					j := migrateJournal{Version: 1, SourceMode: src, TargetMode: target, RootPath: root, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ep.cfg}}
 					b, err := json.Marshal(j)
 					require.NoError(t, err)
 					require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
 					treeBefore := snapshotMigrationTree(t, beadsDir, root)
 					before, _ := os.ReadFile(configfile.ConfigPath(beadsDir))
-					if reverse {
-						want = configfile.DoltModeProxiedServer
-					}
-					if reverse {
-						require.Error(t, runMigrateFromProxiedServer(false, false))
-					} else {
-						require.Error(t, runMigrateToProxiedServer(false, 0, false))
-					}
+					var migrateErr error
+					stderr := captureStderr(t, func() {
+						if reverse {
+							migrateErr = runMigrateFromProxiedServer(false, false)
+						} else {
+							migrateErr = runMigrateToProxiedServer(false, 0, false)
+						}
+					})
+					require.Error(t, migrateErr)
+					assert.Contains(t, strings.ToLower(stderr), "externally hosted proxied dolt endpoint")
 					after, _ := os.ReadFile(configfile.ConfigPath(beadsDir))
 					assert.Equal(t, before, after)
 					cfg, _ := configfile.Load(beadsDir)
