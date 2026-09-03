@@ -311,6 +311,9 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "proxied_server_client_info.json"), sidecar, 0o600))
 					journal, _ := json.Marshal(map[string]any{"version": 1, "source_mode": src, "target_mode": target, "root_path": root, "external": ext, "sidecar": map[string]any{"root_path": root, "external": ext}, "ownership": "external", "attempt": 1, "phase": phase})
 					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, migrateJournalFileName), journal, 0o600))
+					gatePath := filepath.Join(beadsDir, "dolt.gate.lock")
+					gateBefore, gateErr := os.ReadFile(gatePath)
+					gateExists := gateErr == nil
 					tree := snapshotMigrationTree(t, beadsDir)
 					out, err := runBDExecWithBinary(t, bd, dir, env, append([]string{"--json", "migrate"}, command...)...)
 					require.Error(t, err)
@@ -326,9 +329,14 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 					assert.Equal(t, false, payload["mutates"])
 					assert.Contains(t, payload["error"], "externally hosted proxied Dolt endpoint")
 					assert.Equal(t, tree, snapshotMigrationTree(t, beadsDir))
-					for _, p := range append([]string{migrateLockFileName, "dolt.gate.lock"}, serverAssetNames()...) {
+					for _, p := range append([]string{migrateLockFileName}, serverAssetNames()...) {
 						_, statErr := os.Stat(filepath.Join(beadsDir, p))
 						assert.True(t, os.IsNotExist(statErr), "unexpected artifact %s", p)
+					}
+					gateAfter, gateAfterErr := os.ReadFile(gatePath)
+					assert.Equal(t, gateExists, gateAfterErr == nil, "dolt gate lock existence changed")
+					if gateExists {
+						assert.Equal(t, gateBefore, gateAfter, "dolt gate lock changed")
 					}
 					for _, p := range proxiedAssetNames() {
 						_, statErr := os.Stat(filepath.Join(root, p))
