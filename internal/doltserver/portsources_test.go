@@ -186,8 +186,16 @@ func TestDefaultConfigPortSharedServer(t *testing.T) {
 	if cfg.Port != DefaultSharedServerPort {
 		t.Fatalf("shared mode fallback: port = %d, want %d", cfg.Port, DefaultSharedServerPort)
 	}
-	if cfg.PortSource != PortSourceUnset {
-		t.Fatalf("shared mode fallback: source = %q, want %q", cfg.PortSource, PortSourceUnset)
+	if cfg.PortSource != PortSourceSharedServerDefault {
+		t.Fatalf("shared mode fallback: source = %q, want %q", cfg.PortSource, PortSourceSharedServerDefault)
+	}
+	// Sourced, but deliberately NOT authoritative: bd picked 3308 on the
+	// user's behalf. Callers that copy this Port into dolt.Config need a
+	// non-empty source (or applyConfigDefaults infers caller_explicit), and
+	// they need it to answer false here (or auto-start defends a port the
+	// user never configured).
+	if cfg.PortSource.IsAuthoritative() {
+		t.Fatalf("shared mode fallback: source %q reports authoritative, want non-authoritative", cfg.PortSource)
 	}
 	if !cfg.PortSharedServer {
 		t.Fatalf("shared mode fallback: PortSharedServer = false, want true")

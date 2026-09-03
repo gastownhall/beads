@@ -14,6 +14,18 @@ import (
 	"github.com/steveyegge/beads/issueops"
 )
 
+// showNotFoundHint explains that an unresolved issue ID is not proof the ID
+// never existed: bd delete and wisp purge both remove a row (and its
+// events) from the live tables with no trace left behind, so a deleted or
+// purged ID looks identical to one that was never created. bd history can
+// sometimes tell the two apart via Dolt's commit history, but that scan is
+// real, sometimes-slow work (and wisps are never committed to history at
+// all), so it's offered as a pointer rather than run automatically here
+// (ga-m6inyb).
+func showNotFoundHint(id string) string {
+	return fmt.Sprintf("this ID may have never existed, or may reference a deleted/purged record with no trace left in the live database — try 'bd history %s'", id)
+}
+
 var showCmd = &cobra.Command{
 	Use:           "show [id...] [--id=<id>...] [--current]",
 	Aliases:       []string{"view"},
@@ -121,7 +133,12 @@ var showCmd = &cobra.Command{
 				if result != nil {
 					result.Close()
 				}
-				fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				if isNotFoundErr(err) {
+					fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+					fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
+				} else {
+					fmt.Fprintf(os.Stderr, "Error fetching %s: %v\n", id, err)
+				}
 				continue
 			}
 			if result == nil || result.Issue == nil {
@@ -129,6 +146,7 @@ var showCmd = &cobra.Command{
 					result.Close()
 				}
 				fmt.Fprintf(os.Stderr, "Issue %s not found\n", id)
+				fmt.Fprintf(os.Stderr, "Hint: %s\n", showNotFoundHint(id))
 				continue
 			}
 			issue := result.Issue
@@ -258,7 +276,8 @@ var showCmd = &cobra.Command{
 					return jerr
 				}
 			} else {
-				return HandleErrorRespectJSON("no issues found matching the provided IDs")
+				return HandleErrorWithHintRespectJSON("no issues found matching the provided IDs",
+					"some IDs may reference deleted/purged records with no trace left in the live database — try 'bd history <id>' to check")
 			}
 		} else if foundCount > 0 {
 			maybeShowTip(store)

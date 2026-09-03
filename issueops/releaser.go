@@ -55,7 +55,14 @@ type ReleaseRequest struct {
 	// "_" or "-" matches any other such run, so "agent-a", "agent_a" and
 	// "agent.a" are one holder — that is deliberate, so a caller naming the
 	// holder under a different layer's spelling is a match rather than a
-	// mismatch (ga-5ksp5). NOTHING ELSE IS FORGIVEN: the value is not trimmed
+	// mismatch (ga-5ksp5). THE ONE EXCEPTION IS AN EXACT "--" RUN: that is
+	// gascity's session-name encoding of a rig-qualified agent's "/", so it
+	// decodes to "/" rather than collapsing. "a--b" matches "a/b" and no
+	// longer matches "a__b" or "a-b" — "a--b" is the agent "b" on rig "a"
+	// while "a__b" is the dotted alias "a.b", so treating them as one holder
+	// was a widening, and removing it is the point of the exception
+	// (ga-2vy9p2). Longer or mixed runs, "__" included, still collapse.
+	// NOTHING ELSE IS FORGIVEN: the value is not trimmed
 	// and not case-folded, so " agent-a" and "Agent-a" are both refusals. The
 	// validation below trims only far enough to tell a blank expectation from a
 	// real one, and never writes the trimmed form back — the no-mutation

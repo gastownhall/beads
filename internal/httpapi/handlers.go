@@ -77,8 +77,12 @@ func (s *Server) requireNoQuery(w http.ResponseWriter, r *http.Request) bool {
 // it publish the database bind endpoint (advertising it invites clients to
 // bypass this API and dial a server whose trust model is "root with an empty
 // password on loopback") or the absolute host paths. BeadsDir and RepoRoot ARE
-// published, deliberately: they are the single-workspace server's only
-// workspace-identity handshake, and the document says so.
+// published, deliberately: they are the most legible workspace identity for
+// the operator reading a single-workspace server, and the document says so.
+//
+// Those two are also the response's only OPTIONAL members, and this server
+// always publishes them anyway. The optionality is the document's promise to
+// CLIENTS — that absence is legal and must be tolerated — not a switch here.
 //
 // The three members that are NOT the workspace's are named here, because they
 // are this surface's own: the API version, the schema version, and the
@@ -99,8 +103,8 @@ func contextResponse(info domain.ContextInfo, schemaVersion int, capabilities []
 		Backend:   published.Backend,
 		DoltMode:  published.DoltMode,
 		Database:  published.Database,
-		BeadsDir:  published.BeadsDir,
-		RepoRoot:  published.RepoRoot,
+		BeadsDir:  &published.BeadsDir,
+		RepoRoot:  &published.RepoRoot,
 		ProjectId: published.ProjectID,
 	}
 }

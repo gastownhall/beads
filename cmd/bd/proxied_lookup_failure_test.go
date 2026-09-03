@@ -192,7 +192,10 @@ var proxiedLookupCommands = []struct {
 		},
 		// show reports per id and keeps going, so its line has no "Error: "
 		// prefix; the non-zero exit comes from the empty result at the end.
-		wantNotFound: "Issue bd-missing not found",
+		// The second line is the ga-m6inyb hint: reportIssueLookupFailure
+		// no longer implies an absent id definitely never existed, since a
+		// deleted/purged one is observationally identical.
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error fetching bd-missing: connection reset by peer",
 	},
 	{
@@ -200,7 +203,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runShowProxiedServer(showViewCmd("refs"), ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 		exitsZero:    true,
 	},
@@ -209,7 +212,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runShowProxiedServer(showViewCmd("children"), ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 		exitsZero:    true,
 	},
@@ -238,7 +241,7 @@ var proxiedLookupCommands = []struct {
 		run: func(ctx context.Context) error {
 			return runReopenProxiedServer(&cobra.Command{}, ctx, []string{stubMissingID})
 		},
-		wantNotFound: "Issue bd-missing not found",
+		wantNotFound: "Issue " + stubMissingID + " not found\nHint: " + showNotFoundHint(stubMissingID),
 		wantHardErr:  "Error resolving bd-missing: connection reset by peer",
 	},
 	{
@@ -418,7 +421,8 @@ func TestReportIssueLookupFailure(t *testing.T) {
 	t.Run("absent id names the issue", func(t *testing.T) {
 		err := fmt.Errorf("%w: issue bd-gone", storage.ErrNotFound)
 		stderr := captureStderrDuring(t, func() { reportIssueLookupFailure("fetching", "bd-gone", err) })
-		if got, want := strings.TrimSpace(stderr), "Issue bd-gone not found"; got != want {
+		want := "Issue bd-gone not found\nHint: " + showNotFoundHint("bd-gone")
+		if got := strings.TrimSpace(stderr); got != want {
 			t.Errorf("stderr = %q, want %q", got, want)
 		}
 	})
