@@ -277,8 +277,10 @@ func RunImporterWiresTheCrossPlaneEdgeBetweenItsRows(t *testing.T, ctx context.C
 	if result.Created != 3 {
 		t.Errorf("Created = %d, want 3", result.Created)
 	}
-	assertImporterEdgeCount(t, ctx, fixture, wisp, durable, 1)
-	assertImporterEdgeCount(t, ctx, fixture, depender, wisp, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_issue_id", wisp, durable, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_issue_id", wisp, durable, 0)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "dependencies", "depends_on_wisp_id", depender, wisp, 1)
+	assertImporterPlaneEdgeCount(t, ctx, fixture, "wisp_dependencies", "depends_on_wisp_id", depender, wisp, 0)
 	assertImporterSkipped(t, result, nil)
 }
 
@@ -435,6 +437,26 @@ func assertImporterEdgeCount(t *testing.T, ctx context.Context, fixture Importer
 	t.Helper()
 	if got := importerEdgeCount(t, ctx, fixture, source, target); got != want {
 		t.Errorf("edges %s -> %s = %d, want %d", source, target, got, want)
+	}
+}
+
+// assertImporterPlaneEdgeCount pins WHERE an edge landed: one table and one
+// target column, the way RunImporterWiresTheCrossPlaneEdgeBetweenItsRows
+// documents its claim. importerEdgeCount deliberately sums both planes, which
+// is right for "dropped everywhere" and wrong for "wired in the right place":
+// an edge written to the other plane's table, or under the wrong target
+// column, counts as one there too. The cross-plane case asserts the expected
+// place holds exactly one row AND the other plane holds none.
+func assertImporterPlaneEdgeCount(t *testing.T, ctx context.Context, fixture ImporterFixture, table, column, source, target string, want int) {
+	t.Helper()
+	//nolint:gosec // G201: table and column are hardcoded names from this contract's call sites.
+	query := "SELECT COUNT(*) FROM " + table + " WHERE issue_id = ? AND " + column + " = ?"
+	var got int
+	if err := fixture.QueryScalar(ctx, query, []any{source, target}, &got); err != nil {
+		t.Fatalf("count %s.%s edges %s -> %s: %v", table, column, source, target, err)
+	}
+	if got != want {
+		t.Errorf("%s.%s rows %s -> %s = %d, want %d", table, column, source, target, got, want)
 	}
 }
 
