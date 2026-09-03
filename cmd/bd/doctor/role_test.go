@@ -8,6 +8,11 @@ import (
 )
 
 func TestCheckBeadsRole_NotConfigured(t *testing.T) {
+	// Isolate from ambient global/system git config (e.g. a developer machine
+	// with `git config --global beads.role contributor` set).
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
 	// Create a temp directory with git init but no beads.role config
 	tmpDir := newGitRepo(t)
 
@@ -86,6 +91,12 @@ func TestCheckBeadsRole_InvalidValue(t *testing.T) {
 }
 
 func TestCheckBeadsRole_NotGitRepo(t *testing.T) {
+	// Isolate from ambient global/system git config: "git config --get" reads
+	// global/system scope even outside a git repo, so without this an ambient
+	// `git config --global beads.role` leaks into a check that should be N/A.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_SYSTEM", os.DevNull)
+
 	tmpDir, err := os.MkdirTemp("", "beads-role-test")
 	if err != nil {
 		t.Fatal(err)
