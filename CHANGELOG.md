@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
+### Fixed
+
+- **The store-requiring command path ignored `BEADS_DB`/`BD_DB` and silently
+  read the ambient workspace instead** (be-git2o). `selectedNoDBBeadsDir`
+  already resolved an explicit `BEADS_DB`/`BD_DB` target on the no-DB path,
+  but the store-requiring path left `dbPath` empty until the ambient
+  discovery block ran `prepareSelectedCommandContext`, which sets
+  `BEADS_DIR`. `beads.FindDatabasePath()` takes its `BEADS_DIR` branch first
+  and returns early, so its own `BEADS_DB` handling was never reached — and
+  it has no `BD_DB` handling at all. `bd where` and `bd list` could therefore
+  disagree about which workspace was selected: `where` honored the explicit
+  target, `list` silently read whatever `.beads` directory the ambient
+  workspace resolved to. Both variables are now resolved before ambient
+  discovery runs, matching the no-DB path.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
