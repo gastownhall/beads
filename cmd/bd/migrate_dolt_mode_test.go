@@ -478,3 +478,13 @@ func TestMigrateSharedJournalRootMismatchFailsClosed(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, cfg.IsDoltServerMode())
 }
+
+func TestMigrateJournalSidecarRootMismatchFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, RootPath: filepath.Join(beadsDir, "dolt"), Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "other")}}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+	_, err = loadMigrateJournal(beadsDir)
+	require.Error(t, err)
+}
