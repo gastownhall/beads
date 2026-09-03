@@ -794,6 +794,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			return HandleError("migration sidecar must be absent after controls are retired")
 		}
 	}
+	if j == nil && ((shared && liveShared) || (!shared && cfg.IsDoltServerMode() && !liveShared)) {
+		return nil
+	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo
 	if j == nil {
 		sourceSidecar, err = configfile.LoadProxiedServerClientInfo(beadsDir)
