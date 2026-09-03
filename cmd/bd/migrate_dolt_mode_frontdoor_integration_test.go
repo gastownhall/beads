@@ -561,3 +561,52 @@ func TestMigrateDoltModeDirectForwardFaultsFrontDoor(t *testing.T) {
 		})
 	}
 }
+
+// TestMigrateDoltModeDirectReverseFaultsFrontDoor covers the reverse
+// managed-local transition through the executable for every checkpoint.
+func TestMigrateDoltModeDirectReverseFaultsFrontDoor(t *testing.T) {
+	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
+		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
+	}
+	bd := migrationFrontDoorBinary(t)
+	for _, phase := range []string{"prepared", "target_configured", "old_controls_retired", "verified", "committed"} {
+		t.Run(phase, func(t *testing.T) {
+			dir, home := t.TempDir(), t.TempDir()
+			env := migrationFrontDoorEnv(home)
+			out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "reverse", "--quiet")
+			require.NoError(t, err, "init: %s", out)
+			created, err := runBDExecWithBinary(t, bd, dir, env, "create", "reverse migration sentinel", "--json")
+			require.NoError(t, err, "create: %s", created)
+			var row struct {
+				ID string `json:"id"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(created), &row))
+			_, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop")
+			_, err = runBDExecWithBinary(t, bd, dir, env, "migrate", "from-server-to-proxied-server")
+			require.NoError(t, err)
+			_, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop")
+			beadsDir := filepath.Join(dir, ".beads")
+			root := filepath.Join(beadsDir, "dolt")
+			touchFile(t, filepath.Join(root, "migration-sentinel"))
+			before := snapshotMigrationTree(t, beadsDir, root)
+			faultEnv := append(append([]string(nil), env...), "BEADS_MIGRATION_FAIL_PHASE="+phase)
+			out, err = runBDExecWithBinary(t, bd, dir, faultEnv, "migrate", "from-proxied-server-to-server")
+			require.Error(t, err, "fault phase unexpectedly succeeded: %s", out)
+			exitErr, ok := err.(*exec.ExitError)
+			require.True(t, ok)
+			require.Equal(t, 1, exitErr.ExitCode())
+			require.Equal(t, before[filepath.Join(root, "migration-sentinel")], snapshotMigrationTree(t, beadsDir, root)[filepath.Join(root, "migration-sentinel")])
+			retryEnv := append(append([]string(nil), env...), "BEADS_MIGRATION_FAIL_PHASE=")
+			out, err = runBDExecWithBinary(t, bd, dir, retryEnv, "migrate", "from-proxied-server-to-server")
+			require.NoError(t, err, "retry: %s", out)
+			after := snapshotMigrationTree(t, beadsDir, root)
+			_, err = runBDExecWithBinary(t, bd, dir, retryEnv, "migrate", "from-proxied-server-to-server")
+			require.NoError(t, err)
+			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
+			show, err := runBDExecWithBinary(t, bd, dir, retryEnv, "show", row.ID, "--json")
+			require.NoError(t, err, "show: %s", show)
+			assert.Contains(t, show, "reverse migration sentinel")
+			_, _ = runBDExecWithBinary(t, bd, dir, retryEnv, "dolt", "stop")
+		})
+	}
+}
