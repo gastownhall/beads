@@ -33,6 +33,27 @@ func runBDExecSeparated(t *testing.T, bd, dir string, env []string, args ...stri
 	return stdout.String(), stderr.String(), err
 }
 
+func createDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID string) string {
+	t.Helper()
+	blockerOut, err := runBDExecWithBinary(t, bd, dir, env, "create", "migration blocker", "--json")
+	require.NoError(t, err, "create blocker: %s", blockerOut)
+	var blocker struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(blockerOut), &blocker))
+	require.NotEmpty(t, blocker.ID)
+	depOut, depErr := runBDExecWithBinary(t, bd, dir, env, "dep", "add", sentinelID, blocker.ID)
+	require.NoError(t, depErr, "dep add: %s", depOut)
+	return blocker.ID
+}
+
+func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID, blockerID string) {
+	t.Helper()
+	out, err := runBDExecWithBinary(t, bd, dir, env, "dep", "list", sentinelID, "--json")
+	require.NoError(t, err, "dep list: %s", out)
+	assert.Contains(t, out, blockerID, "dependency edge missing")
+}
+
 func migrationFrontDoorBinary(t *testing.T) string {
 	if p := os.Getenv("BEADS_TEST_BD_BINARY"); p != "" {
 		return p
@@ -533,6 +554,7 @@ func TestMigrateDoltModeDirectForwardFaultsFrontDoor(t *testing.T) {
 				ID string `json:"id"`
 			}
 			require.NoError(t, json.Unmarshal([]byte(created), &row))
+			blockerID := createDependencyPair(t, bd, dir, env, row.ID)
 			_, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop")
 			beadsDir := filepath.Join(dir, ".beads")
 			root := filepath.Join(beadsDir, "dolt")
@@ -561,6 +583,7 @@ func TestMigrateDoltModeDirectForwardFaultsFrontDoor(t *testing.T) {
 			}())
 			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
 			assertDirectMigrationFinal(t, beadsDir, root, false, filepath.Join(root, "migration-sentinel"))
+			assertDependencyPair(t, bd, dir, retryEnv, row.ID, blockerID)
 			show, showErr := runBDExecWithBinary(t, bd, dir, retryEnv, "show", row.ID, "--json")
 			require.NoError(t, showErr, "show sentinel: %s", show)
 			assert.Contains(t, show, "migration sentinel")
@@ -588,6 +611,7 @@ func TestMigrateDoltModeDirectReverseFaultsFrontDoor(t *testing.T) {
 				ID string `json:"id"`
 			}
 			require.NoError(t, json.Unmarshal([]byte(created), &row))
+			blockerID := createDependencyPair(t, bd, dir, env, row.ID)
 			_, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop")
 			_, err = runBDExecWithBinary(t, bd, dir, env, "migrate", "from-server-to-proxied-server")
 			require.NoError(t, err)
@@ -611,6 +635,7 @@ func TestMigrateDoltModeDirectReverseFaultsFrontDoor(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
 			assertDirectMigrationFinal(t, beadsDir, root, true, filepath.Join(root, "migration-sentinel"))
+			assertDependencyPair(t, bd, dir, retryEnv, row.ID, blockerID)
 			show, err := runBDExecWithBinary(t, bd, dir, retryEnv, "show", row.ID, "--json")
 			require.NoError(t, err, "show: %s", show)
 			assert.Contains(t, show, "reverse migration sentinel")
@@ -709,7 +734,7 @@ func snapshotSharedMigrationFrontDoor(t *testing.T, beadsDir, sharedDir, root st
 	}
 }
 
-func setupSharedMigrationFrontDoor(t *testing.T, bd string) (dir, home, sharedDir, sharedRoot, issueID string, env []string) {
+func setupSharedMigrationFrontDoor(t *testing.T, bd string) (dir, home, sharedDir, sharedRoot, issueID, blockerID string, env []string) {
 	t.Helper()
 	dir, home = t.TempDir(), t.TempDir()
 	sharedDir = filepath.Join(home, "shared-server")
@@ -728,6 +753,7 @@ func setupSharedMigrationFrontDoor(t *testing.T, bd string) (dir, home, sharedDi
 		ID string `json:"id"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(created), &row))
+	blockerID = createDependencyPair(t, bd, dir, env, row.ID)
 	require.NotEmpty(t, row.ID)
 	// Migrations require exclusive ownership. Stop the real shared Dolt
 	// process before taking the baseline snapshot.
@@ -736,7 +762,7 @@ func setupSharedMigrationFrontDoor(t *testing.T, bd string) (dir, home, sharedDi
 		stop, stopErr := runBDExecWithBinary(t, bd, dir, env, "dolt", "stop")
 		require.NoError(t, stopErr, "stop shared server: %s", stop)
 	}
-	return dir, home, sharedDir, sharedRoot, row.ID, env
+	return dir, home, sharedDir, sharedRoot, row.ID, blockerID, env
 }
 
 func assertSharedMigrationResult(t *testing.T, bd, dir string, env []string, beadsDir, sharedDir, sharedRoot, issueID string, wantShared bool) {
@@ -807,7 +833,7 @@ func TestMigrateDoltModeSharedForwardFaultsFrontDoor(t *testing.T) {
 	bd := migrationFrontDoorBinary(t)
 	for _, phase := range []string{"prepared", "target_configured", "old_controls_retired", "verified", "committed"} {
 		t.Run(phase, func(t *testing.T) {
-			dir, _, sharedDir, sharedRoot, issueID, env := setupSharedMigrationFrontDoor(t, bd)
+			dir, _, sharedDir, sharedRoot, issueID, blockerID, env := setupSharedMigrationFrontDoor(t, bd)
 			beadsDir := filepath.Join(dir, ".beads")
 			touchFile(t, filepath.Join(sharedRoot, "migration-sentinel"))
 			before := snapshotSharedMigrationFrontDoor(t, beadsDir, sharedDir, sharedRoot)
@@ -825,6 +851,7 @@ func TestMigrateDoltModeSharedForwardFaultsFrontDoor(t *testing.T) {
 			require.NoError(t, err, "second success: %s", out)
 			assert.Equal(t, after, snapshotSharedMigrationFrontDoor(t, beadsDir, sharedDir, sharedRoot))
 			assertSharedMigrationResult(t, bd, dir, retryEnv, beadsDir, sharedDir, sharedRoot, issueID, false)
+			assertDependencyPair(t, bd, dir, retryEnv, issueID, blockerID)
 		})
 	}
 }
@@ -838,7 +865,7 @@ func TestMigrateDoltModeSharedReverseFaultsFrontDoor(t *testing.T) {
 	bd := migrationFrontDoorBinary(t)
 	for _, phase := range []string{"prepared", "target_configured", "old_controls_retired", "verified", "committed"} {
 		t.Run(phase, func(t *testing.T) {
-			dir, _, sharedDir, sharedRoot, issueID, env := setupSharedMigrationFrontDoor(t, bd)
+			dir, _, sharedDir, sharedRoot, issueID, blockerID, env := setupSharedMigrationFrontDoor(t, bd)
 			beadsDir := filepath.Join(dir, ".beads")
 			_, err := runBDExecWithBinary(t, bd, dir, env, "migrate", "from-shared-server-to-proxied-server")
 			require.NoError(t, err)
@@ -861,6 +888,7 @@ func TestMigrateDoltModeSharedReverseFaultsFrontDoor(t *testing.T) {
 			require.NoError(t, err, "second success: %s", out)
 			assert.Equal(t, after, snapshotSharedMigrationFrontDoor(t, beadsDir, sharedDir, sharedRoot))
 			assertSharedMigrationResult(t, bd, dir, retryEnv, beadsDir, sharedDir, sharedRoot, issueID, true)
+			assertDependencyPair(t, bd, dir, retryEnv, issueID, blockerID)
 		})
 	}
 }
