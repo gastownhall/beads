@@ -36,7 +36,17 @@ func defaultStderr() io.Writer {
 	return io.Discard
 }
 
-// watchdogStderr is where the migration watchdog's WARN lines go.
+// watchdogStderr is where the migration watchdog's WARN lines go. Unlike
+// stderr it is deliberately NOT terminal-gated: bd serve, systemd, CI and any
+// piped invocation are all non-tty, and they are exactly the cases where a
+// migration that has been running for twenty minutes needs to be visible.
+// Routing it through stderr would make the warning io.Discard precisely there.
+//
+// This matches how this package already emits operator warnings that must not
+// be swallowed (remote_migrate_gate.go, smart_remote_migrate_gate.go, and the
+// skew notices in this file all write to os.Stderr directly); stderr remains
+// for the routine per-migration progress lines it was introduced for.
+// Overridable in tests.
 var watchdogStderr io.Writer = os.Stderr
 
 const largeRigThreshold = 10000
@@ -1743,7 +1753,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 		// risks leaving Dolt in a partially-migrated state with no clean
 		// rollback. Full scoping rationale and rejected alternatives:
 		// bd show be-m65rs.
-		if err := runMigrationWithWatchdog(ctx, stderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
+		if err := runMigrationWithWatchdog(ctx, watchdogStderr, mf.version, humanMigrationName(mf.name), migrationWatchdogIntervalDuration(),
 			func(ctx context.Context) error { return execMigrationBody(ctx, db, string(data)) },
 		); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
