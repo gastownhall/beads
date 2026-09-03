@@ -8,3 +8,9 @@ package doltserver
 func SweepOrphanedTestServers(_ ...string) []int {
 	return nil
 }
+
+// sweepServersUnderRoots is the root-scoped sibling of
+// SweepOrphanedTestServers and is a no-op here for the same reason.
+func sweepServersUnderRoots(_ ...string) []int {
+	return nil
+}
