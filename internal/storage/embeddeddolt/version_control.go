@@ -513,6 +513,14 @@ func (s *EmbeddedDoltStore) ListRemotes(ctx context.Context) ([]storage.RemoteIn
 // where before it read it holding no lock at all.
 
 func (s *EmbeddedDoltStore) Push(ctx context.Context) error {
+	// GH#5433: every Pull variant below auto-commits pending changes first;
+	// push never did, so a working set with pending-but-uncommitted changes
+	// (auto-commit off, or a session that ended right after a write with no
+	// intervening commit) silently pushed nothing new and still reported
+	// success.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcPush(ctx, db, defaultRemote, s.branch, user)
@@ -578,6 +586,10 @@ func (s *EmbeddedDoltStore) PullRemoteWithStrategy(ctx context.Context, remote, 
 }
 
 func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, defaultRemote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return vcForcePush(ctx, db, defaultRemote, s.branch, user)
@@ -586,6 +598,10 @@ func (s *EmbeddedDoltStore) ForcePush(ctx context.Context) error {
 }
 
 func (s *EmbeddedDoltStore) PushRemote(ctx context.Context, remote string, force bool) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, remote, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			if force {
@@ -622,6 +638,10 @@ func (s *EmbeddedDoltStore) Fetch(ctx context.Context, peer string) error {
 }
 
 func (s *EmbeddedDoltStore) PushTo(ctx context.Context, peer string) error {
+	// GH#5433: see Push.
+	if _, err := s.CommitPending(ctx, "beads"); err != nil {
+		return fmt.Errorf("commit pending before push: %w", err)
+	}
 	return s.withPeerAuth(ctx, peer, func(user string) error {
 		return s.withMutatingDBConn(ctx, func(db versioncontrolops.DBConn) error {
 			return versioncontrolops.Push(ctx, db, peer, s.branch, user)
