@@ -4,6 +4,9 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"charm.land/glamour/v2/styles"
+	"github.com/steveyegge/beads/internal/ui"
 )
 
 // TestRenderMarkdownStylesBodyContentRegression3881 is the focused guard for
@@ -428,5 +431,64 @@ func withMarkdownEnv(t *testing.T, values map[string]string) {
 		} else {
 			os.Setenv(key, value)
 		}
+	}
+}
+
+// TestGlamourStylePath pins glamourStylePath's three branches: an explicit
+// GLAMOUR_STYLE override always wins, otherwise the detected terminal
+// background picks glamour's dark or light style.
+func TestGlamourStylePath(t *testing.T) {
+	tests := []struct {
+		name           string
+		glamourStyle   string
+		darkBackground bool
+		want           string
+	}{
+		{
+			name:           "GLAMOUR_STYLE override wins over a light background",
+			glamourStyle:   "dracula",
+			darkBackground: false,
+			want:           "dracula",
+		},
+		{
+			name:           "GLAMOUR_STYLE override wins over a dark background",
+			glamourStyle:   "dracula",
+			darkBackground: true,
+			want:           "dracula",
+		},
+		{
+			name:           "dark background without override",
+			darkBackground: true,
+			want:           styles.DarkStyle,
+		},
+		{
+			name:           "light background without override",
+			darkBackground: false,
+			want:           styles.LightStyle,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			origStyle, hadOrigStyle := os.LookupEnv("GLAMOUR_STYLE")
+			if tt.glamourStyle == "" {
+				os.Unsetenv("GLAMOUR_STYLE")
+			} else {
+				os.Setenv("GLAMOUR_STYLE", tt.glamourStyle)
+			}
+			t.Cleanup(func() {
+				if hadOrigStyle {
+					os.Setenv("GLAMOUR_STYLE", origStyle)
+				} else {
+					os.Unsetenv("GLAMOUR_STYLE")
+				}
+			})
+
+			t.Cleanup(ui.SetDarkBackgroundForTest(tt.darkBackground))
+
+			if got := glamourStylePath(); got != tt.want {
+				t.Fatalf("glamourStylePath() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
