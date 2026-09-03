@@ -5,6 +5,7 @@ package dolt
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -22,6 +23,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/schema"
+	"github.com/steveyegge/beads/internal/storage/versioncontrolops"
 	"github.com/steveyegge/beads/internal/testutil"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -1800,4 +1802,129 @@ func TestPullReportsSuccessOnlyWhenTheMergeLanded(t *testing.T) {
 		t.Fatalf("Pull failed, but not with the merged-nothing post-condition: %v", pullErr)
 	}
 	t.Logf("Pull correctly refused to call this success: %v", pullErr)
+}
+
+// TestPullVerifyUsesBranchQualifiedPreHead pins ga-ivaps Finding 1 (attempt 2):
+// verifyPullLanded's cheap fast path skips the containment check when the branch
+// head MOVED across the pull — a head that moved is proof the transport landed.
+// That inference is only sound when the pre-pull head was read from the SAME
+// branch the post-pull comparison reads (s.branch). Pull now captures it via
+// branchHash(s.branch); a regression to GetCurrentCommit (session HEAD) would,
+// on a pooled connection sitting on the database's default branch, hand back a
+// different branch's head, so a merge that never reached s.branch would look
+// like it had — the fast path would fire and wave a lying pull through.
+//
+// It exercises that fast path directly and DETERMINISTICALLY by calling
+// verifyPullLanded with the two candidate pre-pull heads rather than trying to
+// force a pooled connection onto the wrong branch (which an effectively
+// single-connection server-mode store makes unreachable in-process — the very
+// reason TestPullReportsSuccessOnlyWhenTheMergeLanded has to t.Skip). The
+// wrong-branch head (main's tip, what the bug reads) must skip the check; the
+// branch-qualified head (feature's tip, what the fix reads) must run it and
+// catch the divergence. This is the non-environment-dependent coverage the
+// attempt-2 scorecard asked for.
+func TestPullVerifyUsesBranchQualifiedPreHead(t *testing.T) {
+	store, setup, cleanup := setupEmbeddedGitRemote(t)
+	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 180*time.Second)
+	defer cancel()
+
+	// A committed, pushed main so branchHash(main) is a real, distinct hash to
+	// stand in for "the branch a stray pooled connection is parked on".
+	seed := &types.Issue{
+		ID:        "bq-main-001",
+		Title:     "Main seed",
+		IssueType: types.TypeTask,
+		Status:    types.StatusOpen,
+		Priority:  2,
+	}
+	if err := store.CreateIssue(ctx, seed, "tester"); err != nil {
+		t.Fatalf("CreateIssue(main seed) failed: %v", err)
+	}
+	if err := store.Commit(ctx, "Add bq-main-001"); err != nil {
+		t.Fatalf("Commit(main seed) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("Push(main) failed: %v", err)
+	}
+
+	// The store operates on feature; publish it so a peer can clone and advance it.
+	if err := store.Branch(ctx, "feature"); err != nil {
+		t.Fatalf("Branch(feature) failed: %v", err)
+	}
+	if err := store.Checkout(ctx, "feature"); err != nil {
+		t.Fatalf("Checkout(feature) failed: %v", err)
+	}
+	if err := store.Push(ctx); err != nil {
+		t.Fatalf("pushing the feature branch failed: %v", err)
+	}
+
+	// feature gets a LOCAL-ONLY commit — the reviewer's exact scenario. It moves
+	// feature's tip off both main and the pushed feature tip, and makes the
+	// divergence a genuine one: the peer's branch below shares only the pushed
+	// feature tip as an ancestor, so neither head is the other's. An --allow-empty
+	// commit is the minimal way to advance the tip: what this test needs from the
+	// commit is the new hash on feature, nothing in its tree. Going through
+	// CreateIssue would drag in the write path's cross-table ID-collision probe —
+	// unrelated to verifyPullLanded — and couple the fixture to that schema. The
+	// store session is on feature (Checkout set s.branch above), so DOLT_COMMIT
+	// lands here.
+	if _, err := store.db.ExecContext(ctx,
+		"CALL DOLT_COMMIT('--allow-empty', '-m', 'feature local-only commit')"); err != nil {
+		t.Fatalf("local-only feature commit failed: %v", err)
+	}
+
+	// A peer advances origin/feature from its own process, diverging it from the
+	// local feature branch.
+	cloneDir := filepath.Join(setup.baseDir, "clone-bq")
+	doltClone(t, setup.remoteURL, cloneDir)
+	runCmd(t, cloneDir, "dolt", "fetch", "origin")
+	runCmd(t, cloneDir, "dolt", "checkout", "feature")
+	sourceInsertIssue(t, cloneDir, "bq-clone-001", "Clone issue on feature")
+	runDoltSQL(t, cloneDir, "CALL DOLT_ADD('.'); CALL DOLT_COMMIT('-Am', 'Add bq-clone-001 on feature')")
+	runCmd(t, cloneDir, "dolt", "push", "origin", "feature")
+
+	// The sql-server caches its last read of the remote, and the verify's own
+	// refresh fetch is served from that cache inside the TTL. Wait it out so the
+	// refresh actually sees the peer's commit and the divergence is real.
+	waitOutGitRemoteReadCache()
+
+	featureTip, err := store.branchHash(ctx, "feature")
+	if err != nil || featureTip == "" {
+		t.Fatalf("branchHash(feature) failed: hash=%q err=%v", featureTip, err)
+	}
+	mainTip, err := store.branchHash(ctx, "main")
+	if err != nil || mainTip == "" {
+		t.Fatalf("branchHash(main) failed: hash=%q err=%v", mainTip, err)
+	}
+	if featureTip == mainTip {
+		t.Fatalf("scenario broken: feature and main share tip %q, so a wrong-branch preHead would not differ from the branch-qualified one", featureTip)
+	}
+
+	// The bug's input: preHead read from the wrong branch (main). localHash is
+	// feature's tip, so localHash != preHead trips the fast path and the check is
+	// skipped — the lying pull is (wrongly) called a success. This is the fast
+	// path's load-bearing contract: it is only ever safe when preHead is s.branch.
+	if err := store.verifyPullLanded(ctx, "origin", mainTip); err != nil {
+		t.Fatalf("fast-path contract broken: a wrong-branch preHead must skip the check (return nil), got: %v", err)
+	}
+
+	// The fix's input: preHead read from s.branch (feature). localHash == preHead,
+	// so the fast path does not fire, the containment check runs, and it catches
+	// the divergence the merge left on the wrong branch.
+	got := store.verifyPullLanded(ctx, "origin", featureTip)
+	if got == nil {
+		t.Fatalf("branch-qualified preHead must run the containment check and catch the divergence, got nil")
+	}
+	if msg := got.Error(); !strings.Contains(msg, "merged nothing") || !strings.Contains(msg, "remotes/origin/feature") {
+		t.Fatalf("caught an error, but not the merged-nothing post-condition: %v", got)
+	}
+	// The divergence is genuine — sibling histories whose common ancestor is
+	// neither tip — so it must stay a HARD error, not the fast-forwardable
+	// retryable class bd sync would loop on.
+	if errors.Is(got, versioncontrolops.ErrPullBehindFastForwardable) {
+		t.Fatalf("a genuine divergence must not be classified fast-forwardable-retryable: %v", got)
+	}
+	t.Logf("branch-qualified preHead correctly caught the divergence: %v", got)
 }

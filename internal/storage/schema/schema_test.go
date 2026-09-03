@@ -1925,6 +1925,8 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE issues ADD COLUMN storage_class VARCHAR(16);",
 		"ALTER TABLE wisps ADD COLUMN storage_class VARCHAR(16);",
 		"ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;",
+		// 0066: same prepared-ALTER shape as 0060, same CLI no-op on 2.2.x.
+		"ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1943,6 +1945,9 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// migration reaches the bundle with a prepared ALTER lives in
 		// cli_prepared_ddl.go; these stay as per-migration anchors.
 		"@wisp_comments_needs_fix",
+		// 0066 guards its ALTER the same way; only its source text carries
+		// this probe (the events table's actor column is a bare CREATE).
+		"COLUMN_NAME = 'actor'",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
@@ -1982,6 +1987,7 @@ WHERE table_schema = DATABASE()
   AND column_name = 'applied_at'`, "schema_migrations.applied_at")
 	requireDoltFKRules(t, dir, "fk_comments_issue", "CASCADE", "CASCADE")
 	requireDoltColumnShape(t, dir, "comments", "text", "longtext", "NO")
+	requireDoltColumnShape(t, dir, "bd_events_journal", "actor", "varchar(255)", "NO")
 	requireDoltColumnShape(t, dir, "issues", "description", "longtext", "NO")
 	requireDoltColumnShape(t, dir, "wisps", "description", "longtext", "NO")
 	requireDoltColumnShape(t, dir, "wisps", "no_history", "tinyint(1)", "YES")

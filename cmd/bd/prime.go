@@ -423,9 +423,13 @@ func outputMemoriesOnlyContext(w io.Writer) error {
 }
 
 // formatMemoriesForPrime reads the memory plane through memoryops.Memories and
-// formats it for injection. Returns empty string if no memories or if the plane
-// is unavailable — prime degrades silently rather than failing a session-start
-// hook, which is prime's presentation policy and not the role's.
+// formats it for injection. Prime still never fails a session-start hook over
+// the memory plane — but "degrade" is not "go quiet": a plane that could not be
+// read renders the unavailable banner (or the timeout banner on a deadline), so
+// an operator can tell "this workspace has no memories" from "this agent woke
+// with no recall because the store is down" (gh#5877). Only two cases stay
+// silent: no workspace at all (nothing to inject), and a healthy store with
+// zero memories (a fresh workspace must not be given noise).
 func formatMemoriesForPrime(compact bool) string {
 	// bd-mm8wf: in a proxied-server workspace the memory read must ride the
 	// proxied plane (UOW provider), never ensureStoreActiveForPrime — the
@@ -449,19 +453,22 @@ func formatMemoriesForPrime(compact bool) string {
 			if errors.Is(err, context.DeadlineExceeded) {
 				return formatPrimeMemoryTimeout(compact, timeout)
 			}
-			return "" // Silently skip — store unavailable
+			if errors.Is(err, ErrNoBeadsDatabase) {
+				return "" // No workspace here — genuinely nothing to inject.
+			}
+			return formatPrimeMemoryUnavailable(compact, err)
 		}
 	}
 	if store == nil {
-		return ""
+		return formatPrimeMemoryUnavailable(compact, errors.New("storage reported ready but no store is active"))
 	}
 	memories, err := store.Memories()
 	if err != nil {
-		return ""
+		return formatPrimeMemoryUnavailable(compact, err)
 	}
 	result, err := memories.List(context.Background(), memoryops.ListRequest{})
 	if err != nil {
-		return ""
+		return formatPrimeMemoryUnavailable(compact, err)
 	}
 	return renderPrimeMemoryPlane(result.Memories, compact)
 }
@@ -601,6 +608,51 @@ func formatPrimeMemoryTimeout(compact bool, timeout time.Duration) string {
 		return "\n## Memories\n- " + msg + "\n"
 	}
 	return "\n## Persistent Memories\n\n" + msg + "\n"
+}
+
+// formatPrimeMemoryUnavailable renders the memory section when the plane could
+// not be read at all — store open failed, the memory accessor errored, or the
+// list call errored. It is the non-deadline sibling of
+// formatPrimeMemoryTimeout and carries the same section shape, and it is shared
+// by the classic and proxied routes so the two cannot drift.
+//
+// The wording is deliberately blunt about what did NOT happen: before this,
+// prime omitted the section entirely on these failures, so a fleet operator
+// could not distinguish an agent that has no memories from an agent whose
+// memory plane is down — every instrument read healthy while agents woke with
+// zero recall (gh#5877).
+func formatPrimeMemoryUnavailable(compact bool, err error) string {
+	msg := fmt.Sprintf("Skipped: beads storage unavailable (%s) — persistent memories were NOT injected this session. Run `bd doctor`; if the store is a Dolt server, check it is running and reachable.", primeErrorSummary(err))
+	if compact {
+		return "\n## Memories\n- " + msg + "\n"
+	}
+	return "\n## Persistent Memories\n\n" + msg + "\n"
+}
+
+// primeMemoryErrorMaxLen caps the error text quoted in the unavailable banner.
+const primeMemoryErrorMaxLen = 160
+
+// primeErrorSummary reduces an error to one short single-line phrase fit for a
+// prime section. Storage errors routinely carry multi-line hints and stack-ish
+// detail; prime is injected into an agent's context window, so it quotes the
+// first line only, whitespace-collapsed and length-capped. `bd doctor` is where
+// the full text belongs.
+func primeErrorSummary(err error) string {
+	if err == nil {
+		return "unknown error"
+	}
+	line := err.Error()
+	if i := strings.IndexAny(line, "\r\n"); i >= 0 {
+		line = line[:i]
+	}
+	line = strings.Join(strings.Fields(line), " ")
+	if line == "" {
+		return "unknown error"
+	}
+	if runes := []rune(line); len(runes) > primeMemoryErrorMaxLen {
+		line = strings.TrimRight(string(runes[:primeMemoryErrorMaxLen]), " ") + "…"
+	}
+	return line
 }
 
 // outputMCPContext outputs minimal context for MCP users

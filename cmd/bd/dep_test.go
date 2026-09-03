@@ -936,6 +936,34 @@ func TestRenderTreeOutput(t *testing.T) {
 	}
 }
 
+func TestRenderTreeExternalBlockerMarksRootBlocked(t *testing.T) {
+	tree := []*types.TreeNode{
+		{
+			Issue: types.Issue{ID: "BD-root", Title: "Root", Status: types.StatusOpen, Priority: 1},
+		},
+		{
+			Issue:          types.Issue{ID: "external:remote:payments", Title: "○ payments", Status: types.StatusOpen},
+			Depth:          1,
+			ParentID:       "BD-root",
+			EdgeFromParent: types.DepBlocks,
+		},
+	}
+
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	renderTree(tree, 50, "down")
+	w.Close()
+	os.Stdout = old
+
+	var buf bytes.Buffer
+	_, _ = io.Copy(&buf, r)
+	output := buf.String()
+	if !strings.Contains(output, "[BLOCKED]") || strings.Contains(output, "[READY]") {
+		t.Fatalf("external blocker should mark root blocked, got:\n%s", output)
+	}
+}
+
 func TestRenderTreeOutputShowsDependencyTypeLabelsInMixedGraph(t *testing.T) {
 	downTree := []*types.TreeNode{
 		{
