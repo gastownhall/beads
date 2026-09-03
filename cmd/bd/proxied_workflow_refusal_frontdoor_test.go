@@ -3,13 +3,31 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestDirectWorkflowRepresentativeBehavior(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "directwf", "--skip-hooks", "--skip-agents")
+	cmd := exec.Command(bd, "ship", "refusal")
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := cmd.Run(); err == nil {
+		t.Fatal("direct ship unexpectedly succeeded")
+	}
+	if strings.Contains(strings.ToLower(out.String()), "proxied-server mode") {
+		t.Fatalf("direct mode used proxy refusal: %s", out.String())
+	}
+}
 
 // TestProxiedWorkflowRefusalsFrontDoor executes the real bd binary for every
 // workflow family rejected by the proxy capability contract. Refusals must
