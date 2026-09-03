@@ -10,6 +10,21 @@ import (
 	"testing"
 )
 
+func migrationFrontDoorEnv(home string) []string {
+	env := make([]string, 0)
+	for _, kv := range os.Environ() {
+		key := kv
+		if i := strings.IndexByte(kv, '='); i >= 0 {
+			key = kv[:i]
+		}
+		if strings.HasPrefix(key, "BEADS_DOLT_") || key == "BEADS_SHARED_SERVER_DIR" {
+			continue
+		}
+		env = append(env, kv)
+	}
+	return append(env, "HOME="+home, "USERPROFILE="+home, "BEADS_DOLT_DATA_DIR=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_DOLT_SHARED_SERVER=", "BEADS_SHARED_SERVER_DIR=")
+}
+
 // TestMigrateDoltModeFrontDoor exercises migration through the real bd
 // executable. It is opt-in because it requires a local Dolt installation.
 func TestMigrateDoltModeFrontDoor(t *testing.T) {
@@ -19,7 +34,7 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	bd := buildBDForInitTests(t)
 	dir := t.TempDir()
 	home := t.TempDir()
-	env := append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "BEADS_DOLT_SHARED_SERVER=", "BEADS_SHARED_SERVER_DIR=")
+	env := migrationFrontDoorEnv(home)
 	out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--server", "--prefix", "fd", "--quiet")
 	if err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
@@ -110,7 +125,7 @@ func TestMigrateDoltModeFrontDoorRefusesMalformedSidecar(t *testing.T) {
 	}
 	bd := buildBDForInitTests(t)
 	dir, home := t.TempDir(), t.TempDir()
-	env := append(os.Environ(), "HOME="+home, "USERPROFILE="+home, "BEADS_DOLT_SHARED_SERVER=", "BEADS_SHARED_SERVER_DIR=")
+	env := migrationFrontDoorEnv(home)
 	if out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--proxied-server", "--quiet"); err != nil {
 		t.Fatalf("init: %v\n%s", err, out)
 	}
