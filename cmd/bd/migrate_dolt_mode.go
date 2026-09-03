@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -528,18 +529,17 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
-	liveShared := doltserver.IsSharedServerMode()
-	if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.EqualFold(v, "true") {
-		liveShared = true
+	liveShared, yamlShared, yamlSharedSet, err := migrationSharedTopology(beadsDir)
+	if err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
 	}
-	yamlShared, yamlSharedSet := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
 	if j != nil {
 		wantShared := shared && j.Phase == migratePrepared
-		if !shared && yamlSharedSet && strings.EqualFold(yamlShared, "true") {
+		if !shared && yamlSharedSet && yamlShared {
 			return HandleError("migration journal topology disagrees with persisted shared-server YAML (true)")
 		}
 		if liveShared != wantShared {
-			if yamlSharedSet && strings.EqualFold(yamlShared, "false") && !wantShared {
+			if yamlSharedSet && !yamlShared && !wantShared {
 				// The environment may still advertise shared mode after the
 				// forward transition persisted YAML=false; trust persisted state.
 				liveShared = wantShared
@@ -770,26 +770,24 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
-	liveShared := doltserver.IsSharedServerMode()
-	if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.EqualFold(v, "true") {
-		liveShared = true
+	liveShared, yamlShared, yamlSharedSet, err := migrationSharedTopology(beadsDir)
+	if err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+	}
+	var diskSidecar *configfile.ProxiedServerClientInfo
+	if diskSidecar, err = configfile.LoadProxiedServerClientInfo(beadsDir); err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration sidecar is unreadable: %v", err), ExitCode: 1, Mutates: false})
 	}
 	if j != nil {
 		wantShared := shared && j.Phase != migratePrepared
 		if liveShared != wantShared {
 			return HandleError("migration journal topology does not match live shared-server configuration")
 		}
-	} else if liveShared {
-		return HandleError("migration command topology does not match live shared-server configuration")
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
 		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
 	}
 	if j != nil {
-		diskSidecar, sidecarErr := configfile.LoadProxiedServerClientInfo(beadsDir)
-		if sidecarErr != nil {
-			return HandleError("migration sidecar is unreadable: %v", sidecarErr)
-		}
 		if j.Phase == migratePrepared && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
 			return HandleError("migration sidecar does not match prepared state")
 		}
@@ -800,15 +798,53 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			return HandleError("migration sidecar must be absent after controls are retired")
 		}
 	}
-	if j == nil && ((shared && liveShared) || (!shared && cfg.IsDoltServerMode() && !liveShared)) {
-		return nil
+	if j == nil {
+		alreadyTarget := cfg.IsDoltServerMode() && ((shared && yamlSharedSet && yamlShared) || (!shared && (!yamlSharedSet || !yamlShared)))
+		if alreadyTarget {
+			if diskSidecar != nil {
+				return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: "completed migration has a stale proxied-server sidecar", ExitCode: 1, Mutates: false})
+			}
+			root := doltserver.DoltDirPath(beadsDir)
+			if shared {
+				if sharedRoot, sharedErr := doltserver.SharedDoltPath(); sharedErr == nil {
+					root = sharedRoot
+				}
+			}
+			if running, _ := proxy.IsRunning(root); running {
+				return HandleError("completed migration still has a running proxy")
+			}
+			for _, path := range proxy.ControlFilePaths(root) {
+				_, statErr := os.Stat(path)
+				if os.IsNotExist(statErr) {
+					continue
+				}
+				if statErr != nil {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("completed migration cannot inspect proxy control %s: %v", path, statErr), ExitCode: 1, Mutates: false})
+				}
+				if filepath.Base(path) == proxy.LockFileName || filepath.Base(path) == server.LockFileName {
+					// Migration lock files are created as part of acquiring the
+					// lifecycle gate and may remain as empty, unlocked markers.
+					// Probe only an existing file; TryLock must not create state
+					// during an idempotent no-op.
+					lock, lockErr := util.TryLock(path)
+					if lockErr == nil {
+						lock.Unlock()
+						continue
+					}
+				}
+				if statErr == nil {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("completed migration has stale proxy control %s", path), ExitCode: 1, Mutates: false})
+				}
+			}
+			return nil
+		}
+		if liveShared {
+			return HandleError("migration command topology does not match live shared-server configuration")
+		}
 	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo
 	if j == nil {
-		sourceSidecar, err = configfile.LoadProxiedServerClientInfo(beadsDir)
-		if err != nil {
-			return HandleError("migration sidecar is unreadable: %v", err)
-		}
+		sourceSidecar = diskSidecar
 		if sourceSidecar == nil {
 			return HandleError("migration sidecar is missing")
 		}
@@ -1027,6 +1063,22 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	fmt.Printf("  Data directory unchanged: %s\n", rootDir)
 	fmt.Println("  The dolt sql-server starts automatically on the next bd command.")
 	return nil
+}
+
+// migrationSharedTopology resolves the target workspace's shared-server
+// setting. An explicit workspace YAML value is authoritative over ambient
+// process environment so retries cannot be misclassified by stale env state.
+func migrationSharedTopology(beadsDir string) (live, yaml bool, yamlSet bool, err error) {
+	live = doltserver.IsSharedServerMode()
+	raw, yamlSet := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
+	if !yamlSet {
+		return live, false, false, nil
+	}
+	parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw))
+	if parseErr != nil {
+		return false, false, true, fmt.Errorf("workspace dolt.shared-server is invalid: %q", raw)
+	}
+	return parsed, parsed, true, nil
 }
 
 func proxiedLogAssets(beadsDir string) ([]string, error) {

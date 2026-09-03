@@ -543,6 +543,46 @@ func TestMigrateFromProxiedServer_MalformedSidecarFailsClosed(t *testing.T) {
 	assert.Contains(t, string(data), configfile.DoltModeProxiedServer)
 }
 
+func TestMigrateFromProxiedServer_AlreadyServerRejectsMalformedSidecar(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	path := configfile.ProxiedServerClientInfoPath(beadsDir)
+	require.NoError(t, os.WriteFile(path, []byte("{bad"), 0o600))
+	before := snapshotMigrationTree(t, beadsDir)
+	var err error
+	stderr := captureStderr(t, func() { err = runMigrateFromProxiedServer(false, false) })
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(stderr), "sidecar")
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+}
+
+func TestMigrateFromProxiedServer_AlreadyTargetRejectsStaleSidecar(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "dolt")}))
+	before := snapshotMigrationTree(t, beadsDir)
+	var err error
+	stderr := captureStderr(t, func() { err = runMigrateFromProxiedServer(false, false) })
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(stderr), "stale")
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+}
+
+func TestMigrateFromProxiedToSharedServer_AlreadyTargetRejectsStaleSidecar(t *testing.T) {
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
+	root := filepath.Join(sharedDir, "dolt")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+	before := snapshotMigrationTree(t, beadsDir, root)
+	var err error
+	stderr := captureStderr(t, func() { err = runMigrateFromProxiedServer(false, true) })
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(stderr), "stale")
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
+}
+
 func TestMigrateFromProxiedServer_JournalPreservesExternalSidecar(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	root := filepath.Join(beadsDir, "dolt")
