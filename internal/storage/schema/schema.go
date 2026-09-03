@@ -100,9 +100,8 @@ func migrationWatchdogIntervalDuration() time.Duration {
 // returned error is passed through unchanged. Migrations are allowed to run
 // arbitrarily long by design — store.go's own initSchema comment cites
 // migration 0047's full-table is_blocked recompute as a real example — and
-// no confirmed production hang exists today. See
-// engdocs/plans/be-m65rs-migration-watchdog-scoping.md for the full
-// rationale before turning this into a hard abort.
+// no confirmed production hang exists today. See bd show be-m65rs for the
+// full rationale before turning this into a hard abort.
 func runMigrationWithWatchdog(ctx context.Context, out io.Writer, version int, name string, interval time.Duration, fn func(ctx context.Context) error) error {
 	start := time.Now()
 	done := make(chan struct{})
