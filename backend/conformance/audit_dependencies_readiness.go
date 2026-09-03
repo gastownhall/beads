@@ -385,27 +385,28 @@ func testAuditReadyTypeAndPinnedExclusions(t *testing.T, f Factory) {
 // Statuses, the legacy open/in_progress default when both are empty, and a
 // custom (non-built-in) status flowing through the same IN clause.
 //
-// THIS IS THE ONLY OBSERVER OF THE OR-SET ARM, AND IT COVERS EVERY SEAM THE ARM
-// IS REACHABLE FROM. No role can ask for it — publicops.ReadyRequest carries no
-// status field of any kind, which RunReadyCounterCountsOnlyTheOpenRowsItsListingLists
-// says from the other side — and no in-tree caller sets it either. Every builder
-// that renders a ready query sends the SINGULAR status: workapi.BuildReadyFilter
-// and BuildReadyCountFilter send StatusOpen, and ReadyFilterFromIssueFilter sends
-// StatusOpen while dropping IssueFilter.Statuses, which BuildListFilter has
-// already resolved to open under --ready (issueops/reader_ready_scope.go states
-// that override and why the projection has nothing to drop). What is left is the
-// storage seam this file runs against, which backend.DoltStorage publishes to
-// out-of-tree backends — so Statuses is a public filter field whose only reachable
-// consumer class is exactly the one RunAll is the proof obligation for.
+// THE OR-SET ARM IS REACHABLE FROM `bd list --status a,b --ready`.
+// ReadyFilterFromIssueFilter copies IssueFilter.Statuses onto the ready-work
+// filter instead of dropping it, and BuildListFilter no longer always
+// resolves --ready to open: an explicit selector is the intersection
+// (GH#5832; issueops/reader_ready_scope.go states the honor path).
+// publicops.ReadyRequest still carries no status field of any kind, which
+// RunReadyCounterCountsOnlyTheOpenRowsItsListingLists says from the other
+// side, so `bd ready` — workapi.BuildReadyFilter and BuildReadyCountFilter —
+// still send the SINGULAR StatusOpen. The list --ready path is the in-tree
+// caller that sets Statuses. This file remains the storage-seam observer
+// for the OR-set arm against backend.DoltStorage, which publishes the field
+// to out-of-tree backends; RunAll is still the proof obligation for that
+// seam.
 //
 // The unit-of-work provider's ready union renders this arm from the same shared
 // builder (sqlbuild.BuildReadyWorkWhere), applied to the wisps table as well as
 // issues where the classic stack projects the wisp plane onto a types.IssueFilter
 // instead. Its copy is deliberately unpinned rather than overlooked: that provider
-// is not a storage.DoltStorage, so no external caller reaches it, and no in-tree
-// caller sets Statuses at all. Promoting a status set onto ReadyRequest is what
-// would make it reachable, and would move this case to reader_contract.go beside
-// RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions, where all three
+// is not a storage.DoltStorage, so no external caller reaches it. A status set on
+// ReadyRequest would additionally make `bd ready` vote on this case, and would
+// move it to reader_contract.go beside
+// RunReaderReadySetOwnsItsStatusPinnedAndTemplateDecisions, where the ready-role
 // wirings would vote on it.
 func testAuditReadyMultiStatusFilter(t *testing.T, f Factory) {
 	s := f(t)

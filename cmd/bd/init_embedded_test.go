@@ -63,23 +63,6 @@ func buildEmbeddedBD(t *testing.T) string {
 	return embeddedBD
 }
 
-func initGitRepoAt(t *testing.T, dir string) {
-	t.Helper()
-	for _, args := range [][]string{
-		{"init"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test"},
-		// Force repo-local hooks so tests ignore any global hooksPath override.
-		{"config", "core.hooksPath", ".git/hooks"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s failed: %v\n%s", args[0], err, out)
-		}
-	}
-}
-
 func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {

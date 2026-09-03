@@ -8,6 +8,7 @@ import (
 	"github.com/steveyegge/beads/internal/metrics"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 )
 
 var staleCmd = &cobra.Command{
@@ -32,6 +33,15 @@ This helps identify:
 		days, _ := cmd.Flags().GetInt("days")
 		status, _ := cmd.Flags().GetString("status")
 		limit, _ := cmd.Flags().GetInt("limit")
+		// Normalized for the reason blockedFilterFromFlags gives: these are
+		// exact-match clauses, and every sibling label filter trims its input
+		// before building them.
+		rawLabels, _ := cmd.Flags().GetStringSlice("label")
+		rawLabelsAny, _ := cmd.Flags().GetStringSlice("label-any")
+		rawExcludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+		labels := utils.NormalizeLabels(rawLabels)
+		labelsAny := utils.NormalizeLabels(rawLabelsAny)
+		excludeLabels := utils.NormalizeLabels(rawExcludeLabels)
 		if days < 1 {
 			return HandleErrorRespectJSON("--days must be at least 1")
 		}
@@ -39,9 +49,12 @@ This helps identify:
 			return HandleErrorRespectJSON("invalid status '%s'. Valid values: open, in_progress, blocked, deferred", status)
 		}
 		filter := types.StaleFilter{
-			Days:   days,
-			Status: status,
-			Limit:  limit,
+			Days:          days,
+			Status:        status,
+			Limit:         limit,
+			Labels:        labels,
+			LabelsAny:     labelsAny,
+			ExcludeLabels: excludeLabels,
 		}
 
 		if usesProxiedServer() {
@@ -88,6 +101,9 @@ func init() {
 	staleCmd.Flags().IntP("days", "d", 30, "Issues not updated in this many days")
 	staleCmd.Flags().StringP("status", "s", "", "Filter by status (open|in_progress|blocked|deferred)")
 	staleCmd.Flags().IntP("limit", "n", 50, "Maximum issues to show")
+	staleCmd.Flags().StringSliceP("label", "l", []string{}, "Filter by labels (AND: must have ALL). Can combine with --label-any")
+	staleCmd.Flags().StringSlice("label-any", []string{}, "Filter by labels (OR: must have AT LEAST ONE). Can combine with --label")
+	staleCmd.Flags().StringSlice("exclude-label", []string{}, "Exclude issues that have ANY of these labels")
 	// Note: --json flag is defined as a persistent flag in main.go, not here
 	rootCmd.AddCommand(staleCmd)
 }

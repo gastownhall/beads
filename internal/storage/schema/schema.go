@@ -237,6 +237,21 @@ type migrationSource struct {
 	// TestSentinelTablesAreCreatedByTheSeries enforces the creating side only;
 	// the dropping side is this comment.
 	sentinelTables []string
+	// sentinelColumns are clone-local columns whose absence contradicts an
+	// otherwise at-latest cursor just as strongly as an absent sentinel table.
+	//
+	// INVARIANT: no future migration in this series may DROP or RENAME a
+	// sentinel column (or the table carrying it). Older binaries in the field
+	// check their own sentinel list against the live schema, so removing one
+	// would make every healthy newer database read as "contradicted" to them
+	// and re-run their whole series. TestSentinelColumnsAreCreatedByTheSeries
+	// enforces the creating side only; the dropping side is this comment.
+	sentinelColumns []schemaSentinelColumn
+}
+
+type schemaSentinelColumn struct {
+	table  string
+	column string
 }
 
 var (
@@ -254,6 +269,9 @@ var (
 		// missing; wisps is checked too so a partially materialized database
 		// is caught by whichever is absent.
 		sentinelTables: []string{"wisps", "wisp_dependencies"},
+		// A historical ignored-v16 ordinal collision can leave the local
+		// leases table present but without the column frozen 0016 adds.
+		sentinelColumns: []schemaSentinelColumn{{table: "leases", column: "granted_node"}},
 	}
 )
 
@@ -303,42 +321,14 @@ var versionGatedDoltIgnorePatterns = []struct {
 	{"events", 62}, // 0062_events_dolt_ignore (bd-red8u)
 }
 
-// seedDoltIgnorePatterns idempotently asserts the canonical dolt_ignore
-// patterns and reports whether it actually changed anything. INSERT IGNORE
-// leaves existing rows untouched, so a healthy database sees no working-set
-// change and an explicit operator override (pattern present with
-// ignored=false) is respected. On an under-seeded database the new rows land
-// in the working set and take effect immediately; who commits them depends on
-// the pass: when migration work is needed, MigrateUp exempts dolt_ignore from
-// the pre-existing-dirty guards as pass-owned state (same treatment as the
-// aux-rekey tables) and stageSchemaTables commits it with the pass; on the
-// no-work short-circuit, MigrateUp commits the seed itself in a scoped,
-// labeled commit (keyed off the changed return value) so the heal converges
-// in one pass instead of riding along inside an unrelated later commit.
-func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
-	changed := false
-	seedOne := func(pattern string) error {
-		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
-		if err != nil {
-			return fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
-		}
-		// A RowsAffected error degrades to changed=false for that row: the
-		// seed then stays an uncommitted working-set diff swept up by the
-		// next commit, exactly the pre-scoped-commit behavior.
-		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
-			changed = true
-		}
-		return nil
-	}
-	for _, pattern := range doltIgnorePatterns {
-		if err := seedOne(pattern); err != nil {
-			return changed, err
-		}
-	}
-	// Version-gated patterns seed only once the main cursor proves the flip
-	// migration applied. The cursor table may not exist yet (first-ever run,
-	// before mainSource.migrate bootstraps it): treat that as version 0 and
-	// skip — the flip migration registers its own pattern when it applies.
+// doltIgnoreSeedCandidates is the pattern set this open should assert: the
+// canonical patterns plus any version-gated pattern the main cursor
+// qualifies. The cursor table may not exist yet (first-ever run, before
+// mainSource.migrate bootstraps it): treat that as version 0 and skip the
+// gated ones — the flip migration registers its own pattern when it applies.
+func doltIgnoreSeedCandidates(ctx context.Context, db DBConn) []string {
+	candidates := make([]string, 0, len(doltIgnorePatterns)+len(versionGatedDoltIgnorePatterns))
+	candidates = append(candidates, doltIgnorePatterns...)
 	mainVersion, err := mainSource.currentVersion(ctx, db)
 	if err != nil {
 		mainVersion = 0
@@ -347,8 +337,112 @@ func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
 		if mainVersion < gated.minMainVersion {
 			continue
 		}
-		if err := seedOne(gated.pattern); err != nil {
-			return changed, err
+		candidates = append(candidates, gated.pattern)
+	}
+	return candidates
+}
+
+// missingDoltIgnorePatterns reports which candidates have no row in
+// dolt_ignore yet, i.e. exactly the ones an INSERT IGNORE would actually
+// insert. The probe is a single `WHERE pattern IN (...)` so the equality that
+// decides it is the COLUMN's own collation — the same comparison the primary
+// key uses to swallow an INSERT IGNORE — rather than Go string equality
+// guessing at it. The returned values are the STORED spellings, which under a
+// case-insensitive collation may differ in case from the candidate, so they
+// are matched back case-insensitively; the candidate set has no two entries
+// that collide under case folding, and under a case-sensitive collation the
+// database only ever returns exact matches, so the fold cannot mis-attribute.
+//
+// A read failure is not fatal: dolt_ignore does not exist on a never-migrated
+// database (the first INSERT creates it), and that path is privileged by
+// construction. Treat the probe as "nothing present" and let the writes run,
+// which is exactly the pre-read behavior. A partial read (the query succeeds
+// but iteration fails partway) degrades identically: the half-filled result is
+// discarded so it can never misclassify a registered pattern as missing.
+func missingDoltIgnorePatterns(ctx context.Context, db DBConn, candidates []string) []string {
+	present := make(map[string]bool, len(candidates))
+	placeholders := make([]string, len(candidates))
+	args := make([]any, len(candidates))
+	for i, pattern := range candidates {
+		placeholders[i] = "?"
+		args[i] = pattern
+	}
+	query := "SELECT pattern FROM dolt_ignore WHERE pattern IN (" + strings.Join(placeholders, ", ") + ")"
+	if rows, err := db.QueryContext(ctx, query, args...); err == nil {
+		readErr := false
+		for rows.Next() {
+			var stored string
+			if err := rows.Scan(&stored); err != nil {
+				readErr = true
+				break
+			}
+			present[strings.ToLower(stored)] = true
+		}
+		// rows.Err() surfaces an iteration failure that rows.Next() swallowed;
+		// a Scan error above is tracked separately because rows.Err() does not
+		// report it. Either way the read did not complete.
+		if err := rows.Err(); err != nil {
+			readErr = true
+		}
+		_ = rows.Close()
+		// A partial read must not drive the write decision. If iteration failed
+		// partway, present is half-filled, so a genuinely-registered pattern
+		// would be misclassified as missing and draw a spurious INSERT IGNORE —
+		// the exact command-denied write this seed exists to avoid on a
+		// SELECT/DML-only fence. Discard the partial map so a partial read
+		// degrades to the same "nothing present" blind-write as a query-level
+		// failure, which only ever runs on the privileged opener.
+		if readErr {
+			present = nil
+		}
+	}
+	missing := make([]string, 0, len(candidates))
+	for _, pattern := range candidates {
+		if present[strings.ToLower(pattern)] {
+			continue
+		}
+		missing = append(missing, pattern)
+	}
+	return missing
+}
+
+// seedDoltIgnorePatterns idempotently asserts the canonical dolt_ignore
+// patterns and reports whether it actually changed anything.
+//
+// It READS before it writes, and issues no statement at all for a pattern
+// that is already registered. That is not an optimization: the store is
+// opened by every client, including a wire client coming through the hosted
+// or box fence, whose operator grant is deliberately SELECT/DML-on-data-only.
+// A blind `INSERT IGNORE` is a write for privilege purposes even when it
+// changes nothing, so the unconditional form made a correctly-seeded database
+// un-openable through a fence, and the only way to open it was to grant
+// INSERT on dolt_ignore — which lets a wire client register a pattern for
+// `issues` and silently stop its own writes from ever being committed. The
+// read costs one round trip and removes the need for that grant.
+//
+// The write path is unchanged where a write is genuinely owed: INSERT IGNORE
+// leaves existing rows untouched, so an explicit operator override (pattern
+// present with ignored=false) is respected even in the race where the probe
+// missed it. On an under-seeded database the new rows land in the working set
+// and take effect immediately; who commits them depends on the pass: when
+// migration work is needed, MigrateUp exempts dolt_ignore from the
+// pre-existing-dirty guards as pass-owned state (same treatment as the
+// aux-rekey tables) and stageSchemaTables commits it with the pass; on the
+// no-work short-circuit, MigrateUp commits the seed itself in a scoped,
+// labeled commit (keyed off the changed return value) so the heal converges
+// in one pass instead of riding along inside an unrelated later commit.
+func seedDoltIgnorePatterns(ctx context.Context, db DBConn) (bool, error) {
+	changed := false
+	for _, pattern := range missingDoltIgnorePatterns(ctx, db, doltIgnoreSeedCandidates(ctx, db)) {
+		res, err := db.ExecContext(ctx, "INSERT IGNORE INTO dolt_ignore VALUES (?, true)", pattern)
+		if err != nil {
+			return changed, fmt.Errorf("seeding dolt_ignore pattern %q: %w", pattern, err)
+		}
+		// A RowsAffected error degrades to changed=false for that row: the
+		// seed then stays an uncommitted working-set diff swept up by the
+		// next commit, exactly the pre-scoped-commit behavior.
+		if n, raErr := res.RowsAffected(); raErr == nil && n > 0 {
+			changed = true
 		}
 	}
 	return changed, nil
@@ -1112,6 +1206,23 @@ func (m migrationSource) atLatest(ctx context.Context, db DBConn) bool {
 }
 
 func (m migrationSource) currentVersion(ctx context.Context, db DBConn) (int, error) {
+	// Probe existence with a query that always SUCCEEDS before ever issuing one
+	// that can fail. A Dolt session that issues a failing statement stays
+	// pinned to its pre-statement catalog snapshot, so a bare SELECT against a
+	// not-yet-created cursor table poisons the pooled connection: tables
+	// created afterwards on other connections stay invisible to this one for
+	// the rest of its life in the pool (be-bv7x).
+	var cursorExists int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = ?",
+		m.cursorTable,
+	).Scan(&cursorExists); err != nil {
+		return 0, fmt.Errorf("probing %s existence: %w", m.cursorTable, err)
+	}
+	if cursorExists == 0 {
+		return 0, nil
+	}
+
 	var current int
 	err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version), 0) FROM "+m.cursorTable).Scan(&current)
 	if err != nil && err != sql.ErrNoRows {
@@ -1163,6 +1274,15 @@ func (m migrationSource) cursorContradictedBySchema(ctx context.Context, db DBCo
 			return true, nil
 		}
 	}
+	for _, column := range m.sentinelColumns {
+		present, err := sentinelColumnExists(ctx, db, column.table, column.column)
+		if err != nil {
+			return false, fmt.Errorf("checking %s sentinel column %s.%s: %w", m.cursorTable, column.table, column.column, err)
+		}
+		if !present {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
@@ -1179,6 +1299,8 @@ var sentinelTableExists = func(ctx context.Context, db DBConn, table string) (bo
 	}
 	return n > 0, nil
 }
+
+var sentinelColumnExists = schemaColumnExists
 
 func (m migrationSource) pendingVersions(ctx context.Context, db DBConn) ([]int, error) {
 	current, err := m.currentVersion(ctx, db)
@@ -1288,24 +1410,133 @@ var procedureCallRe = regexp.MustCompile(`(?i)(?:^|;|\n)\s*CALL\s`)
 // dolt_nonlocal_tables rows, 0041 DELETEs then commits them) are made
 // replay-safe by pre-migration repairs keyed to their version, not by editing
 // their shipped SQL — see preMigrationRepair and migration_repairs.go.
+// Most Dolt procedures are called for their side effects alone, and DrainCall
+// discards what they return. That is a statement about these CALL SITES, not
+// about stored procedures in general: DOLT_PULL and DOLT_MERGE report what they
+// did — whether anything merged, and whether it conflicted — only in the row
+// they return. A caller that needs that report uses CallReturningRow, which
+// drains identically.
 func DrainCall(ctx context.Context, db DBConn, query string, args ...any) error {
 	rows, err := db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = rows.Close() }()
+	return drainResultSets(rows, nil)
+}
+
+// CallRow is the first row of a CALL's first result set, keyed by column name.
+// Dolt's procedure rows mix integers with a nullable message, and their column
+// ORDER is a documented-but-unversioned detail (dolt_pull.go pins the
+// fast_forward index in a const with a comment warning it must be updated if
+// the schema changes), so values are read by name and scanned as NullString.
+type CallRow map[string]sql.NullString
+
+// Str returns the named column's text. ok is false when the column is absent
+// from the row or is SQL NULL — DOLT_PULL returns a NULL message whenever its
+// internal message is empty, which is a distinct outcome from any message it
+// might actually spell out.
+func (r CallRow) Str(name string) (value string, ok bool) {
+	v, present := r[name]
+	if !present || !v.Valid {
+		return "", false
+	}
+	return v.String, true
+}
+
+// Int returns the named column parsed as an integer. ok is false when the
+// column is absent, NULL, or not a number.
+func (r CallRow) Int(name string) (value int, ok bool) {
+	s, present := r.Str(name)
+	if !present {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// CallReturningRow runs a CALL exactly as DrainCall does — consuming every row
+// of every result set, so the pinned connection is left clean for the next
+// command — and additionally returns the FIRST row of the FIRST result set.
+//
+// The drain is the load-bearing part and is shared with DrainCall verbatim; see
+// DrainCall's comment for the go-sql-driver error-path asymmetry that makes it
+// necessary. Scanning a row does not shorten the drain: the loop keeps running
+// to the end of every result set whether or not the scan succeeded. Reaching
+// for QueryRowContext instead would drain only the first result set and
+// reintroduce the busy-buffer bug on the pinned *sql.Tx that the pull path uses.
+//
+// A CALL that returns no rows at all yields a nil CallRow and a nil error;
+// reading a column from a nil CallRow reports absent rather than panicking.
+func CallReturningRow(ctx context.Context, db DBConn, query string, args ...any) (CallRow, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var first CallRow
+	if err := drainResultSets(rows, &first); err != nil {
+		return nil, err
+	}
+	return first, nil
+}
+
+// drainResultSets consumes every row of every result set the statement
+// produced. When capture is non-nil the first row of the first result set is
+// also scanned into it; every other row is read and discarded, which is what
+// frees the connection buffer for the next command.
+//
+// A scan failure is recorded and the drain continues, so a row this package
+// cannot decode still leaves a usable connection behind. The drain's own error
+// wins over the scan's: a broken result set explains a failed scan, not the
+// other way round.
+func drainResultSets(rows *sql.Rows, capture *CallRow) error {
+	var scanErr error
+	firstSet := true
 	for {
-		// Consume every row of the current result set. The values are
-		// irrelevant — a CALL's effect comes from its side effects, not from
-		// anything it returns — but reading them is what frees the connection
-		// buffer for the next command.
-		for rows.Next() { //nolint:revive // intentional drain, no body needed
+		for rows.Next() {
+			if capture != nil && firstSet && *capture == nil && scanErr == nil {
+				row, err := scanRowByColumn(rows)
+				if err != nil {
+					scanErr = err
+					continue
+				}
+				*capture = row
+			}
 		}
+		firstSet = false
 		if !rows.NextResultSet() {
 			break
 		}
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	return scanErr
+}
+
+// scanRowByColumn reads the row the cursor is on into a column-name-keyed map.
+func scanRowByColumn(rows *sql.Rows) (CallRow, error) {
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	values := make([]sql.NullString, len(cols))
+	targets := make([]any, len(cols))
+	for i := range values {
+		targets[i] = &values[i]
+	}
+	if err := rows.Scan(targets...); err != nil {
+		return nil, err
+	}
+	row := make(CallRow, len(cols))
+	for i, name := range cols {
+		row[name] = values[i]
+	}
+	return row, nil
 }
 
 // execMigrationBody applies one migration file's SQL on the pinned migration

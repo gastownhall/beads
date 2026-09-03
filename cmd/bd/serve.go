@@ -345,6 +345,11 @@ func runServe() error {
 	// firing them. This is the unit-of-work twin of the
 	// (*storage.HookFiringStore).Unwrap the store-shaped source takes.
 	provider := uow.UnwrapProvider(uowProvider)
+	if provider != nil {
+		// Remove hooks, then restore the external-dependency policy. The policy
+		// is not a hook and must remain on every served ready/claim path.
+		provider = wireExternalDependencyUOWProvider(provider)
+	}
 	if provider == nil {
 		// Server, external-server and shared-server workspaces: PersistentPreRunE
 		// builds a DoltStore for those and no unit-of-work provider, so serve
@@ -382,7 +387,7 @@ func runServe() error {
 				fmt.Fprintf(os.Stderr, "bd serve: closing the unit-of-work provider: %v\n", err)
 			}
 		}()
-		provider = p
+		provider = wireExternalDependencyUOWProvider(p)
 	}
 
 	defer startServeEventsJournalMaintenance(info.BeadsDir, provider)()
