@@ -26,10 +26,20 @@ var (
 	wispsFilterTables  = sqlbuild.WispsFilterTables
 )
 
+// missingOptionalWispTable reports whether err is the absence of a wisp-plane
+// table a database may legitimately not have. A wisp search touches more than
+// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
+// wisp_labels, so a blanket table-not-exist check reports a broken database as
+// an empty wisp plane and silently drops live rows from the result.
+func missingOptionalWispTable(err error) bool {
+	name, ok := dberrors.MissingTableName(err)
+	return ok && sqlbuild.OptionalWispTable(name)
+}
+
 func (r *issueSQLRepositoryImpl) searchAcrossIssuesAndWisps(ctx context.Context, query string, filter types.IssueFilter) (domain.SearchPage, error) {
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		page, err := r.searchTable(ctx, query, filter, wispsFilterTables)
-		if err != nil && !dberrors.IsTableNotExist(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return domain.SearchPage{}, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(page.Items) > 0 {
@@ -105,7 +115,7 @@ func (r *issueSQLRepositoryImpl) searchUnion(ctx context.Context, query string, 
 		return domain.SearchPage{}, fmt.Errorf("search union (hydrate issues): %w", err)
 	}
 	wispsByID, err := r.fetchIssuesByIDs(ctx, page.wispIDs, wispsFilterTables, filter)
-	if err != nil && !dberrors.IsTableNotExist(err) {
+	if err != nil && !missingOptionalWispTable(err) {
 		return domain.SearchPage{}, fmt.Errorf("search union (hydrate wisps): %w", err)
 	}
 

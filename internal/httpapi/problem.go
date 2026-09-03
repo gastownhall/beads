@@ -712,24 +712,16 @@ var operationCodes = map[string][]Code{
 	// and can refuse them the same way. limit=0's mode-dependent refusal has no
 	// analog here because there is no limit to pass.
 	OpCountReadyWork: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
-	// The ready count's vocabulary exactly, and for the same reasons: a
-	// cardinality has no page, so there is no cursor to invalidate and no
-	// unlimited-read refusal to make; and no 404, because a predicate matching
-	// nothing is 0 — the role has no ErrNotFound at all, which its own doc
-	// states, since a question about a set has an answer even when the set is
-	// empty.
+	// A cardinality has no page, so there is no cursor or unlimited-read
+	// refusal. It has no 404 either: a predicate matching nothing is 0.
 	//
-	// Its 400 is ENTIRELY THE TRANSPORT'S, which is the one way this row differs
-	// from the listings' beside it: a malformed boolean, integer or timestamp, a
-	// repeated single-valued parameter, and a `group_by` outside the closed set.
-	//
-	// No ROLE refusal is reachable. issueops.Counter has exactly one
-	// ErrValidation — ValidateCountGroup's unknown dimension, since
-	// BuildCountFilter cannot fail — and countGroupOf refuses that dimension at
-	// the edge, so the shared read failure path never classifies a count. An
-	// unrecognized status or type is not a refusal at all here; the role
-	// promises it matches nothing and answers 0.
-	// TestCountGroupEnumMatchesTheRolesVocabulary is what keeps that true.
+	// Its 400s come from both the transport and the ROLE. The transport refuses
+	// malformed values, repeated single-valued parameters and a `group_by`
+	// outside the closed set. countGroupOf stops that last case at the edge.
+	// The role has exactly one reachable refusal: BuildCountFilter rejects an
+	// invalid metadata key. failReadErr classifies it through invalidFilterParam
+	// as a 400 on `metadata_field`. An unrecognized status or type is not a
+	// refusal; the role promises it matches nothing and answers 0.
 	OpCountIssues: {CodeInvalidArgument, CodeUnauthenticated, CodeBusy, CodeDBUnavailable, CodeInternal},
 	// The listing's vocabulary minus the cursor: this operation has none, so
 	// invalid_cursor cannot arise. An unparseable EXPRESSION is an

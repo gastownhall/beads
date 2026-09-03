@@ -4,7 +4,9 @@ package testutil
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -15,6 +17,7 @@ import (
 
 	_ "github.com/go-sql-driver/mysql" // required by testcontainers Dolt module
 	"github.com/testcontainers/testcontainers-go"
+	tcexec "github.com/testcontainers/testcontainers-go/exec"
 	"github.com/testcontainers/testcontainers-go/modules/dolt"
 )
 
@@ -162,11 +165,62 @@ func startDoltContainer() error {
 	}
 
 	doltTestPort = p.Port()
+
+	if err := waitForDoltReady(doltTestPort); err != nil {
+		_ = testcontainers.TerminateContainer(ctr)
+		return fmt.Errorf("waiting for Dolt server to be query-ready: %w", err)
+	}
+
 	doltSingletonSrv = &doltServer{
 		container: ctr,
 	}
 
 	return nil
+}
+
+// doltReadyProbeTimeout bounds how long waitForDoltReady polls before giving up.
+const doltReadyProbeTimeout = 30 * time.Second
+
+// waitForDoltReady polls the server with a trivial query until it responds
+// or doltReadyProbeTimeout elapses.
+//
+// The testcontainers wait strategy above only matches a log line ("Server
+// ready. Accepting connections."), which confirms the TCP listener is up but
+// not that Dolt's SQL engine can actually serve a query yet. In that narrow
+// startup window, a query issued with an unbounded context (as several test
+// helpers do) can block indefinitely instead of erroring, because nothing
+// ever cancels it to unstick the read — confirmed via goroutine dump during
+// be-fgd round-2 triage: the connection sat in mysqlConn.readWithTimeout /
+// net.Read for 2+ minutes after the container had already logged ready. Each
+// probe attempt here uses its own short bounded context, so a still-warming
+// server fails an attempt fast and gets retried, rather than wedging.
+func waitForDoltReady(port string) error {
+	dsn := fmt.Sprintf("root@tcp(127.0.0.1:%s)/", port)
+	deadline := time.Now().Add(doltReadyProbeTimeout)
+	var lastErr error
+	for {
+		lastErr = pingDoltOnce(dsn)
+		if lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("dolt server at port %s did not become query-ready within %s: %w", port, doltReadyProbeTimeout, lastErr)
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+}
+
+// pingDoltOnce opens a short-lived connection and pings it with a bounded
+// context so a non-responsive server fails this attempt instead of hanging.
+func pingDoltOnce(dsn string) error {
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return db.PingContext(ctx)
 }
 
 // terminateSharedContainer stops and removes the shared Dolt container.
@@ -180,9 +234,32 @@ func terminateSharedContainer() {
 	})
 }
 
-// StartIsolatedDoltContainer starts a per-test Dolt container and returns the
-// mapped host port. The container is terminated automatically when the test finishes.
-func StartIsolatedDoltContainer(t *testing.T) string {
+// IsolatedDoltContainer is a per-test Dolt container together with the
+// accessors a test needs to inspect it from the inside.
+type IsolatedDoltContainer struct {
+	// Port is the mapped host port of the container's Dolt server.
+	Port string
+
+	ctr *dolt.DoltContainer
+}
+
+// Exec runs cmd inside the container and returns its exit code and combined
+// output, demultiplexed (see containerExec).
+func (c *IsolatedDoltContainer) Exec(ctx context.Context, cmd []string) (int, string, error) {
+	if c == nil || c.ctr == nil {
+		return 0, "", fmt.Errorf("no Dolt container running")
+	}
+	return containerExec(ctx, c.ctr, cmd)
+}
+
+// StartIsolatedDoltContainerHandle starts a per-test Dolt container and
+// returns a handle to it. The container is terminated automatically when the
+// test finishes.
+//
+// Unlike StartIsolatedDoltContainer this does NOT touch BEADS_DOLT_PORT or
+// BEADS_DOLT_SERVER_PORT: those are process-wide, so a test that only wants
+// its own server should not perturb sibling tests sharing the process.
+func StartIsolatedDoltContainerHandle(t *testing.T) *IsolatedDoltContainer {
 	t.Helper()
 	if state := checkDolt(); state != doltReady {
 		t.Skipf("skipping test: %s", state)
@@ -208,18 +285,30 @@ func StartIsolatedDoltContainer(t *testing.T) string {
 		t.Fatalf("getting mapped port: %v", err)
 	}
 
-	portStr := port.Port()
-	t.Setenv("BEADS_DOLT_PORT", portStr)
-	return portStr
+	return &IsolatedDoltContainer{Port: port.Port(), ctr: ctr}
 }
 
-// ensureSharedContainer starts the singleton container and sets BEADS_DOLT_PORT.
+// StartIsolatedDoltContainer starts a per-test Dolt container and returns the
+// mapped host port, additionally pointing BEADS_DOLT_PORT and
+// BEADS_DOLT_SERVER_PORT at it for the duration of the test.
+func StartIsolatedDoltContainer(t *testing.T) string {
+	t.Helper()
+	c := StartIsolatedDoltContainerHandle(t)
+	t.Setenv("BEADS_DOLT_PORT", c.Port)
+	t.Setenv("BEADS_DOLT_SERVER_PORT", c.Port)
+	return c.Port
+}
+
+// ensureSharedContainer starts the singleton container and sets
+// BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT.
 func ensureSharedContainer() {
 	doltServerOnce.Do(func() {
 		doltServerErr = startDoltContainer()
 		if doltServerErr == nil && doltTestPort != "" {
 			if err := os.Setenv("BEADS_DOLT_PORT", doltTestPort); err != nil {
 				doltServerErr = fmt.Errorf("set BEADS_DOLT_PORT: %w", err)
+			} else if err := os.Setenv("BEADS_DOLT_SERVER_PORT", doltTestPort); err != nil {
+				doltServerErr = fmt.Errorf("set BEADS_DOLT_SERVER_PORT: %w", err)
 			}
 		}
 	})
@@ -227,7 +316,7 @@ func ensureSharedContainer() {
 
 // EnsureDoltContainerForTestMain starts a shared Dolt container for use in
 // TestMain functions. Call TerminateDoltContainer() after m.Run() to clean up.
-// Sets BEADS_DOLT_PORT process-wide.
+// Sets BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT process-wide.
 func EnsureDoltContainerForTestMain() error {
 	if state := checkDolt(); state != doltReady {
 		return fmt.Errorf("%s", state)
@@ -300,4 +389,27 @@ func DoltContainerCrashError() error {
 		return fmt.Errorf("Dolt container exited (status=%s, exit=%d)", state.Status, state.ExitCode)
 	}
 	return nil
+}
+
+// containerExec runs cmd inside ctr and returns its exit code and combined
+// output. Used by tests that need to inspect a container's filesystem (e.g.
+// the .dolt_dropped_databases/ directory), which has no host-visible path
+// since the containers are started without a bind-mounted data dir.
+//
+// tcexec.Multiplexed() is load-bearing, not decorative. Without it Exec hands
+// back the raw hijacked Docker stream and io.ReadAll glues the 8-byte stdcopy
+// frame header onto the payload: `echo hello` returns
+// "\x01\x00\x00\x00\x00\x00\x00\x06hello\n". A caller that feeds such
+// a string back into the container — a path read out of find(1), say — then
+// fails with "invalid argument" on a prefix it cannot see.
+func containerExec(ctx context.Context, ctr *dolt.DoltContainer, cmd []string) (int, string, error) {
+	code, reader, err := ctr.Exec(ctx, cmd, tcexec.Multiplexed())
+	if err != nil {
+		return 0, "", fmt.Errorf("exec in Dolt container: %w", err)
+	}
+	out, err := io.ReadAll(reader)
+	if err != nil {
+		return code, "", fmt.Errorf("reading exec output: %w", err)
+	}
+	return code, string(out), nil
 }

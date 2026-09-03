@@ -1,6 +1,12 @@
 #!/bin/bash
 # Storage era definitions and upgrade path matrix.
 
+if ((BASH_VERSINFO[0] < 4)); then
+    printf 'versions.sh: this migration-test harness needs bash >= 4 for associative arrays (found %s).\n' "$BASH_VERSION" >&2
+    printf 'versions.sh: macOS ships bash 3.2 by default; install a newer bash (e.g. "brew install bash") and invoke this script through it.\n' >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 # The explicit export/import bridges for reviewed classic SQLite layouts. They
 # are not in-place schema migrations: each SQLite source remains a rollback copy.
 readonly CLASSIC_SQLITE_VERSION="v0.49.6"
@@ -78,6 +84,23 @@ declare -Ar STRICT_RELEASE_ASSETS=(
     ["v1.0.1|linux|amd64"]="beads_1.0.1_linux_amd64.tar.gz"
     ["v1.1.0|linux|amd64"]="beads_1.1.0_linux_amd64.tar.gz"
     ["v1.1.2|linux|amd64"]="beads_1.1.2_linux_amd64.tar.gz"
+    # darwin/arm64: reviewed 2026-08-29 (ga-9sghx) so the corpus can run
+    # natively on Apple Silicon. Every asset below was confirmed to exist via
+    # `gh release view <version> -R gastownhall/beads`, and every checksum was
+    # taken from that release's own goreleaser-published checksums.txt (the
+    # same provenance as the linux|amd64 entries above).
+    ["v0.17.0|darwin|arm64"]="beads_0.17.0_darwin_arm64.tar.gz"
+    ["v0.49.6|darwin|arm64"]="beads_0.49.6_darwin_arm64.tar.gz"
+    ["v0.50.3|darwin|arm64"]="beads_0.50.3_darwin_arm64.tar.gz"
+    ["v0.55.4|darwin|arm64"]="beads_0.55.4_darwin_arm64.tar.gz"
+    ["v0.56.1|darwin|arm64"]="beads_0.56.1_darwin_arm64.tar.gz"
+    ["v0.57.0|darwin|arm64"]="beads_0.57.0_darwin_arm64.tar.gz"
+    ["v0.62.0|darwin|arm64"]="beads_0.62.0_darwin_arm64.tar.gz"
+    ["v0.63.3|darwin|arm64"]="beads_0.63.3_darwin_arm64.tar.gz"
+    ["v1.0.0|darwin|arm64"]="beads_1.0.0_darwin_arm64.tar.gz"
+    ["v1.0.1|darwin|arm64"]="beads_1.0.1_darwin_arm64.tar.gz"
+    ["v1.1.0|darwin|arm64"]="beads_1.1.0_darwin_arm64.tar.gz"
+    ["v1.1.2|darwin|arm64"]="beads_1.1.2_darwin_arm64.tar.gz"
 )
 declare -Ar STRICT_RELEASE_SHA256=(
     ["v0.17.0|linux|amd64"]="d4d08617a324c85b45c9628bc519d659a9ff9c7c37da67aa48727e0af7f19a75"
@@ -92,6 +115,19 @@ declare -Ar STRICT_RELEASE_SHA256=(
     ["v1.0.1|linux|amd64"]="1d2364d5d7083a4634a9e734ca87822fb79c2b6625988f9f791e3376313b1b77"
     ["v1.1.0|linux|amd64"]="b0f3dd607c3fb989ee08d0a6854fba80d0402971eb108f9af6170bc14d491a34"
     ["v1.1.2|linux|amd64"]="a72d71ed374955dc9f83a0f90b54bd7b6a0016709dd1676ae2e368651ed401c2"
+    # darwin/arm64 — see provenance note on STRICT_RELEASE_ASSETS above.
+    ["v0.17.0|darwin|arm64"]="41479fabf76ff76912096bf2e9c1988a9b0d0dd673c7e693342f711770f6d763"
+    ["v0.49.6|darwin|arm64"]="007dacd919eeac48a3a0ecb6aad305ef04e903de02c43a8163d2fd6a63d9ab7d"
+    ["v0.50.3|darwin|arm64"]="26c15b93d82be45c3fa9b6318ffee9a6ae89841ba7ec4ad5c8db6fe6e42d3d3a"
+    ["v0.55.4|darwin|arm64"]="18afdf4f562323a71687b2f7ed95c27750aee8d361b176a4a79caf176f00c0b9"
+    ["v0.56.1|darwin|arm64"]="aa8a4309de2ab8c27a90c03b652cedc53a45880a5c94cd65881006da3c2f0812"
+    ["v0.57.0|darwin|arm64"]="fbbcbdff64da29f72fbe939d4cc285305d73e830889919d182c4c6826a338ced"
+    ["v0.62.0|darwin|arm64"]="4f441c616240c7063a2257ac26138d06eae060a961f029c81855928eae6ae1c0"
+    ["v0.63.3|darwin|arm64"]="2b3ab41dd74a3c2a79bc47dd0b36c0a63a2c5d76f1e3081db5288d294124f245"
+    ["v1.0.0|darwin|arm64"]="b8763b428e6b68550eb2b2505483797794b49ae497a2e265ed3c60f0f0a0bcd2"
+    ["v1.0.1|darwin|arm64"]="f9d5e878fbee8a7051289743e36e52b0b17f1058587170afab7f2d2a30f43199"
+    ["v1.1.0|darwin|arm64"]="c42e24d83b258f7ba9f52a6d2d5f6b055869dfe7807165055988b12e7ea8c564"
+    ["v1.1.2|darwin|arm64"]="9b0137a83a2afd343e2abd2a506be72ea032721000f76669c2cf81729e78501d"
 )
 
 strict_release_asset() {
