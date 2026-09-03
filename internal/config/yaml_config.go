@@ -799,26 +799,110 @@ func scalarStyleFor(value string) yaml.Style {
 }
 
 func commentOutYamlKey(content, key string) string {
-	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:`)
+	if updated, ok := commentOutFlatYamlKey(content, key); ok {
+		return updated
+	}
+	if updated, ok := commentOutNestedYamlKey(content, key); ok {
+		return updated
+	}
+	return content
+}
 
-	var result []string
+func commentOutFlatYamlKey(content, key string) (string, bool) {
+	keyPattern := regexp.MustCompile(`^(\s*)` + regexp.QuoteMeta(key) + `\s*:(.*)$`)
+
+	var lines []string
 	scanner := bufio.NewScanner(strings.NewReader(content))
 	for scanner.Scan() {
-		line := scanner.Text()
-		if keyPattern.MatchString(line) {
-			matches := keyPattern.FindStringSubmatch(line)
-			indent := ""
-			if len(matches) > 1 {
-				indent = matches[1]
-			}
-			// Comment out the line, preserving indentation
-			result = append(result, indent+"# "+strings.TrimLeft(line, " \t"))
-		} else {
-			result = append(result, line)
-		}
+		lines = append(lines, scanner.Text())
 	}
 
-	return strings.Join(result, "\n")
+	found := false
+	for i, line := range lines {
+		matches := keyPattern.FindStringSubmatch(line)
+		if matches == nil {
+			continue
+		}
+		// Commenting out a key whose value is the block beneath it would
+		// orphan that block's lines at an indentation no key introduces,
+		// leaving a config.yaml that no longer parses.
+		if strings.TrimSpace(matches[2]) == "" && opensYamlBlock(lines, i, len(matches[1])) {
+			continue
+		}
+		// Comment out the line, preserving indentation
+		lines[i] = matches[1] + "# " + strings.TrimLeft(line, " \t")
+		found = true
+	}
+
+	return strings.Join(lines, "\n"), found
+}
+
+// opensYamlBlock reports whether the line at idx introduces an indented block,
+// judged by the first following line that carries content.
+func opensYamlBlock(lines []string, idx, indent int) bool {
+	for _, next := range lines[idx+1:] {
+		trimmed := strings.TrimLeft(next, " \t")
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		return len(next)-len(trimmed) > indent
+	}
+	return false
+}
+
+// commentOutNestedYamlKey comments out the leaf line of a dotted key written in
+// nested form (sync:\n  branch: main), the shape SetYamlConfig produces via
+// updateNestedYamlKey and the config.yaml template documents. It edits the
+// source line rather than re-marshaling the tree so the file's comments and
+// layout survive, and it refuses any leaf whose value is not a scalar sharing
+// the key's line, because commenting one line of a multi-line value would leave
+// the file unparseable.
+func commentOutNestedYamlKey(content, key string) (string, bool) {
+	parts := strings.Split(key, ".")
+	if len(parts) < 2 {
+		return content, false
+	}
+
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(content), &root); err != nil {
+		return content, false
+	}
+	if len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return content, false
+	}
+
+	keyNode, valNode := findNestedLeaf(root.Content[0], parts)
+	if keyNode == nil || valNode.Kind != yaml.ScalarNode || keyNode.Line != valNode.Line {
+		return content, false
+	}
+
+	lines := strings.Split(content, "\n")
+	idx := keyNode.Line - 1
+	if idx < 0 || idx >= len(lines) {
+		return content, false
+	}
+	trimmed := strings.TrimLeft(lines[idx], " \t")
+	lines[idx] = lines[idx][:len(lines[idx])-len(trimmed)] + "# " + trimmed
+
+	return strings.Join(lines, "\n"), true
+}
+
+func findNestedLeaf(mapping *yaml.Node, parts []string) (*yaml.Node, *yaml.Node) {
+	current := mapping
+	for i, part := range parts {
+		if current.Kind != yaml.MappingNode {
+			return nil, nil
+		}
+		idx := findMappingChild(current, part)
+		if idx == -1 {
+			return nil, nil
+		}
+		if i == len(parts)-1 {
+			return current.Content[idx], current.Content[idx+1]
+		}
+		current = current.Content[idx+1]
+	}
+	return nil, nil
 }
 
 // formatYamlValue formats a value appropriately for YAML.
