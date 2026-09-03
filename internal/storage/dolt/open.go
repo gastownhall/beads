@@ -48,6 +48,35 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
 
+// ApplyResolvedServerPort fills cfg's server port from doltserver's
+// precedence chain (env > port file > dolt config.yaml > beads config.yaml >
+// metadata.json), and — the part that is easy to drop — records WHICH of those
+// produced it.
+//
+// The source is not decoration. applyConfigDefaults infers "the caller
+// explicitly asserted this port" from "ServerPort nonzero, ServerPortSource
+// unset" (be-wf9a.1). A site that copies doltserver.DefaultConfig(dir).Port on
+// its own therefore launders bd's own bookkeeping — the gitignored port file,
+// or the shared-server default 3308 — into a deliberate user assertion, and
+// that mislabel has two visible consequences:
+//
+//   - the legacy BEADS_DOLT_PORT override becomes a silent no-op, because an
+//     authoritative source outranks the env read (be-9tju); and
+//   - auto-start's benign "configured port is stale, here is the new one"
+//     retarget turns into a hard failure telling the user to fix a port they
+//     never configured (GH#4052).
+//
+// So every hand-built dolt.Config that resolves its port this way goes through
+// here rather than reaching for .Port. Callers that want to resolve only when
+// unset keep their own `if cfg.ServerPort == 0` guard; this function is
+// unconditional.
+func ApplyResolvedServerPort(beadsDir string, cfg *Config) {
+	resolved := doltserver.DefaultConfig(beadsDir)
+	cfg.ServerPort = resolved.Port
+	cfg.ServerPortSource = resolved.PortSource
+	cfg.ServerPortSharedServer = resolved.PortSharedServer
+}
+
 // requireDoltBackend keeps metadata-driven callers from bypassing the storage
 // factory and interpreting another backend's workspace as Dolt. Removed backend
 // identifiers deliberately remain recognizable in metadata so this check can fail
@@ -248,10 +277,10 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		cfg.ServerHost = fileCfg.GetDoltServerHost()
 	}
 	if cfg.ServerPort == 0 {
-		// Use doltserver.DefaultConfig for port resolution (env > port file >
-		// config.yaml > metadata > DerivePort). fileCfg.GetDoltServerPort()
-		// falls back to 3307 which is wrong for standalone repos.
-		cfg.ServerPort = doltserver.DefaultConfig(beadsDir).Port
+		// fileCfg.GetDoltServerPort() falls back to 3307, which is wrong for
+		// standalone repos; ApplyResolvedServerPort walks doltserver's real
+		// precedence chain and carries the source along with the port.
+		ApplyResolvedServerPort(beadsDir, cfg)
 	}
 	// Resolve the server-mode credential (the connection username). In server mode a
 	// configured credential command takes precedence over the static user; it fails
