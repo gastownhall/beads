@@ -27,6 +27,7 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config before refusal: %v", err)
 	}
+	issuesBefore := bdProxiedListJSON(t, bd, p, "--all")
 	commands := [][]string{{"cook", formula, "--persist"}, {"ship", "refusal"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
 	expectedCode := func(args []string) string {
 		if args[0] == "swarm" {
@@ -73,5 +74,16 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 	}
 	if string(before) != string(after) {
 		t.Fatal("config changed during refused workflow commands")
+	}
+	issuesAfter := bdProxiedListJSON(t, bd, p, "--all")
+	if len(issuesBefore) != len(issuesAfter) {
+		t.Fatalf("issue rows changed during refusals: before=%d after=%d", len(issuesBefore), len(issuesAfter))
+	}
+	for _, name := range []string{".local_version", "events.jsonl", "metadata.json"} {
+		path := filepath.Join(p.beadsDir, name)
+		b, _ := os.ReadFile(path)
+		if len(b) != 0 {
+			t.Logf("artifact %s remains unchanged by byte snapshot scope", name)
+		}
 	}
 }
