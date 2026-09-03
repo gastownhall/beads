@@ -2565,6 +2565,14 @@ Aborting.`, ui.RenderWarn("⚠"), location, ui.RenderAccent("bd list"), prefix)
 				// (be-5up5: 2026-08-11 fleet-wide data loss). project_id is only
 				// written by a real prior `bd init`, so a non-empty value here
 				// proves the latter — recovery, not a fresh clone.
+				//
+				// Known limit: project_id was minted by GH#2372, so a workspace
+				// initialized before that carries none and is indistinguishable
+				// here from a fresh clone. Such workspaces FAIL OPEN — init will
+				// still create the database. Accepted deliberately: failing closed
+				// would block legitimate first inits on every pre-GH#2372 clone,
+				// and this guard's job is to stop a silent recreate where we can
+				// PROVE prior initialization, not to guess where we cannot.
 				existingProject := cfg.ProjectID != ""
 
 				result := checkDatabaseOnServer(host, port, user, password, dbName, cfg.GetDoltServerTLS())
