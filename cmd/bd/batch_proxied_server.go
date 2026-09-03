@@ -166,9 +166,12 @@ func runBatchOpUOW(ctx context.Context, uw uow.UnitOfWork, op batchOp) (batchOpR
 		if len(op.args) >= 3 {
 			depType = op.args[2]
 		}
-		dt := types.DependencyType(depType)
-		if !dt.IsValid() {
-			return result, fmt.Errorf("dep add: invalid dependency type %q", depType)
+		// Same canonicalization as the classic path (runBatchOp): IsValid only
+		// checks length, so aliases like blocked-by would otherwise be stored
+		// verbatim as inert non-gating edges (gastownhall/beads#5585).
+		dt := canonicalDependencyType(types.DependencyType(depType))
+		if err := validateDependencyType(dt); err != nil {
+			return result, fmt.Errorf("dep add: %w", err)
 		}
 		dep := &types.Dependency{
 			IssueID:     from,

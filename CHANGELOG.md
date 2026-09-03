@@ -793,6 +793,27 @@ never reused, per the v1.1.1 precedent.)
 
 ### Changed
 
+- **`bd link --type` and `bd batch` `dep.add` now reject custom dependency
+  types, and canonicalize the `blocked-by` / `depends-on` aliases** (#5585,
+  #5560). Both used to accept any string that passed the length check, so
+  `bd link A B --type blocked-by` stored the literal `blocked-by` as an inert
+  edge that `bd ready` / `bd blocked` gating never matched, and a typo such as
+  `--type bogus-type` was stored silently. They now run the same
+  canonicalize-then-validate pair `bd dep add` and `bd create --deps` adopted in
+  #5116: the aliases become `blocks`, and anything outside the well-known set
+  is refused with the accepted list. **This narrows the contract**: a script
+  that relied on `bd link` or `dep.add` to store a custom type such as
+  `mycustom` now gets an error instead. Custom types remain valid at the
+  storage and HTTP layers; this change covers the three CLI sites only.
+
+  The interactive `bd create` form takes the same parse path, so its `Deps`
+  field canonicalizes aliases too, and two entries with different types on the
+  same target are no longer silently collapsed to one edge (#4626, #4833). The
+  form keeps its lenient posture rather than failing after everything has been
+  typed: an unknown type, or a second type on a target that already has one,
+  is warned about and dropped, and the warning names the spellings as typed.
+  `bd link --help` now lists every accepted type and both aliases.
+
 - **Text-input commands now REFUSE two sources instead of silently picking
   one** (#5332). `bd comment`, `bd note` and `bd comments add` used to apply a
   precedence order when a caller gave both positional text and `--stdin` or
