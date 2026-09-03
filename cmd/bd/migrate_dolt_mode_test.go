@@ -462,11 +462,16 @@ func TestMigrateToProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			j, err := loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			require.NotNil(t, j)
+			assert.Equal(t, phase, j.Phase)
+			assert.Equal(t, 1, j.Attempt)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+			after := snapshotMigrationTree(t, beadsDir)
 			j, err = loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			assert.Nil(t, j)
+			require.NoError(t, runMigrateToProxiedServer(false, 0, false))
+			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir))
 		})
 	}
 }
@@ -506,9 +511,12 @@ func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			require.Error(t, runMigrateFromProxiedServer(false, false))
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateFromProxiedServer(false, false))
+			after := snapshotMigrationTree(t, beadsDir)
 			j, err := loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			assert.Nil(t, j)
+			require.NoError(t, runMigrateFromProxiedServer(false, false))
+			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir))
 		})
 	}
 }
