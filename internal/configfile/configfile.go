@@ -385,6 +385,14 @@ func (c *Config) IsDoltServerMode() bool {
 		// persisted host and over config.yaml.
 		return strings.ToLower(c.DoltMode) == DoltModeServer
 	}
+	// NOTE: deliberately no PortImpliesServerMode call here. This resolver
+	// selects the storage backend for every data command, so honoring a bare
+	// BEADS_DOLT_SERVER_PORT here has a materially wider blast radius than the
+	// lifecycle-only question doltserver.resolveServerMode's check 2c answers.
+	// The two therefore still disagree for an unset/embedded dolt_mode plus a
+	// bare port env var and no other server signal. That gap is real, narrow
+	// and tracked: be-2nolj owns whether this resolver should extend to the
+	// port signal, after the call-site audit such a change needs.
 	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
 	return strings.EqualFold(config.GetYamlConfig("dolt.mode"), "server")
 }
@@ -434,6 +442,54 @@ func (c *Config) HostImpliesServerMode() bool {
 		return !IsLocalHostString(h)
 	}
 	return false
+}
+
+// PortImpliesServerMode evaluates port-based server-mode inference: an
+// explicitly named server port means an orchestrator is pointing this
+// workspace at a server address it manages, so beads cannot own that
+// server's lifecycle. Rules, in order, mirroring HostImpliesServerMode:
+//
+//   - Proxied-server workspaces are exempt. A proxied workspace reaches its
+//     server through the proxy, so an ambient port does not describe its
+//     lifecycle and must not reclassify it.
+//   - Otherwise the env vars decide, BEADS_DOLT_SERVER_PORT first and the
+//     legacy BEADS_DOLT_PORT second, matching GetDoltServerPort's own
+//     precedence. A live env var in the current process outranks an explicit
+//     dolt_mode, exactly as the host env var does in HostImpliesServerMode --
+//     the env check there also runs before the DoltMode suppression and can
+//     return first (GH#2949: runtime env beats stale persisted metadata).
+//
+// There is deliberately no persisted-port tier here. HostImpliesServerMode
+// suppresses its weaker persisted/config.yaml host signals on an explicit
+// DoltMode; the port equivalent, metadata.json's dolt_server_port, is read by
+// a later check in doltserver.resolveServerMode that an explicit
+// dolt_mode=embedded already returns before. There is nothing for a
+// downstream guard to protect.
+//
+// NOTE: IsDoltServerMode does NOT consult this predicate. See the note there.
+func (c *Config) PortImpliesServerMode() bool {
+	if strings.EqualFold(c.DoltMode, DoltModeProxiedServer) {
+		return false
+	}
+	return doltServerPortFromEnv() > 0
+}
+
+// doltServerPortFromEnv returns the server port named by
+// BEADS_DOLT_SERVER_PORT or, failing that, the legacy BEADS_DOLT_PORT --
+// mirroring Config.GetDoltServerPort's env precedence without needing a
+// loaded Config. Returns 0 when neither names a valid positive integer.
+func doltServerPortFromEnv() int {
+	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
+		if port, err := strconv.Atoi(p); err == nil && port > 0 {
+			return port
+		}
+	}
+	return 0
 }
 
 // IsLocalHostString reports whether host refers to the local machine, for

@@ -3,7 +3,6 @@ package doltserver
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -135,24 +134,21 @@ func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 	//
 	// Skipped when honorPortEnv is false — see resolveServerModeIgnoringPortEnv.
 	//
-	// Proxied-server workspaces are exempt, for the same reason 2b exempts
-	// them (configfile.HostImpliesServerMode): a proxied workspace reaches
-	// its server through the proxy, so an ambient port var does not describe
-	// its lifecycle and must not reclassify it external. Our own constellation
-	// runs dolt_mode: proxied-server with BEADS_DOLT_SERVER_PORT set, so this
-	// is the live configuration, not a hypothetical one.
+	// Delegates to the same centralized rule as 2b rather than keeping a
+	// private copy: PortImpliesServerMode is shaped like HostImpliesServerMode
+	// (proxied exemption, then the env vars), so the storage-mode and
+	// lifecycle resolvers read one definition of the port rule.
 	//
-	// The remaining HostImpliesServerMode guard -- "any explicit non-empty
-	// DoltMode suppresses inference" -- is deliberately NOT mirrored here:
-	// TestResolveServerMode_EnvPortOverridesStaleEmbedded pins the opposite
-	// for dolt_mode=embedded (GH#2949: a runtime env var beats stale
-	// persisted metadata). That asymmetry is a real, unresolved precedence
-	// question rather than an oversight -- configfile.IsDoltServerMode has no
-	// port check at all, so the two resolvers disagree for
-	// dolt_mode=embedded + port env. Tracked separately; see the PR
-	// discussion for be-lbnk8.
-	if honorPortEnv && !strings.EqualFold(hostCfg.DoltMode, configfile.DoltModeProxiedServer) &&
-		doltServerPortFromEnv() > 0 {
+	// That a bare port env var outranks an explicit dolt_mode is deliberate
+	// and settled (be-yb2ai), not an asymmetry with 2b: HostImpliesServerMode
+	// checks BEADS_DOLT_SERVER_HOST *before* its DoltMode suppression and can
+	// return on it, so the real precedence there is env > explicit dolt_mode >
+	// persisted host. 2c mirrors every tier that has a port-side counterpart.
+	// TestResolveServerMode_EnvPortOverridesStaleEmbedded pins it.
+	//
+	// configfile.IsDoltServerMode deliberately does NOT consult this predicate
+	// — see the note there and be-2nolj.
+	if honorPortEnv && hostCfg.PortImpliesServerMode() {
 		return ServerModeExternal
 	}
 
@@ -169,22 +165,4 @@ func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 
 	// 5. Default: beads owns the server
 	return ServerModeOwned
-}
-
-// doltServerPortFromEnv returns the server port from BEADS_DOLT_SERVER_PORT
-// or BEADS_DOLT_PORT (in that order), or 0 if neither is set to a valid
-// positive integer. Mirrors configfile.Config.GetDoltServerPort()'s env-var
-// precedence without requiring a loaded Config.
-func doltServerPortFromEnv() int {
-	if p := os.Getenv("BEADS_DOLT_SERVER_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	if p := os.Getenv("BEADS_DOLT_PORT"); p != "" {
-		if port, err := strconv.Atoi(p); err == nil && port > 0 {
-			return port
-		}
-	}
-	return 0
 }
