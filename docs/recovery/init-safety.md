@@ -20,6 +20,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — `--discard-remote` refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init` refused because local data already exists](#init-local-exists)
+- [init-missing-server-db — `bd init` refused because the configured server-side database is missing](#init-missing-server-db)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 
 ---
@@ -157,6 +158,81 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## init-missing-server-db
+
+**Symptom**
+
+```
+⚠ Database "myproject" not found on server at 127.0.0.1:3306 (or the server could not be reached to confirm).
+This workspace was already initialized (metadata.json has a project_id from a prior
+bd init), so this looks like a recovery situation, not a fresh clone
+...
+bd init will NOT create an empty database here — that would strand any existing
+issue data behind a new, empty database of the same name.
+```
+
+**What happened**
+
+This workspace is in server mode and `.beads/metadata.json` carries a
+`project_id`, which is written only by a real prior `bd init`. So the project
+was definitely initialized at some point — but its configured database is not
+on the server, or the server could not be reached to confirm.
+
+That is a **recovery** situation, not a fresh clone, and the two are otherwise
+indistinguishable from the local filesystem alone: in server mode there is
+normally no local database directory either way. `bd init` used to resolve the
+ambiguity by assuming "fresh clone" and creating the database. When the
+assumption was wrong, the result was a new, empty database sitting at the name
+the real one used to occupy — the 2026-08-11 fleet-wide data loss.
+
+`bd init` now refuses instead, and the refusal is **not** bypassed by
+`--force` or `--reinit-local`. Those flags authorize destroying a database
+that exists; they do not authorize inventing an empty one where the configured
+database has gone missing.
+
+### 1. Find out where the database went (do this first)
+
+```
+bd doctor          # check project health
+bd dolt status     # inspect Dolt server state
+```
+
+A stopped server, a server started on the wrong port, or a wrong `--data-dir`
+all present exactly like this — and none of them need a re-init. Fixing the
+server brings the data back untouched.
+
+### 2. Restore from an export
+
+```
+bd backup restore                  # if a local backup snapshot exists
+```
+
+Also check `.beads/backup/` for a JSONL export you can import manually.
+
+### 3. Create a fresh empty database at this name (destructive to any
+unrecovered data)
+
+Only when you are certain no recoverable data exists:
+
+```
+bd init --recreate-missing --prefix myproject
+```
+
+`--recreate-missing` is per-invocation only. It is deliberately never implied
+by `--force`, `--reinit-local`, a config key, or an environment variable,
+because it authorizes the one thing this guard exists to prevent.
+
+**Limits worth knowing**
+
+- The guard keys on `project_id`, which was introduced by GH#2372. A workspace
+  initialized before that has no `project_id` and is indistinguishable from a
+  fresh clone, so it **fails open** — `bd init` will still create the database.
+- Server mode only. Proxied-server mode returns early on a missing root and
+  does not reach this guard, and `bd bootstrap` has its own separate
+  mode-blind create path.
 
 ---
 
