@@ -75,7 +75,7 @@ Examples:
 			prepareSelectedNoDBContext(selected)
 		}
 
-		rc, err := beads.GetRepoContext()
+		rc, err := beads.GetRepoContextAllowingNoGit()
 		if err != nil {
 			if jsonOutput {
 				if jerr := outputJSON(map[string]string{"error": fmt.Sprintf("cannot resolve repo context: %v", err)}); jerr != nil {
