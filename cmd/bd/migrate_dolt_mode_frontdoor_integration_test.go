@@ -31,7 +31,11 @@ func migrationFrontDoorEnv(home string) []string {
 		if i := strings.IndexByte(kv, '='); i >= 0 {
 			key = kv[:i]
 		}
-		if strings.HasPrefix(key, "BEADS_DOLT_") || key == "BEADS_SHARED_SERVER_DIR" {
+		// The cmd/bd package TestMain sets BEADS_TEST_MODE and related
+		// controls for its in-process tests. Never inherit those into the
+		// real front-door subprocess: BEADS_TEST_MODE disables auto-start
+		// and makes a freshly initialized server resolve to port 1.
+		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") {
 			continue
 		}
 		env = append(env, kv)
