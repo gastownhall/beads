@@ -249,7 +249,7 @@ func TestMigrateUpSeedsIgnorePatternsWhenNoWorkNeeded(t *testing.T) {
 	// MigrateUp must commit the heal itself, scoped and labeled.
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns', '--skip-empty')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 
 	applied, err := MigrateUp(context.Background(), db)
@@ -368,7 +368,7 @@ func expectOnePendingMigration(t *testing.T, mock sqlmock.Sqlmock) {
 	// seed must not ride the per-step pass commits).
 	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_ADD('dolt_ignore')")).
 		WillReturnRows(sqlmock.NewRows([]string{"status"}))
-	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns')")).
+	mock.ExpectQuery(regexp.QuoteMeta("CALL DOLT_COMMIT('-m', 'schema: seed dolt_ignore patterns', '--skip-empty')")).
 		WillReturnRows(sqlmock.NewRows([]string{"hash"}))
 	expectDoltStatusRows(mock)
 	// MigrateUp probes the aux-rekey crash sentinel (bd-578h9.16); this
