@@ -165,6 +165,8 @@ func RunStoreInvariantTransactionScopesExactlyTheSpanningRecords(t *testing.T, c
 		if err != nil {
 			t.Fatalf("CountHistoryForSubject(%s) before the refused batch: %v", spanning[1].ID, err)
 		}
+	} else {
+		t.Logf("this backend cannot observe history by subject (CountHistoryForSubject is nil): the before-batch history counts for %s and %s go uncaptured", spanning[0].ID, spanning[1].ID)
 	}
 
 	result, err := fixture.EnforceCrossRecordInvariant(ctx, spanning)
@@ -187,6 +189,8 @@ func RunStoreInvariantTransactionScopesExactlyTheSpanningRecords(t *testing.T, c
 		if afterA != beforeA || afterB != beforeB {
 			t.Errorf("a refused batch left a trace: history count for %s went %d->%d, for %s went %d->%d; a refusal must be atomic — the whole batch takes no effect, not just the record that individually triggered it", spanning[0].ID, beforeA, afterA, spanning[1].ID, beforeB, afterB)
 		}
+	} else {
+		t.Logf("this backend cannot observe history by subject (CountHistoryForSubject is nil): the refused batch's atomicity (no partial trace left behind for %s or %s) goes unverified", spanning[0].ID, spanning[1].ID)
 	}
 
 	unrelated := []RecordWrite{
