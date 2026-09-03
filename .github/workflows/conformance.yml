@@ -7,6 +7,10 @@ on:
   pull_request:
     branches: [ main ]
   merge_group:
+  # Direct pushes to main are possible (and happen); without this trigger a
+  # push that breaks a SQL backend goes untested until someone else's PR.
+  push:
+    branches: [ main ]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
