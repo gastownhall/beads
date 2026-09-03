@@ -4,12 +4,16 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func migrationFrontDoorBinary(t *testing.T) string {
@@ -269,5 +273,55 @@ func TestMigrateDoltModeFrontDoorRefusesExternalEndpoint(t *testing.T) {
 				t.Fatal("external refusal mutated migration artifacts")
 			}
 		})
+	}
+}
+
+func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
+	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
+		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
+	}
+	bd := migrationFrontDoorBinary(t)
+	phases := []string{"prepared", "target_configured", "old_controls_retired", "verified", "committed"}
+	for _, reverse := range []bool{false, true} {
+		for _, phase := range phases {
+			for _, unix := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/%s/%s", map[bool]string{false: "forward", true: "reverse"}[reverse], phase, map[bool]string{false: "tcp", true: "unix"}[unix]), func(t *testing.T) {
+					dir, home := t.TempDir(), t.TempDir()
+					env := migrationFrontDoorEnv(home)
+					beadsDir, root := filepath.Join(dir, ".beads"), filepath.Join(dir, ".beads", "dolt")
+					require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+					require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+					src, target := "server", "proxied-server"
+					command := []string{"from-server-to-proxied-server"}
+					if reverse {
+						src, target, command = "proxied-server", "server", []string{"from-proxied-server-to-server"}
+					}
+					mode := src
+					if phase != "prepared" {
+						mode = target
+					}
+					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(fmt.Sprintf(`{"database":"myproj","backend":"dolt","dolt_mode":%q}`, mode)), 0o600))
+					ext := map[string]any{"host": "db.example", "port": 3307}
+					if unix {
+						ext = map[string]any{"socket": "/tmp/beads-front-door.sock"}
+					}
+					sidecar, _ := json.Marshal(map[string]any{"root_path": root, "external": ext})
+					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "proxied_server_client_info.json"), sidecar, 0o600))
+					journal, _ := json.Marshal(map[string]any{"version": 1, "source_mode": src, "target_mode": target, "root_path": root, "external": ext, "sidecar": map[string]any{"root_path": root, "external": ext}, "ownership": "external", "attempt": 1, "phase": phase})
+					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, migrateJournalFileName), journal, 0o600))
+					tree := snapshotMigrationTree(t, beadsDir)
+					out, err := runBDExecWithBinary(t, bd, dir, env, append([]string{"--json", "migrate"}, command...)...)
+					require.Error(t, err)
+					var payload map[string]any
+					require.NoError(t, json.Unmarshal([]byte(out), &payload), out)
+					if data, ok := payload["data"].(map[string]any); ok {
+						payload = data
+					}
+					assert.Equal(t, "proxy.migrate.external_endpoint", payload["code"])
+					assert.Equal(t, false, payload["mutates"])
+					assert.Equal(t, tree, snapshotMigrationTree(t, beadsDir))
+				})
+			}
+		}
 	}
 }
