@@ -526,7 +526,8 @@ func TestMigrateFromProxiedServer_ExternalJournalAlwaysFailsClosed(t *testing.T)
 			if phase == migratePrepared {
 				wantMode = configfile.DoltModeProxiedServer
 			}
-			j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}}}
+			ext := &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}
+			j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, External: ext, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ext}}
 			b, err := json.Marshal(j)
 			require.NoError(t, err)
 			require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
@@ -568,7 +569,7 @@ func TestMigrateExternalJournalAlwaysFailsClosed_TCPAndUnixForwardReverse(t *tes
 					}
 					want = metadataMode
 					writeMetadataConfig(t, beadsDir, metadataMode, "myproj")
-					j := migrateJournal{Version: 1, SourceMode: src, TargetMode: target, RootPath: root, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ep.cfg}}
+					j := migrateJournal{Version: 1, SourceMode: src, TargetMode: target, RootPath: root, External: ep.cfg, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ep.cfg}}
 					b, err := json.Marshal(j)
 					require.NoError(t, err)
 					require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
@@ -634,4 +635,47 @@ func TestMigrateJournalSidecarRootMismatchFailsClosed(t *testing.T) {
 	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
 	_, err = loadMigrateJournal(beadsDir)
 	require.Error(t, err)
+}
+
+func TestMigrateJournalExternalTopologyMismatchFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	root := filepath.Join(beadsDir, "dolt")
+	ext := &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}
+	for _, tc := range []struct {
+		name      string
+		ownership string
+		journal   *configfile.ExternalDoltConfig
+		sidecar   *configfile.ExternalDoltConfig
+	}{
+		{name: "journal missing external", ownership: "external", journal: nil, sidecar: ext},
+		{name: "journal unexpected external", ownership: "managed-local", journal: ext, sidecar: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, Ownership: tc.ownership, Attempt: 1, Phase: migratePrepared, External: tc.journal, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: tc.sidecar}}
+			b, err := json.Marshal(j)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+			_, err = loadMigrateJournal(beadsDir)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestMigrateFromProxiedServer_JournalSidecarChangedFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	root := filepath.Join(beadsDir, "dolt")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+	wantSidecar := &configfile.ProxiedServerClientInfo{RootPath: root, LogPath: filepath.Join(root, "server.log")}
+	gotSidecar := &configfile.ProxiedServerClientInfo{RootPath: root, LogPath: filepath.Join(root, "changed.log")}
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, gotSidecar))
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: wantSidecar}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	journalPath := migrateJournalPath(beadsDir)
+	require.NoError(t, os.WriteFile(journalPath, b, 0o600))
+	before := snapshotMigrationTree(t, beadsDir, root)
+	var migrateErr error
+	captureStderr(t, func() { migrateErr = runMigrateFromProxiedServer(false, false) })
+	require.Error(t, migrateErr)
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
 }
