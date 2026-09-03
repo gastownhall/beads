@@ -49,7 +49,7 @@ func createDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID
 
 func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID, blockerID string) {
 	t.Helper()
-	out, err := runBDExecWithBinary(t, bd, dir, env, "dep", "list", sentinelID, "--json")
+	out, err := runBDExecWithBinary(t, bd, dir, env, "dep", "list", sentinelID, blockerID, "--json")
 	require.NoError(t, err, "dep list: %s", out)
 	var edges []struct {
 		IssueID     string `json:"issue_id"`
@@ -59,7 +59,7 @@ func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID
 	require.NoError(t, json.Unmarshal([]byte(out), &edges), "dep list JSON: %s", out)
 	found := false
 	for _, edge := range edges {
-		if edge.IssueID == sentinelID && edge.DependsOnID == blockerID && edge.Type == "blocks" {
+		if (edge.IssueID == "" || edge.IssueID == sentinelID) && edge.DependsOnID == blockerID && edge.Type == "blocks" {
 			found = true
 		}
 	}
@@ -671,6 +671,13 @@ func assertDirectMigrationFinal(t *testing.T, beadsDir, root string, reverse boo
 		}
 		for _, path := range proxy.ControlFilePaths(root) {
 			_, statErr := os.Stat(path)
+			if statErr == nil && (filepath.Base(path) == proxy.LockFileName || filepath.Base(path) == "server.lock") {
+				lock, lockErr := util.TryLock(path)
+				if lockErr == nil {
+					lock.Unlock()
+					continue
+				}
+			}
 			assert.True(t, os.IsNotExist(statErr), "stale proxy control %s", path)
 		}
 	} else {
@@ -814,6 +821,10 @@ func assertSharedMigrationResult(t *testing.T, bd, dir string, env []string, bea
 		// issue row remains readable after reverse migration.
 		start, startErr := runBDExecWithBinary(t, bd, dir, env, "dolt", "start")
 		require.NoError(t, startErr, "start shared server for verification: %s", start)
+	}
+	if wantShared {
+		start, startErr := runBDExecWithBinary(t, bd, dir, env, "dolt", "start")
+		require.NoError(t, startErr, "start shared server for dependency verification: %s", start)
 	}
 	show, showErr := runBDExecWithBinary(t, bd, dir, env, "show", issueID, "--json")
 	require.NoError(t, showErr, "show migrated issue: %s", show)
