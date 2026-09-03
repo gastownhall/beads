@@ -288,7 +288,9 @@ type UpdateRequest struct {
 	//
 	// THE COMPARISON IS SEPARATOR-INSENSITIVE, exactly as
 	// ReleaseRequest.ExpectedAssignee documents: a run of ".", "_" or "-"
-	// matches any other such run, and nothing else is forgiven.
+	// matches any other such run — except an exact "--" run, which decodes to
+	// "/" as gascity's rig-qualified agent encoding, so "a--b" matches "a/b"
+	// rather than "a__b" — and nothing else is forgiven.
 	ExpectedAssignee *string
 	// ExpectedStatus requires the current status to match. It must be nil when
 	// Claim is true.

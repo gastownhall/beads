@@ -43,9 +43,13 @@ A lease is only meaningful on the replica that granted it. Every other
 replica's view of the holder's liveness is stale by up to one sync interval,
 so a reaper elsewhere can revert a unit that is very much alive over there.
 reclaim therefore records the granting replica on each lease and SKIPS a lease
-another replica granted, naming it on stderr. Reap it where it was granted; use
---any-replica only when that replica is permanently gone (or when this node was
-renamed and its own old leases now look foreign).
+another replica granted, summarizing what it declined on stderr (one line per
+run; 'bd -v' expands it to the first 20 leases individually). Reap it where it
+was granted; use --any-replica only when that replica is permanently gone (or
+when this node was renamed and its own old leases now look foreign — an
+ordinary heartbeat keeps a lease alive but does not re-home it to the node
+heartbeating it). Prefer the narrow form '--any-replica --id <id>': bare
+--any-replica reverts EVERY foreign stale lease, live peers included.
 
 Two invariants the guard cannot enforce for you:
 

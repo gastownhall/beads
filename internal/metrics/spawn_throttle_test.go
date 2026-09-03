@@ -55,6 +55,37 @@ func TestFlusherDueRequiresPendingEvents(t *testing.T) {
 	}
 }
 
+// TestFlusherDueOrphanTempsWithoutBatch pins the GH#5712 orphan-only follow-up:
+// an eventsData dir holding only orphaned .write-* emitter temps and no .evtq
+// batch must still become due once a temp is past pruneTTL, so the prune-only
+// child spawns and reclaims it. Before the fix the due predicate matched only
+// .evtq batches, so such a dir never scheduled a prune and the temp outlived
+// its TTL forever on a disabled machine — the exact leak the review caught. A
+// still-fresh temp is NOT yet due, matching pruneQueue's own TTL gate.
+func TestFlusherDueOrphanTempsWithoutBatch(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	orphan := filepath.Join(dir, writeTempPrefix+"orphan")
+	if err := os.WriteFile(orphan, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write orphan temp: %v", err)
+	}
+
+	// Fresh orphan temp, no batch: nothing is prune-eligible yet, so not due.
+	if flusherDue(dir, now) {
+		t.Errorf("flusherDue(fresh orphan temp only) = true, want false")
+	}
+
+	// Age it past the prune TTL: now the prune child would reclaim it, so the
+	// due predicate must fire even though there is still no .evtq batch.
+	stale := now.Add(-pruneTTL - time.Hour)
+	if err := os.Chtimes(orphan, stale, stale); err != nil {
+		t.Fatalf("chtimes orphan temp: %v", err)
+	}
+	if !flusherDue(dir, now) {
+		t.Errorf("flusherDue(stale orphan temp only) = false, want true (prune-only child, GH#5712)")
+	}
+}
+
 func TestFlusherDueMissingDirIsNotDue(t *testing.T) {
 	if flusherDue(filepath.Join(t.TempDir(), "never-created"), time.Now()) {
 		t.Errorf("flusherDue(missing dir) = true, want false")
@@ -122,7 +153,7 @@ func TestHasQueuedEventsAcrossChunks(t *testing.T) {
 			t.Fatalf("write litter: %v", err)
 		}
 	}
-	if hasQueuedEvents(dir) {
+	if hasQueuedEvents(dir, time.Now()) {
 		t.Errorf("hasQueuedEvents(200 litter files) = true, want false")
 	}
 	// The all-litter pass above is the deterministic pin on the loop: 200
@@ -131,7 +162,7 @@ func TestHasQueuedEventsAcrossChunks(t *testing.T) {
 	// enumeration is sorted (e.g. NTFS, which CI exercises); elsewhere the
 	// batch may surface in any chunk, and the assertion is just "found".
 	writeQueuedEventNamed(t, dir, "zz-last")
-	if !hasQueuedEvents(dir) {
+	if !hasQueuedEvents(dir, time.Now()) {
 		t.Errorf("hasQueuedEvents(batch among 200 litter files) = false, want true")
 	}
 }
@@ -147,7 +178,7 @@ func TestFlusherDueFreshMarkerSkipsQueueScan(t *testing.T) {
 	touchFlushMarker(dir)
 
 	orig := scanQueue
-	scanQueue = func(string) bool {
+	scanQueue = func(string, time.Time) bool {
 		t.Error("flusherDue scanned the queue despite a fresh marker")
 		return true
 	}

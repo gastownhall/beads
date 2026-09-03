@@ -120,15 +120,26 @@ FAKE_HASH="sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 # Backup the file
 cp default.nix default.nix.backup
 
-# Detect sed version (GNU vs BSD)
-if sed --version 2>/dev/null | grep -q "GNU sed"; then
-    SED_INPLACE="sed -i"
-else
-    SED_INPLACE="sed -i ''"
-fi
+# Detect sed version (GNU vs BSD). BSD sed requires an explicit backup-suffix
+# argument to -i; GNU sed must NOT be given one.
+#
+# This is a function rather than a SED_INPLACE string because a string cannot
+# carry an EMPTY argument. After `SED_INPLACE="sed -i ''"` is word-split the two
+# quote characters survive as a literal argument, so BSD sed reads '' as the
+# backup SUFFIX and writes `default.nix''` beside the real file on every macOS
+# run. Nothing ignores that stray, and it holds the placeholder
+# sha256-AAAA... hash, so a `git add -A` can commit a vendorHash that never
+# validates.
+sed_inplace() {
+    if sed --version 2>/dev/null | grep -q "GNU sed"; then
+        sed -i "$@"
+    else
+        sed -i '' "$@"
+    fi
+}
 
 # Update to fake hash
-$SED_INPLACE "s|vendorHash = \".*\";|vendorHash = \"$FAKE_HASH\";|" default.nix
+sed_inplace "s|vendorHash = \".*\";|vendorHash = \"$FAKE_HASH\";|" default.nix
 
 # Step 2: Run nix build and capture the error
 log_info "Building to get actual hash (this will fail intentionally)..."
@@ -171,7 +182,7 @@ log_success "Extracted actual hash: $ACTUAL_HASH"
 
 # Step 4: Update default.nix with the correct hash
 log_info "Updating default.nix with correct hash..."
-$SED_INPLACE "s|vendorHash = \".*\";|vendorHash = \"$ACTUAL_HASH\";|" default.nix
+sed_inplace "s|vendorHash = \".*\";|vendorHash = \"$ACTUAL_HASH\";|" default.nix
 
 # Remove backup
 rm default.nix.backup
