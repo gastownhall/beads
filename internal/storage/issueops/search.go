@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/sqlbuild"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -155,6 +156,16 @@ func hydrateIssueLabelsAndDeps(ctx context.Context, tx DBTX, tables FilterTables
 	return nil
 }
 
+// missingOptionalWispTable reports whether err is the absence of a wisp-plane
+// table a database may legitimately not have. A wisp search touches more than
+// that: its FROM clause carries sqlbuild.LeaseJoin and its hydration reads
+// wisp_labels, so a blanket table-not-exist check reports a broken database as
+// an empty wisp plane and silently drops live rows from the result.
+func missingOptionalWispTable(err error) bool {
+	name, ok := dberrors.MissingTableName(err)
+	return ok && sqlbuild.OptionalWispTable(name)
+}
+
 // searchInTx is the shared wisp-merge wrapper. Ephemeral routing, the
 // empty-wisps probe, the issues+wisps queries, and overlap detection live
 // here once. Both SearchIssuesInTx and SearchIssueIDsInTx use this body —
@@ -163,7 +174,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 	// Route ephemeral-only queries to wisps table.
 	if filter.Ephemeral != nil && *filter.Ephemeral {
 		results, err := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if err != nil && !isTableNotExistError(err) {
+		if err != nil && !missingOptionalWispTable(err) {
 			return nil, fmt.Errorf("search wisps (ephemeral filter): %w", err)
 		}
 		if len(results) > 0 {
@@ -218,7 +229,7 @@ func searchInTx[T any](ctx context.Context, tx DBTX, query string, filter types.
 			return results, nil
 		}
 		wispResults, wispErr := searchTableInTxT(ctx, tx, query, filter, WispsFilterTables, proj)
-		if wispErr != nil && !isTableNotExistError(wispErr) {
+		if wispErr != nil && !missingOptionalWispTable(wispErr) {
 			return nil, fmt.Errorf("search wisps (merge): %w", wispErr)
 		}
 		if len(wispResults) > 0 {
