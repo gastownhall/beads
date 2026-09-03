@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -68,6 +69,28 @@ func legacyProjectSettingsPath(base string) string {
 
 func globalSettingsPath(home string) string {
 	return filepath.Join(home, ".claude", "settings.json")
+}
+
+// marshalSettings renders a Claude settings map as two-space-indented JSON
+// with the trailing newline json.MarshalIndent omits, so the file stays
+// POSIX-clean and byte-stable across runs.
+func marshalSettings(settings map[string]interface{}) ([]byte, error) {
+	data, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
+}
+
+// writeSettingsIfChanged writes data to path only when it differs from what is
+// already on disk. GH#5693: bd init / bd setup claude marshaled and wrote
+// settings.json on every run, so a no-op run still churned the file's mtime
+// and — because MarshalIndent emits no trailing newline — silently stripped it.
+func writeSettingsIfChanged(env claudeEnv, path string, data []byte) error {
+	if existing, err := env.readFile(path); err == nil && bytes.Equal(existing, data) {
+		return nil
+	}
+	return env.writeFile(path, data)
 }
 
 func claudeAgentsEnv(env claudeEnv) agentsEnv {
@@ -277,13 +300,13 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 		}
 	}
 
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := marshalSettings(settings)
 	if err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
 		return err
 	}
 
-	if err := env.writeFile(settingsPath, data); err != nil {
+	if err := writeSettingsIfChanged(env, settingsPath, data); err != nil {
 		_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 		return err
 	}
@@ -300,8 +323,8 @@ func installClaude(env claudeEnv, global bool, stealth bool) error {
 							removeHookCommand(legacyHooks, "SessionStart", v)
 							removeHookCommand(legacyHooks, "PreCompact", v)
 						}
-						if migrated, marshalErr := json.MarshalIndent(legacySettings, "", "  "); marshalErr == nil {
-							if writeErr := env.writeFile(legacyPath, migrated); writeErr == nil {
+						if migrated, marshalErr := marshalSettings(legacySettings); marshalErr == nil {
+							if writeErr := writeSettingsIfChanged(env, legacyPath, migrated); writeErr == nil {
 								_, _ = fmt.Fprintf(env.stdout, "✓ Migrated hooks from %s\n", legacyPath)
 							}
 						}
@@ -473,13 +496,13 @@ func removeClaude(env claudeEnv, global bool) error {
 				removeHookCommand(hooks, "PreCompact", v)
 			}
 
-			data, err = json.MarshalIndent(settings, "", "  ")
+			data, err = marshalSettings(settings)
 			if err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: marshal settings: %v\n", err)
 				return err
 			}
 
-			if err := env.writeFile(settingsPath, data); err != nil {
+			if err := writeSettingsIfChanged(env, settingsPath, data); err != nil {
 				_, _ = fmt.Fprintf(env.stderr, "Error: write settings: %v\n", err)
 				return err
 			}
@@ -497,8 +520,8 @@ func removeClaude(env claudeEnv, global bool) error {
 						removeHookCommand(legacyHooks, "SessionStart", v)
 						removeHookCommand(legacyHooks, "PreCompact", v)
 					}
-					if migrated, marshalErr := json.MarshalIndent(legacySettings, "", "  "); marshalErr == nil {
-						_ = env.writeFile(legacyPath, migrated)
+					if migrated, marshalErr := marshalSettings(legacySettings); marshalErr == nil {
+						_ = writeSettingsIfChanged(env, legacyPath, migrated)
 					}
 				}
 			}
