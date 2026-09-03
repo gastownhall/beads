@@ -105,23 +105,20 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 		t.Fatalf("failed to commit in beta: %v", err)
 	}
 
-	// Verify isolation: Alpha should NOT see Beta's issue
+	// Verify isolation: Alpha should NOT see Beta's issue. GetIssue never
+	// returns (nil, nil) on a miss — issueops.GetIssueInTx always returns a
+	// wrapped storage.ErrNotFound — so isolation is proven by that error,
+	// not by a nil issue with no error.
 	issueFromAlpha, err := alphaStore.GetIssue(ctx, "beta-001")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if issueFromAlpha != nil {
-		t.Fatalf("isolation violated: alpha found beta-001")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("isolation violated: alpha found beta-001 (issue=%v, err=%v)", issueFromAlpha, err)
 	}
 	t.Log("✓ Alpha cannot see beta-001")
 
 	// Verify isolation: Beta should NOT see Alpha's issue
 	issueFromBeta, err := betaStore.GetIssue(ctx, "alpha-001")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if issueFromBeta != nil {
-		t.Fatalf("isolation violated: beta found alpha-001")
+	if !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("isolation violated: beta found alpha-001 (issue=%v, err=%v)", issueFromBeta, err)
 	}
 	t.Log("✓ Beta cannot see alpha-001")
 
@@ -144,11 +141,22 @@ func TestFederationDatabaseIsolation(t *testing.T) {
 func TestFederationVersionControlAPIs(t *testing.T) {
 	skipIfNoDolt(t)
 
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 
-	store, cleanup := setupTestStore(t)
-	defer cleanup()
+	// setupTestStore already checked this store out to its own isolated
+	// branch (testutil.StartTestBranch), not the shared database's literal
+	// "main" — under this suite's branch-per-test isolation, "main" names a
+	// branch shared by every parallel test in the binary. Capture the actual
+	// starting branch so this test returns to ITS OWN state later instead of
+	// jumping onto that shared branch, which never has vc-001 (be-3c78s).
+	startBranch, err := store.CurrentBranch(ctx)
+	if err != nil {
+		t.Fatalf("failed to get starting branch: %v", err)
+	}
 
 	// Create initial issue
 	issue := &types.Issue{
@@ -199,17 +207,20 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 		t.Fatalf("failed to commit: %v", err)
 	}
 
-	// Switch back to main
-	if err := store.Checkout(ctx, "main"); err != nil {
-		t.Fatalf("failed to checkout main: %v", err)
+	// Switch back to this test's own starting branch
+	if err := store.Checkout(ctx, startBranch); err != nil {
+		t.Fatalf("failed to checkout %s: %v", startBranch, err)
 	}
 
-	// Verify main still has original title
-	mainIssue, _ := store.GetIssue(ctx, "vc-001")
-	if mainIssue.Title != "Version control test" {
-		t.Errorf("main should have original title, got %q", mainIssue.Title)
+	// Verify original branch still has original title
+	mainIssue, err := store.GetIssue(ctx, "vc-001")
+	if err != nil {
+		t.Fatalf("failed to get issue after checkout: %v", err)
 	}
-	t.Log("✓ Main branch unchanged")
+	if mainIssue.Title != "Version control test" {
+		t.Errorf("original branch should have original title, got %q", mainIssue.Title)
+	}
+	t.Log("✓ Original branch unchanged")
 
 	// Merge feature branch
 	conflicts, err := store.Merge(ctx, "feature-branch")
@@ -222,7 +233,10 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 	t.Log("✓ Merged feature-branch into main")
 
 	// Verify merge result
-	mergedIssue, _ := store.GetIssue(ctx, "vc-001")
+	mergedIssue, err := store.GetIssue(ctx, "vc-001")
+	if err != nil {
+		t.Fatalf("failed to get issue after merge: %v", err)
+	}
 	if mergedIssue.Title != "Updated on feature branch" {
 		t.Errorf("expected merged title, got %q", mergedIssue.Title)
 	}
@@ -241,11 +255,11 @@ func TestFederationVersionControlAPIs(t *testing.T) {
 func TestFederationRemoteConfiguration(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	// Add a remote (configuration only - won't actually connect)
 	// Production would use: dolthub://org/repo, s3://bucket/path, etc.
@@ -270,11 +284,11 @@ func TestFederationRemoteConfiguration(t *testing.T) {
 func TestFederationHistoryQueries(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	// Create issue
 	issue := &types.Issue{
@@ -338,11 +352,11 @@ func TestFederationHistoryQueries(t *testing.T) {
 func TestFederationListRemotes(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	// Initially no remotes (except possibly origin if Dolt adds one by default)
 	remotes, err := store.ListRemotes(ctx)
@@ -374,11 +388,11 @@ func TestFederationListRemotes(t *testing.T) {
 func TestFederationSyncStatus(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	// Get status for a nonexistent peer (should not error, just return partial data)
 	status, err := store.SyncStatus(ctx, "nonexistent-peer")
@@ -401,11 +415,11 @@ func TestFederationSyncStatus(t *testing.T) {
 func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	peer := &storage.FederationPeer{
 		Name:        "peer-metadata-sync",
@@ -433,8 +447,20 @@ func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected sync to fail for nonexistent file remote")
 	}
-	if federationStatusHasTable(t, ctx, store, "federation_peers") {
-		t.Fatal("sync should commit pending federation_peers metadata before fetch/merge")
+
+	// Sync's own post-fetch bookkeeping (e.g. last-sync metadata) can leave
+	// federation_peers dirty again after the fetch fails, so checking
+	// dolt_status here would be a false signal either way. Instead read the
+	// pre-existing pending write straight from HEAD: it must have been
+	// committed before fetch/merge ran, regardless of what Sync dirties after.
+	var sovereignty string
+	if err := store.db.QueryRowContext(ctx,
+		"SELECT sovereignty FROM federation_peers AS OF 'HEAD' WHERE name = ?", peer.Name,
+	).Scan(&sovereignty); err != nil {
+		t.Fatalf("query federation_peers AS OF HEAD: %v", err)
+	}
+	if sovereignty != "T3" {
+		t.Fatalf("federation_peers.sovereignty AS OF HEAD = %q, want T3 (pending metadata should be committed before fetch/merge)", sovereignty)
 	}
 }
 
@@ -454,11 +480,11 @@ func federationStatusHasTable(t *testing.T, ctx context.Context, store *DoltStor
 func TestFederationPushPullMethods(t *testing.T) {
 	skipIfNoDolt(t)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
-
 	store, cleanup := setupTestStore(t)
 	defer cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
 
 	// These should fail gracefully since no remote exists
 	err := store.PushTo(ctx, "nonexistent")
@@ -1489,10 +1515,15 @@ func setupFederationStore(t *testing.T, ctx context.Context, path, prefix string
 	t.Helper()
 
 	cfg := &Config{
-		Path:            path,
-		CommitterName:   "town-" + prefix,
-		CommitterEmail:  prefix + "@federation.test",
-		Database:        "beads",
+		Path:           path,
+		CommitterName:  "town-" + prefix,
+		CommitterEmail: prefix + "@federation.test",
+		// Each town needs its own database, not just its own Path: New()
+		// always connects in server mode, and TestMain runs one shared Dolt
+		// server for the whole test binary, so Path alone does not isolate
+		// two stores — Database does. A shared literal "beads" here let every
+		// town silently attach to the same database (be-3c78s).
+		Database:        "beads_test_federation_" + prefix,
 		CreateIfMissing: true, // test creates fresh database
 	}
 

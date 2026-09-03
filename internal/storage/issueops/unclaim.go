@@ -130,7 +130,7 @@ func finishUnclaimInTx(ctx context.Context, tx DBTX, eventTable string, id strin
 	// A release changes assignee and status, so it journals as an update. Both
 	// unclaim entry points funnel through here after their CAS succeeded, so
 	// this covers the conditional release too.
-	return RecordEventInTx(ctx, tx, EventUpdate, id)
+	return RecordEventInTx(ctx, tx, EventUpdate, id, actor)
 }
 
 // UnclaimIssueIfAssigneeInTx atomically releases a claim only while the issue is
