@@ -21,16 +21,99 @@ Embedded mode includes everything in the `bd` binary; no separate Dolt install
 is needed. Install the standalone `dolt` CLI only when you want to run server
 mode or work directly with the database via `dolt sql`.
 
+Install a specific version. Do not install `releases/latest` — see
+[Which Dolt version to install](#which-dolt-version-to-install) for the
+version to use and why the pin exists.
+
 ```bash
-# macOS
-brew install dolt
+DOLT_VERSION=2.2.0   # see "Which Dolt version to install" below
 
-# Linux
-curl -L https://github.com/dolthub/dolt/releases/latest/download/install.sh | bash
+os=$(uname -s | tr '[:upper:]' '[:lower:]')
+arch=$(uname -m | sed -e 's/^x86_64$/amd64/' -e 's/^aarch64$/arm64/')
+curl -fsSL "https://github.com/dolthub/dolt/releases/download/v${DOLT_VERSION}/dolt-${os}-${arch}.tar.gz" \
+  | tar -xz -C /tmp
+sudo install -m 0755 "/tmp/dolt-${os}-${arch}/bin/dolt" /usr/local/bin/dolt
 
-# Verify installation
+# Verify you got the version you asked for
 dolt version
 ```
+
+`brew install dolt` installs whatever version the Homebrew formula currently
+points at, which is not pinned. If you install that way, check `dolt version`
+against the pin below.
+
+### Which Dolt version to install
+
+Beads pins Dolt to **2.2.0**. CI installs that same pin with
+`scripts/ci/install-dolt.sh`, which records the per-version measurements and
+the criterion for raising it; raise the pin here and in that script together.
+
+This pin is about the standalone `dolt` CLI, which only server and
+proxied-server mode use. Embedded mode is unaffected either way: it links the
+Dolt engine into `bd` at the version in `go.mod`, currently the commit tagged
+v2.2.0 upstream, no matter which `dolt` CLI is on your PATH.
+
+Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
+percent of freshly created databases come up with that procedure unusable —
+every call answers `Error 1105 (HY000): context canceled`, from any session
+and any new connection, for the life of that server process. Nothing else
+about the database looks wrong: `SELECT 1`, `CALL DOLT_CLEAN()`,
+`CALL DOLT_CHECKOUT('.')`, `CALL DOLT_COMMIT()` and soft resets all work
+normally, so the damage is invisible until something needs a hard reset.
+
+Measured by creating fresh databases and immediately calling the procedure:
+
+| Dolt version | Fresh databases with `DOLT_RESET('--hard')` broken |
+|--------------|----------------------------------------------------|
+| 2.1.8        | 0 / 40                                             |
+| 2.2.0        | 0 / 60                                             |
+| 2.3.0        | 3 / 60                                             |
+| 2.3.1        | 3 / 100                                            |
+
+Versions after 2.3.1 have not been measured. Raise the pin only once a newer
+release is confirmed clean by that same measurement — not because it is
+newer.
+
+Pin rather than track `latest` for a second, independent reason: the upstream
+`releases/latest` URL resolves to the most recently *created* release, not the
+highest version, so it can move backwards — v1.88.2 was created on
+2026-08-17, after both v2.2.4 and v2.3.0.
+
+#### If you are already running 2.3.x
+
+Whether a database is affected is decided per database, when it is created —
+two databases on the same server can differ — so check each one you care
+about, against the server that is actually serving it:
+
+```bash
+# 1. The working set must be clean first: on a dirty working set a hard
+#    reset discards uncommitted changes. If this returns any rows, commit
+#    or clean up before step 3.
+dolt sql -q "SELECT * FROM dolt_status"
+
+# 2. Control — this must succeed. If it does not, you have a different
+#    problem and step 3 proves nothing.
+dolt sql -q "SELECT 1"
+
+# 3. On a clean working set this is a no-op on a healthy database.
+dolt sql -q "CALL DOLT_RESET('--hard')"
+```
+
+Step 2 succeeding while step 3 answers `Error 1105 (HY000): context canceled`
+is the discriminating result — that database is affected. Both succeeding
+means it is not.
+
+The breakage lives in the running server process, not on disk, so restarting
+`dolt sql-server` clears it — verified by re-running the check on an affected
+database after a restart, with a healthy database on the same server as the
+control. A restart re-rolls the dice for every database, though, so the
+durable fix is to move to the pinned version.
+
+This matters because `bd flatten` and the Dolt-history compaction in
+`bd admin compact` both finish by hard-resetting `main` onto a temporary
+branch, and the merge-settle path behind `bd dolt pull` / `bd sync` falls
+back to a hard reset when it has to abandon a merge. See
+[Maintenance](#maintenance--bd-prune-and-bd-purge).
 
 ### New Project
 
@@ -159,6 +242,16 @@ bd prune --older-than 90d --ignore-references --force
 `bd purge` is unaffected — ephemeral beads' references are themselves
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
+
+**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
+and the Dolt-history compaction in `bd admin compact` both build a temporary
+branch and then hard-reset `main` onto it, and the merge-settle path behind
+`bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
+merge. On an affected database that hard reset returns
+`Error 1105 (HY000): context canceled`: `bd flatten` and `bd admin compact`
+stop at that step, and an abandoned merge is left without its rollback. See
+[Which Dolt version to install](#which-dolt-version-to-install) for the check
+and the fix.
 
 ## Migrating Between Backends
 
@@ -651,10 +744,13 @@ explicitly with `--config <file>`.
 
 #### Setup with a Custom LaunchAgent
 
-Install Dolt and initialize its data directory:
+Install Dolt and initialize its data directory. Check the installed version
+against [the pin](#which-dolt-version-to-install) — Homebrew's formula is not
+pinned:
 
 ```bash
 brew install dolt
+dolt version
 cd /opt/homebrew/var/dolt && dolt init
 ```
 

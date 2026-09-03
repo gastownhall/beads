@@ -871,6 +871,13 @@ type ReadyWorkCounter interface {
 	CountReadyWork(ctx context.Context, filter types.WorkFilter) (int, error)
 }
 
+// ExternalDependencyQueryStore returns the narrow set of explicit external
+// blocking edges. Policy decorators use this instead of scanning every graph
+// edge on each ready-work query.
+type ExternalDependencyQueryStore interface {
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
+}
+
 // Transaction provides atomic multi-operation support within a single database transaction.
 //
 // The Transaction interface exposes a subset of storage methods that execute within

@@ -65,9 +65,37 @@ jobs:
           go-version-file: 'go.mod'
 
       - name: Install test dependencies
+        # Backstop for a hang that escapes the inner `timeout` calls, so it has
+        # to sit ABOVE what those calls can legitimately consume: 3 update
+        # attempts x 120s + 2 backoffs x 10s + 180s install = 560s worst case.
+        # 11m leaves ~100s of headroom and stays under the job's 15m budget, so
+        # a stuck step fails as a step instead of cancelling the whole job.
+        timeout-minutes: 11
         run: |
-          sudo apt-get update
-          sudo apt-get install -y jq libicu74
+          updated=""
+          for attempt in 1 2 3; do
+            if sudo timeout 120 apt-get \
+                 -o Acquire::Retries=3 \
+                 -o Acquire::http::Timeout=30 \
+                 -o Acquire::https::Timeout=30 \
+                 update; then
+              updated=yes
+              break
+            fi
+            echo "::warning::apt-get update attempt $attempt failed or timed out"
+            # No backoff after the final attempt - there is nothing left to wait for.
+            if [ "$attempt" -lt 3 ]; then
+              sleep 10
+            fi
+          done
+          # Deliberate best-effort: a stale index still installs these packages
+          # from the runner image cache far more often than not, and failing the
+          # job here would turn a transient mirror outage into a red build. The
+          # warning is what makes the degraded path visible in the job log.
+          if [ -z "$updated" ]; then
+            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
+          fi
+          sudo timeout 180 apt-get install -y jq libicu74
 
       - name: Install Dolt test runtime
         if: contains(fromJSON('["v0.55.4","v0.56.1","v0.57.0","v0.62.0"]'), matrix.version)
