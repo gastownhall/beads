@@ -904,7 +904,14 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./...
+        # -timeout is explicit for the same reason it is in scripts/ci/pr-core.sh
+        # (#6091): ./cmd/bd has outgrown `go test`'s 10m per-package default. On
+        # this runner it lands between 357s and 600s across recent runs — #6091's
+        # own macOS lane passed at 596.7s, 3.3s under the wall — so the package
+        # intermittently dies on the alarm and the panic names whichever test was
+        # in flight, which reads like a hang instead of the clock running out. 30m
+        # matches every other -race lane here for this same code.
+        run: go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./...
 
   # Producer-side guard for the Beads<->consumer CLI contract. Runs the whole
   # cmd/bd/protocol package: the golden corpus (regenerated from this branch's

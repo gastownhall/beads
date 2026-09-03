@@ -265,8 +265,12 @@ func TestMacOSTestJobsReuseWorkspaceBDBinary(t *testing.T) {
 	const (
 		workspaceBDBinary = "${{ github.workspace }}/bd"
 		buildCommand      = "go build -v -tags gms_pure_go ./cmd/bd"
-		prTestCommand     = "go test -tags gms_pure_go -v -race -short -skip '^TestEmbedded' ./..."
-		mainTestCommand   = "go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./..."
+		// -timeout=30m is pinned on both lanes because ./cmd/bd has outgrown
+		// `go test`'s 10m per-package default (#6091). In main.yml it sits on
+		// the invocation rather than in matrix.test-flags, so editing the
+		// matrix cannot silently drop it.
+		prTestCommand   = "go test -tags gms_pure_go -v -race -short -timeout=30m -skip '^TestEmbedded' ./..."
+		mainTestCommand = "go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./..."
 	)
 
 	workflows := map[string]ciWorkflow{

@@ -542,6 +542,13 @@ jobs:
           GOCACHE: ${{ runner.temp }}/go-cache/non-race
         run: go build -v -tags gms_pure_go ./cmd/bd
 
+      # Both lanes below pass -timeout=30m explicitly. ./cmd/bd has outgrown
+      # `go test`'s 10m per-package default (see scripts/ci/pr-core.sh and
+      # #6091), and when it trips the alarm the panic names whichever test was
+      # in flight, so it reads like a hang rather than the package running out
+      # of clock. The flag lives on the invocation, not in matrix.test-flags,
+      # so editing the matrix cannot silently drop it. 30m matches every other
+      # -race lane here for this same code.
       - name: Test (with coverage + JUnit XML)
         if: matrix.coverage
         env:
@@ -551,14 +558,14 @@ jobs:
           gotestsum \
             --junitfile junit.xml \
             --format testdox \
-            -- -tags gms_pure_go -race -short -coverprofile=coverage.out -skip '^TestEmbedded' ./...
+            -- -tags gms_pure_go -race -short -timeout=30m -coverprofile=coverage.out -skip '^TestEmbedded' ./...
 
       - name: Test
         if: ${{ !matrix.coverage }}
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/bd
           GOCACHE: ${{ runner.temp }}/go-cache/race
-        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -skip '^TestEmbedded' ./...
+        run: go test -tags gms_pure_go ${{ matrix.test-flags }} -timeout=30m -skip '^TestEmbedded' ./...
 
       - name: Upload coverage to Codecov
         if: matrix.coverage && !cancelled()
