@@ -115,15 +115,18 @@ func guardLegacyUpgradeWorkspace(beadsDir string) error {
 // what this guard refuses, so bd rejected server workspaces it had created
 // itself moments earlier.
 //
-// The config.yaml layer resolves against the SELECTED workspace: main.go binds
-// the discovered target before admission for exactly this reason, which is also
-// what makes doltserver.IsSharedServerMode() above read the target's config
-// rather than the caller's.
+// On the PersistentPreRunE and doctor paths the config.yaml layer resolves
+// against the SELECTED workspace: main.go binds the discovered target before
+// admission for exactly this reason, which is also what makes
+// doltserver.IsSharedServerMode() above read the target's config rather than
+// the caller's. The ancestor scans are the known exception —
+// guardUndiscoveredLegacyWorkspace below and findParentConfig in bootstrap.go
+// pass candidates that are by construction not the bound target, so for those
+// the env and config.yaml layers come from the caller's process-global state,
+// not from the candidate. Do not rely on the binding from a caller that walks
+// ancestors.
 func workspaceSelectsServerMode(cfg *configfile.Config) bool {
-	if cfg == nil {
-		cfg = configfile.DefaultConfig()
-	}
-	return cfg.IsDoltServerMode()
+	return normalizeLoadedConfig(cfg).IsDoltServerMode()
 }
 
 func isHistoricalSQLiteWorkspace(beadsDir string, cfg *configfile.Config) bool {
