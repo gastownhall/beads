@@ -242,6 +242,18 @@ func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, 
 	return nil
 }
 
+func validateDoltRoot(root string) error {
+	b, err := os.ReadFile(filepath.Join(root, ".dolt", "repo_state.json")) // #nosec G304 -- root is validated migration workspace path
+	if err != nil {
+		return fmt.Errorf("read Dolt identity: %w", err)
+	}
+	var obj map[string]interface{}
+	if err := json.Unmarshal(b, &obj); err != nil || obj == nil {
+		return fmt.Errorf("invalid Dolt identity repo_state.json")
+	}
+	return nil
+}
+
 func migrateToProxiedRunE(metricName, checkName string, shared bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		evt := metrics.NewCommandEvent(metricName)
@@ -559,6 +571,9 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if st, e := os.Stat(filepath.Join(rootPath, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
 		return HandleError("Dolt root %s is not a valid Dolt repository", rootPath)
 	}
+	if err := validateDoltRoot(rootPath); err != nil {
+		return HandleError("Dolt root validation failed: %v", err)
+	}
 
 	if j == nil {
 		sidecar := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
@@ -797,6 +812,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if st, e := os.Stat(filepath.Join(rootDir, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
 		return HandleError("Dolt root %s is not a valid Dolt repository", rootDir)
+	}
+	if err := validateDoltRoot(rootDir); err != nil {
+		return HandleError("Dolt root validation failed: %v", err)
 	}
 
 	serverStateDir := beadsDir
