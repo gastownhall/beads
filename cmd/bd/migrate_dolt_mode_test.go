@@ -94,7 +94,7 @@ func TestMigrateToProxiedServer_MalformedRootIdentityFailsClosed(t *testing.T) {
 }
 
 func TestMigrateToProxiedServer_InvalidRootIdentityShapesFailClosed(t *testing.T) {
-	for _, body := range []string{`{}`, `null`, `{"garbage":true}`, `{"head":null,"remotes":{},"backups":{},"branches":{}}`} {
+	for _, body := range []string{`{}`, `null`, `{"garbage":true}`, `{"head":null,"remotes":{},"backups":{},"branches":{}}`, `{"head":"refs/heads/","remotes":{},"backups":{},"branches":{}}`} {
 		t.Run(body, func(t *testing.T) {
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "dolt", ".dolt", "repo_state.json"), []byte(body), 0o600))
