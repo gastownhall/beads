@@ -177,3 +177,53 @@ func TestMigrateDoltModeFrontDoorRefusesMalformedSidecar(t *testing.T) {
 		t.Fatal("refusal mutated metadata")
 	}
 }
+
+func TestMigrateDoltModeFrontDoorRefusesExternalEndpoint(t *testing.T) {
+	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
+		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
+	}
+	bd := migrationFrontDoorBinary(t)
+	for _, tc := range []struct {
+		name  string
+		flags []string
+		want  string
+	}{
+		{name: "tcp", flags: []string{"--proxied-server-external-host", "db.example", "--proxied-server-external-port", "3307"}, want: "externally hosted proxied Dolt endpoint"},
+		{name: "unix", flags: []string{"--proxied-server-external-socket-path", "/tmp/beads-front-door.sock"}, want: "externally hosted proxied Dolt endpoint"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, home := t.TempDir(), t.TempDir()
+			env := migrationFrontDoorEnv(home)
+			args := append([]string{"init", "--backend", "dolt", "--proxied-server", "--quiet"}, tc.flags...)
+			if out, err := runBDExecWithBinary(t, bd, dir, env, args...); err != nil {
+				t.Fatalf("init external: %v\n%s", err, out)
+			}
+			beadsDir := filepath.Join(dir, ".beads")
+			metaBefore, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			sidecarPath := filepath.Join(beadsDir, "proxied_server_client_info.json")
+			sidecarBefore, err := os.ReadFile(sidecarPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out, err := runBDExecWithBinary(t, bd, dir, env, "migrate", "from-proxied-server-to-server")
+			if err == nil {
+				t.Fatal("external endpoint migration unexpectedly succeeded")
+			}
+			if !strings.Contains(strings.ToLower(out), strings.ToLower(tc.want)) {
+				t.Fatalf("expected refusal text %q, got: %s", tc.want, out)
+			}
+			if got, _ := os.ReadFile(filepath.Join(beadsDir, "metadata.json")); string(got) != string(metaBefore) {
+				t.Fatal("external refusal mutated metadata")
+			}
+			if got, _ := os.ReadFile(sidecarPath); string(got) != string(sidecarBefore) {
+				t.Fatal("external refusal mutated sidecar")
+			}
+			if _, err := os.Stat(filepath.Join(beadsDir, "dolt-mode-migration.json")); !os.IsNotExist(err) {
+				t.Fatal("external refusal created a migration journal")
+			}
+		})
+	}
+}

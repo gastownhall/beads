@@ -22,9 +22,18 @@ func snapshotMigrationTree(t *testing.T, roots ...string) map[string][]byte {
 			if strings.HasSuffix(path, ".gate.lock") || strings.HasSuffix(path, migrateLockFileName) {
 				return nil
 			}
-			if err == nil && info.Mode().IsRegular() {
+			if err != nil {
+				return nil
+			}
+			switch {
+			case info.Mode()&os.ModeSymlink != 0:
+				target, _ := os.Readlink(path)
+				out[path] = []byte("symlink:" + target)
+			case info.IsDir():
+				out[path] = []byte("dir:" + info.Mode().String())
+			case info.Mode().IsRegular():
 				b, _ := os.ReadFile(path)
-				out[path] = b
+				out[path] = append([]byte("file:"+info.Mode().String()+"\x00"), b...)
 			}
 			return nil
 		})
