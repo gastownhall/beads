@@ -126,6 +126,9 @@ async def test_create_and_show_issue(bd_client):
     assert created.issue_type == "bug"
     assert created.status == "open"
 
+    await bd_client.add_comment(AddCommentParams(issue_id=created.id, text="Verified chronology"))
+    comments = await bd_client.list_comments(ListCommentsParams(issue_id=created.id))
+
     # Show issue
     show_params = ShowIssueParams(issue_id=created.id)
     shown = await bd_client.show(show_params)
@@ -133,6 +136,11 @@ async def test_create_and_show_issue(bd_client):
     assert shown.id == created.id
     assert shown.title == created.title
     assert shown.description == created.description
+    assert shown.comment_count == len(comments) == 1
+    if shown.comments_omitted:
+        assert shown.comments == []
+    else:
+        assert [comment.id for comment in shown.comments] == [comment.id for comment in comments]
 
 
 @pytest.mark.asyncio

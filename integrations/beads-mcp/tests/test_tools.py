@@ -124,6 +124,45 @@ async def test_beads_show_issue(sample_issue):
 
 
 @pytest.mark.asyncio
+async def test_beads_show_issue_hydrates_omitted_comments(sample_issue):
+    """A count-only CLI response is expanded before it reaches MCP callers."""
+    comment = Comment(
+        id="c-1",
+        issue_id=sample_issue.id,
+        author="agent",
+        text="Landed the fix",
+        created_at=datetime(2026, 8, 23, 2, 31, 0, tzinfo=timezone.utc),
+    )
+    count_only = sample_issue.model_copy(update={"comment_count": 1, "comments_omitted": True})
+    mock_client = AsyncMock()
+    mock_client.show = AsyncMock(return_value=count_only)
+    mock_client.list_comments = AsyncMock(return_value=[comment])
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        issue = await beads_show_issue(issue_id=sample_issue.id)
+
+    assert issue.comment_count == 1
+    assert issue.comments_omitted is False
+    assert [item.id for item in issue.comments] == ["c-1"]
+    mock_client.list_comments.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_beads_show_issue_reports_zero_without_comment_lookup(sample_issue):
+    """An empty chronology still carries an unconditional zero count."""
+    mock_client = AsyncMock()
+    mock_client.show = AsyncMock(return_value=sample_issue)
+
+    with patch("beads_mcp.tools._get_client", return_value=mock_client):
+        issue = await beads_show_issue(issue_id=sample_issue.id)
+
+    assert issue.comment_count == 0
+    assert issue.comments == []
+    assert issue.comments_omitted is False
+    mock_client.list_comments.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_beads_create_issue(sample_issue):
     """Test beads_create_issue tool."""
     mock_client = AsyncMock()
@@ -583,6 +622,17 @@ async def test_beads_blocked():
     )
     mock_client = AsyncMock()
     mock_client.blocked = AsyncMock(return_value=[blocked_issue])
+    mock_client.list_comments = AsyncMock(
+        return_value=[
+            Comment(
+                id="c-1",
+                issue_id=blocked_issue.id,
+                author="agent",
+                text="Blocked chronology",
+                created_at=now,
+            )
+        ]
+    )
 
     with patch("beads_mcp.tools._get_client", return_value=mock_client):
         result = await beads_blocked()
@@ -590,7 +640,10 @@ async def test_beads_blocked():
     assert len(result) == 1
     assert result[0].id == "bd-1"
     assert result[0].blocked_by_count == 2
+    assert result[0].comment_count == 1
+    assert result[0].comments_omitted is True
     mock_client.blocked.assert_called_once()
+    mock_client.list_comments.assert_called_once()
 
 
 @pytest.mark.asyncio

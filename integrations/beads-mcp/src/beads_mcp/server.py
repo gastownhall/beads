@@ -74,6 +74,7 @@ logging.basicConfig(
 )
 
 T = TypeVar("T")
+IssueT = TypeVar("IssueT", bound=Issue)
 
 # Global state for cleanup
 _cleanup_done = False
@@ -411,7 +412,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "labels_any": "list[str] (optional) - OR filter: must have at least one",
                 "unassigned": "bool (default false) - Only unassigned issues",
                 "sort_policy": "str (optional) - hybrid|priority|oldest",
-                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief": ("bool (default false) - Return only identification plus comment completeness metadata"),
                 "fields": "list[str] (optional) - Custom field projection",
                 "max_description_length": "int (optional) - Truncate descriptions",
                 "workspace_root": "str (optional) - Workspace path",
@@ -432,7 +433,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
                 "query": "str (optional) - Search in title (case-insensitive)",
                 "unassigned": "bool (default false) - Only unassigned issues",
                 "limit": "int (1-100, default 20)",
-                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief": ("bool (default false) - Return only identification plus comment completeness metadata"),
                 "fields": "list[str] (optional) - Custom field projection",
                 "max_description_length": "int (optional) - Truncate descriptions",
                 "workspace_root": "str (optional)",
@@ -442,10 +443,10 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         },
         "show": {
             "name": "show",
-            "description": "Show full details for a specific issue including dependencies",
+            "description": "Show full details including dependencies and comments",
             "parameters": {
                 "issue_id": "str (required) - e.g., 'bd-a1b2'",
-                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief": ("bool (default false) - Return only identification plus comment completeness metadata"),
                 "brief_deps": "bool (default false) - Full issue with compact dependencies",
                 "fields": "list[str] (optional) - Custom field projection",
                 "max_description_length": "int (optional) - Truncate description",
@@ -547,7 +548,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
         },
         "comments": {
             "name": "comments",
-            "description": "List all comments on an issue (show reports comment_count but not the bodies)",
+            "description": "List only the comment chronology for an issue",
             "parameters": {
                 "issue_id": "str (required)",
                 "workspace_root": "str (optional)",
@@ -577,7 +578,7 @@ async def get_tool_info(tool_name: str) -> dict[str, Any]:
             "name": "blocked",
             "description": "Show blocked issues and what blocks them",
             "parameters": {
-                "brief": "bool (default false) - Return only {id, title, status, priority}",
+                "brief": ("bool (default false) - Return only identification plus comment completeness metadata"),
                 "brief_deps": "bool (default false) - Full issues with compact dependencies",
                 "workspace_root": "str (optional)",
             },
@@ -781,16 +782,20 @@ def _to_minimal(issue: Issue) -> IssueMinimal:
         labels=issue.labels,
         dependency_count=issue.dependency_count,
         dependent_count=issue.dependent_count,
+        comment_count=issue.comment_count,
+        comments_omitted=issue.comment_count > 0,
     )
 
 
 def _to_brief(issue: Issue) -> BriefIssue:
-    """Convert full Issue to brief format (id, title, status, priority)."""
+    """Convert full Issue to brief format with comment completeness metadata."""
     return BriefIssue(
         id=issue.id,
         title=issue.title,
         status=issue.status,
         priority=issue.priority,
+        comment_count=issue.comment_count,
+        comments_omitted=issue.comment_count > 0,
     )
 
 
@@ -824,9 +829,31 @@ VALID_ISSUE_FIELDS: set[str] = {
     "labels",
     "dependency_count",
     "dependent_count",
+    "comment_count",
+    "comments_omitted",
     "dependencies",
     "dependents",
+    "comments",
 }
+
+
+def _mark_omitted_comments(issue: IssueT) -> IssueT:
+    """Mark count-only issue records so an absent chronology is never ambiguous."""
+    if issue.comment_count > len(issue.comments) and not issue.comments_omitted:
+        return issue.model_copy(update={"comments_omitted": True})
+    return issue
+
+
+async def _hydrate_comments(issue: IssueT) -> IssueT:
+    """Fetch a chronology that a bulk caller explicitly requested."""
+    comments = await beads_list_comments(issue_id=issue.id)
+    return issue.model_copy(
+        update={
+            "comments": comments,
+            "comment_count": len(comments),
+            "comments_omitted": False,
+        }
+    )
 
 
 def _filter_fields(obj: Issue, fields: list[str]) -> dict[str, Any]:
@@ -897,7 +924,7 @@ async def ready_work(
         unassigned: Filter to only unassigned issues
         sort_policy: Sort policy: hybrid (default), priority, oldest
         workspace_root: Workspace path override
-        brief: If True, return only {id, title, status} (~97% smaller)
+        brief: If True, return identification plus comment completeness metadata
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate descriptions to this length
 
@@ -914,6 +941,9 @@ async def ready_work(
         unassigned=unassigned,
         sort_policy=sort_policy,
     )
+    issues = [_mark_omitted_comments(issue) for issue in issues]
+    if fields and "comments" in fields:
+        issues = [await _hydrate_comments(issue) for issue in issues]
 
     # Apply description truncation first
     if max_description_length:
@@ -981,7 +1011,7 @@ async def list_issues(
         unassigned: Filter to only unassigned issues
         limit: Maximum issues to return (1-100, default 20)
         workspace_root: Workspace path override
-        brief: If True, return only {id, title, status} (~97% smaller)
+        brief: If True, return identification plus comment completeness metadata
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate descriptions to this length
 
@@ -999,6 +1029,9 @@ async def list_issues(
         unassigned=unassigned,
         limit=limit,
     )
+    issues = [_mark_omitted_comments(issue) for issue in issues]
+    if fields and "comments" in fields:
+        issues = [await _hydrate_comments(issue) for issue in issues]
 
     # Apply description truncation first
     if max_description_length:
@@ -1049,12 +1082,13 @@ async def show_issue(
     Args:
         issue_id: The issue ID to show (e.g., 'bd-a1b2')
         workspace_root: Workspace path override
-        brief: If True, return only {id, title, status, priority}
+        brief: If True, return identification plus comment completeness metadata
         brief_deps: If True, return full issue but with compact dependencies
         fields: Return only specified fields (custom projections)
         max_description_length: Truncate description to this length
     """
-    issue = await beads_show_issue(issue_id=issue_id)
+    include_comments = not brief and (fields is None or "comments" in fields)
+    issue = await beads_show_issue(issue_id=issue_id, include_comments=include_comments)
 
     if max_description_length:
         issue = _truncate_description(issue, max_description_length)
@@ -1296,7 +1330,7 @@ async def comment(
 
 @mcp.tool(
     name="comments",
-    description="List all comments on an issue (show reports comment_count but not the comment bodies).",
+    description="List only the comment chronology for an issue.",
 )
 @with_workspace
 async def comments(
@@ -1348,10 +1382,11 @@ async def blocked(
     """Get blocked issues.
 
     Args:
-        brief: If True, return only {id, title, status, priority} per issue
+        brief: If True, return identification plus comment completeness metadata
         brief_deps: If True, return full issues but with compact dependencies
     """
     issues = await beads_blocked()
+    issues = [_mark_omitted_comments(issue) for issue in issues]
 
     # Brief mode - just identification (most compact)
     if brief:
