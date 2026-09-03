@@ -36,7 +36,7 @@ func migrationFrontDoorEnv(home string) []string {
 		}
 		env = append(env, kv)
 	}
-	return append(env, "HOME="+home, "USERPROFILE="+home, "BEADS_DOLT_DATA_DIR=", "BEADS_DOLT_SERVER_HOST=", "BEADS_DOLT_SERVER_PORT=", "BEADS_DOLT_PORT=", "BEADS_DOLT_AUTO_START=", "BEADS_DOLT_SHARED_SERVER=", "BEADS_SHARED_SERVER_DIR=")
+	return append(env, "HOME="+home, "USERPROFILE="+home)
 }
 
 // TestMigrateDoltModeFrontDoor exercises migration through the real bd
