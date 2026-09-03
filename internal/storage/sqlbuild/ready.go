@@ -132,7 +132,10 @@ func BuildReadyWorkWhere(filter types.WorkFilter, tables FilterTables, in ReadyW
 		args = append(args, *filter.Assignee)
 	}
 
-	if !filter.IncludeDeferred {
+	if filter.Deferred {
+		whereClauses = append(whereClauses, "(defer_until IS NOT NULL OR status = ?)")
+		args = append(args, types.StatusDeferred)
+	} else if !filter.IncludeDeferred {
 		whereClauses = append(whereClauses, "(defer_until IS NULL OR defer_until <= UTC_TIMESTAMP())")
 		for start := 0; start < len(in.DeferredChildIDs); start += QueryBatchSize {
 			end := start + QueryBatchSize

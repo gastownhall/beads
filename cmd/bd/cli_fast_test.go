@@ -297,6 +297,32 @@ func TestCLI_List(t *testing.T) {
 	}
 }
 
+func TestCLI_ListReadyDeferredFlagIsRestrictive(t *testing.T) {
+	// This is the end-to-end repro for the dropped deferred filter: --deferred
+	// must select deferred ready work, not merely add it to ordinary ready work.
+	tmpDir := setupCLITestDB(t)
+	runBDInProcess(t, tmpDir, "create", "Ordinary ready candidate", "-p", "1")
+	runBDInProcess(t, tmpDir, "create", "Deferred ready candidate", "-p", "1", "--defer", "+7d")
+
+	withoutDeferred := runBDInProcess(t, tmpDir, "list", "--ready", "--json")
+	var ordinary []map[string]interface{}
+	if err := json.Unmarshal([]byte(withoutDeferred), &ordinary); err != nil {
+		t.Fatalf("failed to parse ready JSON without --deferred: %v\noutput: %s", err, withoutDeferred)
+	}
+	if len(ordinary) != 1 || ordinary[0]["title"] != "Ordinary ready candidate" {
+		t.Fatalf("expected only ordinary ready issue without --deferred, got %#v", ordinary)
+	}
+
+	withDeferred := runBDInProcess(t, tmpDir, "list", "--ready", "--deferred", "--json")
+	var deferred []map[string]interface{}
+	if err := json.Unmarshal([]byte(withDeferred), &deferred); err != nil {
+		t.Fatalf("failed to parse ready JSON with --deferred: %v\noutput: %s", err, withDeferred)
+	}
+	if len(deferred) != 1 || deferred[0]["title"] != "Deferred ready candidate" {
+		t.Fatalf("expected only deferred ready issue with --deferred, got %#v", deferred)
+	}
+}
+
 func TestCLI_Update(t *testing.T) {
 	// Note: Not using t.Parallel() because inProcessMutex serializes execution anyway
 	tmpDir := setupCLITestDB(t)

@@ -70,6 +70,13 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		// --brief` with full rows and nothing to say why.
 		Lite: filter.Lite,
 	}
+	if filter.Deferred {
+		// --deferred is a restrictive filter, not merely an opt-in to future
+		// deferred rows. IncludeDeferred also prevents the normal future-defer
+		// exclusion from undoing the restrictive selection.
+		wf.Deferred = true
+		wf.IncludeDeferred = true
+	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)
 	}

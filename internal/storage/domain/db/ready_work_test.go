@@ -27,6 +27,7 @@ func (s *testSuite) TestIssueGetReadyWork() {
 	s.Run("Unassigned", s.readyUnassigned)
 	s.Run("ExcludesDeferred", s.readyExcludesDeferred)
 	s.Run("IncludeDeferred", s.readyIncludeDeferred)
+	s.Run("DeferredIsRestrictive", s.readyDeferredIsRestrictive)
 	s.Run("LabelFilter", s.readyLabelFilter)
 	s.Run("LimitRespected", s.readyLimitRespected)
 	s.Run("SortByPriority", s.readySortByPriority)
@@ -291,6 +292,24 @@ func (s *testSuite) readyIncludeDeferred() {
 	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{IncludeDeferred: true})
 	s.Require().NoError(err)
 	s.Contains(issueIDsFrom(out), "bd-rdy-idf-1")
+}
+
+func (s *testSuite) readyDeferredIsRestrictive() {
+	r := s.issueRepo()
+	ordinary := newTestIssue("bd-rdy-df-only-ordinary", "ordinary ready")
+	s.Require().NoError(r.Insert(s.Ctx(), ordinary, "tester", domain.InsertIssueOpts{}))
+
+	deferred := newTestIssue("bd-rdy-df-only-deferred", "deferred ready")
+	s.Require().NoError(r.Insert(s.Ctx(), deferred, "tester", domain.InsertIssueOpts{}))
+	future := time.Now().UTC().Add(24 * time.Hour)
+	_, err := s.Runner().ExecContext(s.Ctx(), "UPDATE issues SET defer_until = ? WHERE id = ?", future, deferred.ID)
+	s.Require().NoError(err)
+
+	out, err := r.GetReadyWork(s.Ctx(), types.WorkFilter{Deferred: true, IncludeDeferred: true})
+	s.Require().NoError(err)
+	got := issueIDsFrom(out)
+	s.Contains(got, deferred.ID)
+	s.NotContains(got, ordinary.ID, "--ready --deferred must not return ordinary ready issues")
 }
 
 func (s *testSuite) readyLabelFilter() {

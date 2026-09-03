@@ -46,7 +46,7 @@ func buildReadyWorkOrder(policy types.SortPolicy) sqlbuild.ReadyWorkOrder {
 // the clause text to sqlbuild so both stacks share ready semantics.
 func buildReadyWorkPredicates(ctx context.Context, tx DBTX, filter types.WorkFilter, tables FilterTables) (*readyWorkPredicates, error) {
 	var inputs sqlbuild.ReadyWorkWhereInputs
-	if !filter.IncludeDeferred {
+	if !filter.IncludeDeferred && !filter.Deferred {
 		deferredChildIDs, dcErr := getChildrenOfDeferredParentsInTx(ctx, tx)
 		if dcErr != nil {
 			return nil, fmt.Errorf("get ready work: compute deferred parent children: %w", dcErr)
