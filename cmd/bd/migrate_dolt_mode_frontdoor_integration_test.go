@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
+	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -821,10 +822,6 @@ func assertSharedMigrationResult(t *testing.T, bd, dir string, env []string, bea
 		// issue row remains readable after reverse migration.
 		start, startErr := runBDExecWithBinary(t, bd, dir, env, "dolt", "start")
 		require.NoError(t, startErr, "start shared server for verification: %s", start)
-	}
-	if wantShared {
-		start, startErr := runBDExecWithBinary(t, bd, dir, env, "dolt", "start")
-		require.NoError(t, startErr, "start shared server for dependency verification: %s", start)
 	}
 	show, showErr := runBDExecWithBinary(t, bd, dir, env, "show", issueID, "--json")
 	require.NoError(t, showErr, "show migrated issue: %s", show)
