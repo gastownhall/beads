@@ -114,9 +114,9 @@ bd show bd-bug2
 - Original (canonical) issue remains open
 - `duplicate_of` field stores the canonical ID
 
-### supersedes - Version Chains
+### supersedes - Replacement Links
 
-Marks an issue as superseded by a newer version. The old issue is automatically closed.
+Marks an issue as superseded by a different (replacement) issue. The old issue is automatically closed. This is a replacement link, not a version relation: the new issue takes the old one's place.
 
 **Created by:**
 - `bd supersede <old-id> --with <new-id>`
