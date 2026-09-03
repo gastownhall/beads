@@ -7037,6 +7037,27 @@ components:
         average_lead_time_hours:
           type: number
           description: ALWAYS 0, for the reason above.
+        gate_issues:
+          type: integer
+          description: >-
+            Gate rows, which the default `bd list` suppresses on account of what
+            they are rather than on any filter the caller passed.
+
+
+            ALREADY INCLUDED in `total_issues`, which counts the database rather
+            than the listing — so this is a breakdown of that total, never an
+            addition to it. It is broken out so the two surfaces can be
+            reconciled instead of silently disagreeing about how many issues
+            exist.
+        template_issues:
+          type: integer
+          description: >-
+            Template rows, suppressed by the default `bd list` on the same terms
+            as `gate_issues` and likewise already counted in `total_issues`.
+
+
+            Do not sum the two: a row can be both a gate and a template, and
+            would be counted once in each.
     # The two cycle schemas are pinned like the seven above, and to the same end,
     # but to the canonical types in `issueops` rather than in `internal/types`:
     # the role's own result IS the CLI's `--json` element, so `bd dep cycles`
