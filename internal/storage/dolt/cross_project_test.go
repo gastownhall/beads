@@ -42,9 +42,6 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
 
-	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-	defer cancel()
-
 	tmpDirA, err := os.MkdirTemp("", "dolt-project-a-*")
 	if err != nil {
 		t.Fatalf("failed to create temp dir for project A: %v", err)
@@ -73,21 +70,30 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		CreateIfMissing: true,
 	}
 
-	storeA, err = New(ctx, cfgA)
+	ctxA, cancelA := storeOpenContext()
+	storeA, err = New(ctxA, cfgA)
 	if err != nil {
+		cancelA()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to create store A: %v", err)
 	}
 
-	if err := storeA.SetConfig(ctx, "issue_prefix", prefixA); err != nil {
+	if err := storeA.SetConfig(ctxA, "issue_prefix", prefixA); err != nil {
+		cancelA()
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to set prefix for project A: %v", err)
 	}
+	// Store A's context ends here, before store B's begins, so store B
+	// always gets its own full budget instead of whatever store A left on a
+	// shared deadline (be-gvnsq).
+	cancelA()
 
-	storeB, err = New(ctx, cfgB)
+	ctxB, cancelB := storeOpenContext()
+	defer cancelB()
+	storeB, err = New(ctxB, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -95,7 +101,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to create store B: %v", err)
 	}
 
-	if err := storeB.SetConfig(ctx, "issue_prefix", prefixB); err != nil {
+	if err := storeB.SetConfig(ctxB, "issue_prefix", prefixB); err != nil {
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
@@ -118,6 +124,15 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 // =============================================================================
 // setupTwoProjectStores context budgeting
 // =============================================================================
+
+// storeOpenContext returns a context bounded by testTimeout for one cold
+// store open. setupTwoProjectStores calls this once per store so store B's
+// budget doesn't start counting down until store A's own context has
+// already been created (and cancelled) — otherwise both opens would share a
+// single deadline and store A could starve store B under load (be-gvnsq).
+func storeOpenContext() (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), testTimeout)
+}
 
 // TestStoreOpenContext_FreshBudgetPerCall guards against setupTwoProjectStores
 // reintroducing a single context.WithTimeout shared across both cold store
