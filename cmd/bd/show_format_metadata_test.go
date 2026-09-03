@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/steveyegge/beads/internal/types"
@@ -139,6 +140,40 @@ func TestFormatIssueMetadata_CreatedByLabel(t *testing.T) {
 	}
 	if strings.Contains(out, "Owner: ") {
 		t.Errorf("label %q must not appear — created_by must not render under the Owner label, got:\n%s", "Owner: ", out)
+	}
+}
+
+// TestFormatIssueMetadata_TimestampsRenderLocal guards the rule that the
+// metadata block reports timestamps on the reader's calendar, as the Due and
+// Deferred entries on the same line already did.
+//
+// Created/Started/Updated are stored in UTC. Printing those digits as a bare
+// date put the whole day wrong if it's already tomorrow in UTC.
+//
+// time.Local is swapped rather than TZ, because the zone is resolved once per
+// process and a t.Setenv would land too late to matter — and on a UTC CI box
+// the assertion would then pass without testing anything. That swap is a
+// process-global write, so this test must not be t.Parallel() and will trip
+// -race against any parallel test that reads time.Local.
+func TestFormatIssueMetadata_TimestampsRenderLocal(t *testing.T) {
+	pacific := time.FixedZone("PDT", -7*60*60)
+	orig := time.Local
+	time.Local = pacific
+	t.Cleanup(func() { time.Local = orig })
+
+	// 2026-08-24 01:30 UTC is 2026-08-23 18:30 Pacific — the same instant on
+	// two different calendar days, which is the whole bug.
+	stamp := time.Date(2026, 8, 24, 1, 30, 0, 0, time.UTC)
+	issue := &types.Issue{
+		ID: "test-tz", Title: "t", IssueType: types.TypeTask,
+		CreatedAt: stamp, UpdatedAt: stamp, StartedAt: &stamp,
+	}
+
+	out := ansi.Strip(formatIssueMetadata(issue))
+	for _, want := range []string{"Created: 2026-08-23", "Started: 2026-08-23", "Updated: 2026-08-23"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output (UTC digits rendered as-is put the date a day ahead), got:\n%s", want, out)
+		}
 	}
 }
 
