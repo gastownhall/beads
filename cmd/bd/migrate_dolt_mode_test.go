@@ -161,6 +161,45 @@ func TestMigrateToProxiedServer_MalformedWorkspaceYAMLFailsClosed(t *testing.T) 
 	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
 }
 
+func TestMigrationSharedTopology_ExplicitYAMLOverridesEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		env  string
+		yaml string
+		want bool
+	}{
+		{name: "false overrides true env", env: "1", yaml: "false", want: false},
+		{name: "true overrides empty env", env: "", yaml: "true", want: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			t.Setenv("BEADS_DOLT_SHARED_SERVER", tc.env)
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: "+tc.yaml+"\n"), 0o600))
+			live, value, present, err := migrationSharedTopology(beadsDir)
+			require.NoError(t, err)
+			assert.True(t, present)
+			assert.Equal(t, tc.want, value)
+			assert.Equal(t, tc.want, live)
+		})
+	}
+}
+
+func TestMigrateToProxiedServer_UnreadableWorkspaceYAMLFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	require.NoError(t, os.Mkdir(configPath, 0o700))
+	before := snapshotMigrationTree(t, beadsDir)
+	var err error
+	stderr := captureStderr(t, func() { err = runMigrateToProxiedServer(false, 0, false) })
+	require.Error(t, err)
+	code, ok := exitCodeFromError(err)
+	assert.True(t, ok)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, strings.ToLower(stderr), "reading workspace config")
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+}
+
 func TestMigrateToProxiedServer_AlreadyProxiedRejectsStaleControl(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	root := filepath.Join(beadsDir, "dolt")
