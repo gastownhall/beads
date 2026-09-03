@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"regexp"
 	"strings"
 	"testing"
 
+	lipgloss "charm.land/lipgloss/v2"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -165,5 +167,105 @@ func TestOutputFormattedListWithNoEdgesDoesNotWrite(t *testing.T) {
 	}
 	if writer.writes != 0 {
 		t.Fatalf("zero-edge output made %d writes, want 0", writer.writes)
+	}
+}
+
+func TestFormatTruncationHintExactBytes(t *testing.T) {
+	t.Parallel()
+
+	got := formatTruncationHint(2)
+	plain := stripANSIForTest(got)
+	const want = "\nShowing 2 issues; more results matched but were hidden by --limit. Use --limit 0 for all, or --limit N to raise the cap.\n"
+	if plain != want {
+		t.Fatalf("truncation hint bytes differ\ngot:\n%q\nwant:\n%q", plain, want)
+	}
+	if !strings.HasSuffix(got, "\n") {
+		t.Fatal("truncation hint missing trailing newline")
+	}
+	if strings.HasSuffix(got, "\n\n") {
+		t.Fatal("truncation hint ended with a double newline")
+	}
+	assertNoWhitespaceOnlyLine(t, plain)
+
+	got10 := stripANSIForTest(formatTruncationHint(10))
+	if !strings.Contains(got10, "Showing 10 issues;") {
+		t.Fatalf("limit interpolation missing: %q", got10)
+	}
+	if strings.HasPrefix(got10, "\n\n") {
+		t.Fatalf("leading double newline: %q", got10)
+	}
+}
+
+func TestComposeTruncationHintRejectsLipglossBlankLinePadding(t *testing.T) {
+	t.Parallel()
+
+	// Empty lipgloss Style (props==0) is identity — the colorless test
+	// default, and why RenderWarn("\n"+text+"\n") did not catch GH#5685.
+	// Foreground sets props so alignTextHorizontal pads blank lines to
+	// the widest-line width (not terminal width; no PTY required).
+	style := lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
+	render := func(s string) string { return style.Render(s) }
+	text := truncationHintText(2)
+
+	buggy := render("\n" + text + "\n")
+	got := composeTruncationHint(render, text)
+
+	buggyPlain := stripANSIForTest(buggy)
+	gotPlain := stripANSIForTest(got)
+
+	padWidth := whitespaceOnlyLineWidth(buggyPlain)
+	if padWidth == 0 {
+		t.Fatalf("fixture: styled Render of newline-wrapped text should pad a blank line; got %q", buggyPlain)
+	}
+	if padWidth != len(text) {
+		t.Fatalf("lipgloss pad width = %d, want hint length %d (widest-line width, not terminal width)\nbuggy=%q", padWidth, len(text), buggyPlain)
+	}
+	widest := widestNonBlankLineWidth(buggyPlain)
+	if padWidth != widest {
+		t.Fatalf("lipgloss pad width = %d, want widest-line width %d\nbuggy=%q", padWidth, widest, buggyPlain)
+	}
+
+	assertNoWhitespaceOnlyLine(t, gotPlain)
+	if !strings.HasSuffix(got, "\n") {
+		t.Fatalf("composeTruncationHint missing trailing newline: %q", got)
+	}
+	if strings.HasSuffix(got, "\n\n") {
+		t.Fatal("composeTruncationHint ended with a double newline")
+	}
+	if got == buggy {
+		t.Fatalf("composeTruncationHint still uses newline-inside-Render bytes:\n%q", got)
+	}
+}
+
+func stripANSIForTest(s string) string {
+	return regexp.MustCompile(`\x1b\[[0-9;]*m`).ReplaceAllString(s, "")
+}
+
+func whitespaceOnlyLineWidth(s string) int {
+	width := 0
+	for _, line := range strings.Split(s, "\n") {
+		if line != "" && strings.TrimSpace(line) == "" && len(line) > width {
+			width = len(line)
+		}
+	}
+	return width
+}
+
+func widestNonBlankLineWidth(s string) int {
+	width := 0
+	for _, line := range strings.Split(s, "\n") {
+		if strings.TrimSpace(line) != "" && len(line) > width {
+			width = len(line)
+		}
+	}
+	return width
+}
+
+func assertNoWhitespaceOnlyLine(t *testing.T, s string) {
+	t.Helper()
+	for i, line := range strings.Split(s, "\n") {
+		if line != "" && strings.TrimSpace(line) == "" {
+			t.Fatalf("whitespace-only line at index %d (len=%d): %q", i, len(line), line)
+		}
 	}
 }
