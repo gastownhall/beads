@@ -1082,6 +1082,7 @@ func TestEnvVarOverrides(t *testing.T) {
 	})
 
 	t.Run("BEADS_DOLT_PORT fallback when SERVER_PORT not set", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
 		t.Setenv("BEADS_DOLT_PORT", "3307")
 		cfg := &Config{}
 		if got := cfg.GetDoltServerPort(); got != 3307 {
