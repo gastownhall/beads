@@ -909,12 +909,6 @@ var rootCmd = &cobra.Command{
 		// per-command context and losing Ctrl-C entirely.
 		setRootContext(setupGracefulShutdown())
 
-		// Initialize OTel. Telemetry is opt-in — initTelemetry is a noop
-		// unless BD_OTEL_ENABLED=true or a legacy BD_OTEL_* selector is set.
-		// Must run before any DB access so SQL spans nest under the command
-		// span.
-		initTelemetry(rootCtx, Version)
-
 		// Materialize the user-level metrics config only when metrics are
 		// actually enabled. When metrics are disabled (BD_DISABLE_METRICS or a
 		// user-global metrics.disabled), there is nothing to bootstrap. The
@@ -936,10 +930,6 @@ var rootCmd = &cobra.Command{
 		if cmd.Name() == metrics.SendMetricsSubcommand {
 			return nil
 		}
-
-		// Start root span for this command. rootCtx now carries the span, so
-		// all downstream DB and AI calls become child spans automatically.
-		rootCtx, commandSpan = startCommandSpan(rootCtx, cmd.Name(), Version, os.Args[1:], secretFlagTokens(cmd))
 
 		// Apply verbosity flags early (before any output)
 		debug.SetVerbose(verboseFlag)
@@ -1364,12 +1354,9 @@ var rootCmd = &cobra.Command{
 			return HandleError("strict readonly is unavailable for dolt proxied-server backend; refusing to open a store that cannot guarantee mutation-free access")
 		}
 
-		// Set actor for audit trail
+		// Set actor for audit trail. Used downstream when the command span is
+		// started after the dolt store opens (so bd.prefix can be read first).
 		actor = getActorWithGit()
-		// Attach actor to the command span now that we have it.
-		if commandSpan != nil {
-			commandSpan.SetAttributes(attribute.String("bd.actor", actor))
-		}
 
 		// Check if this is a read-only command (GH#804) or an explicitly
 		// non-mutating preview. Both must open the store read-only: otherwise
@@ -1690,6 +1677,25 @@ var rootCmd = &cobra.Command{
 		storeMutex.Lock()
 		storeActive = true
 		storeMutex.Unlock()
+
+		// Initialize OTel now that the store is open so the issue prefix can be
+		// read and stamped as bd.prefix on the resource and on every metric
+		// measurement. Telemetry is opt-in — initTelemetry is a noop unless
+		// BD_OTEL_ENABLED=true or a legacy BD_OTEL_* selector is set. Commands
+		// that exit before opening the store don't initialize telemetry —
+		// acceptable trade-off because those paths are short-lived setup
+		// commands with no telemetry need.
+		var bdPrefix string
+		if p, gerr := store.GetConfig(rootCtx, "issue_prefix"); gerr == nil {
+			bdPrefix = strings.TrimSuffix(p, "-")
+		}
+		initTelemetry(rootCtx, Version, bdPrefix)
+
+		// Start root span for this command. rootCtx now carries the span, so
+		// all downstream DB and AI calls become child spans automatically.
+		// actor resolved above, so bd.actor is stamped straight away.
+		rootCtx, commandSpan = startCommandSpan(rootCtx, cmd.Name(), Version, os.Args[1:], secretFlagTokens(cmd))
+		commandSpan.SetAttributes(attribute.String("bd.actor", actor))
 
 		// Auto-import from issues.jsonl when embedded database is empty (GH#2994).
 		// This handles the upgrade path from pre-0.56 (dolt/) to 1.0+ (embeddeddolt/)

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	"github.com/steveyegge/beads/internal/idgen"
 	"github.com/steveyegge/beads/internal/storage"
@@ -437,8 +436,7 @@ func (s *DoltStore) verifiedReadyClaim(ctx context.Context, actor string, write 
 	if post.want(assignee, status) {
 		return claimed, nil
 	}
-	doltMetrics.claimVerifyLost.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("op", "ready-claim")))
+	doltMetrics.claimVerifyLost.Add(ctx, 1, attribute.String("op", "ready-claim"))
 	return nil, fmt.Errorf("ready claim of %s reported success but did not land (found assignee=%q status=%q, want %s) — server likely degraded; treat the claim as NOT applied",
 		claimed.ID, assignee, status, post.desc)
 }

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/metric"
 
 	"github.com/steveyegge/beads/internal/storage"
 	storageissueops "github.com/steveyegge/beads/internal/storage/issueops"
@@ -205,8 +204,7 @@ func (s *DoltStore) verifiedClaimWrite(ctx context.Context, id string, post clai
 	if post.want(assignee, status) {
 		return nil
 	}
-	doltMetrics.claimVerifyLost.Add(ctx, 1, metric.WithAttributes(
-		attribute.String("op", post.op)))
+	doltMetrics.claimVerifyLost.Add(ctx, 1, attribute.String("op", post.op))
 	return fmt.Errorf("%s of %s reported success but did not land (found assignee=%q status=%q, want %s) — server likely degraded; treat the %s as NOT applied",
 		post.op, id, assignee, status, post.desc, post.op)
 }
