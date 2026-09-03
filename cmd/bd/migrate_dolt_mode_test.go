@@ -354,10 +354,29 @@ func TestMigrateFromProxiedServer_JournalPreservesExternalSidecar(t *testing.T) 
 	ext := &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307, User: "alice"}
 	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root, External: ext}))
 	require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
-	t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(migratePrepared))
-	require.Error(t, runMigrateFromProxiedServer(false, false))
-	j, err := loadMigrateJournal(beadsDir)
+	require.Error(t, runMigrateFromProxiedServer(false, false), "external endpoint cannot be converted to local server")
+	got, err := configfile.LoadProxiedServerClientInfo(beadsDir)
 	require.NoError(t, err)
-	require.NotNil(t, j.Sidecar)
-	assert.Equal(t, ext, j.Sidecar.External)
+	assert.Equal(t, ext, got.External)
+	cfg, err := configfile.Load(beadsDir)
+	require.NoError(t, err)
+	assert.True(t, cfg.IsDoltProxiedServerMode())
+}
+
+func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+		t.Run(string(phase), func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+			root := filepath.Join(beadsDir, "dolt")
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
+			require.Error(t, runMigrateFromProxiedServer(false, false))
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+			require.NoError(t, runMigrateFromProxiedServer(false, false))
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j)
+		})
+	}
 }
