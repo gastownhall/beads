@@ -312,8 +312,8 @@ func TestDoctorPersistentPreRunExplicitEnvDBTargetOverridesAmbientRedirect(t *te
 			if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "" {
 				t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want \"\" (ambient repo's redirect-source database leaked past an explicit %s target)", got, tc.envVar)
 			}
-			if got := os.Getenv("BEADS_DIR"); got != targetBeadsDir {
-				t.Fatalf("BEADS_DIR = %q, want %q (explicit %s target)", got, targetBeadsDir, tc.envVar)
+			if got, want := utils.CanonicalizePath(os.Getenv("BEADS_DIR")), utils.CanonicalizePath(targetBeadsDir); got != want {
+				t.Fatalf("BEADS_DIR = %q, want %q (explicit %s target)", got, want, tc.envVar)
 			}
 		})
 	}
@@ -372,8 +372,12 @@ func TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase(t *
 	if dbPath != "" {
 		t.Fatalf("dbPath = %q, want \"\" — precondition: a bare --db name must be moved off dbPath, otherwise this test no longer covers the Changed(\"db\")/dbPath==\"\" combination", dbPath)
 	}
-	if got := os.Getenv("BEADS_DIR"); got != ambientSharedBeadsDir {
-		t.Fatalf("BEADS_DIR = %q, want %q — precondition: a bare --db name selects no explicit directory, so the ambient redirect target must be chosen", got, ambientSharedBeadsDir)
+	// Compare canonicalized: this path is resolved through beads.FindBeadsDir(),
+	// which runs utils.CanonicalizePath (EvalSymlinks). On macOS t.TempDir()
+	// hands back /var/folders/... while the resolved form is /private/var/... —
+	// the same directory, so a raw string compare fails there and nowhere else.
+	if got, want := utils.CanonicalizePath(os.Getenv("BEADS_DIR")), utils.CanonicalizePath(ambientSharedBeadsDir); got != want {
+		t.Fatalf("BEADS_DIR = %q, want %q — precondition: a bare --db name selects no explicit directory, so the ambient redirect target must be chosen", got, want)
 	}
 	if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "ambient_source_db" {
 		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q (be-xil regression: the ambient workspace was selected, so its redirect-source database must still be preserved — do not add Changed(\"db\") to explicitDBTargetGiven)", got, "ambient_source_db")
