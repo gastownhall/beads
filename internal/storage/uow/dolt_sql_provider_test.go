@@ -132,6 +132,25 @@ func TestPingWithRetryRecoversFromATransientBadConn(t *testing.T) {
 			t.Fatalf("PingContext called %d times, want exactly 2", p.calls)
 		}
 	})
+
+	t.Run("unresolvable host fails without retrying", func(t *testing.T) {
+		// The narrowing that pays for classifying *net.OpError broadly: a name
+		// that does not resolve will not start resolving, so retrying only
+		// spends the budget before reporting the same misconfiguration.
+		dnsErr := &net.OpError{Op: "dial", Net: "tcp", Err: &net.DNSError{
+			Err: "no such host", Name: "no-such-dolt-host.invalid", IsNotFound: true,
+		}}
+		p := &fakePinger{t: t, errs: []error{dnsErr}}
+
+		err := pingWithRetry(context.Background(), p, testPingBackOff(), testPingAttemptTimeout)
+
+		if !errors.Is(err, dnsErr) {
+			t.Fatalf("pingWithRetry() error = %v, want %v", err, dnsErr)
+		}
+		if p.calls != 1 {
+			t.Fatalf("PingContext called %d times, want exactly 1 (a permanent DNS failure must not retry)", p.calls)
+		}
+	})
 }
 
 // TestPingWithRetryBoundsEachAttempt covers the half of the retry budget that
