@@ -529,6 +529,9 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		return HandleError("migration state is inconsistent: %v", err)
 	}
 	liveShared := doltserver.IsSharedServerMode()
+	if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.EqualFold(v, "true") {
+		liveShared = true
+	}
 	yamlShared, yamlSharedSet := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
 	if j != nil {
 		wantShared := shared && j.Phase == migratePrepared
@@ -768,6 +771,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
 	liveShared := doltserver.IsSharedServerMode()
+	if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.EqualFold(v, "true") {
+		liveShared = true
+	}
 	if j != nil {
 		wantShared := shared && j.Phase != migratePrepared
 		if liveShared != wantShared {
