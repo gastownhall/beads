@@ -23,7 +23,19 @@ import (
 // dies stops heartbeating, its lease_expires_at goes stale, and bd reclaim
 // reverts the issue to ready. Tunable per-claim via WithLeaseTTL on the
 // context, falling back to this default.
-const DefaultLeaseTTL = 5 * time.Minute
+//
+// Widened from 5min (2026-08-09, see gastownhall/gascity ga-z93p0): with no
+// caller anywhere invoking HeartbeatIssueInTx on a cadence, every claim's
+// lease went stale almost immediately regardless of worker liveness, making
+// the TTL decorrelated from actual liveness for any task longer than 5min —
+// which was most real work. 240min is set from a measured p50≈117min /
+// conservative-p90≈167min claim-to-merge duration across 26 real single-
+// worker tasks (small automated bug/tech-debt fixes), with margin. Treat
+// this TTL as a backstop for a lease that's live but stuck, not as the
+// primary "is this worker alive" check — a supervisor with an independent
+// liveness signal (process/session heartbeat, progress markers) should
+// still reclaim dead workers well before this fires.
+const DefaultLeaseTTL = 240 * time.Minute
 
 // leaseTTLContextKey overrides DefaultLeaseTTL for a single claim. Used by tests
 // (short TTLs) and callers that know their work cadence; unset in normal use.
