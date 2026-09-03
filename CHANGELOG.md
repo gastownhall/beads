@@ -185,6 +185,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd config set` no longer dirties the checkout with one machine's answer.**
+  The keys that describe THIS host rather than the project — `dolt.mode`,
+  `dolt.host`, `dolt.port`, `dolt.socket`, `dolt.user`, `dolt.data-dir`,
+  `dolt.debug`, `backup.enabled`, `backup.interval` — are now written to the
+  untracked `.beads/config.local.yaml` instead of the git-tracked
+  `.beads/config.yaml`. Previously bd rewrote the tracked file as a side effect
+  of ordinary operation, so `git status` reported a change nobody made and a
+  release script, a pre-commit hook or a CI clean-tree step refused for a
+  reason no operator could fix by committing once — the next bd run wrote the
+  file again. The same value also propagated to every clone that pulled it.
+  Membership is an exact list, not a namespace: `dolt.auto-start`,
+  `dolt.max-conns`, `dolt.shared-server` and the rest stay shared project
+  settings, and a value left in `config.yaml` still works as a shared default
+  the sidecar overrides. The first machine-local write in a workspace lifts any
+  such key already sitting in `config.yaml` into the sidecar and comments it
+  out of the tracked file — one small diff, once, for the operator to commit.
+  bd also keeps git from seeing the sidecar: `bd init` lists it in
+  `.beads/.gitignore`, and in a checkout made before that entry existed bd adds
+  a per-clone line to `.git/info/exclude` the first time it writes there.
+  `bd config unset` on one of these keys clears the sidecar only; a shared
+  default in `config.yaml` is removed by an explicit edit.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session
