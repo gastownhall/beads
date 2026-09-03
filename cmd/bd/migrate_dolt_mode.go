@@ -249,6 +249,19 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		return err
 	}
 	if cfg.IsDoltProxiedServerMode() {
+		// Repair interrupted migrations: metadata may have been persisted before
+		// the sidecar write. Treat a missing sidecar as resumable, not Already.
+		if info, err := configfile.LoadProxiedServerClientInfo(beadsDir); err == nil && info != nil {
+			fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
+			return nil
+		}
+		root := proxiedServerRoot(beadsDir)
+		if shared {
+			root, _ = doltserver.SharedDoltPath()
+		}
+		if err := configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root, IdleTimeout: idleTimeout}); err != nil {
+			return HandleError("failed to repair %s: %v", configfile.ProxiedServerClientInfoFileName, err)
+		}
 		fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
 		return nil
 	}
