@@ -936,7 +936,12 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if j == nil {
 		if shared {
-			if doltserver.IsSharedServerMode() {
+			// Persisted workspace YAML is authoritative over ambient process
+			// environment. A completed forward migration deliberately leaves
+			// BEADS_DOLT_SHARED_SERVER stale in some shells while writing
+			// dolt.shared-server: false; do not misclassify that proxied repo as
+			// already migrated to shared-server mode.
+			if !cfg.IsDoltProxiedServerMode() && ((!yamlSharedSet && doltserver.IsSharedServerMode()) || (yamlSharedSet && yamlShared)) {
 				fmt.Printf("%s\n", ui.RenderPass("✓ Already in shared-server mode"))
 				return nil
 			}
