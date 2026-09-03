@@ -382,6 +382,9 @@ func TestMigrateDoltModeFrontDoorMalformedStateRefuses(t *testing.T) {
 			beadsDir := filepath.Join(dir, ".beads")
 			require.NoError(t, os.MkdirAll(beadsDir, 0o700))
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version), 0o600))
+			if tc.name == "journal" {
+				require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"myproj","backend":"dolt","dolt_mode":"proxied-server"}`), 0o600))
+			}
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, tc.file), []byte(tc.body), 0o600))
 			before := snapshotMigrationTree(t, beadsDir)
 			out, _, err := runBDExecSeparated(t, bd, dir, env, "--json", "migrate", "from-proxied-server-to-server")
