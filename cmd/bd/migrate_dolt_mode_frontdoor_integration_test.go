@@ -35,7 +35,7 @@ func migrationFrontDoorEnv(home string) []string {
 		// controls for its in-process tests. Never inherit those into the
 		// real front-door subprocess: BEADS_TEST_MODE disables auto-start
 		// and makes a freshly initialized server resolve to port 1.
-		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") {
+		if strings.HasPrefix(key, "BEADS_") || strings.HasPrefix(key, "BD_") || key == "HOME" || key == "USERPROFILE" {
 			continue
 		}
 		env = append(env, kv)
@@ -77,8 +77,9 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 		t.Fatalf("forward migration: %v\n%s", err, out)
 	}
 	metaProxy, _ := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
-	if !strings.Contains(string(metaProxy), `"dolt_mode":"proxied-server"`) {
-		t.Fatal("forward did not persist proxied mode")
+	var proxyMetadata map[string]any
+	if err := json.Unmarshal(metaProxy, &proxyMetadata); err != nil || proxyMetadata["dolt_mode"] != "proxied-server" {
+		t.Fatalf("forward did not persist proxied mode: %s", metaProxy)
 	}
 	info, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
 	if err != nil || len(info) == 0 {
@@ -93,6 +94,12 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	}
 	if out, err = runBDExecWithBinary(t, bd, dir, env, "update", created.ID, "--title", "front-door sentinel updated"); err != nil {
 		t.Fatalf("proxied update: %v\n%s", err, out)
+	}
+	statusOut, _ = runBDExecWithBinary(t, bd, dir, env, "dolt", "status")
+	if strings.Contains(statusOut, "Dolt server: running") {
+		if out, err = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop"); err != nil {
+			t.Fatalf("stop proxied server: %v\n%s", err, out)
+		}
 	}
 	sidecarBefore, err := os.ReadFile(filepath.Join(dir, ".beads", "proxied_server_client_info.json"))
 	if err != nil {
@@ -125,7 +132,8 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 		t.Fatalf("sentinel missing or invalid JSON: %s", show)
 	}
 	meta, err := os.ReadFile(filepath.Join(dir, ".beads", "metadata.json"))
-	if err != nil || !strings.Contains(string(meta), `"dolt_mode":"server"`) {
+	var serverMetadata map[string]any
+	if err != nil || json.Unmarshal(meta, &serverMetadata) != nil || serverMetadata["dolt_mode"] != "server" {
 		t.Fatalf("metadata mode not restored: %s", meta)
 	}
 	if _, err = os.Stat(filepath.Join(dir, ".beads", "proxied_server_client_info.json")); !os.IsNotExist(err) {
