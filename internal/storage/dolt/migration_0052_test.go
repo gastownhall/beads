@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -29,6 +31,15 @@ import (
 // Fixture scale: 2K rows per be-eei §8 guardrail 3. The round-trip
 // demonstrates the DDL is correct under a meaningful population without
 // pushing the test beyond a reasonable timeout.
+//
+// Isolation, and why it is load-bearing here rather than incidental: this test
+// DROPs and re-CREATEs shared indexes (idx_issues_status_updated_at among
+// them) partway through. That is only safe because setupTestStore puts each
+// test on its own Dolt branch via testutil.StartTestBranch (dolt_test.go:173).
+// On the shared testSharedDB without that branch, a concurrent test in this
+// package would observe the table mid-round-trip with its indexes missing — a
+// package-wide hazard, not a local one. Do not add t.Parallel() here, and do
+// not "optimize" the per-test branch away.
 //
 // Up/down SQL is run via the existing runMigrationSQL(path) helper
 // (pr4107_corruption_test.go), which reads the file from disk and executes
@@ -177,11 +188,15 @@ func indexNames(t *testing.T, ctx context.Context, store *DoltStore) map[string]
 	return got
 }
 
+// sortedKeys returns the map's keys in ascending order. Map iteration is
+// randomized, so without the sort the index names in a failure message
+// reorder between runs and two reports of the same failure do not compare.
 func sortedKeys(m map[string]bool) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
 		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -194,8 +209,10 @@ func countIssues(t *testing.T, ctx context.Context, store *DoltStore) int {
 	return n
 }
 
-// sampleIssueIDs collects N evenly-spaced IDs for the round-trip integrity
-// check. Uses a deterministic ORDER BY so the sample is stable across runs.
+// sampleIssueIDs collects the first N issue IDs in id order for the round-trip
+// integrity check. The ORDER BY makes the sample deterministic across runs;
+// the fixture seeds ids as a zero-padded sequence, so "first N by id" is the
+// first N rows inserted rather than a spread across the table.
 func sampleIssueIDs(t *testing.T, ctx context.Context, store *DoltStore, n int) []string {
 	t.Helper()
 	rows, err := store.db.QueryContext(ctx,
@@ -221,10 +238,17 @@ func sampleIssueIDs(t *testing.T, ctx context.Context, store *DoltStore, n int) 
 	return ids
 }
 
-// verifySampleIssues spot-checks that a known set of issue IDs still exist
-// and that their title/status/type round-tripped unchanged after up→down→up.
-// Index operations don't touch row data, but a malformed DDL could in theory
-// trigger Dolt table restructuring; this guards against that worst case.
+// verifySampleIssues spot-checks that a known set of issue IDs still exist and
+// that their title, status and issue type round-tripped unchanged after
+// up→down→up. Index operations don't touch row data, but a malformed DDL could
+// in theory trigger Dolt table restructuring; this guards against that worst
+// case.
+//
+// Expected status and type are recomputed from the ordinal encoded in the id
+// rather than read back from a "before" snapshot, so the check cannot be
+// satisfied by a value the round-trip itself corrupted symmetrically. This
+// mirrors seedDateIndexFixture's own statuses[i%3] / issueTypes[i%3] cycling —
+// keep the two in step if the fixture changes.
 func verifySampleIssues(t *testing.T, ctx context.Context, store *DoltStore, ids []string) {
 	t.Helper()
 	for _, id := range ids {
@@ -240,6 +264,18 @@ func verifySampleIssues(t *testing.T, ctx context.Context, store *DoltStore, ids
 		}
 		if !strings.HasPrefix(iss.Title, "date-idx ") {
 			t.Fatalf("sample verify %s: title mutated to %q", id, iss.Title)
+		}
+		ordinal, err := strconv.Atoi(strings.TrimPrefix(id, "date-idx-"))
+		if err != nil {
+			t.Fatalf("sample verify %s: unexpected id shape (fixture changed?): %v", id, err)
+		}
+		fixtureStatuses := []types.Status{types.StatusOpen, types.StatusInProgress, types.StatusClosed}
+		fixtureTypes := []types.IssueType{types.TypeTask, types.TypeBug, types.TypeFeature}
+		if want := fixtureStatuses[ordinal%len(fixtureStatuses)]; iss.Status != want {
+			t.Fatalf("sample verify %s: status mutated to %q, want %q", id, iss.Status, want)
+		}
+		if want := fixtureTypes[ordinal%len(fixtureTypes)]; iss.IssueType != want {
+			t.Fatalf("sample verify %s: issue type mutated to %q, want %q", id, iss.IssueType, want)
 		}
 	}
 }
