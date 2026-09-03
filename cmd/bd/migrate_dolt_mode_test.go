@@ -462,6 +462,53 @@ func TestMigrateFromProxiedServer_ExternalJournalAlwaysFailsClosed(t *testing.T)
 	}
 }
 
+func TestMigrateExternalJournalAlwaysFailsClosed_TCPAndUnixForwardReverse(t *testing.T) {
+	endpoints := []struct {
+		name string
+		cfg  *configfile.ExternalDoltConfig
+	}{
+		{"tcp", &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}},
+		{"unix", &configfile.ExternalDoltConfig{Socket: "/tmp/beads-dolt.sock"}},
+	}
+	for _, ep := range endpoints {
+		for _, reverse := range []bool{false, true} {
+			for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+				t.Run(ep.name+"/"+string(phase), func(t *testing.T) {
+					beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+					root := filepath.Join(beadsDir, "dolt")
+					if reverse {
+						writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "myproj")
+					}
+					want := configfile.DoltModeServer
+					src := configfile.DoltModeServer
+					target := configfile.DoltModeProxiedServer
+					if reverse {
+						src, target = configfile.DoltModeProxiedServer, configfile.DoltModeServer
+						writeMetadataConfig(t, beadsDir, src, "myproj")
+					}
+					j := migrateJournal{Version: 1, SourceMode: src, TargetMode: target, RootPath: root, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ep.cfg}}
+					b, err := json.Marshal(j)
+					require.NoError(t, err)
+					require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+					before, _ := os.ReadFile(configfile.ConfigPath(beadsDir))
+					if reverse {
+						want = configfile.DoltModeProxiedServer
+					}
+					if reverse {
+						require.Error(t, runMigrateFromProxiedServer(false, false))
+					} else {
+						require.Error(t, runMigrateToProxiedServer(false, 0, false))
+					}
+					after, _ := os.ReadFile(configfile.ConfigPath(beadsDir))
+					assert.Equal(t, before, after)
+					cfg, _ := configfile.Load(beadsDir)
+					assert.Equal(t, want, cfg.GetDoltMode())
+				})
+			}
+		}
+	}
+}
+
 func TestMigrateSharedJournalRootMismatchFailsClosed(t *testing.T) {
 	shared := t.TempDir()
 	t.Setenv("BEADS_SHARED_SERVER_DIR", shared)
@@ -477,6 +524,20 @@ func TestMigrateSharedJournalRootMismatchFailsClosed(t *testing.T) {
 	cfg, err := configfile.Load(beadsDir)
 	require.NoError(t, err)
 	assert.True(t, cfg.IsDoltServerMode())
+}
+
+func TestMigrateSharedJournalMissingYAMLFailsClosed(t *testing.T) {
+	shared := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", shared)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	root := filepath.Join(shared, "dolt")
+	require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, Shared: true, RootPath: root, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root}}
+	b, _ := json.Marshal(j)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+	require.Error(t, runMigrateToProxiedServer(false, 0, true))
 }
 
 func TestMigrateJournalSidecarRootMismatchFailsClosed(t *testing.T) {
