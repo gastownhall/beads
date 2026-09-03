@@ -26,7 +26,11 @@ import (
 // per-store promise, not a global one: a Reorganization can leave one store
 // still serving an Address that another has moved past.
 //
-// THREE §4a CHOICES THIS FILE MAKES THAT THE ARCHITECTURE DOC DOES NOT PIN:
+// THIS FILE ORIGINALLY MADE THREE §4a CHOICES THE ARCHITECTURE DOC DOES NOT
+// PIN. Two have since DIED — retired by fixes made within this same PR,
+// before merge, in response to review. Kept here, marked DIED, so a reader
+// tracing why RetentionAnswer/RetentionFixture look the way they do does not
+// have to reconstruct the history from git log or PR comments:
 //
 //  1. Remove/Commit's refusal under an active Hold is a typed error,
 //     ErrRetentionHeld, rather than a non-accepted-shaped RetentionAnswer —
@@ -37,24 +41,25 @@ import (
 //     worked" and "the removal happened" look like the same kind of value.
 //     (R17's Refusal reasons about the same tradeoff the other way, because
 //     R17 already had a typed non-error outcome shape to reuse — Remove has
-//     no such sibling shape to reuse here.)
-//  2. ForceRemove's attribution is asserted only for shape, not content:
-//     RetentionAnswer carries no attribution field and this contract adds no
-//     dedicated read-back hook for one, so RunForcingAHeldRemovalRecordsWhoWhenWhy
-//     cannot mechanically verify WHERE who/when/why land — only that
-//     ForceRemove accepts them as real parameters and succeeds despite the
-//     Hold. See that function's own doc comment.
-//  3. AN ADDRESS THAT NO OPERATION HAS TOUCHED RESOLVES RestrictionLive BY
-//     DEFAULT, within the one store a case otherwise uses consistently. The
-//     architecture doc defines what removal, erasure, and reorganization DO
-//     but does not separately spell out the baseline for an address a store
-//     tracks but has not yet acted on. This file reserves RestrictionUnknown
-//     for a DIFFERENT store asked about an Address it has no lineage
-//     relationship with at all (FR-06) — see
+//     no such sibling shape to reuse here.) STILL STANDS.
+//  2. DIED. ForceRemove's attribution used to be asserted only for shape,
+//     not content, because RetentionAnswer carried no attribution field.
+//     RetentionAnswer.Attribution now carries it, and
+//     RunForcingAHeldRemovalRecordsWhoWhenWhy asserts real content — see
+//     that function's own doc comment.
+//  3. DIED. An address that no operation had touched used to resolve
+//     RestrictionLive BY DEFAULT, purely by naming convention — a fabricated
+//     Address, from the retired retentionAddress helper, that no store had
+//     ever actually minted. Every case that needs a real, live Address now
+//     mints one for real via RetentionFixture.Mint (see retentionMint).
+//     RestrictionUnknown for a foreign store (FR-06) is UNCHANGED by this:
 //     RunAStoreWithNoLineageKnowledgeAnswersUnknownNotGone and
-//     RunGoneIsDistinguishableFromUnknown, both of which test the Unknown
-//     case via a second, foreign storeID rather than an untouched address on
-//     the primary one.
+//     RunGoneIsDistinguishableFromUnknown still test the Unknown case via a
+//     second, foreign storeID that genuinely never saw the Address — not via
+//     an untouched-but-fabricated address on the primary one, which is the
+//     part that died. retentionAddress itself survives as the one helper
+//     those two cases still use, precisely because Unknown requires an
+//     Address no store ever minted.
 //
 // EVERY HOOK ON BOTH FIXTURES BELOW IS INDEPENDENTLY NILABLE — see the
 // package-level note in expected_revision_contract.go. Every case
@@ -64,11 +69,27 @@ import (
 type RetentionAnswer struct {
 	Restriction Restriction
 	// RetainedWindow is populated once some Addresses within the lineage
-	// have gone, naming the surviving range (R20-c). Nil means no window
-	// applies (e.g. Restriction is Live or Unknown).
+	// have gone, naming the surviving range (R20-c) — AND, independently,
+	// whenever a Hold is protecting an Address from removal, naming that
+	// Address within the range it protects (R20-h). Nil means neither
+	// applies (e.g. Restriction is Live with no Hold in effect, or
+	// Unknown).
 	RetainedWindow *RetainedWindow
 	// ProducingStore names the store that produced this answer (R20-i).
 	ProducingStore string
+	// Attribution records who, when, and why produced this answer, for the
+	// operations that force their way past an ordinary refusal — currently
+	// just ForceRemove (R20-h2). Nil means this answer did not come from an
+	// attributed forcing operation (e.g. an ordinary Remove/Commit, or a
+	// Live/Unknown answer never touched by one).
+	Attribution *ChangeAttribution
+	// Epoch names the store-epoch generation this answer was evaluated
+	// under, so a caller can tell WHICH epoch a GoneReorganization answer
+	// belongs to, not just that reorganization is why the Address is gone
+	// (R20-n). Nil means this answer did not involve epoch reasoning (e.g.
+	// an ordinary Remove/Commit under R20-a..R20-l, evaluated by a store
+	// with no epoch concept at all).
+	Epoch *int
 }
 
 // RemovalReason is why an Address was removed: R20 requires the three
@@ -146,6 +167,15 @@ type RetentionFixture struct {
 	// hook means this backend has no erasure primitive, and the case that
 	// needs it skips with that reason.
 	Erase func(ctx context.Context, storeID string, address Address, correctedState string, attribution ChangeAttribution) (Address, error)
+
+	// Mint mints a fresh Version for id under storeID, returning its
+	// Address — analogous to EpochFixture.MintUnderEpoch, without an epoch
+	// to peg it to. A nil hook means this backend has no way to mint a
+	// real, resolvable Address to test retention against, and cases that
+	// need one skip with that reason. Replaces the retired convention that
+	// a fabricated, never-minted Address defaults to RestrictionLive (see
+	// this file's package doc comment, formerly §4a choice 3).
+	Mint func(ctx context.Context, storeID, id string) (Address, error)
 }
 
 // RunRemovalLeavesTheAddressAbleToAnswer pins R20-a/b: after a committed
@@ -159,8 +189,11 @@ func RunRemovalLeavesTheAddressAbleToAnswer(t *testing.T, ctx context.Context, f
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "answerable")
-	address := retentionAddress(fixture, "answerable")
+	address := retentionMint(t, ctx, fixture, store, "answerable")
 
 	preview, err := fixture.Remove(ctx, store, address, RemovalReasonRetention)
 	if err != nil {
@@ -191,6 +224,9 @@ func RunRemovalReasonIsRetentionErasureOrReorganizationDistinctly(t *testing.T, 
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "reasons")
 	cases := []struct {
 		reason RemovalReason
@@ -202,7 +238,7 @@ func RunRemovalReasonIsRetentionErasureOrReorganizationDistinctly(t *testing.T, 
 	}
 	seen := map[Restriction]bool{}
 	for _, c := range cases {
-		address := retentionAddress(fixture, "reason-"+c.reason.String())
+		address := retentionMint(t, ctx, fixture, store, "reason-"+c.reason.String())
 		preview, err := fixture.Remove(ctx, store, address, c.reason)
 		if err != nil {
 			t.Fatalf("Remove(%s, reason=%s): %v", address, c.reason, err)
@@ -231,8 +267,11 @@ func RunRemovalReportsTheSurvivingRetainedWindow(t *testing.T, ctx context.Conte
 	if fixture.Remove == nil {
 		t.Skip("this backend has no removal primitive (Remove is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "window")
-	address := retentionAddress(fixture, "window")
+	address := retentionMint(t, ctx, fixture, store, "window")
 
 	preview, err := fixture.Remove(ctx, store, address, RemovalReasonRetention)
 	if err != nil {
@@ -260,9 +299,12 @@ func RunRemovalNeverReassignsASurvivingAddress(t *testing.T, ctx context.Context
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "survivor")
-	removed := retentionAddress(fixture, "survivor-removed")
-	survivor := retentionAddress(fixture, "survivor-kept")
+	removed := retentionMint(t, ctx, fixture, store, "survivor-removed")
+	survivor := retentionMint(t, ctx, fixture, store, "survivor-kept")
 
 	before, err := fixture.Resolve(ctx, store, survivor)
 	if err != nil {
@@ -298,9 +340,12 @@ func RunGoneIsDistinguishableFromUnknown(t *testing.T, ctx context.Context, fixt
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "gonevunknown")
 	strangerStore := retentionStore(fixture, "gonevunknown-stranger")
-	gone := retentionAddress(fixture, "gonevunknown-gone")
+	gone := retentionMint(t, ctx, fixture, store, "gonevunknown-gone")
 
 	preview, err := fixture.Remove(ctx, store, gone, RemovalReasonRetention)
 	if err != nil {
@@ -338,9 +383,12 @@ func RunAnAddressNeverResolvesToADifferentState(t *testing.T, ctx context.Contex
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "nomixup")
-	removedAddr := retentionAddress(fixture, "nomixup-removed")
-	liveAddr := retentionAddress(fixture, "nomixup-live")
+	removedAddr := retentionMint(t, ctx, fixture, store, "nomixup-removed")
+	liveAddr := retentionMint(t, ctx, fixture, store, "nomixup-live")
 
 	preview, err := fixture.Remove(ctx, store, removedAddr, RemovalReasonRetention)
 	if err != nil {
@@ -383,8 +431,11 @@ func RunADestructiveOperationEnumeratesAffectedAddressesFirst(t *testing.T, ctx 
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "enumeratefirst")
-	address := retentionAddress(fixture, "enumeratefirst")
+	address := retentionMint(t, ctx, fixture, store, "enumeratefirst")
 
 	before, err := fixture.Resolve(ctx, store, address)
 	if err != nil {
@@ -410,8 +461,9 @@ func RunADestructiveOperationEnumeratesAffectedAddressesFirst(t *testing.T, ctx 
 }
 
 // RunAHoldPreventsRemovalAndReportsInRetainedBounds pins R20-h: an active
-// Hold makes Remove/Commit refuse, and the Address stays out of any Gone
-// restriction.
+// Hold makes Remove/Commit refuse, AND the held Address must show up
+// positively in the reported RetainedWindow bounds — not merely be inferred
+// from the absence of a Gone restriction.
 //
 // §4a choice 1 (see this file's package doc comment): Commit's refusal is
 // the typed ErrRetentionHeld rather than a non-accepted-shaped
@@ -427,8 +479,11 @@ func RunAHoldPreventsRemovalAndReportsInRetainedBounds(t *testing.T, ctx context
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "held")
-	address := retentionAddress(fixture, "held")
+	address := retentionMint(t, ctx, fixture, store, "held")
 
 	if err := fixture.Hold(ctx, store, address); err != nil {
 		t.Fatalf("Hold(%s): %v", address, err)
@@ -449,19 +504,18 @@ func RunAHoldPreventsRemovalAndReportsInRetainedBounds(t *testing.T, ctx context
 	if answer.Restriction == RestrictionGoneRetention || answer.Restriction == RestrictionGoneErasure || answer.Restriction == RestrictionGoneReorganization {
 		t.Errorf("Resolve(%s) reports %s after Commit was refused for being held, want it to remain out of any Gone restriction", address, answer.Restriction)
 	}
+	if answer.RetainedWindow == nil {
+		t.Fatalf("Resolve(%s) after a refused, held removal reports RetainedWindow = nil, want a populated window: R20-h's promise is that a Hold shows up IN the retained bounds, not merely as an absence of a Gone restriction", address)
+	}
+	if answer.RetainedWindow.LowerBound != address || answer.RetainedWindow.UpperBound != address {
+		t.Errorf("Resolve(%s).RetainedWindow = %+v, want both bounds naming the held Address itself: nothing else was ever minted in this store, so the range the Hold protects is exactly this one Address", address, answer.RetainedWindow)
+	}
 }
 
 // RunForcingAHeldRemovalRecordsWhoWhenWhy pins R20-h2: ForceRemove crosses an
-// active Hold and must record who, when, and why.
-//
-// §4a choice 2 (see this file's package doc comment): RetentionAnswer
-// carries no attribution field and this contract adds no dedicated
-// read-back hook for one, so this case cannot mechanically verify WHERE the
-// attribution and reason land — only that ForceRemove accepts them as real
-// parameters and succeeds despite the Hold. A future revision that adds a
-// read-back hook (mirroring how
-// RunRefusalReportsTheRefusingVersionsChangeAttribution verifies R17's
-// attribution) should tighten this case to assert content, not just shape.
+// active Hold and must record who, when, and why — read back via
+// RetentionAnswer.Attribution, not just accepted as parameters (formerly
+// §4a choice 2, now DIED; see this file's package doc comment).
 func RunForcingAHeldRemovalRecordsWhoWhenWhy(t *testing.T, ctx context.Context, fixture RetentionFixture) {
 	t.Helper()
 	if fixture.Hold == nil {
@@ -470,8 +524,11 @@ func RunForcingAHeldRemovalRecordsWhoWhenWhy(t *testing.T, ctx context.Context, 
 	if fixture.ForceRemove == nil {
 		t.Skip("this backend has no forced-removal primitive (ForceRemove is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "forced")
-	address := retentionAddress(fixture, "forced")
+	address := retentionMint(t, ctx, fixture, store, "forced")
 
 	if err := fixture.Hold(ctx, store, address); err != nil {
 		t.Fatalf("Hold(%s): %v", address, err)
@@ -491,6 +548,12 @@ func RunForcingAHeldRemovalRecordsWhoWhenWhy(t *testing.T, ctx context.Context, 
 	if answer.ProducingStore != store {
 		t.Errorf("ForceRemove(%s).ProducingStore = %q, want %q", address, answer.ProducingStore, store)
 	}
+	if answer.Attribution == nil {
+		t.Fatalf("ForceRemove(%s).Attribution = nil, want the who/when/why recorded for this forced removal (R20-h2)", address)
+	}
+	if !sameAttribution(*answer.Attribution, attribution) {
+		t.Errorf("ForceRemove(%s).Attribution = %+v, want %+v (R20-h2: who/when/why must be recorded, not just accepted as parameters)", address, *answer.Attribution, attribution)
+	}
 }
 
 // RunEveryRetentionAnswerNamesItsProducingStore pins R20-i for both a live
@@ -504,10 +567,13 @@ func RunEveryRetentionAnswerNamesItsProducingStore(t *testing.T, ctx context.Con
 	if fixture.Remove == nil {
 		t.Skip("this backend has no removal primitive (Remove is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	storeA := retentionStore(fixture, "namesA")
 	storeB := retentionStore(fixture, "namesB")
-	liveAddr := retentionAddress(fixture, "names-live")
-	goneAddr := retentionAddress(fixture, "names-gone")
+	liveAddr := retentionMint(t, ctx, fixture, storeA, "names-live")
+	goneAddr := retentionMint(t, ctx, fixture, storeB, "names-gone")
 
 	preview, err := fixture.Remove(ctx, storeB, goneAddr, RemovalReasonRetention)
 	if err != nil {
@@ -566,8 +632,11 @@ func RunAStoreThatRemovesStateStillAnswersGoneDurably(t *testing.T, ctx context.
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "durable")
-	address := retentionAddress(fixture, "durable")
+	address := retentionMint(t, ctx, fixture, store, "durable")
 
 	preview, err := fixture.Remove(ctx, store, address, RemovalReasonErasure)
 	if err != nil {
@@ -605,8 +674,11 @@ func RunErasureMintsACorrectedVersionRatherThanEditingInPlace(t *testing.T, ctx 
 	if fixture.Resolve == nil {
 		t.Skip("this backend does not yet report retention state (Resolve is nil)")
 	}
+	if fixture.Mint == nil {
+		t.Skip("this backend has no way to mint a real Address to test retention against (Mint is nil)")
+	}
 	store := retentionStore(fixture, "erasure")
-	original := retentionAddress(fixture, "erasure-original")
+	original := retentionMint(t, ctx, fixture, store, "erasure-original")
 	actor := "retention-operator"
 	attribution := ChangeAttribution{Actor: &actor, At: time.Now().UTC()}
 
@@ -785,7 +857,8 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 		t.Fatalf("MintUnderEpoch(record-b): %v", err)
 	}
 
-	if _, err := fixture.BumpEpoch(ctx, store, EpochBumpTriggerRestore); err != nil {
+	newEpoch, err := fixture.BumpEpoch(ctx, store, EpochBumpTriggerRestore)
+	if err != nil {
 		t.Fatalf("BumpEpoch: %v", err)
 	}
 
@@ -812,6 +885,11 @@ func RunEpochBumpVoidsOnlyAddressesOfVersionsNoLongerServed(t *testing.T, ctx co
 	}
 	if voidedAnswer.Restriction != RestrictionGoneReorganization {
 		t.Errorf("Resolve(a prior-epoch Address no longer served) = %s, want RestrictionGoneReorganization (R20-n)", voidedAnswer.Restriction)
+	}
+	if voidedAnswer.Epoch == nil {
+		t.Fatal("Resolve(a prior-epoch Address no longer served).Epoch = nil, want the current epoch populated (R20-n: the answer must name the current epoch, not just Restriction alone)")
+	} else if *voidedAnswer.Epoch != newEpoch {
+		t.Errorf("Resolve(a prior-epoch Address no longer served).Epoch = %d, want the current epoch %d", *voidedAnswer.Epoch, newEpoch)
 	}
 
 	keptAnswer, err := fixture.Resolve(ctx, store, stillServed)
@@ -841,13 +919,33 @@ func retentionStore(fixture RetentionFixture, tag string) string {
 }
 
 // retentionAddress builds a fresh, syntactically valid Address namespaced by
-// the fixture's IssuePrefix and tag. RetentionFixture has no hook to mint an
-// Address — Remove, Hold, ForceRemove, and Erase are the only per-Address
-// operations it exposes — so every case names its own Address directly. See
-// this file's package doc comment, §4a choice 3, for the Live/Unknown
-// baseline convention this relies on.
+// the fixture's IssuePrefix and tag, WITHOUT ever giving it to any store.
+// RunAStoreWithNoLineageKnowledgeAnswersUnknownNotGone is the only remaining
+// caller: Unknown specifically means a store with no lineage knowledge of
+// the Address at all (FR-06), so fabricating one that no store has ever
+// seen is the correct construction here, not a shortcut — unlike every
+// other case in this file, which now mints a real Address via
+// fixture.Mint/retentionMint instead of relying on the retired
+// Live-baseline convention (see this file's package doc comment, formerly
+// §4a choice 3).
 func retentionAddress(fixture RetentionFixture, tag string) Address {
 	return Address(fixture.IssuePrefix + "-retention-address-" + tag)
+}
+
+// retentionMint mints a fresh Address for tag on store via fixture.Mint,
+// fataling the case if minting fails — analogous to how
+// EpochFixture.MintUnderEpoch is called directly in this file's Epoch
+// cases, without its own wrapper. Cases use this in place of the retired
+// retentionAddress convention (formerly §4a choice 3, now DIED — see this
+// file's package doc comment) for any Address that must resolve as a real,
+// store-established Version.
+func retentionMint(t *testing.T, ctx context.Context, fixture RetentionFixture, store, tag string) Address {
+	t.Helper()
+	address, err := fixture.Mint(ctx, store, tag)
+	if err != nil {
+		t.Fatalf("Mint(%s, %s): %v", store, tag, err)
+	}
+	return address
 }
 
 // epochStore names a storeID namespaced by the fixture's IssuePrefix and tag.
@@ -861,7 +959,23 @@ func epochStore(fixture EpochFixture, tag string) string {
 func sameRetentionAnswer(a, b RetentionAnswer) bool {
 	return a.Restriction == b.Restriction &&
 		a.ProducingStore == b.ProducingStore &&
-		sameRetainedWindow(a.RetainedWindow, b.RetainedWindow)
+		sameRetainedWindow(a.RetainedWindow, b.RetainedWindow) &&
+		sameAttributionPtr(a.Attribution, b.Attribution) &&
+		sameIntPtr(a.Epoch, b.Epoch)
+}
+
+func sameAttributionPtr(a, b *ChangeAttribution) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return sameAttribution(*a, *b)
+}
+
+func sameIntPtr(a, b *int) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return *a == *b
 }
 
 func sameRetainedWindow(a, b *RetainedWindow) bool {

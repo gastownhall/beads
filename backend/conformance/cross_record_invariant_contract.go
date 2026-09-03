@@ -153,12 +153,40 @@ func RunStoreInvariantTransactionScopesExactlyTheSpanningRecords(t *testing.T, c
 		{ID: fixture.IssuePrefix + "-crossrec-scope-a", Patch: map[string]any{"alias": shared}},
 		{ID: fixture.IssuePrefix + "-crossrec-scope-b", Patch: map[string]any{"alias": shared}},
 	}
+
+	var beforeA, beforeB int
+	if fixture.CountHistoryForSubject != nil {
+		var err error
+		beforeA, err = fixture.CountHistoryForSubject(ctx, spanning[0].ID)
+		if err != nil {
+			t.Fatalf("CountHistoryForSubject(%s) before the refused batch: %v", spanning[0].ID, err)
+		}
+		beforeB, err = fixture.CountHistoryForSubject(ctx, spanning[1].ID)
+		if err != nil {
+			t.Fatalf("CountHistoryForSubject(%s) before the refused batch: %v", spanning[1].ID, err)
+		}
+	}
+
 	result, err := fixture.EnforceCrossRecordInvariant(ctx, spanning)
 	if err != nil {
 		t.Fatalf("EnforceCrossRecordInvariant(spanning): %v", err)
 	}
 	if result.Accepted {
 		t.Fatal("EnforceCrossRecordInvariant accepted two writes that jointly violate the shared-alias invariant")
+	}
+
+	if fixture.CountHistoryForSubject != nil {
+		afterA, err := fixture.CountHistoryForSubject(ctx, spanning[0].ID)
+		if err != nil {
+			t.Fatalf("CountHistoryForSubject(%s) after the refused batch: %v", spanning[0].ID, err)
+		}
+		afterB, err := fixture.CountHistoryForSubject(ctx, spanning[1].ID)
+		if err != nil {
+			t.Fatalf("CountHistoryForSubject(%s) after the refused batch: %v", spanning[1].ID, err)
+		}
+		if afterA != beforeA || afterB != beforeB {
+			t.Errorf("a refused batch left a trace: history count for %s went %d->%d, for %s went %d->%d; a refusal must be atomic — the whole batch takes no effect, not just the record that individually triggered it", spanning[0].ID, beforeA, afterA, spanning[1].ID, beforeB, afterB)
+		}
 	}
 
 	unrelated := []RecordWrite{
