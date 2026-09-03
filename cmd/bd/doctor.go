@@ -899,6 +899,11 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, cloneLocalFKCheck)
 	// Don't fail overall check for severed clone-local FKs, just warn
 
+	// Check 21a: Orphaned child counters (twin gap to orphaned deps, #4539)
+	orphanedChildCountersCheck := convertDoctorCheck(doctor.CheckOrphanedChildCounters(path))
+	result.Checks = append(result.Checks, orphanedChildCountersCheck)
+	// Don't fail overall check for orphaned child counters, just warn
+
 	// Check 22a: Child→parent dependencies (anti-pattern)
 	childParentDepsCheck := convertDoctorCheck(doctor.CheckChildParentDependencies(path))
 	result.Checks = append(result.Checks, childParentDepsCheck)
