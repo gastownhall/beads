@@ -351,3 +351,35 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 		}
 	}
 }
+
+func TestMigrateDoltModeFrontDoorMalformedStateRefuses(t *testing.T) {
+	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
+		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
+	}
+	bd := migrationFrontDoorBinary(t)
+	for _, tc := range []struct {
+		name string
+		file string
+		body string
+	}{
+		{"metadata", "metadata.json", "{malformed"},
+		{"journal", migrateJournalFileName, "{malformed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, home := t.TempDir(), t.TempDir()
+			env := migrationFrontDoorEnv(home)
+			beadsDir := filepath.Join(dir, ".beads")
+			require.NoError(t, os.MkdirAll(beadsDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, tc.file), []byte(tc.body), 0o600))
+			before := snapshotMigrationTree(t, beadsDir)
+			out, err := runBDExecWithBinary(t, bd, dir, env, "--json", "migrate", "from-proxied-server-to-server")
+			require.Error(t, err)
+			exitErr, ok := err.(*exec.ExitError)
+			require.True(t, ok)
+			require.Equal(t, 1, exitErr.ExitCode())
+			require.NoError(t, json.Unmarshal([]byte(out), &map[string]any{}), out)
+			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+		})
+	}
+}
