@@ -301,6 +301,8 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 						mode = target
 					}
 					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(fmt.Sprintf(`{"database":"myproj","backend":"dolt","dolt_mode":%q}`, mode)), 0o600))
+					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version), 0o600))
+					require.NoError(t, os.Chmod(beadsDir, 0o700))
 					ext := map[string]any{"host": "db.example", "port": 3307}
 					if unix {
 						ext = map[string]any{"socket": "/tmp/beads-front-door.sock"}
@@ -312,6 +314,9 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 					tree := snapshotMigrationTree(t, beadsDir)
 					out, err := runBDExecWithBinary(t, bd, dir, env, append([]string{"--json", "migrate"}, command...)...)
 					require.Error(t, err)
+					exitErr, ok := err.(*exec.ExitError)
+					require.True(t, ok)
+					require.Equal(t, 1, exitErr.ExitCode())
 					var payload map[string]any
 					require.NoError(t, json.Unmarshal([]byte(out), &payload), out)
 					if data, ok := payload["data"].(map[string]any); ok {
@@ -319,7 +324,19 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 					}
 					assert.Equal(t, "proxy.migrate.external_endpoint", payload["code"])
 					assert.Equal(t, false, payload["mutates"])
+					assert.Contains(t, payload["error"], "externally hosted proxied Dolt endpoint")
 					assert.Equal(t, tree, snapshotMigrationTree(t, beadsDir))
+					for _, p := range append([]string{migrateLockFileName, "dolt.gate.lock"}, serverAssetNames()...) {
+						_, statErr := os.Stat(filepath.Join(beadsDir, p))
+						assert.True(t, os.IsNotExist(statErr), "unexpected artifact %s", p)
+					}
+					for _, p := range proxiedAssetNames() {
+						_, statErr := os.Stat(filepath.Join(root, p))
+						assert.True(t, os.IsNotExist(statErr), "unexpected proxy artifact %s", p)
+					}
+					probe := exec.Command("pgrep", "-af", "[d]b-proxy-child --root "+root)
+					processOut, probeErr := probe.CombinedOutput()
+					assert.True(t, probeErr != nil || len(strings.TrimSpace(string(processOut))) == 0, "proxy process started: %s", processOut)
 				})
 			}
 		}
