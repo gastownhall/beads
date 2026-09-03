@@ -466,7 +466,7 @@ func TestInitGuardServerMessage_DiagnosticsBeforeForce(t *testing.T) {
 // GH#2433's fresh-clone case (whose fixture carries no project_id — see
 // TestInitGuard_FreshCloneWithMetadataJSON above). init must refuse and
 // point at bd bootstrap, not silently recreate an empty database on the
-// server (mirrors scripts/repro-bd-init-recreates-empty-db.sh step 4).
+// server (the missing-database state that reproduced the 2026-08-11 loss).
 func TestInitGuard_ExistingProjectMissingServerDB_Refuses(t *testing.T) {
 	testutil.RequireDoltBinary(t)
 
@@ -628,6 +628,57 @@ func TestInitGuard_ExistingProjectMissingServerDB_RecreateMissingAllows(t *testi
 			t.Fatalf("existing project with --recreate-missing must permit init to proceed even when the server is unreachable, got refusal: %v", err)
 		}
 	})
+}
+
+// TestInitGuard_UnreachableServerRefuses covers the second guard site — server
+// unreachable, or errored while checking — on the REFUSE side.
+//
+// Review of PR #5791, item 2: the PR claimed
+// TestInitGuard_ExistingProjectMissingServerDB_Refuses covered both the
+// reachable-but-missing and the server-unreachable cases, but that test starts
+// a live server, so it only ever exercises the first. The unreachable site had
+// coverage only on the permit side (the BEADS_DOLT_SERVER_PORT=1 subtest of
+// _RecreateMissingAllows), which would not notice if the refusal there were
+// dropped. Needs no Dolt binary: port 1 is unreachable by construction.
+func TestInitGuard_UnreachableServerRefuses(t *testing.T) {
+	oldAllow := initAllowRecreateMissing
+	initAllowRecreateMissing = false
+	defer func() { initAllowRecreateMissing = oldAllow }()
+
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata := map[string]interface{}{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "myproject",
+		"project_id":    "existing-0000-1111-2222-333344445555",
+	}
+	data, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := checkExistingBeadsDataAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("existing project whose server could not be reached must refuse init, got nil error")
+	}
+	if !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("expected the missing-database refusal, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "bd backup restore") {
+		t.Errorf("message must name a recovery path, got:\n%s", err)
+	}
 }
 
 // TestInitGuard_ReinitLocalDoesNotBypassMissingServerDB is the review's item 1.
