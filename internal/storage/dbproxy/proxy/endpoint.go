@@ -632,24 +632,16 @@ func readAndDial(rootDir string) adoptionResult {
 		}
 	}
 
+	// The authenticated identity reply above IS the liveness proof. Do not
+	// add a dial-and-close TCP probe of the data port here: the proxy dials
+	// its backend for every accepted client connection BEFORE any bytes flow
+	// (handleConn), so a zero-byte probe costs the shared dolt server a full
+	// MySQL session on every bd invocation while proving nothing the control
+	// port did not — ListenAndServe binds the data listener before the
+	// control listener exists, so an identity reply carrying this DataPort
+	// already implies the data listener is bound (wy-s8ytnw).
 	ep := Endpoint{Host: "127.0.0.1", Port: pf.Port}
-	if !probePort(ep, identityProbeTimeout) {
-		return adoptionResult{
-			status:  adoptionIdentityMismatch,
-			pidfile: pf,
-			err:     fmt.Errorf("authenticated proxy data port %d is not accepting connections", pf.Port),
-		}
-	}
 	return adoptionResult{status: adoptionAdopted, endpoint: ep, pidfile: pf}
-}
-
-func probePort(ep Endpoint, timeout time.Duration) bool {
-	conn, err := net.DialTimeout("tcp", ep.Address(), timeout)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
 }
 
 func isMalformedPIDFileError(err error) bool {

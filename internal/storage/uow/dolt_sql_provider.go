@@ -390,19 +390,49 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 }
 
 func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUser, rootPassword, tlsConfigName string, teamServer bool, expectedProjectID string, opts providerOptions) (UnitOfWorkProvider, error) {
+	newProvider := func(pool *sql.DB) *doltSQLProvider {
+		return &doltSQLProvider{
+			defaultBranch:     defaultBranch,
+			db:                pool,
+			serverEndpoint:    "tcp:" + ep.Address(),
+			teamServer:        teamServer,
+			expectedProjectID: expectedProjectID,
+			preview:           opts.preview,
+		}
+	}
+
+	// Fast path (wy-s8ytnw): connect straight to the target database. A
+	// successful connect IS the existence proof (the same reasoning the
+	// dolt store applies to Gateway servers), so the steady-state open —
+	// a database that already exists, which is every open but the very
+	// first — costs ONE MySQL session instead of two: initSchema runs on
+	// this pool (USE + the converged-schema reads, or a real migration
+	// when one is pending; the bare CREATE DATABASE inside the locked
+	// preparation is refused with 1007 exactly as it is on a no-database
+	// connection, so `created` stays false and fresh-bootstrap heal can
+	// never be armed by a database this call did not create), and the
+	// same pool is then handed to the provider. Nothing in the migration
+	// path mutates session state, so reusing its pool is safe.
+	//
+	// Any connect failure — the database does not exist yet (1049), the
+	// server is down, bad credentials — falls through to the historical
+	// no-database init connection, which owns creation, the ownership
+	// signal, and every error message callers already match on.
+	if dbConn, err := openDB(ctx, buildDSN(ep, database, rootUser, rootPassword, tlsConfigName)); err == nil {
+		provider := newProvider(dbConn)
+		if err := provider.initSchema(ctx, database); err != nil {
+			_ = dbConn.Close()
+			return nil, fmt.Errorf("uow: init schema: %w", err)
+		}
+		return provider, nil
+	}
+
 	initDB, err := openDB(ctx, buildDSN(ep, "", rootUser, rootPassword, tlsConfigName))
 	if err != nil {
 		return nil, err
 	}
 
-	initProvider := &doltSQLProvider{
-		defaultBranch:     defaultBranch,
-		db:                initDB,
-		serverEndpoint:    "tcp:" + ep.Address(),
-		teamServer:        teamServer,
-		expectedProjectID: expectedProjectID,
-		preview:           opts.preview,
-	}
+	initProvider := newProvider(initDB)
 
 	if err := initProvider.initSchema(ctx, database); err != nil {
 		_ = initDB.Close()
@@ -418,12 +448,5 @@ func openAndInitSchema(ctx context.Context, ep proxy.Endpoint, database, rootUse
 		return nil, err
 	}
 
-	return &doltSQLProvider{
-		defaultBranch:     defaultBranch,
-		db:                dbConn,
-		serverEndpoint:    "tcp:" + ep.Address(),
-		teamServer:        teamServer,
-		expectedProjectID: expectedProjectID,
-		preview:           opts.preview,
-	}, nil
+	return newProvider(dbConn), nil
 }
