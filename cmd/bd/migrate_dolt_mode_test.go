@@ -258,6 +258,17 @@ func TestMigrateSharedToProxiedServer_RootsAtSharedDir(t *testing.T) {
 	assert.NotContains(t, string(body), "shared-server: true", "dolt.shared-server must be turned off")
 }
 
+func TestMigrateSharedToProxiedServer_DryRunDoesNotCreateRoot(t *testing.T) {
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
+	require.NoError(t, runMigrateToProxiedServer(true, 0, true))
+	_, err := os.Stat(filepath.Join(sharedDir, "dolt"))
+	assert.True(t, os.IsNotExist(err), "dry-run must not create shared root")
+}
+
 func TestMigrateToProxiedServer_RejectsSharedRepo(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 	migrateModeWorkspace(t, configfile.DoltModeServer)
@@ -289,6 +300,17 @@ func TestMigrateProxiedToSharedServer_Reverse(t *testing.T) {
 
 	body, _ := os.ReadFile(filepath.Join(beadsDir, "config.yaml"))
 	assert.Contains(t, string(body), "shared-server: true", "dolt.shared-server must be re-enabled")
+}
+
+func TestMigrateProxiedToSharedServer_DryRunDoesNotCreateRoot(t *testing.T) {
+	sharedDir := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	sharedDolt := filepath.Join(sharedDir, "dolt")
+	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: sharedDolt}))
+	require.NoError(t, runMigrateFromProxiedServer(true, true))
+	_, err := os.Stat(sharedDolt)
+	assert.True(t, os.IsNotExist(err), "dry-run must not create shared root")
 }
 
 func TestMigrateFromProxiedToServer_RejectsSharedRooted(t *testing.T) {

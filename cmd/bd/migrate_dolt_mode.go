@@ -216,7 +216,7 @@ func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, 
 	canonical := doltserver.DoltDirPath(beadsDir)
 	if shared {
 		var err error
-		canonical, err = doltserver.SharedDoltDir()
+		canonical, err = doltserver.SharedDoltPath()
 		if err != nil {
 			return fmt.Errorf("resolve shared Dolt root: %w", err)
 		}
@@ -506,7 +506,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		if !doltserver.IsSharedServerMode() {
 			return HandleError("repo is not in shared-server mode; this command only migrates shared-server repos")
 		}
-		rootPath, err = doltserver.SharedDoltDir()
+		rootPath, err = doltserver.SharedDoltPath()
 		if err != nil {
 			return HandleError("failed to resolve shared dolt directory: %v", err)
 		}
@@ -745,7 +745,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		}
 	}
 
-	sharedDolt, sharedErr := doltserver.SharedDoltDir()
+	sharedDolt, sharedErr := doltserver.SharedDoltPath()
 	if shared {
 		if sharedErr != nil {
 			return HandleError("failed to resolve shared dolt directory: %v", sharedErr)
