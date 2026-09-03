@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,24 @@ import (
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/util"
 )
+
+func snapshotMigrationTree(t *testing.T, roots ...string) map[string][]byte {
+	t.Helper()
+	out := map[string][]byte{}
+	for _, root := range roots {
+		_ = filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
+			if strings.HasSuffix(path, ".gate.lock") || strings.HasSuffix(path, migrateLockFileName) {
+				return nil
+			}
+			if err == nil && info.Mode().IsRegular() {
+				b, _ := os.ReadFile(path)
+				out[path] = b
+			}
+			return nil
+		})
+	}
+	return out
+}
 
 func migrateModeWorkspace(t *testing.T, mode string) string {
 	t.Helper()
@@ -490,6 +509,7 @@ func TestMigrateExternalJournalAlwaysFailsClosed_TCPAndUnixForwardReverse(t *tes
 					b, err := json.Marshal(j)
 					require.NoError(t, err)
 					require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+					treeBefore := snapshotMigrationTree(t, beadsDir, root)
 					before, _ := os.ReadFile(configfile.ConfigPath(beadsDir))
 					if reverse {
 						want = configfile.DoltModeProxiedServer
@@ -503,6 +523,7 @@ func TestMigrateExternalJournalAlwaysFailsClosed_TCPAndUnixForwardReverse(t *tes
 					assert.Equal(t, before, after)
 					cfg, _ := configfile.Load(beadsDir)
 					assert.Equal(t, want, cfg.GetDoltMode())
+					assert.Equal(t, treeBefore, snapshotMigrationTree(t, beadsDir, root))
 				})
 			}
 		}
