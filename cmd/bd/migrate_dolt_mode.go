@@ -427,10 +427,10 @@ func migrateModeBeadsDir() (string, error) {
 func loadMigrateModeConfig(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		return nil, HandleError("failed to load config: %v", err)
+		return nil, HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("failed to load config: %v", err), ExitCode: 1, Mutates: false})
 	}
 	if cfg == nil {
-		return nil, HandleError("no beads database found in %s — run 'bd init' first", beadsDir)
+		return nil, HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("no beads database found in %s — run 'bd init' first", beadsDir), ExitCode: 1, Mutates: false})
 	}
 	return cfg, nil
 }
