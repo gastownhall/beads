@@ -63,7 +63,6 @@ Examples:
 func init() {
 	preflightCmd.Flags().Bool("check", false, "Run checks automatically")
 	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash, version sync)")
-	preflightCmd.Flags().Bool("json", false, "Output results as JSON")
 	preflightCmd.Flags().Bool("skip-lint", false, "Skip lint check explicitly")
 
 	rootCmd.AddCommand(preflightCmd)
@@ -79,7 +78,6 @@ func runPreflight(cmd *cobra.Command, args []string) error {
 
 	check, _ := cmd.Flags().GetBool("check")
 	fix, _ := cmd.Flags().GetBool("fix")
-	jsonOutput, _ := cmd.Flags().GetBool("json")
 	skipLint, _ := cmd.Flags().GetBool("skip-lint")
 
 	if fix {
