@@ -134,7 +134,25 @@ func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 	// reason as 1/2/2b: a runtime env var beats stale persisted metadata.
 	//
 	// Skipped when honorPortEnv is false — see resolveServerModeIgnoringPortEnv.
-	if honorPortEnv && doltServerPortFromEnv() > 0 {
+	//
+	// Proxied-server workspaces are exempt, for the same reason 2b exempts
+	// them (configfile.HostImpliesServerMode): a proxied workspace reaches
+	// its server through the proxy, so an ambient port var does not describe
+	// its lifecycle and must not reclassify it external. Our own constellation
+	// runs dolt_mode: proxied-server with BEADS_DOLT_SERVER_PORT set, so this
+	// is the live configuration, not a hypothetical one.
+	//
+	// The remaining HostImpliesServerMode guard -- "any explicit non-empty
+	// DoltMode suppresses inference" -- is deliberately NOT mirrored here:
+	// TestResolveServerMode_EnvPortOverridesStaleEmbedded pins the opposite
+	// for dolt_mode=embedded (GH#2949: a runtime env var beats stale
+	// persisted metadata). That asymmetry is a real, unresolved precedence
+	// question rather than an oversight -- configfile.IsDoltServerMode has no
+	// port check at all, so the two resolvers disagree for
+	// dolt_mode=embedded + port env. Tracked separately; see the PR
+	// discussion for be-lbnk8.
+	if honorPortEnv && !strings.EqualFold(hostCfg.DoltMode, configfile.DoltModeProxiedServer) &&
+		doltServerPortFromEnv() > 0 {
 		return ServerModeExternal
 	}
 
