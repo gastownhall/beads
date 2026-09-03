@@ -54,6 +54,8 @@ func restoreRootFlagState(t *testing.T, state map[string]flagSnapshot) {
 func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("BD_ACTOR", "")
 
 	callerDir := t.TempDir()
 	callerBeadsDir := filepath.Join(callerDir, ".beads")
@@ -134,6 +136,8 @@ func TestPrepareSelectedCommandContext_RebindsTargetConfig(t *testing.T) {
 func TestPrepareSelectedCommandContext_DoesNotMergeCallerConfigForUnsetKeys(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_ACTOR", "")
+	t.Setenv("BD_ACTOR", "")
 
 	root := t.TempDir()
 	callerDir := filepath.Join(root, "caller")

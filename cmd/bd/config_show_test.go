@@ -283,6 +283,7 @@ func TestCollectViperEntriesWithEnvOverride(t *testing.T) {
 	}
 	defer os.Chdir(origDir) //nolint:errcheck
 
+	t.Setenv("BEADS_ACTOR", "")
 	t.Setenv("BD_ACTOR", "env-bot")
 	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
 	config.ResetForTesting()
