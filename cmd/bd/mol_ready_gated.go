@@ -113,9 +113,18 @@ func renderGatedReadyMolecules(molecules []*GatedMolecule) error {
 		fmt.Println()
 	}
 
-	fmt.Println("To dispatch a molecule:")
-	fmt.Println("  bd sling <agent> --mol <molecule-id>")
+	fmt.Println("To dispatch a molecule, assign its ready step to an agent:")
+	fmt.Printf("  bd assign %s <agent>\n", firstReadyStepID(molecules))
 	return nil
+}
+
+func firstReadyStepID(molecules []*GatedMolecule) string {
+	for _, mol := range molecules {
+		if mol.ReadyStep != nil && mol.ReadyStep.ID != "" {
+			return mol.ReadyStep.ID
+		}
+	}
+	return "<ready-step-id>"
 }
 
 // findGateReadyMolecules finds molecules where a gate has closed and work can resume.
