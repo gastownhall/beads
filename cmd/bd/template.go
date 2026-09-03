@@ -340,14 +340,31 @@ func isHandlebarsKeyword(name string) bool {
 	}
 }
 
-// extractAllVariables finds all variables across the entire subgraph
+// extractAllVariables finds all variables across the entire subgraph.
+//
+// The fields scanned here must stay in sync with the fields cloneSubgraphInto
+// substitutes - a var that pour resolves but never demands leaves a silent
+// literal placeholder in the poured bead, and a var it demands but never
+// resolves is a closed loop that fails the pour for nothing (GH#5110,
+// GH#5754).
 func extractAllVariables(subgraph *TemplateSubgraph) []string {
-	allText := ""
-	for _, issue := range subgraph.Issues {
-		allText += issue.Title + " " + issue.Description + " "
-		allText += issue.Design + " " + issue.AcceptanceCriteria + " " + issue.Notes + " "
+	var sb strings.Builder
+	write := func(parts ...string) {
+		for _, p := range parts {
+			if p == "" {
+				continue
+			}
+			sb.WriteString(p)
+			sb.WriteByte(' ')
+		}
 	}
-	return extractVariables(allText)
+	for _, issue := range subgraph.Issues {
+		write(issue.Title, issue.Description, issue.Design, issue.AcceptanceCriteria, issue.Notes)
+		write(issue.Assignee, issue.AwaitID)
+		write(issue.Labels...)
+		write(metadataVarStrings(issue.Metadata)...)
+	}
+	return extractVariables(sb.String())
 }
 
 // extractRequiredVariables returns only variables that don't have defaults.
@@ -415,64 +432,156 @@ func substituteVariables(text string, vars map[string]string) string {
 	})
 }
 
-// substituteMetadataRepo substitutes {{variable}} placeholders in an issue's
-// metadata.repo value (SF2 follow-up). A formula gate step's `repo` selector
-// (e.g. repo = "{{gate_repo}}") is stored literally on the persisted proto's
-// metadata by createGateIssue/persistCookFormula - `bd cook --persist` keeps
-// the proto reusable across pours rather than substituting at compile time.
-// Substitution instead needs to happen at the same point as every other
-// var-bearing issue field (Title, Description, AwaitID, ...): here, in
+// maxMetadataSubstitutionDepth bounds the recursion in substituteJSONVars.
+// Metadata is arbitrary JSON that can arrive from an untrusted proto, and a
+// deeply nested value must not blow the stack.
+const maxMetadataSubstitutionDepth = 32
+
+// substituteMetadataVars substitutes {{variable}} placeholders in every string
+// value of an issue's metadata, at any nesting depth.
+//
+// Formula step metadata (`[steps.metadata]`) and a gate step's `repo` selector
+// (repo = "{{gate_repo}}") are stored literally on the persisted proto by
+// processStepToIssue/createGateIssue - `bd cook --persist` keeps the proto
+// reusable across pours rather than substituting at compile time. Substitution
+// instead happens at the same point as every other var-bearing issue field
+// (Title, Description, Assignee, Labels, AwaitID, ...): here, in
 // cloneSubgraphInto, when a proto is poured/spawned into real issues.
 //
-// Restricted to gh:* gate types (SF4), matching createGateIssue's write-side
-// rule: `repo` on a human/timer/bead gate is unrelated, ordinary metadata,
-// not a GitHub repo selector, so it must not be touched here either.
+// This supersedes the earlier gh:*-gate-only, top-level-"repo"-only rule
+// (SF2/SF4). That restriction existed because interpreting a `repo` key as a
+// GitHub selector is only correct on a gh:* gate - but substituting a
+// {{var}} placeholder interprets nothing about the key, and general metadata
+// carrying literal placeholders was its own bug (GH#5110). A value with no
+// placeholder is unaffected either way.
 //
-// Metadata is arbitrary JSON on any issue, so this only touches a top-level
-// string-valued "repo" key; anything else (missing key, non-object, non-
-// string value) is left untouched for githubRepoFromIssue to validate at
-// check time. The round-trip unmarshals into map[string]json.RawMessage
-// rather than map[string]interface{} and replaces only the "repo" entry, so
-// every OTHER key's value survives byte-identical - interface{} would
-// mangle numbers to float64, and a full re-marshal of decoded values can
-// reshuffle nested object keys and HTML-escape strings that were never
-// touched.
-func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map[string]string) json.RawMessage {
-	if len(metadata) == 0 || !isGitHubGateType(awaitType) {
+// The walk decodes into json.RawMessage rather than interface{} and rebuilds
+// only the containers along a changed path, so every untouched value survives
+// byte-identical - interface{} would mangle numbers to float64, and a full
+// re-marshal of decoded values can HTML-escape strings that were never
+// touched. Metadata with no substitutable placeholder is returned as-is.
+func substituteMetadataVars(metadata json.RawMessage, vars map[string]string) json.RawMessage {
+	if len(metadata) == 0 {
 		return metadata
 	}
-
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(metadata, &raw); err != nil {
+	out, changed := walkJSONStrings(metadata, 0, func(s string) string {
+		return substituteVariables(s, vars)
+	})
+	if !changed {
 		return metadata
 	}
+	return out
+}
 
-	repoRaw, hasRepo := raw["repo"]
-	if !hasRepo {
-		return metadata
+// metadataVarStrings returns every string leaf in an issue's metadata, for
+// variable extraction. Object keys are excluded because substitution does not
+// touch them - scanning them would make pour demand a variable it then refuses
+// to resolve.
+func metadataVarStrings(metadata json.RawMessage) []string {
+	if len(metadata) == 0 {
+		return nil
+	}
+	var found []string
+	walkJSONStrings(metadata, 0, func(s string) string {
+		found = append(found, s)
+		return s
+	})
+	return found
+}
+
+// walkJSONStrings applies fn to every string leaf of a JSON value, at any
+// nesting depth. It reports whether fn changed anything; when nothing did, the
+// input bytes are returned untouched.
+//
+// Object keys are deliberately left alone: rewriting a key could collide with
+// a sibling key and silently drop a value.
+func walkJSONStrings(raw json.RawMessage, depth int, fn func(string) string) (json.RawMessage, bool) {
+	trimmed := bytes.TrimLeft(raw, " \t\r\n")
+	if len(trimmed) == 0 {
+		return raw, false
 	}
 
-	var repoStr string
-	if err := json.Unmarshal(repoRaw, &repoStr); err != nil {
-		// Non-string (e.g. null) repo value: leave untouched for
-		// githubRepoFromIssue to reject at check time.
-		return metadata
+	switch trimmed[0] {
+	case '"':
+		var s string
+		if err := json.Unmarshal(raw, &s); err != nil {
+			return raw, false
+		}
+		replaced := fn(s)
+		if replaced == s {
+			return raw, false
+		}
+		encoded, err := marshalNoHTMLEscape(replaced)
+		if err != nil {
+			return raw, false
+		}
+		return encoded, true
+
+	case '{':
+		if depth >= maxMetadataSubstitutionDepth {
+			return raw, false
+		}
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return raw, false
+		}
+		changed := false
+		for k, v := range obj {
+			if newV, c := walkJSONStrings(v, depth+1, fn); c {
+				obj[k] = newV
+				changed = true
+			}
+		}
+		if !changed {
+			return raw, false
+		}
+		out, err := marshalNoHTMLEscape(obj)
+		if err != nil {
+			return raw, false
+		}
+		return out, true
+
+	case '[':
+		if depth >= maxMetadataSubstitutionDepth {
+			return raw, false
+		}
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err != nil {
+			return raw, false
+		}
+		changed := false
+		for i, v := range arr {
+			if newV, c := walkJSONStrings(v, depth+1, fn); c {
+				arr[i] = newV
+				changed = true
+			}
+		}
+		if !changed {
+			return raw, false
+		}
+		out, err := marshalNoHTMLEscape(arr)
+		if err != nil {
+			return raw, false
+		}
+		return out, true
 	}
 
-	substituted := substituteVariables(repoStr, vars)
-	if substituted == repoStr {
-		return metadata
-	}
+	// Number, bool, null: no string leaf here.
+	return raw, false
+}
 
-	substitutedJSON, err := marshalNoHTMLEscape(substituted)
-	if err != nil {
-		return metadata
+// substituteLabels returns labels with {{variable}} placeholders substituted.
+// A formula step's labels are carried onto the proto literally by
+// processStepToIssue, so - like Title and Description - they resolve here, at
+// pour time (GH#5110). Returns nil for an empty input so an issue with no
+// labels keeps a nil slice.
+func substituteLabels(labels []string, vars map[string]string) []string {
+	if len(labels) == 0 {
+		return nil
 	}
-	raw["repo"] = substitutedJSON
-
-	out, err := marshalNoHTMLEscape(raw)
-	if err != nil {
-		return metadata
+	out := make([]string, len(labels))
+	for i, l := range labels {
+		out[i] = substituteVariables(l, vars)
 	}
 	return out
 }
@@ -480,7 +589,7 @@ func substituteMetadataRepo(metadata json.RawMessage, awaitType string, vars map
 // marshalNoHTMLEscape is json.Marshal without HTML-escaping '<', '>', and
 // '&' - the stdlib's json.Marshal escapes them by default (aimed at
 // embedding JSON in HTML), which would silently corrupt an unrelated
-// metadata value round-tripped through substituteMetadataRepo.
+// metadata value round-tripped through substituteMetadataVars.
 func marshalNoHTMLEscape(v interface{}) (json.RawMessage, error) {
 	var buf bytes.Buffer
 	enc := json.NewEncoder(&buf)
@@ -678,8 +787,13 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 		if opts.RootOnly && oldIssue.ID != subgraph.Root.ID {
 			continue
 		}
-		// Determine assignee: use override for root epic, otherwise keep template's
-		issueAssignee := oldIssue.Assignee
+		// Determine assignee: use override for root epic, otherwise substitute
+		// the template's. Step.assignee is documented as supporting
+		// substitution, and an unsubstituted one is worse than cosmetic - it
+		// makes the poured bead unclosable, because close refuses when the
+		// actor doesn't match the assignee (GH#5754). The --assignee override
+		// is a literal value supplied on the command line, so it wins as-is.
+		issueAssignee := substituteVariables(oldIssue.Assignee, opts.Vars)
 		if oldIssue.ID == subgraph.Root.ID && opts.Assignee != "" {
 			issueAssignee = opts.Assignee
 		}
@@ -702,8 +816,8 @@ func cloneSubgraphInto(ctx context.Context, w molWriter, subgraph *TemplateSubgr
 			AwaitType: oldIssue.AwaitType,
 			AwaitID:   substituteVariables(oldIssue.AwaitID, opts.Vars),
 			Timeout:   oldIssue.Timeout,
-			Labels:    oldIssue.Labels,
-			Metadata:  substituteMetadataRepo(oldIssue.Metadata, oldIssue.AwaitType, opts.Vars),
+			Labels:    substituteLabels(oldIssue.Labels, opts.Vars),
+			Metadata:  substituteMetadataVars(oldIssue.Metadata, opts.Vars),
 			CreatedAt: time.Now(),
 			UpdatedAt: time.Now(),
 		}

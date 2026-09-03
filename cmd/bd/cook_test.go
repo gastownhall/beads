@@ -302,6 +302,69 @@ func TestSubstituteFormulaVars_GateFields(t *testing.T) {
 	}
 }
 
+// TestSubstituteStepVars_LabelsAssigneeMetadata covers GH#5110 and GH#5754:
+// runtime-mode cook substituted Title/Description/Notes/Gate but left labels,
+// assignee, and metadata literal, so `bd cook --mode runtime` emitted (and
+// `--persist` stored) placeholders that no later step ever resolved.
+func TestSubstituteStepVars_LabelsAssigneeMetadata(t *testing.T) {
+	steps := []*formula.Step{
+		{
+			ID:       "qa-contract",
+			Title:    "API-contract QA: {{widget_id}}",
+			Assignee: "{{agent}}",
+			Labels:   []string{"qa-run", "widget:{{widget_id}}", "domain:{{domain}}"},
+			Metadata: map[string]interface{}{
+				"ado_id": "{{ado_id}}",
+				"count":  int64(3),
+				"nested": map[string]interface{}{"k": "{{domain}}"},
+				"list":   []interface{}{"{{domain}}", "static"},
+			},
+			Children: []*formula.Step{
+				{ID: "child", Assignee: "{{agent}}", Labels: []string{"widget:{{widget_id}}"}},
+			},
+		},
+	}
+
+	vars := map[string]string{
+		"widget_id": "my_widget",
+		"domain":    "payroll",
+		"agent":     "design-agent",
+		"ado_id":    "731878",
+	}
+	substituteStepVars(steps, vars)
+
+	step := steps[0]
+	if step.Assignee != "design-agent" {
+		t.Errorf("Assignee = %q, want %q", step.Assignee, "design-agent")
+	}
+	wantLabels := []string{"qa-run", "widget:my_widget", "domain:payroll"}
+	for i, want := range wantLabels {
+		if step.Labels[i] != want {
+			t.Errorf("Labels[%d] = %q, want %q", i, step.Labels[i], want)
+		}
+	}
+	if got := step.Metadata["ado_id"]; got != "731878" {
+		t.Errorf("Metadata[ado_id] = %v, want %q", got, "731878")
+	}
+	if got := step.Metadata["count"]; got != int64(3) {
+		t.Errorf("Metadata[count] = %v (%T), want int64(3) - non-string scalars must be untouched", got, got)
+	}
+	if got := step.Metadata["nested"].(map[string]interface{})["k"]; got != "payroll" {
+		t.Errorf("Metadata[nested][k] = %v, want %q", got, "payroll")
+	}
+	if got := step.Metadata["list"].([]interface{})[0]; got != "payroll" {
+		t.Errorf("Metadata[list][0] = %v, want %q", got, "payroll")
+	}
+
+	child := step.Children[0]
+	if child.Assignee != "design-agent" {
+		t.Errorf("child Assignee = %q, want %q", child.Assignee, "design-agent")
+	}
+	if child.Labels[0] != "widget:my_widget" {
+		t.Errorf("child Labels[0] = %q, want %q", child.Labels[0], "widget:my_widget")
+	}
+}
+
 // TestSubstituteStepVarsRecursive tests deep nesting works correctly
 func TestSubstituteStepVarsRecursive(t *testing.T) {
 	steps := []*formula.Step{
