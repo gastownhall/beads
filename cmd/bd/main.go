@@ -1263,6 +1263,16 @@ var rootCmd = &cobra.Command{
 				beadsDir = beads.FindBeadsDir()
 			}
 			if err := guardLegacyNoStoreCommand(cmd, beadsDir); err != nil {
+				isMigrationCommand := false
+				for current := cmd; current != nil; current = current.Parent() {
+					if current.Name() == "migrate" {
+						isMigrationCommand = true
+						break
+					}
+				}
+				if isMigrationCommand {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+				}
 				return HandleError("%v", err)
 			}
 			if _, err := getDoltAutoCommitMode(); err != nil {
