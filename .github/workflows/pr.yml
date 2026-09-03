@@ -340,9 +340,23 @@ jobs:
   # review merged on a contributor's windows/amd64 attestation for exactly
   # that reason). Same pattern as the focused jobs above: run exactly this
   # package on windows-latest. Tests that need a dolt binary Skipf loudly
-  # (dolt is not installed on the Windows runners), and the unix-socket
-  # cases skip on Windows by design - the portability class this job guards
-  # runs without either.
+  # (dolt is not installed on the Windows runners). Two independent guards,
+  # not one blanket skip, account for the unix-socket cases that do not run
+  # here. TestDoltServer_StartStop_UnixSocket carries the only runtime.GOOS
+  # skip in this directory's tests (doltserver_test.go; the one other GOOS
+  # use is the testPlatformPath helper, which shapes a fixture path rather
+  # than skipping). Separately, of the two unix-socket subtests of
+  # TestExternalDoltServer_Dial, "unix socket dial against a live listener
+  # succeeds" is gated by an unconditional len(sockPath) >= 104 sun_path
+  # check that no GOOS guard wraps: the generated socket path was 123 bytes
+  # in this job's own log, 19 over the limit, so it skips on a hosted
+  # Windows runner. That leaves its sibling "unix socket dial against a
+  # missing path returns wrapped error" as the only unix-socket dial case
+  # that runs here, and it dials a nonexistent path without ever opening a
+  # listener - error-path coverage, not evidence of Windows AF_UNIX support.
+  # #6173 tracks making the 104-byte limit POSIX-only so the live-listener
+  # case could really run here. The portability class this job guards - the
+  # #5820 path handling - runs without either dolt or a live socket server.
   #
   # Deliberately NOT added to ci-gate's `needs`/`CI_GATE_REQUIRED`/env map,
   # following the `test-macos` precedent above: promoting a new job to
