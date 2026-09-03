@@ -51,7 +51,19 @@ func assertDependencyPair(t *testing.T, bd, dir string, env []string, sentinelID
 	t.Helper()
 	out, err := runBDExecWithBinary(t, bd, dir, env, "dep", "list", sentinelID, "--json")
 	require.NoError(t, err, "dep list: %s", out)
-	assert.Contains(t, out, blockerID, "dependency edge missing")
+	var edges []struct {
+		IssueID     string `json:"issue_id"`
+		DependsOnID string `json:"depends_on_id"`
+		Type        string `json:"type"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &edges), "dep list JSON: %s", out)
+	found := false
+	for _, edge := range edges {
+		if edge.IssueID == sentinelID && edge.DependsOnID == blockerID && edge.Type == "blocks" {
+			found = true
+		}
+	}
+	assert.True(t, found, "dependency edge missing: %s -> %s", sentinelID, blockerID)
 }
 
 func migrationFrontDoorBinary(t *testing.T) string {
