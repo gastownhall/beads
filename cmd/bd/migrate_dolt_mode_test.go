@@ -23,6 +23,7 @@ func migrateModeWorkspace(t *testing.T, mode string) string {
 	dir := t.TempDir()
 	beadsDir := filepath.Join(dir, ".beads")
 	require.NoError(t, os.MkdirAll(beadsDir, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(beadsDir, "dolt", ".dolt"), 0o755))
 	writeMetadataConfig(t, beadsDir, mode, "myproj")
 	t.Chdir(dir)
 	return beadsDir
@@ -72,6 +73,17 @@ func TestMigrateToProxiedServer_RejectsNonServerMode(t *testing.T) {
 	migrateModeWorkspace(t, configfile.DoltModeEmbedded)
 	err := runMigrateToProxiedServer(false, 0, false)
 	require.Error(t, err)
+}
+
+func TestMigrateToProxiedServer_MissingRootFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, os.RemoveAll(filepath.Join(beadsDir, "dolt")))
+	before, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+	require.NoError(t, err)
+	require.Error(t, runMigrateToProxiedServer(false, 0, false))
+	after, err := os.ReadFile(configfile.ConfigPath(beadsDir))
+	require.NoError(t, err)
+	assert.Equal(t, before, after)
 }
 
 func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
@@ -227,6 +239,7 @@ func TestMigrateSharedToProxiedServer_RootsAtSharedDir(t *testing.T) {
 	sharedDir := t.TempDir()
 	t.Setenv("BEADS_SHARED_SERVER_DIR", sharedDir)
 	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	require.NoError(t, os.MkdirAll(filepath.Join(sharedDir, "dolt", ".dolt"), 0o755))
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
 
