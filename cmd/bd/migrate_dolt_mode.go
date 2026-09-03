@@ -556,6 +556,9 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if st, e := os.Stat(filepath.Join(rootPath, ".dolt")); e != nil || !st.IsDir() {
 		return HandleError("Dolt root %s is not a valid Dolt directory", rootPath)
 	}
+	if st, e := os.Stat(filepath.Join(rootPath, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt repository", rootPath)
+	}
 
 	if j == nil {
 		sidecar := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
@@ -791,6 +794,9 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if st, e := os.Stat(filepath.Join(rootDir, ".dolt")); e != nil || !st.IsDir() {
 		return HandleError("Dolt root %s is not a valid Dolt directory", rootDir)
+	}
+	if st, e := os.Stat(filepath.Join(rootDir, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt repository", rootDir)
 	}
 
 	serverStateDir := beadsDir
