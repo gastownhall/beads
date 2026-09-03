@@ -1,10 +1,10 @@
 # CI Cleanup Plan
 
-Last reviewed: 2026-08-10
+Last reviewed: 2026-08-14
 
 Freshness source: `engdocs/CI_TEST_SURFACE_AUDIT.md`, `.github/workflows/*.yml`,
-`.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `Makefile`, package test
-manifests, and maintainer decision review.
+`.buildflags`, `.golangci.yml`, `scripts/ci/pr-lint.sh`, `scripts/pr-lint/`,
+`Makefile`, package test manifests, and maintainer decision review.
 
 This document records the agreed target shape for CI cleanup. It is the policy
 and roadmap layer; the current inventory remains in
@@ -51,8 +51,11 @@ Every PR, including docs-only PRs, should run the required Linux baseline:
 
 ## Wrapper Conventions
 
-Shell scripts under `scripts/ci/` are the source of truth. Make targets should
-be aliases for discoverability, not a second implementation of command policy.
+Repository-owned wrappers under `scripts/ci/` are the supported tier
+entrypoints. Make targets should be aliases for discoverability, not a second
+implementation of command policy. A wrapper may delegate shared policy to one
+repository-owned Go driver when production tooling also needs the same
+shell-free contract.
 
 Wrapper rules:
 
@@ -167,6 +170,10 @@ easy to identify and rerun. It includes:
   downloads, a five-minute timeout, and the `gms_pure_go` build tag.
 - A second non-CGO Windows cross-lint pass when the native target does not
   already cover that build tuple.
+
+The two lint passes and their target selection are owned by the
+checkout-local `scripts/pr-lint` Go driver. The Bash wrapper retains formatting,
+direct invocation, and aggregate timing without duplicating that policy.
 
 Both passes are SCOPED BY LANE. On a PR the wrapper takes
 `BD_LINT_NEW_FROM_MERGE_BASE` and reports only the findings that PR introduces,
