@@ -523,7 +523,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	}
 	j, jerr := loadMigrateJournal(beadsDir)
 	if jerr != nil {
-		return HandleError("migration state is unreadable: %v", jerr)
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration state is unreadable: %v", jerr), ExitCode: 1, Mutates: false})
 	}
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
@@ -762,7 +762,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	j, jerr := loadMigrateJournal(beadsDir)
 	if jerr != nil {
-		return HandleError("migration state is unreadable: %v", jerr)
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration state is unreadable: %v", jerr), ExitCode: 1, Mutates: false})
 	}
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
