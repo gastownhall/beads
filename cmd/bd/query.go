@@ -195,7 +195,7 @@ func runQuery(ctx context.Context, querier issueops.Querier, in queryInput) erro
 		return HandleErrorRespectJSON("%v", err)
 	}
 	if jsonOutput {
-		if err := outputJSON(page.Items); err != nil {
+		if err := outputJSONWithPagination(page.Items, listPaginationMeta(len(page.Items), page.HasMore, in.limit)); err != nil {
 			return err
 		}
 	} else {

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -31,6 +32,12 @@ var (
 // buildEmbeddedBD returns the path to an embedded bd binary for subprocess tests.
 // If BEADS_TEST_BD_BINARY is set, uses that pre-built binary (skipping the ~45s build).
 // CI can pre-build once and pass the path to all test invocations.
+// errEmbeddedBDSourceUnavailable: the test binary was built with -trimpath
+// (runtime.Caller records the import path, not a filesystem path) and the
+// process working directory has no module context to resolve the package
+// through, so there is no source tree to build bd from.
+var errEmbeddedBDSourceUnavailable = errors.New("cannot locate the cmd/bd source directory (test binary built with -trimpath and no module context in the working directory); set BEADS_TEST_BD_BINARY to a prebuilt bd binary")
+
 func buildEmbeddedBD(t *testing.T) string {
 	t.Helper()
 	embeddedBDOnce.Do(func() {
@@ -53,10 +60,36 @@ func buildEmbeddedBD(t *testing.T) string {
 		}
 		embeddedBD = filepath.Join(tmpDir, name)
 		cmd := exec.Command("go", "build", "-tags", "gms_pure_go", "-o", embeddedBD, ".")
+		// A compiled test binary can be launched from any directory. Build from
+		// this source file's package directory rather than inheriting that
+		// arbitrary process working directory. Under -trimpath runtime.Caller
+		// records the import path, not a filesystem path, so fall back to
+		// resolving the package through whatever module context the cwd has.
+		if _, sourceFile, _, ok := runtime.Caller(0); ok && filepath.IsAbs(sourceFile) {
+			if dir := filepath.Dir(sourceFile); dir != "" {
+				if fi, statErr := os.Stat(dir); statErr == nil && fi.IsDir() {
+					cmd.Dir = dir
+				}
+			}
+		}
+		if cmd.Dir == "" {
+			out, err := exec.Command("go", "list", "-f", "{{.Dir}}", "github.com/steveyegge/beads/cmd/bd").Output()
+			if err != nil || strings.TrimSpace(string(out)) == "" {
+				embeddedBDErr = errEmbeddedBDSourceUnavailable
+				return
+			}
+			cmd.Dir = strings.TrimSpace(string(out))
+		}
 		if out, err := cmd.CombinedOutput(); err != nil {
 			embeddedBDErr = fmt.Errorf("go build failed: %v\n%s", err, out)
 		}
 	})
+	if errors.Is(embeddedBDErr, errEmbeddedBDSourceUnavailable) {
+		// Same posture as testenv.MustHaveGoBuild: a test that needs to build
+		// bd from source cannot run where the source is unreachable, and
+		// that is a skip with a pointer, not a failure of the code under test.
+		t.Skipf("skipping: %v", embeddedBDErr)
+	}
 	if embeddedBDErr != nil {
 		t.Fatalf("Failed to build embedded bd binary: %v", embeddedBDErr)
 	}
@@ -67,6 +100,13 @@ func bdEnv(dir string) []string {
 	var env []string
 	for _, e := range os.Environ() {
 		if strings.HasPrefix(e, "BEADS_") {
+			continue
+		}
+		// An ambient envelope opt-in would wrap every fixture command's JSON
+		// in {schema_version, data} and break the bare-array parsing all the
+		// bdList*JSON helpers do. Tests that want the envelope opt in per
+		// child command (exec.Cmd keeps the last duplicate env entry).
+		if strings.HasPrefix(e, "BD_JSON_ENVELOPE=") {
 			continue
 		}
 		env = append(env, e)

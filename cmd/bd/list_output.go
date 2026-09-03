@@ -15,8 +15,15 @@ import (
 // printTruncationHint emits a one-line notice to stderr when the list output
 // was truncated by --limit, so users and agents can't mistake a partial view
 // for a complete one (GH#3212, GH#788).
+//
+// The notice is deliberately NOT gated on stderr being a terminal, matching
+// bd ready's unconditional hint (GH#4892): piped consumers are exactly the
+// ones that cannot see a partial page is partial (GH#5102). Since GH#4094
+// piped stdout never applies the default limit, so this fires for a piped
+// caller only when a --limit they set themselves (flag, config, or
+// BD_LIST_LIMIT) cut the page — stdout stays clean either way.
 func printTruncationHint(truncated bool, effectiveLimit int) {
-	if !truncated || effectiveLimit <= 0 || !ui.IsStderrTerminal() {
+	if !truncated || effectiveLimit <= 0 {
 		return
 	}
 	fmt.Fprint(os.Stderr, formatTruncationHint(effectiveLimit))
@@ -36,6 +43,19 @@ func formatTruncationHint(effectiveLimit int) string {
 func composeTruncationHint(render func(string) string, text string) string {
 	rendered := strings.TrimRight(render(text), " \t\r\n")
 	return "\n" + rendered + "\n"
+}
+
+// listPaginationMeta builds the pagination entry for a truncated listing
+// page, mirroring bd ready's envelope (GH#4892). Nil when nothing was cut,
+// so the "pagination" key is absent and callers can test for its presence.
+// Total is left unset: this route's page carries a has-more verdict, not a
+// count, and inventing one would cost a second query (same trade the proxied
+// ready route made).
+func listPaginationMeta(returned int, truncated bool, effectiveLimit int) *PaginationMeta {
+	if !truncated || effectiveLimit <= 0 {
+		return nil
+	}
+	return &PaginationMeta{Returned: returned, Truncated: true}
 }
 
 func outputDotFormat(out io.Writer, issues []*types.Issue, depsByIssueID map[string][]*types.Dependency) error {

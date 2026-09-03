@@ -254,11 +254,12 @@ func TestEmbeddedList(t *testing.T) {
 	})
 
 	t.Run("limit_truncation_hint", func(t *testing.T) {
-		// GH#4094: hint is suppressed when stderr is not a terminal (piped).
-		// bdListCapture always runs in piped mode, so no hint expected even when truncated.
+		// GH#5102: the hint fires on stderr even when piped, matching bd
+		// ready — a piped consumer is exactly who can't tell a partial page
+		// is partial. bdListCapture always runs in piped mode.
 		stdout, stderr := bdListCapture(t, bd, dir, "--limit", "2")
-		if strings.Contains(stderr, "more results matched") {
-			t.Errorf("truncation hint must not appear on piped stderr (GH#4094):\nstderr: %q\nstdout: %q", stderr, stdout)
+		if !strings.Contains(stderr, "more results matched") {
+			t.Errorf("expected truncation hint on piped stderr (GH#5102):\nstderr: %q\nstdout: %q", stderr, stdout)
 		}
 		// Hint must never appear in stdout.
 		if strings.Contains(stdout, "more results matched") {
@@ -276,6 +277,50 @@ func TestEmbeddedList(t *testing.T) {
 		_, stderrHigh := bdListCapture(t, bd, dir, "--limit", "1000")
 		if strings.Contains(stderrHigh, "more results matched") {
 			t.Errorf("false-positive truncation hint when under limit:\n%s", stderrHigh)
+		}
+	})
+
+	t.Run("limit_pagination_envelope", func(t *testing.T) {
+		// GH#5102: under BD_JSON_ENVELOPE=1 a truncated page carries a
+		// "pagination" key (returned/truncated), parity with bd ready
+		// (GH#4892). Total is absent: this route has a has-more verdict,
+		// not a count.
+		runEnvelope := func(args ...string) map[string]json.RawMessage {
+			t.Helper()
+			fullArgs := append([]string{"list", "--json"}, args...)
+			cmd := exec.Command(bd, fullArgs...)
+			cmd.Dir = dir
+			cmd.Env = append(bdEnv(dir), "BD_JSON_ENVELOPE=1")
+			stdout, stderr, err := runCommandBuffers(t, cmd)
+			if err != nil {
+				t.Fatalf("bd list --json %s failed: %v\nstderr:\n%s", strings.Join(args, " "), err, stderr.String())
+			}
+			var env map[string]json.RawMessage
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &env); err != nil {
+				t.Fatalf("parse envelope: %v\n%s", err, stdout.String())
+			}
+			return env
+		}
+
+		env := runEnvelope("--limit", "2")
+		raw, ok := env["pagination"]
+		if !ok {
+			t.Fatalf("truncated page must carry a pagination key, got: %v", env)
+		}
+		var pag struct {
+			Returned  int  `json:"returned"`
+			Truncated bool `json:"truncated"`
+		}
+		if err := json.Unmarshal(raw, &pag); err != nil {
+			t.Fatalf("parse pagination: %v", err)
+		}
+		if !pag.Truncated || pag.Returned != 2 {
+			t.Errorf("pagination = %+v, want truncated=true returned=2", pag)
+		}
+
+		// Not truncated: the key must be absent so callers can test presence.
+		if envAll := runEnvelope("--limit", "0"); envAll["pagination"] != nil {
+			t.Errorf("unexpected pagination key on untruncated page: %s", envAll["pagination"])
 		}
 	})
 
