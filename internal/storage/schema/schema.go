@@ -81,18 +81,27 @@ const migrationWatchdogInterval = 5 * time.Minute
 const migrationWatchdogIntervalEnv = "BEADS_MIGRATION_WATCHDOG_INTERVAL"
 
 // migrationWatchdogIntervalDuration returns the configured watchdog interval.
-// BEADS_MIGRATION_WATCHDOG_INTERVAL overrides the compiled-in default; valid
-// time.ParseDuration strings (e.g. "10m", "90s") are accepted. Unset, empty,
-// or unparsable values fall back to migrationWatchdogInterval — same
-// unset/invalid-falls-back-to-default shape as
-// internal/storage/dolt/store.go's timeoutFromEnv (a different package, so
-// not reused directly).
+// BEADS_MIGRATION_WATCHDOG_INTERVAL overrides the compiled-in default. Valid
+// time.ParseDuration strings ("10m", "90s") and bare numbers treated as
+// seconds ("90") are both accepted; unset, empty, unparsable, or non-positive
+// values fall back to migrationWatchdogInterval. This is the full contract of
+// internal/storage/dolt/store.go's parseTimeout, bare-seconds included —
+// mirrored rather than reused because that function is unexported in another
+// package.
 func migrationWatchdogIntervalDuration() time.Duration {
 	raw := strings.TrimSpace(os.Getenv(migrationWatchdogIntervalEnv))
 	if raw == "" {
 		return migrationWatchdogInterval
 	}
-	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+	if d, err := time.ParseDuration(raw); err == nil {
+		if d > 0 {
+			return d
+		}
+		return migrationWatchdogInterval
+	}
+	// Bare numbers mean seconds, matching parseTimeout. Without this an
+	// operator setting the value to 90 gets 5m and no diagnostic.
+	if d, err := time.ParseDuration(raw + "s"); err == nil && d > 0 {
 		return d
 	}
 	return migrationWatchdogInterval
