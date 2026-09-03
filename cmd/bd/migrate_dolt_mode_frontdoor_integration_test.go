@@ -5,10 +5,24 @@ package main
 import (
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func migrationFrontDoorBinary(t *testing.T) string {
+	if p := os.Getenv("BEADS_TEST_BD_BINARY"); p != "" {
+		return p
+	}
+	out := filepath.Join(t.TempDir(), "bd")
+	cmd := exec.Command("go", "build", "-o", out, ".")
+	cmd.Dir = "."
+	if b, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build cgo bd: %v\n%s", err, b)
+	}
+	return out
+}
 
 func migrationFrontDoorEnv(home string) []string {
 	env := make([]string, 0)
@@ -31,7 +45,7 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
 		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
 	}
-	bd := buildBDForInitTests(t)
+	bd := migrationFrontDoorBinary(t)
 	dir := t.TempDir()
 	home := t.TempDir()
 	env := migrationFrontDoorEnv(home)
@@ -123,7 +137,7 @@ func TestMigrateDoltModeFrontDoorRefusesMalformedSidecar(t *testing.T) {
 	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
 		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
 	}
-	bd := buildBDForInitTests(t)
+	bd := migrationFrontDoorBinary(t)
 	dir, home := t.TempDir(), t.TempDir()
 	env := migrationFrontDoorEnv(home)
 	if out, err := runBDExecWithBinary(t, bd, dir, env, "init", "--backend", "dolt", "--proxied-server", "--quiet"); err != nil {
