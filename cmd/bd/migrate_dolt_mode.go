@@ -208,6 +208,59 @@ func externalMigrationRefusal(message string) error {
 	})
 }
 
+func migrationInvalidState(message string) error {
+	return HandleProxyCapabilityError(&ProxyCapabilityError{
+		Code:     "proxy.migrate.invalid_state",
+		Message:  message,
+		ExitCode: 1,
+		Mutates:  false,
+	})
+}
+
+// validateCompletedProxyControls verifies that an already-proxied target has
+// no live process or stale lifecycle artifacts. Empty, unlocked lock markers
+// are harmless leftovers from a prior lifecycle and are intentionally
+// accepted; a held marker still proves active ownership and is refused.
+func validateCompletedProxyControls(root string) error {
+	if running, _ := proxy.IsRunning(root); running {
+		return migrationInvalidState("completed migration still has a running proxy")
+	}
+	for _, control := range proxy.ControlFilePaths(root) {
+		if _, statErr := os.Stat(control); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return migrationInvalidState(fmt.Sprintf("completed migration cannot inspect proxy control %s: %v", control, statErr))
+		}
+		base := filepath.Base(control)
+		if base == proxy.LockFileName || base == server.LockFileName {
+			lock, lockErr := util.TryLock(control)
+			if lockErr == nil {
+				lock.Unlock()
+				continue
+			}
+			return migrationInvalidState(fmt.Sprintf("completed migration has a held proxy control %s", base))
+		}
+		return migrationInvalidState(fmt.Sprintf("completed migration has stale proxy control %s", base))
+	}
+	return nil
+}
+
+func validateCompletedLockMarker(path string, label string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return migrationInvalidState(fmt.Sprintf("completed migration cannot inspect %s: %v", label, err))
+	}
+	lock, err := util.TryLock(path)
+	if err != nil {
+		return migrationInvalidState(fmt.Sprintf("completed migration has a held %s", label))
+	}
+	lock.Unlock()
+	return nil
+}
+
 func migrationSidecarsEquivalent(beadsDir string, a, b *configfile.ProxiedServerClientInfo) bool {
 	if a == nil || b == nil {
 		return a == b
@@ -556,24 +609,42 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if cfg.IsDoltProxiedServerMode() && j == nil {
 		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
 		if ierr != nil {
-			return HandleError("migration sidecar is unreadable: %v", ierr)
+			return migrationInvalidState(fmt.Sprintf("migration sidecar is unreadable: %v", ierr))
 		}
 		if info != nil {
-			if info.External != nil || filepath.Clean(info.ResolvedRootPath(beadsDir)) != filepath.Clean(doltserver.DoltDirPath(beadsDir)) {
-				return HandleError("proxied sidecar does not match local migration target")
-			}
-			if running, _ := proxy.IsRunning(info.ResolvedRootPath(beadsDir)); running {
-				return HandleError("proxied server is still running")
-			}
-			for _, control := range proxy.ControlFilePaths(info.ResolvedRootPath(beadsDir)) {
-				if _, statErr := os.Stat(control); statErr == nil {
-					return HandleError("proxied server control artifact %s remains", filepath.Base(control))
+			canonicalRoot := doltserver.DoltDirPath(beadsDir)
+			if shared {
+				canonicalRoot, ierr = doltserver.SharedDoltPath()
+				if ierr != nil {
+					return migrationInvalidState(fmt.Sprintf("failed to resolve shared migration root: %v", ierr))
 				}
+			}
+			if info.External != nil {
+				return migrationInvalidState("completed migration has an externally hosted proxied Dolt endpoint")
+			}
+			if filepath.Clean(info.ResolvedRootPath(beadsDir)) != filepath.Clean(canonicalRoot) {
+				return migrationInvalidState("proxied sidecar does not match canonical migration target")
+			}
+			if !shared && yamlSharedSet && yamlShared {
+				return migrationInvalidState("completed migration topology is shared-server; use the shared migration command")
+			}
+			if err := validateCompletedProxyControls(canonicalRoot); err != nil {
+				return err
+			}
+			stateDir := beadsDir
+			if shared {
+				stateDir, ierr = doltserver.SharedServerDir()
+				if ierr != nil {
+					return migrationInvalidState(fmt.Sprintf("failed to resolve shared server state: %v", ierr))
+				}
+			}
+			if err := validateCompletedLockMarker(doltserver.LockPath(stateDir), "dolt-server lock"); err != nil {
+				return err
 			}
 			fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
 			return nil
 		}
-		return HandleError("repo is marked proxied-server but %s is missing; rerun migration with a recoverable journal", configfile.ProxiedServerClientInfoFileName)
+		return migrationInvalidState(fmt.Sprintf("repo is marked proxied-server but %s is missing; rerun migration with a recoverable journal", configfile.ProxiedServerClientInfoFileName))
 	}
 
 	var rootPath string

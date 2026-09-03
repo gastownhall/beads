@@ -108,6 +108,23 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	if err != nil || !json.Valid([]byte(list)) || !strings.Contains(list, created.ID) {
 		t.Fatalf("proxied list JSON: %v\n%s", err, list)
 	}
+	// A completed forward migration must refuse while its proxy process still
+	// owns the target. This is exercised through the actual bd front door,
+	// before provider startup can hide the ownership conflict.
+	runningOut, runningErr := runBDExecWithBinary(t, bd, dir, env, "--json", "migrate", "from-server-to-proxied-server")
+	if runningErr == nil {
+		t.Fatalf("forward no-op unexpectedly succeeded while proxy was running: %s", runningOut)
+	}
+	var runningRefusal map[string]any
+	if err := json.Unmarshal([]byte(runningOut), &runningRefusal); err != nil {
+		t.Fatalf("running-proxy refusal JSON: %v\n%s", err, runningOut)
+	}
+	if data, ok := runningRefusal["data"].(map[string]any); ok {
+		runningRefusal = data
+	}
+	if runningRefusal["code"] != "proxy.migrate.invalid_state" || runningRefusal["mutates"] != false {
+		t.Fatalf("running-proxy refusal = %s", runningOut)
+	}
 	if out, err = runBDExecWithBinary(t, bd, dir, env, "update", created.ID, "--title", "front-door sentinel updated"); err != nil {
 		t.Fatalf("proxied update: %v\n%s", err, out)
 	}
@@ -400,6 +417,91 @@ func TestMigrateDoltModeFrontDoorMalformedStateRefuses(t *testing.T) {
 			assert.Equal(t, "proxy.migrate.invalid_state", payload["code"])
 			assert.Equal(t, false, payload["mutates"])
 			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+		})
+	}
+}
+
+// TestMigrateDoltModeForwardNoopRefusalsFrontDoor keeps the completed-target
+// path fail-closed at the real CLI boundary. Both output modes must preserve
+// the workspace byte-for-byte while refusing ambiguous ownership/artifacts.
+func TestMigrateDoltModeForwardNoopRefusalsFrontDoor(t *testing.T) {
+	if os.Getenv("BEADS_TEST_MIGRATION_FRONTDOOR") != "1" {
+		t.Skip("set BEADS_TEST_MIGRATION_FRONTDOOR=1")
+	}
+	bd := migrationFrontDoorBinary(t)
+	cases := []struct {
+		name   string
+		shared bool
+		info   map[string]any
+		asset  string
+		want   string
+	}{
+		{name: "direct external sidecar", info: map[string]any{"external": map[string]any{"host": "db.example", "port": 3307}}, want: "externally hosted"},
+		{name: "direct mismatched sidecar", info: map[string]any{"root_path": "/tmp/other"}, want: "canonical"},
+		{name: "direct stale control", asset: "proxy.log", want: "stale proxy control"},
+		{name: "shared mismatched sidecar", shared: true, info: map[string]any{"root_path": "/tmp/other"}, want: "canonical"},
+		{name: "shared external sidecar", shared: true, info: map[string]any{"external": map[string]any{"host": "db.example", "port": 3307}}, want: "externally hosted"},
+		{name: "shared stale control", shared: true, asset: "proxy.log", want: "stale proxy control"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, home := t.TempDir(), t.TempDir()
+			env := migrationFrontDoorEnv(home)
+			beadsDir := filepath.Join(dir, ".beads")
+			root := filepath.Join(beadsDir, "dolt")
+			if tc.shared {
+				shared := filepath.Join(home, "shared-server")
+				env = append(env, "BEADS_SHARED_SERVER_DIR="+shared, "BEADS_DOLT_SHARED_SERVER=1")
+				root = filepath.Join(shared, "dolt")
+			}
+			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+			require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+			require.NoError(t, os.MkdirAll(beadsDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"myproj","backend":"dolt","dolt_mode":"proxied-server"}`), 0o600))
+			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version), 0o600))
+			if tc.shared {
+				require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
+			}
+			if tc.info == nil {
+				tc.info = map[string]any{"root_path": root}
+			}
+			if _, ok := tc.info["root_path"]; !ok {
+				tc.info["root_path"] = root
+			}
+			b, err := json.Marshal(tc.info)
+			require.NoError(t, err)
+			sidecar := filepath.Join(beadsDir, "proxied_server_client_info.json")
+			require.NoError(t, os.WriteFile(sidecar, b, 0o600))
+			if tc.asset != "" {
+				require.NoError(t, os.WriteFile(filepath.Join(root, tc.asset), []byte("stale"), 0o600))
+			}
+			before := snapshotMigrationTree(t, beadsDir, root)
+			for _, jsonMode := range []bool{false, true} {
+				args := []string{"migrate", "from-server-to-proxied-server"}
+				if tc.shared {
+					args[1] = "from-shared-server-to-proxied-server"
+				}
+				if jsonMode {
+					args = append([]string{"--json"}, args...)
+				}
+				stdout, stderr, runErr := runBDExecSeparated(t, bd, dir, env, args...)
+				require.Error(t, runErr)
+				exitErr, ok := runErr.(*exec.ExitError)
+				require.True(t, ok)
+				require.Equal(t, 1, exitErr.ExitCode())
+				if jsonMode {
+					var payload map[string]any
+					require.NoError(t, json.Unmarshal([]byte(stdout), &payload), stdout)
+					if data, ok := payload["data"].(map[string]any); ok {
+						payload = data
+					}
+					assert.Equal(t, "proxy.migrate.invalid_state", payload["code"])
+					assert.Equal(t, false, payload["mutates"])
+				} else {
+					assert.Contains(t, strings.ToLower(stderr), strings.ToLower(tc.want))
+				}
+				assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
+			}
 		})
 	}
 }
