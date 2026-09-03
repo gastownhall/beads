@@ -209,6 +209,39 @@ func validateMigrationJournalAgainstConfig(j *migrateJournal, cfg *configfile.Co
 	return nil
 }
 
+func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, forward bool) error {
+	if j == nil {
+		return nil
+	}
+	canonical := doltserver.DoltDirPath(beadsDir)
+	if shared {
+		var err error
+		canonical, err = doltserver.SharedDoltDir()
+		if err != nil {
+			return fmt.Errorf("resolve shared Dolt root: %w", err)
+		}
+	}
+	if filepath.Clean(j.RootPath) != filepath.Clean(canonical) {
+		return fmt.Errorf("journal root %s does not match canonical %s", j.RootPath, canonical)
+	}
+	if shared {
+		want := "true"
+		if j.Phase != migratePrepared {
+			want = "false"
+		}
+		if !forward {
+			want = "true"
+			if j.Phase == migratePrepared {
+				want = "false"
+			}
+		}
+		if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok && strings.ToLower(v) != want {
+			return fmt.Errorf("shared-server YAML is %q, want %s for phase %s", v, want, j.Phase)
+		}
+	}
+	return nil
+}
+
 func migrateToProxiedRunE(metricName, checkName string, shared bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
 		evt := metrics.NewCommandEvent(metricName)
@@ -486,6 +519,11 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	}
 
 	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if j != nil {
+		if err := validateMigrationTopology(beadsDir, j, shared, true); err != nil {
+			return HandleError("migration topology is inconsistent: %v", err)
+		}
+	}
 	if state, _ := doltserver.IsRunning(serverDir); state != nil && state.Running {
 		return HandleErrorWithHint("dolt server is still running", "stop it first: bd dolt stop")
 	}
@@ -676,6 +714,11 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if sourceSidecar != nil && sourceSidecar.RootPath == "" {
 		sourceSidecar.RootPath = rootDir
+	}
+	if j != nil {
+		if err := validateMigrationTopology(beadsDir, j, shared, false); err != nil {
+			return HandleError("migration topology is inconsistent: %v", err)
+		}
 	}
 
 	sharedDolt, sharedErr := doltserver.SharedDoltDir()

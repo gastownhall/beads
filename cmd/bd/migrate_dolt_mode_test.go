@@ -406,3 +406,20 @@ func TestMigrateFromProxiedServer_ExternalJournalAlwaysFailsClosed(t *testing.T)
 		})
 	}
 }
+
+func TestMigrateSharedJournalRootMismatchFailsClosed(t *testing.T) {
+	shared := t.TempDir()
+	t.Setenv("BEADS_SHARED_SERVER_DIR", shared)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
+	root := filepath.Join(beadsDir, "dolt")
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, Shared: true, RootPath: root, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root}}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+	require.Error(t, runMigrateToProxiedServer(false, 0, true))
+	cfg, err := configfile.Load(beadsDir)
+	require.NoError(t, err)
+	assert.True(t, cfg.IsDoltServerMode())
+}
