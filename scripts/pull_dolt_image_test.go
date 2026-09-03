@@ -56,7 +56,7 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 	wantCalls := map[string]int{
 		"main.yml":       2,
 		"pr.yml":         2,
-		"pr-risk.yml":    2,
+		"pr-risk.yml":    3,
 		"regression.yml": 1,
 	}
 

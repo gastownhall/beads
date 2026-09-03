@@ -9,17 +9,27 @@ Set up beads with Dolt sync so your issues follow you across computers.
 
 You need two tools installed on every machine:
 
-| Tool | Minimum Version | Install |
-|------|-----------------|---------|
+| Tool | Version | Install |
+|------|---------|---------|
 | **bd** (beads CLI) | 0.59.0+ | See [Installation](/getting-started/installation) |
-| **Dolt** | 2.2.0+ | `brew install dolt` or [dolt install script](https://github.com/dolthub/dolt/releases/latest/download/install.sh) |
+| **Dolt** | A specific pinned version, not "latest" | See [Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install) |
 
 Verify both are installed:
 
 ```bash
 bd version     # must be 0.59.0+
-dolt version   # must be 2.2.0+
+dolt version   # must match the pinned version
 ```
+
+Install a specific Dolt version rather than `releases/latest`. On Dolt 2.3.x a
+few percent of freshly created databases come up with `CALL
+DOLT_RESET('--hard')` broken for the life of the server process, which breaks
+`bd flatten`, `bd admin compact` and the rollback behind `bd dolt pull`;
+separately, the upstream `latest` URL can resolve to a *lower* version than
+one released days earlier.
+[Which Dolt version to install](/architecture/dolt#which-dolt-version-to-install)
+has the measurements, the install command, and how to check a database you
+already have.
 
 ## Initial Setup (First Computer)
 
