@@ -36,6 +36,9 @@ func defaultStderr() io.Writer {
 	return io.Discard
 }
 
+// watchdogStderr is where the migration watchdog's WARN lines go.
+var watchdogStderr io.Writer = os.Stderr
+
 const largeRigThreshold = 10000
 
 // issueRowCounter returns the current issues-table row count, or an error if
