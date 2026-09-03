@@ -401,6 +401,14 @@ bd config set jira.custom_fields.customfield_10042 '{"value":"AI Platform"}'
 bd config set jira.custom_fields.Story.customfield_10042 '{"value":"AI Platform"}'
 ```
 
+Jira pull sync imports ticket relationships when the linked tickets are also
+available locally or included in the same pull result:
+
+- Jira parent/subtask hierarchy becomes `parent-child` dependencies.
+- Jira "blocks" links become `blocks` dependencies, with direction preserved.
+- Jira duplicate links become `duplicates` dependencies.
+- Other Jira issue links become `related` dependencies.
+
 `jira.custom_fields.<field>` applies to every issue pushed to Jira. `jira.custom_fields.<JiraType>.<field>` applies only when the mapped Jira issue type matches `<JiraType>`; per-type fields override global fields with the same field key. Values beginning with `{` or `[` are sent as JSON (useful for select-like fields); other values are sent as strings. `jira.url`, `jira.project`/`jira.projects`, and `jira.api_token` fall back to the `JIRA_URL`, `JIRA_PROJECT`/`JIRA_PROJECTS`, and `JIRA_API_TOKEN` environment variables. See [bd jira](/cli-reference/jira).
 
 ### Linear
