@@ -145,6 +145,9 @@ func TestManagedLocalProxiedOutageReconnectContract(t *testing.T) {
 	p := bdManagedLocalInit(t, bd, "outage_managed", 5*time.Minute)
 	sentinel := bdProxiedCreate(t, bd, p.dir, "managed outage sentinel")
 	proxyBefore := readManagedProxyPidFile(t, p)
+	if proxyBefore == nil || !processAlive(proxyBefore.Pid) {
+		t.Fatalf("managed-local proxy is not running: %+v", proxyBefore)
+	}
 	backend := readManagedBackendPidFile(t, p)
 	if backend == nil || !processAlive(backend.Pid) {
 		t.Fatal("managed-local backend is not running")
@@ -152,13 +155,7 @@ func TestManagedLocalProxiedOutageReconnectContract(t *testing.T) {
 	proc, err := os.FindProcess(backend.Pid)
 	require.NoError(t, err)
 	require.NoError(t, proc.Kill())
-	_, stderr, err, timedOut := runProxiedDeadline(t, bd, p.dir, 3*time.Second, "show", sentinel.ID, "--json")
-	if timedOut {
-		t.Fatal("managed child outage command exceeded 3s bound")
-	}
-	if err == nil || !actionableTransportError(stderr) {
-		t.Fatalf("managed child outage = err %v stderr %q; want bounded transport refusal", err, stderr)
-	}
+	require.Eventually(t, func() bool { return !processAlive(proxyBefore.Pid) }, 3*time.Second, 50*time.Millisecond, "managed proxy did not retire after child death")
 	// 1.3.0 contract: child death terminates the owned proxy; the next bd
 	// invocation starts a fresh proxy/backend rather than in-place restarting.
 	got := bdProxiedShow(t, bd, p.dir, sentinel.ID)
