@@ -75,7 +75,7 @@ func TestOutputContextFunction(t *testing.T) {
 			stealthMode:   false,
 			ephemeralMode: false,
 			localOnlyMode: false,
-			expectText:    []string{"Beads Workflow Context", "bd dolt push", "Team-maintainer behavior is opt-in", "conservative by default"},
+			expectText:    []string{"Beads Workflow Context", "Hooks auto-call this in Claude Code, Codex, and Pi", "bd dolt push", "Team-maintainer behavior is opt-in", "conservative by default"},
 			rejectText:    []string{"bd export", "--from-main"},
 		},
 		{

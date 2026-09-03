@@ -897,7 +897,7 @@ git status                  # Check changed files
 	context := primeTruncationDirective + `# Beads Workflow Context
 
 > **Context Recovery**: Run ` + "`bd prime`" + ` after compaction, clear, or new session
-> Hooks auto-call this in Claude Code and Codex when a beads workspace is resolved
+> Hooks auto-call this in Claude Code, Codex, and Pi when a beads workspace is resolved
 
 ` + redirectNotice
 	if memories != "" {
