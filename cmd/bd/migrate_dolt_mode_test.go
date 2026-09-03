@@ -91,6 +91,13 @@ func touchFile(t *testing.T, path string) {
 	require.NoError(t, os.WriteFile(path, []byte("x"), 0o600))
 }
 
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return b
+}
+
 func serverAssetNames() []string {
 	return []string{"dolt-server.pid", "dolt-server.port", "dolt-server.lock", "dolt-server.log", "dolt-server.log.1"}
 }
@@ -467,6 +474,10 @@ func TestMigrateSharedToProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			root := filepath.Join(sharedDir, "dolt")
 			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+			sentinel := filepath.Join(root, "migration-sentinel")
+			touchFile(t, sentinel)
+			sentinelBefore, err := os.ReadFile(sentinel)
+			require.NoError(t, err)
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
@@ -478,6 +489,7 @@ func TestMigrateSharedToProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateToProxiedServer(false, 0, true))
 			require.NoError(t, runMigrateToProxiedServer(false, 0, true))
+			assert.Equal(t, sentinelBefore, mustReadFile(t, sentinel), "migration sentinel changed")
 		})
 	}
 }
@@ -536,6 +548,10 @@ func TestMigrateFromProxiedToSharedServer_AllCheckpointFaultsRetry(t *testing.T)
 			root := filepath.Join(sharedDir, "dolt")
 			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
 			require.NoError(t, os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600))
+			sentinel := filepath.Join(root, "migration-sentinel")
+			touchFile(t, sentinel)
+			sentinelBefore, err := os.ReadFile(sentinel)
+			require.NoError(t, err)
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
@@ -549,6 +565,7 @@ func TestMigrateFromProxiedToSharedServer_AllCheckpointFaultsRetry(t *testing.T)
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateFromProxiedServer(false, true))
 			require.NoError(t, runMigrateFromProxiedServer(false, true))
+			assert.Equal(t, sentinelBefore, mustReadFile(t, sentinel), "migration sentinel changed")
 			cfg, _ := configfile.Load(beadsDir)
 			assert.True(t, cfg.IsDoltServerMode())
 			v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
@@ -787,12 +804,17 @@ func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 			root := filepath.Join(beadsDir, "dolt")
 			require.NoError(t, os.MkdirAll(filepath.Join(root, ".dolt"), 0o755))
+			sentinel := filepath.Join(root, "migration-sentinel")
+			touchFile(t, sentinel)
+			sentinelBefore, err := os.ReadFile(sentinel)
+			require.NoError(t, err)
 			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: root}))
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(phase))
 			require.Error(t, runMigrateFromProxiedServer(false, false))
 			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
 			require.NoError(t, runMigrateFromProxiedServer(false, false))
 			after := snapshotMigrationTree(t, beadsDir)
+			assert.Equal(t, sentinelBefore, mustReadFile(t, sentinel), "migration sentinel changed")
 			j, err := loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			assert.Nil(t, j)
