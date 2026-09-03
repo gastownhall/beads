@@ -189,6 +189,15 @@ func migrateFault(phase migratePhase) error {
 	return nil
 }
 
+func externalMigrationRefusal(message string) error {
+	return HandleProxyCapabilityError(&ProxyCapabilityError{
+		Code:     "proxy.migrate.external_endpoint",
+		Message:  message,
+		ExitCode: 1,
+		Mutates:  false,
+	})
+}
+
 func checkpointMigration(beadsDir string, j *migrateJournal, phase migratePhase) error {
 	j.Phase = phase
 	if err := saveMigrateJournal(beadsDir, j); err != nil {
@@ -509,7 +518,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		return HandleError("migration command topology does not match live shared-server configuration")
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
-		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
+		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
 	}
 	if cfg.IsDoltProxiedServerMode() && j == nil {
 		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
@@ -560,7 +569,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		}
 		if info != nil {
 			if info.External != nil {
-				return HandleError("cannot migrate an externally hosted proxied Dolt endpoint; reconfigure the endpoint on its owner first")
+				return externalMigrationRefusal("cannot migrate an externally hosted proxied Dolt endpoint; reconfigure the endpoint on its owner first")
 			}
 			resolvedSidecarRoot := info.ResolvedRootPath(beadsDir)
 			if resolvedSidecarRoot != "" && filepath.Clean(resolvedSidecarRoot) != filepath.Clean(rootPath) {
@@ -738,7 +747,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return HandleError("migration command topology does not match live shared-server configuration")
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
-		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
+		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
 	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo
 	if j == nil {
@@ -750,7 +759,7 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			return HandleError("migration sidecar is missing")
 		}
 		if sourceSidecar.External != nil {
-			return HandleError("cannot migrate an externally hosted proxied Dolt endpoint to local server mode; reconfigure the endpoint on its owner first")
+			return externalMigrationRefusal("cannot migrate an externally hosted proxied Dolt endpoint to local server mode; reconfigure the endpoint on its owner first")
 		}
 	}
 	if j == nil {
