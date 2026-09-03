@@ -711,6 +711,110 @@ reports conflicts.`,
 	},
 }
 
+var doltRebaseCmd = &cobra.Command{
+	Use:           "rebase",
+	SilenceUsage:  true,
+	SilenceErrors: true,
+	Short:         "Reconcile colliding child IDs so a blocked sync can merge",
+	Long: `Reconcile cross-clone hierarchical child-ID collisions that a plain pull
+cannot auto-merge — two clones that each created a child under the same parent
+while offline both minted the same "parent.N" id (#4796).
+
+bd dolt rebase fetches the remote, renumbers the losing side's colliding
+children to free ids, then completes the merge (resolving the child-counter to
+the true high-water mark). It leaves the push to you.
+
+By default the REMOTE keeps its ids and your local colliding children are
+renumbered (--remote-dominates), since the remote is the shared copy other
+clones have already pulled. Use --local-dominates to keep your local ids and
+renumber the remote's instead.
+
+A backup tag is created before anything is mutated; the command reports it.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if isDoltLocalOnly() {
+			fmt.Println("Remote sync is disabled for this project (dolt.local-only=true).")
+			fmt.Println("Nothing to rebase.")
+			return nil
+		}
+		localDom, _ := cmd.Flags().GetBool("local-dominates")
+		remoteDom, _ := cmd.Flags().GetBool("remote-dominates")
+		if localDom && remoteDom {
+			return HandleError("--local-dominates and --remote-dominates are mutually exclusive")
+		}
+		ctx := context.Background()
+		st := getStore()
+		if st == nil {
+			return HandleError("no store available")
+		}
+		// Optional capability, reached the way cmd/bd reaches StoreLocator,
+		// Flattener and the rest: it is not on the engine interface, so it does not
+		// promote through a decorator and needs the unwrap.
+		rebaser, ok := storage.UnwrapStore(st).(storage.ChildCollisionRebaser)
+		if !ok {
+			return HandleError("this storage backend cannot rebase child-ID collisions")
+		}
+		remote, _ := cmd.Flags().GetString("remote")
+		if remote == "" {
+			remote = "origin"
+		}
+
+		fmt.Printf("Rebasing against remote %q (%s)...\n", remote, directionLabel(localDom))
+		report, err := rebaser.RebaseRemote(ctx, remote, localDom)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			if isRemoteNotFoundErr(err) {
+				fmt.Fprintf(os.Stderr, "\nRemote %q is not configured.\n", remote)
+				fmt.Fprintln(os.Stderr, "Use 'bd dolt remote add <name> <url>' to add it.")
+			} else if report != nil && report.Restored {
+				// The reconcile itself failed: it is atomic, so it has already
+				// hard-reset the branch back to this pre-rebase tag and nothing was
+				// left half-done.
+				fmt.Fprintf(os.Stderr, "\nThe database was restored to its pre-rebase state (backup tag: %s).\n", report.BackupTag)
+				fmt.Fprintln(os.Stderr, "No changes were kept; resolve the cause above and retry.")
+			} else if report != nil && len(report.Renumbered) > 0 {
+				// The reconcile committed and a LATER step failed (the post-merge
+				// is_blocked recompute). Nothing was rolled back — saying otherwise
+				// would send the operator hunting for changes that are in fact live.
+				fmt.Fprintf(os.Stderr, "\nThe rebase itself completed and was committed; nothing was rolled back.\n")
+				fmt.Fprintf(os.Stderr, "Renumbered %d colliding child id(s):\n", len(report.Renumbered))
+				for _, r := range report.Renumbered {
+					fmt.Fprintf(os.Stderr, "  %s → %s\n", r.OldID, r.NewID)
+				}
+				fmt.Fprintln(os.Stderr, "Only the follow-up step above failed. Blocked state may be stale until you")
+				fmt.Fprintln(os.Stderr, "run 'bd doctor --fix', which recomputes it from the dependency graph.")
+				if report.BackupTag != "" {
+					fmt.Fprintf(os.Stderr, "Pre-rebase backup tag (to undo the rebase deliberately): %s\n", report.BackupTag)
+				}
+			}
+			return SilentExit()
+		}
+		if report == nil || len(report.Renumbered) == 0 {
+			fmt.Printf("No child-ID collisions between local and %q; nothing to rebase (use 'bd dolt pull').\n", remote)
+			return nil
+		}
+		if report.BackupTag != "" {
+			fmt.Printf("Pre-rebase backup tag: %s (kept as a safety net for this reconcile)\n", report.BackupTag)
+		}
+		fmt.Printf("Renumbered %d colliding child id(s):\n", len(report.Renumbered))
+		for _, r := range report.Renumbered {
+			fmt.Printf("  %s → %s\n", r.OldID, r.NewID)
+		}
+		for parent, last := range report.CountersSet {
+			fmt.Printf("  counter %s → last_child %d\n", parent, last)
+		}
+		fmt.Println("Rebase complete. Run 'bd dolt push' to share.")
+		return nil
+	},
+}
+
+// directionLabel names the dominant side for user-facing output.
+func directionLabel(localDominates bool) string {
+	if localDominates {
+		return "local-dominates"
+	}
+	return "remote-dominates"
+}
+
 var doltCommitCmd = &cobra.Command{
 	Use:   "commit",
 	Short: "Create a Dolt commit from pending changes",
@@ -1807,6 +1911,9 @@ func init() {
 	doltPushCmd.Flags().Bool("no-adopt", false, "Never derive a Dolt remote from git origin (also BD_NO_REMOTE_ADOPT=1)")
 	doltPullCmd.Flags().String("remote", "", "Pull from a specific named remote instead of the default")
 	doltPullCmd.Flags().String("strategy", "", "Conflict resolution strategy for conflicts the auto-resolver declines: 'ours' or 'theirs' (embedded storage only, #4992)")
+	doltRebaseCmd.Flags().Bool("remote-dominates", false, "Remote keeps its ids; renumber local colliding children (default)")
+	doltRebaseCmd.Flags().Bool("local-dominates", false, "Local keeps its ids; renumber the remote's colliding children")
+	doltRebaseCmd.Flags().String("remote", "", "Rebase against a specific named remote instead of origin")
 	doltCommitCmd.Flags().StringP("message", "m", "", "Commit message (default: auto-generated)")
 	doltCleanDatabasesCmd.Flags().Bool("dry-run", false, "Show what would be dropped without dropping")
 	doltCleanDatabasesCmd.Flags().Bool("purge-dropped", false, "After dropping, also run CALL DOLT_PURGE_DROPPED_DATABASES() — server-global and irreversible, see --help")
@@ -1822,6 +1929,7 @@ func init() {
 	doltCmd.AddCommand(doltCommitCmd)
 	doltCmd.AddCommand(doltPushCmd)
 	doltCmd.AddCommand(doltPullCmd)
+	doltCmd.AddCommand(doltRebaseCmd)
 	doltCmd.AddCommand(doltStartCmd)
 	doltCmd.AddCommand(doltStopCmd)
 	doltCmd.AddCommand(doltStatusCmd)
