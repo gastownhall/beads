@@ -510,6 +510,25 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 	}
 }
 
+// explicitDBTargetGiven reports whether the caller named an explicit database
+// target that overrides the ambient workspace. These are the three routes the
+// PR body for be-fyt names and that selectedNoDBBeadsDir below honors ahead of
+// the ambient repo: a --db value that resolves to a path (which lands in
+// dbPath), BEADS_DB, and BD_DB.
+//
+// Deliberately NOT keyed on PersistentFlags().Changed("db"). A --db value that
+// names a *database* rather than a path is moved to dbNameFromDBFlag and
+// clears dbPath (~line 990), and that value is consumed only on the
+// store-requiring path (~line 1553). On the no-DB path selectedNoDBBeadsDir
+// therefore falls through to the ambient workspace anyway, so the ambient
+// redirect source's database must still be preserved for it. Keying on
+// Changed("db") would suppress that and reopen be-xil for
+// `bd doctor --db <name>` in a redirected repo; see
+// TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase.
+func explicitDBTargetGiven() bool {
+	return dbPath != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != ""
+}
+
 func selectedNoDBBeadsDir(cmd *cobra.Command) string {
 	if cmd != nil && cmd.Root() != nil && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" {
 		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
@@ -1169,14 +1188,22 @@ var rootCmd = &cobra.Command{
 		// database instead of the source's, producing false "wrong database"
 		// diagnoses against an unrelated rig's schema.
 		if skipsStoreInit {
-			// be-fyt round 1: guard exactly like the store-requiring sibling at
-			// line ~1223 does. beads.GetRedirectInfo() always resolves from the
+			// be-fyt round 1: only preserve when the caller did NOT name an
+			// explicit target. beads.GetRedirectInfo() always resolves from the
 			// ambient CWD repo's local .beads regardless of --db/BEADS_DIR
 			// (bd-wayc3), so calling it unconditionally let an explicit --db/
 			// BEADS_DB/BD_DB target's own database be silently shadowed by the
 			// ambient repo's unrelated redirect-source database — reopening
 			// be-xil's failure mode via a narrower trigger.
-			if dbPath == "" {
+			//
+			// Round 2 (review of PR #5774): the guard was spelled `dbPath == ""`,
+			// but dbPath is populated from BEADS_DB/BD_DB only when those are
+			// *unset* (~line 1002), so both env routes slipped straight through
+			// a guard that claimed to cover them while selectedNoDBBeadsDir
+			// (~lines 519, 523) rebound BEADS_DIR to the explicit target — the
+			// two disagreed. explicitDBTargetGiven asks the question
+			// selectedNoDBBeadsDir asks, so they cannot drift apart again.
+			if !explicitDBTargetGiven() {
 				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
 			}
 			beadsDir := selectedNoDBBeadsDir(cmd)
