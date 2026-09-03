@@ -251,6 +251,11 @@ func TestMigrateDoltModeFrontDoorRefusesExternalEndpoint(t *testing.T) {
 			if !strings.Contains(strings.ToLower(out), strings.ToLower(tc.want)) {
 				t.Fatalf("expected refusal text %q, got: %s", tc.want, out)
 			}
+			// Refusal must happen before any proxy/provider process starts.
+			probe := exec.Command("pgrep", "-af", "[d]b-proxy-child --root "+root)
+			if processOut, probeErr := probe.CombinedOutput(); probeErr == nil && len(strings.TrimSpace(string(processOut))) > 0 {
+				t.Fatalf("external refusal started a proxy process: %s", processOut)
+			}
 			if got, _ := os.ReadFile(filepath.Join(beadsDir, "metadata.json")); string(got) != string(metaBefore) {
 				t.Fatal("external refusal mutated metadata")
 			}
