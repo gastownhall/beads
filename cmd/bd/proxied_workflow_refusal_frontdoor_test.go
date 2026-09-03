@@ -17,11 +17,16 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 	requireManagedLocalProxiedEnv(t)
 	bd := buildEmbeddedBD(t)
 	p := bdManagedLocalInit(t, bd, "refusal", 5*time.Minute)
+	epic := bdProxiedCreate(t, bd, p.dir, "refusal epic", "--type", "epic")
+	formula := filepath.Join(t.TempDir(), "refusal.toml")
+	if err := os.WriteFile(formula, []byte("name = \"refusal\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	before, err := os.ReadFile(filepath.Join(p.proxyRoot, "config.yaml"))
 	if err != nil {
 		t.Fatalf("read config before refusal: %v", err)
 	}
-	commands := [][]string{{"cook", "--persist"}, {"ship"}, {"swarm", "create"}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
+	commands := [][]string{{"cook", formula, "--persist"}, {"ship", "refusal"}, {"swarm", "create", epic.ID}, {"swarm", "list"}, {"merge-slot", "create"}, {"merge-slot", "check"}, {"merge-slot", "acquire"}, {"merge-slot", "release"}}
 	for _, args := range commands {
 		t.Run(strings.Join(args, "/"), func(t *testing.T) {
 			stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir, append(args, "--json")...)
