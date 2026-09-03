@@ -149,6 +149,18 @@ func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
 	require.NoError(t, assetErr, "dry-run must not delete assets")
 }
 
+func TestMigrateToProxiedServer_MalformedWorkspaceYAMLFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	configPath := filepath.Join(beadsDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte("dolt: ["), 0o600))
+	before := snapshotMigrationTree(t, beadsDir)
+	var err error
+	stderr := captureStderr(t, func() { err = runMigrateToProxiedServer(false, 0, false) })
+	require.Error(t, err)
+	assert.Contains(t, strings.ToLower(stderr), "parsing workspace config")
+	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
+}
+
 func TestMigrateToProxiedServer_AlreadyProxiedRejectsStaleControl(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	root := filepath.Join(beadsDir, "dolt")
