@@ -107,6 +107,12 @@ func loadMigrateJournal(beadsDir string) (*migrateJournal, error) {
 	if j.Ownership != "managed-local" && j.Ownership != "external" {
 		return nil, fmt.Errorf("invalid %s: unknown ownership %q", migrateJournalFileName, j.Ownership)
 	}
+	// Journals written before the External field was added recorded the
+	// endpoint only in the sidecar. Infer it for compatibility so recovery
+	// still takes the typed, fail-closed external path.
+	if j.External == nil && j.Ownership == "external" && j.Sidecar.External != nil {
+		j.External = j.Sidecar.External
+	}
 	if j.Ownership == "external" && j.Sidecar.External == nil {
 		return nil, fmt.Errorf("invalid %s: external ownership missing endpoint", migrateJournalFileName)
 	}
@@ -768,8 +774,14 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		if sidecarErr != nil {
 			return HandleError("migration sidecar is unreadable: %v", sidecarErr)
 		}
-		if !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+		if j.Phase == migratePrepared && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
 			return HandleError("migration sidecar does not match prepared state")
+		}
+		if j.Phase == migrateTargetConfigured && diskSidecar != nil && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+			return HandleError("migration sidecar does not match prepared state")
+		}
+		if (j.Phase == migrateOldControlsRetired || j.Phase == migrateVerified || j.Phase == migrateCommitted) && diskSidecar != nil {
+			return HandleError("migration sidecar must be absent after controls are retired")
 		}
 	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo

@@ -647,7 +647,7 @@ func TestMigrateJournalExternalTopologyMismatchFailsClosed(t *testing.T) {
 		journal   *configfile.ExternalDoltConfig
 		sidecar   *configfile.ExternalDoltConfig
 	}{
-		{name: "journal missing external", ownership: "external", journal: nil, sidecar: ext},
+		{name: "journal external differs", ownership: "external", journal: &configfile.ExternalDoltConfig{Host: "other.example", Port: 3307}, sidecar: ext},
 		{name: "journal unexpected external", ownership: "managed-local", journal: ext, sidecar: nil},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -659,6 +659,20 @@ func TestMigrateJournalExternalTopologyMismatchFailsClosed(t *testing.T) {
 			require.Error(t, err)
 		})
 	}
+}
+
+func TestMigrateJournalLegacyExternalFieldInfersSidecar(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	root := filepath.Join(beadsDir, "dolt")
+	ext := &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, Ownership: "external", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: ext}}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+	got, err := loadMigrateJournal(beadsDir)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, ext, got.External)
 }
 
 func TestMigrateFromProxiedServer_JournalSidecarChangedFailsClosed(t *testing.T) {
