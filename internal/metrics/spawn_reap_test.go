@@ -49,7 +49,18 @@ func TestStartDetachedReapsExitedChild(t *testing.T) {
 	for time.Now().Before(deadline) {
 		st, alive := unixProcStat(pid)
 		if strings.Contains(st, "Z") {
-			t.Fatalf("child pid %d became a zombie (stat=%q); startDetached did not reap", pid, st)
+			// Exited but not yet wait4'd. That is the reaper's WINDOW, not
+			// its failure: startDetached reaps from a goroutine, and between
+			// the child's exit and that goroutine's Wait returning the
+			// process table legitimately reads Z. Normally microseconds —
+			// but under -race on a loaded runner the goroutine can be
+			// descheduled for longer than one 20ms poll, and failing on the
+			// first sighting turned that scheduling gap into a red build.
+			// A zombie is proof the child ran; keep polling, and a zombie
+			// that is STILL here at the deadline fails below, stat and all.
+			seenLive = true
+			time.Sleep(20 * time.Millisecond)
+			continue
 		}
 		if alive {
 			seenLive = true
