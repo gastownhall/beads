@@ -565,6 +565,11 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			if running, _ := proxy.IsRunning(info.ResolvedRootPath(beadsDir)); running {
 				return HandleError("proxied server is still running")
 			}
+			for _, control := range proxy.ControlFilePaths(info.ResolvedRootPath(beadsDir)) {
+				if _, statErr := os.Stat(control); statErr == nil {
+					return HandleError("proxied server control artifact %s remains", filepath.Base(control))
+				}
+			}
 			fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
 			return nil
 		}
