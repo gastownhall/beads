@@ -139,6 +139,54 @@ func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
 	require.NoError(t, assetErr, "dry-run must not delete assets")
 }
 
+func TestMigrateToProxiedServer_StaleSidecarFailsClosed(t *testing.T) {
+	rootCases := []struct {
+		name string
+		info *configfile.ProxiedServerClientInfo
+		want string
+	}{
+		{
+			name: "external endpoint",
+			info: &configfile.ProxiedServerClientInfo{
+				RootPath: filepath.Join("/", "external-root"),
+				External: &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307},
+			},
+			want: "externally hosted proxied dolt endpoint",
+		},
+		{
+			name: "mismatched local root",
+			info: &configfile.ProxiedServerClientInfo{RootPath: filepath.Join("/", "another-repo")},
+			want: "sidecar root",
+		},
+		{
+			name: "matching relative root",
+			info: &configfile.ProxiedServerClientInfo{RootPath: "dolt"},
+			want: "exists without a recoverable journal",
+		},
+	}
+	for _, tc := range rootCases {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			root := filepath.Join(beadsDir, "dolt")
+			require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, tc.info))
+			before := snapshotMigrationTree(t, beadsDir, root)
+			var migrateErr error
+			stderr := captureStderr(t, func() {
+				migrateErr = runMigrateToProxiedServer(false, 0, false)
+			})
+			require.Error(t, migrateErr)
+			assert.Contains(t, strings.ToLower(stderr), tc.want)
+			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
+			cfg, err := configfile.Load(beadsDir)
+			require.NoError(t, err)
+			assert.True(t, cfg.IsDoltServerMode())
+			journal, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, journal)
+		})
+	}
+}
+
 func TestMigrateToServer_FlipsModeAndRemovesSidecar(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
 	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{}))
