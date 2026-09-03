@@ -50,6 +50,13 @@ type migrateJournal struct {
 	Attempt    int                                 `json:"attempt"`
 	Phase      migratePhase                        `json:"phase"`
 }
+type migrateDryRunOutput struct {
+	DryRun     bool   `json:"dry_run"`
+	SourceMode string `json:"source_mode"`
+	TargetMode string `json:"target_mode"`
+	Shared     bool   `json:"shared"`
+	RootPath   string `json:"root_path"`
+}
 
 func migrateJournalPath(beadsDir string) string {
 	return filepath.Join(beadsDir, migrateJournalFileName)
@@ -555,6 +562,11 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	}
 
 	if dryRun {
+		if jsonOutput {
+			b, _ := json.Marshal(migrateDryRunOutput{true, configfile.DoltModeServer, configfile.DoltModeProxiedServer, shared, rootPath})
+			fmt.Println(string(b))
+			return nil
+		}
 		fmt.Println("Dry run mode - no changes will be made")
 		fmt.Printf("Would set dolt_mode: %s → %s\n", configfile.DoltModeServer, configfile.DoltModeProxiedServer)
 		if shared {
@@ -795,6 +807,11 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 
 	if dryRun {
+		if jsonOutput {
+			b, _ := json.Marshal(migrateDryRunOutput{true, configfile.DoltModeProxiedServer, expectedTarget, shared, rootDir})
+			fmt.Println(string(b))
+			return nil
+		}
 		fmt.Println("Dry run mode - no changes will be made")
 		fmt.Printf("Would set dolt_mode: %s → %s\n", configfile.DoltModeProxiedServer, configfile.DoltModeServer)
 		if shared {

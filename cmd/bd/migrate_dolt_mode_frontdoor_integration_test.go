@@ -28,14 +28,17 @@ func TestMigrateDoltModeFrontDoor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create sentinel: %v\n%s", err, createOut)
 	}
+	statusOut, _ := runBDExecWithBinary(t, bd, dir, env, "dolt", "status")
+	if strings.Contains(statusOut, "Dolt server: running") {
+		if out, err = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop"); err != nil {
+			t.Fatalf("stop running server: %v\n%s", err, out)
+		}
+	}
 	var created struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal([]byte(createOut), &created); err != nil || created.ID == "" {
 		t.Fatalf("invalid create JSON: %s", createOut)
-	}
-	if out, err = runBDExecWithBinary(t, bd, dir, env, "dolt", "stop"); err != nil {
-		t.Fatalf("stop server: %v\n%s", err, out)
 	}
 	if out, err = runBDExecWithBinary(t, bd, dir, env, "migrate", "from-server-to-proxied-server"); err != nil {
 		t.Fatalf("forward migration: %v\n%s", err, out)
