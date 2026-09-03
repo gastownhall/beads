@@ -319,6 +319,67 @@ func TestDoctorPersistentPreRunExplicitEnvDBTargetOverridesAmbientRedirect(t *te
 	}
 }
 
+// TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase pins
+// why explicitDBTargetGiven does not key on PersistentFlags().Changed("db").
+//
+// A --db value that names a database rather than a path is moved to
+// dbNameFromDBFlag and clears dbPath (main.go ~990), leaving Changed("db")
+// true with dbPath == "". That value is consumed only on the store-requiring
+// path (~1553, proxied-server mode), so on the no-DB path selectedNoDBBeadsDir
+// finds no explicit directory target and falls through to beads.FindBeadsDir(),
+// which follows the ambient repo's redirect. The selected workspace IS the
+// ambient one, so the ambient source's dolt_database must still be preserved —
+// exactly be-xil's fix. A guard that treated Changed("db") as "explicit target
+// given" would suppress preservation here and reopen be-xil for
+// `bd doctor --db <name>` in a redirected repo.
+func TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase(t *testing.T) {
+	ambientSourceDir := filepath.Join(t.TempDir(), "ambient-source")
+	ambientSourceBeadsDir := filepath.Join(ambientSourceDir, ".beads")
+	writeTestConfigYAML(t, ambientSourceBeadsDir, "")
+	writeMetadataConfig(t, ambientSourceBeadsDir, configfile.DoltModeServer, "ambient_source_db")
+
+	ambientSharedBeadsDir := filepath.Join(t.TempDir(), "ambient-shared", ".beads")
+	writeTestConfigYAML(t, ambientSharedBeadsDir, "")
+	writeMetadataConfig(t, ambientSharedBeadsDir, configfile.DoltModeServer, "ambient_shared_default_db")
+
+	if err := os.WriteFile(filepath.Join(ambientSourceBeadsDir, "redirect"), []byte(ambientSharedBeadsDir), 0o600); err != nil {
+		t.Fatalf("write redirect: %v", err)
+	}
+
+	t.Chdir(ambientSourceDir)
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_DATABASE", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+
+	config.ResetForTesting()
+	t.Cleanup(config.ResetForTesting)
+	savePersistentPreRunState(t)
+	t.Setenv("BEADS_DB", "")
+	t.Setenv("BD_DB", "")
+
+	// A valid identifier that does not exist as a path: main.go ~990 routes it
+	// to dbNameFromDBFlag and clears dbPath.
+	dbPath = "somebaredbname"
+	if flag := rootCmd.PersistentFlags().Lookup("db"); flag != nil {
+		flag.Changed = true
+	}
+
+	if err := rootCmd.PersistentPreRunE(doctorCmd, nil); err != nil {
+		t.Fatalf("PersistentPreRunE: %v", err)
+	}
+
+	if dbPath != "" {
+		t.Fatalf("dbPath = %q, want \"\" — precondition: a bare --db name must be moved off dbPath, otherwise this test no longer covers the Changed(\"db\")/dbPath==\"\" combination", dbPath)
+	}
+	if got := os.Getenv("BEADS_DIR"); got != ambientSharedBeadsDir {
+		t.Fatalf("BEADS_DIR = %q, want %q — precondition: a bare --db name selects no explicit directory, so the ambient redirect target must be chosen", got, ambientSharedBeadsDir)
+	}
+	if got := os.Getenv("BEADS_DOLT_SERVER_DATABASE"); got != "ambient_source_db" {
+		t.Fatalf("BEADS_DOLT_SERVER_DATABASE = %q, want %q (be-xil regression: the ambient workspace was selected, so its redirect-source database must still be preserved — do not add Changed(\"db\") to explicitDBTargetGiven)", got, "ambient_source_db")
+	}
+}
+
 func TestBootstrapPersistentPreRunUsesExplicitDBTarget(t *testing.T) {
 	callerRepo := filepath.Join(t.TempDir(), "caller")
 	callerBeadsDir := filepath.Join(callerRepo, ".beads")
