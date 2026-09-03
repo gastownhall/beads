@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -184,33 +185,68 @@ func TestMigrateDoltModeFrontDoorRefusesExternalEndpoint(t *testing.T) {
 	}
 	bd := migrationFrontDoorBinary(t)
 	for _, tc := range []struct {
-		name  string
-		flags []string
-		want  string
+		name string
+		want string
 	}{
-		{name: "tcp", flags: []string{"--proxied-server-external-host", "db.example", "--proxied-server-external-port", "3307"}, want: "externally hosted proxied Dolt endpoint"},
-		{name: "unix", flags: []string{"--proxied-server-external-socket-path", "/tmp/beads-front-door.sock"}, want: "externally hosted proxied Dolt endpoint"},
+		{name: "tcp", want: "externally hosted proxied Dolt endpoint"},
+		{name: "unix", want: "externally hosted proxied Dolt endpoint"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, home := t.TempDir(), t.TempDir()
 			env := migrationFrontDoorEnv(home)
-			args := append([]string{"init", "--backend", "dolt", "--proxied-server", "--quiet"}, tc.flags...)
-			if out, err := runBDExecWithBinary(t, bd, dir, env, args...); err != nil {
-				t.Fatalf("init external: %v\n%s", err, out)
-			}
 			beadsDir := filepath.Join(dir, ".beads")
+			root := filepath.Join(beadsDir, "dolt")
+			if err := os.MkdirAll(filepath.Join(root, ".dolt"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(root, ".dolt", "repo_state.json"), []byte(`{"head":"refs/heads/main","remotes":{},"backups":{},"branches":{}}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(`{"database":"myproj","backend":"dolt","dolt_mode":"proxied-server"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(beadsDir, 0o700); err != nil {
+				t.Fatal(err)
+			}
 			metaBefore, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
 			if err != nil {
 				t.Fatal(err)
 			}
 			sidecarPath := filepath.Join(beadsDir, "proxied_server_client_info.json")
+			// Replace the managed sidecar with an externally-owned endpoint.
+			// This exercises migration refusal without attempting a network
+			// connection to an unreachable host/socket during init.
+			external := map[string]any{"root_path": filepath.Join(beadsDir, "dolt"), "external": map[string]any{}}
+			if tc.name == "tcp" {
+				external["external"] = map[string]any{"host": "db.example", "port": 3307}
+			} else {
+				external["external"] = map[string]any{"socket": "/tmp/beads-front-door.sock"}
+			}
+			sidecarData, _ := json.Marshal(external)
+			if err := os.WriteFile(sidecarPath, sidecarData, 0o600); err != nil {
+				t.Fatal(err)
+			}
 			sidecarBefore, err := os.ReadFile(sidecarPath)
 			if err != nil {
 				t.Fatal(err)
 			}
-			out, err := runBDExecWithBinary(t, bd, dir, env, "migrate", "from-proxied-server-to-server")
+			treeBefore := snapshotMigrationTree(t, beadsDir)
+			out, err := runBDExecWithBinary(t, bd, dir, env, "--json", "migrate", "from-proxied-server-to-server")
 			if err == nil {
 				t.Fatal("external endpoint migration unexpectedly succeeded")
+			}
+			if exitErr, ok := err.(*exec.ExitError); !ok || exitErr.ExitCode() != 1 {
+				t.Fatalf("expected exit code 1, got %v", err)
+			}
+			var refusal map[string]any
+			if err := json.Unmarshal([]byte(out), &refusal); err != nil {
+				t.Fatalf("invalid refusal JSON: %v\n%s", err, out)
+			}
+			if data, ok := refusal["data"].(map[string]any); ok {
+				refusal = data
+			}
+			if refusal["code"] != "proxy.migrate.external_endpoint" || refusal["mutates"] != false {
+				t.Fatalf("expected typed non-mutating refusal, got: %s", out)
 			}
 			if !strings.Contains(strings.ToLower(out), strings.ToLower(tc.want)) {
 				t.Fatalf("expected refusal text %q, got: %s", tc.want, out)
@@ -223,6 +259,9 @@ func TestMigrateDoltModeFrontDoorRefusesExternalEndpoint(t *testing.T) {
 			}
 			if _, err := os.Stat(filepath.Join(beadsDir, "dolt-mode-migration.json")); !os.IsNotExist(err) {
 				t.Fatal("external refusal created a migration journal")
+			}
+			if got := snapshotMigrationTree(t, beadsDir); !reflect.DeepEqual(treeBefore, got) {
+				t.Fatal("external refusal mutated migration artifacts")
 			}
 		})
 	}
