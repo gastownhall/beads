@@ -184,6 +184,90 @@ func reportLabelEdit(issueIDs []string, labels []string, operation string, jsonO
 	return nil
 }
 
+// removeLabelsByPrefix removes every label starting with prefix from each
+// issue in issueIDs, through issueops.Lifecycle — the same role
+// applyLabelEdit uses, so the events journal and both storage routes see this
+// edit the same way they see a plain `label remove`. Unlike applyLabelEdit
+// (which applies one fixed, caller-supplied label set to every issue), the
+// label set here is resolved per-issue from that issue's current labels via
+// issueops.Reader, since different issues may carry different prefix-matching
+// labels — so the loop is one Get plus one Update per issue rather than one
+// shared patch for all of them.
+func removeLabelsByPrefix(ctx context.Context, issueIDs []string, prefix string, jsonOut bool) error {
+	reader, err := openIssueReader()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	type removal struct {
+		issueID string
+		label   string
+	}
+	var removals []removal
+	for _, issueID := range issueIDs {
+		details, gerr := reader.Get(ctx, issueops.GetRequest{ID: issueID})
+		if gerr != nil {
+			return HandleErrorRespectJSON("getting labels for %s: %v", issueID, gerr)
+		}
+		for _, label := range labelsWithPrefix(details.Labels, prefix) {
+			removals = append(removals, removal{issueID: issueID, label: label})
+		}
+	}
+	if len(removals) == 0 {
+		if jsonOut {
+			return outputJSON([]map[string]interface{}{})
+		}
+		fmt.Printf("No labels matching prefix '%s' found\n", prefix)
+		return nil
+	}
+
+	lifecycle, err := openIssueLifecycle()
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	ctx, err = issueOpsContext(ctx)
+	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	// Grouped per issue (rather than one call per removal) because a single
+	// LabelPatch.Remove already de-duplicates and applies every label for
+	// that issue in one Update — matching applyLabelEdit's "one call per
+	// issue, one patch per call" contract instead of one call per label.
+	byIssue := make(map[string][]string)
+	var order []string
+	for _, r := range removals {
+		if _, ok := byIssue[r.issueID]; !ok {
+			order = append(order, r.issueID)
+		}
+		byIssue[r.issueID] = append(byIssue[r.issueID], r.label)
+	}
+	for _, issueID := range order {
+		if _, uerr := lifecycle.Update(ctx, issueops.UpdateRequest{
+			Actor:   actor,
+			IssueID: issueID,
+			Patch:   issueops.IssuePatch{Labels: issueops.LabelPatch{Remove: byIssue[issueID]}},
+		}); uerr != nil {
+			return HandleErrorRespectJSON("label removed (prefix): %s: %v", issueID, uerr)
+		}
+		commandDidWrite.Store(true)
+	}
+
+	if jsonOut {
+		results := make([]map[string]interface{}, 0, len(removals))
+		for _, r := range removals {
+			results = append(results, map[string]interface{}{
+				"status":   "removed",
+				"issue_id": r.issueID,
+				"label":    r.label,
+			})
+		}
+		return outputJSON(results)
+	}
+	for _, r := range removals {
+		fmt.Printf("%s Removed label '%s' from %s\n", ui.RenderPass("✓"), r.label, r.issueID)
+	}
+	return nil
+}
+
 // parseLabelArgs splits positional args into issue IDs and labels. The final
 // arg is the label spec; commas separate multiple labels ("label1,label2").
 func parseLabelArgs(args []string) (issueIDs []string, labels []string) {
@@ -204,6 +288,18 @@ func splitLabelArg(arg string) []string {
 		}
 	}
 	return labels
+}
+
+// labelsWithPrefix returns the subset of labels whose name starts with
+// prefix, preserving input order.
+func labelsWithPrefix(labels []string, prefix string) []string {
+	var matched []string
+	for _, label := range labels {
+		if strings.HasPrefix(label, prefix) {
+			matched = append(matched, label)
+		}
+	}
+	return matched
 }
 
 // resolveLabelIssueIDs resolves every issue-ID positional arg to the EXACT id
@@ -260,10 +356,17 @@ var labelAddCmd = &cobra.Command{
 
 //nolint:dupl // labelRemoveCmd and labelAddCmd are similar but serve different operations
 var labelRemoveCmd = &cobra.Command{
-	Use:           "remove [issue-id...] [label[,label...]]",
-	Short:         "Remove one or more labels from one or more issues",
-	Long:          "Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2",
-	Args:          cobra.MinimumNArgs(2),
+	Use:   "remove [issue-id...] [label[,label...]]",
+	Short: "Remove one or more labels from one or more issues",
+	Long: "Remove labels from issues. Issue IDs come first; the final argument is the label. Pass multiple labels comma-separated: bd label remove bd-123 label1,label2\n\n" +
+		"With --prefix, no label argument is needed: every label on the given issue(s) starting with the prefix is removed, e.g. bd label remove bd-123 --prefix pool:refused:",
+	Args: func(cmd *cobra.Command, args []string) error {
+		prefix, _ := cmd.Flags().GetString("prefix")
+		if prefix != "" {
+			return cobra.MinimumNArgs(1)(cmd, args)
+		}
+		return cobra.MinimumNArgs(2)(cmd, args)
+	},
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -276,6 +379,14 @@ var labelRemoveCmd = &cobra.Command{
 			}
 		}()
 
+		prefix, _ := cmd.Flags().GetString("prefix")
+		if prefix != "" {
+			issueIDs, err := resolveLabelIssueIDs(rootCtx, "remove", args)
+			if err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
+			return removeLabelsByPrefix(rootCtx, issueIDs, prefix, jsonOutput)
+		}
 		return runLabelRemove(rootCtx, args)
 	},
 }
@@ -468,6 +579,8 @@ func init() {
 	labelRemoveCmd.ValidArgsFunction = issueIDCompletion
 	labelListCmd.ValidArgsFunction = issueIDCompletion
 	labelPropagateCmd.ValidArgsFunction = issueIDCompletion
+
+	labelRemoveCmd.Flags().String("prefix", "", "Remove every label matching this prefix instead of an exact label (e.g., 'pool:refused:' removes all pool:refused:* labels). No label positional argument is needed when set.")
 
 	labelCmd.AddCommand(labelAddCmd)
 	labelCmd.AddCommand(labelRemoveCmd)

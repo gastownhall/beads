@@ -226,6 +226,36 @@ func TestEmbeddedLabel(t *testing.T) {
 		}
 	})
 
+	t.Run("label_remove_prefix", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove", "--type", "task",
+			"--label", "pool:refused:reason-a", "--label", "pool:refused:reason-b", "--label", "needs-human")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "pool:refused:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		for _, l := range labels {
+			if strings.HasPrefix(l, "pool:refused:") {
+				t.Errorf("label %q should have been removed by prefix: %v", l, labels)
+			}
+		}
+		found := false
+		for _, l := range labels {
+			if l == "needs-human" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("expected 'needs-human' to survive: %v", labels)
+		}
+	})
+
+	t.Run("label_remove_prefix_no_match_is_noop", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Prefix remove no match", "--type", "task", "--label", "keep-me")
+		bdLabel(t, bd, dir, "remove", issue.ID, "--prefix", "does-not-exist:")
+		labels := bdLabelListJSON(t, bd, dir, issue.ID)
+		if len(labels) != 1 || labels[0] != "keep-me" {
+			t.Errorf("expected only 'keep-me' to survive a no-match prefix removal: %v", labels)
+		}
+	})
+
 	t.Run("label_remove_json", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "JSON rm label", "--type", "task", "--label", "jsonrm")
 		cmd := exec.Command(bd, "label", "remove", issue.ID, "jsonrm", "--json")

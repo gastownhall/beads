@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd label remove --prefix` removes every label matching a prefix in one
+  call**, instead of requiring an exact label name per removal. `bd list`/`bd
+  ready` already supported `--label-pattern`/`--label-regex` for *finding*
+  issues by label shape; `label remove` had no equivalent for *stripping* a
+  whole label family (e.g. every `pool:refused:*` reason label) — callers had
+  to fetch the labels themselves and issue one `label remove` per exact name.
+  `--prefix` resolves the matching labels per issue and removes them in a
+  single transaction; `bd label remove <id> --prefix pool:refused:` replaces
+  that fetch-then-loop. Routed through the same `issueops.Lifecycle`/
+  `issueops.Reader` roles as a plain `label remove`, so it works identically
+  on the embedded and proxied-server (`bd serve`) storage modes.
 - **The events journal records WHO performed each mutation.** `bd_events_journal`
   gains an `actor` column (migration 0066 plus its ignored-series twin 0025, so
   upgraded workspaces and fresh clones converge on the same shape), stamped
