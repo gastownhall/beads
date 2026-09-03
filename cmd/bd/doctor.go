@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -249,10 +250,26 @@ Examples:
 			return nil
 		}
 
+		// GH#4993: assess once, before any branch that can write. Lazy so
+		// read-only paths skip the probe; memoised so repeats cannot disagree.
+		schemaGate := sync.OnceValue(func() doctor.FixGate {
+			return doctor.AssessSchemaFixGate(absPath)
+		})
+
 		// artifacts, conventions, and pollution work in embedded mode and run
 		// unconditionally; validate still requires a server-mode connection
 		// and stays gated (GH#3597).
 		if doctorCheckFlag != "" {
+			// GH#4993: these handlers return directly, so their destructive
+			// paths bypassed the gate. Refuse at the single branch point.
+			if checkFlagWrites(doctorCheckFlag, doctorClean, doctorFix) {
+				if gate := schemaGate(); gate.DBReachable && !gate.AllowDBFix {
+					return HandleErrorWithHint(
+						fmt.Sprintf("refusing destructive 'bd doctor --check=%s': %s", doctorCheckFlag, gate.Reason),
+						"Re-run without --clean/--fix to inspect read-only, or resolve the schema state first",
+					)
+				}
+			}
 			switch doctorCheckFlag {
 			case "artifacts":
 				return runArtifactsCheck(absPath, doctorClean, doctorYes)
@@ -296,12 +313,17 @@ Examples:
 
 		result := runDiagnostics(absPath)
 
+		// GH#4993: guard once, on the result, before any emitter reads it.
+		// Per-renderer sanitizing exempted --json, --agent and --output.
+		sanitizeFixAdvice(&result, schemaGate())
+
 		if doctorDryRun {
-			previewFixes(result)
+			previewFixes(result, schemaGate())
 		} else if doctorFix {
-			applyFixes(result)
+			applyFixes(result, schemaGate())
 			fmt.Println("\nVerifying fixes...")
 			result = runDiagnostics(absPath)
+			sanitizeFixAdvice(&result, schemaGate())
 		}
 
 		if doctorOutput != "" || jsonOutput {
@@ -330,7 +352,7 @@ Examples:
 				return err
 			}
 		} else if doctorOutput == "" {
-			printDiagnostics(result)
+			printDiagnostics(result, schemaGate())
 		}
 
 		if !result.OverallOK {
@@ -1121,7 +1143,36 @@ func exportDiagnostics(result doctorResult, outputPath string) error {
 	return nil
 }
 
-func printDiagnostics(result doctorResult) {
+// checkFlagWrites reports whether a `--check=<flag>` can modify state and so
+// must clear the schema gate (GH#4993). New destructive checks go here.
+func checkFlagWrites(flag string, clean, fix bool) bool {
+	switch flag {
+	case "artifacts", "pollution":
+		return clean
+	case "validate":
+		return fix
+	}
+	return false
+}
+
+// sanitizeFixAdvice rewrites each Fix tip in place so no emitter publishes
+// advice the gate ruled unsafe (GH#4993). Index-based write is load-bearing:
+// ranging by value over []doctorCheck mutates a copy.
+func sanitizeFixAdvice(result *doctorResult, gate doctor.FixGate) {
+	if result == nil {
+		return
+	}
+	for i := range result.Checks {
+		if result.Checks[i].Fix == "" {
+			continue
+		}
+		result.Checks[i].Fix = doctor.SanitizeFixRecommendation(result.Checks[i].Fix, gate)
+	}
+}
+
+func printDiagnostics(result doctorResult, gate doctor.FixGate) {
+	// GH#4993: tips arrive already sanitized; do not re-assess the gate here.
+
 	// Pre-calculate counts and collect issues grouped by category
 	checksByCategory := make(map[string][]doctorCheck)
 	issuesByCategory := make(map[string][]doctorCheck)
@@ -1266,6 +1317,11 @@ func printDiagnostics(result doctorResult) {
 			noun = "warnings"
 		}
 		fmt.Printf("%s\n", ui.RenderMuted(fmt.Sprintf("(%d %s suppressed via doctor.suppress config)", result.SuppressedCount, noun)))
+	}
+
+	// GH#4993: surface the schema gate verdict assessed once in RunE.
+	if gate.Reason != "" {
+		fmt.Printf("\n%s Schema fix-gate: %s\n", ui.RenderWarn("⚠"), gate.Reason)
 	}
 }
 
