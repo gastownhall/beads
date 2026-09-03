@@ -41,6 +41,15 @@ FLAG SURFACE
   bd init --force               Deprecated alias for --reinit-local.
                                 Kept working for ≥2 releases.
 
+  bd init --recreate-missing    Authorize creating a fresh, empty database
+                                when this project's configured server-mode
+                                database is missing or unreachable. Opt-in
+                                per invocation only: never implied by
+                                --force/--reinit-local, config, or env.
+                                Without it, bd init REFUSES rather than
+                                silently recreating a lost database as
+                                empty (be-5up5).
+
   bd init --from-jsonl          Import from configured import.path. If
                                 origin has Dolt data, this refuses unless
                                 --discard-remote authorizes replacing that
