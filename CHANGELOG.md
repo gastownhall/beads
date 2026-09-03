@@ -23,6 +23,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
+### Fixed
+
+- **An ambient `BEADS_DOLT_SERVER_PORT` no longer suppresses auto-start or
+  stops bd reaping its own orphaned server**
+  ([#5934](https://github.com/gastownhall/beads/pull/5934)). Setting
+  `BEADS_DOLT_SERVER_PORT` (or the legacy `BEADS_DOLT_PORT`) now makes
+  `ResolveServerMode` classify a workspace as an externally-managed server, so
+  bd stops trying to own a lifecycle it does not own. The stale-server cleanup
+  path is deliberately carved out of that rule: it keeps resolving the mode
+  without the port var, so bd still reaps a same-repo orphan it started
+  (GH#2430) instead of declining because the environment named a port. A
+  `proxied-server` workspace is exempt from the new rule entirely — it reaches
+  its server through the proxy, so an ambient port does not describe its
+  lifecycle.
+
 ## [1.3.0] - 2026-09-15
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery
