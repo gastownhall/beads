@@ -609,6 +609,50 @@ func newServerRetryBackoff() backoff.BackOff {
 	return bo
 }
 
+// looksLikeClientReadTimeout reports whether err is the go-sql-driver's
+// deadline kill rather than a server/network failure. The driver surfaces BOTH
+// as "invalid connection" / "driver: bad connection", so the string alone
+// cannot distinguish them — but a deadline kill lands at the deadline, and a
+// server disappearing does not care what our timeout is. elapsed is measured
+// around the failing call, and deadline is the read deadline the failing
+// connection was actually built with (DoltStore.poolReadDeadline) — never a
+// second copy of it, or the blame names a deadline that never fired.
+//
+// Why this matters (ga-2xwhcz, 2026-08-31): under load, real gc/bd reads
+// exceeded the 10s pool deadline and reported "invalid connection" / "failed
+// to generate issue ID: bad connection". That reads as a broken transport and
+// sent responders at connectivity while the actual fault was a slow server —
+// a misdiagnosis that cost hours across two incident windows.
+func looksLikeClientReadTimeout(err error, elapsed, deadline time.Duration) bool {
+	// deadline <= 0 means the connection carries no read deadline at all
+	// (openMigrationDB, embedded mode), so no deadline kill is possible.
+	if err == nil || deadline <= 0 {
+		return false
+	}
+	// Allow a small margin: the deadline fires slightly after it expires.
+	if elapsed < deadline-(500*time.Millisecond) {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "invalid connection") ||
+		strings.Contains(errStr, "driver: bad connection")
+}
+
+// explainClientReadTimeout rewrites a deadline kill into an error that names
+// the real cause. It deliberately does NOT change retry classification —
+// changing failure semantics under load is a separate, measured decision — it
+// only stops the error from lying about which subsystem is at fault.
+func explainClientReadTimeout(err error, elapsed, deadline time.Duration, what string) error {
+	if !looksLikeClientReadTimeout(err, elapsed, deadline) {
+		return err
+	}
+	return fmt.Errorf(
+		"%s exceeded the %s client read deadline after %s: the server is SLOW, not the connection broken "+
+			"(the MySQL driver reports a deadline kill as \"invalid connection\"); "+
+			"check complex-query health, not connectivity: %w",
+		what, deadline, elapsed.Round(time.Millisecond), err)
+}
+
 // isRetryableError returns true if the error is a transient connection error
 // that should be retried in server mode.
 func isRetryableError(err error) bool {
@@ -2197,6 +2241,32 @@ func isExternalServerHost(host string) bool {
 	return true
 }
 
+// poolReadDeadline reports the read deadline this store's pooled connections
+// were actually built with, read back off the DSN buildServerDSN produced. It
+// is the discriminator the client-timeout classifier uses (ga-2xwhcz): the
+// MySQL driver reports a deadline kill as "invalid connection",
+// indistinguishable by string from a server that genuinely went away, so
+// elapsed-vs-this-value is what tells them apart. Reading it back off the DSN
+// keeps the classifier and the DSN on ONE value — a second copy is how the two
+// silently drift, and a hard-coded 10s blames a deadline a rig running
+// dolt.pool-read-timeout=60s never had. It also picks up
+// Config.PoolReadTimeoutFallback for free, because buildServerDSN has already
+// resolved the whole precedence chain into the DSN by the time it is read
+// back. Returns 0 when the connection carries no read deadline, which the
+// classifier treats as "no deadline kill possible".
+//
+// No production caller yet, by design: the only site that classifies today runs
+// over openMigrationDB's deadline-less pool and passes 0. This is the contract
+// the pooled-path adoption (ga-yma80p) stands on, and the DSN-coherence test
+// TestPoolReadTimeoutIsTheDSNValue keeps it honest until then.
+func (s *DoltStore) poolReadDeadline() time.Duration {
+	parsed, err := mysql.ParseDSN(s.connStr)
+	if err != nil {
+		return defaultPoolReadTimeout
+	}
+	return parsed.ReadTimeout
+}
+
 // buildServerDSN constructs a MySQL DSN for connecting to a Dolt server.
 // If database is empty, connects without selecting a database (for init operations).
 // Adds ReadTimeout/WriteTimeout for long-lived connection pools.
@@ -2624,8 +2694,11 @@ func initSchemaOnDBWithBootstrapHeal(
 	return applied, nil
 }
 
-func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB) (int, error) {
-	return initSchemaOnDBWithRetryAndGate(ctx, db, nil)
+// readDeadline is the caller's pool read deadline, used only to name a client
+// deadline kill for what it is (see explainClientReadTimeout); pass 0 when the
+// connection carries no read deadline.
+func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB, readDeadline time.Duration) (int, error) {
+	return initSchemaOnDBWithRetryAndGate(ctx, db, nil, readDeadline)
 }
 
 // initSchemaOnDBWithRetryAndGate is initSchemaOnDBWithRetry with an optional
@@ -2634,8 +2707,8 @@ func initSchemaOnDBWithRetry(ctx context.Context, db *sql.DB) (int, error) {
 // startup/catalog races the migration retry absorbs, so gate probe errors are
 // retried with them instead of failing the open fast (bd-6dnrw.30); a
 // *schema.RemoteMigrateGateError refusal stays permanent.
-func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error) (int, error) {
-	return initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, db, gate, nil, "")
+func initSchemaOnDBWithRetryAndGate(ctx context.Context, db *sql.DB, gate func(context.Context, *sql.DB) error, readDeadline time.Duration) (int, error) {
+	return initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, db, gate, nil, "", readDeadline)
 }
 
 // initSchemaOnDBWithRetryAndGateBootstrapHeal shares one capability across the
@@ -2646,6 +2719,7 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 	gate func(context.Context, *sql.DB) error,
 	bootstrapHeal *schema.FreshBootstrapHealCapability,
 	endpoint string,
+	readDeadline time.Duration,
 ) (int, error) {
 	// Schema initialization for server mode is idempotent. Retry transient
 	// Dolt startup/catalog races and contended migration-lock attempts so
@@ -2666,7 +2740,12 @@ func initSchemaOnDBWithRetryAndGateBootstrapHeal(
 			}
 		}
 		var schemaErr error
+		attemptStart := time.Now()
 		applied, schemaErr = initSchemaOnDBWithBootstrapHeal(ctx, db, bootstrapHeal, endpoint)
+		// Name a deadline kill for what it is before it propagates. Retry
+		// classification is unchanged — this only stops the surfaced error from
+		// blaming the transport for a slow server (ga-2xwhcz).
+		schemaErr = explainClientReadTimeout(schemaErr, time.Since(attemptStart), readDeadline, "schema init")
 		if schemaErr != nil && isRetryableError(schemaErr) {
 			return schemaErr
 		}
@@ -2729,7 +2808,16 @@ func (s *DoltStore) initSchema(ctx context.Context, bootstrapHeal *schema.FreshB
 	gate := func(ctx context.Context, db *sql.DB) error {
 		return schema.CheckRemoteMigrateGateForRemoteWithRemoteCheckAndAdopt(ctx, db, s.remote, s.hasPersistedCLIRemote, adopt)
 	}
-	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint)
+	// Read deadline 0, deliberately: openMigrationDB builds its pool with
+	// ReadTimeout=0 so a long migration is never killed mid-flight, which makes
+	// a client deadline kill IMPOSSIBLE on this path. Passing the pooled
+	// deadline here would blame a deadline this connection never had — the same
+	// lie the classifier exists to stop, just at a different number. The
+	// deadline<=0 guard in looksLikeClientReadTimeout keeps the explainer
+	// correctly silent. Adopting it on the pooled path, where the ga-2xwhcz
+	// incident actually spoke ("failed to generate issue ID: bad connection"),
+	// is tracked as ga-yma80p — this silence is intentional, not an oversight.
+	applied, err := initSchemaOnDBWithRetryAndGateBootstrapHeal(ctx, migDB, gate, bootstrapHeal, s.serverEndpoint, 0)
 	return applied, err
 }
 
@@ -2742,7 +2830,10 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 		return 0, err
 	}
 	defer migDB.Close()
-	return initSchemaOnDBWithRetry(ctx, migDB)
+	// Read deadline 0 for the same reason as initSchema: this runs over
+	// openMigrationDB's ReadTimeout=0 pool, so no client deadline kill can
+	// occur and naming one would misattribute the failure (ga-yma80p).
+	return initSchemaOnDBWithRetry(ctx, migDB, 0)
 }
 
 // openMigrationDB opens a one-off connection pool for schema migrations with no
