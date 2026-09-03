@@ -331,7 +331,11 @@ func isTransientPingError(err error) bool {
 		errors.Is(err, io.ErrUnexpectedEOF)
 }
 
-func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff) error {
+// pingAttemptTimeout bounds a single ping attempt.
+const pingAttemptTimeout = 10 * time.Second
+
+func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
+	_ = attemptTimeout // red: not honored yet
 	return backoff.Retry(func() error {
 		err := p.PingContext(ctx)
 		if err == nil {
@@ -351,7 +355,7 @@ func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	}
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = 30 * time.Second
-	if err := pingWithRetry(ctx, conn, bo); err != nil {
+	if err := pingWithRetry(ctx, conn, bo, pingAttemptTimeout); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
