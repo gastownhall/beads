@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -15,6 +16,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func runBDExecSeparated(t *testing.T, bd, dir string, env []string, args ...string) (string, string, error) {
+	t.Helper()
+	cmd := exec.Command(bd, args...)
+	cmd.Dir, cmd.Env = dir, env
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	err := cmd.Run()
+	return stdout.String(), stderr.String(), err
+}
 
 func migrationFrontDoorBinary(t *testing.T) string {
 	if p := os.Getenv("BEADS_TEST_BD_BINARY"); p != "" {
@@ -373,12 +384,18 @@ func TestMigrateDoltModeFrontDoorMalformedStateRefuses(t *testing.T) {
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, ".local_version"), []byte(Version), 0o600))
 			require.NoError(t, os.WriteFile(filepath.Join(beadsDir, tc.file), []byte(tc.body), 0o600))
 			before := snapshotMigrationTree(t, beadsDir)
-			out, err := runBDExecWithBinary(t, bd, dir, env, "--json", "migrate", "from-proxied-server-to-server")
+			out, _, err := runBDExecSeparated(t, bd, dir, env, "--json", "migrate", "from-proxied-server-to-server")
 			require.Error(t, err)
 			exitErr, ok := err.(*exec.ExitError)
 			require.True(t, ok)
 			require.Equal(t, 1, exitErr.ExitCode())
-			require.NoError(t, json.Unmarshal([]byte(out), &map[string]any{}), out)
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal([]byte(out), &payload), out)
+			if data, ok := payload["data"].(map[string]any); ok {
+				payload = data
+			}
+			assert.Equal(t, "proxy.migrate.invalid_state", payload["code"])
+			assert.Equal(t, false, payload["mutates"])
 			assert.Equal(t, before, snapshotMigrationTree(t, beadsDir))
 		})
 	}
