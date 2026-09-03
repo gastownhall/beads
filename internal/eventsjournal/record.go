@@ -40,6 +40,17 @@ type Record struct {
 	Op string `json:"op"`
 	// IssueID is the mutated issue's id.
 	IssueID string `json:"issue_id"`
+	// Actor is the acting identity that performed the mutation, as resolved
+	// for the audit-events table; on an op=comment row it is the comment's
+	// author (caller-asserted, the same value as comment.author — structured
+	// comments emit no audit event). Absent when the mutation path has no
+	// actor: derived maintenance (is_blocked recomputes), the delete plumbing
+	// (every delete except a rename's synthetic delete row — the storage
+	// surface drops the actor before the journal sees it), and rows written
+	// before the journal recorded actors. An absent actor is never user
+	// attribution; a consumer must read it as "system/unknown", not as a
+	// conflicting writer.
+	Actor string `json:"actor,omitempty"`
 	// Issue is the full issue state AFTER the mutation, and the literal JSON
 	// `null` on a delete — never absent. A delete has no surviving row, and a
 	// consumer must be able to tell that from a payload this server failed to
@@ -62,6 +73,7 @@ func NewRecord(row storage.EventsJournalRow) Record {
 		TS:      row.TS,
 		Op:      row.Op,
 		IssueID: row.IssueID,
+		Actor:   row.Actor,
 		Issue:   json.RawMessage("null"),
 	}
 	if row.IssueJSON != "" {

@@ -59,6 +59,29 @@ func runInitProxiedServer(cmd *cobra.Command, ctx context.Context, in initProxie
 		return fmt.Errorf("--team is not supported with --proxied-server")
 	}
 
+	// Preflight the external dolt binary before any .beads/ write below
+	// (checkExistingBeadsData onward). This only applies to managed
+	// proxied-server mode (in.externalConfig == nil): external mode talks
+	// to a remote/pre-existing dolt sql-server over the network and never
+	// spawns a local dolt binary, so it has nothing to preflight here.
+	// Failing here means a missing/broken dolt produces a clean preflight
+	// error instead of a half-initialized .beads/ directory from a later
+	// failure in newManagedProxiedServerUOWProvider.
+	//
+	// Shares resolveAndProbeDolt (uow_factory.go) with
+	// newManagedProxiedServerUOWProvider, which this same `bd init
+	// --proxied-server` invocation goes on to call a few lines below via
+	// newProxiedServerUOWProvider: the shared doltVersionWarnOnce means the
+	// version advisory prints at most once for the command, not once per
+	// call site.
+	if in.externalConfig == nil {
+		// in.quiet, not the global quietFlag: init's local --quiet shadows
+		// the persistent flag, so the global is false under `bd init -q`.
+		if _, err := resolveAndProbeDolt(ctx, "bd init --proxied-server", in.quiet || quietFlag); err != nil {
+			return err
+		}
+	}
+
 	if err := config.Initialize(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to initialize config: %v\n", err)
 	}

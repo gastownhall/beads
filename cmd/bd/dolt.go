@@ -34,17 +34,21 @@ var doltCmd = &cobra.Command{
 	Short:   "Configure Dolt database settings",
 	Long: `Configure and manage Dolt database settings and server lifecycle.
 
-Beads uses a dolt sql-server for all database operations. The server is
-auto-started transparently when needed. Use these commands for explicit
-control or diagnostics.
+Beads runs Dolt embedded (in-process) by default: there is no sql-server and
+nothing is auto-started. A database only uses a dolt sql-server when it is
+configured for one: shared-server mode, an explicit server mode, or a
+non-localhost dolt_server_host. The server-only commands below fail with
+"not supported in embedded mode (no Dolt server)" on an embedded database.
 
-Server lifecycle:
+Server lifecycle (server mode only):
   bd dolt start        Start the Dolt server for this project
   bd dolt stop         Stop the Dolt server for this project
-  bd dolt status       Show Dolt server status
 
-Configuration:
+Diagnostics (both modes):
+  bd dolt status       Show Dolt engine status (embedded: in-process, data dir)
   bd dolt show         Show current Dolt configuration with connection test
+
+Configuration (server mode only):
   bd dolt set <k> <v>  Set a configuration value
   bd dolt test         Test server connection
 
@@ -732,24 +736,26 @@ For more options (--stdin, custom messages), see: bd vc commit`,
 		if msg == "" {
 			msg = fmt.Sprintf("bd: dolt commit (auto-commit) by %s", getActor())
 		}
-		beforeHash, beforeErr := st.GetCurrentCommit(ctx)
-		if err := st.Commit(ctx, msg); err != nil {
+		// CommitAll, not Commit: this command's contract is "any uncommitted
+		// changes in the working set", including changes made externally and
+		// the config table — which server-mode Commit excludes (GH#2455), so
+		// out-of-band config dirt used to survive this command forever. Its
+		// committed bool also replaces the HEAD-before/HEAD-after comparison
+		// this command used to detect tolerated no-ops with, which cost two
+		// extra HEAD reads and raced against concurrent writers.
+		committed, err := st.CommitAll(ctx, msg)
+		if err != nil {
 			if isDoltNothingToCommit(err) {
-				fmt.Println("Nothing to commit.")
-				return nil
+				committed = false
+			} else {
+				return HandleError("%v", err)
 			}
-			return HandleError("%v", err)
 		}
-		commandDidExplicitDoltCommit = true
-
-		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
-		// store) returns a nil error even when HEAD did not move. Detect that
-		// case here instead of relying on the error, so both backends report
-		// the same "nothing to commit" outcome.
-		if afterHash, afterErr := st.GetCurrentCommit(ctx); beforeErr == nil && afterErr == nil && afterHash == beforeHash {
+		if !committed {
 			fmt.Println("Nothing to commit.")
 			return nil
 		}
+		commandDidExplicitDoltCommit = true
 
 		fmt.Println("Committed.")
 		return nil

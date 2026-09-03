@@ -81,6 +81,14 @@ type SweeperFixture struct {
 	// can cite a candidate from a wisp's comment without knowing how that
 	// backend reaches wisp_comments.
 	AddComment func(ctx context.Context, issueID, author, text string) error
+	// Exec runs a raw seeding script, the same hook shape the cycle-detector
+	// kit uses. The tier-boundary case needs it to manufacture the LEGACY
+	// typed-wisp row (issues plane, wisp_type set, ephemeral 0) that no
+	// current create path can mint — every one of them now infers ephemeral
+	// from wisp_type, which is exactly why the legacy rows have to be built
+	// by hand. A nil Exec means "this backend cannot seed raw rows", and the
+	// case that needs it SKIPS with that reason rather than passing quietly.
+	Exec func(ctx context.Context, statements []SQLStatement) error
 }
 
 // sweeperClosedAt is the stamp every seeded candidate carries, and
@@ -176,6 +184,81 @@ func RunSweeperClearsOneTierAndLeavesTheOther(t *testing.T, ctx context.Context,
 		t.Fatalf("ephemeral sweep reported Swept = %d, want 1", result.Swept)
 	}
 	sweeperAssertWispRows(t, ctx, fixture, 0, wispID)
+}
+
+// RunSweeperTreatsALegacyTypedWispAsEphemeralTier pins the tier boundary on
+// the row shape that motivated it: a closed row in the ISSUES plane carrying a
+// wisp_type but not the ephemeral flag — the shape older creators minted, 858
+// of which survived every purge in one production DB because the candidate
+// filter matched the flag alone (and the flag's search route never left the
+// wisps plane).
+//
+// The ephemeral sweep must take it; the durable sweep must not — a typed wisp
+// is ephemeral-tier however it was minted. The durable sibling proves the
+// boundary moved rather than collapsed into "purge takes everything".
+//
+// The legacy shape is manufactured with a raw UPDATE because every current
+// create path infers ephemeral from wisp_type; the rows this case guards were
+// minted before the inference existed.
+func RunSweeperTreatsALegacyTypedWispAsEphemeralTier(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	if fixture.Exec == nil {
+		t.Skip("backend cannot seed raw rows (no Exec hook)")
+	}
+	legacy := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "legacywisp", "typed", false), nil)
+	durable := sweeperSeed(t, ctx, fixture, sweeperIssue(fixture, "legacywisp", "plain", false), nil)
+	if err := fixture.Exec(ctx, []SQLStatement{{
+		Query: "UPDATE issues SET wisp_type = 'patrol' WHERE id = ?",
+		Args:  []any{legacy},
+	}}); err != nil {
+		t.Fatalf("manufacturing the legacy typed-wisp shape: %v", err)
+	}
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "legacywisp"),
+	})
+	if result.Swept != 1 {
+		t.Fatalf("ephemeral sweep Swept = %d, want 1 (the legacy typed wisp)", result.Swept)
+	}
+	sweeperAssertIssueRows(t, ctx, fixture, 0, legacy)
+	sweeperAssertIssueRows(t, ctx, fixture, 1, durable)
+
+	result = sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepDurable,
+		IDPattern: sweeperPattern(fixture, "legacywisp"),
+	})
+	if result.Swept != 1 {
+		t.Fatalf("durable sweep Swept = %d, want 1 (the plain closed issue)", result.Swept)
+	}
+	sweeperAssertIssueRows(t, ctx, fixture, 0, durable)
+}
+
+// RunSweeperLeavesNoHistoryBeadsToTheDurableTier pins the other edge of the
+// same boundary: a NoHistory bead lives in the WISPS plane with ephemeral=0
+// and no wisp_type, and it is durable-tier (GH#3649) — widening the ephemeral
+// tier to typed wisps must not sweep it up.
+func RunSweeperLeavesNoHistoryBeadsToTheDurableTier(t *testing.T, ctx context.Context, fixture SweeperFixture) {
+	t.Helper()
+	// Seeded through CreateWisp, not CreateIssue: putting a NoHistory bead in
+	// the wisps plane is the CREATE verb's routing, and not every fixture's
+	// CreateIssue goes through that verb (the uow kit calls the domain-level
+	// create, which takes the plane as an argument). The sweeper contract
+	// needs the row SHAPE in the wisps plane, however a backend gets it there.
+	noHistory := sweeperIssue(fixture, "nohist", "keep", false)
+	noHistory.NoHistory = true
+	if err := fixture.CreateWisp(ctx, noHistory, "sweeper-seed"); err != nil {
+		t.Fatalf("seeding %s: %v", noHistory.ID, err)
+	}
+
+	result := sweeperSweep(t, ctx, fixture, publicops.SweepRequest{
+		Tier:      publicops.SweepEphemeral,
+		IDPattern: sweeperPattern(fixture, "nohist"),
+	})
+	if result.Swept != 0 {
+		t.Fatalf("ephemeral sweep Swept = %d, want 0 — a NoHistory bead is durable-tier", result.Swept)
+	}
+	sweeperAssertWispRows(t, ctx, fixture, 1, noHistory.ID)
 }
 
 // RunSweeperProtectsPinnedRows pins the protection no request field overrides

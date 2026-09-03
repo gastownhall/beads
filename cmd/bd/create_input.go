@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/beads/internal/timeparsing"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/ui"
+	"github.com/steveyegge/beads/internal/utils"
 	"github.com/steveyegge/beads/internal/validation"
 )
 
@@ -94,7 +95,7 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	}
 	if in.markdownFile != "" {
 		if len(args) > 0 {
-			return in, HandleError("cannot specify both title and --file flag")
+			return in, HandleError("cannot specify both title and --file flag; for a single issue's description from a file, use --body-file")
 		}
 		if in.dryRun {
 			return in, HandleError("--dry-run is not supported with --file flag")
@@ -197,6 +198,12 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	if len(labelAlias) > 0 {
 		in.labels = append(in.labels, labelAlias...)
 	}
+	// Normalize after merging the alias so dedupe spans both flags. Read paths
+	// (list, search, ready, orphans) already do this; without it here, `--labels
+	// 'a, b'` stores " b" with pflag's leading space and can never match its own
+	// filter.
+	in.labels = utils.NormalizeLabels(in.labels)
+	warnLabelsContainingWhitespace(in.labels)
 	in.deps, _ = cmd.Flags().GetStringSlice("deps")
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")

@@ -256,11 +256,20 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 |---|---|
 | Current embedded metadata with `.beads/embeddeddolt/` and no explicit server selection | Direct current-era upgrade |
 | Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
-| Explicit server metadata plus `.beads/dolt/` and a valid witness whose major version is 1 or newer | Normal current server-mode upgrade |
-| Explicit server metadata plus `.beads/dolt/` and a missing, malformed, or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness whose major version is 1 or newer | Normal current server-mode upgrade |
+| Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
 | `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
 | One `.beads/*.db` file, such as `beads.db` or `vc.db` | Sealed SQLite bridge |
+
+The witness is whatever `bd` held in its own version string when it last touched
+the workspace, so it may be a plain release, a release candidate, a build
+carrying metadata, or a Go pseudo-version; all of those are read as the version
+they name. A witness that is present but unreadable is not treated as a legacy
+marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
+rather than refusing every command. A *missing* witness stays ambiguous and is
+still refused.
 
 Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
 opening storage or rewriting metadata. This is intentional: preserve the source

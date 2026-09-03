@@ -321,7 +321,7 @@ func (s *DoltStore) demoteToWispInTx(ctx context.Context, tx *sql.Tx, id string,
 	// maintenance has settled. UpdateIssueWithoutEventInTx above suppressed only
 	// the human audit event — its own journal row already recorded the field
 	// change, and this one records the plane move.
-	if err := issueops.RecordEventInTx(ctx, tx, issueops.EventUpdate, id); err != nil {
+	if err := issueops.RecordEventInTx(ctx, tx, issueops.EventUpdate, id, actor); err != nil {
 		return err
 	}
 
