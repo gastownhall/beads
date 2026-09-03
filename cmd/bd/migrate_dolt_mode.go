@@ -547,7 +547,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 				return HandleError("migration journal topology does not match live shared-server configuration")
 			}
 		}
-	} else if shared && !liveShared {
+	} else if shared && !liveShared && !cfg.IsDoltProxiedServerMode() {
 		return HandleError("migration command topology does not match live shared-server configuration")
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
