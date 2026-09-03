@@ -104,11 +104,16 @@ func RenderMarkdown(markdown string) string {
 // colors, which read poorly on a light-background terminal. Honor an
 // explicit GLAMOUR_STYLE override first, then fall back to the same
 // detected background internal/ui already uses.
+//
+// ui.IsDarkBackground's zero value is "light", which would be wrong for an
+// unprobed dark terminal, but this is only ever reached from RenderMarkdown
+// under useANSI, the same ui.ShouldUseColor() gate that guards the probe
+// itself — so by the time this runs, the value is never unprobed.
 func glamourStylePath() string {
 	if envStyle := os.Getenv("GLAMOUR_STYLE"); envStyle != "" {
 		return envStyle
 	}
-	if ui.IsDarkBackground {
+	if ui.IsDarkBackground() {
 		return styles.DarkStyle
 	}
 	return styles.LightStyle
