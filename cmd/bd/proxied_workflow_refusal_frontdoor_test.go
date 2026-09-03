@@ -61,7 +61,13 @@ func TestProxiedWorkflowRefusalsFrontDoor(t *testing.T) {
 		}
 		return "proxy.formula.unsupported"
 	}
-	expectedMessage := func(args []string) string { return args[0] + " is not supported in proxied-server mode" }
+	expectedMessage := func(args []string) string {
+		name := args[0]
+		if (args[0] == "swarm" || args[0] == "merge-slot") && len(args) > 1 {
+			name += " " + args[1]
+		}
+		return name + " is not supported in proxied-server mode"
+	}
 	for _, args := range commands {
 		t.Run(strings.Join(args, "/"), func(t *testing.T) {
 			for _, jsonMode := range []bool{false, true} {
