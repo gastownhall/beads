@@ -279,6 +279,8 @@ Yes, three ways: `bd query` for the built-in query language (compound filters, b
 
 Yes — native Windows support, no MSYS or MinGW required. A PowerShell script installs prebuilt releases, and everything works with Windows paths. See [Installation](/getting-started/installation#windows-11).
 
+Because `bd.exe` is a native binary, two integration details catch people out: Node programs cannot spawn the npm `bd.cmd` shim without a shell, and `/tmp` paths that reach `bd` unconverted — from Node, scripts, or config values — resolve to the drive root, not Git Bash's `/tmp`. Both are covered under [Platform-Specific Issues](/reference/troubleshooting#platform-specific-issues).
+
 ### Can I use beads with git worktrees?
 
 Yes — beads works from normal git worktrees with no special setup. All worktrees in a repository share the same `.beads` workspace; `bd` discovers it from linked worktrees automatically.

@@ -6,6 +6,7 @@ import (
 
 	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/telemetry"
 )
 
@@ -42,13 +43,17 @@ func TestWireStorageDecorators_TelemetryOff_HookOn(t *testing.T) {
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	if inner := hf.Unwrap(); inner.(*stubChainStore) != raw {
-		t.Errorf("HookFiringStore.Unwrap() should return raw store directly when telemetry off; got %T", inner)
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
+	if !ok {
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
+	}
+	if inner := ext.Unwrap(); inner.(*stubChainStore) != raw {
+		t.Errorf("external dependency policy should wrap raw store directly when telemetry off; got %T", inner)
 	}
 }
 
-// Asserts the full HookFiringStore → InstrumentedStorage → raw chain that the
-// rest of bd depends on for storage spans + bd.storage.* / bd.issue.count
+// Asserts the full HookFiringStore → externaldeps.Store → InstrumentedStorage
+// → raw chain that the rest of bd depends on for storage spans + bd.storage.* / bd.issue.count
 // metrics. This is the regression test for the original PR-3475 bug, where
 // WrapStorage was implemented but never called.
 func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
@@ -61,9 +66,13 @@ func TestWireStorageDecorators_TelemetryOn_HookOn(t *testing.T) {
 	if !ok {
 		t.Fatalf("outer decorator: got %T; want *storage.HookFiringStore", got)
 	}
-	inst, ok := hf.Unwrap().(*telemetry.InstrumentedStorage)
+	ext, ok := hf.Unwrap().(*externaldeps.Store)
 	if !ok {
-		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", hf.Unwrap())
+		t.Fatalf("second decorator: got %T; want *externaldeps.Store", hf.Unwrap())
+	}
+	inst, ok := ext.Unwrap().(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatalf("middle decorator: got %T; want *telemetry.InstrumentedStorage", ext.Unwrap())
 	}
 	if inner := inst.Unwrap(); inner.(*stubChainStore) != raw {
 		t.Errorf("InstrumentedStorage.Unwrap() should return raw store; got %T", inner)
@@ -106,9 +115,13 @@ func TestWireStorageDecorators_TelemetryOn_HookDisabled(t *testing.T) {
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
 
-	inst, ok := got.(*telemetry.InstrumentedStorage)
+	ext, ok := got.(*externaldeps.Store)
 	if !ok {
-		t.Fatalf("expected *telemetry.InstrumentedStorage when hooks disabled; got %T", got)
+		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
+	}
+	inst, ok := ext.Unwrap().(*telemetry.InstrumentedStorage)
+	if !ok {
+		t.Fatalf("expected *telemetry.InstrumentedStorage when hooks disabled; got %T", ext.Unwrap())
 	}
 	if inner := inst.Unwrap(); inner.(*stubChainStore) != raw {
 		t.Errorf("InstrumentedStorage.Unwrap() should return raw store; got %T", inner)
@@ -119,8 +132,12 @@ func TestWireStorageDecorators_TelemetryOff_HookDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, hooks.NewRunner("/nonexistent"), true)
-	if got.(*stubChainStore) != raw {
-		t.Errorf("with telemetry off and hooks disabled, expected raw store back; got %T", got)
+	ext, ok := got.(*externaldeps.Store)
+	if !ok {
+		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
+	}
+	if ext.Unwrap().(*stubChainStore) != raw {
+		t.Errorf("with telemetry off and hooks disabled, expected external decorator around raw store; got %T", ext.Unwrap())
 	}
 }
 
@@ -128,7 +145,11 @@ func TestWireStorageDecorators_NilHookRunner(t *testing.T) {
 	clearTelemetryEnv(t)
 	raw := &stubChainStore{}
 	got := wireStorageDecorators(raw, nil, false)
-	if got.(*stubChainStore) != raw {
-		t.Errorf("with telemetry off and nil hookRunner, expected raw store back; got %T", got)
+	ext, ok := got.(*externaldeps.Store)
+	if !ok {
+		t.Fatalf("outer decorator: got %T; want *externaldeps.Store", got)
+	}
+	if ext.Unwrap().(*stubChainStore) != raw {
+		t.Errorf("with telemetry off and nil hookRunner, expected external decorator around raw store; got %T", ext.Unwrap())
 	}
 }

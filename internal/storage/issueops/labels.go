@@ -163,7 +163,7 @@ func AddLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issueID,
 	}
 	// A label is part of the bead snapshot, so a label write journals as an
 	// update carrying the complete post-mutation set.
-	return RecordEventInTx(ctx, tx, EventUpdate, issueID)
+	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
 }
 
 // RemoveLabelInTx removes a label from an issue and records an event within
@@ -194,5 +194,5 @@ func RemoveLabelInTx(ctx context.Context, tx DBTX, labelTable, eventTable, issue
 	}); err != nil {
 		return fmt.Errorf("remove label: record event: %w", err)
 	}
-	return RecordEventInTx(ctx, tx, EventUpdate, issueID)
+	return RecordEventInTx(ctx, tx, EventUpdate, issueID, actor)
 }

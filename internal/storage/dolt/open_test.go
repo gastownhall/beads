@@ -401,4 +401,103 @@ func TestApplyResolvedConfig(t *testing.T) {
 			t.Fatalf("PoolReadTimeout = %v, want caller's 2m", cfg.PoolReadTimeout)
 		}
 	})
+
+	t.Run("propagates ServerPortSource and ServerPortSharedServer alongside ServerPort (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+
+		if cfg.ServerPort != 14567 {
+			t.Fatalf("ServerPort = %d, want 14567", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
+			t.Fatalf("ServerPortSource = %q, want %q (applyResolvedConfig must propagate doltserver.DefaultConfig's PortSource, not just Port)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
+		}
+		if cfg.ServerPortSharedServer != false {
+			t.Fatalf("ServerPortSharedServer = %v, want false", cfg.ServerPortSharedServer)
+		}
+	})
+
+	t.Run("chained through applyConfigDefaults: port-file resolution is never mislabeled caller-explicit (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPortSource != doltserver.PortSourcePortFile {
+			t.Fatalf("ServerPortSource = %q, want %q (a port-file-resolved port must not be mislabeled caller_explicit — GH#4052 auto-start fail-closed logic depends on this)", cfg.ServerPortSource, doltserver.PortSourcePortFile)
+		}
+		if cfg.ServerPort != 14567 {
+			t.Fatalf("ServerPort = %d, want 14567 (unchanged)", cfg.ServerPort)
+		}
+	})
+
+	t.Run("legacy BEADS_DOLT_PORT redirects away from a non-authoritative port-file port (be-9tju)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+		t.Setenv("BEADS_DOLT_PORT", "43211")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		if err := doltserver.EnsurePortFile(beadsDir, 14567); err != nil {
+			t.Fatalf("EnsurePortFile: %v", err)
+		}
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != 43211 {
+			t.Fatalf("ServerPort = %d, want 43211 (legacy BEADS_DOLT_PORT must override a non-authoritative port-file-resolved port — regression of hq-27t bug class)", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceEnv {
+			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceEnv)
+		}
+	})
+
+	t.Run("genuinely caller-explicit ServerPort still outranks ambient BEADS_DOLT_SERVER_PORT env (be-wf9a.1 regression safety)", func(t *testing.T) {
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "43211")
+		t.Setenv("BEADS_DOLT_PORT", "")
+		t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+		t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+		beadsDir := t.TempDir()
+		fileCfg := &configfile.Config{Backend: configfile.BackendDolt}
+		cfg := &Config{ServerPort: 15000}
+
+		if err := applyResolvedConfig(context.Background(), beadsDir, fileCfg, cfg); err != nil {
+			t.Fatalf("applyResolvedConfig: %v", err)
+		}
+		applyConfigDefaults(cfg)
+
+		if cfg.ServerPort != 15000 {
+			t.Fatalf("ServerPort = %d, want 15000 (caller-explicit preset must outrank ambient env)", cfg.ServerPort)
+		}
+		if cfg.ServerPortSource != doltserver.PortSourceCallerExplicit {
+			t.Fatalf("ServerPortSource = %q, want %q", cfg.ServerPortSource, doltserver.PortSourceCallerExplicit)
+		}
+	})
 }
