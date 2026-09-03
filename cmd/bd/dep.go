@@ -848,7 +848,151 @@ func printDepListEdges(anchors []issueops.AnchorEdges) error {
 		}
 		fmt.Printf("\n%s Dependencies of %s:\n\n", ui.RenderAccent("📋"), anchor.ID)
 		for _, dep := range anchor.Edges {
-			fmt.Printf("  %s via %s\n", dep.DependsOnID, dep.Type)
+			// This route is reached for "down" only, so the label is the
+			// down one; it is printed anyway so that every row `bd dep list`
+			// can emit says which end of its edge it is, in every mode.
+			fmt.Printf("  %s %s via %s\n", depEdgeDirectionLabel("down", dep.Type), dep.DependsOnID, dep.Type)
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+// depEdgeDirectionLabel names which END of an edge a `bd dep list` row sits on,
+// relative to the anchor the caller asked about.
+//
+// Direction is the whole meaning of a dependency edge, and without a label the
+// row renders as "<id>: <title> [P1] (open) via blocks" — a line that is
+// IDENTICAL for --direction=down and --direction=up. The two opposite readings
+// of an edge are therefore indistinguishable in the output, and the natural
+// reading of the default (down) form is the REVERSE of what it means: under
+// `bd dep list a`, the row "b: ... via blocks" scans as "a blocks b" when what
+// it says is that b blocks a. `bd dep tree` is the only surface that
+// disambiguates today, by badging its root [BLOCKED] and its children [blocks];
+// a caller who reaches for `dep list` first reads the graph backwards with
+// nothing in the output to catch it.
+//
+// The blocking-type split is the same one `dep tree` uses for that badge
+// (IsBlockingEdge), so the sharper wording appears exactly where "blocked" is
+// the true relation, and the structural wording covers every other type —
+// including the open vocabulary a workspace defines for itself, where no
+// blocking claim would be warranted.
+func depEdgeDirectionLabel(direction string, depType types.DependencyType) string {
+	if direction == "up" {
+		if depType.IsBlockingEdge() {
+			return "BLOCKS"
+		}
+		return "DEPENDED ON BY"
+	}
+	if depType.IsBlockingEdge() {
+		return "BLOCKED BY"
+	}
+	return "DEPENDS ON"
+}
+
+// depEdgeDirectionValue is the --json counterpart of depEdgeDirectionLabel: the
+// VERB of the triple <anchor_id> <dependency_direction> <id>, so a machine
+// consumer reads an edge in subject-verb-object order without having to know
+// which flag produced the answer. The payload used to be the far-end issue's
+// own row and nothing else, which carries no direction at all — the same
+// ambiguity as the text form, in a shape that is harder to eyeball.
+func depEdgeDirectionValue(direction string) string {
+	if direction == "up" {
+		return "depended-on-by"
+	}
+	return "depends-on"
+}
+
+// depListRow is one `bd dep list --json` row: the far-end issue's own fields,
+// plus the two that say which edge it came from. Both additions are ADDITIVE —
+// every key the payload carried before is still present, unmoved and unrenamed.
+type depListRow struct {
+	*types.IssueWithDependencyMetadata
+	// AnchorID is the issue the caller asked about: the edge's SUBJECT. It is
+	// per-row rather than per-answer because one listing may name several
+	// anchors, and a flat array cannot otherwise say which anchor a row
+	// belongs to.
+	AnchorID string `json:"anchor_id"`
+	// DependencyDirection is "depends-on" (anchor_id depends on this issue) or
+	// "depended-on-by" (anchor_id is depended on by this issue).
+	DependencyDirection string `json:"dependency_direction"`
+}
+
+// depListNeighbors pairs one anchor with the neighbors a Relations query
+// answered for it, so the renderer can name BOTH ends of every edge.
+type depListNeighbors struct {
+	anchorID  string
+	neighbors []*issueops.RelatedIssue
+}
+
+// printDepListNeighbors renders the Relations answer for `bd dep list`, and is
+// shared by the embedded and proxied-server routes so the two cannot drift
+// apart in what they print.
+func printDepListNeighbors(groups []depListNeighbors, direction string) error {
+	total := 0
+	for _, g := range groups {
+		total += len(g.neighbors)
+	}
+
+	if jsonOutput {
+		rows := []depListRow{}
+		for _, g := range groups {
+			for _, iss := range g.neighbors {
+				rows = append(rows, depListRow{
+					IssueWithDependencyMetadata: iss,
+					AnchorID:                    g.anchorID,
+					DependencyDirection:         depEdgeDirectionValue(direction),
+				})
+			}
+		}
+		return outputJSON(rows)
+	}
+
+	if total == 0 {
+		if len(groups) == 1 {
+			if direction == "up" {
+				fmt.Printf("\nNo issues depend on %s\n", groups[0].anchorID)
+			} else {
+				fmt.Printf("\n%s has no dependencies\n", groups[0].anchorID)
+			}
+		} else {
+			fmt.Println("\nNo dependencies found")
+		}
+		return nil
+	}
+
+	for _, g := range groups {
+		if len(g.neighbors) == 0 {
+			continue
+		}
+		// The anchor is named once per group only when the listing carries
+		// more than one — the single-id call, which is the overwhelmingly
+		// common one, keeps the shape it has always had, and every row in
+		// either shape still says which end of the edge it is.
+		if len(groups) > 1 {
+			heading := "Dependencies of " + g.anchorID
+			if direction == "up" {
+				heading = "Dependents of " + g.anchorID
+			}
+			fmt.Printf("\n%s %s:\n\n", ui.RenderAccent("📋"), heading)
+		}
+		for _, iss := range g.neighbors {
+			var idStr string
+			switch iss.Status {
+			case types.StatusOpen:
+				idStr = ui.StatusOpenStyle.Render(iss.ID)
+			case types.StatusInProgress:
+				idStr = ui.StatusInProgressStyle.Render(iss.ID)
+			case types.StatusBlocked:
+				idStr = ui.StatusBlockedStyle.Render(iss.ID)
+			case types.StatusClosed:
+				idStr = ui.StatusClosedStyle.Render(iss.ID)
+			default:
+				idStr = iss.ID
+			}
+			fmt.Printf("  %s %s: %s [P%d] (%s) via %s\n",
+				depEdgeDirectionLabel(direction, iss.DependencyType),
+				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
 		}
 	}
 	fmt.Println()
@@ -904,6 +1048,16 @@ var depListCmd = &cobra.Command{
 By default shows dependencies (what issues depend on). Use --direction to control:
   - down: Show dependencies (what this issue depends on) - default
   - up:   Show dependents (what depends on this issue)
+
+Every row states its own direction, because "sc-b: ... via blocks" alone reads
+as the reverse of what it means:
+
+  BLOCKED BY / DEPENDS ON     the listed issue is one the queried issue needs
+  BLOCKS / DEPENDED ON BY     the listed issue is one that needs the queried issue
+
+With --json each row carries "anchor_id" (the issue you asked about) and
+"dependency_direction" ("depends-on" or "depended-on-by"), so a row reads in
+subject-verb-object order: <anchor_id> <dependency_direction> <id>.
 
 Multiple IDs can be provided for batch dep listing. With --json, the output
 is a flat array of dependency records across all requested issues.
@@ -1015,7 +1169,7 @@ Examples:
 			request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
 		}
 
-		var allIssues []*issueops.RelatedIssue
+		groups := make([]depListNeighbors, 0, len(resolved))
 		for _, r := range resolved {
 			rel, err := r.store.IssueRelations()
 			if err != nil {
@@ -1026,7 +1180,7 @@ Examples:
 			if err != nil {
 				return HandleErrorRespectJSON("%v", err)
 			}
-			allIssues = append(allIssues, issues...)
+			groups = append(groups, depListNeighbors{anchorID: r.fullID, neighbors: issues})
 		}
 
 		// Relations silently drops "down" edges whose target has no row in
@@ -1041,49 +1195,11 @@ Examples:
 		// role exists to detect it from here — tracked separately.
 		if direction == "down" && len(resolved) == 1 {
 			if reader, err := resolved[0].store.EdgeReader(); err == nil {
-				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, allIssues)
+				warnDroppedDepEdges(ctx, reader, resolved[0].fullID, typeFilter, groups[0].neighbors)
 			}
 		}
 
-		if jsonOutput {
-			if allIssues == nil {
-				allIssues = []*issueops.RelatedIssue{}
-			}
-			return outputJSON(allIssues)
-		}
-
-		if len(allIssues) == 0 {
-			if len(resolved) == 1 {
-				if direction == "up" {
-					fmt.Printf("\nNo issues depend on %s\n", resolved[0].fullID)
-				} else {
-					fmt.Printf("\n%s has no dependencies\n", resolved[0].fullID)
-				}
-			} else {
-				fmt.Println("\nNo dependencies found")
-			}
-			return nil
-		}
-
-		for _, iss := range allIssues {
-			var idStr string
-			switch iss.Status {
-			case types.StatusOpen:
-				idStr = ui.StatusOpenStyle.Render(iss.ID)
-			case types.StatusInProgress:
-				idStr = ui.StatusInProgressStyle.Render(iss.ID)
-			case types.StatusBlocked:
-				idStr = ui.StatusBlockedStyle.Render(iss.ID)
-			case types.StatusClosed:
-				idStr = ui.StatusClosedStyle.Render(iss.ID)
-			default:
-				idStr = iss.ID
-			}
-			fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-				idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
-		}
-		fmt.Println()
-		return nil
+		return printDepListNeighbors(groups, direction)
 	},
 }
 

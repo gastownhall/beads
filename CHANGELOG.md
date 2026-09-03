@@ -179,6 +179,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or mixed runs, `__` and `---` included, are unaffected and still collapse.
 
 ### Fixed
+- **`bd dep list` now states each row's direction**
+  ([#5959](https://github.com/gastownhall/beads/pull/5959)). Rows rendered as
+  `<id>: <title> [P1] (open) via blocks` — a line that was identical for
+  `--direction=down` and `--direction=up`, and whose natural reading is the
+  reverse of the default's meaning: under `bd dep list a`, the row
+  `b: … via blocks` scans as "a blocks b" when it says that b blocks a. Text
+  rows now carry `BLOCKED BY` / `DEPENDS ON` (down) or `BLOCKS` /
+  `DEPENDED ON BY` (up), using the same blocking-type split `bd dep tree` uses
+  for its `[BLOCKED]` badge. `--json` rows gain two additive keys, `anchor_id`
+  and `dependency_direction` (`depends-on` / `depended-on-by`), so a row reads
+  in subject-verb-object order; every key the payload carried before is
+  unchanged. A listing naming several anchors also gains a per-anchor heading —
+  a single-anchor listing keeps the shape it has always had.
 
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or

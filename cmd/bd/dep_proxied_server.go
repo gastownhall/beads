@@ -411,14 +411,14 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 		request.Types = []types.DependencyType{types.DependencyType(typeFilter)}
 	}
 
-	var allIssues []*issueops.RelatedIssue
+	groups := make([]depListNeighbors, 0, len(args))
 	for _, id := range args {
 		request.ID = id
 		issues, err := rel.Related(ctx, request)
 		if err != nil {
 			return HandleErrorRespectJSON("%v", err)
 		}
-		allIssues = append(allIssues, issues...)
+		groups = append(groups, depListNeighbors{anchorID: id, neighbors: issues})
 	}
 
 	// Same gap as the embedded RunE for this command (cmd/bd/dep.go): Relations
@@ -430,50 +430,11 @@ func runDepListProxiedServer(cmd *cobra.Command, ctx context.Context, args []str
 	// touches stdout/--json.
 	if direction == "down" && len(args) == 1 {
 		if reader, err := proxiedEdgeReader(); err == nil {
-			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, allIssues)
+			warnDroppedDepEdges(ctx, reader, args[0], typeFilter, groups[0].neighbors)
 		}
 	}
 
-	if jsonOutput {
-		if allIssues == nil {
-			allIssues = []*issueops.RelatedIssue{}
-		}
-		_ = outputJSON(allIssues)
-		return nil
-	}
-
-	if len(allIssues) == 0 {
-		if len(args) == 1 {
-			if direction == "up" {
-				fmt.Printf("\nNo issues depend on %s\n", args[0])
-			} else {
-				fmt.Printf("\n%s has no dependencies\n", args[0])
-			}
-		} else {
-			fmt.Println("\nNo dependencies found")
-		}
-		return nil
-	}
-
-	for _, iss := range allIssues {
-		var idStr string
-		switch iss.Status {
-		case types.StatusOpen:
-			idStr = ui.StatusOpenStyle.Render(iss.ID)
-		case types.StatusInProgress:
-			idStr = ui.StatusInProgressStyle.Render(iss.ID)
-		case types.StatusBlocked:
-			idStr = ui.StatusBlockedStyle.Render(iss.ID)
-		case types.StatusClosed:
-			idStr = ui.StatusClosedStyle.Render(iss.ID)
-		default:
-			idStr = iss.ID
-		}
-		fmt.Printf("  %s: %s [P%d] (%s) via %s\n",
-			idStr, iss.Title, iss.Priority, iss.Status, iss.DependencyType)
-	}
-	fmt.Println()
-	return nil
+	return printDepListNeighbors(groups, direction)
 }
 
 // runDepListRecordsProxiedServer answers `bd dep list a b c` with raw edge
