@@ -151,6 +151,17 @@ func removeMigrateJournal(beadsDir string) error {
 	if err := os.Remove(migrateJournalPath(beadsDir)); err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
+	if err != nil {
+		return fmt.Errorf("opening migration directory: %w", err)
+	}
+	if err = d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing migration directory: %w", err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("closing migration directory: %w", err)
+	}
 	return nil
 }
 
