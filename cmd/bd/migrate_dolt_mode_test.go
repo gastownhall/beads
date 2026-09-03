@@ -627,6 +627,19 @@ func TestMigrateSharedJournalMissingYAMLFailsClosed(t *testing.T) {
 	require.Error(t, runMigrateToProxiedServer(false, 0, true))
 }
 
+func TestMigrateNonSharedJournalRejectsPersistedSharedYAML(t *testing.T) {
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1") // stale ambient environment
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: true\n"), 0o600))
+	root := filepath.Join(beadsDir, "dolt")
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, RootPath: root, Ownership: "managed-local", Attempt: 1, Phase: migrateTargetConfigured, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root}}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+	err = runMigrateToProxiedServer(false, 0, false)
+	require.Error(t, err)
+}
+
 func TestMigrateJournalSidecarRootMismatchFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, RootPath: filepath.Join(beadsDir, "dolt"), Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: filepath.Join(beadsDir, "other")}}

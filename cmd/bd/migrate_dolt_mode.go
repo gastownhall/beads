@@ -529,10 +529,20 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		return HandleError("migration state is inconsistent: %v", err)
 	}
 	liveShared := doltserver.IsSharedServerMode()
+	yamlShared, yamlSharedSet := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server")
 	if j != nil {
 		wantShared := shared && j.Phase == migratePrepared
+		if !shared && yamlSharedSet && strings.EqualFold(yamlShared, "true") {
+			return HandleError("migration journal topology disagrees with persisted shared-server YAML (true)")
+		}
 		if liveShared != wantShared {
-			return HandleError("migration journal topology does not match live shared-server configuration")
+			if yamlSharedSet && strings.EqualFold(yamlShared, "false") && !wantShared {
+				// The environment may still advertise shared mode after the
+				// forward transition persisted YAML=false; trust persisted state.
+				liveShared = wantShared
+			} else {
+				return HandleError("migration journal topology does not match live shared-server configuration")
+			}
 		}
 	} else if shared && !liveShared {
 		return HandleError("migration command topology does not match live shared-server configuration")
