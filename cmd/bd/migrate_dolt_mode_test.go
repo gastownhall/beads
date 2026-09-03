@@ -87,6 +87,12 @@ func TestMigrateToProxiedServer_MissingRootFailsClosed(t *testing.T) {
 	assert.Equal(t, before, after)
 }
 
+func TestMigrateToProxiedServer_MalformedRootIdentityFailsClosed(t *testing.T) {
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "dolt", ".dolt", "repo_state.json"), []byte("not-json"), 0o600))
+	require.Error(t, runMigrateToProxiedServer(false, 0, false))
+}
+
 func TestMigrateToProxiedServer_DryRunWritesNothing(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	touchFile(t, filepath.Join(beadsDir, "dolt-server.log"))
@@ -289,6 +295,7 @@ func TestMigrateProxiedToSharedServer_Reverse(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt:\n  shared-server: false\n"), 0o600))
 	sharedDolt := filepath.Join(sharedDir, "dolt")
 	require.NoError(t, os.MkdirAll(filepath.Join(sharedDolt, ".dolt"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sharedDolt, ".dolt", "repo_state.json"), []byte(`{}`), 0o600))
 	require.NoError(t, configfile.SaveProxiedServerClientInfo(beadsDir, &configfile.ProxiedServerClientInfo{RootPath: sharedDolt}))
 
 	require.NoError(t, runMigrateFromProxiedServer(false, true))
