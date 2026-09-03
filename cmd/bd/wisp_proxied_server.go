@@ -31,9 +31,10 @@ func runWispCreateProxiedServer(ctx context.Context, in wispCreateInput) error {
 	if sg, err := resolveAndCookFormulaWithVars(in.protoArg, nil, vars); err == nil {
 		formulaSubgraph = sg
 		formulaProtoID = sg.Root.ID
-	} else if errors.Is(err, formula.ErrVarValidation) {
-		// in.protoArg IS a formula; the --var values it was given fail
-		// enum/pattern/required-empty constraints. Report that directly
+	} else if errors.Is(err, formula.ErrVarValidation) || errors.Is(err, formula.ErrValidation) {
+		// in.protoArg IS a formula; either the formula itself does not
+		// validate, or the --var values it was given fail enum/pattern/
+		// required-empty constraints. Report that directly
 		// instead of falling through to the proto-ID lookup below, which
 		// would otherwise mask this as "not found as formula or proto".
 		return HandleError("%v", err)
