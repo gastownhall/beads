@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -377,6 +378,31 @@ func TestMigrateFromProxiedServer_AllCheckpointFaultsRetry(t *testing.T) {
 			j, err := loadMigrateJournal(beadsDir)
 			require.NoError(t, err)
 			assert.Nil(t, j)
+		})
+	}
+}
+
+func TestMigrateFromProxiedServer_ExternalJournalAlwaysFailsClosed(t *testing.T) {
+	for _, phase := range []migratePhase{migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted} {
+		t.Run(string(phase), func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeProxiedServer)
+			root := filepath.Join(beadsDir, "dolt")
+			require.NoError(t, os.MkdirAll(root, 0o755))
+			if phase != migratePrepared {
+				writeMetadataConfig(t, beadsDir, configfile.DoltModeServer, "myproj")
+			}
+			wantMode := configfile.DoltModeServer
+			if phase == migratePrepared {
+				wantMode = configfile.DoltModeProxiedServer
+			}
+			j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: configfile.DoltModeServer, RootPath: root, Ownership: "external", Attempt: 1, Phase: phase, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root, External: &configfile.ExternalDoltConfig{Host: "db.example", Port: 3307}}}
+			b, err := json.Marshal(j)
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+			require.Error(t, runMigrateFromProxiedServer(false, false))
+			cfg, err := configfile.Load(beadsDir)
+			require.NoError(t, err)
+			assert.Equal(t, wantMode, cfg.GetDoltMode())
 		})
 	}
 }
