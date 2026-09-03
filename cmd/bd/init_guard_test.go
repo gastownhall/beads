@@ -629,3 +629,105 @@ func TestInitGuard_ExistingProjectMissingServerDB_RecreateMissingAllows(t *testi
 		}
 	})
 }
+
+// TestInitGuard_ReinitLocalDoesNotBypassMissingServerDB is the review's item 1.
+//
+// --force is a deprecated alias for --reinit-local, and --reinit-local skips
+// checkExistingBeadsData entirely. The reinit path's own typed confirmation
+// keys on countExistingIssues, which returns 0 or an error in exactly the case
+// where the server-side database is missing — so before this fix,
+// `bd init --force` against a lost database created a fresh empty one with no
+// prompt and no destroy token. That is the 2026-08-11 fleet-wide data-loss
+// reflex, reached through the flag an operator in a panic is most likely to
+// reach for, and it is what makes --recreate-missing's "never implied by
+// --force" help text an honest guarantee rather than an aspiration.
+//
+// guardMissingServerDatabaseAt is the narrow guard the reinit path now runs.
+// The subtests pin both halves: it must refuse without --recreate-missing, and
+// must still permit with it (otherwise the documented recovery path is dead).
+func TestInitGuard_ReinitLocalDoesNotBypassMissingServerDB(t *testing.T) {
+	newExistingProjectWorkspace := func(t *testing.T) string {
+		t.Helper()
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := map[string]interface{}{
+			"database":      "dolt",
+			"backend":       "dolt",
+			"dolt_mode":     "server",
+			"dolt_database": "myproject",
+			"project_id":    "existing-0000-1111-2222-333344445555",
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return beadsDir
+	}
+
+	t.Run("refuses without --recreate-missing", func(t *testing.T) {
+		oldAllow := initAllowRecreateMissing
+		initAllowRecreateMissing = false
+		defer func() { initAllowRecreateMissing = oldAllow }()
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+		err := guardMissingServerDatabaseAt(newExistingProjectWorkspace(t), "myproject")
+		if err == nil {
+			t.Fatal("bd init --force/--reinit-local against a missing server-side database must refuse, got nil error")
+		}
+		if !strings.Contains(err.Error(), "not found on server") {
+			t.Errorf("expected the missing-database refusal, got: %v", err)
+		}
+	})
+
+	t.Run("permits with --recreate-missing", func(t *testing.T) {
+		oldAllow := initAllowRecreateMissing
+		initAllowRecreateMissing = true
+		defer func() { initAllowRecreateMissing = oldAllow }()
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+		if err := guardMissingServerDatabaseAt(newExistingProjectWorkspace(t), "myproject"); err != nil {
+			t.Fatalf("--recreate-missing must still authorize the reinit path, got: %v", err)
+		}
+	})
+
+	t.Run("stays silent on a fresh clone with no project_id", func(t *testing.T) {
+		oldAllow := initAllowRecreateMissing
+		initAllowRecreateMissing = false
+		defer func() { initAllowRecreateMissing = oldAllow }()
+		oldServerMode := serverMode
+		serverMode = true
+		defer func() { serverMode = oldServerMode }()
+		t.Setenv("BEADS_DOLT_SERVER_PORT", "1")
+
+		tmpDir := t.TempDir()
+		beadsDir := filepath.Join(tmpDir, ".beads")
+		if err := os.MkdirAll(beadsDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		metadata := map[string]interface{}{
+			"database":      "dolt",
+			"backend":       "dolt",
+			"dolt_mode":     "server",
+			"dolt_database": "myproject",
+			// no project_id: a genuine fresh clone, which --reinit-local must
+			// still be able to initialize.
+		}
+		data, _ := json.Marshal(metadata)
+		if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
+			t.Fatalf("a fresh clone (no project_id) must not be blocked by this guard, got: %v", err)
+		}
+	})
+}

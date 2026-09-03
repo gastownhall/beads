@@ -764,8 +764,21 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// authorize cross-boundary operations on remote history (see
 		// CheckRemoteSafety at cmd/bd/init_safety.go and
 		// engdocs/adr/0002-init-safety-invariants.md).
+		initAllowRecreateMissing = recreateMissing
+		if reinitLocal {
+			// be-5up5 round 2 (review of PR #5791): --reinit-local/--force skip
+			// checkExistingBeadsData entirely, and the typed confirmation below
+			// keys on countExistingIssues, which returns 0/err in exactly the
+			// missing-database case — so `bd init --force` against a lost
+			// server-side database used to create a fresh empty one with no
+			// prompt and no destroy token. Those flags authorize destroying a
+			// database that exists; only --recreate-missing authorizes creating
+			// one where the configured database has gone missing.
+			if err := guardMissingServerDatabase(prefix); err != nil {
+				return fmt.Errorf("%v", err)
+			}
+		}
 		if !reinitLocal {
-			initAllowRecreateMissing = recreateMissing
 			if err := checkExistingBeadsData(prefix); err != nil {
 				// --init-if-missing makes init idempotent, but ONLY for the
 				// benign "workspace already initialized" case. An operational
@@ -2900,6 +2913,83 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 	// machine, so it counts as explicit too — the seeding block above already
 	// treats it like --server.
 	return config.GetYamlConfig("dolt.mode") != ""
+}
+
+// guardMissingServerDatabaseAt is the be-5up5 refusal, narrowed to the single
+// question --reinit-local/--force must NOT be able to answer for you: is this
+// an already-initialized server-mode project whose configured database is
+// missing or unconfirmable?
+//
+// It exists because those flags bypass checkExistingBeedsData entirely (see the
+// !reinitLocal gate in the init command), and the reinit path's own typed
+// confirmation keys on countExistingIssues — which returns 0 or an error in
+// exactly the case this guard is about, so no prompt fires either. That left
+// `bd init --force` against a lost database creating a fresh empty one with no
+// prompt and no destroy token: the precise reflex of the 2026-08-11 fleet-wide
+// data loss, reached by the flag a panicking operator is most likely to try.
+//
+// --reinit-local/--force authorize destroying a database that EXISTS. They do
+// not authorize inventing an empty one where the configured database has gone
+// missing. Only the explicit, per-invocation --recreate-missing does that,
+// which is what keeps that flag's "never implied by --force" help text true.
+//
+// Deliberately narrow: it answers only the missing-database question and
+// returns nil for every other state, so it never resurrects the
+// "already initialized" refusal that --reinit-local is legitimately meant to
+// bypass.
+func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
+	if initAllowRecreateMissing {
+		return nil
+	}
+	if beadsDir == "" {
+		return nil
+	}
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return nil
+	}
+
+	cfg, cfgErr := configfile.LoadForDiscovery(beadsDir)
+	if cfgErr != nil || cfg == nil {
+		// Unreadable or absent metadata is the caller's problem, not this
+		// guard's: without it we cannot prove the workspace was ever
+		// initialized, and this guard only ever fires on proof that it was.
+		return nil
+	}
+	if cfg.GetBackend() != configfile.BackendDolt || !cfg.IsDoltServerMode() {
+		return nil
+	}
+	// project_id is written only by a real prior `bd init`, so a non-empty
+	// value is what separates recovery from a genuine fresh clone.
+	if cfg.ProjectID == "" {
+		return nil
+	}
+	// A local dolt/ directory means there IS local data to protect, which is
+	// the "already initialized" case --reinit-local exists to override.
+	if info, err := os.Stat(doltserver.ResolveDoltDir(beadsDir)); err == nil && info.IsDir() {
+		return nil
+	}
+
+	host := cfg.GetDoltServerHost()
+	port := doltserver.DefaultConfig(beadsDir).Port
+	dbName := cfg.GetDoltDatabase()
+
+	result := checkDatabaseOnServer(host, port, cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
+	if result.Reachable && result.Exists && result.Err == nil {
+		// The database is there. Whatever happens next is the ordinary
+		// reinit path's business, not this guard's.
+		return nil
+	}
+	return initGuardMissingServerDBMessage(dbName, host, port, prefix)
+}
+
+// guardMissingServerDatabase resolves the init target the same way
+// checkExistingBeadsData does, then applies guardMissingServerDatabaseAt.
+func guardMissingServerDatabase(prefix string) error {
+	beadsDir := resolveInitBeadsDir()
+	if beadsDir == "" {
+		return nil
+	}
+	return guardMissingServerDatabaseAt(beadsDir, prefix)
 }
 
 func checkExistingBeadsData(prefix string) error {
