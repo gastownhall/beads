@@ -312,6 +312,7 @@ func TestMigrateDoltModeFrontDoorExternalJournalMatrix(t *testing.T) {
 					journal, _ := json.Marshal(map[string]any{"version": 1, "source_mode": src, "target_mode": target, "root_path": root, "external": ext, "sidecar": map[string]any{"root_path": root, "external": ext}, "ownership": "external", "attempt": 1, "phase": phase})
 					require.NoError(t, os.WriteFile(filepath.Join(beadsDir, migrateJournalFileName), journal, 0o600))
 					gatePath := filepath.Join(beadsDir, "dolt.gate.lock")
+					require.NoError(t, os.WriteFile(gatePath, []byte("preseeded-gate-lock"), 0o600))
 					gateBefore, gateErr := os.ReadFile(gatePath)
 					gateExists := gateErr == nil
 					tree := snapshotMigrationTree(t, beadsDir)
