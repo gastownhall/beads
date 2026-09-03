@@ -475,6 +475,15 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
 	}
+	liveShared := doltserver.IsSharedServerMode()
+	if j != nil {
+		wantShared := shared && j.Phase == migratePrepared
+		if liveShared != wantShared {
+			return HandleError("migration journal topology does not match live shared-server configuration")
+		}
+	} else if shared && !liveShared {
+		return HandleError("migration command topology does not match live shared-server configuration")
+	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
 		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
 	}
@@ -658,6 +667,15 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
 		return HandleError("migration state is inconsistent: %v", err)
+	}
+	liveShared := doltserver.IsSharedServerMode()
+	if j != nil {
+		wantShared := shared && j.Phase != migratePrepared
+		if liveShared != wantShared {
+			return HandleError("migration journal topology does not match live shared-server configuration")
+		}
+	} else if liveShared {
+		return HandleError("migration command topology does not match live shared-server configuration")
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
 		return HandleError("cannot resume migration for externally hosted proxied Dolt endpoint")
