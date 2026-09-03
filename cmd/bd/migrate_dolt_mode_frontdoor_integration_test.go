@@ -560,6 +560,7 @@ func TestMigrateDoltModeDirectForwardFaultsFrontDoor(t *testing.T) {
 				return e
 			}())
 			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
+			assertDirectMigrationFinal(t, beadsDir, root, false, filepath.Join(root, "migration-sentinel"))
 			show, showErr := runBDExecWithBinary(t, bd, dir, retryEnv, "show", row.ID, "--json")
 			require.NoError(t, showErr, "show sentinel: %s", show)
 			assert.Contains(t, show, "migration sentinel")
@@ -609,12 +610,54 @@ func TestMigrateDoltModeDirectReverseFaultsFrontDoor(t *testing.T) {
 			_, err = runBDExecWithBinary(t, bd, dir, retryEnv, "migrate", "from-proxied-server-to-server")
 			require.NoError(t, err)
 			assert.Equal(t, after, snapshotMigrationTree(t, beadsDir, root))
+			assertDirectMigrationFinal(t, beadsDir, root, true, filepath.Join(root, "migration-sentinel"))
 			show, err := runBDExecWithBinary(t, bd, dir, retryEnv, "show", row.ID, "--json")
 			require.NoError(t, err, "show: %s", show)
 			assert.Contains(t, show, "reverse migration sentinel")
 			_, _ = runBDExecWithBinary(t, bd, dir, retryEnv, "dolt", "stop")
 		})
 	}
+}
+
+func assertDirectMigrationFinal(t *testing.T, beadsDir, root string, reverse bool, sentinel string) {
+	t.Helper()
+	meta, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(meta, &got))
+	if reverse {
+		assert.Equal(t, "server", got["dolt_mode"])
+		_, err = os.Stat(filepath.Join(beadsDir, configfile.ProxiedServerClientInfoFileName))
+		assert.True(t, os.IsNotExist(err), "reverse sidecar remains")
+		if value, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); ok {
+			assert.Equal(t, "false", strings.ToLower(value), "direct reverse must not enable shared topology")
+		}
+		for _, path := range proxy.ControlFilePaths(root) {
+			_, statErr := os.Stat(path)
+			assert.True(t, os.IsNotExist(statErr), "stale proxy control %s", path)
+		}
+	} else {
+		assert.Equal(t, "proxied-server", got["dolt_mode"])
+		info, infoErr := configfile.LoadProxiedServerClientInfo(beadsDir)
+		require.NoError(t, infoErr)
+		require.NotNil(t, info)
+		assert.Equal(t, filepath.Clean(root), filepath.Clean(info.ResolvedRootPath(beadsDir)))
+		for _, path := range serverAssetNames() {
+			_, statErr := os.Stat(filepath.Join(beadsDir, path))
+			assert.True(t, os.IsNotExist(statErr), "stale server control %s", path)
+		}
+	}
+	for _, path := range []string{filepath.Join(beadsDir, migrateJournalFileName), filepath.Join(beadsDir, migrateLockFileName)} {
+		_, statErr := os.Stat(path)
+		assert.True(t, os.IsNotExist(statErr), "stale migration artifact %s", path)
+	}
+	sentinelBytes, sentinelErr := os.ReadFile(sentinel)
+	require.NoError(t, sentinelErr)
+	assert.Equal(t, []byte("x"), sentinelBytes, "migration changed Dolt root sentinel")
+	doltState, _ := doltserver.IsRunning(beadsDir)
+	assert.False(t, doltState != nil && doltState.Running, "direct Dolt process still running")
+	proxyRunning, _ := proxy.IsRunning(root)
+	assert.False(t, proxyRunning, "direct proxy process still running")
 }
 
 // sharedMigrationFrontDoorSnapshot records both durable migration artifacts
