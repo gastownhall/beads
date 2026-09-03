@@ -113,6 +113,9 @@ func loadMigrateJournal(beadsDir string) (*migrateJournal, error) {
 	if j.Ownership == "managed-local" && j.Sidecar.External != nil {
 		return nil, fmt.Errorf("invalid %s: managed-local ownership has external endpoint", migrateJournalFileName)
 	}
+	if !reflect.DeepEqual(j.External, j.Sidecar.External) {
+		return nil, fmt.Errorf("invalid %s: external topology disagrees with sidecar", migrateJournalFileName)
+	}
 	if j.Sidecar.External != nil {
 		if err := j.Sidecar.External.Validate(); err != nil {
 			return nil, fmt.Errorf("invalid %s external topology: %w", migrateJournalFileName, err)
@@ -196,6 +199,17 @@ func externalMigrationRefusal(message string) error {
 		ExitCode: 1,
 		Mutates:  false,
 	})
+}
+
+func migrationSidecarsEquivalent(beadsDir string, a, b *configfile.ProxiedServerClientInfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.ResolvedRootPath(beadsDir) == b.ResolvedRootPath(beadsDir) &&
+		a.ResolvedConfigPath(beadsDir) == b.ResolvedConfigPath(beadsDir) &&
+		a.ResolvedLogPath(beadsDir) == b.ResolvedLogPath(beadsDir) &&
+		a.Port == b.Port && a.IdleTimeout == b.IdleTimeout &&
+		reflect.DeepEqual(a.External, b.External)
 }
 
 func checkpointMigration(beadsDir string, j *migrateJournal, phase migratePhase) error {
@@ -748,6 +762,15 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	}
 	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
 		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
+	}
+	if j != nil {
+		diskSidecar, sidecarErr := configfile.LoadProxiedServerClientInfo(beadsDir)
+		if sidecarErr != nil {
+			return HandleError("migration sidecar is unreadable: %v", sidecarErr)
+		}
+		if !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+			return HandleError("migration sidecar does not match prepared state")
+		}
 	}
 	var sourceSidecar *configfile.ProxiedServerClientInfo
 	if j == nil {
