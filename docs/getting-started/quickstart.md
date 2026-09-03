@@ -34,7 +34,7 @@ The agent picks the right task every time. No wasted cycles.
 
 ## Installation
 
-Install `bd` using [the full installation guide](/getting-started/installation) (Homebrew, install script, npm, or `go install`).
+Install `bd` using [the full installation guide](/docs/getting-started/installation.md) (Homebrew, install script, npm, or `go install`).
 
 **Developing in a clone of this repository:** use `make install` so the binary gets correct build metadata and a consistent install path. Avoid ad-hoc `go build` / `go install` without the Makefile unless you know what you are doing — see the repository `README` and `AGENTS.md`.
 
