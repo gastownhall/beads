@@ -350,11 +350,15 @@ func TestFederationHistoryQueries(t *testing.T) {
 
 // TestFederationListRemotes tests the ListRemotes API.
 //
-// Can report "context deadline exceeded" under the full concurrent test
-// suite even though its own operations complete in well under a second:
-// this package serializes access to one shared Dolt server through a
-// size-2 slot semaphore (acquireTestSlot in dolt_test.go), so heavy
-// parallel load queues test start rather than failing any assertion here.
+// A "context deadline exceeded" reported against this test is not the context
+// built below. That one is created AFTER setupTestStore returns, so the
+// test-slot queue wait is already over and it starts with a fresh minute --
+// setupTestStore's doc comment in dolt_test.go prescribes that ordering for
+// exactly this reason. The deadline that can genuinely expire here is
+// setupTestStore's own testContext, the package-wide testTimeout, around
+// New() and initSchemaOnDB; it surfaces as "failed to create Dolt store" or
+// "failed to initialize branch-local ignored schema" attributed to this test
+// rather than as a failure of any assertion below.
 func TestFederationListRemotes(t *testing.T) {
 	skipIfNoDolt(t)
 
@@ -418,10 +422,11 @@ func TestFederationSyncStatus(t *testing.T) {
 	}
 }
 
-// Like TestFederationListRemotes above, this test can show "context
-// deadline exceeded" under full-suite concurrency due to the shared Dolt
-// server's bounded test-slot queue, not a defect in the sync/commit
-// ordering below.
+// TestFederationSyncCommitsPendingPeerMetadataBeforeFetch has the same
+// exposure as TestFederationListRemotes above: a "context deadline exceeded"
+// attributed to it comes from setupTestStore's testTimeout around the store
+// open, not from the minute-long context below and not from a defect in the
+// sync/commit ordering.
 func TestFederationSyncCommitsPendingPeerMetadataBeforeFetch(t *testing.T) {
 	skipIfNoDolt(t)
 
