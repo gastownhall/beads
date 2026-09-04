@@ -1956,6 +1956,23 @@ paths:
             type: array
             items:
               type: string
+        - name: include_ephemeral
+          in: query
+          description: >-
+            Admit the EPHEMERAL PLANE — the wisps table — and nothing else.
+            Exactly the first of `include_infra`'s four changes, with none of
+            the other three: no type exclusion is taken off, so a row whose TYPE
+            a default count already excludes stays excluded.
+
+
+            It exists because there was no way to ask for that one thing. The
+            write path routes on STORAGE CLASS, not type, so a `no_history` bead
+            lives in the wisps table while remaining ordinary durable work.
+            Reaching it needed `include_infra`, which also drops template rows of
+            the named type — one silent undercount traded for another.
+          schema:
+            type: boolean
+            default: false
         - name: include_infra
           in: query
           description: >-

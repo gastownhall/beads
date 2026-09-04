@@ -102,7 +102,7 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 
 	if in.IncludeInfra {
 		applyCountIncludeInfra(&filter, in.IssueType, cfg)
-	} else {
+	} else if !in.IncludeEphemeral {
 		filter.SkipWisps = true
 	}
 	return filter, nil
