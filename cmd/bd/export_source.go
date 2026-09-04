@@ -259,7 +259,24 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 	}
 	mergeExportMap(rel.commentCounts, counts)
 
-	wispLabels, err := s.uw.LabelUseCase().GetLabelsForWisps(ctx, allIDs) //nolint:forbidigo // bulk relation load; see GetLabelsForIssues above
+	// The wisp_labels / wisp_comments rows of a wisp are keyed by an issue_id
+	// that lives in the WISPS table (promotion moves them to the durable
+	// tables, issueops.PromoteFromEphemeralInTx), so the three wisp readers
+	// below only need the ids that are wisps right now. Handing them the
+	// whole workspace was pure waste — on a 19k-issue rig with no wisps it
+	// was three 19k-placeholder statements answering nothing (wy-237yfi).
+	// CountsByWispIDs is NOT narrowed: its inbound leg counts wisp -> durable
+	// edges under the durable target's id.
+	// A nil set means membership could NOT be read (the wisps table is
+	// absent, the tolerated case) — never "no wisps": fail open to the full
+	// id list so the readers below keep their own table-not-exist tolerance.
+	wispSet, err := s.WispPlaneIDs(ctx, allIDs)
+	if err != nil {
+		return exportRelations{}, err
+	}
+	wispIDs := wispReaderIDs(allIDs, wispSet)
+
+	wispLabels, err := s.uw.LabelUseCase().GetLabelsForWisps(ctx, wispIDs) //nolint:forbidigo // bulk relation load; see GetLabelsForIssues above
 	if err != nil {
 		if !dberrors.IsTableNotExist(err) {
 			return exportRelations{}, fmt.Errorf("load wisp labels: %w", err)
@@ -267,7 +284,7 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 	} else {
 		mergeExportMap(rel.labels, wispLabels)
 	}
-	wispComments, err := s.uw.CommentUseCase().GetCommentsForWisps(ctx, allIDs)
+	wispComments, err := s.uw.CommentUseCase().GetCommentsForWisps(ctx, wispIDs)
 	if err != nil {
 		if !dberrors.IsTableNotExist(err) {
 			return exportRelations{}, fmt.Errorf("load wisp comments: %w", err)
@@ -275,7 +292,7 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 	} else {
 		mergeExportMap(rel.comments, wispComments)
 	}
-	wispCounts, err := s.uw.CommentUseCase().GetWispCommentCounts(ctx, allIDs)
+	wispCounts, err := s.uw.CommentUseCase().GetWispCommentCounts(ctx, wispIDs)
 	if err != nil {
 		if !dberrors.IsTableNotExist(err) {
 			return exportRelations{}, fmt.Errorf("load wisp comment counts: %w", err)
@@ -319,17 +336,47 @@ func (s *uowExportSource) LoadExportRelations(ctx context.Context, issues []*typ
 	return rel, nil
 }
 
+// wispPlaneSubset returns, in input order, the ids that wispSet marks as
+// wisp-plane; none marked yields nil, and the bulk readers answer nil with no
+// statement at all. The caller decides what a nil SET means (see
+// LoadExportRelations: unreadable membership fails open, never empty).
+func wispPlaneSubset(ids []string, wispSet map[string]bool) []string {
+	var out []string
+	for _, id := range ids {
+		if wispSet[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// wispReaderIDs is the caller-side policy wispPlaneSubset defers: a nil set
+// means membership was UNREADABLE (WispPlaneIDs tolerated a missing wisps
+// table), so every id goes to the wisp readers and they keep their own
+// table-not-exist tolerance; a non-nil set — even an empty one — is the
+// answer, and only the ids in it go.
+func wispReaderIDs(ids []string, wispSet map[string]bool) []string {
+	if wispSet == nil {
+		return ids
+	}
+	return wispPlaneSubset(ids, wispSet)
+}
+
 // WispPlaneIDs classifies by wisps-table membership through the plane-pinned
 // GetWispsByIDs read (row flags are NOT a substitute — see the exportSource
-// interface comment). A rig without the wisp tables has no wisp-plane rows,
-// mirroring the tolerance of the wisp-plane legs in LoadExportRelations.
+// interface comment). A rig without the wisps table has no wisp-plane rows
+// (nil set), mirroring the tolerance of the wisp-plane legs in
+// LoadExportRelations. Only the WISPS table is optional: the read joins
+// leases, and a blanket table-not-exist check would report a broken
+// database as an empty wisp plane (the issue_search.go missingOptionalWispTable
+// lesson), so the tolerance is pinned to that one table name.
 func (s *uowExportSource) WispPlaneIDs(ctx context.Context, ids []string) (map[string]bool, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
 	wisps, err := s.uw.IssueUseCase().GetWispsByIDs(ctx, ids)
 	if err != nil {
-		if dberrors.IsTableNotExist(err) {
+		if dberrors.IsMissingTable(err, "wisps") {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("wisp plane membership: %w", err)
