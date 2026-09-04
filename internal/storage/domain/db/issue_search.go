@@ -361,30 +361,29 @@ func (r *issueSQLRepositoryImpl) hydrateIssues(ctx context.Context, issues []*ty
 //nolint:gosec // G201: labelTable is "labels" or "wisp_labels" (hardcoded by callers).
 func (r *issueSQLRepositoryImpl) getLabelsFromTable(ctx context.Context, labelTable string, ids []string) (map[string][]string, error) {
 	result := make(map[string][]string)
-	for start := 0; start < len(ids); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		placeholders, args := buildInPlaceholders(ids[start:end])
+	err := forEachIDBatch(ids, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
 		rows, err := r.runner.QueryContext(ctx, fmt.Sprintf(
 			`SELECT issue_id, label FROM %s WHERE issue_id IN (%s) ORDER BY issue_id, label`,
 			labelTable, placeholders), args...)
 		if err != nil {
-			return nil, fmt.Errorf("get labels from %s: %w", labelTable, err)
+			return fmt.Errorf("get labels from %s: %w", labelTable, err)
 		}
+		defer rows.Close()
 		for rows.Next() {
 			var issueID, label string
 			if err := rows.Scan(&issueID, &label); err != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get labels: scan: %w", err)
+				return fmt.Errorf("get labels: scan: %w", err)
 			}
 			result[issueID] = append(result[issueID], label)
 		}
-		_ = rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get labels: rows: %w", err)
+			return fmt.Errorf("get labels: rows: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }
@@ -392,31 +391,30 @@ func (r *issueSQLRepositoryImpl) getLabelsFromTable(ctx context.Context, labelTa
 //nolint:gosec // G201: depTable is "dependencies" or "wisp_dependencies" (hardcoded by callers).
 func (r *issueSQLRepositoryImpl) getDependencyRecordsFromTable(ctx context.Context, depTable string, ids []string) (map[string][]*types.Dependency, error) {
 	result := make(map[string][]*types.Dependency)
-	for start := 0; start < len(ids); start += queryBatchSize {
-		end := start + queryBatchSize
-		if end > len(ids) {
-			end = len(ids)
-		}
-		placeholders, args := buildInPlaceholders(ids[start:end])
+	err := forEachIDBatch(ids, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
 		rows, err := r.runner.QueryContext(ctx, fmt.Sprintf(
 			`SELECT issue_id, %s AS depends_on_id, type, created_at, created_by, metadata, thread_id
 			 FROM %s WHERE issue_id IN (%s) ORDER BY issue_id`,
 			depTargetExpr, depTable, placeholders), args...)
 		if err != nil {
-			return nil, fmt.Errorf("get dep records from %s: %w", depTable, err)
+			return fmt.Errorf("get dep records from %s: %w", depTable, err)
 		}
+		defer rows.Close()
 		for rows.Next() {
 			dep, scanErr := scanDepRow(rows)
 			if scanErr != nil {
-				_ = rows.Close()
-				return nil, fmt.Errorf("get dep records: scan: %w", scanErr)
+				return fmt.Errorf("get dep records: scan: %w", scanErr)
 			}
 			result[dep.IssueID] = append(result[dep.IssueID], dep)
 		}
-		_ = rows.Close()
 		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("get dep records: rows: %w", err)
+			return fmt.Errorf("get dep records: rows: %w", err)
 		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return result, nil
 }

@@ -107,6 +107,15 @@ func seedProxiedExportFixture(t *testing.T, bd string, p proxiedProject) exportP
 
 	// Ephemeral wisp: excluded from default export, included with --all.
 	fx.wisp = bdProxiedCreateSilent(t, bd, p.dir, "Ephemeral heartbeat", "--ephemeral", "--wisp-type", "heartbeat")
+	// Relations on the wisp: the --all export must carry them, which is what
+	// pins the UOW plane partition (only wisp ids reach the wisp readers,
+	// wy-237yfi) against the classic-mode oracle.
+	if out, err := bdProxiedRun(t, bd, p.dir, "label", "add", fx.wisp, "wisp-label"); err != nil {
+		t.Fatalf("label add on wisp: %v\n%s", err, out)
+	}
+	if out, err := bdProxiedRun(t, bd, p.dir, "comment", fx.wisp, "wisp comment"); err != nil {
+		t.Fatalf("comment on wisp: %v\n%s", err, out)
+	}
 
 	// Infra-typed bead (message): auto-routed to the ephemeral plane and an
 	// infra type, so default export must exclude it and --all include it.
@@ -408,6 +417,21 @@ func TestProxiedServerExport(t *testing.T) {
 		keys := exportMemoryKeys(records)
 		if len(keys) != 2 || keys[0] != "aardvark" || keys[1] != "zebra" {
 			t.Errorf("--all export memories = %v, want [aardvark zebra] (sorted)", keys)
+		}
+		// The wisp's own relations ride along: a misclassified plane would
+		// drop them silently while the id above still passes.
+		for _, rec := range records {
+			if rec["id"] != fx.wisp {
+				continue
+			}
+			labels, _ := rec["labels"].([]any)
+			if len(labels) != 1 || labels[0] != "wisp-label" {
+				t.Errorf("--all export wisp %s labels = %v, want [wisp-label]", fx.wisp, rec["labels"])
+			}
+			comments, _ := rec["comments"].([]any)
+			if len(comments) != 1 {
+				t.Errorf("--all export wisp %s comments = %v, want one", fx.wisp, rec["comments"])
+			}
 		}
 	})
 

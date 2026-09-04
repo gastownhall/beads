@@ -567,35 +567,33 @@ func (r *issueSQLRepositoryImpl) Get(ctx context.Context, id string, opts domain
 }
 
 func (r *issueSQLRepositoryImpl) GetByIDs(ctx context.Context, ids []string, opts domain.IssueTableOpts) ([]*types.Issue, error) {
-	if len(ids) == 0 {
-		return nil, nil
-	}
-	placeholders := make([]string, len(ids))
-	args := make([]any, len(ids))
-	for i, id := range ids {
-		placeholders[i] = "?"
-		args[i] = id
-	}
 	table := pickIssueTable(opts.UseWispsTable)
-	//nolint:gosec // G201: table is one of two hardcoded constants
-	q := fmt.Sprintf("SELECT %s FROM %s %s WHERE id IN (%s)",
-		issueSelectColumns, table, sqlbuild.LeaseJoin(table), strings.Join(placeholders, ","))
-	rows, err := r.runner.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, fmt.Errorf("db: GetByIDs: %w", err)
-	}
-	defer rows.Close()
-
 	var out []*types.Issue
-	for rows.Next() {
-		issue, err := scanIssue(rows)
+	err := forEachIDBatch(ids, func(batch []string) error {
+		placeholders, args := buildInPlaceholders(batch)
+		//nolint:gosec // G201: table is one of two hardcoded constants
+		q := fmt.Sprintf("SELECT %s FROM %s %s WHERE id IN (%s)",
+			issueSelectColumns, table, sqlbuild.LeaseJoin(table), placeholders)
+		rows, err := r.runner.QueryContext(ctx, q, args...)
 		if err != nil {
-			return nil, fmt.Errorf("db: GetByIDs: scan: %w", err)
+			return fmt.Errorf("db: GetByIDs: %w", err)
 		}
-		out = append(out, issue)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("db: GetByIDs: rows: %w", err)
+		defer rows.Close()
+
+		for rows.Next() {
+			issue, err := scanIssue(rows)
+			if err != nil {
+				return fmt.Errorf("db: GetByIDs: scan: %w", err)
+			}
+			out = append(out, issue)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("db: GetByIDs: rows: %w", err)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	return out, nil
 }
