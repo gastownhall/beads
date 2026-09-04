@@ -7,7 +7,7 @@
 **Source commit:** `7d53c890623e75e4c2e2748e3eb1167ba39db9f2` (parent `c0d8da42de5fd15c95adac85e342ba4a121da0fb` = origin/main's own tip — zero divergence, no rebase needed)
 **Branch:** `deploy/be-3vzut-gate`, cut directly at the reviewed SHA via `resolve_deploy_branch_target be-3vzut 7d53c890623e75e4c2e2748e3eb1167ba39db9f2`
 **Push target:** `headfork` (`quad341/beads-sec003-contrib`) — `origin` push-disabled by design (`DISABLED-upstream-is-fetch-only-push-to-fork-and-PR`). Pushed and independently verified: `git ls-remote headfork refs/heads/deploy/be-3vzut-gate` → `7d53c890623e75e4c2e2748e3eb1167ba39db9f2`, matches local HEAD exactly.
-**PR:** PENDING — to be opened against `gastownhall/beads:main` from `quad341/beads-sec003-contrib:deploy/be-3vzut-gate`
+**PR:** https://github.com/gastownhall/beads/pull/6262 — OPEN, `gastownhall/beads:main` ← `quad341/beads-sec003-contrib:deploy/be-3vzut-gate`, MERGEABLE
 
 ## Verdict: 7/7 — criterion 7 (ancestry scope) via bounded mayor waiver, all others raw PASS
 
