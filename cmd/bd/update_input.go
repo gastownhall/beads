@@ -176,7 +176,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(dueStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --due format %q. Examples: +6h, tomorrow, next monday, 2025-01-15", dueStr)
+				return nil, HandleErrorRespectJSON("invalid --due format %q. %s", dueStr, deferUntilFormatHint)
 			}
 			in.fields["due_at"] = t
 		}
@@ -192,7 +192,7 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 		} else {
 			t, err := timeparsing.ParseRelativeTime(deferStr, time.Now())
 			if err != nil {
-				return nil, HandleErrorRespectJSON("invalid --defer format %q. Examples: +1h, tomorrow, next monday, 2025-01-15", deferStr)
+				return nil, HandleErrorRespectJSON("invalid --defer format %q. %s", deferStr, deferUntilFormatHint)
 			}
 			inPast := t.Before(time.Now())
 			if inPast && !jsonOut {
