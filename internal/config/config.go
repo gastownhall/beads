@@ -1094,6 +1094,14 @@ func GetInfraTypesFromYAML() []string {
 	return getConfigList("types.infra")
 }
 
+// GetProtectedWispLabelsFromYAML retrieves the labels that make a wisp
+// unreclaimable by `bd mol wisp gc`, from config.yaml. Used as a fallback when
+// the database has no wisp.protected_labels value (caller should fall through
+// to the built-in default). Returns nil if the key is unset.
+func GetProtectedWispLabelsFromYAML() []string {
+	return getConfigList("wisp.protected_labels")
+}
+
 // GetCustomStatusesFromYAML retrieves custom statuses from config.yaml.
 // This is used as a fallback when the database doesn't have status.custom set yet
 // or when the database connection is temporarily unavailable.
