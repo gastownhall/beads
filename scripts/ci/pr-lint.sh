@@ -39,3 +39,15 @@ if [[ "$native_goos" != "windows" || "$native_cgo_enabled" != "0" ]]; then
                 --timeout=5m --build-tags=gms_pure_go \
                 ${lint_scope[@]+"${lint_scope[@]}"} ./...
 fi
+
+# Files guarded by //go:build darwin (and the !windows && !linux fallbacks)
+# are invisible to the Linux runner too. Cross-lint the non-CGO darwin build
+# from the same runner so a darwin-only finding fails the PR instead of the
+# next maintainer's laptop, unless the native target above already matches it.
+if [[ "$native_goos" != "darwin" || "$native_cgo_enabled" != "0" ]]; then
+    ci_time "golangci-lint (darwin)" -- \
+        env GOOS=darwin GOARCH=arm64 CGO_ENABLED=0 GOWORK=off \
+            golangci-lint run --config=.golangci.yml --modules-download-mode=readonly \
+                --timeout=5m --build-tags=gms_pure_go \
+                ${lint_scope[@]+"${lint_scope[@]}"} ./...
+fi
