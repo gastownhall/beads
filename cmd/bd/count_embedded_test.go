@@ -90,12 +90,16 @@ func TestEmbeddedCount(t *testing.T) {
 	bdCreate(t, bd, dir, "Count labeled two", "--type", "task", "--label", "backend")
 	bdCreate(t, bd, dir, "Count notes issue", "--type", "task", "--description", "notes keyword here")
 	bdCreate(t, bd, dir, "Count metadata issue", "--type", "task", "--metadata", `{"count_scope":"matching"}`)
+	// The same key with a different value: --has-metadata-key matches both
+	// fixtures where --metadata-field matches one, so the two filters cannot
+	// pass by answering the same number.
+	bdCreate(t, bd, dir, "Count metadata key issue", "--type", "task", "--metadata", `{"count_scope":"other"}`)
 
 	// ===== Basic count =====
 
 	t.Run("basic_count_no_filters", func(t *testing.T) {
 		out := strings.TrimSpace(bdCount(t, bd, dir))
-		// Should return a number >= 9 (we created 9 issues)
+		// Should return a number >= 10 (we created 10 issues)
 		if out == "0" {
 			t.Error("expected non-zero count")
 		}
@@ -176,6 +180,14 @@ func TestEmbeddedCount(t *testing.T) {
 		want := len(bdListJSON(t, bd, dir, "--all", "--limit", "0", "--metadata-field", "count_scope=matching"))
 		if got != want || got != 1 {
 			t.Errorf("count --metadata-field = %d, want list cardinality %d and fixture count 1", got, want)
+		}
+	})
+
+	t.Run("filter_by_has_metadata_key", func(t *testing.T) {
+		got := int(bdCountJSON(t, bd, dir, "--has-metadata-key", "count_scope")["count"].(float64))
+		want := len(bdListJSON(t, bd, dir, "--all", "--limit", "0", "--has-metadata-key", "count_scope"))
+		if got != want || got != 2 {
+			t.Errorf("count --has-metadata-key = %d, want list cardinality %d and fixture count 2", got, want)
 		}
 	})
 

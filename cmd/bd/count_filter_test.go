@@ -65,6 +65,7 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		"no-assignee":       "true",
 		"no-labels":         "true",
 		"metadata-field":    "team=platform",
+		"has-metadata-key":  "audit_ref",
 		"priority":          "1",
 		"priority-min":      "0",
 		"priority-max":      "4",
@@ -118,6 +119,7 @@ func TestParseCountRequestCarriesEveryFilterFlag(t *testing.T) {
 		NoAssignee:     true,
 		NoLabels:       true,
 		MetadataFields: map[string]string{"team": "platform"},
+		HasMetadataKey: "audit_ref",
 		IncludeInfra:   true,
 	}
 	if !reflect.DeepEqual(request, want) {
@@ -136,6 +138,16 @@ func TestParseCountRequestRejectsInvalidMetadataField(t *testing.T) {
 				t.Fatalf("parseCountRequest accepted --metadata-field %q", value)
 			}
 		})
+	}
+}
+
+func TestParseCountRequestRejectsInvalidHasMetadataKey(t *testing.T) {
+	flags := newCountFlagSet(t)
+	if err := flags.Flags().Set("has-metadata-key", "1bad"); err != nil {
+		t.Fatalf("set --has-metadata-key: %v", err)
+	}
+	if _, _, err := parseCountRequest(flags); err == nil {
+		t.Fatal("parseCountRequest accepted --has-metadata-key 1bad")
 	}
 }
 
