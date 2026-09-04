@@ -135,6 +135,12 @@ func qualifyEmptyServerInitWitness(beadsDir string, in emptyServerInitWitnessInp
 	if !strings.EqualFold(cfg.DoltMode, configfile.DoltModeServer) || !hasLegacyDoltRoot(beadsDir) {
 		return emptyServerInitWitnessQualification{}, false
 	}
+	// The destroy-count gate is skipped later only because the counted store
+	// is the proved one; a configuration that would open anything else must
+	// keep the ordinary guard.
+	if !configuredIdentityMatchesProof(cfg, in) {
+		return emptyServerInitWitnessQualification{}, false
+	}
 	// The exception is only for a genuinely missing witness. A historical,
 	// malformed, non-regular, or otherwise pre-existing path must stay on the
 	// ordinary guard path; the later O_EXCL check closes the race after this
@@ -162,19 +168,154 @@ func qualifyEmptyServerInitWitness(beadsDir string, in emptyServerInitWitnessInp
 		dsn.Password = password
 	}
 
-	empty, err := selectedServerDatabaseIsEmpty(dsn)
+	empty, err := provedRootDatabasesAreEmpty(beadsDir, dsn)
 	if err != nil || !empty {
 		return emptyServerInitWitnessQualification{}, false
 	}
 	return emptyServerInitWitnessQualification{beadsDir: beadsDir, dsn: dsn}, true
 }
 
-// createEmptyServerInitWitness records that the current binary has begun
-// initializing this workspace after re-proving the exact database empty. The
-// version witness identifies the release era; it is not an init-completion
-// marker. Keeping the current version after a later store-open failure is safe
-// and lets ordinary current-era recovery retry instead of misclassifying the
-// partial workspace as pre-1.0 data.
+// configuredIdentityMatchesProof reports whether the store the workspace
+// configuration would open — the one countExistingIssues counts — is the
+// database the qualification proves empty. Explicit --server-host and
+// --server-port are promoted into BEADS_DOLT_SERVER_* before the guard runs,
+// so host and port cannot diverge here; --database is not promoted, so the
+// database name is what makes the counted store the proved one.
+//
+// The persisted socket is checked for a different reason: countExistingIssues
+// never reads metadata's dolt_server_socket (dolt.NewFromConfig only honors
+// BEADS_DOLT_SERVER_SOCKET, which the flag promotion unsets), but every
+// post-recovery command does (resolveDoltServerConnection), so a socket that
+// is still live would route the recovered workspace to whatever it serves
+// instead of the proved HOST:PORT database.
+func configuredIdentityMatchesProof(cfg *configfile.Config, in emptyServerInitWitnessInput) bool {
+	if cfg.GetDoltDatabase() != in.Database {
+		return false
+	}
+	if cfg.DoltServerSocket == "" {
+		return true
+	}
+	// A dead persisted socket falls back to the explicit TCP endpoint on later
+	// commands and is cleared from metadata on success; a live one refuses.
+	return dolt.ResolveSocketTransport(cfg.DoltServerSocket, in.ServerHost, in.ServerPort, 500*time.Millisecond) == ""
+}
+
+// localDoltRootDatabases lists the databases materialized beneath the legacy
+// Dolt root as the server names them: every immediate subdirectory holding a
+// .dolt, plus the root itself when bd's own `dolt init` (ensureDoltInit) left
+// a .dolt there, which the server serves under the directory's name.
+func localDoltRootDatabases(beadsDir string) ([]string, error) {
+	root := filepath.Join(beadsDir, "dolt")
+	var names []string
+	if _, err := os.Lstat(filepath.Join(root, ".dolt")); err == nil {
+		names = append(names, sanitizeDBName(filepath.Base(root)))
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		if _, err := os.Lstat(filepath.Join(root, entry.Name(), ".dolt")); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return nil, err
+		}
+		names = append(names, sanitizeDBName(entry.Name()))
+	}
+	return names, nil
+}
+
+// provedRootDatabasesAreEmpty widens the emptiness proof from the selected
+// database to the whole server root the witness disarms: every database the
+// server lists must have zero tables, the selected database must be among
+// them, and every database materialized under the local root must be served
+// (an unlisted one cannot be proved empty). The selected-database proof runs
+// last so the DSN is also verified to select exactly the requested database.
+// It never creates a database, table, or schema; callers treat every error
+// as a failed qualification.
+func provedRootDatabasesAreEmpty(beadsDir string, dsn doltutil.ServerDSN) (bool, error) {
+	local, err := localDoltRootDatabases(beadsDir)
+	if err != nil {
+		return false, err
+	}
+
+	rootDSN := dsn
+	rootDSN.Database = ""
+	db, err := sql.Open("mysql", rootDSN.String())
+	if err != nil {
+		return false, err
+	}
+	defer db.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := db.PingContext(ctx); err != nil {
+		return false, err
+	}
+
+	listed, err := listServerDatabases(ctx, db)
+	if err != nil {
+		return false, err
+	}
+
+	if !listed[dsn.Database] {
+		return false, nil
+	}
+	for _, name := range local {
+		if !listed[name] {
+			return false, nil
+		}
+	}
+	for name := range listed {
+		var tables int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", name).Scan(&tables); err != nil {
+			return false, err
+		}
+		if tables != 0 {
+			return false, nil
+		}
+	}
+	return selectedServerDatabaseIsEmpty(dsn)
+}
+
+// listServerDatabases returns every database the server lists, minus the
+// built-in system schemas.
+func listServerDatabases(ctx context.Context, db *sql.DB) (map[string]bool, error) {
+	rows, err := db.QueryContext(ctx, "SHOW DATABASES")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	listed := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, err
+		}
+		if name == "information_schema" || name == "mysql" || name == "performance_schema" {
+			continue
+		}
+		listed[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return listed, nil
+}
+
+// createEmptyServerInitWitness records that the current binary has
+// initialized this workspace: it runs only after the root was re-proved empty
+// and the store has been opened, so a store-open failure never leaves a
+// current-era witness beside nothing initialized. The version witness
+// identifies the release era; it is not an init-completion marker, and
+// keeping it after a later optional step fails lets ordinary current-era
+// recovery retry instead of misclassifying the workspace as pre-1.0 data.
 //
 // O_EXCL is essential: a historical witness created between the two proofs
 // must be left byte-for-byte intact and cause the original guard refusal to

@@ -3,7 +3,7 @@ title: Recovery Playbooks
 description: Step-by-step recovery for bd init and bd dolt push/pull refusals, including the primary-key fork playbook
 ---
 
-Last reviewed: 2026-06-09
+Last reviewed: 2026-09-04
 
 Freshness source: `cmd/bd/init.go`, `cmd/bd/init_safety.go`,
 `cmd/bd/init_safety_test.go`, and `cmd/bd/dolt.go`.
@@ -20,6 +20,7 @@ See also: `bd help init-safety`, and
 - [init-force-refused — `bd init --force`/`--reinit-local` refused because origin has Dolt history](#init-force-refused)
 - [init-token-missing — `--discard-remote` refused because `--destroy-token` is missing or wrong](#init-token-missing)
 - [init-local-exists — `bd init` refused because local data already exists](#init-local-exists)
+- [legacy-empty-server-recovery — `bd init` refused on an unwitnessed server workspace whose database was never populated](#legacy-empty-server-recovery)
 - [pk-fork-refused — `bd dolt pull`/`push` refused because a table has different primary keys in its common ancestor](#pk-fork-refused)
 
 ---
@@ -157,6 +158,63 @@ enough to create a restorable backup before reinitializing.
 If you did NOT expect `bd init` to be the right command here, run
 `bd doctor` first — you may be looking at a server config issue that a
 re-init won't fix.
+
+---
+
+## legacy-empty-server-recovery
+
+**Symptom**
+
+```
+legacy Dolt server workspace detected; explicit migration is required before this bd version can open or modify the workspace. Preserve .beads unchanged and follow docs/getting-started/upgrading.md#cross-era-upgrades
+```
+
+on a workspace whose `metadata.json` selects `dolt_mode: server`, whose
+`.beads/dolt/` root exists, and which has no `.local_version` — typically a
+bootstrap that created the server database but was interrupted before the
+witness was written, so the database is still empty.
+
+**Why this happens**
+
+A missing witness is ambiguous: the guard cannot tell a never-populated
+current-era workspace from pre-1.0 data, so every command refuses. Only one
+narrow init shape may proceed without a witness, and only after proving there
+is nothing to destroy.
+
+**Recovery path**
+
+```
+bd init --force --server --server-host HOST --server-port PORT --database NAME
+```
+
+This is admitted only when all of the following hold; otherwise the refusal
+above is preserved unchanged:
+
+1. `NAME` is the database `metadata.json` (or `BEADS_DOLT_SERVER_DATABASE`)
+   already selects, so the destroy-count gate is skipped only for the store it
+   would have counted.
+2. No live `dolt_server_socket` persisted in `metadata.json` would route the
+   commands run after recovery away from `HOST:PORT` (the init's own count
+   ignores that socket; every later command honors it). A dead socket path
+   is tolerated and cleared from `metadata.json` on success.
+3. Read-only SQL proves that every database the server lists, and every
+   database materialized under `.beads/dolt/`, has zero tables. One Dolt root
+   serves many databases and the witness disarms the guard for the whole
+   workspace, so a non-empty sibling database refuses.
+4. The init is a native server init: not `--proxied-server`, not shared-server
+   mode, and no `dolt.credential-command` is configured.
+
+The proof is repeated under `bd init`'s mutation gate, and the current-era
+`.local_version` is created exclusively (`O_EXCL`) only after the store opens.
+If a witness appears in between, or the store fails to open, no witness is
+written and the original refusal wins. If the exclusive witness write itself
+fails after the store opened, the store has already created its schema, so the
+proved database is no longer empty: later runs refuse, and the workspace must
+be recovered through the explicit export/import path below.
+
+If any condition fails, or the database was ever populated, follow the
+explicit legacy Dolt export/import path in
+[Cross-era Upgrades](../getting-started/upgrading.md#cross-era-upgrades).
 
 ---
 

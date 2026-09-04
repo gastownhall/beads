@@ -997,10 +997,13 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			// countExistingIssues opens and initializes a schema on a truly empty
-			// database. The recovery candidate already proved zero tables and is
-			// re-proved immediately before schema creation below, so skip only that
-			// mutating count while retaining the gate and every remote-safety check.
+			// countExistingIssues opens the configured store and initializes a
+			// schema on a truly empty database. Skipping it is admissible for the
+			// recovery candidate only because qualification proved that the
+			// configured store IS the proved empty database (same database name,
+			// no live persisted socket), so the count could only ever be zero;
+			// it is re-proved immediately before schema creation below. The gate
+			// and every remote-safety check are retained.
 			return runInitReinitPreflight(reinitLocal && legacyGuardErr == nil, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
@@ -1401,10 +1404,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		}
 		if serverSocket != "" {
 			doltCfg.ServerSocket = serverSocket
-		} else if cmd.Flags().Changed("server-host") && cmd.Flags().Changed("server-port") {
-			// An explicit TCP endpoint must not be shadowed by a socket left in
-			// workspace metadata from an earlier server incarnation.
-			doltCfg.ServerSocket = ""
 		}
 		if serverUser != "" {
 			doltCfg.ServerUser = serverUser
@@ -1499,14 +1498,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// gate is held and immediately before schema creation. The gate excludes
 		// competing bd init processes for this workspace, not arbitrary external
 		// SQL writers; the second proof narrows that unavoidable server-side race.
-		// If the database changed or another writer restored a witness, preserve
-		// the original legacy refusal rather than modifying either one.
+		// If any database under the root changed, preserve the original legacy
+		// refusal rather than modifying anything. The witness itself is created
+		// only after the store opens below.
 		if legacyGuardErr != nil {
-			empty, proofErr := selectedServerDatabaseIsEmpty(emptyServerWitness.dsn)
+			empty, proofErr := provedRootDatabasesAreEmpty(emptyServerWitness.beadsDir, emptyServerWitness.dsn)
 			if proofErr != nil || !empty {
-				return legacyGuardErr
-			}
-			if err := createEmptyServerInitWitness(emptyServerWitness); err != nil {
 				return legacyGuardErr
 			}
 		}
@@ -1545,10 +1542,21 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			return &exitError{Code: 1}
 		}
 
+		// The recovery witness is created exclusively, and only now that the
+		// store exists: a store-open failure above leaves the legacy guard armed
+		// with nothing initialized. A witness that appeared between the proof
+		// and this point (O_EXCL failure) makes the original refusal win.
+		if legacyGuardErr != nil {
+			if err := createEmptyServerInitWitness(emptyServerWitness); err != nil {
+				_ = store.Close()
+				return legacyGuardErr
+			}
+		}
+
 		// Write the completed witness as soon as the store/schema exists. If a
 		// later optional initialization step is interrupted, the next command
 		// sees a current-era witness rather than a stranded blank one.
-		if useLocalBeads || legacyGuardErr != nil {
+		if useLocalBeads && legacyGuardErr == nil {
 			localVersionPath := filepath.Join(beadsDir, localVersionFile)
 			if err := writeLocalVersion(localVersionPath, Version); err != nil && !quiet {
 				fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", err)
@@ -1780,7 +1788,10 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 					if serverSocket != "" {
 						cfg.DoltServerSocket = serverSocket
-					} else if cmd.Flags().Changed("server-host") && cmd.Flags().Changed("server-port") {
+					} else if legacyGuardErr != nil {
+						// Recovery pinned the explicit TCP endpoint; a socket
+						// persisted from an earlier server incarnation must
+						// not outrank it on later commands.
 						cfg.DoltServerSocket = ""
 					}
 					if serverUser != "" {

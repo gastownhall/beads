@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
@@ -112,6 +115,97 @@ func TestPinEmptyServerInitWitnessPinsQualifiedTCPConnection(t *testing.T) {
 		cfg.ServerUser != "qualified-user" || cfg.ServerPassword != "qualified-password" ||
 		!cfg.ServerTLS || cfg.Database != "qualified_database" || cfg.AutoStart {
 		t.Fatalf("pin did not preserve the qualified TCP connection: %+v", cfg)
+	}
+}
+
+func TestConfiguredIdentityMatchesProof(t *testing.T) {
+	// The explicit TCP endpoint is live so a dead persisted socket can fall
+	// back to it; the live unix socket stands in for an earlier server
+	// incarnation that would outrank TCP.
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcp.Close()
+	port := tcp.Addr().(*net.TCPAddr).Port
+	// Unix socket paths are length-limited, so avoid the long t.TempDir() name.
+	sockDir, err := os.MkdirTemp("", "bd-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockDir)
+	liveSocket := filepath.Join(sockDir, "live.sock")
+	unixListener, err := net.Listen("unix", liveSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unixListener.Close()
+
+	in := emptyServerInitWitnessInput{Database: "proved", ServerHost: "127.0.0.1", ServerPort: port}
+	tests := map[string]struct {
+		cfg   configfile.Config
+		envDB string
+		want  bool
+	}{
+		"same database":              {cfg: configfile.Config{DoltDatabase: "proved"}, want: true},
+		"different database":         {cfg: configfile.Config{DoltDatabase: "configured"}, want: false},
+		"env override equals flag":   {cfg: configfile.Config{DoltDatabase: "configured"}, envDB: "proved", want: true},
+		"persisted live unix socket": {cfg: configfile.Config{DoltDatabase: "proved", DoltServerSocket: liveSocket}, want: false},
+		"persisted dead socket path": {cfg: configfile.Config{DoltDatabase: "proved", DoltServerSocket: filepath.Join(sockDir, "dead.sock")}, want: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_DATABASE", tt.envDB)
+			cfg := tt.cfg
+			if got := configuredIdentityMatchesProof(&cfg, in); got != tt.want {
+				t.Fatalf("configuredIdentityMatchesProof() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLocalDoltRootDatabases(t *testing.T) {
+	beadsDir := t.TempDir()
+	for _, dir := range []string{"a/.dolt", "b-c/.dolt", "plain"} {
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := localDoltRootDatabases(beadsDir)
+	if err != nil {
+		t.Fatalf("localDoltRootDatabases() error = %v", err)
+	}
+	if want := []string{"a", "b_c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("localDoltRootDatabases() = %v, want %v", got, want)
+	}
+
+	// bd's own server start runs `dolt init` in the root, and the server serves
+	// that repository under the directory's name; it must be proved too.
+	if err := os.Mkdir(filepath.Join(beadsDir, "dolt", ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err = localDoltRootDatabases(beadsDir)
+	if err != nil {
+		t.Fatalf("localDoltRootDatabases() with root .dolt error = %v", err)
+	}
+	if want := []string{"dolt", "a", "b_c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("localDoltRootDatabases() with root .dolt = %v, want %v", got, want)
+	}
+}
+
+func TestProvedRootDatabasesAreEmptyFailsClosedWhenUnreachable(t *testing.T) {
+	beadsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := provedRootDatabasesAreEmpty(beadsDir, doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     1,
+		User:     "root",
+		Database: "missing",
+	})
+	if err == nil || empty {
+		t.Fatalf("provedRootDatabasesAreEmpty() = (%v, %v), want false with an error", empty, err)
 	}
 }
 
