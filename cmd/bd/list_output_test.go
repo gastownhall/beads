@@ -90,6 +90,57 @@ func TestOutputFormattedListExactBytes(t *testing.T) {
 	}
 }
 
+// TestOutputFormattedListEdgeScope pins what --format's help now states: every
+// non-dot format renders the dependency edges BETWEEN the listed issues, so it
+// prints nothing both when there are no dependencies and when the only
+// dependency leaves the listed set. The second case is what covers the
+// endpoint-membership guard; without it, a listing would spill edges to issues
+// the caller filtered out. Only 'dot' declares nodes, which is why it alone
+// still prints on an edgeless listing.
+func TestOutputFormattedListEdgeScope(t *testing.T) {
+	t.Parallel()
+	issues, _ := listOutputFixture()
+
+	for _, tc := range []struct {
+		name string
+		deps map[string][]*types.Dependency
+	}{
+		{name: "no dependencies", deps: nil},
+		{
+			name: "dependency leaves the listed set",
+			deps: map[string][]*types.Dependency{
+				"list-a": {{IssueID: "list-a", DependsOnID: "list-unlisted", Type: types.DepBlocks}},
+			},
+		},
+	} {
+		for _, format := range []string{"digraph", "{{.IssueID}} -> {{.DependsOnID}}"} {
+			t.Run(tc.name+"/"+format, func(t *testing.T) {
+				t.Parallel()
+				var out bytes.Buffer
+				if err := outputFormattedList(&out, issues, tc.deps, format); err != nil {
+					t.Fatalf("outputFormattedList: %v", err)
+				}
+				if got := out.String(); got != "" {
+					t.Fatalf("format %q wrote %q, want no output", format, got)
+				}
+			})
+		}
+	}
+
+	t.Run("dot declares nodes without edges", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := outputFormattedList(&out, issues, nil, "dot"); err != nil {
+			t.Fatalf("outputFormattedList: %v", err)
+		}
+		for _, id := range []string{"list-a", "list-b"} {
+			if !strings.Contains(out.String(), id) {
+				t.Fatalf("dot output with no dependencies omitted node %q:\n%s", id, out.String())
+			}
+		}
+	})
+}
+
 func TestOutputFormattedListWriterErrors(t *testing.T) {
 	t.Parallel()
 	issues, deps := listOutputFixture()
