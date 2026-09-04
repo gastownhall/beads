@@ -100,7 +100,17 @@ func TestLegacyUpgradeGuardRefusesBeforeMutatingHistoricalWorkspace(t *testing.T
 					commandCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 					cmd := exec.CommandContext(commandCtx, bd, tc.args...)
 					cmd.Dir = repoDir
-					cmd.Env = append(os.Environ(), "BD_DISABLE_METRICS=1", "BEADS_DOLT_AUTO_START=0")
+					// Pin the mode inputs the guard now reads through
+					// IsDoltServerMode: this child inherits os.Environ(), so
+					// without them a developer's shell decides which refusal
+					// text these historical layouts produce.
+					cmd.Env = append(os.Environ(),
+						"BD_DISABLE_METRICS=1",
+						"BEADS_DOLT_AUTO_START=0",
+						"BEADS_DOLT_SERVER_MODE=0",
+						"BEADS_DOLT_SHARED_SERVER=0",
+						"BEADS_DOLT_SERVER_HOST=",
+					)
 					var stdout, stderr bytes.Buffer
 					cmd.Stdout = &stdout
 					cmd.Stderr = &stderr

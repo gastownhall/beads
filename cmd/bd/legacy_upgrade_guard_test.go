@@ -8,7 +8,22 @@ import (
 	"github.com/steveyegge/beads/internal/config"
 )
 
+// pinLegacyUpgradeGuardEnv pins the process-global inputs the guard now reads
+// through configfile.IsDoltServerMode, so these tables assert the workspace
+// shape each case lays down rather than whatever mode the developer's shell
+// happens to select. CI already unsets these three
+// (scripts/ci/lib/test-env.sh), so the pins make a local `go test ./cmd/bd/`
+// match CI instead of changing what CI checks.
+func pinLegacyUpgradeGuardEnv(t *testing.T) {
+	t.Helper()
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "0")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "0")
+	t.Setenv("BEADS_DOLT_SERVER_HOST", "")
+}
+
 func TestLegacyUpgradeGuardRefusesHistoricalLayoutsWithoutMutatingMetadata(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name     string
 		metadata string
@@ -77,6 +92,7 @@ func TestLegacyUpgradeGuardRefusesHistoricalLayoutsWithoutMutatingMetadata(t *te
 }
 
 func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	t.Run("metadata-less v091 vc database", func(t *testing.T) {
 		beadsDir := t.TempDir()
 		if err := os.WriteFile(filepath.Join(beadsDir, "vc.db"), []byte("SQLite format 3\x00"), 0o600); err != nil {
@@ -247,6 +263,7 @@ func TestLegacyUpgradeGuardMetadataLessSQLiteAndCurrentEmbeddedPrecedence(t *tes
 }
 
 func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name        string
 		version     string
@@ -296,6 +313,7 @@ func TestLegacyUpgradeGuardServerSelectionBeatsStaleEmbeddedRepository(t *testin
 }
 
 func TestLegacyUpgradeGuardRefusesOldDoltRootWithoutTrustingVersionWitness(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name     string
 		metadata string
@@ -331,6 +349,9 @@ func TestLegacyUpgradeGuardRefusesOldDoltRootWithoutTrustingVersionWitness(t *te
 }
 
 func TestLegacyUpgradeGuardSharedServerAdmission(t *testing.T) {
+	// The per-case BEADS_DOLT_SHARED_SERVER below is set after this and wins;
+	// the pin is what keeps the other two mode inputs out of the decision.
+	pinLegacyUpgradeGuardEnv(t)
 	tests := []struct {
 		name        string
 		metadata    string
@@ -380,6 +401,7 @@ func TestLegacyUpgradeGuardSharedServerAdmission(t *testing.T) {
 }
 
 func TestLegacyUpgradeGuardLeavesCurrentDoltWorkspaceAlone(t *testing.T) {
+	pinLegacyUpgradeGuardEnv(t)
 	beadsDir := t.TempDir()
 	metadata := `{"backend":"dolt","dolt_mode":"embedded"}`
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0o600); err != nil {
