@@ -961,11 +961,11 @@ func formatTimeForRPC(t *time.Time) string {
 // project (bd-6dnrw.32), relaxed for previews exactly as the root pre-run
 // relaxes the command's own store.
 func openDryRunTargetStore(ctx context.Context, repoPath string, repoFlagChanged bool, repoOverride string) (storage.DoltStorage, error) {
-	if isAmbiguousRepoTarget(repoFlagChanged, repoOverride) {
-		// Same misresolution as the write path (be-flg / gt-rlwo): a preview
-		// read against a phantom store is a preview of the wrong repo.
-		return nil, ambiguousRepoTargetError(repoOverride, routing.ExpandPath(repoPath))
-	}
+	// Remote URLs are resolved before the ambiguity guard, because a remote URL
+	// is not a filesystem path and filepath.IsAbs is false for every supported
+	// scheme -- so isAmbiguousRepoTarget would refuse all of them. The write
+	// path orders these the same way (its IsRemoteURL branch runs before
+	// ensureBeadsDirForPath); this is the read side of that same ordering.
 	if remotecache.IsRemoteURL(repoPath) {
 		cache, err := remotecache.DefaultCache()
 		if err != nil {
@@ -978,6 +978,12 @@ func openDryRunTargetStore(ctx context.Context, repoPath string, repoFlagChanged
 			return nil, fmt.Errorf("dry-run parent lookup requires an existing cached remote store for %s: %w", repoPath, err)
 		}
 		return store, nil
+	}
+
+	if isAmbiguousRepoTarget(repoFlagChanged, repoOverride) {
+		// Same misresolution as the write path (be-flg / gt-rlwo): a preview
+		// read against a phantom store is a preview of the wrong repo.
+		return nil, ambiguousRepoTargetError(repoOverride, routing.ExpandPath(repoPath))
 	}
 
 	targetPath := routing.ExpandPath(repoPath)

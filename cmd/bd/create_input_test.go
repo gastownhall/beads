@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/steveyegge/beads/internal/remotecache"
 )
 
 func TestCreateCommandRejectsExtraPositionalArguments(t *testing.T) {
@@ -270,6 +273,62 @@ func TestIsAmbiguousRepoTarget(t *testing.T) {
 			got := isAmbiguousRepoTarget(tt.flagChanged, tt.repoOverride)
 			if got != tt.wantAmbiguous {
 				t.Errorf("isAmbiguousRepoTarget(%v, %q) = %v, want %v", tt.flagChanged, tt.repoOverride, got, tt.wantAmbiguous)
+			}
+		})
+	}
+}
+
+// TestRemoteURLsAreNotRefusedAsAmbiguousRepoTargets pins the ORDERING that
+// makes the --repo ambiguity guard safe, rather than any single call site.
+//
+// isAmbiguousRepoTarget answers a filesystem question (is this value absolute
+// or "~/"-prefixed?). A remote URL is not a filesystem path, and filepath.IsAbs
+// is false for every supported scheme, so the predicate classifies ALL of them
+// as ambiguous. That is not a bug in the predicate — it is why every caller
+// must resolve remote URLs BEFORE consulting it.
+//
+// The write path has always done this (its remotecache.IsRemoteURL branch runs
+// before ensureBeadsDirForPath). The dry-run path did not, which made
+// `bd create --dry-run --parent ... --repo <remote URL>` fail for every remote
+// while the identical non-dry-run create succeeded.
+func TestRemoteURLsAreNotRefusedAsAmbiguousRepoTargets(t *testing.T) {
+	remotes := []string{
+		"https://github.com/owner/repo.git",
+		"http://example.com/owner/repo.git",
+		"ssh://git@github.com/owner/repo.git",
+		"git@github.com:owner/repo.git",
+		"dolthub://org/db",
+		"file:///srv/beads/repo",
+		"s3://bucket/prefix",
+		"gs://bucket/prefix",
+	}
+
+	for _, u := range remotes {
+		t.Run(u, func(t *testing.T) {
+			if !remotecache.IsRemoteURL(u) {
+				t.Fatalf("test premise broken: %q is not recognised as a remote URL", u)
+			}
+			// The predicate refuses it. This assertion is the point of the
+			// test: it documents that the guard is unsafe to run first, so a
+			// future reordering fails here with an explanation instead of
+			// silently breaking every remote.
+			if !isAmbiguousRepoTarget(true, u) {
+				t.Fatalf("premise changed: isAmbiguousRepoTarget no longer refuses %q; "+
+					"if the predicate now understands remote URLs, this test and the "+
+					"call-site ordering it protects should be revisited", u)
+			}
+
+			// Contain any cache directory the lookup may create.
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("XDG_CACHE_HOME", t.TempDir())
+
+			_, err := openDryRunTargetStore(context.Background(), u, true, u)
+			if err == nil {
+				return // resolved a cached remote; certainly not refused
+			}
+			if strings.Contains(err.Error(), "is a relative/bare path") {
+				t.Fatalf("remote URL %q was refused by the ambiguity guard: %v\n"+
+					"the guard must run AFTER remote URLs are resolved", u, err)
 			}
 		})
 	}
