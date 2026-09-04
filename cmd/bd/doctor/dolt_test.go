@@ -11,6 +11,22 @@ import (
 // exists. GetBackend() always returns "dolt" after the dolt-native cleanup.
 // (bd-yqpwy)
 
+// clearDoltPortEnv unsets the Dolt server port overrides for the duration of
+// a test. TestMain exports BEADS_DOLT_PORT and BEADS_DOLT_SERVER_PORT for the
+// package-wide test server, and the env var is the first stop in
+// doltserver.DefaultConfig's port chain, so a test that asserts the
+// "no server" or "unreachable server" path would otherwise reach the shared
+// server whenever the package runs with a live Dolt container.
+func clearDoltPortEnv(t *testing.T) {
+	t.Helper()
+	for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {
+		if orig, ok := os.LookupEnv(key); ok {
+			t.Cleanup(func() { os.Setenv(key, orig) })
+			os.Unsetenv(key)
+		}
+	}
+}
+
 func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 	// GH#2722: In owned/embedded mode (non-external), when no server is
 	// running, server-dependent checks should be skipped gracefully (StatusOK)
@@ -30,6 +46,7 @@ func TestRunDoltHealthChecks_DoltBackendNoServer(t *testing.T) {
 
 	// No BEADS_DOLT_SERVER_PORT set → port 0 → no server running
 	// No BEADS_DOLT_SHARED_SERVER → owned mode (not external)
+	clearDoltPortEnv(t)
 	checks := RunDoltHealthChecks(tmpDir)
 	if len(checks) != 7 {
 		t.Fatalf("expected exactly 7 checks (consistent shape), got %d", len(checks))

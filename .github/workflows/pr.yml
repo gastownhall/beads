@@ -875,21 +875,18 @@ jobs:
   # at the STEP level (see the build-examples rationale above: a job-level
   # continue-on-error job still reports a FAILURE check run, which
   # pr-preflight and the merge patrol gate on), because with a live Dolt
-  # server present four tests in that package fail on assumptions about the
-  # environment rather than on product behavior (measured on 0a031457d):
-  #   - TestRunDoltHealthChecks_DoltBackendNoServer and
-  #     TestCheckFreshClone_ServerModeUnreachable assert the "no reachable
-  #     server" wording, but the server IS reachable here, so they read
-  #     "Connected successfully" / "Database exists on server";
-  #   - TestCheckTestPollution_NoTestIssues_EmptyDB wants "N/A (query
-  #     failed)" and gets a successful query;
-  #   - TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD wants a verified
-  #     fingerprint and gets "N/A (no database)".
-  # The first one also reports tables in the shared doctor_pkg_shared
-  # database, i.e. cross-test leakage inside the package.
+  # server present two tests in that package still fail on assumptions
+  # about the environment rather than on product behavior. The test step
+  # skips exactly those two by name (see the -skip list on the step), so a
+  # green step means "no NEW failure" and any other failure turns it red.
+  # (Two more used to fail the same way — TestRunDoltHealthChecks_DoltBackendNoServer
+  # and TestCheckFreshClone_ServerModeUnreachable reached the package test
+  # server through TestMain's BEADS_DOLT_SERVER_PORT — and now clear that
+  # override; see clearDoltPortEnv in cmd/bd/doctor/dolt_test.go.)
   #
-  # Promote to required once those tests are made server-agnostic; until
-  # then this job is a visible, non-blocking record of the gap.
+  # Promote to required once the two skipped tests are made server-agnostic
+  # and the -skip list is empty; until then this job is a visible,
+  # non-blocking record of the gap.
   #
   # To promote it to a real gate: drop every step's continue-on-error and
   # the two warning steps, then add `test-doctor-dolt` to ci-gate's `needs`,
@@ -982,8 +979,19 @@ jobs:
       # package outright when the Dolt container is unavailable (it only
       # warns and runs the non-Dolt tests otherwise), so a Dolt-less runner
       # surfaces as a red step rather than as a suite that quietly lost its
-      # four known failures. The step timeout is a backstop above go test's
-      # own -timeout so the step, not the job, is what a hang kills.
+      # known failures. The step timeout is a backstop above go test's own
+      # -timeout so the step, not the job, is what a hang kills.
+      #
+      # Expected-failure list (-skip, anchored on exact test names). Each
+      # entry fails only because a live server is present; remove an entry
+      # once its test is server-agnostic:
+      #   - TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD: wants
+      #     "Verified (...)" but gets "N/A (no database)", because
+      #     CheckRepoFingerprint stats the local .beads/dolt directory,
+      #     which does not exist when the test's dolt.New used the server.
+      #   - TestCheckTestPollution_NoTestIssues_EmptyDB: wants "N/A (query
+      #     failed)" but the database it resolves to on the shared server
+      #     already has an issues table, so the query succeeds.
       - name: Test doctor with Dolt
         id: test-doctor
         if: >-
@@ -1000,12 +1008,12 @@ jobs:
         env:
           BEADS_TEST_BD_BINARY: ${{ github.workspace }}/ci-build-artifacts/bd-linux-gms-pure
           BEADS_DOCTOR_REQUIRE_DOLT: "1"
-        run: go test -tags gms_pure_go -race -count=1 -timeout 25m -v ./cmd/bd/doctor/
+        run: go test -tags gms_pure_go -race -count=1 -timeout 25m -v -skip '^(TestCheckRepoFingerprint_UsesTargetRepoOutsideCWD|TestCheckTestPollution_NoTestIssues_EmptyDB)$' ./cmd/bd/doctor/
 
       - name: Warn when the doctor Dolt suite fails
         if: steps.test-doctor.outcome == 'failure'
         run: |
-          echo "::warning title=doctor Dolt suite failed::cmd/bd/doctor failed against a live Dolt server (see the 'Test doctor with Dolt' step above; the four environment-assumption failures listed in this job's comment are known). Advisory only; this does not block the merge."
+          echo "::warning title=doctor Dolt suite failed::cmd/bd/doctor failed against a live Dolt server outside the two tests on the step's -skip list, i.e. a NEW failure (see the 'Test doctor with Dolt' step above). Advisory only; this does not block the merge."
 
       - name: Warn when the advisory job could not run at all
         if: steps.test-doctor.outcome == 'skipped'
