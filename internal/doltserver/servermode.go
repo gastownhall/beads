@@ -147,7 +147,7 @@ func resolveServerMode(beadsDir string, honorPortEnv bool) ServerMode {
 	// TestResolveServerMode_EnvPortOverridesStaleEmbedded pins it.
 	//
 	// configfile.IsDoltServerMode deliberately does NOT consult this predicate
-	// — see the note there and be-2nolj.
+	// — see the note there and GH#6181.
 	if honorPortEnv && hostCfg.PortImpliesServerMode() {
 		return ServerModeExternal
 	}
