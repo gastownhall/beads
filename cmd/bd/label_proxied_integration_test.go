@@ -83,6 +83,59 @@ func TestProxiedServerLabel(t *testing.T) {
 		}
 	})
 
+	// rename is the end-to-end regression test for the finding that
+	// runLabelRenameProxiedServer used to fan a rename out into a per-issue
+	// AddLabel + RemoveLabel pair (journaling label_added/label_removed)
+	// instead of calling domain.LabelUseCase.RenameLabel, which emits one
+	// label_renamed event. internal/storage/domain/db's
+	// TestLabelUseCase/RenameLabel/EmitsOneRenamedEventPerIssue exercises the
+	// same use case directly against dolt; this closes the gap through the
+	// actual `bd label rename` CLI + proxied server wiring.
+	t.Run("rename", func(t *testing.T) {
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "lr")
+		issue := bdProxiedCreate(t, bd, p.dir, "Rename target")
+		bdProxiedLabel(t, bd, p.dir, "add", issue.ID, "old-name")
+
+		out := bdProxiedLabel(t, bd, p.dir, "rename", "old-name", "new-name")
+		if !strings.Contains(out, "Renamed label 'old-name' to 'new-name': 1 issue") {
+			t.Errorf("expected the rename confirmation, got:\n%s", out)
+		}
+
+		if got := bdProxiedLabelListJSON(t, bd, p.dir, issue.ID); len(got) != 1 || got[0] != "new-name" {
+			t.Fatalf("labels after rename = %v, want [new-name]", got)
+		}
+
+		db := openProxiedDB(t, p)
+		var renamedCount int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_renamed' AND old_value = 'old-name' AND new_value = 'new-name'",
+			issue.ID).Scan(&renamedCount); err != nil {
+			t.Fatalf("count label_renamed events: %v", err)
+		}
+		if renamedCount != 1 {
+			t.Errorf("label_renamed events = %d, want 1", renamedCount)
+		}
+
+		var addedCount, removedCount int
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_added'",
+			issue.ID).Scan(&addedCount); err != nil {
+			t.Fatalf("count label_added events: %v", err)
+		}
+		if err := db.QueryRowContext(context.Background(),
+			"SELECT COUNT(*) FROM events WHERE issue_id = ? AND event_type = 'label_removed'",
+			issue.ID).Scan(&removedCount); err != nil {
+			t.Fatalf("count label_removed events: %v", err)
+		}
+		if addedCount != 1 {
+			t.Errorf("label_added events = %d, want 1 (only the initial `label add`, not a second one from a rename-as-add)", addedCount)
+		}
+		if removedCount != 0 {
+			t.Errorf("label_removed events = %d, want 0 (the rename must not journal label_removed)", removedCount)
+		}
+	})
+
 	t.Run("add_multiple_issues", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "lm")

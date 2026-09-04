@@ -407,6 +407,19 @@ type Storage interface {
 	RemoveLabel(ctx context.Context, issueID, label, actor string) error
 	GetLabels(ctx context.Context, issueID string) ([]string, error)
 	GetIssuesByLabel(ctx context.Context, label string) ([]*types.Issue, error)
+	// RenameLabel renames a label across every issue and wisp that carries
+	// it. An issue that already carries newLabel is a merge (the stale
+	// oldLabel row is dropped, no error) rather than a duplicate-key
+	// conflict. renamed is the count of issues and wisps that carried
+	// oldLabel; merged is the subset that already had newLabel; ids lists
+	// every touched id, both planes together. oldLabel carried by nothing is
+	// an honest no-op: renamed and merged are 0, ids is nil, err is nil.
+	// oldLabel and newLabel equal after trimming is refused with
+	// issueops.ErrRenameLabelSameName instead of treated as a no-op - the
+	// merge branch above would otherwise wipe the label instead of leaving
+	// it alone (every carrier already "has newLabel", so the stale-row drop
+	// removes every row).
+	RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error)
 
 	// Work queries
 	GetReadyWork(ctx context.Context, filter types.WorkFilter) ([]*types.Issue, error)

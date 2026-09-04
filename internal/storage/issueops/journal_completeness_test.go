@@ -105,6 +105,7 @@ var mutationEntryPoints = []string{
 	"RemoveDependencyInTx",
 	"AddLabelInTx",
 	"RemoveLabelInTx",
+	"RenameLabelInTx",
 	"UpdateIssueIDInTx",
 	"AddIssueCommentInTx",
 	"ImportIssueCommentInTx",

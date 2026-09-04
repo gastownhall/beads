@@ -87,6 +87,18 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
 }
 
+// RenameLabel sweeps both label planes (labels and wisp_labels) for oldLabel,
+// reusing issueops.RenameLabelInTx rather than restating its SQL shape here:
+// r.runner satisfies issueops.DBTX structurally, so this is the exact same
+// merge logic, same-name refusal (issueops.ErrRenameLabelSameName) and
+// EventLabelRenamed emission the direct DoltStore/EmbeddedDoltStore route
+// uses. That identity, not merely a matching shape, is what keeps this route
+// and the direct one from drifting the way runLabelRenameProxiedServer's
+// hand-rolled add-then-remove fan-out used to.
+func (r *labelSQLRepositoryImpl) RenameLabel(ctx context.Context, oldLabel, newLabel, actor string) (renamed, merged int, ids []string, err error) {
+	return issueops.RenameLabelInTx(ctx, r.runner, oldLabel, newLabel, actor)
+}
+
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
 	if issueID == "" {
 		return fmt.Errorf("db: LabelSQLRepository.Delete: issueID must not be empty")
