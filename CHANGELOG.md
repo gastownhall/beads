@@ -180,6 +180,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd dolt status` and `bd info` report externally managed Unix-socket
+  topology truthfully** ([#6017](https://github.com/gastownhall/beads/issues/6017)).
+  Status now probes the configured socket and database instead of treating a
+  missing repo-local PID file (and port zero) as proof that the server is down.
+  Info labels direct CLI access separately from Dolt mode and transport, so a
+  shared server is no longer presented ambiguously as merely `Mode: direct`.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session

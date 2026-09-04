@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
 	"github.com/steveyegge/beads/internal/workapi"
 )
@@ -43,5 +44,34 @@ func TestInfoConfigExcludesTheKVPlane(t *testing.T) {
 		if _, ok := got[want]; !ok {
 			t.Errorf("%q was dropped; only keys under %q may be", want, kvkeys.Prefix)
 		}
+	}
+}
+
+func TestBuildDirectInfoSeparatesAccessFromDoltTopology(t *testing.T) {
+	socket := "/tmp/shared-dolt.sock"
+	got := buildDirectInfo("/repo/.beads/dolt", &configfile.Config{
+		Backend:          configfile.BackendDolt,
+		DoltMode:         configfile.DoltModeServer,
+		DoltServerSocket: socket,
+	})
+
+	if got["access_mode"] != "direct" {
+		t.Fatalf("access_mode = %v, want direct", got["access_mode"])
+	}
+	if got["dolt_mode"] != configfile.DoltModeServer {
+		t.Fatalf("dolt_mode = %v, want server", got["dolt_mode"])
+	}
+	if got["transport"] != "unix_socket" || got["socket"] != socket {
+		t.Fatalf("expected Unix-socket topology, got %#v", got)
+	}
+
+	out := captureStdout(t, func() error { return renderInfo(got, false, "/repo/.beads/dolt") })
+	for _, want := range []string{"Access mode: direct", "Dolt mode: server", "Transport: unix_socket", "Socket: " + socket} {
+		if !strings.Contains(out, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "\nMode: direct") {
+		t.Fatalf("ambiguous topology label remains in output:\n%s", out)
 	}
 }
