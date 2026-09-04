@@ -510,6 +510,36 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 	}
 }
 
+// explicitDBTargetGiven reports whether the caller named an explicit database
+// target that overrides the ambient workspace. These are the three routes the
+// PR body for be-fyt names and that selectedNoDBBeadsDir below honors ahead of
+// the ambient repo: a --db value that resolves to a path (which lands in
+// dbPath), BEADS_DB, and BD_DB.
+//
+// Deliberately NOT keyed on PersistentFlags().Changed("db"). A --db value that
+// names a *database* rather than a path is moved to dbNameFromDBFlag and
+// clears dbPath (~line 990), and that value is consumed only on the
+// store-requiring path (~line 1553). On the no-DB path selectedNoDBBeadsDir
+// therefore falls through to the ambient workspace anyway, so the ambient
+// redirect source's database must still be preserved for it. Keying on
+// Changed("db") would suppress that and reopen be-xil for
+// `bd doctor --db <name>` in a redirected repo; see
+// TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase.
+//
+// KNOWN GAP (be-bf75p): selectedNoDBBeadsDir honors a fourth route this
+// predicate does not — BEADS_DIR != "" -> beads.FindBeadsDir() (~line 551) —
+// so a BEADS_DIR naming a foreign target still inherits the ambient repo's
+// redirect-source database. Reproduces only inside a git repo, because
+// GetRedirectInfo reaches the ambient repo through findLocalBdsDirInRepo
+// (internal/beads/beads.go:394), which keys off git.GetRepoRoot() alone.
+// Emptiness is the wrong test for it: BEADS_DIR pre-set *to the redirect
+// target* is bd-wayc3's own case, where preservation is wanted, so the fix has
+// to compare BEADS_DIR against the redirect target rather than check that it
+// is unset. That comparison is be-bf75p's, not this PR's.
+func explicitDBTargetGiven() bool {
+	return dbPath != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != ""
+}
+
 func selectedNoDBBeadsDir(cmd *cobra.Command) string {
 	if cmd != nil && cmd.Root() != nil && cmd.Root().PersistentFlags().Changed("db") && dbPath != "" {
 		if selectedBeadsDir := resolveCommandBeadsDir(dbPath); selectedBeadsDir != "" {
@@ -1155,7 +1185,46 @@ var rootCmd = &cobra.Command{
 		// setup before they inspect server mode or per-project Dolt settings.
 		// Rebind them to the selected workspace so explicit --db / BEADS_DB
 		// targets behave consistently across doctor/bootstrap/context/dolt.
+		//
+		// Capture redirect info BEFORE selectedNoDBBeadsDir() resolves the
+		// beads dir, mirroring the store-requiring path below (be-xil):
+		// selectedNoDBBeadsDir() always returns the post-redirect target
+		// directory (every branch bottoms out in beads.FindBeadsDir() or a
+		// dbPath already resolved through it, both of which call
+		// FollowRedirect internally). Calling preserveRedirectSourceDatabase
+		// with that already-resolved target means beads.ResolveRedirect finds
+		// no redirect file there and silently never preserves the source's
+		// configured dolt_database — so doctor (and other no-DB commands)
+		// would fall through to the shared target directory's own default
+		// database instead of the source's, producing false "wrong database"
+		// diagnoses against an unrelated rig's schema.
 		if skipsStoreInit {
+			// be-fyt round 1: only preserve when the caller did NOT name an
+			// explicit target. beads.GetRedirectInfo() always resolves from the
+			// ambient CWD repo's local .beads regardless of --db/BEADS_DIR
+			// (bd-wayc3), so calling it unconditionally let an explicit --db/
+			// BEADS_DB/BD_DB target's own database be silently shadowed by the
+			// ambient repo's unrelated redirect-source database — reopening
+			// be-xil's failure mode via a narrower trigger.
+			//
+			// Round 2 (review of PR #5774): the guard was spelled `dbPath == ""`,
+			// but dbPath is populated from BEADS_DB/BD_DB only when those are
+			// *unset* (~line 1002), so both env routes slipped straight through
+			// a guard that claimed to cover them while selectedNoDBBeadsDir
+			// (~lines 519, 523) rebound BEADS_DIR to the explicit target — the
+			// two disagreed. explicitDBTargetGiven now covers all three of the
+			// routes that populate dbPath/BEADS_DB/BD_DB.
+			//
+			// It does NOT cover selectedNoDBBeadsDir's fourth route, BEADS_DIR
+			// (~line 551), so the two predicates still disagree there and a
+			// foreign BEADS_DIR target inherits the ambient repo's
+			// redirect-source database — inside a git repo only. Measured, not
+			// assumed; tracked and specified as be-bf75p. See the KNOWN GAP
+			// paragraph on explicitDBTargetGiven for why emptiness is the wrong
+			// test and what the fix has to compare instead.
+			if !explicitDBTargetGiven() {
+				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
+			}
 			beadsDir := selectedNoDBBeadsDir(cmd)
 			prepareSelectedNoDBContext(beadsDir)
 			refreshBoundCommandConfig(cmd)
