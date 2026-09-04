@@ -348,16 +348,34 @@ type RedirectInfo struct {
 // BEADS_DIR is set. This handles the case where BEADS_DIR is pre-set to the redirect target
 // (e.g., by shell environment or tooling), but we still need to detect that a redirect exists.
 func GetRedirectInfo() RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepo(), findLocalBeadsDir)
+}
+
+// GetRedirectInfoFrom is GetRedirectInfo for the workspace at dir rather than
+// the process cwd: the .beads directory at dir's git repository root is
+// checked for a redirect first, then the nearest .beads walking up from dir.
+// BEADS_DIR is not consulted, since a caller asking about dir has already
+// resolved it (under `bd -C dir` it names the redirect target itself, which
+// would mask the clone's redirect). Used by `bd -C dir prime` so the redirect
+// notice describes the primed workspace (gastownhall/beads#5509).
+func GetRedirectInfoFrom(dir string) RedirectInfo {
+	return redirectInfoFor(findLocalBdsDirInRepoFrom(dir), func() string { return findBeadsDirUpward(dir) })
+}
+
+// redirectInfoFor reports the redirect state given the repo-local .beads
+// directory ("" outside a git repository) and a fallback locator for the
+// non-git case.
+func redirectInfoFor(repoLocalBeadsDir string, fallback func() string) RedirectInfo {
 	// First, always check the git repo's local .beads directory for redirects
 	// This handles the case where BEADS_DIR is pre-set to the redirect target
-	if localBeadsDir := findLocalBdsDirInRepo(); localBeadsDir != "" {
-		if info := checkRedirectInDir(localBeadsDir); info.IsRedirected {
+	if repoLocalBeadsDir != "" {
+		if info := checkRedirectInDir(repoLocalBeadsDir); info.IsRedirected {
 			return info
 		}
 	}
 
 	// Fall back to original logic for non-git-repo cases
-	if localBeadsDir := findLocalBeadsDir(); localBeadsDir != "" {
+	if localBeadsDir := fallback(); localBeadsDir != "" {
 		return checkRedirectInDir(localBeadsDir)
 	}
 
@@ -392,8 +410,22 @@ func checkRedirectInDir(beadsDir string) RedirectInfo {
 // This ignores BEADS_DIR to find the "true local" .beads for redirect detection.
 // bd-wayc3: Added to detect redirects even when BEADS_DIR is pre-set.
 func findLocalBdsDirInRepo() string {
-	// Get git repo root
-	repoRoot := git.GetRepoRoot()
+	return repoLocalBeadsDir(git.GetRepoRoot())
+}
+
+// findLocalBdsDirInRepoFrom is findLocalBdsDirInRepo for the git repository
+// containing dir rather than the process cwd.
+func findLocalBdsDirInRepoFrom(dir string) string {
+	repoRoot, err := gitOutput(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return ""
+	}
+	return repoLocalBeadsDir(repoRoot)
+}
+
+// repoLocalBeadsDir returns <repoRoot>/.beads when repoRoot is known and the
+// directory exists, else "".
+func repoLocalBeadsDir(repoRoot string) string {
 	if repoRoot == "" {
 		return ""
 	}
@@ -444,8 +476,13 @@ func findLocalBeadsDir() string {
 	if err != nil {
 		return ""
 	}
+	return findBeadsDirUpward(cwd)
+}
 
-	for dir := cwd; dir != "/" && dir != "."; {
+// findBeadsDirUpward returns the nearest .beads directory at or above start,
+// without following redirects, or "" when there is none.
+func findBeadsDirUpward(start string) string {
+	for dir := start; dir != "/" && dir != "."; {
 		beadsDir := filepath.Join(dir, ".beads")
 		if info, err := os.Stat(beadsDir); err == nil && info.IsDir() {
 			return beadsDir
