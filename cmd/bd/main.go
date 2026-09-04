@@ -525,6 +525,17 @@ func preserveRedirectSourceDatabase(beadsDir string) {
 // Changed("db") would suppress that and reopen be-xil for
 // `bd doctor --db <name>` in a redirected repo; see
 // TestDoctorPersistentPreRunBareDBNameStillPreservesAmbientSourceDatabase.
+//
+// KNOWN GAP (be-bf75p): selectedNoDBBeadsDir honors a fourth route this
+// predicate does not — BEADS_DIR != "" -> beads.FindBeadsDir() (~line 551) —
+// so a BEADS_DIR naming a foreign target still inherits the ambient repo's
+// redirect-source database. Reproduces only inside a git repo, because
+// GetRedirectInfo reaches the ambient repo through findLocalBdsDirInRepo
+// (internal/beads/beads.go:394), which keys off git.GetRepoRoot() alone.
+// Emptiness is the wrong test for it: BEADS_DIR pre-set *to the redirect
+// target* is bd-wayc3's own case, where preservation is wanted, so the fix has
+// to compare BEADS_DIR against the redirect target rather than check that it
+// is unset. That comparison is be-bf75p's, not this PR's.
 func explicitDBTargetGiven() bool {
 	return dbPath != "" || os.Getenv("BEADS_DB") != "" || os.Getenv("BD_DB") != ""
 }
@@ -1201,8 +1212,16 @@ var rootCmd = &cobra.Command{
 			// *unset* (~line 1002), so both env routes slipped straight through
 			// a guard that claimed to cover them while selectedNoDBBeadsDir
 			// (~lines 519, 523) rebound BEADS_DIR to the explicit target — the
-			// two disagreed. explicitDBTargetGiven asks the question
-			// selectedNoDBBeadsDir asks, so they cannot drift apart again.
+			// two disagreed. explicitDBTargetGiven now covers all three of the
+			// routes that populate dbPath/BEADS_DB/BD_DB.
+			//
+			// It does NOT cover selectedNoDBBeadsDir's fourth route, BEADS_DIR
+			// (~line 551), so the two predicates still disagree there and a
+			// foreign BEADS_DIR target inherits the ambient repo's
+			// redirect-source database — inside a git repo only. Measured, not
+			// assumed; tracked and specified as be-bf75p. See the KNOWN GAP
+			// paragraph on explicitDBTargetGiven for why emptiness is the wrong
+			// test and what the fix has to compare instead.
 			if !explicitDBTargetGiven() {
 				preserveRedirectSourceDatabase(beads.GetRedirectInfo().LocalDir)
 			}
