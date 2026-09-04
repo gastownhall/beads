@@ -226,12 +226,26 @@ Returns a summary object when `--json` is active:
 ### bd export --json
 
 Outputs JSONL (one JSON object per line), not wrapped in an envelope.
-Each line is a self-contained issue or memory record, discriminated by
-`_type` (`"issue"` / `"memory"`). Export lines do **not** carry
+Each line is a self-contained record, discriminated by `_type`
+(`"issue"` / `"memory"` / `"label-definition"`). Export lines do **not** carry
 `schema_version` — that field belongs to the `--json` command envelope,
 not to the interchange stream. The interchange's own version marker is the
 optional `_schema` header record (`{"_schema":"beads-jsonl/1"}`), which
 readers skip.
+
+`"label-definition"` records carry the workspace's opt-in curated label
+vocabulary (`bd label define`). They are emitted whenever the registry is
+non-empty, including in a default `bd export` with no flags: unlike memories
+they are shared workspace policy rather than agent context, so there is no
+`--include-` flag gating them and no flag suppressing them. Each record
+carries `label`, an optional `description`, `created_at` and an optional
+`created_by`; `bd import` applies label and description, stamping its own
+creation time and using `created_by` as the actor when present.
+
+Consumers must dispatch on `_type` rather than assuming every line is an
+issue. A reader that unmarshals every line into an issue struct sees a
+label-definition record as a titleless issue; `bd import` itself dispatches
+on `_type` before the issue path for exactly this reason.
 
 Issue records carry an optional `wisp_plane` boolean: the explicit
 wisps-plane marker. Export stamps it on rows that live in the wisps table
