@@ -495,6 +495,7 @@ const (
 	EventDependencyRemoved = types.EventDependencyRemoved
 	EventLabelAdded        = types.EventLabelAdded
 	EventLabelRemoved      = types.EventLabelRemoved
+	EventLabelRenamed      = types.EventLabelRenamed
 	EventCompacted         = types.EventCompacted
 )
 
