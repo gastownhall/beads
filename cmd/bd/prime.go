@@ -111,7 +111,10 @@ Config options:
 	  (1) .beads/PRIME.md relative to the current directory;
 	  (2) PRIME.md in the .beads directory bd resolves for this workspace
 	      (honors $BEADS_DIR; a redirected .beads is followed);
-	  (3) the global ~/.config/beads/PRIME.md (or OS equivalent config dir).
+	  (3) the global PRIME.md in bd's user config dir:
+	      ~/.config/beads/ on Linux ($XDG_CONFIG_HOME/beads/ if set),
+	      ~/Library/Application Support/beads/ on macOS,
+	      %AppData%\beads\ on Windows.
 	- Persistent memories (from bd remember) are still appended so memory
 	  injection keeps working under a custom template.
 	- Use --export to dump the default content for customization.
