@@ -204,6 +204,17 @@ Configure the connection with flags or environment variables:
 | `--server-user` | `BEADS_DOLT_SERVER_USER` | `root` |
 | | `BEADS_DOLT_PASSWORD` | (none) |
 
+**`BEADS_DOLT_SERVER_PORT` also declares the server externally managed.**
+Setting it — or the legacy `BEADS_DOLT_PORT` — makes `ResolveServerMode`
+classify the workspace as an externally-managed server, so bd will not
+auto-start a server for it: if nothing is listening on that port you get
+`auto-start is suppressed because the server is externally managed` rather
+than a server started on it. Use these vars to point bd at a server you
+already run; they are not a way to choose the port of a bd-owned server. A
+`dolt_mode: proxied-server` workspace is exempt — it reaches its server
+through the proxy, so an ambient port does not describe its lifecycle — and
+a shared-server workspace is already classified external on its own.
+
 **Unix domain sockets:** Use `--server-socket` to connect via a Unix socket
 instead of TCP. This avoids port conflicts between concurrent projects and is
 useful in sandboxed environments (e.g., Claude Code) where file-level access
@@ -545,6 +556,11 @@ dolt:
 | `DOLT_REMOTE_USER` | Clone/push/pull auth user |
 | `DOLT_REMOTE_PASSWORD` | Clone/push/pull auth password |
 | `BD_DOLT_AUTO_COMMIT` | Override auto-commit setting |
+
+**Note:** `BEADS_DOLT_SERVER_PORT` (and the legacy `BEADS_DOLT_PORT`) do more
+than name a port — setting either also marks the workspace as an
+externally-managed server and suppresses auto-start. See **Server Mode**
+above.
 
 ### Credentials File
 
