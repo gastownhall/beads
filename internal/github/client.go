@@ -144,7 +144,7 @@ func (c *Client) doRequest(ctx context.Context, method, urlStr string, body inte
 			continue
 		}
 
-		return nil, nil, fmt.Errorf("API error: %s (status %d)", string(respBody), resp.StatusCode)
+		return nil, nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody), URL: urlStr}
 	}
 
 	if lastRateLimit != nil {
@@ -362,6 +362,92 @@ func (c *Client) FetchIssueByNumber(ctx context.Context, number int) (*Issue, er
 	}
 
 	return &issue, nil
+}
+
+// listIssuePages walks every page of an endpoint that returns a bare JSON
+// array of issues (sub-issues, dependencies), following GitHub's Link header
+// the same way FetchIssues and ListRepositories do. Relationship endpoints
+// default to 30 items per page, so an unpaginated read silently truncates the
+// existing-relationship set and makes the push pass re-POST links that are
+// already there.
+func (c *Client) listIssuePages(ctx context.Context, endpoint string) ([]Issue, error) {
+	var allIssues []Issue
+	page := 1
+
+	for {
+		select {
+		case <-ctx.Done():
+			return allIssues, ctx.Err()
+		default:
+		}
+
+		urlStr := fmt.Sprintf("%s?per_page=%d&page=%d", endpoint, MaxPerPage, page)
+		respBody, headers, err := c.doRequest(ctx, http.MethodGet, urlStr, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		var issues []Issue
+		if err := json.Unmarshal(respBody, &issues); err != nil {
+			return nil, fmt.Errorf("failed to parse response: %w", err)
+		}
+		allIssues = append(allIssues, issues...)
+
+		if nextPageURL(headers) == "" {
+			break
+		}
+		page++
+
+		if page > MaxPages {
+			return nil, fmt.Errorf("pagination limit exceeded: stopped after %d pages", MaxPages)
+		}
+	}
+
+	return allIssues, nil
+}
+
+// ListSubIssues retrieves the sub-issues of the given parent issue number,
+// following pagination so callers see every existing sub-issue.
+func (c *Client) ListSubIssues(ctx context.Context, parentNumber int) ([]Issue, error) {
+	endpoint := fmt.Sprintf("%s%s/issues/%d/sub_issues", c.BaseURL, c.repoPath(), parentNumber)
+	issues, err := c.listIssuePages(ctx, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list sub-issues of #%d: %w", parentNumber, err)
+	}
+	return issues, nil
+}
+
+// AddSubIssue makes subIssueID a sub-issue of the issue at parentNumber.
+// subIssueID is the sub-issue's internal numeric ID (Issue.ID), not its number.
+func (c *Client) AddSubIssue(ctx context.Context, parentNumber, subIssueID int) error {
+	urlStr := fmt.Sprintf("%s%s/issues/%d/sub_issues", c.BaseURL, c.repoPath(), parentNumber)
+	body := map[string]interface{}{"sub_issue_id": subIssueID}
+	if _, _, err := c.doRequest(ctx, http.MethodPost, urlStr, body); err != nil {
+		return fmt.Errorf("failed to add sub-issue %d to #%d: %w", subIssueID, parentNumber, err)
+	}
+	return nil
+}
+
+// ListBlockedBy retrieves the issues that block the given issue number,
+// following pagination so callers see every existing dependency.
+func (c *Client) ListBlockedBy(ctx context.Context, number int) ([]Issue, error) {
+	endpoint := fmt.Sprintf("%s%s/issues/%d/dependencies/blocked_by", c.BaseURL, c.repoPath(), number)
+	issues, err := c.listIssuePages(ctx, endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to list blocking issues for #%d: %w", number, err)
+	}
+	return issues, nil
+}
+
+// AddBlockedBy records that the issue at number is blocked by blockingIssueID.
+// blockingIssueID is the blocking issue's internal numeric ID (Issue.ID), not its number.
+func (c *Client) AddBlockedBy(ctx context.Context, number, blockingIssueID int) error {
+	urlStr := fmt.Sprintf("%s%s/issues/%d/dependencies/blocked_by", c.BaseURL, c.repoPath(), number)
+	body := map[string]interface{}{"issue_id": blockingIssueID}
+	if _, _, err := c.doRequest(ctx, http.MethodPost, urlStr, body); err != nil {
+		return fmt.Errorf("failed to add blocked_by %d to #%d: %w", blockingIssueID, number, err)
+	}
+	return nil
 }
 
 // ListRepositories retrieves repositories accessible to the authenticated user.
