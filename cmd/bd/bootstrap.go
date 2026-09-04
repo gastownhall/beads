@@ -112,6 +112,7 @@ Bootstrap auto-detects the right action:
   • If .beads/issues.jsonl exists: imports from git-tracked JSONL
   • If no database exists: creates a fresh one
   • If database already exists: validates and reports status
+    (exception: an empty pre-hydration skeleton is replaced by the remote's data)
 
 This is the recommended command for:
   • Setting up beads on a fresh clone
@@ -348,7 +349,11 @@ func detectBootstrapAction(beadsDir string, cfg *configfile.Config) BootstrapPla
 		// instead of reporting "nothing to do" and stranding the workspace.
 		// A legitimately empty `bd init` database with no hydratable remote is
 		// still left alone. The emptiness probe opens the embedded engine, so it
-		// is gated behind the cheap remote check to keep the common path fast.
+		// is gated behind the remote check, which runs first only because a
+		// missing remote is the common no-op case. That check is not free — for a
+		// git origin it is a `git ls-remote` (10s timeout), and detectBootstrapAction
+		// probes the same remote again during sync detection below — but it stays
+		// off the hot path of an already-hydrated workspace, which returns above.
 		if !isServer && bootstrapHasHydratableRemote() &&
 			embeddedDBIsEmpty(filepath.Join(beadsDir, "embeddeddolt"), cfg.GetDoltDatabase()) {
 			plan = dbAction // fall through to sync detection; restored as fallback if none found
@@ -492,31 +497,80 @@ func existingBootstrapDBPlan(beadsDir string, cfg *configfile.Config, isServer, 
 }
 
 // embeddedDBIsEmpty reports true ONLY when dataDir holds a readable embedded
-// Dolt database whose `issues` table contains zero rows — the fingerprint of
-// the skeleton the SessionStart `bd prime` hook creates before hydration
-// (#5915). Any failure to open the engine or read the issues table returns
-// false, so the caller treats the directory as an authoritative existing
-// database and leaves it untouched. This deliberate error==false rule keeps
+// Dolt database that provably carries NO user work — the fingerprint of the
+// skeleton the SessionStart `bd prime` hook creates before hydration (#5915).
+//
+// The caller (cloneViaEmbedded) deletes the whole database before re-cloning, so
+// proving zero `issues` is not enough: a database with zero issues can still
+// hold a user-chosen prefix, a server-provisioned project id, custom statuses,
+// federation peers, or routes, and destroying that would regress the GH#5037
+// "already exists, nothing to do" contract into silent data loss. Emptiness is
+// therefore proven on two fronts:
+//
+//   - UNIDENTIFIED: neither bootstrap marker is present — no `issue_prefix` in
+//     config and no `_project_id` in metadata. This is the same pair
+//     workapi.RefuseIdentifiedSubstrate treats as "already a real workspace",
+//     and either one alone is enough to disqualify.
+//   - NO USER ROWS: every user-data table (issues, wisps, custom_types,
+//     custom_statuses, federation_peers, routes) is empty. None of these carry
+//     seeded defaults, so a fresh skeleton has them all at zero.
+//
+// Any failure to open the engine or read a probed table/marker returns false, so
+// the caller treats the directory as an authoritative existing database and
+// leaves it untouched. This deliberate error==false rule fails closed and keeps
 // two behaviors intact: a bare directory that is not a valid Dolt database
 // (OpenSQL errors) is left alone, and a pure-Go (CGO_ENABLED=0) build, whose
 // OpenSQL stub always errors, keeps the pre-existing "database already exists"
 // detection. We re-clone over a local database only when we can PROVE it holds
-// no issue data, never on an ambiguous or unreadable directory.
+// no user work, never on an ambiguous or unreadable directory.
 func embeddedDBIsEmpty(dataDir, dbName string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, dbName, "")
+	db, cleanup, err := embeddeddolt.OpenSQL(ctx, dataDir, dbName, "main")
 	if err != nil {
 		return false
 	}
 	defer func() { _ = cleanup() }()
 
-	var count int
-	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM issues").Scan(&count); err != nil {
-		return false
+	// Identity markers: either one present means a bootstrapped workspace bd must
+	// never stamp over. The queries are constant strings (table and key are the
+	// canonical workapi.ConfigKeyIssuePrefix / MetadataKeyProjectID markers, not
+	// interpolated) so there is no injection surface. A probe error fails closed
+	// — we cannot prove the marker's absence.
+	for _, markerQuery := range []string{
+		"SELECT COUNT(*) FROM config WHERE `key` = 'issue_prefix'",
+		"SELECT COUNT(*) FROM metadata WHERE `key` = '_project_id'",
+	} {
+		var n int
+		if err := db.QueryRowContext(ctx, markerQuery).Scan(&n); err != nil {
+			return false
+		}
+		if n != 0 {
+			return false
+		}
 	}
-	return count == 0
+
+	// User-data tables: every one must be empty. Each query is a constant string
+	// (no table interpolation) so there is no injection surface. A probe error
+	// (missing table, unreadable engine) fails closed for the same reason as above.
+	for _, countQuery := range []string{
+		"SELECT COUNT(*) FROM issues",
+		"SELECT COUNT(*) FROM wisps",
+		"SELECT COUNT(*) FROM custom_types",
+		"SELECT COUNT(*) FROM custom_statuses",
+		"SELECT COUNT(*) FROM federation_peers",
+		"SELECT COUNT(*) FROM routes",
+	} {
+		var n int
+		if err := db.QueryRowContext(ctx, countQuery).Scan(&n); err != nil {
+			return false
+		}
+		if n != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // bootstrapHasHydratableRemote reports whether a Dolt remote with data is
