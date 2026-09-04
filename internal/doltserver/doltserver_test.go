@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net"
@@ -342,6 +343,113 @@ func TestDefaultConfig(t *testing.T) {
 			t.Errorf("expected port file port 14000, got %d", cfg.Port)
 		}
 	})
+}
+
+// captureStderr swaps os.Stderr to a pipe for the duration of fn and returns
+// whatever was written. Mirrors the helper in internal/beads/beads_test.go.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	defer func() { os.Stderr = orig }()
+
+	fn()
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing stderr pipe writer: %v", err)
+	}
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	return buf.String()
+}
+
+// TestDefaultConfig_NoDeprecationWarningInExternalMode is a regression test:
+// when metadata.json declares an explicit dolt_server_port, ResolveServerMode
+// classifies the setup as ServerModeExternal (rule #4), and beads never writes
+// the dolt-server.port file in that mode. The deprecation warning telling the
+// user to delete the port and rely on that (never-written) port file is
+// incorrect and must stay suppressed. The port value itself must still be
+// honored so existing external-server setups keep connecting.
+func TestDefaultConfig_NoDeprecationWarningInExternalMode(t *testing.T) {
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	metaCfg := &configfile.Config{
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = DefaultConfig(dir)
+	})
+
+	if cfg.Mode != ServerModeExternal {
+		t.Errorf("expected Mode = ServerModeExternal, got %v", cfg.Mode)
+	}
+	if cfg.Port != 3307 {
+		t.Errorf("expected port 3307 honored from metadata.json, got %d", cfg.Port)
+	}
+	if cfg.PortSource != PortSourceMetadataJSON {
+		t.Errorf("expected PortSource = %q, got %q", PortSourceMetadataJSON, cfg.PortSource)
+	}
+	if stderr != "" {
+		t.Errorf("expected no deprecation warning in External mode, got stderr:\n%s", stderr)
+	}
+}
+
+// TestDefaultConfig_DeprecationWarningStillFiresInNonExternalMode guards the
+// opposite branch of the External-mode suppression: the warning must still fire
+// when the resolved mode is NOT External, so genuine git-tracked-port-leakage
+// footguns keep getting surfaced.
+//
+// Constructing a non-External mode that ALSO reaches the metadata fallback is
+// necessarily artificial: ResolveServerMode rule #4 makes an explicit port
+// imply External, so the only way to land here with a metadata port is to set
+// dolt_mode="embedded", which rule #3 evaluates first and wins. This exercises
+// the conditional's other branch; it is not meant to model a real deployment.
+func TestDefaultConfig_DeprecationWarningStillFiresInNonExternalMode(t *testing.T) {
+	t.Setenv("GT_ROOT", "")
+	t.Setenv("BEADS_DOLT_SERVER_PORT", "")
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "")
+	t.Setenv("BEADS_DOLT_SERVER_MODE", "")
+	config.ResetForTesting()
+
+	dir := t.TempDir()
+	// dolt_mode=embedded is evaluated before the explicit-port rule in
+	// ResolveServerMode, so this yields ServerModeEmbedded despite the port.
+	metaCfg := &configfile.Config{
+		DoltMode:       configfile.DoltModeEmbedded,
+		DoltServerPort: 3307,
+	}
+	if err := metaCfg.Save(dir); err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg *Config
+	stderr := captureStderr(t, func() {
+		cfg = DefaultConfig(dir)
+	})
+
+	if cfg.Mode != ServerModeEmbedded {
+		t.Errorf("expected Mode = ServerModeEmbedded, got %v", cfg.Mode)
+	}
+	if cfg.Port != 3307 {
+		t.Errorf("expected port 3307 honored from metadata.json, got %d", cfg.Port)
+	}
+	if !strings.Contains(stderr, "dolt_server_port in metadata.json is deprecated") {
+		t.Errorf("expected deprecation warning in non-External mode, got stderr:\n%s", stderr)
+	}
 }
 
 func TestEnsurePortFile(t *testing.T) {

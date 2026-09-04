@@ -743,6 +743,16 @@ var portSources = []portSource{
 		// Deprecated: git-tracked, propagates to all contributors, causing
 		// cross-project data leakage (GH#2372). Kept as a fallback so existing
 		// setups don't break silently.
+		//
+		// The warning is suppressed in External mode (ServerModeExternal):
+		// an explicit dolt_server_port is exactly what selects External mode
+		// (see ResolveServerMode rule #4), and beads never starts/manages the
+		// server there, so the dolt-server.port file is never written. Telling
+		// the user to delete the port and rely on a port file that will never
+		// exist is incorrect — and acting on it would silently flip the mode
+		// to Owned, making beads spawn its own server instead of connecting to
+		// theirs. BEADS_DOLT_SERVER_MODE=1 and shared-server mode likewise map
+		// to External and never write the port file.
 		label:  "metadata.json dolt_server_port (deprecated fallback)",
 		source: PortSourceMetadataJSON,
 		resolve: func(beadsDir string) (int, bool) {
@@ -750,9 +760,11 @@ var portSources = []portSource{
 			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
 				return 0, false
 			}
-			fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
-			fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
-			fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
+			if ResolveServerMode(beadsDir) != ServerModeExternal {
+				fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
+				fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
+				fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
+			}
 			return metaCfg.DoltServerPort, true
 		},
 	},
