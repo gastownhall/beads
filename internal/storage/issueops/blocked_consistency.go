@@ -265,12 +265,14 @@ func RecomputeAllIsBlockedInTx(ctx context.Context, tx DBTX) (int64, error) {
 //
 // Unlike the scoped passes, the full repair runs UNBATCHED semi-join statements
 // (markAllBlockedSQL/unmarkAllBlockedSQL): the id lists here cover every row by
-// construction, so an IN-batch adds nothing but statement count, and the
-// batched templates' OR-of-correlated-EXISTS shape cannot be decorrelated by
-// the engine — per-outer-row subquery execution made the full repair cost
-// ~80+ statement-seconds on fast hardware and >600s on small cloud CPUs
-// (bd-t9ypt). The id lists are still captured for the journal snapshot, and
-// len(wispIDs) doubles as the "wisps table exists and has rows" signal.
+// construction, so an IN-batch adds nothing but statement count. This was the
+// first home of the decorrelated union — the batched templates' original
+// OR-of-correlated-EXISTS shape ran per outer row and made the full repair
+// cost ~80+ statement-seconds on fast hardware and >600s on small cloud CPUs
+// (bd-t9ypt); the batched templates now use the same union scoped to their
+// batch (gastownhall/beads#6288). The id lists are still captured for the
+// journal snapshot, and len(wispIDs) doubles as the "wisps table exists and
+// has rows" signal.
 func recomputeIsBlockedCounting(ctx context.Context, tx DBTX, issueIDs, wispIDs []string) (int64, error) {
 	if len(issueIDs) == 0 && len(wispIDs) == 0 {
 		return 0, nil
@@ -365,47 +367,76 @@ func unmarkAllBlockedSQL(table, alias, depTable string) string {
 
 // shouldBeBlockedIDsUnionSQL selects, UNCORRELATED with any outer row, every
 // depTable issue_id that currently has a reason to be blocked: one UNION leg
-// per branch of the correlated disjunction inside the batched mark/unmark
-// templates in blocked_state.go, in the same order. Semantically,
-// `<alias>.id IN (this select)` ≡ that disjunction: every branch
-// of the disjunction correlates with the outer row ONLY through
-// d.issue_id = <alias>.id, so membership of the outer id in the union of each
-// branch's issue_ids is the same predicate — but the engine evaluates this
-// form once as hash lookups instead of per outer row (bd-t9ypt). The lockstep
-// test pins the two forms to each other.
+// per reason — an open blocks/conditional-blocks target (issue or wisp), a
+// blocked parent-child parent (issue or wisp), a blocking waits-for gate.
+// Semantically, `<alias>.id IN (this select)` ≡ the disjunction of those
+// reasons correlated on d.issue_id = <alias>.id, which is what the batched
+// mark/unmark templates in blocked_state.go once spelled out as five
+// correlated EXISTS — but the engine evaluates this form once as hash
+// lookups instead of per outer row (bd-t9ypt). Full repair, doctor count and
+// the batched templates (scoped, see below) now share this one definition.
 //
 //nolint:gosec // G201: depTable is constant; waitsForGateBlockedSQL is a constant template.
 func shouldBeBlockedIDsUnionSQL(depTable string) string {
+	return shouldBeBlockedIDsUnionScopedSQL(depTable, "")
+}
+
+// shouldBeBlockedIDsUnionScopedSQL is shouldBeBlockedIDsUnionSQL with an
+// extra predicate on the dependency row appended to every leg's WHERE — "" for
+// the whole table (full repair, doctor count), batchScopeSQL for the batched
+// mark/unmark templates in blocked_state.go, which confine each leg to
+// d.issue_id IN (batch) so the union stays index-sized per statement. scope is
+// spliced verbatim: a %s inside it survives this Sprintf for the batch runner.
+//
+// The waits-for leg wraps its dependency rows in a DISTINCT derived table
+// BEFORE the gate predicate (waitsForGateBlockedSQL, six correlated EXISTS
+// over the parent-child children and the spawner) is applied, so the engine
+// narrows to the leg's few waits-for rows first and evaluates the gate only
+// per surviving row. Written flat, dolt 2.1.8's planner pushed the gate's
+// correlated subqueries ahead of the type filter and re-ran them against the
+// whole overlay for every candidate row — over a 19k-row uncommitted working
+// set the flat leg took 436 s while returning zero rows; behind the derived
+// table, 0.01 s (gastownhall/beads#6288, wy-pyrus4). The DISTINCT is
+// semantically free (the leg feeds a UNION, and the gate depends only on the
+// projected columns) and is what makes the barrier structural: a plain
+// single-table derived table is the mergeable shape MySQL-dialect planners
+// fold back into the outer query; a DISTINCT one is materialized.
+//
+//nolint:gosec // G201: depTable and scope are constants; waitsForGateBlockedSQL is a constant template.
+func shouldBeBlockedIDsUnionScopedSQL(depTable, scope string) string {
 	return fmt.Sprintf(`
 		SELECT d.issue_id FROM %[1]s d
 		JOIN issues t ON t.id = d.depends_on_issue_id
-		WHERE d.issue_id IS NOT NULL
+		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		  AND t.status <> 'closed' AND t.status <> 'pinned'
 		UNION
 		SELECT d.issue_id FROM %[1]s d
 		JOIN wisps t ON t.id = d.depends_on_wisp_id
-		WHERE d.issue_id IS NOT NULL
+		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND (d.type = 'blocks' OR d.type = 'conditional-blocks')
 		  AND t.status <> 'closed' AND t.status <> 'pinned'
 		UNION
 		SELECT d.issue_id FROM %[1]s d
 		JOIN issues p ON p.id = d.depends_on_issue_id
-		WHERE d.issue_id IS NOT NULL
+		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
 		UNION
 		SELECT d.issue_id FROM %[1]s d
 		JOIN wisps p ON p.id = d.depends_on_wisp_id
-		WHERE d.issue_id IS NOT NULL
+		WHERE d.issue_id IS NOT NULL %[3]s
 		  AND d.type = 'parent-child'
 		  AND p.is_blocked = 1
 		UNION
-		SELECT d.issue_id FROM %[1]s d
-		WHERE d.issue_id IS NOT NULL
-		  AND d.type = 'waits-for'
-		  AND (%[2]s)
-	`, depTable, waitsForGateBlockedSQL)
+		SELECT d.issue_id FROM (
+		  SELECT DISTINCT d.issue_id, d.depends_on_issue_id, d.depends_on_wisp_id, d.metadata
+		  FROM %[1]s d
+		  WHERE d.issue_id IS NOT NULL %[3]s
+		    AND d.type = 'waits-for'
+		) d
+		WHERE (%[2]s)
+	`, depTable, waitsForGateBlockedSQL, scope)
 }
 
 // CountIsBlockedInconsistenciesInTx reports how many issue and wisp rows carry a
