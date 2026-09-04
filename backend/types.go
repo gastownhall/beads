@@ -30,6 +30,7 @@ type (
 	IssueWithCounts             = types.IssueWithCounts
 	IssueWithDependencyMetadata = types.IssueWithDependencyMetadata
 	Label                       = types.Label
+	LabelDefinition             = types.LabelDefinition
 	MolType                     = types.MolType
 	MoleculeLastActivity        = types.MoleculeLastActivity
 	MoleculeProgressStats       = types.MoleculeProgressStats

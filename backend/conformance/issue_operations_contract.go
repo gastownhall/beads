@@ -2227,3 +2227,128 @@ func assertIssueOperationsAssigneeAndStatus(t *testing.T, ctx context.Context, f
 		t.Errorf("%s status = %q, want %q", id, status, wantStatus)
 	}
 }
+
+// RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce pins the
+// labels.vocabulary knob at the guarded-mutation chokepoint (bda-yxac). Until
+// this case existed, enforcement lived only in selected CLI call sites, so the
+// SAME patch was refused by `bd label add` and accepted over HTTP/MCP - the
+// policy depended on which front door served the write. The case drives the
+// role verb every guarded route reaches, so all three backends must refuse.
+//
+// Removal stays exempt: a legacy label written before enforce was configured
+// must remain deletable under enforce, or the mode locks its own cleanup out.
+func RunIssueOperationsUpdateRefusesAnUndefinedLabelUnderEnforce(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	id := fixture.IssuePrefix + "-labelvocab"
+	// Seed while the mode is still open (the default), carrying the legacy
+	// label the removal leg deletes under enforce.
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "seed",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{ID: id, Title: id, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"legacy-undef"}},
+	}); err != nil {
+		t.Fatalf("seed %s: %v", id, err)
+	}
+	if err := fixture.Exec(ctx, `INSERT INTO label_definitions (label, label_folded, created_by) VALUES (?, ?, ?)`,
+		"lane-a", "lane-a", "seed"); err != nil {
+		t.Fatalf("define lane-a: %v", err)
+	}
+	if err := fixture.SetConfig(ctx, "labels.vocabulary", "enforce"); err != nil {
+		t.Fatalf("SetConfig(labels.vocabulary): %v", err)
+	}
+
+	before := readIssueOperationsRowMarks(t, ctx, fixture, id)
+	events := newIssueOperationsEventCounter(t, ctx, fixture, id)
+	if _, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Add: []string{"undefined-add"}})); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("update %s adding an undefined label under enforce: err = %v, want ErrValidation", id, err)
+	}
+	if _, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Replace: publicops.Field[[]string]{Set: true, Value: []string{"undefined-replace"}}})); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("update %s replacing with an undefined label under enforce: err = %v, want ErrValidation", id, err)
+	}
+	assertIssueOperationsScalarValue(t, ctx, fixture, "labels after the refused patches", "1",
+		"SELECT COUNT(*) FROM labels WHERE issue_id = ?", []any{id})
+	if after := readIssueOperationsRowMarks(t, ctx, fixture, id); after != before {
+		t.Errorf("a refused label patch rewrote %s: %+v, want it unchanged at %+v", id, after, before)
+	}
+	events.assert(t, "refused label patches", 0, nil)
+
+	// A label named in both Add and Remove never lands (removal wins), so it
+	// must not be refused: the check judges what the patch WRITES.
+	if _, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Add: []string{"undefined-transient"}, Remove: []string{"undefined-transient"}})); err != nil {
+		t.Fatalf("update %s with a removal-wins transient label: %v", id, err)
+	}
+
+	// Removal of a stored legacy label stays allowed under enforce.
+	if _, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Remove: []string{"legacy-undef"}})); err != nil {
+		t.Fatalf("update %s removing a legacy undefined label under enforce: %v", id, err)
+	}
+
+	// The defined spelling is accepted.
+	accepted, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Add: []string{"lane-a"}}))
+	if err != nil {
+		t.Fatalf("update %s adding a defined label under enforce: %v", id, err)
+	}
+	if !accepted.Changed {
+		t.Fatalf("adding the defined label to %s reported no change", id)
+	}
+	assertIssueOperationsScalarValue(t, ctx, fixture, "labels after the accepted add", "lane-a",
+		"SELECT label FROM labels WHERE issue_id = ?", []any{id})
+
+	if err := fixture.SetConfig(ctx, "labels.vocabulary", "open"); err != nil {
+		t.Fatalf("SetConfig(labels.vocabulary open): %v", err)
+	}
+	if _, err := fixture.Operations.Update(ctx, issueOperationsLabelPatchRequest(id, publicops.LabelPatch{Add: []string{"undefined-open"}})); err != nil {
+		t.Fatalf("update %s adding an undefined label under open: %v", id, err)
+	}
+}
+
+// RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce is the create
+// leg of the chokepoint case above: a guarded create naming an undefined
+// label under enforce writes nothing, and the defined spelling lands.
+func RunIssueOperationsCreateRefusesAnUndefinedLabelUnderEnforce(t *testing.T, ctx context.Context, fixture IssueOperationsStagingFixture) {
+	t.Helper()
+
+	if err := fixture.Exec(ctx, `INSERT INTO label_definitions (label, label_folded, created_by) VALUES (?, ?, ?)`,
+		"lane-b", "lane-b", "seed"); err != nil {
+		t.Fatalf("define lane-b: %v", err)
+	}
+	if err := fixture.SetConfig(ctx, "labels.vocabulary", "enforce"); err != nil {
+		t.Fatalf("SetConfig(labels.vocabulary): %v", err)
+	}
+
+	refusedID := fixture.IssuePrefix + "-labelvocab-create-refused"
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{ID: refusedID, Title: refusedID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"undefined-create"}},
+	}); !errors.Is(err, publicops.ErrValidation) {
+		t.Fatalf("create %s with an undefined label under enforce: err = %v, want ErrValidation", refusedID, err)
+	}
+	assertIssueOperationsRowCount(t, ctx, fixture, "issues", refusedID, 0)
+
+	acceptedID := fixture.IssuePrefix + "-labelvocab-create-ok"
+	if _, err := fixture.Operations.Create(ctx, publicops.CreateRequest{
+		Actor:         "writer",
+		ForceIDPrefix: true,
+		Issue:         &types.Issue{ID: acceptedID, Title: acceptedID, Status: types.StatusOpen, Priority: 2, IssueType: types.TypeTask, Labels: []string{"lane-b"}},
+	}); err != nil {
+		t.Fatalf("create %s with a defined label under enforce: %v", acceptedID, err)
+	}
+	assertIssueOperationsScalarValue(t, ctx, fixture, "label on the accepted create", "lane-b",
+		"SELECT label FROM labels WHERE issue_id = ?", []any{acceptedID})
+
+	if err := fixture.SetConfig(ctx, "labels.vocabulary", "open"); err != nil {
+		t.Fatalf("SetConfig(labels.vocabulary open): %v", err)
+	}
+}
+
+// issueOperationsLabelPatchRequest builds the bare label edit whose vocabulary
+// check the cases above pin.
+func issueOperationsLabelPatchRequest(id string, patch publicops.LabelPatch) publicops.UpdateRequest {
+	return publicops.UpdateRequest{
+		Actor:   "writer",
+		IssueID: id,
+		Patch:   publicops.IssuePatch{Labels: patch},
+	}
+}

@@ -204,6 +204,9 @@ func gatherCreateInput(cmd *cobra.Command, args []string) (createInput, error) {
 	// filter.
 	in.labels = utils.NormalizeLabels(in.labels)
 	warnLabelsContainingWhitespace(in.labels)
+	if err := checkLabelVocabulary(rootCtx, in.labels); err != nil {
+		return in, HandleErrorRespectJSON("%v", err)
+	}
 	in.deps, _ = cmd.Flags().GetStringSlice("deps")
 
 	in.repoOverride, _ = cmd.Flags().GetString("repo")

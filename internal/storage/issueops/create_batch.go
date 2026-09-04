@@ -140,6 +140,11 @@ func ExecuteCreateBatch(ctx context.Context, tx *sql.Tx, request publicops.Creat
 			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, err)
 		}
 		issue := prepared.Issue
+		// Vocabulary enforcement (bda-yxac): same caller-named-labels check as
+		// ExecuteCreate, per item, attributed to the item that carried them.
+		if err := checkLabelVocabularyForGuardedWriteInTx(ctx, tx, issue.Labels); err != nil {
+			return publicops.CreateBatchResult{}, nil, CreateBatchItemError(i, err)
+		}
 		// Configured infra types live in the wisp tables, the same routing
 		// ExecuteCreate applies. Mark the issue BEFORE its ID is assigned so ID
 		// generation, the create-only guard and table routing all agree.

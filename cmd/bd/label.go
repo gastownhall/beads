@@ -418,6 +418,14 @@ var labelPropagateCmd = &cobra.Command{
 			return HandleErrorRespectJSON("'provides:' labels are reserved for cross-project capabilities. Hint: use 'bd ship %s' instead", strings.TrimPrefix(label, "provides:"))
 		}
 
+		// Vocabulary check (bda-1735): propagate is an interactive label-write
+		// command and joins the same advertised enforcement set as create,
+		// update, label add, tag and quick - it was the one interactive writer
+		// missing from it (codex cross-model finding).
+		if err := checkLabelVocabulary(ctx, []string{label}); err != nil {
+			return HandleErrorRespectJSON("label propagate: %v", err)
+		}
+
 		children, err := store.SearchIssues(ctx, "", types.IssueFilter{ParentID: &parentID})
 		if err != nil {
 			return HandleErrorRespectJSON("searching children of %s: %v", parentID, err)
@@ -509,6 +517,17 @@ func runLabelAdd(ctx context.Context, args []string) error {
 	warnLabelsContainingWhitespace(labels)
 	issueIDs, err := resolveLabelIssueIDs(ctx, "add", issueIDs)
 	if err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
+	// The vocabulary check runs AFTER the ids resolve, unlike the
+	// reserved-prefix refusal above: it is config-dependent (a read of
+	// labels.vocabulary on this route's unit of work), and a command whose
+	// lookup failed must return before touching any other surface - the
+	// proxied-lookup-failure contract. Checked before this order existed,
+	// readLabelsVocabularyMode dereferenced ConfigUseCase on a partial UOW
+	// and segfaulted on every proxied `bd label add` against a missing id
+	// (bda-t54v).
+	if err := checkLabelVocabulary(ctx, labels); err != nil {
 		return HandleErrorRespectJSON("%v", err)
 	}
 	return applyLabelEdit(ctx, issueIDs, labels, labelOperationAdded)

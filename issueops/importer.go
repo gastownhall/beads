@@ -20,6 +20,12 @@ type ImportBatchRequest struct {
 	// applies its kv prefixes); a duplicated key writes twice and the later
 	// record wins, which is the classic import's sequential behavior.
 	Memories []ImportMemory
+	// LabelDefinitions are the label vocabulary records ('bd label define'),
+	// applied define-if-absent in the same transaction: an exact re-import is
+	// a no-op, a case-insensitive collision keeps the existing definition and
+	// reports a warning, and only genuine storage failures fail the batch -
+	// an import replays history and must not hard-fail on it.
+	LabelDefinitions []ImportLabelDefinition
 	// AllowStale imports rows even when their updated_at is older than the
 	// stored issue's. When false, the engine's conditional upsert rejects the
 	// stale row inside the transaction and reports it in StaleRejectedIDs —
@@ -46,6 +52,16 @@ type ImportMemory struct {
 	Value string
 }
 
+// ImportLabelDefinition is one label vocabulary record ('bd label define')
+// carried by an import. Actor, when set, is recorded as the definer
+// (typically the exporting workspace's created_by); empty falls back to the
+// batch actor.
+type ImportLabelDefinition struct {
+	Label       string
+	Description string
+	Actor       string
+}
+
 // SkippedDependency reports one dependency edge the import dropped rather
 // than failing the batch: its target is missing, invalid, or would form a
 // disallowed edge.
@@ -62,6 +78,13 @@ type ImportBatchResult struct {
 	Created int
 	// MemoriesImported counts the memory records written.
 	MemoriesImported int
+	// LabelDefinitionsImported counts the vocabulary records actually
+	// defined - exact re-imports and case-collisions are not counted.
+	LabelDefinitionsImported int
+	// LabelDefinitionWarnings reports the vocabulary records kept out -
+	// case-insensitive collisions with the existing registry, or definitions
+	// refused by a concurrent define. Never a batch failure.
+	LabelDefinitionWarnings []string
 	// StaleRejectedIDs lists rows the in-transaction stale guard rejected: a
 	// locally-newer row kept every stored column. Deduplicated by ID.
 	StaleRejectedIDs []string

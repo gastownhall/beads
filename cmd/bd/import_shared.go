@@ -1277,8 +1277,9 @@ func intPtrEqual(a, b *int) bool {
 
 // importLocalResult holds counts from a local JSONL import.
 type importLocalResult struct {
-	Issues   int
-	Memories int
+	Issues           int
+	Memories         int
+	LabelDefinitions int
 }
 
 // memoryRecord represents a memory entry in the JSONL export.
@@ -1286,6 +1287,59 @@ type memoryRecord struct {
 	Type  string `json:"_type"`
 	Key   string `json:"key"`
 	Value string `json:"value"`
+}
+
+// labelDefinitionRecord represents a label vocabulary entry ('bd label
+// define') in the JSONL export. Field names match types.LabelDefinition's
+// JSON tags, so an exported line round-trips unchanged; created_at rides
+// along in the export for provenance but is not restored (DefineLabel stamps
+// its own creation time).
+type labelDefinitionRecord struct {
+	Type        string  `json:"_type"`
+	Label       string  `json:"label"`
+	Description *string `json:"description"`
+	CreatedBy   *string `json:"created_by"`
+}
+
+// applyLabelDefinitionsClassic imports vocabulary records through the classic
+// store surface with define-if-absent semantics (the decision logic is
+// issueops.ImportLabelDefinitions, shared with the uow batch importer).
+// Warnings - case-insensitive collisions kept as the existing definition -
+// go to stderr and never fail the import.
+// labelDefinitionsBatchImporter is the single-tx, single-Dolt-commit batch
+// surface DoltStore provides (bda-o5gq). Stores without it fall back to the
+// per-record define loop.
+type labelDefinitionsBatchImporter interface {
+	ImportLabelDefinitions(ctx context.Context, incoming []types.LabelDefinition, actor string) (int, []string, error)
+}
+
+func applyLabelDefinitionsClassic(ctx context.Context, st storage.LabelVocabularyStore, defs []labelDefinitionRecord) (int, error) {
+	if len(defs) == 0 {
+		return 0, nil
+	}
+	incoming := make([]types.LabelDefinition, 0, len(defs))
+	for _, d := range defs {
+		incoming = append(incoming, types.LabelDefinition{Label: d.Label, Description: d.Description, CreatedBy: d.CreatedBy})
+	}
+	if bi, ok := st.(labelDefinitionsBatchImporter); ok {
+		// One transaction, one Dolt commit (bda-o5gq): a later issue-import
+		// failure no longer leaves per-record published definitions behind,
+		// and a large input does not mint one history commit per record.
+		defined, warnings, err := bi.ImportLabelDefinitions(ctx, incoming, getActorWithGit())
+		for _, w := range warnings {
+			fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+		}
+		return defined, err
+	}
+	existing, err := st.ListLabelDefinitions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("import label definitions: read registry: %w", err)
+	}
+	defined, warnings, err := issueops.ImportLabelDefinitions(ctx, existing, incoming, getActorWithGit(), st.DefineLabel)
+	for _, w := range warnings {
+		fmt.Fprintf(os.Stderr, "warning: %s\n", w)
+	}
+	return defined, err
 }
 
 // importFromLocalJSONL imports issues (and memories) from a local JSONL file on disk
@@ -1299,13 +1353,14 @@ func importFromLocalJSONL(ctx context.Context, store storage.DoltStorage, localP
 	return result.Issues, nil
 }
 
-// parseJSONLFile reads a JSONL file and returns parsed issues and config
-// entries (memories). Pure function — no store I/O.
-func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
+// parseJSONLFile reads a JSONL file and returns parsed issues, config
+// entries (memories) and label vocabulary definitions. Pure function - no
+// store I/O.
+func parseJSONLFile(path string) ([]*types.Issue, map[string]string, []labelDefinitionRecord, error) {
 	//nolint:gosec // G304: path from user-provided CLI argument
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
+		return nil, nil, nil, fmt.Errorf("failed to read JSONL file %s: %w", path, err)
 	}
 
 	scanner := bufio.NewScanner(strings.NewReader(string(data)))
@@ -1313,6 +1368,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 	scanner.Buffer(make([]byte, 0, 1024*1024), 64*1024*1024)
 	var issues []*types.Issue
 	configEntries := make(map[string]string)
+	var labelDefs []labelDefinitionRecord
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -1323,7 +1379,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Peek at the record to check for _type field
 		var peek map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &peek); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse JSONL line: %w", err)
 		}
 
 		// Skip the optional beads-jsonl metadata/header record.
@@ -1340,16 +1396,26 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 			continue
 		}
 
-		// Check if this is a memory record
+		// Check if this is a memory or label-definition record
 		if rawType, ok := peek["_type"]; ok {
 			var typeStr string
 			if err := json.Unmarshal(rawType, &typeStr); err == nil && typeStr == "memory" {
 				var mem memoryRecord
 				if err := json.Unmarshal([]byte(line), &mem); err != nil {
-					return nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
+					return nil, nil, nil, fmt.Errorf("failed to parse memory record: %w", err)
 				}
 				if mem.Key != "" && mem.Value != "" {
 					configEntries[kvPrefix+memoryPrefix+mem.Key] = mem.Value
+				}
+				continue
+			}
+			if typeStr == "label-definition" {
+				var def labelDefinitionRecord
+				if err := json.Unmarshal([]byte(line), &def); err != nil {
+					return nil, nil, nil, fmt.Errorf("failed to parse label definition record: %w", err)
+				}
+				if def.Label != "" {
+					labelDefs = append(labelDefs, def)
 				}
 				continue
 			}
@@ -1358,7 +1424,7 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		// Regular issue record
 		var issue types.Issue
 		if err := json.Unmarshal([]byte(line), &issue); err != nil {
-			return nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
+			return nil, nil, nil, fmt.Errorf("failed to parse issue from JSONL: %w", err)
 		}
 		// Skip tombstone entries: these are deleted issues exported by older
 		// versions (pre-v0.50) with status "tombstone" and deleted_at set.
@@ -1373,10 +1439,10 @@ func parseJSONLFile(path string) ([]*types.Issue, map[string]string, error) {
 		issues = append(issues, &issue)
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
+		return nil, nil, nil, fmt.Errorf("failed to scan JSONL: %w", err)
 	}
 
-	return issues, configEntries, nil
+	return issues, configEntries, labelDefs, nil
 }
 
 // applyImportWispPlane resolves which storage plane (wisps vs issues table) a
@@ -1460,7 +1526,7 @@ func importFromLocalJSONLConflictSkip(ctx context.Context, store storage.DoltSto
 // SetConfig, while routing regular issue records through the normal path.
 // conflictSkip selects insert-if-new (true) vs UPSERT (false) for issue rows.
 func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage, localPath string, conflictSkip bool) (*importLocalResult, error) {
-	issues, configEntries, err := parseJSONLFile(localPath)
+	issues, configEntries, labelDefs, err := parseJSONLFile(localPath)
 	if err != nil {
 		return nil, err
 	}
@@ -1474,6 +1540,13 @@ func importFromLocalJSONLWithOpts(ctx context.Context, store storage.DoltStorage
 		}
 		result.Memories++
 	}
+
+	// Import label vocabulary definitions (define-if-absent; warnings to stderr)
+	defined, err := applyLabelDefinitionsClassic(ctx, store, labelDefs)
+	if err != nil {
+		return nil, err
+	}
+	result.LabelDefinitions = defined
 
 	// Import issues
 	if len(issues) > 0 {

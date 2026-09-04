@@ -22,6 +22,9 @@ func runQuickProxiedServer(cmd *cobra.Command, ctx context.Context, args []strin
 	labels, _ := cmd.Flags().GetStringSlice("labels")
 	labels = utils.NormalizeLabels(labels)
 	warnLabelsContainingWhitespace(labels)
+	if err := checkLabelVocabulary(ctx, labels); err != nil {
+		return HandleErrorRespectJSON("%v", err)
+	}
 	parentID, _ := cmd.Flags().GetString("parent")
 
 	priority, err := validation.ValidatePriority(priorityStr)

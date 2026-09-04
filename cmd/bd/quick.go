@@ -52,6 +52,9 @@ Example:
 		labels, _ := cmd.Flags().GetStringSlice("labels")
 		labels = utils.NormalizeLabels(labels)
 		warnLabelsContainingWhitespace(labels)
+		if err := checkLabelVocabulary(rootCtx, labels); err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
 		parentID, _ := cmd.Flags().GetString("parent")
 
 		priority, err := validation.ValidatePriority(priorityStr)
