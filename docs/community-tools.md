@@ -81,6 +81,8 @@ Install with `uv tool install git+https://github.com/jklenk/thread`. Built by [@
 
 - **[LoopTroop](https://github.com/looptroop-ai/LoopTroop)** - Local AI coding orchestrator for automated task planning, execution, and feedback loops. Uses a Beads-inspired methodology with LLM Council consensus and worktree isolation. Built by [@looptroop-ai](https://github.com/looptroop-ai). (Node.js/TypeScript)
 
+- **[beads-pm-kit](https://github.com/cuongbphv/beads-pm-kit)** - Ten skills that let an agent run a Beads board the way a project manager does: split a spec into sized beads, estimate from measured history, take and loop through ready work, run a batch in parallel worktrees, report progress, forecast an ETA (or refuse to give a date), audit "already done" claims, and hand off a session. One authored copy builds for Claude Code, Cursor, Codex and Antigravity; all reads and writes go through the `bd` CLI. Install with `npx skills add cuongbphv/beads-pm-kit`. Built by [@cuongbphv](https://github.com/cuongbphv). (Markdown/Node.js/Python)
+
 ## Coordination Servers
 
 - **[BeadHub](https://github.com/beadhub/beadhub)** - Open-source coordination server for AI agent teams running beads. The `bdh` CLI is a transparent wrapper over `bd` that adds work claiming, file reservation, presence awareness, and inter-agent messaging (async mail and sync chat). Includes a web dashboard. Free hosted at beadhub.ai for open-source projects. Built by [@juanre](https://github.com/juanre). (Python/TypeScript)
