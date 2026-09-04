@@ -35,9 +35,16 @@ type Tracker struct {
 	store  storage.Storage
 }
 
-// GitHubClient exposes the tracker's underlying REST client so callers
-// (e.g. the dependency-link push pass) can issue relationship API calls.
-func (t *Tracker) GitHubClient() *Client { return t.client }
+// LinkResolver returns a relationship resolver bound to this tracker's
+// repository, or nil when the tracker has not been initialized. Callers get
+// the resolver (and, through it, the repository ref scope) rather than the raw
+// REST client, so relationship sync cannot reach past the endpoints it needs.
+func (t *Tracker) LinkResolver() *LinkResolver {
+	if t.client == nil {
+		return nil
+	}
+	return NewLinkResolver(t.client)
+}
 
 func (t *Tracker) Name() string         { return "github" }
 func (t *Tracker) DisplayName() string  { return "GitHub" }
@@ -232,23 +239,14 @@ func (t *Tracker) ExtractIdentifier(ref string) string {
 	return matches[1]
 }
 
-// IssueNumberFromRef extracts a GitHub repository-scoped issue number from a
-// local external ref (a full GitHub issue URL or the "github:{digits}"
-// shorthand produced by BuildExternalRef).
-func IssueNumberFromRef(ref string) (int, bool) {
-	ref = strings.TrimSpace(ref)
-	if ref == "" {
-		return 0, false
+// RefScope returns the repository scope used to resolve external refs to issue
+// numbers for relationship sync. Refs are deliberately not resolved by issue
+// number alone: see RefScope.
+func (t *Tracker) RefScope() RefScope {
+	if t.client == nil {
+		return RefScope{}
 	}
-	if m := ghShorthandPattern.FindStringSubmatch(ref); len(m) >= 2 {
-		n, err := strconv.Atoi(m[1])
-		return n, err == nil && n > 0
-	}
-	if m := issueNumberPattern.FindStringSubmatch(ref); len(m) >= 2 {
-		n, err := strconv.Atoi(m[1])
-		return n, err == nil && n > 0
-	}
-	return 0, false
+	return NewRefScope(t.client.BaseURL, t.client.Owner, t.client.Repo)
 }
 
 func (t *Tracker) BuildExternalRef(issue *tracker.TrackerIssue) string {
