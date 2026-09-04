@@ -185,8 +185,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **An ambient `BEADS_DOLT_SERVER_PORT` no longer suppresses auto-start or
-  stops bd reaping its own orphaned server**
+- **An ambient `BEADS_DOLT_SERVER_PORT` now marks a workspace externally
+  managed — suppressing auto-start — and no longer stops bd reaping its own
+  orphaned server**
   ([#5934](https://github.com/gastownhall/beads/pull/5934)). Setting
   `BEADS_DOLT_SERVER_PORT` (or the legacy `BEADS_DOLT_PORT`) now makes
   `ResolveServerMode` classify a workspace as an externally-managed server, so
