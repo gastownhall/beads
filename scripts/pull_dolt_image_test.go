@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -83,6 +84,40 @@ func TestDoltImagePullWorkflowsUseRetryHelper(t *testing.T) {
 		}
 		if strings.Contains(string(data), "docker pull "+doltSQLServerImage) {
 			t.Errorf("%s still pulls the Dolt image without retries", filepath.Base(path))
+		}
+	}
+}
+
+// TestDoctorDoltLaneSkipListNamesRealTests guards the expected-failure list
+// on pr.yml's test-doctor-dolt lane: `go test -skip` matches nothing, and
+// says nothing, when a listed test is renamed or deleted, so each name on the
+// list must still exist as a top-level test function in cmd/bd/doctor.
+func TestDoctorDoltLaneSkipListNamesRealTests(t *testing.T) {
+	root := sourceRepoRoot(t)
+	data, err := os.ReadFile(filepath.Join(root, ".github", "workflows", "pr.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skipRE := regexp.MustCompile(`-skip '\^\(([A-Za-z0-9_|]+)\)\$' \./cmd/bd/doctor/`)
+	match := skipRE.FindStringSubmatch(string(data))
+	if match == nil {
+		t.Fatalf("pr.yml: no anchored -skip '^(A|B)$' list on the ./cmd/bd/doctor/ test step")
+	}
+	testFiles, err := filepath.Glob(filepath.Join(root, "cmd", "bd", "doctor", "*_test.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sources strings.Builder
+	for _, path := range testFiles {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources.Write(src)
+	}
+	for _, name := range strings.Split(match[1], "|") {
+		if !strings.Contains(sources.String(), "func "+name+"(") {
+			t.Errorf("pr.yml -skip lists %s, but no `func %s(` exists in cmd/bd/doctor/*_test.go", name, name)
 		}
 	}
 }

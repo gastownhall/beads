@@ -16,7 +16,10 @@ import (
 // package-wide test server, and the env var is the first stop in
 // doltserver.DefaultConfig's port chain, so a test that asserts the
 // "no server" or "unreachable server" path would otherwise reach the shared
-// server whenever the package runs with a live Dolt container.
+// server whenever the package runs with a live Dolt container. It uses
+// os.Unsetenv + t.Cleanup rather than t.Setenv because Go has no t.Unsetenv
+// and t.Setenv(key, "") is not the same as unset; the package has no
+// t.Parallel tests, so the direct env write is safe.
 func clearDoltPortEnv(t *testing.T) {
 	t.Helper()
 	for _, key := range []string{"BEADS_DOLT_PORT", "BEADS_DOLT_SERVER_PORT"} {

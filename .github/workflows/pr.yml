@@ -898,10 +898,14 @@ jobs:
     # No job-level timeout or continue-on-error on purpose (same reasoning
     # as build-examples): a job-level timeout CANCELS the job and a
     # job-level continue-on-error still yields a FAILURE check run, and
-    # both block the merge lane repo-wide. Every step carries its own
-    # timeout-minutes AND continue-on-error instead, so a hang or failure
-    # anywhere degrades to a warning annotation while the job concludes
-    # green.
+    # both block the merge lane repo-wide. Every step that runs code (setup,
+    # artifact download, the test itself) carries its own timeout-minutes
+    # AND continue-on-error instead, so a hang or failure anywhere degrades
+    # to a warning annotation while the job concludes green; the two
+    # trailing warn steps are plain echoes and carry neither. If
+    # build-artifacts itself fails, `needs` skips this whole job with no
+    # warning annotation; that is acceptable because SKIPPED is not a
+    # blocking rollup conclusion.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
         id: checkout
@@ -1016,7 +1020,15 @@ jobs:
           echo "::warning title=doctor Dolt suite failed::cmd/bd/doctor failed against a live Dolt server outside the two tests on the step's -skip list, i.e. a NEW failure (see the 'Test doctor with Dolt' step above). Advisory only; this does not block the merge."
 
       - name: Warn when the advisory job could not run at all
-        if: steps.test-doctor.outcome == 'skipped'
+        if: >-
+          steps.checkout.outcome != 'success' ||
+          steps.setup-go.outcome != 'success' ||
+          steps.install-dolt.outcome != 'success' ||
+          steps.verify-dolt.outcome != 'success' ||
+          steps.identity.outcome != 'success' ||
+          steps.pull-image.outcome != 'success' ||
+          steps.download-artifacts.outcome != 'success' ||
+          steps.verify-artifacts.outcome != 'success'
         run: |
           echo "::warning title=doctor Dolt check skipped::a setup step failed, so cmd/bd/doctor could not be run against Dolt this run (checkout: ${{ steps.checkout.outcome }}, setup-go: ${{ steps.setup-go.outcome }}, install-dolt: ${{ steps.install-dolt.outcome }}, verify-dolt: ${{ steps.verify-dolt.outcome }}, identity: ${{ steps.identity.outcome }}, pull-image: ${{ steps.pull-image.outcome }}, download-artifacts: ${{ steps.download-artifacts.outcome }}, verify-artifacts: ${{ steps.verify-artifacts.outcome }}). Advisory only; this does not block the merge."
 
