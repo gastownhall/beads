@@ -74,6 +74,16 @@ func testMainInner(m *testing.M) int {
 	defer os.RemoveAll(root)
 
 	if err := testutil.EnsureDoltContainerForTestMain(); err != nil {
+		// Locally a missing container only warns, so contributors without
+		// Docker keep the non-Dolt tests. A CI lane that has pulled the image
+		// sets BEADS_DOCTOR_REQUIRE_DOLT=1 to turn that into a package-level
+		// failure instead (same contract as BEADS_FIX_REQUIRE_DOLT in
+		// cmd/bd/doctor/fix): otherwise a Dolt-less runner silently drops
+		// every server-backed test and the lane reports a false green.
+		if os.Getenv("BEADS_DOCTOR_REQUIRE_DOLT") == "1" {
+			fmt.Fprintf(os.Stderr, "FATAL: %v, but BEADS_DOCTOR_REQUIRE_DOLT=1; the doctor Dolt suite must not silently skip\n", err)
+			return 1
+		}
 		fmt.Fprintf(os.Stderr, "WARN: %v, skipping Dolt tests\n", err)
 	} else {
 		defer testutil.TerminateDoltContainer()
