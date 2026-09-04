@@ -1,12 +1,225 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/storage/dolt"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
 )
+
+func TestEmptyServerInitWitnessInputQualifies(t *testing.T) {
+	valid := emptyServerInitWitnessInput{
+		ExplicitServer:   true,
+		ExplicitDatabase: true,
+		Database:         "hq",
+		ReinitLocal:      true,
+		ExplicitHost:     true,
+		ServerHost:       "127.0.0.1",
+		ExplicitPort:     true,
+		ServerPort:       3307,
+	}
+	tests := map[string]struct {
+		input emptyServerInitWitnessInput
+		want  bool
+	}{
+		"explicit TCP":              {input: valid, want: true},
+		"missing explicit server":   {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitServer = false })},
+		"missing explicit database": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitDatabase = false })},
+		"missing reinit":            {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ReinitLocal = false })},
+		"proxied server":            {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ProxiedServer = true })},
+		"shared server":             {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.SharedServer = true })},
+		"missing explicit TCP port": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitPort = false })},
+		"missing explicit TCP host": {input: withEmptyServerInput(valid, func(in *emptyServerInitWitnessInput) { in.ExplicitHost = false })},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			if got := tt.input.qualifies(); got != tt.want {
+				t.Fatalf("qualifies() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func withEmptyServerInput(in emptyServerInitWitnessInput, mutate func(*emptyServerInitWitnessInput)) emptyServerInitWitnessInput {
+	mutate(&in)
+	return in
+}
+
+func TestCreateEmptyServerInitWitnessDoesNotReplaceExistingWitness(t *testing.T) {
+	beadsDir := t.TempDir()
+	witnessPath := filepath.Join(beadsDir, localVersionFile)
+	historicalWitness := []byte("0.62.0\n")
+	if err := os.WriteFile(witnessPath, historicalWitness, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := createEmptyServerInitWitness(emptyServerInitWitnessQualification{beadsDir: beadsDir})
+	if err == nil {
+		t.Fatal("createEmptyServerInitWitness() succeeded over an existing historical witness")
+	}
+	got, err := os.ReadFile(witnessPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, historicalWitness) {
+		t.Fatalf("historical witness was modified: got %q, want %q", got, historicalWitness)
+	}
+}
+
+func TestCreateEmptyServerInitWitnessWritesCurrentVersionExclusively(t *testing.T) {
+	beadsDir := t.TempDir()
+	qualification := emptyServerInitWitnessQualification{beadsDir: beadsDir}
+	if err := createEmptyServerInitWitness(qualification); err != nil {
+		t.Fatalf("createEmptyServerInitWitness() error = %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != Version+"\n" {
+		t.Fatalf("witness = %q, want %q", got, Version+"\n")
+	}
+}
+
+func TestPinEmptyServerInitWitnessPinsQualifiedTCPConnection(t *testing.T) {
+	cfg := &dolt.Config{
+		ServerSocket:   "/tmp/stale.sock",
+		ServerHost:     "wrong-host",
+		ServerPort:     3307,
+		ServerUser:     "wrong-user",
+		ServerPassword: "wrong-password",
+		ServerTLS:      false,
+		Database:       "wrong_database",
+		AutoStart:      true,
+	}
+	qualification := emptyServerInitWitnessQualification{dsn: doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     43123,
+		User:     "qualified-user",
+		Password: "qualified-password",
+		Database: "qualified_database",
+		TLS:      true,
+	}}
+
+	pinEmptyServerInitWitness(cfg, qualification)
+
+	if cfg.ServerSocket != "" || cfg.ServerHost != "127.0.0.1" || cfg.ServerPort != 43123 ||
+		cfg.ServerUser != "qualified-user" || cfg.ServerPassword != "qualified-password" ||
+		!cfg.ServerTLS || cfg.Database != "qualified_database" || cfg.AutoStart {
+		t.Fatalf("pin did not preserve the qualified TCP connection: %+v", cfg)
+	}
+}
+
+func TestConfiguredIdentityMatchesProof(t *testing.T) {
+	// The explicit TCP endpoint is live so a dead persisted socket can fall
+	// back to it; the live unix socket stands in for an earlier server
+	// incarnation that would outrank TCP.
+	tcp, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tcp.Close()
+	port := tcp.Addr().(*net.TCPAddr).Port
+	// Unix socket paths are length-limited, so avoid the long t.TempDir() name.
+	sockDir, err := os.MkdirTemp("", "bd-sock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(sockDir)
+	liveSocket := filepath.Join(sockDir, "live.sock")
+	unixListener, err := net.Listen("unix", liveSocket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unixListener.Close()
+
+	in := emptyServerInitWitnessInput{Database: "proved", ServerHost: "127.0.0.1", ServerPort: port}
+	tests := map[string]struct {
+		cfg   configfile.Config
+		envDB string
+		want  bool
+	}{
+		"same database":              {cfg: configfile.Config{DoltDatabase: "proved"}, want: true},
+		"different database":         {cfg: configfile.Config{DoltDatabase: "configured"}, want: false},
+		"env override equals flag":   {cfg: configfile.Config{DoltDatabase: "configured"}, envDB: "proved", want: true},
+		"persisted live unix socket": {cfg: configfile.Config{DoltDatabase: "proved", DoltServerSocket: liveSocket}, want: false},
+		"persisted dead socket path": {cfg: configfile.Config{DoltDatabase: "proved", DoltServerSocket: filepath.Join(sockDir, "dead.sock")}, want: true},
+	}
+	for name, tt := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_DATABASE", tt.envDB)
+			cfg := tt.cfg
+			if got := configuredIdentityMatchesProof(&cfg, in); got != tt.want {
+				t.Fatalf("configuredIdentityMatchesProof() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLocalDoltRootDatabases(t *testing.T) {
+	beadsDir := t.TempDir()
+	for _, dir := range []string{"a/.dolt", "b-c/.dolt", "plain"} {
+		if err := os.MkdirAll(filepath.Join(beadsDir, "dolt", dir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := localDoltRootDatabases(beadsDir)
+	if err != nil {
+		t.Fatalf("localDoltRootDatabases() error = %v", err)
+	}
+	if want := []string{"a", "b_c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("localDoltRootDatabases() = %v, want %v", got, want)
+	}
+
+	// bd's own server start runs `dolt init` in the root, and the server serves
+	// that repository under the directory's name; it must be proved too.
+	if err := os.Mkdir(filepath.Join(beadsDir, "dolt", ".dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	got, err = localDoltRootDatabases(beadsDir)
+	if err != nil {
+		t.Fatalf("localDoltRootDatabases() with root .dolt error = %v", err)
+	}
+	if want := []string{"dolt", "a", "b_c"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("localDoltRootDatabases() with root .dolt = %v, want %v", got, want)
+	}
+}
+
+func TestProvedRootDatabasesAreEmptyFailsClosedWhenUnreachable(t *testing.T) {
+	beadsDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(beadsDir, "dolt"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	empty, err := provedRootDatabasesAreEmpty(beadsDir, doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     1,
+		User:     "root",
+		Database: "missing",
+	})
+	if err == nil || empty {
+		t.Fatalf("provedRootDatabasesAreEmpty() = (%v, %v), want false with an error", empty, err)
+	}
+}
+
+func TestSelectedServerDatabaseIsEmptyFailsClosedWhenUnreachable(t *testing.T) {
+	empty, err := selectedServerDatabaseIsEmpty(doltutil.ServerDSN{
+		Host:     "127.0.0.1",
+		Port:     1,
+		User:     "root",
+		Database: "missing",
+	})
+	if err == nil || empty {
+		t.Fatalf("selectedServerDatabaseIsEmpty() = (%v, %v), want false with an error", empty, err)
+	}
+}
 
 func TestInitGuardServerMessage(t *testing.T) {
 	tests := map[string]struct {

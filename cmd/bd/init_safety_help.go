@@ -70,6 +70,14 @@ DESTROY-TOKEN (non-interactive only)
   deliberate guard against pattern-matched one-liners (see
   engdocs/adr/0002-init-safety-invariants.md).
 
+LEGACY WORKSPACE RECOVERY
+
+  An unwitnessed server workspace (.beads/dolt/ present, no .local_version)
+  admits only bd init --force --server --server-host H --server-port P
+  --database D, and only when D is the configured database, no live
+  persisted socket redirects the connection, and every database the server
+  lists (plus every one under .beads/dolt/) is proven to have zero tables.
+
 EXIT CODES
 
   10    refused: remote has Dolt history and you selected local history

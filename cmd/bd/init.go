@@ -751,9 +751,31 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		// Historical workspaces need an explicit sealed-copy bridge. This runs
 		// before init's existing-workspace checks so even --force cannot create
 		// or rewrite state beside a source that has not been preserved.
+		var legacyGuardErr error
+		var emptyServerWitness emptyServerInitWitnessQualification
 		if beadsDir := resolveInitBeadsDir(); beadsDir != "" {
 			if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
-				return err
+				if !isLegacyUpgradeRefusal(err) {
+					return err
+				}
+				explicitServer, _ := cmd.Flags().GetBool("server")
+				qualification, qualified := qualifyEmptyServerInitWitness(beadsDir, emptyServerInitWitnessInput{
+					ExplicitServer:   cmd.Flags().Changed("server") && explicitServer,
+					ExplicitDatabase: cmd.Flags().Changed("database"),
+					Database:         database,
+					ReinitLocal:      reinitLocal,
+					ProxiedServer:    initProxiedServer,
+					SharedServer:     sharedServer || doltserver.IsSharedServerMode(),
+					ExplicitHost:     cmd.Flags().Changed("server-host"),
+					ServerHost:       serverHost,
+					ExplicitPort:     cmd.Flags().Changed("server-port"),
+					ServerPort:       serverPort,
+				})
+				if !qualified {
+					return err
+				}
+				legacyGuardErr = err
+				emptyServerWitness = qualification
 			}
 		}
 
@@ -975,7 +997,14 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			plannedDBPathAbs = filepath.Dir(plannedDBPathAbs)
 		}
 		initGateHandle, gateErr := acquireInitMutationGate(rootCtx, beadsDirAbs, plannedDBPathAbs, func() error {
-			return runInitReinitPreflight(reinitLocal, destroyTokenPrefix, destroyToken)
+			// countExistingIssues opens the configured store and initializes a
+			// schema on a truly empty database. Skipping it is admissible for the
+			// recovery candidate only because qualification proved that the
+			// configured store IS the proved empty database (same database name,
+			// no live persisted socket), so the count could only ever be zero;
+			// it is re-proved immediately before schema creation below. The gate
+			// and every remote-safety check are retained.
+			return runInitReinitPreflight(reinitLocal && legacyGuardErr == nil, destroyTokenPrefix, destroyToken)
 		})
 		if gateErr != nil {
 			return gateErr
@@ -1379,6 +1408,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if serverUser != "" {
 			doltCfg.ServerUser = serverUser
 		}
+		if legacyGuardErr != nil {
+			// Recovery must stay pinned to the exact TCP endpoint proved empty;
+			// never auto-start a different repo-local server after that proof.
+			doltCfg.AutoStart = false
+		}
 
 		// Route through the gateway credential machinery: when a credential
 		// command is configured, its token becomes the connection username and
@@ -1387,6 +1421,12 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 		if err := applyInitGatewayCredential(ctx, beadsDir, doltCfg); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: resolving dolt credential command: %v\n", err)
 			return &exitError{Code: 1}
+		}
+		if legacyGuardErr != nil {
+			if doltCfg.Gateway {
+				return legacyGuardErr
+			}
+			pinEmptyServerInitWitness(doltCfg, emptyServerWitness)
 		}
 
 		initLock, err := acquireEmbeddedLock(beadsDir, initServerMode || initProxiedServer)
@@ -1453,6 +1493,21 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 		}
 
+		// The initial read-only qualification happened before the normal init
+		// safety checks. Re-prove emptiness now, while the local workspace init
+		// gate is held and immediately before schema creation. The gate excludes
+		// competing bd init processes for this workspace, not arbitrary external
+		// SQL writers; the second proof narrows that unavoidable server-side race.
+		// If any database under the root changed, preserve the original legacy
+		// refusal rather than modifying anything. The witness itself is created
+		// only after the store opens below.
+		if legacyGuardErr != nil {
+			empty, proofErr := provedRootDatabasesAreEmpty(emptyServerWitness.beadsDir, emptyServerWitness.dsn)
+			if proofErr != nil || !empty {
+				return legacyGuardErr
+			}
+		}
+
 		store, err := newDoltStore(ctx, doltCfg)
 		if err != nil {
 			// #4259: the remote-migrate gate refused to auto-apply pending
@@ -1485,6 +1540,27 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 			}
 			fmt.Fprintf(os.Stderr, "Error: failed to open Dolt store: %v\n", err)
 			return &exitError{Code: 1}
+		}
+
+		// The recovery witness is created exclusively, and only now that the
+		// store exists: a store-open failure above leaves the legacy guard armed
+		// with nothing initialized. A witness that appeared between the proof
+		// and this point (O_EXCL failure) makes the original refusal win.
+		if legacyGuardErr != nil {
+			if err := createEmptyServerInitWitness(emptyServerWitness); err != nil {
+				_ = store.Close()
+				return legacyGuardErr
+			}
+		}
+
+		// Write the completed witness as soon as the store/schema exists. If a
+		// later optional initialization step is interrupted, the next command
+		// sees a current-era witness rather than a stranded blank one.
+		if useLocalBeads && legacyGuardErr == nil {
+			localVersionPath := filepath.Join(beadsDir, localVersionFile)
+			if err := writeLocalVersion(localVersionPath, Version); err != nil && !quiet {
+				fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", err)
+			}
 		}
 
 		// Initialize global database schema and config in shared-server mode.
@@ -1712,6 +1788,11 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 					}
 					if serverSocket != "" {
 						cfg.DoltServerSocket = serverSocket
+					} else if legacyGuardErr != nil {
+						// Recovery pinned the explicit TCP endpoint; a socket
+						// persisted from an earlier server incarnation must
+						// not outrank it on later commands.
+						cfg.DoltServerSocket = ""
 					}
 					if serverUser != "" {
 						cfg.DoltServerUser = serverUser
@@ -2045,17 +2126,6 @@ Non-interactive mode (--non-interactive or BD_NON_INTERACTIVE=1):
 				} else if !quiet {
 					fmt.Printf("  Hooks installed to: .beads/hooks/\n")
 				}
-			}
-		}
-
-		// Initialize version tracking: create .local_version file during bd init
-		// instead of deferring it to the first bd command.
-		// This ensures no "Version Tracking" warning from bd doctor after init.
-		if useLocalBeads {
-			localVersionPath := filepath.Join(beadsDir, ".local_version")
-			if err := writeLocalVersion(localVersionPath, Version); err != nil && !quiet {
-				fmt.Fprintf(os.Stderr, "Warning: failed to initialize version tracking: %v\n", err)
-				// Non-fatal - initialization still succeeded
 			}
 		}
 

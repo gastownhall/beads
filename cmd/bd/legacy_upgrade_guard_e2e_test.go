@@ -6,8 +6,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,8 +19,304 @@ import (
 	"testing"
 	"time"
 
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/beads/internal/configfile"
+	"github.com/steveyegge/beads/internal/doltserver"
+	"github.com/steveyegge/beads/internal/storage/doltutil"
+	"github.com/steveyegge/beads/internal/testutil"
 )
+
+func TestLegacyUpgradeGuardAdmitsAffirmativelyEmptyServerDatabase(t *testing.T) {
+	testutil.RequireDoltCLIOnly(t)
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("start native Dolt server: %v", err)
+	}
+	t.Cleanup(func() { _ = doltserver.Stop(beadsDir) })
+	database := uniqueTestDBName(t)
+	// Deliberately retain a stale socket in metadata. Gas City names TCP with
+	// --server-host/--server-port, so the qualification and init must use those
+	// exact flags rather than silently routing through this stale endpoint.
+	cfg := &configfile.Config{Database: "dolt", Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: database, DoltServerHost: "127.0.0.1", DoltServerPort: state.Port, DoltServerSocket: filepath.Join(t.TempDir(), "stale.sock")}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root"}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", database)); err != nil {
+		t.Fatalf("create empty database: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, state.Port) })
+	t.Setenv("BEADS_DIR", beadsDir)
+	if err := guardLegacyUpgradeWorkspace(beadsDir); !isLegacyUpgradeRefusal(err) {
+		t.Fatalf("fixture guard = %v, want legacy refusal before fix", err)
+	}
+	empty, err := selectedServerDatabaseIsEmpty(doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root", Database: database})
+	if err != nil || !empty {
+		t.Fatalf("fixture empty-database proof = (%v, %v), want (true, nil)", empty, err)
+	}
+	if _, qualified := qualifyEmptyServerInitWitness(beadsDir, emptyServerInitWitnessInput{
+		ExplicitServer: true, ExplicitDatabase: true, Database: database, ReinitLocal: true,
+		ExplicitHost: true, ServerHost: "127.0.0.1", ExplicitPort: true, ServerPort: state.Port,
+	}); !qualified {
+		t.Fatal("fixture did not qualify for the narrow empty-server init recovery")
+	}
+	// Explicit host/port flags must suppress an ambient socket all the way
+	// through dolt.New's defaulting, or schema creation would be redirected
+	// after the TCP database was proved empty.
+	t.Setenv("BEADS_DOLT_SERVER_SOCKET", filepath.Join(t.TempDir(), "stale.sock"))
+	bd := buildBDUnderTest(t)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cmdCancel()
+	cmd := exec.CommandContext(cmdCtx, bd, "init", "--force", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--server", "--server-host", "127.0.0.1", "--server-port", fmt.Sprint(state.Port), "--database", database)
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir, "BD_DISABLE_METRICS=1", "BEADS_DOLT_AUTO_START=0")
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err != nil {
+		witness, witnessErr := os.ReadFile(filepath.Join(beadsDir, localVersionFile))
+		t.Fatalf("bd init --force empty server DB = %v, want success (witness=%q, witnessErr=%v):\n%s", err, witness, witnessErr, output.String())
+	}
+	got, err := os.ReadFile(filepath.Join(beadsDir, localVersionFile))
+	if err != nil {
+		t.Fatalf("read version witness: %v", err)
+	}
+	if strings.TrimSpace(string(got)) != Version {
+		t.Fatalf("version witness = %q, want %q", strings.TrimSpace(string(got)), Version)
+	}
+	inspectCtx, inspectCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer inspectCancel()
+	var tableCount int
+	if err := db.QueryRowContext(inspectCtx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", database).Scan(&tableCount); err != nil {
+		t.Fatalf("inspect proved database schema: %v", err)
+	}
+	if tableCount == 0 {
+		t.Fatalf("proved database %q has no schema tables after init", database)
+	}
+	// The recovered workspace is current-era for every later command, and the
+	// stale socket must not outrank the pinned TCP endpoint on those commands.
+	if err := guardLegacyUpgradeWorkspace(beadsDir); err != nil {
+		t.Fatalf("guard after recovery = %v, want nil", err)
+	}
+	recovered, err := configfile.Load(beadsDir)
+	if err != nil {
+		t.Fatalf("load recovered metadata: %v", err)
+	}
+	if recovered.DoltServerSocket != "" {
+		t.Fatalf("recovered metadata dolt_server_socket = %q, want empty", recovered.DoltServerSocket)
+	}
+}
+
+// legacyEmptyServerFixture is a workspace whose metadata selects native
+// server mode for configuredDB beneath a legacy .beads/dolt root with no
+// version witness, served by a per-test Dolt server.
+type legacyEmptyServerFixture struct {
+	repoDir  string
+	beadsDir string
+	port     int
+	db       *sql.DB
+}
+
+func newLegacyEmptyServerFixture(t *testing.T, configuredDB string, databases ...string) legacyEmptyServerFixture {
+	t.Helper()
+	testutil.RequireDoltCLIOnly(t)
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("start native Dolt server: %v", err)
+	}
+	t.Cleanup(func() { _ = doltserver.Stop(beadsDir) })
+	cfg := &configfile.Config{Database: "dolt", Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: configuredDB, DoltServerHost: "127.0.0.1", DoltServerPort: state.Port}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("mysql", doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root"}.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, database := range databases {
+		if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", database)); err != nil {
+			t.Fatalf("create database %q: %v", database, err)
+		}
+		t.Cleanup(func() { dropTestDatabase(database, state.Port) })
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	return legacyEmptyServerFixture{repoDir: repoDir, beadsDir: beadsDir, port: state.Port, db: db}
+}
+
+func (f legacyEmptyServerFixture) createTable(t *testing.T, database string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := f.db.ExecContext(ctx, fmt.Sprintf("USE `%s`; CREATE TABLE preserved (id INT PRIMARY KEY)", database)); err != nil {
+		t.Fatalf("create preserved table in %q: %v", database, err)
+	}
+}
+
+func (f legacyEmptyServerFixture) tableCount(t *testing.T, database string) int {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var count int
+	if err := f.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = ?", database).Scan(&count); err != nil {
+		t.Fatalf("count tables in %q: %v", database, err)
+	}
+	return count
+}
+
+// runRecoveryInit runs the exact explicit native server re-init shape that
+// the empty-server recovery admits, naming database on the command line.
+func (f legacyEmptyServerFixture) runRecoveryInit(t *testing.T, database string) (string, error) {
+	t.Helper()
+	bd := buildBDUnderTest(t)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cmdCancel()
+	cmd := exec.CommandContext(cmdCtx, bd, "init", "--force", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--server", "--server-host", "127.0.0.1", "--server-port", fmt.Sprint(f.port), "--database", database)
+	cmd.Dir = f.repoDir
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+f.beadsDir, "BD_DISABLE_METRICS=1", "BEADS_DOLT_AUTO_START=0")
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	err := cmd.Run()
+	return output.String(), err
+}
+
+func (f legacyEmptyServerFixture) requireLegacyRefusal(t *testing.T, output string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("bd init --force succeeded, want legacy refusal:\n%s", output)
+	}
+	if !strings.Contains(output, "legacy Dolt server workspace detected") {
+		t.Fatalf("bd init --force output = %q, want legacy refusal", output)
+	}
+	if _, err := os.Lstat(filepath.Join(f.beadsDir, localVersionFile)); !os.IsNotExist(err) {
+		t.Fatalf("version witness was created despite refusal: %v", err)
+	}
+}
+
+func TestLegacyUpgradeGuardRefusesEmptyDatabaseBesideNonEmptySibling(t *testing.T) {
+	database := uniqueTestDBName(t)
+	const sibling = "legacy_sibling"
+	f := newLegacyEmptyServerFixture(t, database, database, sibling)
+	f.createTable(t, sibling)
+
+	// One Dolt root serves every database beneath it, and the witness disarms
+	// the guard for the whole workspace, so an empty selected database beside
+	// a non-empty sibling must not qualify.
+	output, err := f.runRecoveryInit(t, database)
+	f.requireLegacyRefusal(t, output, err)
+	if got := f.tableCount(t, database); got != 0 {
+		t.Fatalf("proved database %q has %d tables after refusal, want 0", database, got)
+	}
+	if got := f.tableCount(t, sibling); got != 1 {
+		t.Fatalf("sibling database %q has %d tables after refusal, want 1", sibling, got)
+	}
+}
+
+func TestLegacyUpgradeGuardRefusesRepointingToEmptySiblingWithoutWitness(t *testing.T) {
+	configured := uniqueTestDBName(t)
+	const empty = "empty_sibling"
+	f := newLegacyEmptyServerFixture(t, configured, configured, empty)
+
+	// Both databases are empty, so the root proof alone would admit this
+	// shape: only the identity check refuses. countExistingIssues counts the
+	// configured database, so a flag naming a different database must not be
+	// allowed to skip the destroy gate and repoint metadata away from the
+	// store it never counted.
+	output, err := f.runRecoveryInit(t, empty)
+	f.requireLegacyRefusal(t, output, err)
+	if got := f.tableCount(t, configured); got != 0 {
+		t.Fatalf("configured database %q has %d tables after refusal, want 0", configured, got)
+	}
+	if got := f.tableCount(t, empty); got != 0 {
+		t.Fatalf("empty database %q has %d tables after refusal, want 0", empty, got)
+	}
+	cfg, err := configfile.Load(f.beadsDir)
+	if err != nil {
+		t.Fatalf("load metadata after refusal: %v", err)
+	}
+	if cfg.DoltDatabase != configured {
+		t.Fatalf("metadata dolt_database = %q after refusal, want %q", cfg.DoltDatabase, configured)
+	}
+}
+
+func TestLegacyUpgradeGuardRefusesNonEmptyServerDatabaseWithoutWitness(t *testing.T) {
+	testutil.RequireDoltCLIOnly(t)
+	repoDir := t.TempDir()
+	beadsDir := filepath.Join(repoDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	state, err := doltserver.Start(beadsDir)
+	if err != nil {
+		t.Fatalf("start native Dolt server: %v", err)
+	}
+	t.Cleanup(func() { _ = doltserver.Stop(beadsDir) })
+	database := uniqueTestDBName(t)
+	cfg := &configfile.Config{Database: "dolt", Backend: configfile.BackendDolt, DoltMode: configfile.DoltModeServer, DoltDatabase: database, DoltServerHost: "127.0.0.1", DoltServerPort: state.Port}
+	if err := cfg.Save(beadsDir); err != nil {
+		t.Fatalf("save metadata: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("dolt.mode: server\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn := doltutil.ServerDSN{Host: "127.0.0.1", Port: state.Port, User: "root"}.String()
+	db, err := sql.Open("mysql", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE `%s`", database)); err != nil {
+		t.Fatalf("create server database: %v", err)
+	}
+	t.Cleanup(func() { dropTestDatabase(database, state.Port) })
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("USE `%s`; CREATE TABLE preserved (id INT PRIMARY KEY)", database)); err != nil {
+		t.Fatalf("create preserved table: %v", err)
+	}
+	t.Setenv("BEADS_DIR", beadsDir)
+	bd := buildBDUnderTest(t)
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cmdCancel()
+	cmd := exec.CommandContext(cmdCtx, bd, "init", "--force", "--quiet", "--non-interactive", "--skip-hooks", "--skip-agents", "--server", "--server-host", "127.0.0.1", "--server-port", fmt.Sprint(state.Port), "--database", database)
+	cmd.Dir = repoDir
+	cmd.Env = append(os.Environ(), "BEADS_DIR="+beadsDir, "BD_DISABLE_METRICS=1", "BEADS_DOLT_AUTO_START=0")
+	var output bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &output, &output
+	if err := cmd.Run(); err == nil {
+		t.Fatalf("bd init --force non-empty server DB succeeded, want legacy refusal:\n%s", output.String())
+	} else if !strings.Contains(output.String(), "legacy Dolt server workspace detected") {
+		t.Fatalf("bd init --force non-empty server DB output = %q, want legacy refusal", output.String())
+	}
+	if _, err := os.Lstat(filepath.Join(beadsDir, localVersionFile)); !os.IsNotExist(err) {
+		t.Fatalf("version witness was changed for non-empty server DB: %v", err)
+	}
+}
 
 func TestLegacyUpgradeGuardRefusesBeforeMutatingHistoricalWorkspace(t *testing.T) {
 	bd := buildBDUnderTest(t)

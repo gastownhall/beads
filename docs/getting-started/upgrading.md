@@ -258,6 +258,7 @@ server selection is not overridden by a stale `.beads/embeddeddolt/` repository.
 | Explicit server metadata plus `.local_version` from v0.55.4 through v0.62.0, whether or not `.beads/dolt/` exists | Explicit legacy Dolt export/import |
 | Explicit server metadata plus `.beads/dolt/` and a witness whose major version is 1 or newer | Normal current server-mode upgrade |
 | Explicit server metadata plus `.beads/dolt/` and a missing or pre-v1 witness | Explicit legacy Dolt export/import |
+| Explicit server metadata plus `.beads/dolt/`, no witness, and every database the named server lists (plus every one under that root) proven to have zero tables | Narrow empty-server recovery via explicit `bd init --force --server --server-host … --server-port … --database …` (see below) |
 | Explicit server metadata plus `.beads/dolt/` and a witness that is present but unreadable | Normal current server-mode upgrade, with a warning |
 | Explicit server metadata without `.beads/dolt/`, and a missing, malformed, or non-historical witness | Normal current server-mode compatibility path |
 | `.beads/dolt/` with missing metadata or persisted `dolt_mode` blank/`embedded` | Explicit legacy Dolt export/import, except for the configured shared-server compatibility path described below |
@@ -270,6 +271,19 @@ they name. A witness that is present but unreadable is not treated as a legacy
 marker — no pre-v1 `bd` could have written one — so `bd` warns and continues
 rather than refusing every command. A *missing* witness stays ambiguous and is
 still refused.
+
+One narrow exception covers an unwitnessed server workspace whose Dolt root was
+never populated (for example, a bootstrap that created the database but was
+interrupted before the witness). `bd init --force --server --server-host HOST
+--server-port PORT --database NAME` is admitted only when `NAME` is the database
+the workspace configuration already selects, no live persisted socket would
+redirect the connection elsewhere, and read-only SQL proves that every database
+the server lists — plus every database materialized under `.beads/dolt/` — has
+zero tables. The proof is repeated under init's mutation gate, and the
+current-era `.local_version` witness is created exclusively only after the store
+opens. A non-empty sibling database, a different configured database, a proxied
+or shared server, a credential command, or a witness that appears in the
+meantime all keep the ordinary refusal. See `bd help init-safety`.
 
 Current `bd` refuses recognized historical SQLite and legacy Dolt layouts before
 opening storage or rewriting metadata. This is intentional: preserve the source
