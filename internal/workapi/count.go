@@ -67,7 +67,10 @@ func BuildCountFilter(in issueops.CountRequest, cfg ListConfig) (types.IssueFilt
 	if len(in.MetadataFields) > 0 {
 		filter.MetadataFields = in.MetadataFields
 	}
-	if err := ValidateMetadataFilters(in.MetadataFields, ""); err != nil {
+	if in.HasMetadataKey != "" {
+		filter.HasMetadataKey = in.HasMetadataKey
+	}
+	if err := ValidateMetadataFilters(in.MetadataFields, in.HasMetadataKey); err != nil {
 		return types.IssueFilter{}, err
 	}
 
