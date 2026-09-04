@@ -33,7 +33,16 @@ func TestManagesLiveServerOnPort(t *testing.T) {
 		}
 	}
 
-	t.Run("live pid and matching port file is proof", func(t *testing.T) {
+	// The PID recorded here is this test binary's, which is emphatically not a
+	// dolt sql-server: parseDoltProcessPIDs requires "dolt" followed by
+	// "sql-server" in the command line, so an identity check would never return
+	// it. That is the point — this subtest pins the predicate's liveness-only
+	// contract and is the live demonstration that any live PID beside an
+	// agreeing port file is accepted today, dolt or not. #6123 is expected to
+	// tighten that (a distinct adoption marker, or an identity check); when it
+	// does, this subtest goes red, and that is the signal to re-derive #6088's
+	// guarantee from whatever the new proof is, not to relax the assertion.
+	t.Run("any live pid with an agreeing port file is proof", func(t *testing.T) {
 		dir := newDir(t)
 		write(t, dir, PortFileName, port)
 		write(t, dir, PIDFileName, os.Getpid())

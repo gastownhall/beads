@@ -575,12 +575,36 @@ func ReadPortFile(beadsDir string) int {
 // records that foreign PID and the port before reporting Running. So an
 // operator running `dolt sql-server` over .beads/dolt under systemd or a
 // container — exactly the operator portConflictDiagnostics addresses — mints
-// this proof by typing `bd dolt start`. Closing it means recording adoption
-// distinctly from launch (skip the write on the adopt branch, or mark it so
-// this helper declines it), which is a behavior change on the auto-start path
-// and belongs with #6123 rather than in a gate-hardening patch. It is unix-only
-// in practice: isProcessInDir returns false on Windows, so reclaimPort never
-// takes the CWD-match adopt branch there.
+// this proof by typing `bd dolt start`.
+//
+// Typing it is not required, though, and the effect does not wear off. The
+// storage layer dials with a 500 ms timeout, so any open that times out —
+// under load, or inside a systemd/container restart window — reaches the same
+// adopt branch through its auto-start path with no operator action at all.
+// Nothing suppresses that by default for the topology this predicate exists to
+// gate: when the endpoint comes only from BEADS_DOLT_SERVER_PORT,
+// ResolveServerMode still answers Owned (that is the bug being closed here), so
+// EnsureRunningDetailed's ServerModeExternal branch never fires and Start()
+// proceeds. Once the adopt branch has written the two files they stay:
+// IsRunning clears them only for a PID that is corrupt, dead, or not dolt, and
+// an adopted server is a live dolt process on all three counts. The workspace
+// then answers "owned" from that point on, so a single timed-out dial disarms
+// the gate permanently.
+//
+// One setting does suppress it: `dolt.auto-start: false` (or
+// BEADS_DOLT_AUTO_START=0) fails serverOpenCanAutoStart and IsAutoStartDisabled,
+// so a timed-out open errors instead of adopting. That closes the incidental
+// route only — `bd dolt start` never consults either check, so the deliberate
+// route above stays open. It is the one mitigation an operator has while #6123
+// is open.
+//
+// Closing it means recording adoption distinctly from launch (skip the write on
+// the adopt branch, or mark it so this helper declines it), which is a behavior
+// change on the auto-start path and belongs with #6123 rather than in a
+// gate-hardening patch — though incidental and permanent is a sharper argument
+// for #6123 than a resolver tidy-up would be. It is unix-only in practice:
+// isProcessInDir returns false on Windows, so reclaimPort never takes the
+// CWD-match adopt branch there.
 //
 // Recycled PID (narrower). This stops short of IsRunning's isDoltProcess()
 // command-name check, which shells out to `ps` (PowerShell on Windows) —
