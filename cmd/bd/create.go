@@ -428,12 +428,7 @@ var createCmd = &cobra.Command{
 				targetBeadsDir := routing.ExpandPath(repoPath)
 				debug.Logf("DEBUG: Routing to target repo: %s\n", targetBeadsDir)
 
-				// Auto-routed paths (routing.mode: auto, routing.default)
-				// come from config, not caller input, so they're always
-				// allowed to auto-vivify as before; only an explicit --repo
-				// flag value can be ambiguous.
-				allowCreate := !isAmbiguousRepoTarget(cmd.Flags().Changed("repo"), repoOverride)
-				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, allowCreate); err != nil {
+				if err := ensureBeadsDirForPath(rootCtx, targetBeadsDir, store, cmd.Flags().Changed("repo"), repoOverride); err != nil {
 					return HandleError("failed to initialize target repo: %v", err)
 				}
 
@@ -467,7 +462,7 @@ var createCmd = &cobra.Command{
 		parentLookupStore := store
 		if dryRun && repoPath != "." {
 			var err error
-			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath)
+			parentLookupStore, err = openDryRunTargetStore(rootCtx, repoPath, cmd.Flags().Changed("repo"), repoOverride)
 			if err != nil {
 				return HandleError("%v", err)
 			}
@@ -965,7 +960,12 @@ func formatTimeForRPC(t *time.Time) string {
 // newPreviewStoreFromConfig is the non-mutating factory for a foreign
 // project (bd-6dnrw.32), relaxed for previews exactly as the root pre-run
 // relaxes the command's own store.
-func openDryRunTargetStore(ctx context.Context, repoPath string) (storage.DoltStorage, error) {
+func openDryRunTargetStore(ctx context.Context, repoPath string, repoFlagChanged bool, repoOverride string) (storage.DoltStorage, error) {
+	if isAmbiguousRepoTarget(repoFlagChanged, repoOverride) {
+		// Same misresolution as the write path (be-flg / gt-rlwo): a preview
+		// read against a phantom store is a preview of the wrong repo.
+		return nil, ambiguousRepoTargetError(repoOverride, routing.ExpandPath(repoPath))
+	}
 	if remotecache.IsRemoteURL(repoPath) {
 		cache, err := remotecache.DefaultCache()
 		if err != nil {
@@ -1007,13 +1007,31 @@ func isAmbiguousRepoTarget(repoFlagChanged bool, repoOverride string) bool {
 	return repoFlagChanged && !filepath.IsAbs(repoOverride) && !strings.HasPrefix(repoOverride, "~/")
 }
 
+// ambiguousRepoTargetError explains a refused --repo value. It names the
+// resolved path because that is the one thing that makes the refusal
+// comprehensible: the caller typed a name and got a directory under their
+// cwd. It deliberately does not claim the workspace is missing — the
+// resolved target may well exist, and using it is exactly the bug (be-flg).
+func ambiguousRepoTargetError(repoOverride, resolvedPath string) error {
+	return fmt.Errorf("--repo %q is a relative/bare path, so it resolved against the current directory to %s; bd has no registry of repo names, so that is almost certainly not the workspace you meant. Pass an absolute or \"~/\"-prefixed --repo path instead", repoOverride, resolvedPath)
+}
+
 // ensureBeadsDirForPath ensures a beads directory exists at the target path.
 // If the .beads directory doesn't exist, it creates it and initializes with
 // the same prefix as the source store (T010, T012: prefix inheritance).
 //
-// When allowCreate is false, a target with no existing workspace is refused
-// instead of fabricated — see isAmbiguousRepoTarget.
-func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage, allowCreate bool) error {
+// An ambiguous explicit --repo value (see isAmbiguousRepoTarget) is refused
+// outright, BEFORE the existence check: the misresolved path is just as wrong
+// when a workspace happens to sit there already, and using one silently is
+// worse than fabricating one, because nothing is left behind to notice
+// (be-flg / gt-rlwo). Auto-routed paths (routing.mode: auto, routing.default)
+// come from config rather than caller input, so repoFlagChanged is false for
+// them and they keep auto-vivifying as before.
+func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore storage.DoltStorage, repoFlagChanged bool, repoOverride string) error {
+	if isAmbiguousRepoTarget(repoFlagChanged, repoOverride) {
+		return ambiguousRepoTargetError(repoOverride, targetPath)
+	}
+
 	beadsDir := filepath.Join(targetPath, ".beads")
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
 
@@ -1021,10 +1039,6 @@ func ensureBeadsDirForPath(ctx context.Context, targetPath string, sourceStore s
 	// metadata.json is the canonical marker for an initialized beads dir.
 	if _, err := os.Stat(metadataPath); err == nil {
 		return nil
-	}
-
-	if !allowCreate {
-		return fmt.Errorf("no beads workspace found at %s and --repo's value is a relative/bare path, so it won't be auto-created here (this is likely not the target you intended). Pass an absolute or \"~/\"-prefixed --repo path to an existing workspace instead", targetPath)
 	}
 
 	// Create .beads directory

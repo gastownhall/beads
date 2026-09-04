@@ -238,9 +238,11 @@ func newCreateFlagsCommand(t *testing.T, args ...string) *cobra.Command {
 	return cmd
 }
 
-// TestIsAmbiguousRepoTarget covers bd-8d3f: an explicit relative/bare --repo
-// value with no existing workspace must be refused rather than silently
-// auto-vivified. Table-tested at the pure-function level since the embedded
+// TestIsAmbiguousRepoTarget covers bd-8d3f and be-flg: an explicit
+// relative/bare --repo value must be refused rather than resolved against the
+// cwd — whether that resolves onto nothing (bd-8d3f, silently auto-vivified a
+// phantom workspace) or onto a workspace that already exists (be-flg, silently
+// wrote into it). Table-tested at the pure-function level since the embedded
 // dolt round trip is ~15s per case.
 func TestIsAmbiguousRepoTarget(t *testing.T) {
 	tests := []struct {
