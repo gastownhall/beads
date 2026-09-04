@@ -676,6 +676,10 @@ jobs:
     name: PR Core (wrapper timing)
     runs-on: ubuntu-latest
     needs: build-artifacts
+    # scripts/ci/pr-core.sh bounds each package at 25m; keep that inside one
+    # finite job budget so a real hang reports instead of riding the 360m
+    # runner default.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
