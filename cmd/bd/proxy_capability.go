@@ -121,6 +121,12 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"gate discover":          refused("proxy.gate.unsupported", "gate discover is not supported in proxied-server mode"),
 	"admin cleanup":          refused("proxy.admin.unsupported", "admin cleanup is not supported in proxied-server mode"),
 	"admin reset":            refused("proxy.admin.unsupported", "admin reset is not supported in proxied-server mode"),
+	"dolt push":              refused("proxy.dolt_push.unsupported", "dolt push is not supported in proxied-server mode"),
+	"dolt pull":              refused("proxy.dolt_pull.unsupported", "dolt pull is not supported in proxied-server mode"),
+	"dolt commit":            refused("proxy.dolt_commit.unsupported", "dolt commit is not supported in proxied-server mode"),
+	"dolt remote":            refused("proxy.dolt_remote.unsupported", "dolt remote is not supported in proxied-server mode"),
+	"dolt remote add":        refused("proxy.dolt_remote.unsupported", "dolt remote add is not supported in proxied-server mode"),
+	"dolt remote list":       refused("proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode"),
 	"cook":                   refused("proxy.formula.unsupported", "cook is not supported in proxied-server mode"),
 	"ship":                   refused("proxy.formula.unsupported", "ship is not supported in proxied-server mode"),
 	"swarm create":           refused("proxy.swarm.unsupported", "swarm create is not supported in proxied-server mode"),
@@ -130,6 +136,7 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"merge-slot acquire":     refused("proxy.merge_slot.unsupported", "merge-slot acquire is not supported in proxied-server mode"),
 	"merge-slot release":     refused("proxy.merge_slot.unsupported", "merge-slot release is not supported in proxied-server mode"),
 	"dolt remote reset-data": refused("proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode"),
+	"sync":                   refused("proxy.sync.unsupported", "sync is not supported in proxied-server mode"),
 }
 
 func init() {
@@ -142,7 +149,8 @@ func init() {
 	} {
 		rule := proxyMaintenanceRefusals[parent]
 		for _, child := range children {
-			proxyMaintenanceRefusals[parent+" "+child] = rule
+			path := parent + " " + child
+			proxyMaintenanceRefusals[path] = refused(rule.Code, path+" is not supported in proxied-server mode")
 		}
 	}
 }
@@ -170,7 +178,11 @@ func validateProxyMaintenanceBeforeProvider(cmd *cobra.Command) error {
 		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode})
 	}
 	if class, ok := LookupHistoryCapability(path); ok && class == HistoryDirectOnly {
-		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.history.unsupported", Message: path + " is not supported in proxied-server mode", ExitCode: 1})
+		rule := refused("proxy.history.unsupported", path+" is not supported in proxied-server mode")
+		if specific, found := proxyMaintenanceRefusals[path]; found {
+			rule = specific
+		}
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: rule.Code, Message: rule.Message, ExitCode: rule.ExitCode, Mutates: rule.Mutates})
 	}
 	if strings.Contains(path, " ") {
 		return nil
