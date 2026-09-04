@@ -391,7 +391,7 @@ func (c *Config) IsDoltServerMode() bool {
 	// lifecycle-only question doltserver.resolveServerMode's check 2c answers.
 	// The two therefore still disagree for an unset/embedded dolt_mode plus a
 	// bare port env var and no other server signal. That gap is real, narrow
-	// and tracked: be-2nolj owns whether this resolver should extend to the
+	// and tracked: GH#6181 owns whether this resolver should extend to the
 	// port signal, after the call-site audit such a change needs.
 	// Fall back to config.yaml dolt.mode setting (no metadata.json mode set)
 	return strings.EqualFold(config.GetYamlConfig("dolt.mode"), "server")
