@@ -20,6 +20,20 @@ import (
 	"github.com/steveyegge/beads/internal/storage/dbproxy/server"
 )
 
+// unixSocketPath returns a bindable Unix socket path. t.TempDir() embeds the
+// full test name, which on macOS sits under a long /var/folders/... root and
+// overflows the ~104-byte sun_path limit, so bind fails with "invalid
+// argument". A short unnamed temp dir stays well inside the limit.
+func unixSocketPath(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bdproxy")
+	if err != nil {
+		t.Fatalf("temp dir for unix socket: %v", err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return filepath.Join(dir, "u.sock")
+}
+
 // externalTransportFixture is a deliberately small real TCP/Unix listener
 // used to exercise the production proxy transport. It withholds all bytes in
 // blackhole mode and echoes bytes in echo mode. The open set lets tests prove
@@ -269,7 +283,7 @@ func TestExternalProxyEstablishedTunnelClientCloseDrainsTCPAndUnix(t *testing.T)
 			}
 			address := ""
 			if network == "unix" {
-				address = filepath.Join(t.TempDir(), "upstream.sock")
+				address = unixSocketPath(t)
 			}
 			fixture := newExternalTransportFixture(t, network, address, true)
 			running := startExternalProxy(t, fixture)
@@ -306,7 +320,7 @@ func TestExternalProxyShutdownClosesEstablishedTCPAndUnixTunnels(t *testing.T) {
 		t.Run(network, func(t *testing.T) {
 			address := ""
 			if network == "unix" {
-				address = filepath.Join(t.TempDir(), "upstream.sock")
+				address = unixSocketPath(t)
 			}
 			fixture := newExternalTransportFixture(t, network, address, true)
 			running := startExternalProxy(t, fixture)
@@ -341,7 +355,7 @@ func TestExternalProxyOutageAndRestoreReDialsTCPAndUnix(t *testing.T) {
 		t.Run(network, func(t *testing.T) {
 			address := ""
 			if network == "unix" {
-				address = filepath.Join(t.TempDir(), "upstream.sock")
+				address = unixSocketPath(t)
 			}
 			fixture := newExternalTransportFixture(t, network, address, false)
 			running := startExternalProxy(t, fixture)
@@ -412,7 +426,7 @@ func TestExternalProxyUnavailableStartupIsBoundedForTCPAndUnix(t *testing.T) {
 				address = ln.Addr().String()
 				_ = ln.Close()
 			} else {
-				address = filepath.Join(t.TempDir(), "missing.sock")
+				address = unixSocketPath(t)
 			}
 			upstream, err := server.NewExternalDoltServer(externalServerConfig(t, network, address))
 			if err != nil {

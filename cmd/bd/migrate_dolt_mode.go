@@ -299,6 +299,40 @@ func validateMigrationJournalAgainstConfig(j *migrateJournal, cfg *configfile.Co
 	return nil
 }
 
+// sameMigrationRoot reports whether two spellings name the same Dolt root.
+//
+// A recorded journal/sidecar root and the canonical root derived at run time
+// can be lexically different yet identical on disk: on macOS the temp and
+// data roots reach the same directory through the /var -> /private/var
+// symlink, so a filepath.Clean comparison alone rejects a valid topology.
+// Resolving the deepest existing component canonicalizes that prefix while
+// still working when the leaf itself has not been created yet.
+func sameMigrationRoot(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	return resolveExistingMigrationPath(a) == resolveExistingMigrationPath(b)
+}
+
+func resolveExistingMigrationPath(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	current := filepath.Clean(path)
+	var trailing string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, trailing)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(path)
+		}
+		trailing = filepath.Join(filepath.Base(current), trailing)
+		current = parent
+	}
+}
+
 func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, forward bool) error {
 	if j == nil {
 		return nil
@@ -311,7 +345,7 @@ func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, 
 			return fmt.Errorf("resolve shared Dolt root: %w", err)
 		}
 	}
-	if filepath.Clean(j.RootPath) != filepath.Clean(canonical) {
+	if !sameMigrationRoot(j.RootPath, canonical) {
 		return fmt.Errorf("journal root %s does not match canonical %s", j.RootPath, canonical)
 	}
 	if shared {
@@ -622,7 +656,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			if info.External != nil {
 				return migrationInvalidState("completed migration has an externally hosted proxied Dolt endpoint")
 			}
-			if filepath.Clean(info.ResolvedRootPath(beadsDir)) != filepath.Clean(canonicalRoot) {
+			if !sameMigrationRoot(info.ResolvedRootPath(beadsDir), canonicalRoot) {
 				return migrationInvalidState("proxied sidecar does not match canonical migration target")
 			}
 			if !shared && yamlSharedSet && yamlShared {
@@ -687,7 +721,7 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 				return externalMigrationRefusal("cannot migrate an externally hosted proxied Dolt endpoint; reconfigure the endpoint on its owner first")
 			}
 			resolvedSidecarRoot := info.ResolvedRootPath(beadsDir)
-			if resolvedSidecarRoot != "" && filepath.Clean(resolvedSidecarRoot) != filepath.Clean(rootPath) {
+			if resolvedSidecarRoot != "" && !sameMigrationRoot(resolvedSidecarRoot, rootPath) {
 				return HandleError("migration sidecar root %s does not match canonical %s", info.RootPath, rootPath)
 			}
 			return HandleError("migration sidecar exists without a recoverable journal; remove it only after verifying ownership")

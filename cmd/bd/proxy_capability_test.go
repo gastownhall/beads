@@ -156,6 +156,12 @@ func TestProxyWorkflowRefusalContractAndNoMutation(t *testing.T) {
 			oldJSON := jsonOutput
 			jsonOutput = true
 			t.Cleanup(func() { jsonOutput = oldJSON })
+			// commandDidWrite is a process-wide latch that any earlier test in
+			// this package may already have set, so it has to be baselined
+			// here or the assertion below reports another test's write.
+			oldDidWrite := commandDidWrite.Load()
+			commandDidWrite.Store(false)
+			t.Cleanup(func() { commandDidWrite.Store(oldDidWrite) })
 			out := captureStdout(t, func() error { _ = validateProxyMaintenanceBeforeProvider(cmd); return nil })
 			var got map[string]any
 			if err := json.Unmarshal([]byte(out), &got); err != nil || got["code"] != tc.code || got["error"] != tc.message {
