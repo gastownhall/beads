@@ -61,6 +61,32 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresWindowsEmbeddedInitGuard(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "test-windows-liveness")
+	step := job.step(t, "Run Windows embedded init guard")
+	if job.RunsOn != "windows-latest" || job.If != "" || job.ContinueOnError {
+		t.Error("embedded init guard must run in the required native Windows job")
+	}
+	if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Error("embedded init guard must not be conditional or allow failure")
+	}
+	if step.Shell != "pwsh" || step.Env["CGO_ENABLED"] != "1" {
+		t.Error("embedded init guard requires native PowerShell and its CGO test surface")
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if gate.If != "${{ always() }}" || gate.ContinueOnError {
+		t.Error("CI gate must evaluate failed and skipped Windows jobs")
+	}
+	if !contains(gate.Needs, "test-windows-liveness") ||
+		gateEnv["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "TEST_WINDOWS_LIVENESS") {
+		t.Error("embedded init guard must propagate through the required CI gate")
+	}
+}
+
 func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "complexity-report")
