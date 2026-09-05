@@ -937,6 +937,13 @@ func guardLegacyNoStoreCommand(cmd *cobra.Command, beadsDir string) error {
 		cmd == legacySQLiteCmd {
 		return nil
 	}
+	// Some explicit maintenance front doors validate an operator-selected
+	// target that is not an active workspace. They opt out of the legacy
+	// workspace guard in addition to the store-init guard; ordinary commands
+	// retain the guard by default.
+	if cmd.Annotations["bd:skip_legacy_guard"] == "1" {
+		return nil
+	}
 	if cmd == schemaCmd && cmd.Parent() != nil && cmd.Parent().Parent() == nil {
 		return nil
 	}
