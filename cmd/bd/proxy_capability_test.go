@@ -81,3 +81,31 @@ func TestProxyCapabilityDirectEscapeHatch(t *testing.T) {
 		}
 	}
 }
+
+func TestReadyClaimValidatesMaxRowsBeforeProvider(t *testing.T) {
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	root := &cobra.Command{Use: "bd"}
+	cmd := &cobra.Command{Use: "ready"}
+	cmd.Flags().Bool("claim", false, "")
+	cmd.Flags().Int("max-rows", 0, "")
+	root.AddCommand(cmd)
+	if err := cmd.Flags().Set("claim", "true"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Flags().Set("max-rows", "-1"); err != nil {
+		t.Fatal(err)
+	}
+	var gotErr error
+	out := captureStdout(t, func() error {
+		gotErr = validateProxyCapabilitiesBeforeProvider(cmd)
+		return nil
+	})
+	if code, ok := exitCodeFromError(gotErr); !ok || code != 1 {
+		t.Fatalf("ready claim invalid max-rows exit = %v, want 1", code)
+	}
+	if !strings.Contains(out, "--max-rows must be non-negative") {
+		t.Fatalf("ready claim invalid max-rows refusal = %q", out)
+	}
+}
