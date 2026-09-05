@@ -28,13 +28,14 @@ import (
 // dies with Error 1105 ("table with name issue_versions already exists");
 // once that's guarded, CREATE TABLE store_epoch would die the same way, and
 // once both are guarded, ALTER TABLE issues ADD COLUMN current_revision would
-// die on a duplicate-column error. Editing the shipped, content-hashed 0067
-// SQL bytes is constrained the same way 0040/0041 were (see
-// TestSchemaInitRecoversFromPartialNonlocalMigration above): CREATE TABLE IF
-// NOT EXISTS is safe, ordinary MySQL-flavored DDL, but MySQL (which Dolt
-// follows) has no ADD COLUMN IF NOT EXISTS — that is a MariaDB-only extension
-// — so the column guard must come from elsewhere in the runtime migration
-// path, not from the frozen file text itself.
+// die on a duplicate-column error. All four guards now live in the frozen
+// file itself: CREATE TABLE IF NOT EXISTS for the tables, and an
+// INFORMATION_SCHEMA-probed PREPARE for each plane's ADD COLUMN (MySQL, which
+// Dolt follows, has no ADD COLUMN IF NOT EXISTS — that is a MariaDB-only
+// extension). Keeping the guard in the SQL rather than in the Go runtime path
+// is what makes the file idempotent for callers that execute its bytes
+// directly, which is the shape
+// TestPR4107Migration0067ReplaysIdempotentlyAsRawSQL exercises.
 func TestSchemaInitReplaysMigration0067WhenBookkeepingRowMissing(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
@@ -90,11 +91,11 @@ func TestSchemaInitReplaysMigration0067WhenBookkeepingRowMissing(t *testing.T) {
 	}
 
 	// 3. Re-init replays migration 67 against a database that already has its
-	//    tables and column. RED (pre-fix): dies on Error 1105, "table with
+	//    tables and columns. RED (pre-fix): dies on Error 1105, "table with
 	//    name issue_versions already exists" — the same failure
 	//    TestProtocol_V2_DesignatedMigratorOverride hits at the full
 	//    bd-binary integration level. GREEN (post-fix): CREATE TABLE IF NOT
-	//    EXISTS plus the ADD COLUMN idempotency guard make the replay a clean
+	//    EXISTS plus the two guarded ADD COLUMNs make the replay a clean
 	//    no-op, and the chain reaches latest again.
 	if _, err := initSchemaOnDB(ctx, db); err != nil {
 		if !strings.Contains(err.Error(), "already exists") {
@@ -103,4 +104,90 @@ func TestSchemaInitReplaysMigration0067WhenBookkeepingRowMissing(t *testing.T) {
 		t.Fatalf("re-init after forged missing 0067 bookkeeping row (this is the designated-migrator replay bug, be-xrl84): %v", err)
 	}
 	assertSchemaVersionAtLeast(ctx, t, db, latest)
+}
+
+// TestMigration0067ReplaysIdempotentlyAsRawSQLThroughPR4107Harness is the
+// raw-SQL half of the same guarantee, and the half no Go-side guard can
+// provide.
+//
+// pr4107_corruption_test.go's runMigrationSQLFilesFrom re-executes the frozen
+// .up.sql bytes from 0046 onward straight through the driver, against a store
+// setupTestStore has already migrated to latest. Nothing in
+// internal/storage/schema is in that path — not execMigrationBody, not any
+// filename-keyed override — so every migration >= 0046 has to be idempotent
+// as raw SQL on its own. 0067's two ADD COLUMNs are guarded on
+// INFORMATION_SCHEMA for exactly this, and this test is the proof, run
+// through that harness rather than a hand-written double-apply: the same call
+// TestPR4107IssueIsBlockedMigrationMatchesRuntimeMixedGraphSemantics makes,
+// made twice.
+//
+// It also pins that the guard NO-OPS rather than re-applies: a column whose
+// replay silently dropped and re-added it would pass a mere "the column
+// exists" check while resetting every row to the DEFAULT. Phase 1 writes no
+// revisions, so the seeded value below is the only way to see that
+// difference from here.
+func TestMigration0067ReplaysIdempotentlyAsRawSQLThroughPR4107Harness(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	createPerm(t, ctx, store, "mig0067-replay-subject")
+	if _, err := store.db.ExecContext(ctx,
+		"UPDATE issues SET current_revision = 42 WHERE id = 'mig0067-replay-subject'"); err != nil {
+		t.Fatalf("seed current_revision: %v", err)
+	}
+	if _, err := store.db.ExecContext(ctx, `
+		INSERT INTO issue_versions (issue_id, revision, epoch, change_at)
+		VALUES ('mig0067-replay-subject', 42, 1, '2026-09-05 00:00:00')`); err != nil {
+		t.Fatalf("seed issue_versions row: %v", err)
+	}
+
+	for pass := 1; pass <= 2; pass++ {
+		runMigrationSQLFilesFrom(t, ctx, store, "../schema/migrations", 46)
+
+		for _, table := range []string{"issues", "wisps"} {
+			if got := countColumn(t, ctx, store, table, "current_revision"); got != 1 {
+				t.Fatalf("pass %d: %s.current_revision column count = %d, want exactly 1", pass, table, got)
+			}
+		}
+
+		var revision int64
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT current_revision FROM issues WHERE id = 'mig0067-replay-subject'").Scan(&revision); err != nil {
+			t.Fatalf("pass %d: read back current_revision: %v", pass, err)
+		}
+		if revision != 42 {
+			t.Fatalf("pass %d: issues.current_revision = %d, want the seeded 42 — the replay re-applied the ADD COLUMN instead of no-opping", pass, revision)
+		}
+
+		var versionRows int
+		if err := store.db.QueryRowContext(ctx,
+			"SELECT COUNT(*) FROM issue_versions WHERE issue_id = 'mig0067-replay-subject'").Scan(&versionRows); err != nil {
+			t.Fatalf("pass %d: count issue_versions: %v", pass, err)
+		}
+		if versionRows != 1 {
+			t.Fatalf("pass %d: issue_versions row count = %d, want 1 — CREATE TABLE IF NOT EXISTS must not recreate the table", pass, versionRows)
+		}
+
+		if got := countColumn(t, ctx, store, "store_epoch", "epoch"); got != 1 {
+			t.Fatalf("pass %d: store_epoch.epoch column count = %d, want 1", pass, got)
+		}
+	}
+}
+
+// countColumn returns how many INFORMATION_SCHEMA.COLUMNS rows table.column
+// has in the current database — 0 or 1 in practice, and the assertion that
+// distinguishes "the guard held" from "the replay added a second one".
+func countColumn(t *testing.T, ctx context.Context, store *DoltStore, table, column string) int {
+	t.Helper()
+	var n int
+	if err := store.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?`,
+		table, column).Scan(&n); err != nil {
+		t.Fatalf("count %s.%s: %v", table, column, err)
+	}
+	return n
 }

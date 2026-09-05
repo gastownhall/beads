@@ -1927,6 +1927,9 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		"ALTER TABLE wisp_comments MODIFY COLUMN text LONGTEXT NOT NULL;",
 		// 0066: same prepared-ALTER shape as 0060, same CLI no-op on 2.2.x.
 		"ALTER TABLE bd_events_journal ADD COLUMN actor VARCHAR(255) NOT NULL DEFAULT '';",
+		// 0067: two-plane prepared ADD COLUMN, same shape as 0060.
+		"ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;",
+		"ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1948,6 +1951,11 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0066 guards its ALTER the same way; only its source text carries
 		// this probe (the events table's actor column is a bare CREATE).
 		"COLUMN_NAME = 'actor'",
+		// 0067 guards both planes' ALTERs the same way. Its two guard
+		// variables are the per-migration anchors; the probe token would
+		// also appear in the ignored twin, which is not bundled.
+		"@issues_cr_needs_add",
+		"@wisps_cr_needs_add",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
