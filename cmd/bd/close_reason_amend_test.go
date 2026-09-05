@@ -130,6 +130,15 @@ func TestCloseAlreadyClosedRefusesReasonOnEmptyStored(t *testing.T) {
 	if !strings.Contains(res.stderr, "empty close reason") {
 		t.Errorf("refusal does not say the stored reason is empty:\n%s", res.stderr)
 	}
+	// The gap codex caught on the first revision: an empty stored reason made
+	// the success line fall back to the SUPPLIED text, echoing the discarded
+	// reason back on exactly the shape this bead was filed about.
+	if strings.Contains(res.stdout, amendSuppliedReason) {
+		t.Errorf("stdout echoed the discarded reason back:\n%s", res.stdout)
+	}
+	if !strings.Contains(res.stdout, "(no close reason recorded)") {
+		t.Errorf("stdout does not say the record carries no reason:\n%s", res.stdout)
+	}
 	if got := env.get("test-amd4").CloseReason; got != "" {
 		t.Errorf("close_reason = %q, want it still empty", got)
 	}
@@ -175,7 +184,8 @@ func TestCloseReportedReason(t *testing.T) {
 	}{
 		{"a real close reports what it wrote", true, "new", "", "new"},
 		{"a no-op reports the stored reason", false, "new", "stored", "stored"},
-		{"a no-op with nothing stored has nothing truer to print", false, "new", "", "new"},
+		{"a no-op with nothing stored never borrows the supplied text", false, "new", "", noCloseReasonRecorded},
+		{"whitespace is not a stored reason either", false, "new", "  \n ", noCloseReasonRecorded},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
