@@ -1003,8 +1003,39 @@ func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source Reco
 //
 //nolint:gosec // G201: table names come from WispTableRouting (hardcoded constants)
 func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
+	return getIssuesByIDsInTx(ctx, tx, ids, wispSet, false)
+}
+
+// GetIssuesByIDsLiteInTx is GetIssuesByIDsInTx with the LITE projection: it
+// reads IssueSelectColumnsLite and scans with ScanIssueLiteFrom, so the six
+// heavy TEXT columns (description, design, acceptance_criteria, notes, payload,
+// waiters) come back zero-valued with IsLitePartial=true on every row. Labels
+// are hydrated exactly as the full form hydrates them - lite drops free-form
+// TEXT, never a relationship.
+//
+// It exists as a second exported name rather than a bool parameter on the
+// existing one because the two answer different questions and the caller must
+// say which: a row from here CANNOT be handed to anything that reads a body,
+// and a signature change would have made every one of the twelve existing call
+// sites silently re-classify. Use it only where the rows are consumed for
+// identity, routing or ordering; a caller that needs a body refetches by id.
+func GetIssuesByIDsLiteInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[string]struct{}) ([]*types.Issue, error) {
+	return getIssuesByIDsInTx(ctx, tx, ids, wispSet, true)
+}
+
+func getIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[string]struct{}, lite bool) ([]*types.Issue, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+
+	// The column list and the scan function are chosen together, never
+	// separately: ScanIssueFrom and ScanIssueLiteFrom scan POSITIONALLY, so a
+	// mismatched pair does not fail on the missing text - it shifts every
+	// column after the first dropped one. The schema-parity test pins the two
+	// lists against each other; this pairs them at the one place they are used.
+	columns, scan := IssueSelectColumns, ScanIssueFrom
+	if lite {
+		columns, scan = IssueSelectColumnsLite, ScanIssueLiteFrom
 	}
 
 	if wispSet == nil {
@@ -1047,13 +1078,13 @@ func GetIssuesByIDsInTx(ctx context.Context, tx DBTX, ids []string, wispSet map[
 
 			rows, err := tx.QueryContext(ctx, fmt.Sprintf(
 				`SELECT %s FROM %s %s WHERE id IN (%s)`,
-				IssueSelectColumns, pair.table, sqlbuild.LeaseJoin(pair.table), inClause), args...)
+				columns, pair.table, sqlbuild.LeaseJoin(pair.table), inClause), args...)
 			if err != nil {
 				return nil, fmt.Errorf("get issues by IDs from %s: %w", pair.table, err)
 			}
 			issueMap := make(map[string]*types.Issue)
 			for rows.Next() {
-				issue, scanErr := ScanIssueFrom(rows)
+				issue, scanErr := scan(rows)
 				if scanErr != nil {
 					_ = rows.Close()
 					return nil, fmt.Errorf("get issues by IDs: scan: %w", scanErr)
