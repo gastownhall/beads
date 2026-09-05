@@ -2497,7 +2497,11 @@ Aborting.`, ui.RenderWarn("⚠"), proxiedRoot, ui.RenderAccent("bd list"))
 			entries, err := os.ReadDir(embeddedRoot)
 			if err != nil {
 				if os.IsNotExist(err) {
-					return nil // No embedded root -> fresh clone, safe to init
+					// On Windows, ReadDir can report a missing path for a regular file.
+					// Confirm absence before treating the root as a fresh clone.
+					if _, statErr := os.Stat(embeddedRoot); os.IsNotExist(statErr) {
+						return nil // No embedded root -> fresh clone, safe to init
+					}
 				}
 				return fmt.Errorf("failed to read embedded dolt directory %s: %w", embeddedRoot, err)
 			}
