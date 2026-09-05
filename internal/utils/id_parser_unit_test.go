@@ -89,8 +89,9 @@ func TestEmitPartialResolutionNoticeNamesBothIDs(t *testing.T) {
 // list. It avoids the live-Dolt dependency in id_parser_test.go, which skips
 // when no test server is running and so cannot pin this behaviour in CI.
 type fakeResolverStore struct {
-	ids    []string
-	prefix string
+	ids     []string
+	prefix  string
+	allowed string // allowed_prefixes config, for cross-prefix cases
 }
 
 func (f *fakeResolverStore) SearchIssues(_ context.Context, _ string, filter types.IssueFilter) ([]*types.Issue, error) {
@@ -117,8 +118,11 @@ func (f *fakeResolverStore) SearchIssueIDs(_ context.Context, query string, _ ty
 }
 
 func (f *fakeResolverStore) GetConfig(_ context.Context, key string) (string, error) {
-	if key == "issue_prefix" {
+	switch key {
+	case "issue_prefix":
 		return f.prefix, nil
+	case "allowed_prefixes":
+		return f.allowed, nil
 	}
 	return "", nil
 }
@@ -142,6 +146,66 @@ func TestResolvePartialIDNotifiesWhenParentIDResolvesToItsChild(t *testing.T) {
 	}
 	if !strings.Contains(out, "bd-x.11.1") || !strings.Contains(out, "not an exact issue ID") {
 		t.Fatalf("expected a partial-resolution notice on stderr, got %q", out)
+	}
+}
+
+// Reaching the in-loop exact-hash return needs a CROSS-PREFIX input: both
+// fast paths (raw input, then prefix-normalized input) miss, because the
+// issue's real prefix is an allowed one that is not the configured default, so
+// resolution falls through to the search loop and matches on hash alone. That
+// return is a second silent exit, and an emission planted there survives any
+// test that only exercises the fast paths.
+func TestResolvePartialIDSilentOnCrossPrefixExactHashMatch(t *testing.T) {
+	store := &fakeResolverStore{ids: []string{"hq-a3f8e9"}, prefix: "bd", allowed: "hq"}
+
+	var resolved string
+	var err error
+	out := captureStderr(t, func() {
+		resolved, err = ResolvePartialID(context.Background(), store, "a3f8e9")
+	})
+	if err != nil {
+		t.Fatalf("ResolvePartialID returned error: %v", err)
+	}
+	if resolved != "hq-a3f8e9" {
+		t.Fatalf("resolved = %q, want %q", resolved, "hq-a3f8e9")
+	}
+	if out != "" {
+		t.Fatalf("expected no notice for an exact hash match, got %q", out)
+	}
+}
+
+// A prefix-less exact input is still silent, via the normalized fast path.
+func TestResolvePartialIDSilentOnPrefixlessExactMatch(t *testing.T) {
+	store := &fakeResolverStore{ids: []string{"bd-a3f8e9"}, prefix: "bd"}
+
+	var resolved string
+	var err error
+	out := captureStderr(t, func() {
+		resolved, err = ResolvePartialID(context.Background(), store, "a3f8e9")
+	})
+	if err != nil {
+		t.Fatalf("ResolvePartialID returned error: %v", err)
+	}
+	if resolved != "bd-a3f8e9" {
+		t.Fatalf("resolved = %q, want %q", resolved, "bd-a3f8e9")
+	}
+	if out != "" {
+		t.Fatalf("expected no notice for an exact match, got %q", out)
+	}
+}
+
+// The documented abbreviation path notifies too — this is not limited to the
+// parent/child shape, and the CHANGELOG says so.
+func TestResolvePartialIDNotifiesOnOrdinaryAbbreviation(t *testing.T) {
+	store := &fakeResolverStore{ids: []string{"bd-a3f8e9"}, prefix: "bd"}
+
+	out := captureStderr(t, func() {
+		if _, err := ResolvePartialID(context.Background(), store, "a3f8"); err != nil {
+			t.Errorf("ResolvePartialID returned error: %v", err)
+		}
+	})
+	if !strings.Contains(out, "bd-a3f8e9") {
+		t.Fatalf("expected a notice naming the resolved ID, got %q", out)
 	}
 }
 
@@ -171,6 +235,12 @@ func captureStderr(t *testing.T, fn func()) string {
 	if err != nil {
 		t.Fatalf("os.Pipe: %v", err)
 	}
+	// Restore even if fn panics, so one failure cannot swallow every later
+	// test's stderr. Both pipe ends are closed before returning.
+	defer func() {
+		os.Stderr = orig
+		_ = r.Close()
+	}()
 	os.Stderr = w
 	done := make(chan string, 1)
 	go func() {
@@ -180,6 +250,5 @@ func captureStderr(t *testing.T, fn func()) string {
 	}()
 	fn()
 	_ = w.Close()
-	os.Stderr = orig
 	return <-done
 }

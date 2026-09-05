@@ -17,7 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   signal. bd now writes a one-line note to stderr identifying both the input and
   what it resolved to. The case that motivates it: a hierarchical child is a
   valid leading-prefix match for its own parent's ID, so after a parent is
-  renamed or deleted the vacated ID quietly resolves to the child. stdout and
+  renamed or deleted the vacated ID quietly resolves to the child. Note this
+  covers **every** leading-prefix abbreviation, not only that shape, so the
+  ordinary documented `a3f8` -> `bd-a3f8e9` path now emits a line too, once per
+  resolved argument. That breadth is deliberate: a `.`-boundary rule would fix
+  parent/child but leave `bd-x.1` -> `bd-x.11` just as silent. stdout and
   `--json` are unchanged; silence it with `--quiet` or
   `BD_NO_PARTIAL_ID_NOTICE=1`.
 
