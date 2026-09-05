@@ -279,7 +279,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if (-not $IsWindows) { throw 'The embedded init regression requires Windows' }
-          $go = (Get-Command go -CommandType Application -ErrorAction Stop).Source
+          $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           if (((& $go env GOHOSTOS GOOS) -join '/') -ne 'windows/windows') {
             throw 'The embedded init regression requires native Windows Go'
           }
