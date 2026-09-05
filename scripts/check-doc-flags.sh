@@ -99,7 +99,7 @@ SQLITE_REFS=$(grep -rn 'beads\.db\|default\.db\|sqlite3.*\.beads\|\.beads/.*\.db
     2>/dev/null \
     | grep -v 'CHANGELOG\|removed\|legacy\|migration\|migrate\|was removed\|pre-\|old\|deprecated' \
     | grep -vE 'docs/CLI_REFERENCE\.md:.*--db string.*Database path' \
-    | grep -vE 'docs/architecture/dolt\.md:.*\.backup-.*\.db' \
+    | grep -vE 'docs/DOLT\.md:.*\.backup-.*\.db' \
     | grep -vE 'AGENT_INSTRUCTIONS\.md:.*filepath\.Join\(tmpDir, "\.beads", "beads\.db"\)' \
     || true)
 

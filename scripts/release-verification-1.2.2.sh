@@ -49,7 +49,7 @@ BD_NEW="$WORK/bd-1.2.2"
 say "L1: version + schema skew unit tests"
 v="$("$BD_NEW" version 2>/dev/null | head -1)"
 case "$v" in *1.2.2*) ok "L1a bd version reports 1.2.2 ($v)";; *) bad "L1a bd version = '$v', want 1.2.2";; esac
-if (cd "$ROOT" && go test ./internal/storage/schema/ -run 'TestSchemaSkew' -count=1 >/dev/null 2>&1); then
+if (cd "$ROOT" && go test -tags gms_pure_go ./internal/storage/schema/ -run 'TestSchemaSkew' -count=1 >/dev/null 2>&1); then
     ok "L1b schema skew unit tests"
 else
     bad "L1b schema skew unit tests"
