@@ -14,12 +14,8 @@ jobs:
           # same file. Matching a bare "=======" line alone flagged SQL,
           # shell and Markdown separators fleet-wide (false red on every PR),
           # so a file is reported only when it carries both real markers.
-          excludes=':(exclude)**/.venv/**' \
-                   ':(exclude)**/node_modules/**' \
-                   ':(exclude)**/dist/**' \
-                   ':(exclude)**/build/**' \
-                   ':(exclude)**/.cache/**' \
-                   ':(exclude)**/_vendor/**'
+          excludes=":(exclude)**/.venv/** :(exclude)**/node_modules/** :(exclude)**/dist/** :(exclude)**/build/** :(exclude)**/.cache/** :(exclude)**/_vendor/**"
+          # shellcheck disable=SC2086 -- $excludes is a space-separated pathspec list on purpose
           opening=$(git grep -l -E '^<<<<<<< ' -- . $excludes || true)
           closing=$(git grep -l -E '^>>>>>>> ' -- . $excludes || true)
           markers=$(comm -12 <(printf '%s\n' "$opening" | sort -u) <(printf '%s\n' "$closing" | sort -u) | sed '/^$/d')
