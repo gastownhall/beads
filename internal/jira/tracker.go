@@ -10,7 +10,6 @@ import (
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
-	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/tracker"
 	"github.com/steveyegge/beads/internal/types"
 )
@@ -24,7 +23,7 @@ func init() {
 // Tracker implements tracker.IssueTracker for Jira.
 type Tracker struct {
 	client           *Client
-	store            storage.Storage
+	store            tracker.Store
 	jiraURL          string
 	projectKeys      []string                          // one or more project keys (first is primary)
 	apiVersion       string                            // "2" or "3" (default: "3")
@@ -58,7 +57,7 @@ func (t *Tracker) Name() string         { return "jira" }
 func (t *Tracker) DisplayName() string  { return "Jira" }
 func (t *Tracker) ConfigPrefix() string { return "jira" }
 
-func (t *Tracker) Init(ctx context.Context, store storage.Storage) error {
+func (t *Tracker) Init(ctx context.Context, store tracker.Store) error {
 	t.store = store
 
 	jiraURL, err := t.getConfig(ctx, "jira.url", "JIRA_URL")

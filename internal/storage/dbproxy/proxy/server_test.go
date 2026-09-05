@@ -406,6 +406,53 @@ func TestProxy_BackendDialError(t *testing.T) {
 	assertNoPidFile(t, root)
 }
 
+func TestProxy_BackendDialFailureHasStableDiagnosticAndNoFallbackFiles(t *testing.T) {
+	t.Parallel()
+
+	ts := server.New()
+	stats := &proxy.Stats{}
+	port := freeTCPPort(t)
+	root := t.TempDir()
+	h := runProxy(t, proxy.ProxyOpts{
+		RootDir: root, Port: port, Server: ts, Stats: stats,
+	})
+	waitListening(t, root, listenWait)
+
+	before, err := os.ReadDir(root)
+	require.NoError(t, err)
+	ts.SetDialErr(errors.New("upstream unavailable"))
+	c := dialProxy(t, port)
+	_, err = c.Read(make([]byte, 1))
+	assert.Error(t, err)
+	require.NoError(t, c.Close())
+	require.Eventually(t, func() bool {
+		return stats.Snapshot().BackendDialErrors >= 1
+	}, ioTimeout, 10*time.Millisecond)
+
+	logData, err := os.ReadFile(filepath.Join(root, proxy.LogFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(logData), "backend dial error:")
+	assert.NotContains(t, string(logData), "fallback")
+	after, err := os.ReadDir(root)
+	require.NoError(t, err)
+	assert.Equal(t, dirEntryNames(before), dirEntryNames(after), "dial failure must not create fallback files")
+	pf, err := pidfile.Read(root, proxy.PIDFileName)
+	require.NoError(t, err)
+	assert.NotNil(t, pf, "proxy remains alive after one upstream dial failure")
+
+	h.Cancel()
+	require.NoError(t, h.waitErr(t, shutdownWait))
+	assertNoPidFile(t, root)
+}
+
+func dirEntryNames(entries []os.DirEntry) []string {
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
 func TestProxy_IdleTimeout_Fires(t *testing.T) {
 	t.Parallel()
 

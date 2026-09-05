@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`bd ready --claim` now refuses a row cap under `--proxied-server`.** The
+  proxied ready role cannot enforce `--max-rows`/`BEADS_MAX_ROWS`, so bd fails
+  loudly rather than silently dropping the limit; `--claim` no longer exempts
+  the command. Agent rigs that set the cap globally must unset it for proxied
+  `bd ready --claim`. Direct mode is unchanged, and a claim there still
+  succeeds against a ready pool larger than the cap.
+
 ## [1.3.0] - 2026-08-28
 
 The first tested release off `main` since the 1.1 line. [1.2.2] was a recovery

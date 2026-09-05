@@ -84,9 +84,11 @@ const (
 	readyDialTimeout       = 2 * time.Second
 	readyInitialBackoff    = 50 * time.Millisecond
 	readyMaxBackoff        = 1 * time.Second
+	backendDialTimeout     = 5 * time.Second
 	idleWatcherMinInterval = 1 * time.Second
 	backendStopTimeout     = 5 * time.Minute
 	tcpKeepAlivePeriod     = 30 * time.Second
+	backendHealthInterval  = 100 * time.Millisecond
 )
 
 var errIdleTimeout = errors.New("idle timeout reached")
@@ -337,6 +339,20 @@ func (p *proxyServer) ListenAndServe(parentCtx context.Context) error {
 		return nil
 	})
 	g.Go(func() error { return p.idleWatcher(gctx) })
+	g.Go(func() error {
+		t := time.NewTicker(backendHealthInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-gctx.Done():
+				return nil
+			case <-t.C:
+				if !p.server.Running(gctx) {
+					return errors.New("database server exited")
+				}
+			}
+		}
+	})
 	g.Go(func() error { return p.acceptLoop(gctx) })
 
 	runErr := g.Wait()
@@ -437,7 +453,9 @@ func (p *proxyServer) handleConn(ctx context.Context, client net.Conn) error {
 	}()
 
 	p.stats.IncBackendDialAttempt()
-	backend, err := p.server.Dial(ctx)
+	dialCtx, cancelDial := context.WithTimeout(ctx, backendDialTimeout)
+	backend, err := p.server.Dial(dialCtx)
+	cancelDial()
 	if err != nil {
 		p.tracef("handleConn(%s) backend dial error: %v", addr, err)
 		p.stats.IncBackendDialError()

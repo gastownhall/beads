@@ -75,7 +75,7 @@ func rejectMaxRowsUnderProxiedServer(cmd *cobra.Command) error {
 // that warning under proxied mode (be-x42v.4 round-4 follow-up).
 func rejectResolvedMaxRowsUnderProxiedServer(maxRows int) error {
 	if maxRows > 0 {
-		return HandleErrorRespectJSON("--max-rows / BEADS_MAX_ROWS is not supported in proxied-server mode")
+		return HandleProxyCapabilityError(AssertProxyCapability(ProxyModeProxied, ProxyCapMaxRows))
 	}
 	return nil
 }

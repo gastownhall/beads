@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,6 +25,363 @@ import (
 )
 
 const migrateLockFileName = "migrate.lock"
+
+const migrateJournalFileName = "dolt-mode-migration.json"
+
+type migratePhase string
+
+const (
+	migratePrepared           migratePhase = "prepared"
+	migrateTargetConfigured   migratePhase = "target_configured"
+	migrateOldControlsRetired migratePhase = "old_controls_retired"
+	migrateVerified           migratePhase = "verified"
+	migrateCommitted          migratePhase = "committed"
+)
+
+type migrateJournal struct {
+	Version    int                                 `json:"version"`
+	SourceMode string                              `json:"source_mode"`
+	TargetMode string                              `json:"target_mode"`
+	Shared     bool                                `json:"shared"`
+	RootPath   string                              `json:"root_path,omitempty"`
+	External   *configfile.ExternalDoltConfig      `json:"external,omitempty"`
+	Sidecar    *configfile.ProxiedServerClientInfo `json:"sidecar,omitempty"`
+	LogAssets  []string                            `json:"log_assets,omitempty"`
+	Ownership  string                              `json:"ownership"`
+	Attempt    int                                 `json:"attempt"`
+	Phase      migratePhase                        `json:"phase"`
+}
+type migrateDryRunOutput struct {
+	DryRun     bool   `json:"dry_run"`
+	SourceMode string `json:"source_mode"`
+	TargetMode string `json:"target_mode"`
+	Shared     bool   `json:"shared"`
+	RootPath   string `json:"root_path"`
+}
+
+func migrateJournalPath(beadsDir string) string {
+	return filepath.Join(beadsDir, migrateJournalFileName)
+}
+
+func loadMigrateJournal(beadsDir string) (*migrateJournal, error) {
+	b, err := os.ReadFile(migrateJournalPath(beadsDir))
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", migrateJournalFileName, err)
+	}
+	var j migrateJournal
+	if err := json.Unmarshal(b, &j); err != nil {
+		return nil, fmt.Errorf("parsing %s: %w", migrateJournalFileName, err)
+	}
+	if j.Version != 1 || j.SourceMode == "" || j.TargetMode == "" || j.Phase == "" || j.Attempt < 1 {
+		return nil, fmt.Errorf("invalid %s: missing required migration state", migrateJournalFileName)
+	}
+	switch j.Phase {
+	case migratePrepared, migrateTargetConfigured, migrateOldControlsRetired, migrateVerified, migrateCommitted:
+	default:
+		return nil, fmt.Errorf("invalid %s: unknown phase %q", migrateJournalFileName, j.Phase)
+	}
+	if j.RootPath == "" || !filepath.IsAbs(j.RootPath) || filepath.Clean(j.RootPath) != j.RootPath {
+		return nil, fmt.Errorf("invalid %s: root_path must be a clean absolute path", migrateJournalFileName)
+	}
+	if j.SourceMode == configfile.DoltModeServer && j.TargetMode == configfile.DoltModeProxiedServer {
+		if j.Shared { /* shared-server uses server mode plus shared topology */
+		}
+	} else if j.SourceMode == configfile.DoltModeProxiedServer && (j.TargetMode == configfile.DoltModeServer || j.TargetMode == "shared-server") {
+		if j.TargetMode == "shared-server" && !j.Shared {
+			return nil, fmt.Errorf("invalid %s: shared target requires shared topology", migrateJournalFileName)
+		}
+		if j.TargetMode == configfile.DoltModeServer && j.Shared {
+			return nil, fmt.Errorf("invalid %s: server target cannot use shared topology", migrateJournalFileName)
+		}
+	} else {
+		return nil, fmt.Errorf("invalid %s: unsupported mode transition %s -> %s", migrateJournalFileName, j.SourceMode, j.TargetMode)
+	}
+	if j.Sidecar == nil {
+		return nil, fmt.Errorf("invalid %s: missing sidecar topology", migrateJournalFileName)
+	}
+	if j.Sidecar.RootPath == "" || j.Sidecar.ResolvedRootPath(beadsDir) == "" {
+		return nil, fmt.Errorf("invalid %s: sidecar root_path is required", migrateJournalFileName)
+	}
+	if j.Ownership != "managed-local" && j.Ownership != "external" {
+		return nil, fmt.Errorf("invalid %s: unknown ownership %q", migrateJournalFileName, j.Ownership)
+	}
+	// Journals written before the External field was added recorded the
+	// endpoint only in the sidecar. Infer it for compatibility so recovery
+	// still takes the typed, fail-closed external path.
+	if j.External == nil && j.Ownership == "external" && j.Sidecar.External != nil {
+		j.External = j.Sidecar.External
+	}
+	if j.Ownership == "external" && j.Sidecar.External == nil {
+		return nil, fmt.Errorf("invalid %s: external ownership missing endpoint", migrateJournalFileName)
+	}
+	if j.Ownership == "managed-local" && j.Sidecar.External != nil {
+		return nil, fmt.Errorf("invalid %s: managed-local ownership has external endpoint", migrateJournalFileName)
+	}
+	if !reflect.DeepEqual(j.External, j.Sidecar.External) {
+		return nil, fmt.Errorf("invalid %s: external topology disagrees with sidecar", migrateJournalFileName)
+	}
+	if j.Sidecar.External != nil {
+		if err := j.Sidecar.External.Validate(); err != nil {
+			return nil, fmt.Errorf("invalid %s external topology: %w", migrateJournalFileName, err)
+		}
+	}
+	if rp := j.Sidecar.ResolvedRootPath(beadsDir); rp != "" && filepath.Clean(rp) != j.RootPath {
+		return nil, fmt.Errorf("invalid %s: sidecar root does not match root_path", migrateJournalFileName)
+	}
+	return &j, nil
+}
+
+func saveMigrateJournal(beadsDir string, j *migrateJournal) error {
+	b, err := json.MarshalIndent(j, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(beadsDir, ".dolt-mode-migration-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }()
+	if err = tmp.Chmod(0o600); err == nil {
+		_, err = tmp.Write(b)
+	}
+	if err == nil {
+		err = tmp.Sync()
+	}
+	if closeErr := tmp.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return fmt.Errorf("writing %s: %w", migrateJournalFileName, err)
+	}
+	if err = os.Rename(tmpName, migrateJournalPath(beadsDir)); err != nil {
+		return err
+	}
+	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
+	if err != nil {
+		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	}
+	if err = d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing %s directory: %w", migrateJournalFileName, err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("closing %s directory: %w", migrateJournalFileName, err)
+	}
+	return nil
+}
+
+func removeMigrateJournal(beadsDir string) error {
+	if err := os.Remove(migrateJournalPath(beadsDir)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	d, err := os.Open(beadsDir) // #nosec G304 -- beadsDir is the discovered workspace directory
+	if err != nil {
+		return fmt.Errorf("opening migration directory: %w", err)
+	}
+	if err = d.Sync(); err != nil {
+		_ = d.Close()
+		return fmt.Errorf("syncing migration directory: %w", err)
+	}
+	if err = d.Close(); err != nil {
+		return fmt.Errorf("closing migration directory: %w", err)
+	}
+	return nil
+}
+
+func migrateFault(phase migratePhase) error {
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("BEADS_MIGRATION_FAIL_PHASE")), string(phase)) {
+		return fmt.Errorf("migration fault injected after phase %s", phase)
+	}
+	return nil
+}
+
+func externalMigrationRefusal(message string) error {
+	return HandleProxyCapabilityError(&ProxyCapabilityError{
+		Code:     "proxy.migrate.external_endpoint",
+		Message:  message,
+		ExitCode: 1,
+		Mutates:  false,
+	})
+}
+
+func migrationInvalidState(message string) error {
+	return HandleProxyCapabilityError(&ProxyCapabilityError{
+		Code:     "proxy.migrate.invalid_state",
+		Message:  message,
+		ExitCode: 1,
+		Mutates:  false,
+	})
+}
+
+// validateCompletedProxyControls verifies that an already-proxied target has
+// no live process or stale lifecycle artifacts. Empty, unlocked lock markers
+// are harmless leftovers from a prior lifecycle and are intentionally
+// accepted; a held marker still proves active ownership and is refused.
+func validateCompletedProxyControls(root string) error {
+	if running, _ := proxy.IsRunning(root); running {
+		return migrationInvalidState("completed migration still has a running proxy")
+	}
+	for _, control := range proxy.ControlFilePaths(root) {
+		if _, statErr := os.Stat(control); statErr != nil {
+			if os.IsNotExist(statErr) {
+				continue
+			}
+			return migrationInvalidState(fmt.Sprintf("completed migration cannot inspect proxy control %s: %v", control, statErr))
+		}
+		base := filepath.Base(control)
+		if base == proxy.LockFileName || base == server.LockFileName {
+			lock, lockErr := util.TryLock(control)
+			if lockErr == nil {
+				lock.Unlock()
+				continue
+			}
+			return migrationInvalidState(fmt.Sprintf("completed migration has a held proxy control %s", base))
+		}
+		return migrationInvalidState(fmt.Sprintf("completed migration has stale proxy control %s", base))
+	}
+	return nil
+}
+
+func validateCompletedLockMarker(path string, label string) error {
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return migrationInvalidState(fmt.Sprintf("completed migration cannot inspect %s: %v", label, err))
+	}
+	lock, err := util.TryLock(path)
+	if err != nil {
+		return migrationInvalidState(fmt.Sprintf("completed migration has a held %s", label))
+	}
+	lock.Unlock()
+	return nil
+}
+
+func migrationSidecarsEquivalent(beadsDir string, a, b *configfile.ProxiedServerClientInfo) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.ResolvedRootPath(beadsDir) == b.ResolvedRootPath(beadsDir) &&
+		a.ResolvedConfigPath(beadsDir) == b.ResolvedConfigPath(beadsDir) &&
+		a.ResolvedLogPath(beadsDir) == b.ResolvedLogPath(beadsDir) &&
+		a.Port == b.Port && a.IdleTimeout == b.IdleTimeout &&
+		reflect.DeepEqual(a.External, b.External)
+}
+
+func checkpointMigration(beadsDir string, j *migrateJournal, phase migratePhase) error {
+	j.Phase = phase
+	if err := saveMigrateJournal(beadsDir, j); err != nil {
+		return err
+	}
+	return migrateFault(phase)
+}
+
+func validateMigrationJournalAgainstConfig(j *migrateJournal, cfg *configfile.Config) error {
+	if j == nil || cfg == nil {
+		return nil
+	}
+	if j.Phase == migratePrepared {
+		if cfg.GetDoltMode() != j.SourceMode && cfg.GetDoltMode() != j.TargetMode && !(j.TargetMode == "shared-server" && cfg.IsDoltServerMode()) {
+			return fmt.Errorf("migration journal phase %s disagrees with metadata mode %q", j.Phase, cfg.GetDoltMode())
+		}
+		return nil
+	}
+	if j.TargetMode == configfile.DoltModeProxiedServer && !cfg.IsDoltProxiedServerMode() {
+		return fmt.Errorf("migration journal phase %s requires proxied-server metadata", j.Phase)
+	}
+	if j.TargetMode != configfile.DoltModeProxiedServer && !cfg.IsDoltServerMode() {
+		return fmt.Errorf("migration journal phase %s requires server metadata", j.Phase)
+	}
+	return nil
+}
+
+// sameMigrationRoot reports whether two spellings name the same Dolt root.
+//
+// A recorded journal/sidecar root and the canonical root derived at run time
+// can be lexically different yet identical on disk: on macOS the temp and
+// data roots reach the same directory through the /var -> /private/var
+// symlink, so a filepath.Clean comparison alone rejects a valid topology.
+// Resolving the deepest existing component canonicalizes that prefix while
+// still working when the leaf itself has not been created yet.
+func sameMigrationRoot(a, b string) bool {
+	if filepath.Clean(a) == filepath.Clean(b) {
+		return true
+	}
+	return resolveExistingMigrationPath(a) == resolveExistingMigrationPath(b)
+}
+
+func resolveExistingMigrationPath(path string) string {
+	if path == "" || !filepath.IsAbs(path) {
+		return filepath.Clean(path)
+	}
+	current := filepath.Clean(path)
+	var trailing string
+	for {
+		if resolved, err := filepath.EvalSymlinks(current); err == nil {
+			return filepath.Join(resolved, trailing)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(path)
+		}
+		trailing = filepath.Join(filepath.Base(current), trailing)
+		current = parent
+	}
+}
+
+func validateMigrationTopology(beadsDir string, j *migrateJournal, shared bool, forward bool) error {
+	if j == nil {
+		return nil
+	}
+	canonical := doltserver.DoltDirPath(beadsDir)
+	if shared {
+		var err error
+		canonical, err = doltserver.SharedDoltPath()
+		if err != nil {
+			return fmt.Errorf("resolve shared Dolt root: %w", err)
+		}
+	}
+	if !sameMigrationRoot(j.RootPath, canonical) {
+		return fmt.Errorf("journal root %s does not match canonical %s", j.RootPath, canonical)
+	}
+	if shared {
+		want := "true"
+		if j.Phase != migratePrepared {
+			want = "false"
+		}
+		if !forward {
+			want = "true"
+			if j.Phase == migratePrepared {
+				want = "false"
+			}
+		}
+		if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); !ok || strings.ToLower(v) != want {
+			return fmt.Errorf("shared-server YAML is %q, want %s for phase %s", v, want, j.Phase)
+		}
+	}
+	return nil
+}
+
+func validateDoltRoot(root string) error {
+	b, err := os.ReadFile(filepath.Join(root, ".dolt", "repo_state.json")) // #nosec G304 -- root is validated migration workspace path
+	if err != nil {
+		return fmt.Errorf("read Dolt identity: %w", err)
+	}
+	var obj struct {
+		Head     string                 `json:"head"`
+		Remotes  map[string]interface{} `json:"remotes"`
+		Backups  map[string]interface{} `json:"backups"`
+		Branches map[string]interface{} `json:"branches"`
+	}
+	if err := json.Unmarshal(b, &obj); err != nil || obj.Head == "" || !strings.HasPrefix(obj.Head, "refs/heads/") || strings.TrimPrefix(obj.Head, "refs/heads/") == "" || obj.Remotes == nil || obj.Backups == nil || obj.Branches == nil {
+		return fmt.Errorf("invalid Dolt identity repo_state.json")
+	}
+	return nil
+}
 
 func migrateToProxiedRunE(metricName, checkName string, shared bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
@@ -143,6 +504,20 @@ func resolveMigrateIdleTimeout(cmd *cobra.Command) (time.Duration, error) {
 	return v, nil
 }
 
+// formatMigrateIdleTimeout renders a resolved idle timeout for operator-facing
+// messages. resolveMigrateIdleTimeout maps an omitted flag to 0 and an explicit
+// "--idle-timeout 0" to IdleTimeoutNever, so both sentinels need names.
+func formatMigrateIdleTimeout(d time.Duration) string {
+	switch d {
+	case proxy.IdleTimeoutNever:
+		return "never"
+	case 0:
+		return "default"
+	default:
+		return d.String()
+	}
+}
+
 func migrateModeBeadsDir() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -154,10 +529,10 @@ func migrateModeBeadsDir() (string, error) {
 func loadMigrateModeConfig(beadsDir string) (*configfile.Config, error) {
 	cfg, err := configfile.Load(beadsDir)
 	if err != nil {
-		return nil, HandleError("failed to load config: %v", err)
+		return nil, HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("failed to load config: %v", err), ExitCode: 1, Mutates: false})
 	}
 	if cfg == nil {
-		return nil, HandleError("no beads database found in %s — run 'bd init' first", beadsDir)
+		return nil, HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("no beads database found in %s — run 'bd init' first", beadsDir), ExitCode: 1, Mutates: false})
 	}
 	return cfg, nil
 }
@@ -248,21 +623,91 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 	if err != nil {
 		return err
 	}
-	if cfg.IsDoltProxiedServerMode() {
-		fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
-		return nil
+	j, jerr := loadMigrateJournal(beadsDir)
+	if jerr != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration state is unreadable: %v", jerr), ExitCode: 1, Mutates: false})
+	}
+	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
+		return HandleError("migration state is inconsistent: %v", err)
+	}
+	liveShared, yamlShared, yamlSharedSet, err := migrationSharedTopology(beadsDir)
+	if err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+	}
+	if j != nil {
+		wantShared := shared && j.Phase == migratePrepared
+		if !shared && yamlSharedSet && yamlShared {
+			return HandleError("migration journal topology disagrees with persisted shared-server YAML (true)")
+		}
+		if liveShared != wantShared {
+			if yamlSharedSet && !yamlShared && !wantShared {
+				// The environment may still advertise shared mode after the
+				// forward transition persisted YAML=false; trust persisted state.
+				liveShared = wantShared
+			} else {
+				return HandleError("migration journal topology does not match live shared-server configuration")
+			}
+		}
+	} else if shared && !liveShared && !cfg.IsDoltProxiedServerMode() {
+		return HandleError("migration command topology does not match live shared-server configuration")
+	}
+	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
+		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
+	}
+	if cfg.IsDoltProxiedServerMode() && j == nil {
+		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
+		if ierr != nil {
+			return migrationInvalidState(fmt.Sprintf("migration sidecar is unreadable: %v", ierr))
+		}
+		if info != nil {
+			canonicalRoot := doltserver.DoltDirPath(beadsDir)
+			if shared {
+				canonicalRoot, ierr = doltserver.SharedDoltPath()
+				if ierr != nil {
+					return migrationInvalidState(fmt.Sprintf("failed to resolve shared migration root: %v", ierr))
+				}
+			}
+			if info.External != nil {
+				return migrationInvalidState("completed migration has an externally hosted proxied Dolt endpoint")
+			}
+			if !sameMigrationRoot(info.ResolvedRootPath(beadsDir), canonicalRoot) {
+				return migrationInvalidState("proxied sidecar does not match canonical migration target")
+			}
+			if !shared && yamlSharedSet && yamlShared {
+				return migrationInvalidState("completed migration topology is shared-server; use the shared migration command")
+			}
+			if err := validateCompletedProxyControls(canonicalRoot); err != nil {
+				return err
+			}
+			stateDir := beadsDir
+			if shared {
+				stateDir, ierr = doltserver.SharedServerDir()
+				if ierr != nil {
+					return migrationInvalidState(fmt.Sprintf("failed to resolve shared server state: %v", ierr))
+				}
+			}
+			if err := validateCompletedLockMarker(doltserver.LockPath(stateDir), "dolt-server lock"); err != nil {
+				return err
+			}
+			fmt.Printf("%s\n", ui.RenderPass("✓ Already in proxied-server mode"))
+			return nil
+		}
+		return migrationInvalidState(fmt.Sprintf("repo is marked proxied-server but %s is missing; rerun migration with a recoverable journal", configfile.ProxiedServerClientInfoFileName))
 	}
 
 	var rootPath string
-	if shared {
+	if j != nil {
+		rootPath = j.RootPath
+	} else if shared {
 		if !doltserver.IsSharedServerMode() {
 			return HandleError("repo is not in shared-server mode; this command only migrates shared-server repos")
 		}
-		rootPath, err = doltserver.SharedDoltDir()
+		rootPath, err = doltserver.SharedDoltPath()
 		if err != nil {
 			return HandleError("failed to resolve shared dolt directory: %v", err)
 		}
 	} else {
+		rootPath = doltserver.DoltDirPath(beadsDir)
 		if !cfg.IsDoltServerMode() {
 			return HandleError("repo is not in server mode (dolt_mode=%q); this command only migrates server-mode repos", cfg.GetDoltMode())
 		}
@@ -277,13 +722,42 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 			return HandleErrorWithHint("repo is in shared-server mode", "use 'bd migrate from-shared-server-to-proxied-server'")
 		}
 	}
+	if j == nil {
+		// A sidecar without its migration journal is ambiguous state. Refuse
+		// to overwrite it: an externally-owned endpoint cannot be safely
+		// converted, and a mismatched local root may point at another repo.
+		info, ierr := configfile.LoadProxiedServerClientInfo(beadsDir)
+		if ierr != nil {
+			return HandleError("migration sidecar is unreadable: %v", ierr)
+		}
+		if info != nil {
+			if info.External != nil {
+				return externalMigrationRefusal("cannot migrate an externally hosted proxied Dolt endpoint; reconfigure the endpoint on its owner first")
+			}
+			resolvedSidecarRoot := info.ResolvedRootPath(beadsDir)
+			if resolvedSidecarRoot != "" && !sameMigrationRoot(resolvedSidecarRoot, rootPath) {
+				return HandleError("migration sidecar root %s does not match canonical %s", info.RootPath, rootPath)
+			}
+			return HandleError("migration sidecar exists without a recoverable journal; remove it only after verifying ownership")
+		}
+	}
 
 	serverDir := doltserver.ResolveServerDir(beadsDir)
+	if j != nil {
+		if err := validateMigrationTopology(beadsDir, j, shared, true); err != nil {
+			return HandleError("migration topology is inconsistent: %v", err)
+		}
+	}
 	if state, _ := doltserver.IsRunning(serverDir); state != nil && state.Running {
 		return HandleErrorWithHint("dolt server is still running", "stop it first: bd dolt stop")
 	}
 
 	if dryRun {
+		if jsonOutput {
+			b, _ := json.Marshal(migrateDryRunOutput{true, configfile.DoltModeServer, configfile.DoltModeProxiedServer, shared, rootPath})
+			fmt.Println(string(b))
+			return nil
+		}
 		fmt.Println("Dry run mode - no changes will be made")
 		fmt.Printf("Would set dolt_mode: %s → %s\n", configfile.DoltModeServer, configfile.DoltModeProxiedServer)
 		if shared {
@@ -296,24 +770,107 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 		}
 		return nil
 	}
-
-	cfg.DoltMode = configfile.DoltModeProxiedServer
-	if err := cfg.Save(beadsDir); err != nil {
-		return HandleError("failed to save metadata.json: %v", err)
+	if st, e := os.Stat(rootPath); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s does not exist or is not a directory", rootPath)
+	}
+	if st, e := os.Stat(filepath.Join(rootPath, ".dolt")); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt directory", rootPath)
+	}
+	if st, e := os.Stat(filepath.Join(rootPath, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt repository", rootPath)
+	}
+	if err := validateDoltRoot(rootPath); err != nil {
+		return HandleError("Dolt root validation failed: %v", err)
 	}
 
-	if shared {
-		if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "false"); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not disable dolt.shared-server: %v\n", err)
+	if j == nil {
+		sidecar := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
+		j = &migrateJournal{Version: 1, SourceMode: cfg.GetDoltMode(), TargetMode: configfile.DoltModeProxiedServer, Shared: shared, RootPath: rootPath, Sidecar: sidecar, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared}
+		if err := saveMigrateJournal(beadsDir, j); err != nil {
+			return HandleError("failed to prepare migration: %v", err)
+		}
+		if err := migrateFault(migratePrepared); err != nil {
+			return err
+		}
+	} else if j.TargetMode != configfile.DoltModeProxiedServer || j.Shared != shared {
+		return HandleError("migration journal belongs to a different migration")
+	} else {
+		j.Attempt++
+		if err := saveMigrateJournal(beadsDir, j); err != nil {
+			return HandleError("failed to update migration attempt: %v", err)
 		}
 	}
 
-	info := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
-	if err := configfile.SaveProxiedServerClientInfo(beadsDir, info); err != nil {
-		return HandleError("failed to write %s: %v", configfile.ProxiedServerClientInfoFileName, err)
+	if j.Phase == migratePrepared {
+		cfg.DoltMode = configfile.DoltModeProxiedServer
+		if err := cfg.Save(beadsDir); err != nil {
+			return HandleError("failed to save metadata.json: %v", err)
+		}
+		if shared {
+			if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "false"); err != nil {
+				return HandleError("failed to disable dolt.shared-server: %v", err)
+			}
+		}
+		// Replay the recorded plan instead of rebuilding it from the current
+		// argv. A resume that omits or changes --idle-timeout would otherwise
+		// write a sidecar the target_configured check below then rejects, and
+		// because that check runs only after the phase has advanced past
+		// migratePrepared, this block never runs again — the workspace would be
+		// wedged in proxied-server mode with no in-tool recovery.
+		info := j.Sidecar
+		if info == nil {
+			info = &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
+		} else if info.IdleTimeout != idleTimeout {
+			fmt.Fprintf(os.Stderr, "Warning: resuming migration with the recorded --idle-timeout (%s); the value supplied now (%s) is ignored\n", formatMigrateIdleTimeout(info.IdleTimeout), formatMigrateIdleTimeout(idleTimeout))
+		}
+		if err := configfile.SaveProxiedServerClientInfo(beadsDir, info); err != nil {
+			return HandleError("failed to write %s: %v", configfile.ProxiedServerClientInfoFileName, err)
+		}
+		if err := checkpointMigration(beadsDir, j, migrateTargetConfigured); err != nil {
+			return err
+		}
 	}
-
-	warnMigrateRemovalErrors(doltserver.RemoveStateFiles(serverDir))
+	if j.Phase == migrateTargetConfigured {
+		if info, e := configfile.LoadProxiedServerClientInfo(beadsDir); e != nil {
+			return HandleError("migration sidecar is unreadable: %v", e)
+		} else if info == nil && j.Sidecar != nil {
+			if e := configfile.SaveProxiedServerClientInfo(beadsDir, j.Sidecar); e != nil {
+				return HandleError("failed to repair %s: %v", configfile.ProxiedServerClientInfoFileName, e)
+			}
+		} else if j.Sidecar != nil && !reflect.DeepEqual(info, j.Sidecar) {
+			return HandleError("migration sidecar does not match prepared state")
+		}
+		if errs := doltserver.RemoveStateFiles(serverDir); len(errs) > 0 {
+			return HandleError("failed to retire Dolt server controls: %v", errs[0])
+		}
+		if err := checkpointMigration(beadsDir, j, migrateOldControlsRetired); err != nil {
+			return err
+		}
+	}
+	if j.Phase == migrateOldControlsRetired {
+		if c, e := configfile.Load(beadsDir); e != nil || c == nil || !c.IsDoltProxiedServerMode() {
+			return HandleError("migration verification failed: metadata mode is not proxied-server")
+		}
+		if info, e := configfile.LoadProxiedServerClientInfo(beadsDir); e != nil || info == nil {
+			return HandleError("migration verification failed: proxied sidecar is missing or unreadable")
+		}
+		if err := checkpointMigration(beadsDir, j, migrateVerified); err != nil {
+			return err
+		}
+	}
+	if j.Phase == migrateVerified {
+		if err := checkpointMigration(beadsDir, j, migrateCommitted); err != nil {
+			return err
+		}
+		if err := removeMigrateJournal(beadsDir); err != nil {
+			return HandleError("failed to finalize migration: %v", err)
+		}
+	}
+	if j.Phase == migrateCommitted {
+		if err := removeMigrateJournal(beadsDir); err != nil {
+			return HandleError("failed to finalize migration: %v", err)
+		}
+	}
 
 	dataDir := proxiedServerRoot(beadsDir)
 	if shared {
@@ -347,17 +904,134 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	if err != nil {
 		return err
 	}
-	if shared {
-		if doltserver.IsSharedServerMode() {
-			fmt.Printf("%s\n", ui.RenderPass("✓ Already in shared-server mode"))
+	j, jerr := loadMigrateJournal(beadsDir)
+	if jerr != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration state is unreadable: %v", jerr), ExitCode: 1, Mutates: false})
+	}
+	if err := validateMigrationJournalAgainstConfig(j, cfg); err != nil {
+		return HandleError("migration state is inconsistent: %v", err)
+	}
+	liveShared, yamlShared, yamlSharedSet, err := migrationSharedTopology(beadsDir)
+	if err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: err.Error(), ExitCode: 1, Mutates: false})
+	}
+	var diskSidecar *configfile.ProxiedServerClientInfo
+	if diskSidecar, err = configfile.LoadProxiedServerClientInfo(beadsDir); err != nil {
+		return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("migration sidecar is unreadable: %v", err), ExitCode: 1, Mutates: false})
+	}
+	if j != nil {
+		wantShared := shared && j.Phase != migratePrepared
+		if liveShared != wantShared {
+			return HandleError("migration journal topology does not match live shared-server configuration")
+		}
+	}
+	if j != nil && j.Sidecar != nil && j.Sidecar.External != nil {
+		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
+	}
+	if j != nil {
+		// SCOPED TO REVERSE JOURNALS, and the scope is load-bearing. At
+		// migratePrepared the two directions disagree about whether the
+		// sidecar is on disk: a reverse journal records a sidecar that
+		// already exists, while a forward journal records the plan it is
+		// about to write and only advances past migratePrepared after the
+		// write. So a crash in a forward migration's pre-write window leaves
+		// diskSidecar nil against a non-nil j.Sidecar, and an unscoped guard
+		// refuses this command — the documented escape hatch — by naming a
+		// file whose absence is the correct state for that phase. Forward
+		// journals fall through to the journal-ownership check below, which
+		// reports the real situation. Testing TargetMode against the forward
+		// value rather than for the reverse one keeps the guard live for
+		// BOTH reverse targets, "server" and "shared-server".
+		if j.Phase == migratePrepared && j.TargetMode != configfile.DoltModeProxiedServer &&
+			!migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+			return HandleError("migration sidecar does not match prepared state")
+		}
+		if j.Phase == migrateTargetConfigured && diskSidecar != nil && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+			return HandleError("migration sidecar does not match prepared state")
+		}
+		if (j.Phase == migrateOldControlsRetired || j.Phase == migrateVerified || j.Phase == migrateCommitted) && diskSidecar != nil {
+			return HandleError("migration sidecar must be absent after controls are retired")
+		}
+	}
+	if j == nil {
+		alreadyTarget := cfg.IsDoltServerMode() && ((shared && yamlSharedSet && yamlShared) || (!shared && (!yamlSharedSet || !yamlShared)))
+		if alreadyTarget {
+			if diskSidecar != nil {
+				return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: "completed migration has a stale proxied-server sidecar", ExitCode: 1, Mutates: false})
+			}
+			root := doltserver.DoltDirPath(beadsDir)
+			if shared {
+				if sharedRoot, sharedErr := doltserver.SharedDoltPath(); sharedErr == nil {
+					root = sharedRoot
+				}
+			}
+			if running, _ := proxy.IsRunning(root); running {
+				return HandleError("completed migration still has a running proxy")
+			}
+			for _, path := range proxy.ControlFilePaths(root) {
+				_, statErr := os.Stat(path)
+				if os.IsNotExist(statErr) {
+					continue
+				}
+				if statErr != nil {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("completed migration cannot inspect proxy control %s: %v", path, statErr), ExitCode: 1, Mutates: false})
+				}
+				if filepath.Base(path) == proxy.LockFileName || filepath.Base(path) == server.LockFileName {
+					// Migration lock files are created as part of acquiring the
+					// lifecycle gate and may remain as empty, unlocked markers.
+					// Probe only an existing file; TryLock must not create state
+					// during an idempotent no-op.
+					lock, lockErr := util.TryLock(path)
+					if lockErr == nil {
+						lock.Unlock()
+						continue
+					}
+				}
+				if statErr == nil {
+					return HandleProxyCapabilityError(&ProxyCapabilityError{Code: "proxy.migrate.invalid_state", Message: fmt.Sprintf("completed migration has stale proxy control %s", path), ExitCode: 1, Mutates: false})
+				}
+			}
 			return nil
 		}
-	} else if cfg.IsDoltServerMode() && !doltserver.IsSharedServerMode() {
-		fmt.Printf("%s\n", ui.RenderPass("✓ Already in server mode"))
-		return nil
+		if liveShared {
+			return HandleError("migration command topology does not match live shared-server configuration")
+		}
 	}
-	if !cfg.IsDoltProxiedServerMode() {
+	var sourceSidecar *configfile.ProxiedServerClientInfo
+	if j == nil {
+		sourceSidecar = diskSidecar
+		if sourceSidecar == nil {
+			return HandleError("migration sidecar is missing")
+		}
+		if sourceSidecar.External != nil {
+			return externalMigrationRefusal("cannot migrate an externally hosted proxied Dolt endpoint to local server mode; reconfigure the endpoint on its owner first")
+		}
+	}
+	if j == nil {
+		if shared {
+			// Persisted workspace YAML is authoritative over ambient process
+			// environment. A completed forward migration deliberately leaves
+			// BEADS_DOLT_SHARED_SERVER stale in some shells while writing
+			// dolt.shared-server: false; do not misclassify that proxied repo as
+			// already migrated to shared-server mode.
+			if !cfg.IsDoltProxiedServerMode() && ((!yamlSharedSet && doltserver.IsSharedServerMode()) || (yamlSharedSet && yamlShared)) {
+				fmt.Printf("%s\n", ui.RenderPass("✓ Already in shared-server mode"))
+				return nil
+			}
+		} else if cfg.IsDoltServerMode() && !doltserver.IsSharedServerMode() {
+			fmt.Printf("%s\n", ui.RenderPass("✓ Already in server mode"))
+			return nil
+		}
+	}
+	if j == nil && !cfg.IsDoltProxiedServerMode() {
 		return HandleError("repo is not in proxied-server mode (dolt_mode=%q); this command only migrates proxied-server repos", cfg.GetDoltMode())
+	}
+	expectedTarget := configfile.DoltModeServer
+	if shared {
+		expectedTarget = "shared-server"
+	}
+	if j != nil && (j.TargetMode != expectedTarget || j.Shared != shared) {
+		return HandleError("migration journal belongs to a different migration")
 	}
 	// Leaving proxied mode would make dolt_team_server inert and resume
 	// bd-driven schema migrations on the bts-owned database.
@@ -366,12 +1040,25 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			"if the database is no longer bts-managed, remove dolt_team_server from .beads/metadata.json first")
 	}
 
-	rootDir, err := resolveProxiedServerRootPath(beadsDir)
-	if err != nil {
-		return HandleError("%v", err)
+	rootDir := ""
+	if j != nil {
+		rootDir = j.RootPath
+	} else {
+		rootDir, err = resolveProxiedServerRootPath(beadsDir)
+		if err != nil {
+			return HandleError("%v", err)
+		}
+	}
+	if sourceSidecar != nil && sourceSidecar.RootPath == "" {
+		sourceSidecar.RootPath = rootDir
+	}
+	if j != nil {
+		if err := validateMigrationTopology(beadsDir, j, shared, false); err != nil {
+			return HandleError("migration topology is inconsistent: %v", err)
+		}
 	}
 
-	sharedDolt, sharedErr := doltserver.SharedDoltDir()
+	sharedDolt, sharedErr := doltserver.SharedDoltPath()
 	if shared {
 		if sharedErr != nil {
 			return HandleError("failed to resolve shared dolt directory: %v", sharedErr)
@@ -387,12 +1074,22 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return HandleErrorWithHint("proxied-server is still running", "stop it first: bd dolt stop")
 	}
 
-	logAssets, err := proxiedLogAssets(beadsDir)
-	if err != nil {
-		return HandleError("%v", err)
+	var logAssets []string
+	if j != nil {
+		logAssets = append(logAssets, j.LogAssets...)
+	} else {
+		logAssets, err = proxiedLogAssets(beadsDir)
+		if err != nil {
+			return HandleError("%v", err)
+		}
 	}
 
 	if dryRun {
+		if jsonOutput {
+			b, _ := json.Marshal(migrateDryRunOutput{true, configfile.DoltModeProxiedServer, expectedTarget, shared, rootDir})
+			fmt.Println(string(b))
+			return nil
+		}
 		fmt.Println("Dry run mode - no changes will be made")
 		fmt.Printf("Would set dolt_mode: %s → %s\n", configfile.DoltModeProxiedServer, configfile.DoltModeServer)
 		if shared {
@@ -406,6 +1103,18 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 			fmt.Printf("Would remove %s\n", p)
 		}
 		return nil
+	}
+	if st, e := os.Stat(rootDir); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s does not exist or is not a directory", rootDir)
+	}
+	if st, e := os.Stat(filepath.Join(rootDir, ".dolt")); e != nil || !st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt directory", rootDir)
+	}
+	if st, e := os.Stat(filepath.Join(rootDir, ".dolt", "repo_state.json")); e != nil || st.IsDir() {
+		return HandleError("Dolt root %s is not a valid Dolt repository", rootDir)
+	}
+	if err := validateDoltRoot(rootDir); err != nil {
+		return HandleError("Dolt root validation failed: %v", err)
 	}
 
 	serverStateDir := beadsDir
@@ -433,28 +1142,77 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return migrateLockErr("dolt sql-server", err)
 	}
 	defer serverLock.Unlock()
-
-	if err := doltserver.MarkDoltDirCompatible(rootDir); err != nil {
-		return HandleError("failed to mark dolt directory compatible: %v", err)
-	}
-
-	cfg.DoltMode = configfile.DoltModeServer
-	if err := cfg.Save(beadsDir); err != nil {
-		return HandleError("failed to save metadata.json: %v", err)
-	}
-
-	if shared {
-		if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "true"); err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: could not enable dolt.shared-server: %v\n", err)
+	if j == nil {
+		j = &migrateJournal{Version: 1, SourceMode: configfile.DoltModeProxiedServer, TargetMode: expectedTarget, Shared: shared, RootPath: rootDir, Sidecar: sourceSidecar, LogAssets: logAssets, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared}
+		if err := saveMigrateJournal(beadsDir, j); err != nil {
+			return HandleError("failed to prepare migration: %v", err)
+		}
+		if err := migrateFault(migratePrepared); err != nil {
+			return err
+		}
+	} else {
+		j.Attempt++
+		if err := saveMigrateJournal(beadsDir, j); err != nil {
+			return HandleError("failed to update migration attempt: %v", err)
 		}
 	}
-
-	if err := os.Remove(configfile.ProxiedServerClientInfoPath(beadsDir)); err != nil && !os.IsNotExist(err) {
-		return HandleError("failed to remove %s: %v", configfile.ProxiedServerClientInfoFileName, err)
+	if j.Phase == migratePrepared {
+		if err := doltserver.MarkDoltDirCompatible(rootDir); err != nil {
+			return HandleError("failed to mark dolt directory compatible: %v", err)
+		}
+		cfg.DoltMode = configfile.DoltModeServer
+		if err := cfg.Save(beadsDir); err != nil {
+			return HandleError("failed to save metadata.json: %v", err)
+		}
+		if shared {
+			if err := config.SetYamlConfigInDir(beadsDir, "dolt.shared-server", "true"); err != nil {
+				return HandleError("failed to enable dolt.shared-server: %v", err)
+			}
+		}
+		if err := checkpointMigration(beadsDir, j, migrateTargetConfigured); err != nil {
+			return err
+		}
 	}
-
-	warnMigrateRemovalErrors(proxy.PurgeControlFiles(rootDir))
-	warnMigrateRemovalErrors(removeMigrateAssets(logAssets))
+	if j.Phase == migrateTargetConfigured {
+		if err := os.Remove(configfile.ProxiedServerClientInfoPath(beadsDir)); err != nil && !os.IsNotExist(err) {
+			return HandleError("failed to remove %s: %v", configfile.ProxiedServerClientInfoFileName, err)
+		}
+		if errs := proxy.PurgeControlFiles(rootDir); len(errs) > 0 {
+			return HandleError("failed to retire proxy controls: %v", errs[0])
+		}
+		if errs := removeMigrateAssets(logAssets); len(errs) > 0 {
+			return HandleError("failed to retire proxy logs: %v", errs[0])
+		}
+		if err := checkpointMigration(beadsDir, j, migrateOldControlsRetired); err != nil {
+			return err
+		}
+	}
+	if j.Phase == migrateOldControlsRetired {
+		if c, e := configfile.Load(beadsDir); e != nil || c == nil || !c.IsDoltServerMode() {
+			return HandleError("migration verification failed: metadata mode is not server")
+		}
+		if shared {
+			if v, ok := config.WorkspaceYamlValue(beadsDir, "dolt.shared-server"); !ok || strings.ToLower(v) != "true" {
+				return HandleError("migration verification failed: shared-server is not enabled")
+			}
+		}
+		if err := checkpointMigration(beadsDir, j, migrateVerified); err != nil {
+			return err
+		}
+	}
+	if j.Phase == migrateVerified {
+		if err := checkpointMigration(beadsDir, j, migrateCommitted); err != nil {
+			return err
+		}
+		if err := removeMigrateJournal(beadsDir); err != nil {
+			return HandleError("failed to finalize migration: %v", err)
+		}
+	}
+	if j.Phase == migrateCommitted {
+		if err := removeMigrateJournal(beadsDir); err != nil {
+			return HandleError("failed to finalize migration: %v", err)
+		}
+	}
 
 	commandDidWrite.Store(true)
 	if shared {
@@ -465,6 +1223,25 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 	fmt.Printf("  Data directory unchanged: %s\n", rootDir)
 	fmt.Println("  The dolt sql-server starts automatically on the next bd command.")
 	return nil
+}
+
+// migrationSharedTopology resolves the target workspace's shared-server
+// setting. An explicit workspace YAML value is authoritative over ambient
+// process environment so retries cannot be misclassified by stale env state.
+func migrationSharedTopology(beadsDir string) (live, yaml bool, yamlSet bool, err error) {
+	live = doltserver.IsSharedServerMode()
+	raw, yamlSet, readErr := config.WorkspaceYamlValueStrict(beadsDir, "dolt.shared-server")
+	if readErr != nil {
+		return false, false, false, readErr
+	}
+	if !yamlSet {
+		return live, false, false, nil
+	}
+	parsed, parseErr := strconv.ParseBool(strings.TrimSpace(raw))
+	if parseErr != nil {
+		return false, false, true, fmt.Errorf("workspace dolt.shared-server is invalid: %q", raw)
+	}
+	return parsed, parsed, true, nil
 }
 
 func proxiedLogAssets(beadsDir string) ([]string, error) {
