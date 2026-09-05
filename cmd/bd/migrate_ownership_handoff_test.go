@@ -34,6 +34,34 @@ func TestOwnershipHandoffCommandIsExplicitAndSkipsStore(t *testing.T) {
 	}
 }
 
+func TestOwnershipHandoffCommandMissingIdentityUsesTypedJSON(t *testing.T) {
+	setOwnershipHandoffFlag(t, "root", "")
+	setOwnershipHandoffFlag(t, "database", "")
+	setOwnershipHandoffFlag(t, "workspace", "")
+	setOwnershipHandoffFlag(t, "journal", "")
+	setOwnershipHandoffFlag(t, "socket", "")
+	setOwnershipHandoffFlag(t, "host", "127.0.0.1")
+	setOwnershipHandoffFlag(t, "port", "3307")
+	oldJSON := jsonOutput
+	jsonOutput = true
+	t.Cleanup(func() { jsonOutput = oldJSON })
+	var runErr error
+	out := captureStdout(t, func() error {
+		runErr = runOwnershipHandoffCommand(ownershipHandoffCmd, nil)
+		return nil
+	})
+	if runErr == nil {
+		t.Fatal("missing identity unexpectedly succeeded")
+	}
+	var got ownershipHandoffOutput
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatalf("decode strict handoff JSON %q: %v", out, err)
+	}
+	if got.ErrorCode != "invalid_request" || got.Phase != ownershiphandoff.PhasePrepared {
+		t.Fatalf("output=%+v, want typed invalid_request", got)
+	}
+}
+
 func TestOwnershipHandoffRunRejectsInvalidRequestBeforeProvider(t *testing.T) {
 	root := canonicalTempDir(t)
 	called := 0

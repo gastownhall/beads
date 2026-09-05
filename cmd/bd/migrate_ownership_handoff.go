@@ -152,8 +152,5 @@ func init() {
 	ownershipHandoffCmd.Flags().Bool("dry-run", false, "Validate identity without opening a provider or mutating state")
 	ownershipHandoffCmd.Flags().Bool("resume", false, "Resume a journaled handoff (the default retry behavior)")
 	ownershipHandoffCmd.Flags().Bool("retry", false, "Retry a journaled handoff (alias for --resume)")
-	_ = ownershipHandoffCmd.MarkFlagRequired("root")
-	_ = ownershipHandoffCmd.MarkFlagRequired("database")
-	_ = ownershipHandoffCmd.MarkFlagRequired("workspace")
 	migrateCmd.AddCommand(ownershipHandoffCmd)
 }
