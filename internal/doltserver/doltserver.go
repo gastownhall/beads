@@ -743,6 +743,27 @@ var portSources = []portSource{
 		// Deprecated: git-tracked, propagates to all contributors, causing
 		// cross-project data leakage (GH#2372). Kept as a fallback so existing
 		// setups don't break silently.
+		//
+		// The warning targets the GH#2372 leak shape specifically: a
+		// dolt_server_port committed alongside a LOOPBACK (or absent) host,
+		// where every contributor's clone dials whatever listens on that port
+		// on THEIR OWN machine. It is gated on exactly that condition via
+		// externalNonLocalhostHost (GH#3545 / GH#3518), which the codebase
+		// already uses to distinguish a genuinely external deployment from a
+		// bd-owned local one. A NON-loopback dolt_server_host names a shared
+		// server on purpose (the One True Dolt Server for a team/site);
+		// committing its port is the intended design, not a leak, so the
+		// warning stays silent there and the port is honored unchanged.
+		//
+		// The remediation text names the UNTRACKED sources that keep the
+		// setup External without the git-tracked port — BEADS_DOLT_SERVER_MODE=1
+		// paired with BEADS_DOLT_SERVER_PORT, or dolt.port in the global /
+		// project config.yaml — and warns that simply deleting the field
+		// WITHOUT one of those flips the resolved mode to Owned, making bd
+		// spawn its own server on an ephemeral port instead of connecting to
+		// the external one. The earlier wording pointed at the port file as
+		// "the primary source", which is false in External mode (bd never
+		// writes it there) and led users toward that silent mode flip.
 		label:  "metadata.json dolt_server_port (deprecated fallback)",
 		source: PortSourceMetadataJSON,
 		resolve: func(beadsDir string) (int, bool) {
@@ -750,9 +771,22 @@ var portSources = []portSource{
 			if err != nil || metaCfg == nil || metaCfg.DoltServerPort <= 0 {
 				return 0, false
 			}
-			fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
-			fmt.Fprintf(os.Stderr, "  The port file (.beads/dolt-server.port) is now the primary source.\n")
-			fmt.Fprintf(os.Stderr, "  Remove dolt_server_port from .beads/metadata.json to silence this warning.\n")
+			// Gate on the host, not on ResolveServerMode: an explicit
+			// metadata port selects External (ResolveServerMode rule #4),
+			// so gating there would leave the warning reachable only in the
+			// contrived dolt_mode="embedded"+port case — i.e. never in the
+			// loopback-port leak it was written for. externalNonLocalhostHost
+			// returns true iff the EFFECTIVE host (env > metadata > config;
+			// see GetDoltServerHost) is non-loopback, matching how the rest
+			// of the codebase splits external-vs-local deployments.
+			if _, external := externalNonLocalhostHost(beadsDir); !external {
+				fmt.Fprintf(os.Stderr, "Warning: dolt_server_port in metadata.json is deprecated (can cause cross-project data leakage).\n")
+				fmt.Fprintf(os.Stderr, "  To stay connected to an external server without the git-tracked port:\n")
+				fmt.Fprintf(os.Stderr, "    set BEADS_DOLT_SERVER_MODE=1 and BEADS_DOLT_SERVER_PORT=<port>, or\n")
+				fmt.Fprintf(os.Stderr, "    put dolt.port in ~/.config/bd/config.yaml or the project config.yaml.\n")
+				fmt.Fprintf(os.Stderr, "  Simply removing dolt_server_port without one of those flips the server mode to\n")
+				fmt.Fprintf(os.Stderr, "  \"owned\": bd spawns its own server on an ephemeral port instead of connecting to yours.\n")
+			}
 			return metaCfg.DoltServerPort, true
 		},
 	},
