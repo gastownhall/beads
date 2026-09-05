@@ -87,7 +87,15 @@ func buildJSONCapabilityError(e *ProxyCapabilityError) interface{} {
 
 // HandleProxyCapabilityError renders a stable capability refusal while
 // preserving the normal text/JSON front-door conventions.
+//
+// The allow path of every AssertProxy*Capability returns nil, and this wraps
+// that return value directly, so nil must pass through: without the fast path
+// errors.As(nil, ...) is false and an allowed capability would render as
+// "Error: <nil>" with exit 1 at a front door nothing downstream catches.
 func HandleProxyCapabilityError(err error) error {
+	if err == nil {
+		return nil
+	}
 	var capErr *ProxyCapabilityError
 	if !errors.As(err, &capErr) {
 		return HandleErrorRespectJSON("%v", err)

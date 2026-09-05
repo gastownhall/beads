@@ -1267,7 +1267,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "warning: %v\n", err)
 				}
 			}
-			if cmdName == "doctor" && usesProxiedServer() {
+			if proxyCommandPath(cmd) == "doctor" && usesProxiedServer() {
 				// Refuse only on a real refusal. validateProxyMaintenance...
 				// returns nil for doctor subcommands, and returning early on
 				// that would skip the legacy-store guard and autocommit-mode
