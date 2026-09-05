@@ -514,9 +514,41 @@ jobs:
 
       - name: Exercise credential command fixtures on Windows
         if: matrix.os == 'windows-latest'
+        shell: pwsh
         env:
           CGO_ENABLED: "0"
-        run: go test -tags gms_pure_go -count=1 -run '^(TestCommandSourceRealShell|TestCredentialCommandFixtureProtocol|TestApplyGatewayCredentialCommand|TestApplyGatewayCredentialJSONEnvelope|TestApplyGatewayCredentialFailsClosed|TestApplyGatewayCredentialPresetWins|TestApplyGatewayCredentialRejectsBadCharToken|TestApplyResolvedConfigGatewayCredential)$' ./internal/creds ./internal/storage/dolt
+        run: |
+          $go = (Get-Command go -CommandType Application -ErrorAction Stop).Source
+          $hostInfo = @(& $go env GOHOSTOS GOOS)
+          if ($LASTEXITCODE -ne 0 -or ($hostInfo -join ',') -ne 'windows,windows') {
+            throw 'Credential fixtures require native Windows Go'
+          }
+          $expected = @{
+            'github.com/steveyegge/beads/internal/testutil/credentialcmd' = @('TestProtocol')
+            'github.com/steveyegge/beads/internal/creds' = @(
+              'TestCommandSourceRealShell', 'TestCredentialCommandFixtureProtocol')
+            'github.com/steveyegge/beads/internal/storage/dolt' = @(
+              'TestApplyGatewayCredentialCommand', 'TestApplyGatewayCredentialJSONEnvelope',
+              'TestApplyGatewayCredentialFailsClosed', 'TestApplyGatewayCredentialPresetWins',
+              'TestApplyGatewayCredentialRejectsBadCharToken', 'TestApplyResolvedConfigGatewayCredential')
+          }
+          $selector = '^(' + (($expected.Values | ForEach-Object { $_ }) -join '|') + ')$'
+          $raw = & $go test -json -tags gms_pure_go -count=1 -run $selector @($expected.Keys)
+          $testStatus = $LASTEXITCODE
+          $events = @($raw | ForEach-Object { $_ | ConvertFrom-Json -ErrorAction Stop })
+          $events | Where-Object Output | ForEach-Object { [Console]::Write($_.Output) }
+          if ($testStatus -ne 0) { exit $testStatus }
+          if (@($events | Where-Object { $_.Action -in 'fail', 'skip' }).Count -ne 0) {
+            throw 'Credential fixtures must pass without skips'
+          }
+          foreach ($package in $expected.Keys) {
+            foreach ($test in $expected[$package]) {
+              $passes = @($events | Where-Object {
+                $_.Package -eq $package -and $_.Test -eq $test -and $_.Action -eq 'pass'
+              })
+              if ($passes.Count -ne 1) { throw "Expected one PASS for $package/$test" }
+            }
+          }
 
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'
