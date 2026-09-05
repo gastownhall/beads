@@ -550,17 +550,31 @@ func closeReasonDiscardedRefusal(id, stored string) string {
 // closeReportedReason is the reason `bd close` PRINTS for one settled id.
 //
 // A real close reports the reason it just wrote. An already-closed no-op
-// reports the STORED one — echoing back text the close discarded is what made
-// this failure read as confirmation, and it reads most like confirmation
-// exactly when the caller passed --reason-file and sees its whole file come
-// back out (be-ctr). A no-op with nothing stored has nothing truer to print,
-// so it keeps the supplied text rather than printing an empty reason.
+// reports what is ON THE RECORD and NEVER the supplied text — echoing back
+// text the close discarded is what made this failure read as confirmation, and
+// it reads most like confirmation exactly when the caller passed --reason-file
+// and sees its whole file come back out (be-ctr).
+//
+// A no-op with nothing stored says so rather than borrowing the caller's text.
+// An earlier revision fell back to the supplied reason here, on the grounds
+// that an empty reason is nothing to print; codex caught that it reintroduced
+// the exact defect for issues closed WITHOUT a reason, which is the shape the
+// live instance (be-mh0, close_reason "Closed") is closest to. "Nothing truer
+// to print" was wrong: that a close recorded no reason is itself true, and it
+// is the fact an agent amending the record most needs to see.
 func closeReportedReason(changed bool, supplied, stored string) string {
-	if changed || strings.TrimSpace(stored) == "" {
+	if changed {
 		return supplied
+	}
+	if strings.TrimSpace(stored) == "" {
+		return noCloseReasonRecorded
 	}
 	return stored
 }
+
+// noCloseReasonRecorded is what an already-closed issue with no stored reason
+// reports. Parenthesized so it cannot be mistaken for a reason someone wrote.
+const noCloseReasonRecorded = "(no close reason recorded)"
 
 // storedCloseReason reads the close reason already on the record, preferring
 // the operation's own post-state snapshot and falling back to the pre-close
