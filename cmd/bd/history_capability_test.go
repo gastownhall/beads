@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"maps"
+	"slices"
 	"strings"
 	"testing"
 
@@ -59,7 +61,10 @@ func TestHistoryDirectOnlyRefusalContract(t *testing.T) {
 	oldProvider := uowProvider
 	oldJSON := jsonOutput
 	t.Cleanup(func() { uowProvider = oldProvider; jsonOutput = oldJSON })
-	for _, path := range []string{"branch", "conflicts", "repo", "federation", "vc", "flatten", "dolt push", "dolt pull", "dolt commit", "dolt remote add", "sync"} {
+	// Driven off the expectation table itself: a second hand-written path list
+	// let "dolt remote list" and "dolt remote reset-data" sit in `expected`
+	// while nothing asserted them, which reads as coverage that is not there.
+	for _, path := range slices.Sorted(maps.Keys(expected)) {
 		parts := strings.Split(path, " ")
 		root := &cobra.Command{Use: "bd"}
 		cmd := &cobra.Command{Use: parts[0]}

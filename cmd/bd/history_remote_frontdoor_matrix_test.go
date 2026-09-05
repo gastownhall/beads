@@ -81,6 +81,9 @@ func TestHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 		{"dolt remote list", "proxy.dolt_remote.unsupported", "dolt remote list is not supported in proxied-server mode", []string{"dolt", "remote", "list"}},
 		{"dolt remote reset-data", "proxy.dolt_remote.unsupported", "dolt remote reset-data is not supported in proxied-server mode", []string{"dolt", "remote", "reset-data", "backup"}},
 		{"sync", "proxy.sync.unsupported", "sync is not supported in proxied-server mode", []string{"sync"}},
+		// Keyed on the path "admin compact", not the leaf name "compact":
+		// root `bd compact` is a different command that is proxy-supported.
+		{"admin compact", "proxy.compact.unsupported", "only 'bd admin compact --dolt' is supported in proxied-server mode", []string{"admin", "compact", "--stats"}},
 	}
 	for _, f := range fixtures {
 		t.Run(f.name, func(t *testing.T) {
@@ -118,6 +121,72 @@ func TestHistoryRemoteRefusalFrontDoorMatrix(t *testing.T) {
 					after := snapshotHistoryState(t, bd, p)
 					if string(before) != string(after) {
 						t.Fatal("durable artifacts changed during refusal")
+					}
+				})
+			}
+		})
+	}
+}
+
+// TestHistoryRemoteAllowPathFrontDoorMatrix is the allow-path complement of the
+// refusal matrix above, and it is the direction that needed the coverage. A
+// refusal that stops firing degrades to the older, opaque late failure; a
+// refusal that fires too widely breaks a command that works, and does it at the
+// front door where there is no fallback. That is what the leaf-name keying did
+// to `bd mol ready --gated`, which is proxy-supported, has no --max-rows flag,
+// and shares its leaf name with `bd ready` — so it refused to run for anyone
+// with BEADS_MAX_ROWS exported.
+//
+// Each command runs twice: once with a clean environment and once under
+// BEADS_MAX_ROWS=5, because the cap is the input that turned the front door
+// from a no-op into a refusal.
+func TestHistoryRemoteAllowPathFrontDoorMatrix(t *testing.T) {
+	bd := buildEmbeddedBD(t)
+	requireManagedLocalProxiedEnv(t)
+	p := bdManagedLocalInit(t, bd, "hm_allow", 5*time.Minute)
+	sentinel := bdProxiedCreate(t, bd, p.dir, "allow-path sentinel")
+	commands := []struct {
+		name string
+		args []string
+		// capRefused marks the commands whose row cap is genuinely unsupported
+		// under --proxied-server, so an active cap must still be refused rather
+		// than silently ignored. Every other row must survive the same cap.
+		capRefused bool
+	}{
+		{name: "mol ready --gated", args: []string{"mol", "ready", "--gated"}},
+		{name: "ready", args: []string{"ready"}, capRefused: true},
+		{name: "list", args: []string{"list"}},
+		{name: "dep tree", args: []string{"dep", "tree", sentinel.ID}},
+	}
+	for _, env := range []struct {
+		name   string
+		extras []string
+	}{
+		{name: "clean"},
+		{name: "capped", extras: []string{"BEADS_MAX_ROWS=5"}},
+	} {
+		t.Run(env.name, func(t *testing.T) {
+			for _, tc := range commands {
+				t.Run(tc.name, func(t *testing.T) {
+					stdout, stderr, err := bdProxiedRunBuffersWithEnv(t, bd, p.dir, env.extras, tc.args...)
+					refusal := "is not supported in proxied-server mode"
+					if tc.capRefused && len(env.extras) > 0 {
+						if err == nil {
+							t.Fatalf("bd %s ignored an unsupported row cap; want a refusal\nstdout=%s", strings.Join(tc.args, " "), stdout)
+						}
+						if !strings.Contains(stderr+stdout, refusal) {
+							t.Fatalf("bd %s failed without the cap refusal: %v\nstdout=%s\nstderr=%s",
+								strings.Join(tc.args, " "), err, stdout, stderr)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatalf("bd %s was refused on the allow path: %v\nstdout=%s\nstderr=%s",
+							strings.Join(tc.args, " "), err, stdout, stderr)
+					}
+					if strings.Contains(stderr, refusal) {
+						t.Fatalf("bd %s printed a proxied refusal while exiting 0: stderr=%q",
+							strings.Join(tc.args, " "), stderr)
 					}
 				})
 			}
