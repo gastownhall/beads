@@ -201,6 +201,15 @@ func TestProxiedServerServeClose(t *testing.T) {
 	// row from the same post-state snapshot. `bd show --json` is deliberately
 	// not the oracle — it answers IssueDetails, with the counts and the revision
 	// this response does not carry, so it would compare two different shapes.
+	//
+	// The re-close replays the reason the first close ALREADY STORED. It used to
+	// pass a different one, spelled "ignored under first-close-wins", which is
+	// now the one re-close `bd close` refuses: an explicit reason it must drop
+	// exits non-zero rather than reporting a write it did not perform (be-ctr).
+	// A replay of the stored reason is the same idempotent no-op against the same
+	// snapshot, so the oracle is unchanged — and that a DIFFERING reason is
+	// dropped is still pinned, by the first-close-wins subtest above and by
+	// cmd/bd/close_reason_amend_test.go.
 	t.Run("the closed issue matches bd close --json element 0", func(t *testing.T) {
 		issue := bdProxiedCreate(t, bd, p.dir, "parity oracle", "-p", "1",
 			"-d", "described", "--acceptance", "accepted", "--label", "oracle")
@@ -214,7 +223,7 @@ func TestProxiedServerServeClose(t *testing.T) {
 			t.Fatalf("issue = %#v, want an object", body["issue"])
 		}
 
-		fromCLI := bdProxiedCloseOneRaw(t, bd, p.dir, issue.ID, "--reason", "ignored under first-close-wins")
+		fromCLI := bdProxiedCloseOneRaw(t, bd, p.dir, issue.ID, "--reason", "done")
 
 		// The allowlist is EMPTY: both surfaces marshal the same canonical
 		// struct from the same post-state snapshot, so any difference at all is
