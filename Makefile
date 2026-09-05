@@ -345,10 +345,13 @@ endif
 
 install: check-up-to-date
 
-# Format all Go files
+# Format all Go files.
+# Through the go.mod-pinned gofmt, never a bare PATH one: a newer local Go
+# formats differently from CI, so a bare gofmt -w here rewrites files into a
+# form CI's gofmt then rejects. See scripts/ci/gofmt-bin.sh.
 fmt:
 	@echo "Formatting Go files..."
-	@gofmt -w .
+	@gofmt_bin="$$(./scripts/ci/gofmt-bin.sh)" && "$$gofmt_bin" -w .
 	@echo "Done"
 
 # Check that all Go files are properly formatted (for CI)
