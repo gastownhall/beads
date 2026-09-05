@@ -5,9 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/types"
 )
 
@@ -224,7 +226,50 @@ func ResolvePartialID(ctx context.Context, store PartialIDResolverStore, input s
 		return "", fmt.Errorf("%w: %q matches %d issues: %v\nUse more characters to disambiguate", ErrAmbiguousID, input, len(matches), matches)
 	}
 
-	return matches[0], nil
+	// Sole leading-prefix match. Every other return from this function is an
+	// exact match (or a prefix-normalized exact match), so this is the one path
+	// that hands back an issue the caller did not name.
+	resolved := matches[0]
+	if shouldNotifyPartialResolution(input, resolved, debug.IsQuiet(), os.Getenv("BD_NO_PARTIAL_ID_NOTICE")) {
+		emitPartialResolutionNotice(input, resolved)
+	}
+	return resolved, nil
+}
+
+// shouldNotifyPartialResolution is the testable predicate behind the
+// partial-resolution notice. It takes the quiet flag and the suppression env
+// value as parameters so tests can cover every combination, the same shape as
+// shouldWarnImplicitBlocksDefault in cmd/bd/dep.go.
+//
+// Deliberately NOT gated on stderr being a terminal, which is where it departs
+// from that precedent. The implicit-blocks warning tells an interactive
+// operator about a default they chose; this one tells a caller that the issue
+// it is about to act on is not the issue it named, and the callers most exposed
+// to that — scripts, hooks and agents — are exactly the non-TTY ones. Gating on
+// a TTY would silence it precisely where it is most needed.
+func shouldNotifyPartialResolution(input, resolved string, quiet bool, noNotifyEnv string) bool {
+	if resolved == "" || resolved == input {
+		return false
+	}
+	// --quiet is documented as "Suppress non-essential output (errors only)",
+	// matching how the other non-error stderr notices behave.
+	if quiet {
+		return false
+	}
+	// Explicit opt-out, following the BD_NO_DEP_TYPE_WARNING precedent.
+	if noNotifyEnv != "" {
+		return false
+	}
+	return true
+}
+
+// emitPartialResolutionNotice writes the notice. Split from the gate so the
+// message text can be asserted under a captured stderr.
+//
+// stderr, never stdout: --json payloads and piped stdout stay byte-for-byte
+// unchanged, so this cannot break a parsing caller.
+func emitPartialResolutionNotice(input, resolved string) {
+	fmt.Fprintf(os.Stderr, "note: %q is not an exact issue ID; resolved to %s (silence with --quiet or BD_NO_PARTIAL_ID_NOTICE=1)\n", input, resolved) //nolint:gosec // G705: stderr, not a browser context
 }
 
 func partialIDSearchPart(hashPart string) (string, bool) {
