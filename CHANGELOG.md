@@ -185,6 +185,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`bd repo add` no longer stores a working-directory-relative repository
+  path.** A bare or relative argument (`bd repo add ../other-repo`) was
+  persisted into `repos.additional` exactly as typed, and every consumer —
+  `bd repo sync`, `bd doctor`'s multi-repo checks — re-resolves that string
+  against its own working directory. The entry therefore named a different
+  directory for every cwd a later command ran from, and the `.beads` existence
+  check `repo add` performs proves only that the path resolved at add time,
+  from the adder's cwd. Even read charitably as "relative to the repo root" it
+  never worked, because the resolution is against the process cwd rather than
+  against `config.yaml`'s directory, so a `bd repo sync` from a subdirectory of
+  the same clone already missed. A relative path is now resolved once, at add
+  time, and stored absolute. Absolute paths, remote URLs and `~/`-prefixed
+  paths are still stored verbatim — the last deliberately, since a `~/` entry
+  is already independent of the working directory and absolutizing it would
+  bake one user's home directory into a `config.yaml` that is version
+  controlled and shared across clones. `bd repo remove` matches a configured
+  entry verbatim first and then in the same canonical form, so entries written
+  by older versions stay removable and `bd repo remove ../other-repo` still
+  finds what `bd repo add ../other-repo` wrote from that directory; it also
+  resolves that entry before the delete, so a missing `config.yaml` now fails
+  ahead of the destructive `DeleteIssuesBySourceRepo` rather than after it.
+
 - **`bd prime` says when it could NOT read the memory plane**
   ([#5877](https://github.com/gastownhall/beads/issues/5877)). A broken or
   unreachable store made prime omit the memory section entirely, so a session
