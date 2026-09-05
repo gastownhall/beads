@@ -2651,8 +2651,12 @@ func countExistingIssues(_ string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+	entries, err := os.ReadDir(beadsDir)
+	if os.IsNotExist(err) || (err == nil && len(entries) == 0) {
 		return 0, nil
+	}
+	if err != nil {
+		return 0, err
 	}
 	// The preview open permits older schemas but never migrates them. The
 	// reinit count below reads only existing tables, not current-schema stats.

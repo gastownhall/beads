@@ -158,6 +158,15 @@ func TestInitReinitPreflightFreshWorkspace(t *testing.T) {
 	if _, err := os.Stat(beadsDir); !os.IsNotExist(err) {
 		t.Fatalf("preflight created workspace artifacts: %v", err)
 	}
+	if err := os.Mkdir(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := runInitReinitPreflight(true, "test", ""); err != nil {
+		t.Fatalf("pre-created empty workspace refused: %v", err)
+	}
+	if entries, err := os.ReadDir(beadsDir); err != nil || len(entries) != 0 {
+		t.Fatalf("preflight changed empty workspace: %v, %v", entries, err)
+	}
 }
 
 func unusedInitPreflightPort(t *testing.T) int {
