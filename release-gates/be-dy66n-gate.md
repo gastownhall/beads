@@ -78,3 +78,15 @@ This follows established precedent: be-gd3v, be-79jh, be-39ss, be-pp7e, be-r3ysh
 ## Disposition
 
 **PASS, 7/7, no waivers.** PR [gastownhall/beads#6304](https://github.com/gastownhall/beads/pull/6304) opened, verified OPEN and MERGEABLE, authored by our own account (no external-contributor human-hold triggered). Four pre-existing, non-diff-owned failure/finding classes encountered during gate evaluation, all attributed to their exact pre-existing tracker beads (be-9ogs6, be-irise, be-w4qbu, be-a0dxu) with clause-3 proof and citation comments posted this round. Reporting to mayor for visibility only; no merge-request routed, per contributor-only merge-authority carve-out.
+
+## Fix-round amendment — 2026-09-05, maintainer review of PR #6304
+
+This gate's verdict stands as recorded for source commit `26033d8e4`. It is **not** re-run here; this section exists so the record does not read as current for a head it never evaluated.
+
+Maintainer review on PR #6304 returned two decisions that change facts asserted above:
+
+1. **`current_revision` is now on both planes.** `wisps.current_revision BIGINT NOT NULL DEFAULT 1` is carried for shape parity (nothing reads or writes it in any phase) — `TestSchemaParityIssuesVsWisps` enforces strict issues↔wisps column-name parity with no exemption list. This amends the section-8 issues-only decision the gated commit encoded. Because `wisps` is dolt-ignored, the change ships with an ignored-series twin, `migrations/ignored/0026_add_wisps_current_revision.up.sql` (check D of `scripts/check-migration-hygiene.sh`; precedent ignored/0013 for 0054, ignored/0020 for 0060).
+
+2. **The ADD COLUMN idempotency guard moved from Go into the SQL.** Criterion 1's evidence line above records a verified "non-PREPARE ADD COLUMN idempotency guard" (`execMigration0067Body` in `schema.go`). That guard is gone and `schema.go` is back at `origin/main`: `internal/storage/dolt/pr4107_corruption_test.go`'s replay harness re-executes the frozen `.up.sql` bytes directly, so no Go-side guard is in that path and every migration ≥ 0046 must be idempotent as raw SQL on its own. Both ADD COLUMNs are now INFORMATION_SCHEMA-guarded PREPAREs (0060/0066 pattern), with a direct-DDL fresh-bundle override in `cliCompatibleMigrationSQL` for the pre-2.3 CLI hazard (0060/0065/0066 precedent).
+
+The diffstat recorded above is likewise the gated commit's, not the fix round's.
