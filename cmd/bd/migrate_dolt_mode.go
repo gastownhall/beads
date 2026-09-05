@@ -504,6 +504,20 @@ func resolveMigrateIdleTimeout(cmd *cobra.Command) (time.Duration, error) {
 	return v, nil
 }
 
+// formatMigrateIdleTimeout renders a resolved idle timeout for operator-facing
+// messages. resolveMigrateIdleTimeout maps an omitted flag to 0 and an explicit
+// "--idle-timeout 0" to IdleTimeoutNever, so both sentinels need names.
+func formatMigrateIdleTimeout(d time.Duration) string {
+	switch d {
+	case proxy.IdleTimeoutNever:
+		return "never"
+	case 0:
+		return "default"
+	default:
+		return d.String()
+	}
+}
+
 func migrateModeBeadsDir() (string, error) {
 	beadsDir := beads.FindBeadsDir()
 	if beadsDir == "" {
@@ -797,7 +811,18 @@ func runMigrateToProxiedServer(dryRun bool, idleTimeout time.Duration, shared bo
 				return HandleError("failed to disable dolt.shared-server: %v", err)
 			}
 		}
-		info := &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
+		// Replay the recorded plan instead of rebuilding it from the current
+		// argv. A resume that omits or changes --idle-timeout would otherwise
+		// write a sidecar the target_configured check below then rejects, and
+		// because that check runs only after the phase has advanced past
+		// migratePrepared, this block never runs again — the workspace would be
+		// wedged in proxied-server mode with no in-tool recovery.
+		info := j.Sidecar
+		if info == nil {
+			info = &configfile.ProxiedServerClientInfo{RootPath: rootPath, IdleTimeout: idleTimeout}
+		} else if info.IdleTimeout != idleTimeout {
+			fmt.Fprintf(os.Stderr, "Warning: resuming migration with the recorded --idle-timeout (%s); the value supplied now (%s) is ignored\n", formatMigrateIdleTimeout(info.IdleTimeout), formatMigrateIdleTimeout(idleTimeout))
+		}
 		if err := configfile.SaveProxiedServerClientInfo(beadsDir, info); err != nil {
 			return HandleError("failed to write %s: %v", configfile.ProxiedServerClientInfoFileName, err)
 		}
@@ -904,7 +929,21 @@ func runMigrateFromProxiedServer(dryRun bool, shared bool) error {
 		return externalMigrationRefusal("cannot resume migration for externally hosted proxied Dolt endpoint")
 	}
 	if j != nil {
-		if j.Phase == migratePrepared && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
+		// SCOPED TO REVERSE JOURNALS, and the scope is load-bearing. At
+		// migratePrepared the two directions disagree about whether the
+		// sidecar is on disk: a reverse journal records a sidecar that
+		// already exists, while a forward journal records the plan it is
+		// about to write and only advances past migratePrepared after the
+		// write. So a crash in a forward migration's pre-write window leaves
+		// diskSidecar nil against a non-nil j.Sidecar, and an unscoped guard
+		// refuses this command — the documented escape hatch — by naming a
+		// file whose absence is the correct state for that phase. Forward
+		// journals fall through to the journal-ownership check below, which
+		// reports the real situation. Testing TargetMode against the forward
+		// value rather than for the reverse one keeps the guard live for
+		// BOTH reverse targets, "server" and "shared-server".
+		if j.Phase == migratePrepared && j.TargetMode != configfile.DoltModeProxiedServer &&
+			!migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {
 			return HandleError("migration sidecar does not match prepared state")
 		}
 		if j.Phase == migrateTargetConfigured && diskSidecar != nil && !migrationSidecarsEquivalent(beadsDir, diskSidecar, j.Sidecar) {

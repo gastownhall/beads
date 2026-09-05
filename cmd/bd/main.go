@@ -1257,7 +1257,13 @@ var rootCmd = &cobra.Command{
 				}
 			}
 			if cmdName == "doctor" && usesProxiedServer() {
-				return validateProxyMaintenanceBeforeProvider(cmd)
+				// Refuse only on a real refusal. validateProxyMaintenance...
+				// returns nil for doctor subcommands, and returning early on
+				// that would skip the legacy-store guard and autocommit-mode
+				// resolution every other skipsStoreInit command still runs.
+				if err := validateProxyMaintenanceBeforeProvider(cmd); err != nil {
+					return err
+				}
 			}
 			if beadsDir == "" {
 				beadsDir = beads.FindBeadsDir()

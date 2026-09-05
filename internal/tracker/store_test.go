@@ -72,10 +72,19 @@ type lifecycleStoreFake struct {
 	storage.Storage
 	labels    []string
 	updateErr error
+	// degraded records a direct UpdateIssue that bypassed the lifecycle
+	// transaction. That is the label-dropping fallback ApplyIssueUpdate takes
+	// when its inner value is not a storage.IssueLifecycleStore.
+	degraded bool
 }
 
 func (s *lifecycleStoreFake) RunInIssueLifecycleTransaction(ctx context.Context, _ string, fn func(storage.IssueLifecycleTransaction) error) error {
 	return fn(&lifecycleTxFake{store: s})
+}
+
+func (s *lifecycleStoreFake) UpdateIssue(context.Context, string, map[string]interface{}, string) error {
+	s.degraded = true
+	return s.updateErr
 }
 
 type lifecycleTxFake struct {
@@ -132,5 +141,66 @@ func TestDirectStoreApplyIssueUpdateFailureDoesNotTouchLabels(t *testing.T) {
 	}
 	if len(underlying.labels) != 1 || underlying.labels[0] != "keep" {
 		t.Fatalf("failed update changed labels: %v", underlying.labels)
+	}
+}
+
+// TestNewEngineKeepsDirectStoreAdaptationIntact pins the production wiring that
+// no other test covers: trackerStoreForCommand adapts the direct store itself
+// and hands the adapter to NewEngine, which adapts again. Re-wrapping produces
+// &directStore{Storage: &directStore{...}}, whose inner value can never satisfy
+// storage.IssueLifecycleStore, so ApplyIssueUpdate silently degrades to a
+// label-less, transaction-less UpdateIssue. The conformance harness cannot see
+// this: its store implements tracker.Store directly, which is the one shape
+// direct mode never produces.
+func TestNewEngineKeepsDirectStoreAdaptationIntact(t *testing.T) {
+	underlying := &lifecycleStoreFake{labels: []string{"stale"}}
+	adapted := NewStore(underlying) // what trackerStoreForCommand returns in direct mode
+
+	engine := NewEngine(nil, adapted, "actor")
+
+	if engine.Store != adapted {
+		t.Fatalf("NewEngine re-adapted an already-adapted store: %T", engine.Store)
+	}
+	updater, ok := engine.Store.(IssueUpdater)
+	if !ok {
+		t.Fatalf("engine store %T lost the IssueUpdater capability", engine.Store)
+	}
+	if err := updater.ApplyIssueUpdate(context.Background(), "bd-1", nil, []string{"fresh"}, "actor"); err != nil {
+		t.Fatal(err)
+	}
+	if underlying.degraded {
+		t.Fatal("ApplyIssueUpdate bypassed the lifecycle transaction")
+	}
+	if len(underlying.labels) != 1 || underlying.labels[0] != "fresh" {
+		t.Fatalf("labels did not survive the pull: %v", underlying.labels)
+	}
+}
+
+func TestNewStoreIsIdempotent(t *testing.T) {
+	direct := NewStore(&lifecycleStoreFake{})
+	if got := NewStore(direct); got != direct {
+		t.Fatalf("NewStore(directStore) = %T, want the same value", got)
+	}
+	uowBacked := NewUOWStore(failingUOWProvider{err: errors.New("unused")})
+	if got := NewStore(uowBacked); got != uowBacked {
+		t.Fatalf("NewStore(uowStore) = %T, want the same value", got)
+	}
+	stub := contractStoreStub{}
+	if got := NewStore(NewStore(stub)); got != Store(stub) {
+		t.Fatalf("NewStore(narrow Store) = %T, want the same value", got)
+	}
+}
+
+func TestDirectStoreApplyIssueUpdateNormalizesLabels(t *testing.T) {
+	underlying := &lifecycleStoreFake{labels: []string{"keep"}}
+	store := NewStore(underlying).(*directStore)
+
+	// " keep " differs from "keep" only in whitespace and must not churn;
+	// the empty label must be dropped rather than reaching AddLabel.
+	if err := store.ApplyIssueUpdate(context.Background(), "bd-1", nil, []string{" keep ", ""}, "actor"); err != nil {
+		t.Fatal(err)
+	}
+	if len(underlying.labels) != 1 || underlying.labels[0] != "keep" {
+		t.Fatalf("labels churned or admitted an empty value: %v", underlying.labels)
 	}
 }

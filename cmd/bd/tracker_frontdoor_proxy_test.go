@@ -159,6 +159,44 @@ func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfig(t *testing.T) {
 	}
 }
 
+// TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfigOnOAuth is the OAuth
+// mirror of the test above. The helper must apply linear.api_endpoint on BOTH
+// auth branches, as Tracker.Init does; an early return on the OAuth branch
+// silently ignores a configured custom endpoint whenever OAuth credentials are
+// present, which is the whole set of CI environments.
+func TestBuildLinearClientAPIOnlyUsesProxiedEndpointConfigOnOAuth(t *testing.T) {
+	t.Setenv("LINEAR_OAUTH_CLIENT_ID", "client")
+	t.Setenv("LINEAR_OAUTH_CLIENT_SECRET", "secret")
+	st := &configOnlyTrackerStore{config: map[string]string{"linear.api_endpoint": "https://proxy.example/graphql"}}
+	oldTransport := http.DefaultTransport
+	t.Cleanup(func() { http.DefaultTransport = oldTransport })
+
+	// The OAuth branch makes two requests, and only the second is the one under
+	// test: the token exchange goes to the OAuth token endpoint, which
+	// linear.api_endpoint does not and should not redirect. Serve that one a
+	// token and record where the GraphQL call actually lands.
+	var graphQLURL string
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.URL.String() == linear.DefaultOAuthTokenURL {
+			body := `{"access_token":"tok","token_type":"Bearer","expires_in":3600}`
+			return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header), Request: req}, nil
+		}
+		graphQLURL = req.URL.String()
+		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"data":{"teams":{"nodes":[]}}}`)), Header: make(http.Header), Request: req}, nil
+	})
+
+	client, err := buildLinearClientAPIOnly(context.Background(), "", st)
+	if err != nil {
+		t.Fatalf("build client: %v", err)
+	}
+	if _, err := client.FetchTeams(context.Background()); err != nil {
+		t.Fatalf("fetch teams: %v", err)
+	}
+	if graphQLURL != "https://proxy.example/graphql" {
+		t.Fatalf("OAuth branch sent GraphQL to %q, want the configured linear.api_endpoint", graphQLURL)
+	}
+}
+
 type roundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripperFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }

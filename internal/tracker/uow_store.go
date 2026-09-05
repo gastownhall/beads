@@ -67,16 +67,64 @@ func (s *uowStore) SearchIssues(ctx context.Context, query string, filter types.
 	return page.Items, err
 }
 
+// GetIssueByExternalRef resolves the ISSUES PLANE FIRST and only then falls
+// back to the wisp plane, because that ordering is the direct backend's
+// deliberate contract, not an accident of its implementation:
+// issueops.GetIssueByExternalRefInTx queries `issues` and only falls through to
+// `wisps` on sql.ErrNoRows, and says why ("so that pushed ephemeral beads are
+// found during pull dedup").
+//
+// A single merged search cannot express that. SearchIssues with neither plane
+// flag set routes to searchUnion, a UNION ALL over the two legs ordered by
+// content and terminating in `id ASC` — no plane preference. So for an
+// external_ref present on BOTH planes, direct mode returns the issue and a
+// merged search returns whichever row happens to sort first. The consumer is
+// the pull dedup in engine.go, which then UPDATES the returned row with remote
+// content, making the divergence a silent write to the wrong local bead in
+// proxied mode only.
+//
+// Both plane reads share ONE unit of work. They must: uow.RunTxRead opens a
+// fresh UOW per call, so issuing them as two s.SearchIssues calls would split
+// one logical lookup across two read transactions, and the fallback's premise
+// ("the issues plane is already known empty") would no longer be
+// snapshot-guaranteed. A concurrent same-ref insert into the issues plane
+// landing between the two reads would let the merged fallback return the wisp,
+// re-creating exactly the wrong-row write this ordering exists to prevent.
+// The direct backend resolves both planes inside a single withReadTx, so the
+// shared snapshot is also the parity-preserving shape.
 func (s *uowStore) GetIssueByExternalRef(ctx context.Context, ref string) (*types.Issue, error) {
-	filter := types.IssueFilter{ExternalRef: &ref, Limit: 1}
-	issues, err := s.SearchIssues(ctx, "", filter)
-	if err != nil {
-		return nil, err
-	}
-	if len(issues) == 0 {
-		return nil, storage.ErrNotFound
-	}
-	return issues[0], nil
+	return uow.RunTxRead(ctx, s.provider, func(ctx context.Context, uw uow.UnitOfWork) (*types.Issue, error) {
+		// Issues plane. SkipWisps selects the plane without contributing a WHERE
+		// clause, so this is the exact analog of the direct backend's
+		// `SELECT id FROM issues WHERE external_ref = ?`.
+		page, err := uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &ref, Limit: 1, SkipWisps: true})
+		if err != nil {
+			return nil, err
+		}
+		if len(page.Items) > 0 {
+			return page.Items[0], nil
+		}
+
+		// Wisp fallback, expressed as the merged search rather than Ephemeral=true.
+		// Ephemeral is the only flag that routes to the wisps plane alone, but it
+		// ALSO contributes `ephemeral = 1`, a predicate the direct backend's
+		// `SELECT id FROM wisps WHERE external_ref = ?` does not have — it would
+		// drop wisp-plane rows carrying ephemeral=0 (NoHistory beads, and typed
+		// wisps minted without the flag; see types.IssueFilter.EphemeralTier),
+		// trading this divergence for a narrower one. The merged search adds no
+		// predicate, and its issues leg is already known empty from the search
+		// above — in the same snapshot, now that both reads share this UOW — so a
+		// hit here can only be a wisp, which is the fallback the direct backend
+		// performs.
+		page, err = uw.IssueUseCase().SearchIssues(ctx, "", types.IssueFilter{ExternalRef: &ref, Limit: 1})
+		if err != nil {
+			return nil, err
+		}
+		if len(page.Items) == 0 {
+			return nil, storage.ErrNotFound
+		}
+		return page.Items[0], nil
+	})
 }
 
 func (s *uowStore) GetDependentsWithMetadata(ctx context.Context, id string) ([]*types.IssueWithDependencyMetadata, error) {

@@ -43,4 +43,3 @@ missing or stale runtime state, concurrent starts, and duplicate-owner
 conditions are refusal boundaries. Existing rows, event history, metadata,
 locks, PID records, and unrelated files are no-mutation artifacts in those
 cases.
-

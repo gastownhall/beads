@@ -298,7 +298,10 @@ func AssertProxyCommandCapability(command string, mode ProxyMode, capability Pro
 	if commands, ok := proxyCommandCapabilities[command]; ok {
 		if modes, ok := commands[mode]; ok {
 			if rule, ok := modes[capability]; ok {
-				if rule.Outcome == ProxyOutcomeHonored || rule.Outcome == ProxyOutcomeDelegated {
+				// N/A means the command has no such flag, which is not a
+				// refusal. Without it, a future assert call site on an N/A row
+				// would return a non-nil error carrying an empty message.
+				if rule.Outcome == ProxyOutcomeHonored || rule.Outcome == ProxyOutcomeDelegated || rule.Outcome == ProxyOutcomeNA {
 					return nil
 				}
 				if rule.Code != "" {

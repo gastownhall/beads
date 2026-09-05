@@ -1215,17 +1215,23 @@ func buildLinearClientAPIOnly(ctx context.Context, teamID string, st tracker.Sto
 	if oauthClientSecret == "" {
 		oauthClientSecret = config.GetString("linear.oauth_client_secret")
 	}
+	// Select the auth branch first and apply linear.api_endpoint once, after
+	// it — the shape Tracker.Init uses. Returning the OAuth client inline
+	// would leave this helper asymmetric between its own two branches, with a
+	// custom endpoint honored for an API key and ignored for OAuth.
+	var client *linear.Client
 	if oauthClientID != "" && oauthClientSecret != "" {
-		return linear.NewOAuthClient(linear.OAuthConfig{ClientID: oauthClientID, ClientSecret: oauthClientSecret}, teamID), nil
+		client = linear.NewOAuthClient(linear.OAuthConfig{ClientID: oauthClientID, ClientSecret: oauthClientSecret}, teamID)
+	} else {
+		apiKey := os.Getenv("LINEAR_API_KEY")
+		if apiKey == "" {
+			apiKey = config.GetString("linear.api_key")
+		}
+		if apiKey == "" {
+			return nil, fmt.Errorf("Linear authentication not configured")
+		}
+		client = linear.NewClient(apiKey, teamID)
 	}
-	apiKey := os.Getenv("LINEAR_API_KEY")
-	if apiKey == "" {
-		apiKey = config.GetString("linear.api_key")
-	}
-	if apiKey == "" {
-		return nil, fmt.Errorf("Linear authentication not configured")
-	}
-	client := linear.NewClient(apiKey, teamID)
 	if st != nil {
 		if endpoint, _ := st.GetConfig(ctx, "linear.api_endpoint"); endpoint != "" {
 			client = client.WithEndpoint(endpoint)

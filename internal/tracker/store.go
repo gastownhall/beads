@@ -38,8 +38,31 @@ type ExternalRefHistoryStore interface {
 }
 
 // NewStore adapts a classic storage.Storage to the tracker contract. Values
-// already implementing Store are returned unchanged.
+// already implementing Store are returned unchanged, so NewStore is idempotent
+// and safe to call on a value that a caller has already adapted.
+//
+// Branch order is load-bearing, and neither interface alone can discriminate:
+//
+//   - storage.Storage is a strict superset of Store, so a raw direct store also
+//     satisfies Store. Testing Store first would return it un-adapted and drop
+//     ApplyIssueUpdate entirely.
+//   - directStore embeds the storage.Storage interface, so *directStore
+//     satisfies storage.Storage too. Testing storage.Storage first re-wraps an
+//     already-adapted value as &directStore{Storage: &directStore{...}}, and
+//     the inner *directStore can never satisfy storage.IssueLifecycleStore
+//     (RunInIssueLifecycleTransaction is not part of storage.Storage). That
+//     silently degrades ApplyIssueUpdate to UpdateIssue — no labels, no
+//     lifecycle transaction.
+//
+// The tracker's own adapters are therefore matched by concrete type first: no
+// storage backend can accidentally satisfy that check.
 func NewStore(value interface{}) Store {
+	switch store := value.(type) {
+	case *directStore:
+		return store
+	case *uowStore:
+		return store
+	}
 	if store, ok := value.(storage.Storage); ok {
 		return &directStore{Storage: store}
 	}
@@ -66,40 +89,15 @@ func (s *directStore) ApplyIssueUpdate(ctx context.Context, id string, updates m
 		if labels == nil {
 			return nil
 		}
-		return syncLabels(ctx, tx, id, labels, actor)
+		// syncIssueLabels, not a local copy: it normalizes both label sets
+		// (trim + drop empty), which is the semantics the pull path had before
+		// this seam moved behind ApplyIssueUpdate. Comparing raw strings makes
+		// a whitespace-only difference churn remove+add on every sync and lets
+		// an empty label reach AddLabel.
+		return syncIssueLabels(ctx, tx, id, labels, actor)
 	})
 }
 
 func (s *directStore) GetDependenciesWithMetadata(ctx context.Context, id string) ([]*types.IssueWithDependencyMetadata, error) {
 	return s.Storage.GetDependenciesWithMetadata(ctx, id)
-}
-
-func syncLabels(ctx context.Context, tx storage.Transaction, id string, desired []string, actor string) error {
-	current, err := tx.GetLabels(ctx, id)
-	if err != nil {
-		return err
-	}
-	currentSet := make(map[string]struct{}, len(current))
-	for _, label := range current {
-		currentSet[label] = struct{}{}
-	}
-	desiredSet := make(map[string]struct{}, len(desired))
-	for _, label := range desired {
-		desiredSet[label] = struct{}{}
-	}
-	for label := range currentSet {
-		if _, ok := desiredSet[label]; !ok {
-			if err := tx.RemoveLabel(ctx, id, label, actor); err != nil {
-				return err
-			}
-		}
-	}
-	for label := range desiredSet {
-		if _, ok := currentSet[label]; !ok {
-			if err := tx.AddLabel(ctx, id, label, actor); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }

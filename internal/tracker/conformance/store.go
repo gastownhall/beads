@@ -14,10 +14,18 @@ import (
 // for adapter contract tests that need to observe local mutations without
 // opening a real Dolt server.
 type Store struct {
-	mu        sync.Mutex
-	Issues    map[string]*types.Issue
-	Config    map[string]string
-	Metadata  map[string]string
+	mu       sync.Mutex
+	Issues   map[string]*types.Issue
+	Config   map[string]string
+	Metadata map[string]string
+
+	// Wisps is the second storage plane. It exists so the shared suite can
+	// state the external_ref resolution contract — issues win over wisps —
+	// which is unrepresentable in a single-plane fixture and which a merged
+	// search silently gets wrong. Empty unless a test seeds it, so every
+	// other assertion is unaffected.
+	Wisps map[string]*types.Issue
+
 	LastSync  string
 	Mutations int
 }
@@ -53,7 +61,7 @@ func (s *Store) ApplyIssueUpdate(ctx context.Context, id string, updates map[str
 
 // NewStore returns an empty fake tracker store.
 func NewStore() *Store {
-	return &Store{Issues: map[string]*types.Issue{}, Config: map[string]string{}, Metadata: map[string]string{}}
+	return &Store{Issues: map[string]*types.Issue{}, Wisps: map[string]*types.Issue{}, Config: map[string]string{}, Metadata: map[string]string{}}
 }
 
 // Open returns the store as a unit-of-work target. The call is intentionally
@@ -104,16 +112,36 @@ func (s *Store) SearchIssues(_ context.Context, _ string, _ types.IssueFilter) (
 	return out, nil
 }
 
-// GetIssueByExternalRef finds one local issue by external reference.
+// GetIssueByExternalRef finds one local issue by external reference, issues
+// plane first and wisps only as a fallback. The order is the contract, not an
+// implementation detail: the direct backend resolves `issues` before `wisps`
+// so pull dedup updates the durable bead rather than a pushed ephemeral one,
+// and Run asserts it (see external_ref_resolution_prefers_issue_plane).
 func (s *Store) GetIssueByExternalRef(_ context.Context, ref string) (*types.Issue, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, issue := range s.Issues {
-		if issue.ExternalRef != nil && *issue.ExternalRef == ref {
+	for _, plane := range []map[string]*types.Issue{s.Issues, s.Wisps} {
+		if issue := matchExternalRef(plane, ref); issue != nil {
 			return cloneIssue(issue), nil
 		}
 	}
 	return nil, storage.ErrNotFound
+}
+
+// matchExternalRef returns the lowest-ID row in one plane carrying ref, or nil.
+// Go map iteration is randomized, so picking by ID keeps a plane with several
+// matching rows from making the harness flaky.
+func matchExternalRef(plane map[string]*types.Issue, ref string) *types.Issue {
+	var found *types.Issue
+	for _, issue := range plane {
+		if issue.ExternalRef == nil || *issue.ExternalRef != ref {
+			continue
+		}
+		if found == nil || issue.ID < found.ID {
+			found = issue
+		}
+	}
+	return found
 }
 
 // GetDependentsWithMetadata returns no dependents in the minimal fixture.

@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -711,6 +712,54 @@ func TestMigrateToProxiedServer_RetryAfterCheckpointFault(t *testing.T) {
 	assert.Nil(t, j, "successful migration removes its journal")
 }
 
+// TestMigrateToProxiedServer_ResumeReplaysRecordedIdleTimeout covers the resume
+// case every other fault-retry test misses: the retry replays identical argv, so
+// the sidecar is only ever rebuilt in its trivially-consistent form. A resume
+// that changes --idle-timeout (or omits it, which resolves differently again)
+// must replay the journal's recorded plan. Rebuilding the sidecar from the
+// current argv persists the divergence before the equality check detects it, and
+// because the rebuild is gated on phase == migratePrepared, re-supplying the
+// original value cannot repair it afterwards.
+func TestMigrateToProxiedServer_ResumeReplaysRecordedIdleTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		resume time.Duration
+	}{
+		{name: "changed", resume: 5 * time.Minute},
+		{name: "omitted", resume: 0},
+		{name: "never", resume: proxy.IdleTimeoutNever},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+			recorded := 90 * time.Second
+
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", string(migratePrepared))
+			require.Error(t, runMigrateToProxiedServer(false, recorded, false))
+			j, err := loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			require.NotNil(t, j)
+			require.Equal(t, migratePrepared, j.Phase)
+			require.NotNil(t, j.Sidecar)
+			require.Equal(t, recorded, j.Sidecar.IdleTimeout)
+
+			t.Setenv("BEADS_MIGRATION_FAIL_PHASE", "")
+			require.NoError(t, runMigrateToProxiedServer(false, tc.resume, false))
+
+			j, err = loadMigrateJournal(beadsDir)
+			require.NoError(t, err)
+			assert.Nil(t, j, "successful migration removes its journal")
+			info, err := configfile.LoadProxiedServerClientInfo(beadsDir)
+			require.NoError(t, err)
+			require.NotNil(t, info)
+			assert.Equal(t, recorded, info.IdleTimeout, "sidecar must hold the recorded plan, not the resume argv")
+
+			// The reverse migration is the documented escape hatch; it compares
+			// the same two values, so it must also accept the resumed state.
+			require.NoError(t, runMigrateFromProxiedServer(false, false))
+		})
+	}
+}
+
 func TestMigrateJournal_UnknownPhaseFailsClosed(t *testing.T) {
 	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
 	path := migrateJournalPath(beadsDir)
@@ -1024,4 +1073,49 @@ func TestMigrateFromProxiedServer_JournalSidecarChangedFailsClosed(t *testing.T)
 	captureStderr(t, func() { migrateErr = runMigrateFromProxiedServer(false, false) })
 	require.Error(t, migrateErr)
 	assert.Equal(t, before, snapshotMigrationTree(t, beadsDir, root))
+}
+
+// TestMigrateFromProxiedServer_ForwardJournalAtPreparedIsNotSidecarRefused is
+// the complement of the test above, and the reason its guard is scoped to
+// reverse journals.
+//
+// The two directions mean different things by a migratePrepared journal that
+// names a sidecar. A reverse journal names one that is already on disk, so a
+// mismatch is real corruption -- that is the case above. A forward journal
+// names the sidecar it is about to write, and only advances past
+// migratePrepared once the write lands, so a crash in that pre-write window
+// leaves no sidecar on disk at all. That is the correct state for the phase,
+// not a mismatch.
+//
+// This command is the documented escape hatch out of exactly that wreck: the
+// non-proxied-mode refusal is gated on j == nil, so a leftover journal is what
+// lets the operator run it with the live mode still on "server". An unscoped
+// sidecar check refuses here by naming a missing file, which strands the
+// workspace with no way forward and no way back.
+func TestMigrateFromProxiedServer_ForwardJournalAtPreparedIsNotSidecarRefused(t *testing.T) {
+	// Live mode is still the forward migration's source: it flips only after
+	// the sidecar is written, so a crash before that leaves it untouched.
+	beadsDir := migrateModeWorkspace(t, configfile.DoltModeServer)
+	root := filepath.Join(beadsDir, "dolt")
+	j := migrateJournal{Version: 1, SourceMode: configfile.DoltModeServer, TargetMode: configfile.DoltModeProxiedServer, RootPath: root, Ownership: "managed-local", Attempt: 1, Phase: migratePrepared, Sidecar: &configfile.ProxiedServerClientInfo{RootPath: root}}
+	b, err := json.Marshal(j)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(migrateJournalPath(beadsDir), b, 0o600))
+
+	// Precondition: no sidecar on disk, which is what the guard would have
+	// compared against the journal's.
+	_, statErr := os.Stat(configfile.ProxiedServerClientInfoPath(beadsDir))
+	require.True(t, os.IsNotExist(statErr), "precondition: sidecar must be absent, got %v", statErr)
+
+	var migrateErr error
+	stderr := captureStderr(t, func() { migrateErr = runMigrateFromProxiedServer(false, false) })
+
+	// Deliberately not asserting success: what this command does next with a
+	// forward journal is its own behavior and has its own coverage. The pin is
+	// only that it does not stop at the sidecar comparison, whose message
+	// would be a lie about the workspace.
+	if migrateErr != nil {
+		assert.NotContains(t, stderr, "migration sidecar does not match prepared state")
+		assert.NotContains(t, migrateErr.Error(), "migration sidecar does not match prepared state")
+	}
 }

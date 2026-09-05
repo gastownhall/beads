@@ -132,7 +132,12 @@ type Engine struct {
 }
 
 // NewEngine creates a new sync engine for the given tracker and storage.
-func NewEngine(tracker IssueTracker, store interface{}, actor string) *Engine {
+//
+// store is typed rather than interface{} so the seam names its contract: a
+// storage.Storage satisfies Store and is adapted here, while a caller that
+// already adapted its store (trackerStoreForCommand) passes the adapter
+// straight through. NewStore is idempotent, so adapting twice is a no-op.
+func NewEngine(tracker IssueTracker, store Store, actor string) *Engine {
 	return &Engine{
 		Tracker: tracker,
 		Store:   NewStore(store),
@@ -577,14 +582,6 @@ func (e *Engine) doPull(ctx context.Context, opts SyncOptions, allowOverwriteIDs
 		attribute.Int("sync.skipped", stats.Skipped),
 	)
 	return stats, nil
-}
-
-// applyPullIssueUpdate keeps a pulled update atomic with its labels.
-func applyPullIssueUpdate(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, labels []string, actor string) error {
-	if err := applyPullIssueFields(ctx, tx, id, updates, actor); err != nil {
-		return err
-	}
-	return syncIssueLabels(ctx, tx, id, labels, actor)
 }
 
 func applyPullIssueFields(ctx context.Context, tx storage.IssueLifecycleTransaction, id string, updates map[string]interface{}, actor string) error {

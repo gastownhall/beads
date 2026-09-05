@@ -146,6 +146,48 @@ func Run(t *testing.T, build func(*testing.T, *Fixture) Setup) {
 		}
 	})
 
+	t.Run("external_ref_resolution_prefers_issue_plane", func(t *testing.T) {
+		s := newSetup(t)
+		// The setup seeded Expected.ExternalRef on the issues plane. Put the
+		// SAME ref on the wisps plane — the state a push-then-pull produces
+		// once a wisp has been pushed under a ref the durable bead also
+		// carries — and give the wisp the ID that sorts first, so a resolver
+		// with no plane preference returns it.
+		var want string
+		for id, issue := range s.Store.Issues {
+			if issue.ExternalRef != nil && *issue.ExternalRef == s.Expected.ExternalRef {
+				want = id
+				break
+			}
+		}
+		if want == "" {
+			t.Fatalf("setup seeded no issues-plane row for %q", s.Expected.ExternalRef)
+		}
+		ref := s.Expected.ExternalRef
+		wispID := "aaa-wisp-" + want
+		s.Store.Wisps[wispID] = &types.Issue{ID: wispID, Title: "pushed wisp", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &ref}
+
+		got, err := s.Store.GetIssueByExternalRef(ctx, ref)
+		if err != nil {
+			t.Fatalf("resolve %q: %v", ref, err)
+		}
+		// Resolving to the wisp would make the pull dedup update the ephemeral
+		// row instead of the durable bead — a silent write to the wrong issue.
+		if got == nil || got.ID != want {
+			t.Fatalf("external_ref %q resolved to %v, want issues-plane %q: the issues plane must win over the wisp plane", ref, got, want)
+		}
+
+		// And the wisp plane is still reachable when the issues plane has no
+		// match, so plane preference did not become plane exclusion.
+		otherRef := ref + "-wisp-only"
+		onlyID := "wisp-only"
+		s.Store.Wisps[onlyID] = &types.Issue{ID: onlyID, Title: "wisp only", Status: types.StatusOpen, IssueType: types.TypeTask, Priority: 2, Ephemeral: true, ExternalRef: &otherRef}
+		got, err = s.Store.GetIssueByExternalRef(ctx, otherRef)
+		if err != nil || got == nil || got.ID != onlyID {
+			t.Fatalf("wisp-only external_ref %q resolved to (%v, %v), want %q", otherRef, got, err, onlyID)
+		}
+	})
+
 	t.Run("api_only_does_not_open_uow", func(t *testing.T) {
 		fixture := &Fixture{HTTP: NewHTTPDouble(), StoreFactory: NewFactory()}
 		s := build(t, fixture)
