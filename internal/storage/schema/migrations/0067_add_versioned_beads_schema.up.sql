@@ -12,10 +12,22 @@
 -- exists by the time any migration runs, so unlike 0066's guarded ADD COLUMN
 -- (needed because bd_events_journal is a dolt-ignored table that a fresh
 -- clone may materialize from the ignored series instead of via this file),
--- no idempotent-replay justification applies here, and a PREPARE'd ADD
--- COLUMN/DROP COLUMN silently vanishes under the CLI-bundle path on a
--- pre-2.3 Dolt CLI (see cli_prepared_ddl.go).
-CREATE TABLE issue_versions (
+-- no PREPARE-based idempotent-replay justification applies here, and a
+-- PREPARE'd ADD COLUMN/DROP COLUMN silently vanishes under the CLI-bundle
+-- path on a pre-2.3 Dolt CLI (see cli_prepared_ddl.go).
+--
+-- The CREATE TABLEs below are guarded with IF NOT EXISTS -- ordinary,
+-- unwrapped MySQL-flavored DDL, so this doesn't reintroduce the PREPARE
+-- hazard -- so a designated-migrator replay (schema_migrations bookkeeping
+-- row missing, e.g. BD_ALLOW_REMOTE_MIGRATE=1 against a clone that already
+-- has these tables) doesn't die on Error 1105. The ADD COLUMN below has no
+-- equivalent IF NOT EXISTS: MySQL, which Dolt follows, has never had that
+-- construct for ADD COLUMN (it's a MariaDB-only extension), and PREPARE-ing
+-- it to fake one is exactly the vanishing hazard above. Its replay guard
+-- instead lives in Go, keyed to this migration's filename, right where the
+-- runtime executes migration bodies (see execMigration0067Body in
+-- schema.go).
+CREATE TABLE IF NOT EXISTS issue_versions (
     issue_id VARCHAR(255) NOT NULL,
     revision BIGINT NOT NULL,
     epoch INT NOT NULL,
@@ -32,7 +44,7 @@ CREATE TABLE issue_versions (
 -- Singleton: exactly one row, id=1, once a later phase creates it. Phase 1
 -- leaves the table empty -- the CHECK just pins the shape the lazy-init that
 -- eventually seeds it (Phase 2/3) must follow.
-CREATE TABLE store_epoch (
+CREATE TABLE IF NOT EXISTS store_epoch (
     id TINYINT(1) NOT NULL DEFAULT 1,
     epoch INT NOT NULL DEFAULT 1,
     bumped_at DATETIME,

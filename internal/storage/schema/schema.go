@@ -1551,6 +1551,79 @@ func execMigrationBody(ctx context.Context, db DBConn, sqlText string) error {
 	return DrainCall(ctx, db, sqlText)
 }
 
+// migration0067Filename keys the designated-migrator replay guard below to
+// exactly one frozen migration file — see execMigrationBodyForFile.
+const migration0067Filename = "0067_add_versioned_beads_schema.up.sql"
+
+// alterIssuesAddCurrentRevision is the exact leading text of migration 0067's
+// one ALTER TABLE statement, frozen alongside the migration file itself. Used
+// only to recognize that one statement out of the handful splitSQLStatements
+// hands back; not a general SQL parser.
+const alterIssuesAddCurrentRevision = "ALTER TABLE issues ADD COLUMN current_revision"
+
+// execMigrationBodyForFile is runMigrations' single dispatch point: most
+// migrations run through the shared execMigrationBody, but a migration whose
+// frozen SQL cannot fully guard its own idempotent replay gets a
+// filename-keyed override here instead.
+func execMigrationBodyForFile(ctx context.Context, db DBConn, name, sqlText string) error {
+	if name == migration0067Filename {
+		return execMigration0067Body(ctx, db, sqlText)
+	}
+	return execMigrationBody(ctx, db, sqlText)
+}
+
+// execMigration0067Body applies migration 0067's frozen SQL exactly like
+// execMigrationBody — one ExecContext call, the file's bytes unchanged — so
+// an ordinary forward migration (the only shape any pre-existing test in this
+// package simulates, e.g. lock_test.go's expectOnePendingMigration) is
+// byte-for-byte identical in call shape and behavior to before this guard
+// existed. It only does something different when that single call fails: a
+// designated-migrator replay (be-xrl84) hits this file again after
+// issue_versions, store_epoch and issues.current_revision all already exist.
+// The two CREATE TABLEs guard themselves (CREATE TABLE IF NOT EXISTS is
+// ordinary, unwrapped MySQL DDL), so on replay the batch fails on the ALTER's
+// duplicate-column condition specifically — MySQL, which Dolt follows, has
+// never had ADD COLUMN IF NOT EXISTS (it's a MariaDB-only extension), and
+// PREPARE-ing one to fake it silently vanishes under the CLI-bundle path on a
+// pre-2.3 Dolt CLI (see cli_prepared_ddl.go).
+//
+// Rather than pattern-match Dolt's DDL-conflict error text or number to
+// confirm that guess, failure is confirmed the same way success is: reread
+// INFORMATION_SCHEMA. CREATE TABLE's own conflict surfaces as a generic
+// Error 1105 ("table ... already exists") rather than MySQL's usual
+// table-exists code, so there is no reason to trust the ALTER's conflict is
+// any more standardized. If issues.current_revision exists after the
+// failure, that failure is this exact replay collision — retry once with the
+// ALTER statement stripped from the batch (statements re-derived from sqlText
+// itself via splitSQLStatements, not a hand-maintained copy, so the retry
+// cannot silently drift from the frozen file it is guarding). Any other
+// failure (column still absent) is a real error and is returned unchanged.
+func execMigration0067Body(ctx context.Context, db DBConn, sqlText string) error {
+	_, err := db.ExecContext(ctx, sqlText)
+	if err == nil {
+		return nil
+	}
+
+	exists, existsErr := schemaColumnExists(ctx, db, "issues", "current_revision")
+	if existsErr != nil || !exists {
+		return err
+	}
+
+	var kept []string
+	for _, stmt := range splitSQLStatements(sqlText) {
+		text := strings.TrimSpace(stmt.text)
+		if text == "" || strings.HasPrefix(text, alterIssuesAddCurrentRevision) {
+			continue
+		}
+		kept = append(kept, text)
+	}
+	if len(kept) == 0 {
+		return nil
+	}
+	_, err = db.ExecContext(ctx, strings.Join(kept, ";\n")+";")
+	return err
+}
+
 // migrate brings the source up to its latest version and returns the number of
 // numbered migrations applied plus whether it added the content_hash column to a
 // pre-existing cursor table. The column signal lets MigrateUp stage and commit
@@ -1668,7 +1741,7 @@ func runMigrations(ctx context.Context, db DBConn, src migrationSource, minVersi
 
 		fmt.Fprintf(stderr, "Applying migration %04d: %s…\n", mf.version, humanMigrationName(mf.name))
 		start := time.Now()
-		if err := execMigrationBody(ctx, db, string(data)); err != nil {
+		if err := execMigrationBodyForFile(ctx, db, mf.name, string(data)); err != nil {
 			return count, fmt.Errorf("migration %s: %w", mf.name, err)
 		}
 		sum := sha256.Sum256(data)

@@ -48,8 +48,8 @@ func TestMigration0067AddsVersionedBeadsSchema(t *testing.T) {
 		t.Fatalf("MigrationSQL(%s) error = %v, want the migration file to exist", migration0067Up, err)
 	}
 	for _, want := range []string{
-		"CREATE TABLE issue_versions",
-		"CREATE TABLE store_epoch",
+		"CREATE TABLE IF NOT EXISTS issue_versions",
+		"CREATE TABLE IF NOT EXISTS store_epoch",
 		"PRIMARY KEY (issue_id, revision)",
 		"ALTER TABLE issues ADD COLUMN current_revision",
 	} {
