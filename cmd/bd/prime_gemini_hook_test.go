@@ -240,6 +240,9 @@ func isolatedGlobalPrimeConfigFixture(t *testing.T) (string, []string) {
 	}
 
 	for _, variable := range profileVars {
+		if err := os.MkdirAll(variable.value, 0o755); err != nil {
+			t.Fatalf("create isolated %s directory: %v", variable.key, err)
+		}
 		t.Setenv(variable.key, variable.value)
 	}
 

@@ -142,6 +142,30 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 }
 
+func TestPRCIGateRequiresWindowsGlobalPrimeOverride(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "test-windows-liveness")
+	step := job.step(t, "Run native Windows global Prime override")
+	if job.If != "" || job.ContinueOnError || step.If != "" ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatal("native Windows global Prime override must be unconditional and required")
+	}
+	if step.Shell != "bash" || step.Env["CGO_ENABLED"] != "1" {
+		t.Fatal("native Windows global Prime override requires Bash and CGO")
+	}
+	if !strings.Contains(step.Run, "./scripts/test.sh") ||
+		!strings.Contains(step.Run, "^TestPrimeBinaryPortfolio$/^TestPrime_HookJSON_GlobalPrimeOverride$") {
+		t.Fatal("native Windows gate must execute the global Prime override fixture")
+	}
+	gate := workflow.job(t, "ci-gate")
+	env := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "test-windows-liveness") ||
+		env["TEST_WINDOWS_LIVENESS"] != "${{ needs.test-windows-liveness.result }}" ||
+		!contains(strings.Fields(env["CI_GATE_REQUIRED"]), "TEST_WINDOWS_LIVENESS") {
+		t.Fatal("CI gate must require the native Windows result")
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
