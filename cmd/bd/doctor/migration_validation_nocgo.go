@@ -28,31 +28,31 @@ type MigrationValidationResult struct {
 // CheckMigrationReadiness returns a warning when CGO is not available.
 func CheckMigrationReadiness(path string) (DoctorCheck, MigrationValidationResult) {
 	return DoctorCheck{
-			Name:     "Migration Readiness",
-			Status:   StatusWarning,
-			Message:  "Skipped: requires CGO",
-			Category: CategoryMaintenance,
-		}, MigrationValidationResult{
-			Phase:   "pre-migration",
-			Ready:   false,
-			Backend: "unknown",
-			Errors:  []string{"Dolt migration requires CGO build"},
-		}
+		Name:     "Migration Readiness",
+		Status:   StatusWarning,
+		Message:  "Skipped: requires CGO",
+		Category: CategoryMaintenance,
+	}, MigrationValidationResult{
+		Phase:   "pre-migration",
+		Ready:   false,
+		Backend: "unknown",
+		Errors:  []string{"Dolt migration requires CGO build"},
+	}
 }
 
 // CheckMigrationCompletion returns a warning when CGO is not available.
 func CheckMigrationCompletion(path string) (DoctorCheck, MigrationValidationResult) {
 	return DoctorCheck{
-			Name:     "Migration Completion",
-			Status:   StatusWarning,
-			Message:  "Skipped: requires CGO",
-			Category: CategoryMaintenance,
-		}, MigrationValidationResult{
-			Phase:   "post-migration",
-			Ready:   false,
-			Backend: "unknown",
-			Errors:  []string{"Dolt migration requires CGO build"},
-		}
+		Name:     "Migration Completion",
+		Status:   StatusWarning,
+		Message:  "Skipped: requires CGO",
+		Category: CategoryMaintenance,
+	}, MigrationValidationResult{
+		Phase:   "post-migration",
+		Ready:   false,
+		Backend: "unknown",
+		Errors:  []string{"Dolt migration requires CGO build"},
+	}
 }
 
 // CheckDoltLocks returns a warning when CGO is not available.
