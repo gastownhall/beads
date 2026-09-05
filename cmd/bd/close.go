@@ -576,12 +576,17 @@ func closeReportedReason(changed bool, supplied, stored string) string {
 // reports. Parenthesized so it cannot be mistaken for a reason someone wrote.
 const noCloseReasonRecorded = "(no close reason recorded)"
 
-// storedCloseReason reads the close reason already on the record, preferring
-// the operation's own post-state snapshot and falling back to the pre-close
-// read. On the no-op path the two agree by construction; the fallback is for
-// a route whose post-state snapshot is absent.
+// storedCloseReason reads the close reason already on the record.
+//
+// The operation's own POST-STATE snapshot is authoritative and is used
+// whenever there is one, INCLUDING when it is empty. An earlier revision fell
+// back to the pre-close read on an empty post-state; codex caught that this
+// makes a concurrent reopen-and-reclose report the reason the old closure had
+// — and, worse, lets a supplied reason match that stale value and pass as an
+// idempotent success. The pre-close read is a fallback for a route that hands
+// back no post-state at all, and for nothing else.
 func storedCloseReason(after, before *types.Issue) string {
-	if after != nil && after.CloseReason != "" {
+	if after != nil {
 		return after.CloseReason
 	}
 	if before != nil {
