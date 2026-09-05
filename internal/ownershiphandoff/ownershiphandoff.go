@@ -13,6 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/beads/internal/lockfile"
 )
 
 // Owner identifies the lifecycle authority for a Dolt scope.
@@ -69,13 +71,16 @@ type Snapshot struct {
 
 // Journal is the atomically persisted handoff state.
 type Journal struct {
-	Request   Request   `json:"request"`
-	Snapshot  Snapshot  `json:"snapshot,omitempty"`
-	Phase     Phase     `json:"phase"`
-	Owner     Owner     `json:"owner"`
-	ErrorCode string    `json:"error_code,omitempty"`
-	Error     string    `json:"error,omitempty"`
-	UpdatedAt time.Time `json:"updated_at"`
+	Request              Request   `json:"request"`
+	Snapshot             Snapshot  `json:"snapshot,omitempty"`
+	SnapshotCaptured     bool      `json:"snapshot_captured,omitempty"`
+	CommitHookInProgress bool      `json:"commit_hook_in_progress,omitempty"`
+	CommitHookRan        bool      `json:"commit_hook_ran,omitempty"`
+	Phase                Phase     `json:"phase"`
+	Owner                Owner     `json:"owner"`
+	ErrorCode            string    `json:"error_code,omitempty"`
+	Error                string    `json:"error,omitempty"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // Result is the typed front-door outcome shared by text and JSON callers.
@@ -98,10 +103,19 @@ type Hooks struct {
 	StopLegacy func(context.Context, Request, Snapshot) error
 	Verify     func(context.Context, Request, Snapshot) error
 	Commit     func(context.Context, Request, Snapshot) error
+	// CommitReplay is an optional idempotent recovery operation for a commit
+	// attempt whose outcome is unknown (for example, a process crash after the
+	// hook ran but before its completion checkpoint was durable). Without this
+	// explicit provider guarantee, Execute refuses to guess or invoke Commit a
+	// second time.
+	CommitReplay func(context.Context, Request, Snapshot) error
 }
 
 // ValidateRequest rejects incomplete, non-canonical, or remotely managed identities.
 func ValidateRequest(r Request) error {
+	if !filepath.IsAbs(r.Root) || filepath.Clean(r.Root) != r.Root {
+		return errors.New("root must be an absolute canonical path")
+	}
 	if r.Owner != OwnerLegacyGC {
 		return errors.New("owner must be legacy-gc")
 	}
@@ -111,10 +125,7 @@ func ValidateRequest(r Request) error {
 	if r.Root == "" {
 		return errors.New("root is required")
 	}
-	abs, err := filepath.Abs(r.Root)
-	if err != nil {
-		return fmt.Errorf("resolve root: %w", err)
-	}
+	abs := r.Root
 	info, err := os.Stat(abs)
 	if err != nil || !info.IsDir() {
 		return fmt.Errorf("root must be an existing directory: %w", err)
@@ -131,10 +142,17 @@ func ValidateRequest(r Request) error {
 		return errors.New("endpoint may specify socket or port, not both")
 	}
 	if e.Socket != "" {
+		if e.Host != "" {
+			return errors.New("socket endpoint must not specify a host")
+		}
 		if !filepath.IsAbs(e.Socket) {
 			return errors.New("socket must be absolute")
 		}
-		rel, err := filepath.Rel(filepath.Clean(abs), filepath.Clean(e.Socket))
+		resolved, err := resolvePathForContainment(e.Socket)
+		if err != nil {
+			return fmt.Errorf("resolve socket: %w", err)
+		}
+		rel, err := filepath.Rel(real, resolved)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return errors.New("external unix endpoint is not eligible for handoff")
 		}
@@ -148,6 +166,36 @@ func ValidateRequest(r Request) error {
 		return errors.New("external endpoint is not eligible for handoff")
 	}
 	return nil
+}
+
+// resolvePathForContainment resolves every existing component of path. The
+// final socket is commonly created by the provider after validation, so a
+// missing final component is retained while symlinked parent directories are
+// still resolved. This prevents a socket beneath root from escaping through a
+// symlink introduced after the lexical Rel check.
+func resolvePathForContainment(path string) (string, error) {
+	path = filepath.Clean(path)
+	var suffix []string
+	for {
+		if _, err := os.Lstat(path); err == nil {
+			resolved, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return "", err
+			}
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			return filepath.Clean(resolved), nil
+		} else if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(path)
+		if parent == path {
+			return "", os.ErrNotExist
+		}
+		suffix = append(suffix, filepath.Base(path))
+		path = parent
+	}
 }
 
 // Load reads and validates a handoff journal from path.
@@ -173,6 +221,15 @@ func Load(path string) (Journal, error) {
 	}
 	if j.Phase == PhaseCommitted && j.Owner != OwnerBD {
 		return Journal{}, errors.New("committed handoff journal must be owned by bd")
+	}
+	if (j.CommitHookInProgress || j.CommitHookRan) && j.Phase != PhaseVerified && j.Phase != PhaseCommitted {
+		return Journal{}, errors.New("handoff journal has commit checkpoint in an invalid phase")
+	}
+	if j.CommitHookInProgress && j.CommitHookRan {
+		return Journal{}, errors.New("handoff journal has conflicting commit checkpoints")
+	}
+	if j.Phase == PhaseCommitted && j.CommitHookInProgress {
+		return Journal{}, errors.New("committed handoff journal has an in-progress commit")
 	}
 	return j, nil
 }
@@ -210,6 +267,37 @@ func result(j Journal, mutates bool) Result {
 	return Result{Phase: j.Phase, Owner: j.Owner, Root: j.Request.Root, Database: j.Request.Database, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
 }
 
+func mutationOccurred(j Journal) bool {
+	return j.Phase == PhaseOldOwnerStopped || j.Phase == PhaseVerified ||
+		j.Phase == PhaseCommitted || j.CommitHookRan || j.CommitHookInProgress
+}
+
+func snapshotCaptured(j Journal) bool {
+	return j.SnapshotCaptured || len(j.Snapshot.Metadata) != 0 ||
+		len(j.Snapshot.Config) != 0 || j.Snapshot.Sentinel != ""
+}
+
+func journalSaveError(j Journal, saveErr error) (Result, error) {
+	j.ErrorCode = "journal_save_failed"
+	j.Error = saveErr.Error()
+	return result(j, mutationOccurred(j)), fmt.Errorf("save handoff journal: %w", saveErr)
+}
+
+// acquireLock opens a persistent advisory lock beside the journal. The lock
+// inode is never removed: the kernel releases the lock when the process exits,
+// so a crash cannot wedge retries or let stale reclaimers unlink a live lock.
+func acquireLock(path string) (*os.File, error) {
+	lock, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0600) //nolint:gosec // path is derived from the operator-selected journal
+	if err != nil {
+		return nil, err
+	}
+	if err := lockfile.FlockExclusiveNonBlocking(lock); err != nil {
+		_ = lock.Close()
+		return nil, err
+	}
+	return lock, nil
+}
+
 // Execute validates and performs a handoff. Dry-run validates identity only
 // and never invokes a hook or opens a provider. A committed journal replays as
 // a no-op. Failures are journaled and leave legacy-gc authoritative.
@@ -219,6 +307,7 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 	}
 	if j, err := Load(journalPath); err == nil {
 		if j.Request != r {
+			j.ErrorCode = "identity_conflict"
 			return result(j, false), errors.New("handoff journal identity conflicts with request")
 		}
 		if j.Phase == PhaseCommitted {
@@ -232,34 +321,48 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 		return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, Root: r.Root, Database: r.Database, Endpoint: r.Endpoint, Mutates: false}, nil
 	}
 	lockPath := journalPath + ".lock"
-	lock, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600) //nolint:gosec // lock path is derived from the operator-selected journal
+	lock, err := acquireLock(lockPath)
 	if err != nil {
 		return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, Root: r.Root, Database: r.Database, Endpoint: r.Endpoint, ErrorCode: "concurrent_handoff"}, fmt.Errorf("acquire handoff lock: %w", err)
 	}
-	_ = lock.Close()
-	defer func() { _ = os.Remove(lockPath) }()
+	defer func() {
+		_ = lockfile.FlockUnlock(lock)
+		_ = lock.Close()
+	}()
 	j := Journal{Request: r, Owner: OwnerLegacyGC, Phase: PhasePrepared, UpdatedAt: time.Now().UTC()}
 	if old, err := Load(journalPath); err == nil {
+		if old.Request != r {
+			old.ErrorCode = "identity_conflict"
+			return result(old, mutationOccurred(old)), errors.New("handoff journal identity conflicts with request")
+		}
+		if old.Phase == PhaseCommitted {
+			return result(old, false), nil
+		}
 		j = old
 	} else if !os.IsNotExist(err) {
 		return result(j, false), err
 	}
 	fail := func(code string, err error) (Result, error) {
 		j.ErrorCode, j.Error, j.UpdatedAt = code, err.Error(), time.Now().UTC()
-		_ = save(journalPath, j)
-		return result(j, false), err
+		if saveErr := save(journalPath, j); saveErr != nil {
+			return journalSaveError(j, errors.Join(err, saveErr))
+		}
+		return result(j, mutationOccurred(j)), err
 	}
 	if j.Phase == PhasePrepared {
-		if h.Snapshot == nil {
-			return fail("snapshot_unavailable", errors.New("snapshot hook is required"))
-		}
-		s, err := h.Snapshot(ctx, r)
-		if err != nil {
-			return fail("snapshot_failed", err)
-		}
-		j.Snapshot = s
-		if err := save(journalPath, j); err != nil {
-			return result(j, false), err
+		if !snapshotCaptured(j) {
+			if h.Snapshot == nil {
+				return fail("snapshot_unavailable", errors.New("snapshot hook is required"))
+			}
+			s, err := h.Snapshot(ctx, r)
+			if err != nil {
+				return fail("snapshot_failed", err)
+			}
+			j.Snapshot = s
+			j.SnapshotCaptured = true
+			if err := save(journalPath, j); err != nil {
+				return journalSaveError(j, err)
+			}
 		}
 	}
 	if j.Phase == PhasePrepared {
@@ -272,7 +375,7 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 		j.Phase = PhaseTargetConfigured
 		j.UpdatedAt = time.Now().UTC()
 		if err := save(journalPath, j); err != nil {
-			return result(j, false), err
+			return journalSaveError(j, err)
 		}
 	}
 	if j.Phase == PhaseTargetConfigured {
@@ -285,7 +388,7 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 		j.Phase = PhaseOldOwnerStopped
 		j.UpdatedAt = time.Now().UTC()
 		if err := save(journalPath, j); err != nil {
-			return result(j, false), err
+			return journalSaveError(j, err)
 		}
 	}
 	if j.Phase == PhaseOldOwnerStopped {
@@ -298,15 +401,61 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 		j.Phase = PhaseVerified
 		j.UpdatedAt = time.Now().UTC()
 		if err := save(journalPath, j); err != nil {
-			return result(j, false), err
+			return journalSaveError(j, err)
 		}
 	}
 	if j.Phase == PhaseVerified {
-		if h.Commit == nil {
-			return fail("commit_unavailable", errors.New("commit hook is required"))
+		if j.CommitHookInProgress && !j.CommitHookRan {
+			if h.CommitReplay == nil {
+				message := "commit hook outcome is unknown; an idempotent commit replay hook is required"
+				if j.Error != "" {
+					message = j.Error + "; " + message
+				}
+				return fail("commit_recovery_required", errors.New(message))
+			}
+			if err := h.CommitReplay(ctx, r, j.Snapshot); err != nil {
+				return fail("commit_recovery_failed", err)
+			}
+			j.CommitHookRan = true
+			j.CommitHookInProgress = false
+			j.ErrorCode = ""
+			j.Error = ""
+			j.UpdatedAt = time.Now().UTC()
+			if err := save(journalPath, j); err != nil {
+				return journalSaveError(j, err)
+			}
 		}
-		if err := h.Commit(ctx, r, j.Snapshot); err != nil {
-			return fail("commit_failed", err)
+		if !j.CommitHookRan {
+			if h.Commit == nil {
+				return fail("commit_unavailable", errors.New("commit hook is required"))
+			}
+			// Reserve the commit hook durably before invoking it. If the process
+			// crashes after this checkpoint, a retry refuses to invoke Commit a
+			// second time unless the provider supplies CommitReplay.
+			j.CommitHookInProgress = true
+			j.ErrorCode = ""
+			j.Error = ""
+			j.UpdatedAt = time.Now().UTC()
+			if err := save(journalPath, j); err != nil {
+				return journalSaveError(j, err)
+			}
+			if err := h.Commit(ctx, r, j.Snapshot); err != nil {
+				j.ErrorCode = "commit_failed"
+				j.Error = err.Error()
+				j.UpdatedAt = time.Now().UTC()
+				if saveErr := save(journalPath, j); saveErr != nil {
+					return journalSaveError(j, errors.Join(err, saveErr))
+				}
+				return result(j, mutationOccurred(j)), err
+			}
+			j.CommitHookRan = true
+			j.CommitHookInProgress = false
+			j.ErrorCode = ""
+			j.Error = ""
+			j.UpdatedAt = time.Now().UTC()
+			if err := save(journalPath, j); err != nil {
+				return journalSaveError(j, err)
+			}
 		}
 		j.Owner = OwnerBD
 		j.Phase = PhaseCommitted
@@ -314,7 +463,7 @@ func Execute(ctx context.Context, r Request, journalPath string, h Hooks, dryRun
 		j.Error = ""
 		j.UpdatedAt = time.Now().UTC()
 		if err := save(journalPath, j); err != nil {
-			return result(j, false), err
+			return journalSaveError(j, err)
 		}
 	}
 	return result(j, true), nil
