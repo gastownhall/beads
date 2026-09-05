@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`bd` says when it resolved a partial ID instead of matching one exactly.**
-  ID resolution tries an exact match first and only then falls back to
+  ([#6302](https://github.com/gastownhall/beads/pull/6302)) ID resolution tries an exact match first and only then falls back to
   leading-prefix abbreviation (`a3f8` -> `a3f8e9`). Ambiguity was already a hard
   error naming every candidate, but a *sole* abbreviation match was returned
   silently, so a caller could act on an issue it had not named without any
