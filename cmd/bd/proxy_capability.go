@@ -340,6 +340,13 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	if name == "ready" {
+		claim, _ := cmd.Flags().GetBool("claim")
+		if claim {
+			// A claim always consumes one row. The proxied claim route has
+			// its own single-row transaction and intentionally ignores the
+			// bulk BEADS_MAX_ROWS cap after validating its value.
+			return nil
+		}
 		maxRows, _, err := resolveMaxRows(cmd)
 		if err != nil {
 			return err
