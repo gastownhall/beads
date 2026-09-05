@@ -21,7 +21,7 @@ func validRequest(t *testing.T) Request {
 		t.Fatal(err)
 	}
 	root = canonical
-	return Request{Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
+	return Request{CityRoot: root, Root: root, Database: "beads", Workspace: "ws-1", Endpoint: Endpoint{Host: "127.0.0.1", Port: 3307}, Owner: OwnerLegacyGC}
 }
 
 func TestValidateRejectsSymlinkRootAndExternalEndpoint(t *testing.T) {

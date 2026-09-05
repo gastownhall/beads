@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -15,6 +14,7 @@ import (
 // the handoff front door. It intentionally keeps provider state out of the
 // wire shape; lifecycle details belong to ownershiphandoff.Hooks.
 type ownershipHandoffIdentity struct {
+	CityRoot  string                    `json:"city_root"`
 	Root      string                    `json:"root"`
 	Database  string                    `json:"database"`
 	Workspace string                    `json:"workspace"`
@@ -27,16 +27,15 @@ type ownershipHandoffIdentity struct {
 type ownershipHandoffOutput struct {
 	Phase     ownershiphandoff.Phase   `json:"phase"`
 	Owner     ownershiphandoff.Owner   `json:"owner"`
+	Mutates   bool                     `json:"mutates"`
 	Identity  ownershipHandoffIdentity `json:"identity"`
 	ErrorCode string                   `json:"error_code"`
 }
 
-// ownershipHandoffProvider is replaced by an embedding/provider integration
-// or a focused test. The default is intentionally unavailable: invoking this
-// explicit escape hatch must never guess how to stop a legacy owner.
-var ownershipHandoffProvider ownershiphandoff.Provider = ownershiphandoff.ProviderFunc(func(_ context.Context, _ ownershiphandoff.Request) (ownershiphandoff.Hooks, error) {
-	return ownershiphandoff.Hooks{}, errors.New("no provider-neutral legacy-owner handoff adapter is configured")
-})
+// ownershipHandoffProvider invokes only the explicit GC handoff protocol. It
+// resolves GC_BIN after request/journal validation and while the journal lock
+// is held; absent or untrusted binaries fail closed without process probing.
+var ownershipHandoffProvider ownershiphandoff.Provider = ownershiphandoff.NewGCProviderFromEnv()
 
 var ownershipHandoffCmd = &cobra.Command{
 	Use:           "ownership-handoff",
@@ -55,6 +54,7 @@ const ownershipHandoffJournalName = "ownership-handoff.json"
 
 func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 	root, _ := cmd.Flags().GetString("root")
+	cityRoot, _ := cmd.Flags().GetString("city")
 	database, _ := cmd.Flags().GetString("database")
 	workspace, _ := cmd.Flags().GetString("workspace")
 	host, _ := cmd.Flags().GetString("host")
@@ -75,7 +75,7 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 		if cmd.Flags().Changed("host") || cmd.Flags().Changed("port") {
 			err := errors.New("socket endpoint cannot be combined with explicit --host or --port")
 			result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
-				Root: root, Database: database, Workspace: workspace,
+				CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace,
 				Endpoint: ownershiphandoff.Endpoint{Host: host, Port: port, Socket: socket}, ErrorCode: "invalid_request"}
 			if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
 				return outputErr
@@ -86,6 +86,7 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 		port = 0
 	}
 	request := ownershiphandoff.Request{
+		CityRoot:  cityRoot,
 		Root:      root,
 		Database:  database,
 		Workspace: workspace,
@@ -95,10 +96,20 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 	if journal == "" {
 		journal = filepath.Join(root, ownershipHandoffJournalName)
 	}
+	if cityRoot == "" {
+		err := errors.New("city root is required to identify the lifecycle owner")
+		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
+			CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace,
+			Endpoint: request.Endpoint, ErrorCode: "invalid_request"}
+		if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
+			return outputErr
+		}
+		return &exitError{Code: 1}
+	}
 	if journal != filepath.Join(root, ownershipHandoffJournalName) {
 		err := errors.New("journal must be the canonical <root>/ownership-handoff.json path")
 		result := ownershiphandoff.Result{Phase: ownershiphandoff.PhasePrepared, Owner: ownershiphandoff.OwnerLegacyGC,
-			Root: root, Database: database, Workspace: workspace, Endpoint: request.Endpoint, ErrorCode: "invalid_journal"}
+			CityRoot: cityRoot, Root: root, Database: database, Workspace: workspace, Endpoint: request.Endpoint, ErrorCode: "invalid_journal"}
 		if outputErr := writeOwnershipHandoffOutput(result, err); outputErr != nil {
 			return outputErr
 		}
@@ -116,9 +127,11 @@ func runOwnershipHandoffCommand(cmd *cobra.Command, _ []string) error {
 
 func writeOwnershipHandoffOutput(result ownershiphandoff.Result, runErr error) error {
 	output := ownershipHandoffOutput{
-		Phase: result.Phase,
-		Owner: result.Owner,
+		Phase:   result.Phase,
+		Owner:   result.Owner,
+		Mutates: result.Mutates,
 		Identity: ownershipHandoffIdentity{
+			CityRoot:  result.CityRoot,
 			Root:      result.Root,
 			Database:  result.Database,
 			Workspace: result.Workspace,
@@ -131,8 +144,8 @@ func writeOwnershipHandoffOutput(result ownershiphandoff.Result, runErr error) e
 			return err
 		}
 	} else {
-		fmt.Fprintf(os.Stdout, "ownership handoff: phase=%s owner=%s root=%s database=%s workspace=%s endpoint=%s error_code=%s\n",
-			output.Phase, output.Owner, output.Identity.Root, output.Identity.Database,
+		fmt.Fprintf(os.Stdout, "ownership handoff: phase=%s owner=%s mutates=%t city=%s root=%s database=%s workspace=%s endpoint=%s error_code=%s\n",
+			output.Phase, output.Owner, output.Mutates, output.Identity.CityRoot, output.Identity.Root, output.Identity.Database,
 			output.Identity.Workspace, output.Identity.Endpoint.String(), output.ErrorCode)
 	}
 	if runErr != nil && !jsonOutput {
@@ -143,6 +156,7 @@ func writeOwnershipHandoffOutput(result ownershiphandoff.Result, runErr error) e
 
 func init() {
 	ownershipHandoffCmd.Flags().String("root", "", "Canonical Dolt root being handed off")
+	ownershipHandoffCmd.Flags().String("city", "", "Canonical Gas City root owning the legacy server")
 	ownershipHandoffCmd.Flags().String("database", "", "Database identity being handed off")
 	ownershipHandoffCmd.Flags().String("workspace", "", "Workspace identity being handed off")
 	ownershipHandoffCmd.Flags().String("host", "127.0.0.1", "Loopback host for the legacy server")

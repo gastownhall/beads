@@ -55,6 +55,7 @@ func (e Endpoint) String() string {
 
 // Request identifies the exact scope being handed off.
 type Request struct {
+	CityRoot  string   `json:"city_root"`
 	Root      string   `json:"root"`
 	Database  string   `json:"database"`
 	Workspace string   `json:"workspace"`
@@ -87,6 +88,7 @@ type Journal struct {
 type Result struct {
 	Phase     Phase    `json:"phase"`
 	Owner     Owner    `json:"owner"`
+	CityRoot  string   `json:"city_root"`
 	Root      string   `json:"root"`
 	Database  string   `json:"database"`
 	Workspace string   `json:"workspace"`
@@ -128,6 +130,27 @@ func (f ProviderFunc) OwnershipHandoffHooks(ctx context.Context, r Request) (Hoo
 	return f(ctx, r)
 }
 
+// CodedError lets a provider preserve a stable protocol error code at the
+// handoff front door while retaining the underlying cause for diagnostics.
+type CodedError struct {
+	Code string
+	Err  error
+}
+
+// Error implements error.
+func (e CodedError) Error() string {
+	if e.Err == nil {
+		return e.Code
+	}
+	return e.Err.Error()
+}
+
+// Unwrap exposes the provider cause to errors.Is and errors.As.
+func (e CodedError) Unwrap() error { return e.Err }
+
+// HandoffErrorCode returns the stable provider protocol code.
+func (e CodedError) HandoffErrorCode() string { return stableErrorCode(e.Code, "provider_unavailable") }
+
 // ValidateRequest rejects incomplete, non-canonical, or remotely managed identities.
 func ValidateRequest(r Request) error {
 	if !filepath.IsAbs(r.Root) || filepath.Clean(r.Root) != r.Root {
@@ -141,6 +164,26 @@ func ValidateRequest(r Request) error {
 	}
 	if r.Root == "" {
 		return errors.New("root is required")
+	}
+	if r.CityRoot == "" {
+		return errors.New("city root is required")
+	}
+	if !filepath.IsAbs(r.CityRoot) || filepath.Clean(r.CityRoot) != r.CityRoot {
+		return errors.New("city root must be an absolute canonical path")
+	}
+	cityInfo, err := os.Stat(r.CityRoot)
+	if err != nil {
+		return fmt.Errorf("city root must be an existing directory: %w", err)
+	}
+	if !cityInfo.IsDir() {
+		return errors.New("city root must be an existing directory")
+	}
+	cityReal, err := filepath.EvalSymlinks(r.CityRoot)
+	if err != nil {
+		return fmt.Errorf("resolve city root: %w", err)
+	}
+	if filepath.Clean(r.CityRoot) != filepath.Clean(cityReal) {
+		return errors.New("city root must be canonical and not symlinked")
 	}
 	abs := r.Root
 	info, err := os.Stat(abs)
@@ -321,11 +364,11 @@ func save(path string, j Journal) error {
 }
 
 func result(j Journal, mutates bool) Result {
-	return Result{Phase: j.Phase, Owner: j.Owner, Root: j.Request.Root, Database: j.Request.Database, Workspace: j.Request.Workspace, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
+	return Result{Phase: j.Phase, Owner: j.Owner, CityRoot: j.Request.CityRoot, Root: j.Request.Root, Database: j.Request.Database, Workspace: j.Request.Workspace, Endpoint: j.Request.Endpoint, Mutates: mutates, ErrorCode: j.ErrorCode}
 }
 
 func requestResult(r Request, code string) Result {
-	return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, Root: r.Root, Database: r.Database, Workspace: r.Workspace, Endpoint: r.Endpoint, Mutates: false, ErrorCode: code}
+	return Result{Phase: PhasePrepared, Owner: OwnerLegacyGC, CityRoot: r.CityRoot, Root: r.Root, Database: r.Database, Workspace: r.Workspace, Endpoint: r.Endpoint, Mutates: false, ErrorCode: code}
 }
 
 // Run resolves provider-owned hooks and executes a handoff. Request and
@@ -393,11 +436,12 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 	}
 	hooks, err := provider.OwnershipHandoffHooks(ctx, r)
 	if err != nil {
+		code := handoffErrorCode(err, "provider_unavailable")
 		if existing != nil {
-			existing.ErrorCode = "provider_unavailable"
+			existing.ErrorCode = code
 			return result(*existing, mutationOccurred(*existing)), fmt.Errorf("resolve ownership handoff provider: %w", err)
 		}
-		return requestResult(r, "provider_unavailable"), fmt.Errorf("resolve ownership handoff provider: %w", err)
+		return requestResult(r, code), fmt.Errorf("resolve ownership handoff provider: %w", err)
 	}
 	return executeLocked(ctx, r, journalPath, hooks)
 }
@@ -405,6 +449,33 @@ func Run(ctx context.Context, r Request, journalPath string, provider Provider, 
 func mutationOccurred(j Journal) bool {
 	return j.Phase == PhaseTargetConfigured || j.Phase == PhaseOldOwnerStopped || j.Phase == PhaseVerified ||
 		j.Phase == PhaseCommitted || j.CommitHookRan || j.CommitHookInProgress
+}
+
+func handoffErrorCode(err error, fallback string) string {
+	if err == nil {
+		return fallback
+	}
+	var coded interface{ HandoffErrorCode() string }
+	if errors.As(err, &coded) && coded.HandoffErrorCode() != "" {
+		return stableErrorCode(coded.HandoffErrorCode(), fallback)
+	}
+	return fallback
+}
+
+func stableErrorCode(code, fallback string) string {
+	switch code {
+	case "invalid_request", "invalid_journal", "journal_unreadable", "concurrent_handoff",
+		"provider_unavailable", "snapshot_unavailable", "snapshot_failed", "configure_unavailable",
+		"target_configure_failed", "owner_stop_unavailable", "owner_stop_failed", "verification_failed",
+		"verify_unavailable", "commit_unavailable", "commit_failed", "commit_recovery_required",
+		"commit_recovery_failed", "journal_save_failed", "protocol_version", "unsupported_scope",
+		"managed_owner_missing", "state_missing", "process_missing", "process_unowned",
+		"endpoint_unreachable", "port_conflict", "identity_changed", "lifecycle_busy", "data_lock_held",
+		"stop_failed":
+		return code
+	default:
+		return fallback
+	}
 }
 
 func snapshotCaptured(j Journal) bool {
@@ -474,7 +545,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 			}
 			s, err := h.Snapshot(ctx, r)
 			if err != nil {
-				return fail("snapshot_failed", err)
+				return fail(handoffErrorCode(err, "snapshot_failed"), err)
 			}
 			j.Snapshot = s
 			j.SnapshotCaptured = true
@@ -488,7 +559,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 			return fail("configure_unavailable", errors.New("configure hook is required"))
 		}
 		if err := h.Configure(ctx, r, j.Snapshot); err != nil {
-			return fail("target_configure_failed", err)
+			return fail(handoffErrorCode(err, "target_configure_failed"), err)
 		}
 		j.Phase = PhaseTargetConfigured
 		j.UpdatedAt = time.Now().UTC()
@@ -501,7 +572,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 			return fail("owner_stop_unavailable", errors.New("legacy owner stop hook is required"))
 		}
 		if err := h.StopLegacy(ctx, r, j.Snapshot); err != nil {
-			return fail("owner_stop_failed", err)
+			return fail(handoffErrorCode(err, "owner_stop_failed"), err)
 		}
 		j.Phase = PhaseOldOwnerStopped
 		j.UpdatedAt = time.Now().UTC()
@@ -514,7 +585,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 			return fail("verify_unavailable", errors.New("verify hook is required"))
 		}
 		if err := h.Verify(ctx, r, j.Snapshot); err != nil {
-			return fail("verification_failed", err)
+			return fail(handoffErrorCode(err, "verification_failed"), err)
 		}
 		j.Phase = PhaseVerified
 		j.UpdatedAt = time.Now().UTC()
@@ -532,7 +603,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 				return fail("commit_recovery_required", errors.New(message))
 			}
 			if err := h.CommitReplay(ctx, r, j.Snapshot); err != nil {
-				return fail("commit_recovery_failed", err)
+				return fail(handoffErrorCode(err, "commit_recovery_failed"), err)
 			}
 			j.CommitHookRan = true
 			j.CommitHookInProgress = false
@@ -558,7 +629,7 @@ func executeLocked(ctx context.Context, r Request, journalPath string, h Hooks) 
 				return journalSaveError(j, err)
 			}
 			if err := h.Commit(ctx, r, j.Snapshot); err != nil {
-				j.ErrorCode = "commit_failed"
+				j.ErrorCode = handoffErrorCode(err, "commit_failed")
 				j.Error = err.Error()
 				j.UpdatedAt = time.Now().UTC()
 				if saveErr := save(journalPath, j); saveErr != nil {
