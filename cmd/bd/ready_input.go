@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -28,6 +30,7 @@ type readyInput struct {
 	dirLabels []string
 
 	claim        bool
+	full         bool
 	gated        bool
 	molID        string
 	explain      bool
@@ -61,6 +64,7 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	in.molID, _ = cmd.Flags().GetString("mol")
 	in.explain, _ = cmd.Flags().GetBool("explain")
 	in.Brief, _ = cmd.Flags().GetBool("brief")
+	in.full, _ = cmd.Flags().GetBool("full")
 	in.prettyFormat, _ = cmd.Flags().GetBool("pretty")
 	in.plainFormat, _ = cmd.Flags().GetBool("plain")
 	if flat, _ := cmd.Flags().GetBool("flat"); flat {
@@ -114,6 +118,24 @@ func gatherReadyInput(cmd *cobra.Command, resolveCap func(*cobra.Command) (int, 
 	if err := briefModeConflict(in.Brief, in.claim, in.gated, in.explain, in.molID, in.jsonOut); err != nil {
 		return in, err
 	}
+	if in.Brief && in.full {
+		return in, HandleErrorRespectJSON("--brief cannot be combined with --full; they name opposite projections")
+	}
+	// LITE IS THE DEFAULT PROJECTION for the JSON ready route (bd-cz2mp).
+	// Resolved AFTER briefModeConflict so a --brief the user typed is still
+	// validated against the modes that cannot honor it, and so the default
+	// itself never manufactures one of those refusals.
+	//
+	// It is written onto in.Brief rather than carried beside it because Brief
+	// is already the one seam that reaches types.WorkFilter.Lite
+	// (workapi.BuildReadyFilter), on both routes and both backends. A second
+	// field would be a second way to say the same thing, and the two would
+	// drift.
+	lite, warning := resolveReadyProjection(in.Brief, in.full, in.claim, in.gated, in.explain, in.molID, in.jsonOut, osEnv)
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, warning) //nolint:errcheck
+	}
+	in.Brief = lite
 	if in.Offset > 0 && in.claim {
 		return in, HandleErrorRespectJSON("--offset cannot be combined with --claim")
 	}
