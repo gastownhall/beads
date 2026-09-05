@@ -184,9 +184,18 @@ func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []str
 
 	placeholders, args := buildInPlaceholders(ids)
 
+	// Column list and scan function are chosen together; see
+	// issueSelectColumnsLite. filter.Lite is the caller's statement that it
+	// will not read a body off these rows, and honoring it here is what makes
+	// this backend's bare ready scan agree with the counted one.
+	columns, scan := issueSelectColumns, scanIssue
+	if filter.Lite {
+		columns, scan = issueSelectColumnsLite, scanIssueLite
+	}
+
 	//nolint:gosec // G201: tables.Main is "issues" or "wisps"; placeholders are ?.
 	fetchSQL := fmt.Sprintf(`SELECT %s FROM %s %s WHERE id IN (%s)`,
-		issueSelectColumns, tables.Main, sqlbuild.LeaseJoin(tables.Main), placeholders)
+		columns, tables.Main, sqlbuild.LeaseJoin(tables.Main), placeholders)
 	rows, err := r.runner.QueryContext(ctx, fetchSQL, args...)
 	if err != nil {
 		return nil, err
@@ -195,7 +204,7 @@ func (r *issueSQLRepositoryImpl) fetchIssuesByIDs(ctx context.Context, ids []str
 	out := make(map[string]*types.Issue, len(ids))
 	ordered := make([]*types.Issue, 0, len(ids))
 	for rows.Next() {
-		issue, scanErr := scanIssue(rows)
+		issue, scanErr := scan(rows)
 		if scanErr != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("scan: %w", scanErr)
