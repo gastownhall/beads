@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`bd` says when it resolved a partial ID instead of matching one exactly.**
+  ID resolution tries an exact match first and only then falls back to
+  leading-prefix abbreviation (`a3f8` -> `a3f8e9`). Ambiguity was already a hard
+  error naming every candidate, but a *sole* abbreviation match was returned
+  silently, so a caller could act on an issue it had not named without any
+  signal. bd now writes a one-line note to stderr identifying both the input and
+  what it resolved to. The case that motivates it: a hierarchical child is a
+  valid leading-prefix match for its own parent's ID, so after a parent is
+  renamed or deleted the vacated ID quietly resolves to the child. stdout and
+  `--json` are unchanged; silence it with `--quiet` or
+  `BD_NO_PARTIAL_ID_NOTICE=1`.
+
 - **`bd count` supports repeatable `--metadata-field key=value` filters**
   ([#6023](https://github.com/gastownhall/beads/issues/6023)), so callers can
   count the same metadata-scoped set `bd list` returns without fetching every
