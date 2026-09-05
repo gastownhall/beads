@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -119,9 +120,19 @@ func TestRequiredSuiteContract(t *testing.T) {
 		}
 	})
 
-	if actual, err := listCompiledTopLevelTests(); err != nil {
-		t.Fatal(err)
-	} else if validateRequiredSuiteInventory(suite, actual) == nil {
+	t.Run("compiled suite", func(t *testing.T) {
+		actual, err := listCompiledTopLevelTests()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.ContainsFunc(actual, func(name string) bool {
+			return strings.HasPrefix(name, suite.memberPrefix)
+		}) {
+			t.Skip("doc-freshness tests are not compiled without the integration build tag")
+		}
+		if err := validateRequiredSuiteInventory(suite, actual); err != nil {
+			t.Fatal(err)
+		}
 		for _, run := range []string{"^$", "^TestDocFreshnessDoesNotRequirePython$", "^TestDocFreshness"} {
 			t.Run("TestMain rejects "+run, func(t *testing.T) {
 				output, exitCode := runSuiteTestProcess(t, run, docFreshnessRequiredSuite)
@@ -130,7 +141,7 @@ func TestRequiredSuiteContract(t *testing.T) {
 				}
 			})
 		}
-	}
+	})
 
 	t.Run("Unicode inventory is retained", func(t *testing.T) {
 		parsed := parseCompiledTopLevelTests("TestDocFreshnessΔ\nok\texample/scripts\t0.1s\n")

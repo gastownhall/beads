@@ -62,6 +62,7 @@ date() {
 }
 `
 
+// Register every TestDocFreshness* test in requiredSuiteDefinitions in required_suite_test.go.
 func TestDocFreshnessDoesNotRequirePython(t *testing.T) {
 	run := runDocFreshness(t, "2026-01-15", "2026-01-31", "90")
 	if run.err != nil {
