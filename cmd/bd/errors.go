@@ -73,7 +73,7 @@ func buildJSONError(message, hint string) interface{} {
 }
 
 func buildJSONCapabilityError(e *ProxyCapabilityError) interface{} {
-	inner := map[string]interface{}{"error": e.Message, "code": e.Code}
+	inner := map[string]interface{}{"error": e.Message, "code": e.Code, "mutates": e.Mutates}
 	if jsonEnvelopeEnabled() {
 		return map[string]interface{}{"schema_version": JSONSchemaVersion, "data": inner}
 	}

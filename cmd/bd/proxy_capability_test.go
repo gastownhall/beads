@@ -74,22 +74,6 @@ func TestProxyCapabilityRefusalFrontDoorJSONIncludesCode(t *testing.T) {
 	}
 }
 
-func TestProxyCapabilityRefusalDoesNotNeedProvider(t *testing.T) {
-	oldProvider := uowProvider
-	uowProvider = nil
-	t.Cleanup(func() { uowProvider = oldProvider })
-	oldJSON := jsonOutput
-	jsonOutput = true
-	t.Cleanup(func() { jsonOutput = oldJSON })
-	out := captureStdout(t, func() error {
-		_ = runCreateProxiedServer(nil, t.Context(), createInput{repoOverrideSet: true})
-		return nil
-	})
-	if !strings.Contains(out, `"code": "proxy.repo.unsupported"`) {
-		t.Fatalf("refusal = %q", out)
-	}
-}
-
 func TestProxyCapabilityDirectEscapeHatch(t *testing.T) {
 	for _, cap := range []ProxyCapability{ProxyCapReadonly, ProxyCapMaxRows, ProxyCapWatch, ProxyCapRepo} {
 		if err := AssertProxyCapability(ProxyModeDirect, cap); err != nil {

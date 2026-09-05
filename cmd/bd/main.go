@@ -621,6 +621,17 @@ func prepareSelectedNoDBContext(beadsDir string) {
 	prepareSelectedCommandContext(beadsDir, true)
 }
 
+func commandJSONFlagChanged(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	if cmd.Flags().Changed("json") {
+		return true
+	}
+	root := cmd.Root()
+	return root != nil && root.PersistentFlags().Changed("json")
+}
+
 // refreshBoundCommandConfig reapplies config-backed defaults after the command
 // context has been rebound to a resolved target beads directory. This keeps
 // explicit flags authoritative while letting rerouted/explicit-db commands use
@@ -633,7 +644,7 @@ func refreshBoundCommandConfig(cmd *cobra.Command) {
 	if root == nil {
 		root = cmd
 	}
-	if !root.PersistentFlags().Changed("json") && !root.PersistentFlags().Changed("format") {
+	if !commandJSONFlagChanged(cmd) && !root.PersistentFlags().Changed("format") {
 		jsonOutput = config.GetBool("json")
 	}
 	if !root.PersistentFlags().Changed("readonly") {
@@ -974,7 +985,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 		// If flag wasn't explicitly set, use viper value
-		if !cmd.Root().PersistentFlags().Changed("json") && !cmd.Root().PersistentFlags().Changed("format") {
+		if !commandJSONFlagChanged(cmd) && !cmd.Root().PersistentFlags().Changed("format") {
 			jsonOutput = config.GetBool("json")
 		} else {
 			flagOverrides["json"] = struct {
