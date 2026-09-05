@@ -2635,9 +2635,8 @@ Aborting.`, ui.RenderWarn("⚠"), dbPath, ui.RenderAccent("bd list"), prefix)
 	return nil // No database found, safe to init
 }
 
-// countExistingIssues attempts to connect to the existing database and count
-// issues. Returns 0 if the database is unreachable or empty. Used by --force
-// safeguard to show users what they're about to destroy.
+// countExistingIssues inspects existing data without initializing or migrating
+// it. An unreadable store is not evidence that there are no issues to protect.
 func countExistingIssues(_ string) (int, error) {
 	var beadsDir string
 	if envBeadsDir := os.Getenv("BEADS_DIR"); envBeadsDir != "" {
@@ -2652,12 +2651,24 @@ func countExistingIssues(_ string) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	store, err := newDoltStoreFromConfig(ctx, beadsDir)
+	if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+		return 0, nil
+	}
+	// The preview open permits older schemas but never migrates them. The
+	// reinit count below reads only existing tables, not current-schema stats.
+	store, err := newPreviewStoreFromConfig(ctx, beadsDir)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = store.Close() }()
 
+	if counter, ok := store.(interface {
+		CountIssuesForReinit(context.Context) (int, error)
+	}); ok {
+		return counter.CountIssuesForReinit(ctx)
+	}
+	// Registered non-SQL backends retain their statistics contract, through
+	// their read-only open rather than their writable factory.
 	stats, err := store.GetStatistics(ctx)
 	if err != nil {
 		return 0, err
@@ -2675,7 +2686,10 @@ func runInitReinitPreflight(reinitLocal bool, prefix, destroyToken string) error
 		return nil
 	}
 	count, err := countExistingIssues(prefix)
-	if err != nil || count == 0 {
+	if err != nil {
+		return fmt.Errorf("cannot verify existing issues; refusing re-initialization: %w", err)
+	}
+	if count == 0 {
 		return nil
 	}
 

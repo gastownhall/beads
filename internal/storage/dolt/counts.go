@@ -37,6 +37,17 @@ func (s *DoltStore) CountIssues(ctx context.Context, query string, filter types.
 	return n, err
 }
 
+// CountIssuesForReinit inspects existing issue data without requiring the latest schema.
+func (s *DoltStore) CountIssuesForReinit(ctx context.Context) (int, error) {
+	var count int
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		count, err = issueops.CountIssuesForReinitInTx(ctx, tx)
+		return err
+	})
+	return count, err
+}
+
 // CountIssuesByGroup returns per-group issue counts. groupBy is one of:
 // status, priority, type, assignee, label.
 func (s *DoltStore) CountIssuesByGroup(ctx context.Context, filter types.IssueFilter, groupBy string) (map[string]int, error) {

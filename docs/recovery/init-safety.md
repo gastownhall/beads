@@ -139,6 +139,13 @@ confirmation.
 Local `.beads/` has existing issues. `bd init --reinit-local` would
 permanently destroy them.
 
+The preflight inspects existing issues and wisps without running schema
+migrations. It can count older schemas without upgrading them. If the store
+cannot be inspected (for example, a connection failure or an unrecognized
+schema), initialization refuses with `cannot verify existing issues` rather
+than treating the database as empty. A destroy token does not bypass this
+refusal; restore access to the configured database before retrying.
+
 **Recovery paths**
 
 ### 1. Export first, then proceed
