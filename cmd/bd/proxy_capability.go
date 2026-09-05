@@ -110,7 +110,7 @@ var proxyMaintenanceRefusals = map[string]proxyCapabilityRule{
 	"vc":                     refused("proxy.vc.unsupported", "vc is not supported in proxied-server mode"),
 	"federation":             refused("proxy.federation.unsupported", "federation is not supported in proxied-server mode"),
 	"repo":                   refused("proxy.repo.unsupported", "repo is not supported in proxied-server mode"),
-	"compact":                refused("proxy.compact.unsupported", "compact requires --dolt in proxied-server mode"),
+	"compact":                refused("proxy.compact.unsupported", "only 'compact --dolt' is supported in proxied-server mode"),
 	"backup init":            refused("proxy.backup.unsupported", "backup init is not supported in proxied-server mode"),
 	"backup sync":            refused("proxy.backup.unsupported", "backup sync is not supported in proxied-server mode"),
 	"backup remove":          refused("proxy.backup.unsupported", "backup remove is not supported in proxied-server mode"),
@@ -335,6 +335,13 @@ func validateProxyCapabilitiesBeforeProvider(cmd *cobra.Command) error {
 		}
 	}
 	if name == "ready" {
+		claim, _ := cmd.Flags().GetBool("claim")
+		if claim {
+			// A claim always consumes one row. The proxied claim route has
+			// its own single-row transaction and intentionally ignores the
+			// bulk BEADS_MAX_ROWS cap after validating its value.
+			return nil
+		}
 		maxRows, _, err := resolveMaxRows(cmd)
 		if err != nil {
 			return err
