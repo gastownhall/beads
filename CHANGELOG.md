@@ -65,20 +65,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks in embedded, server, and proxied-server command paths; the legacy
   `<rig>:<bead-id>` await value remains accepted for compatibility.
 
-- **Write commands now refuse to run while a MIGRATION-FREEZE sentinel sits
-  at the town root** (dc-6jaq), mirroring the gate the gt CLI already applies
-  to `gt mail send`/`nudge`/`sling`/`assign`. `bd create`/`update`/`close`/
-  `remember`/`import` and every other command gated by `CheckReadonly`
-  (~120 call sites, `bd q` included) now print `⛔ town is frozen for
-  migration (by <operator>)` and exit 1 instead of writing to a store mid-
-  migration. The check runs twice: once early in the root command, before
+- **Write commands now refuse to run while a MIGRATION-FREEZE sentinel is
+  present** (dc-6jaq), mirroring the gate the gt CLI already applies to
+  `gt mail send`/`nudge`/`sling`/`assign`. The sentinel is read from the Gas
+  Town root when there is one, and otherwise from the workspace's `.beads`
+  directory, so the stand-down is available to every beads workspace and not
+  only to a town. `bd create`/`update`/`close`/`remember`/`import` and every
+  other command gated by `CheckReadonly` (~120 call sites, `bd q` included)
+  now print `⛔ town is frozen for migration (by <operator>)` — or
+  `⛔ workspace is frozen …` outside a town — and exit 1 instead of writing to
+  a store mid-migration. The check runs twice: once early in the root command, before
   version-bump auto-migration or JSONL auto-import can touch the store, and
   again at each write command's own chokepoint. Read commands (`list`,
   `show`, `ready`, …) keep working during a freeze — the same early check
   also skips version tracking and auto-migration for them, so a frozen store
   is never rewritten just because someone ran a read. `--dry-run`/`--inspect`
   previews are blocked at the per-command chokepoint instead, same as strict
-  `--readonly` already blocks them. Clear the freeze with `gt migrate thaw`.
+  `--readonly` already blocks them. Clear a town freeze with `gt migrate thaw`;
+  outside a town, remove the `.beads/MIGRATION-FREEZE` file, which the refusal
+  names by path. The sentinel is in the `.beads/.gitignore` template and in
+  `bd doctor`'s untrack list, so it is neither committed by a new workspace nor
+  left tracked in one that committed it before those landed — a committed
+  sentinel would freeze every clone that pulled it.
 
 - **`bd dep add` names the implicit `type=blocks` default, but only to an
   interactive operator** (#5854). Creating an edge with no `-t/--type` silently

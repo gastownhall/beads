@@ -1,9 +1,21 @@
-// Package migration provides read-side access to the town-wide
-// MIGRATION-FREEZE write-freeze sentinel used during Gas Town dolt
-// migrations. The sentinel file itself is created and removed by the gt CLI
-// (see gt migrate freeze/thaw, gastownhall/gastown's internal/migration
-// package) — bd only reads it, before a write command runs, to refuse
-// human-typed writes that would bypass the gt-layer gate (dc-6jaq).
+// Package migration provides read-side access to the MIGRATION-FREEZE
+// write-freeze sentinel: a file whose presence makes bd refuse write commands
+// and skip the root pre-run's own side effects (version tracking, the
+// version-bump auto-migrate, auto-import) until it is removed.
+//
+// It stops WRITES, not schema migration. A read command is let through so
+// diagnosis keeps working, and its store open still runs schema.MigrateUp —
+// nothing under internal/storage consults this sentinel. A behind database
+// read under an active freeze is migrated by that read. Closing that gap
+// belongs at the MigrateUp chokepoint and is a separate change.
+//
+// It has two homes, resolved by cmd/bd's freezeRoot. In a Gas Town workspace
+// the sentinel sits at the town root and is created and removed by the gt CLI
+// (gt migrate freeze/thaw, gastownhall/gastown's internal/migration package);
+// bd only reads it, to refuse human-typed writes that would bypass the
+// gt-layer gate (dc-6jaq). Anywhere else it sits in the .beads directory and
+// the operator manages it directly — same sentinel, same semantics, for the
+// fleets that are not towns.
 package migration
 
 import (
