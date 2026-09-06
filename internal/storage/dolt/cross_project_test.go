@@ -19,7 +19,6 @@
 package dolt
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,30 +69,26 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		CreateIfMissing: true,
 	}
 
-	ctxA, cancelA := storeOpenContext()
-	storeA, err = New(ctxA, cfgA)
+	// Each cold open gets its own budget (openStoreWithOwnBudget); ctx below
+	// covers only the cheap SetConfig calls, which are not cold opens.
+	ctx, cancel := testContext(t)
+	defer cancel()
+
+	storeA, err = openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
-		cancelA()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to create store A: %v", err)
 	}
 
-	if err := storeA.SetConfig(ctxA, "issue_prefix", prefixA); err != nil {
-		cancelA()
+	if err := storeA.SetConfig(ctx, "issue_prefix", prefixA); err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
 		t.Fatalf("failed to set prefix for project A: %v", err)
 	}
-	// Store A's context ends here, before store B's begins, so store B
-	// always gets its own full budget instead of whatever store A left on a
-	// shared deadline (be-gvnsq).
-	cancelA()
 
-	ctxB, cancelB := storeOpenContext()
-	defer cancelB()
-	storeB, err = New(ctxB, cfgB)
+	storeB, err = openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -101,7 +96,7 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 		t.Fatalf("failed to create store B: %v", err)
 	}
 
-	if err := storeB.SetConfig(ctxB, "issue_prefix", prefixB); err != nil {
+	if err := storeB.SetConfig(ctx, "issue_prefix", prefixB); err != nil {
 		storeA.Close()
 		storeB.Close()
 		os.RemoveAll(tmpDirA)
@@ -119,64 +114,6 @@ func setupTwoProjectStores(t *testing.T, prefixA, prefixB string) (storeA, store
 	}
 
 	return storeA, storeB, cleanup
-}
-
-// =============================================================================
-// setupTwoProjectStores context budgeting
-// =============================================================================
-
-// storeOpenContext returns a context bounded by testTimeout for one cold
-// store open. setupTwoProjectStores calls this once per store so store B's
-// budget doesn't start counting down until store A's own context has
-// already been created (and cancelled) — otherwise both opens would share a
-// single deadline and store A could starve store B under load (be-gvnsq).
-func storeOpenContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), testTimeout)
-}
-
-// TestStoreOpenContext_FreshBudgetPerCall guards against setupTwoProjectStores
-// reintroducing a single context.WithTimeout shared across both cold store
-// opens. When both opens shared one deadline, store A consuming most of the
-// budget under host load left store B with only the leftover slice, failing
-// with "context deadline exceeded" (be-gvnsq, ~39% of runs under load).
-// storeOpenContext must hand each store its own full testTimeout budget,
-// unaffected by time already spent on the other store's open.
-func TestStoreOpenContext_FreshBudgetPerCall(t *testing.T) {
-	start := time.Now()
-	ctx1, cancel1 := storeOpenContext()
-	defer cancel1()
-	deadline1, ok := ctx1.Deadline()
-	if !ok {
-		t.Fatal("storeOpenContext: expected a context with a deadline")
-	}
-	if got := deadline1.Sub(start); got < testTimeout-time.Second || got > testTimeout+time.Second {
-		t.Fatalf("storeOpenContext: first call's budget = %v, want ~%v", got, testTimeout)
-	}
-
-	// Simulate store A's open consuming a meaningful slice of its budget
-	// before store B's context is created.
-	const simulatedStoreAOpen = 500 * time.Millisecond
-	time.Sleep(simulatedStoreAOpen)
-
-	ctx2, cancel2 := storeOpenContext()
-	defer cancel2()
-	deadline2, ok := ctx2.Deadline()
-	if !ok {
-		t.Fatal("storeOpenContext: expected a context with a deadline")
-	}
-
-	// The whole point of giving each store its own context: store B's budget
-	// must not be drained by time store A already spent. If both opens
-	// shared one context, deadline2 would equal deadline1 exactly, leaving
-	// store B only testTimeout-simulatedStoreAOpen remaining.
-	if deadline2.Equal(deadline1) {
-		t.Fatal("storeOpenContext: second call returned the same deadline as the first — " +
-			"store opens are sharing one context instead of each getting its own")
-	}
-	if remaining := time.Until(deadline2); remaining < testTimeout-time.Second {
-		t.Fatalf("storeOpenContext: second call's remaining budget = %v, want ~%v — "+
-			"it was reduced by time already spent on the first call", remaining, testTimeout)
-	}
 }
 
 // =============================================================================
@@ -304,7 +241,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		CreateIfMissing: true,
 	}
 
-	storeA, err := New(ctx, cfgA)
+	storeA, err := openStoreWithOwnBudget(t, cfgA)
 	if err != nil {
 		os.RemoveAll(tmpDirA)
 		os.RemoveAll(tmpDirB)
@@ -317,7 +254,7 @@ func TestCrossProject_PortCollision_SameDatabase(t *testing.T) {
 		t.Fatalf("set prefix A: %v", err)
 	}
 
-	storeB, err := New(ctx, cfgB)
+	storeB, err := openStoreWithOwnBudget(t, cfgB)
 	if err != nil {
 		storeA.Close()
 		os.RemoveAll(tmpDirA)
@@ -809,7 +746,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 	ownerID := "11111111-1111-1111-1111-111111111111"
 	f.saveLocalProjectID(t, ownerID)
 
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -826,7 +763,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_ForeignRejected(t *testing.
 	foreignID := "22222222-2222-2222-2222-222222222222"
 	f.saveLocalProjectID(t, foreignID)
 
-	foreignStore, err := New(ctx, f.config())
+	foreignStore, err := openStoreWithOwnBudget(t, f.config())
 	if err == nil {
 		foreignStore.Close()
 		t.Fatalf("expected identity mismatch error, got nil (silently connected to foreign project's database)")
@@ -853,7 +790,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds(t *testing
 	projectID := "55555555-5555-5555-5555-555555555555"
 	f.saveLocalProjectID(t, projectID)
 
-	firstStore, err := New(ctx, f.config())
+	firstStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create first store: %v", err)
 	}
@@ -863,7 +800,7 @@ func TestCrossProject_IdentityCheck_ExistingDatabase_MatchingSucceeds(t *testing
 	}
 	firstStore.Close()
 
-	secondStore, err := New(ctx, f.config())
+	secondStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("reconnect with matching project id must succeed, got: %v", err)
 	}
@@ -900,7 +837,7 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata(t *testing.T) {
 
 	f := newIdentityTestFixture(t, "nolocal")
 
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -911,7 +848,7 @@ func TestCrossProject_IdentityCheck_SoftSkip_NoLocalMetadata(t *testing.T) {
 	ownerStore.Close()
 
 	// No metadata.json written for this reopen — configfile.Load returns nil.
-	reopenStore, err := New(ctx, f.config())
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("expected soft-skip (no local metadata.json), got error: %v", err)
 	}
@@ -928,21 +865,19 @@ func TestCrossProject_IdentityCheck_SoftSkip_EmptyDBProjectID(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
 	t.Cleanup(releaseTestSlot)
-	ctx, cancel := testContext(t)
-	defer cancel()
 
 	f := newIdentityTestFixture(t, "emptydb")
 
 	// Create the database but never seed _project_id — simulating an
 	// old-style database from before GH#2372.
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
 	ownerStore.Close()
 
 	f.saveLocalProjectID(t, "66666666-6666-6666-6666-666666666666")
-	reopenStore, err := New(ctx, f.config())
+	reopenStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("expected soft-skip (database has no _project_id), got error: %v", err)
 	}
@@ -973,7 +908,7 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 	f.saveLocalProjectID(t, ownerID)
 
 	// Seed schema and _project_id with a normal (non-gateway) open first.
-	ownerStore, err := New(ctx, f.config())
+	ownerStore, err := openStoreWithOwnBudget(t, f.config())
 	if err != nil {
 		t.Fatalf("create owner store: %v", err)
 	}
@@ -993,7 +928,7 @@ func TestCrossProject_IdentityCheck_Gateway_SkipsVerification(t *testing.T) {
 
 	gatewayCfg := f.config()
 	gatewayCfg.Gateway = true
-	gatewayStore, err := New(ctx, gatewayCfg)
+	gatewayStore, err := openStoreWithOwnBudget(t, gatewayCfg)
 	if err != nil {
 		t.Fatalf("gateway open must skip identity verification (reconciled by resolveInitProjectID instead), got error: %v", err)
 	}

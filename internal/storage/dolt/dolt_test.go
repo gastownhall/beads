@@ -25,8 +25,8 @@ import (
 // testTimeout bounds each test's context. It must cover a cold store setup —
 // container-assisted connect plus the FULL migration chain (every versioned +
 // ignored migration, each Dolt-committed), which grows as migrations
-// accumulate — with headroom for a loaded machine; some tests set up two
-// stores under one context.
+// accumulate — with headroom for a loaded machine. Each cold open gets its own
+// budget via openStoreWithOwnBudget; no test shares one deadline across two.
 const testTimeout = 45 * time.Second
 
 // testSem limits concurrent database-touching tests to avoid overwhelming the
@@ -60,6 +60,25 @@ func releaseAllTestSlots() {
 func testContext(t *testing.T) (context.Context, context.CancelFunc) {
 	t.Helper()
 	return context.WithTimeout(context.Background(), testTimeout)
+}
+
+// openStoreWithOwnBudget opens a store under its own testTimeout budget and
+// releases that budget as soon as the open returns.
+//
+// Use it anywhere a test opens two stores in sequence. Sharing one context
+// across both opens is the bug it exists to prevent: a cold open runs the full
+// migration chain, so under host load the first open can consume most of a
+// shared deadline and leave the second only the remainder, which then fails
+// with "context deadline exceeded" (be-gvnsq, ~39% of runs under load). Each
+// open starting from a full budget removes the coupling entirely.
+//
+// Cancelling at return is safe: the context bounds the open itself, not the
+// returned store. Store operations take the caller's own context afterwards.
+func openStoreWithOwnBudget(t *testing.T, cfg *Config) (*DoltStore, error) {
+	t.Helper()
+	ctx, cancel := testContext(t)
+	defer cancel()
+	return New(ctx, cfg)
 }
 
 // skipIfNoDolt skips the test if Dolt is not installed or the test server
