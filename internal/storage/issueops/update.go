@@ -544,6 +544,9 @@ func updateIssueInTx(ctx context.Context, tx DBTX, id string, updates map[string
 	if err := RecordEventInTx(ctx, tx, EventUpdate, id, actor); err != nil {
 		return nil, err
 	}
+	if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+		return nil, err
+	}
 	return updateResult, nil
 }
 
