@@ -94,6 +94,41 @@ func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowExercisesNativeUserConfigDiagnostics(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	if job.RunsOn != "${{ matrix.os }}" || job.If != "" || job.ContinueOnError || job.TimeoutMinutes != 20 {
+		t.Fatal("native config diagnostic lane must remain required on the existing platform matrix")
+	}
+	if !equalStrings(job.Strategy.Matrix.OS, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+		t.Fatalf("unexpected platform matrix: %v", job.Strategy.Matrix.OS)
+	}
+	wantHosts := map[string]string{"ubuntu-latest": "linux", "macos-latest": "darwin", "windows-latest": "windows"}
+	if len(job.Strategy.Matrix.Include) != len(wantHosts) {
+		t.Fatalf("unexpected native host tuples: %v", job.Strategy.Matrix.Include)
+	}
+	for _, tuple := range job.Strategy.Matrix.Include {
+		if want, ok := wantHosts[tuple.OS]; !ok || tuple.ExpectedGOOS != want {
+			t.Fatalf("unexpected native host tuple: %+v", tuple)
+		}
+		delete(wantHosts, tuple.OS)
+	}
+	step := job.step(t, "Check native user config diagnostics")
+	if step.If != "" || step.Shell != "bash" || step.Env["CGO_ENABLED"] != "0" ||
+		(step.ContinueOnError != nil && step.ContinueOnError != false) {
+		t.Fatalf("native diagnostic step is conditional, optional, or uses the wrong host: %+v", step)
+	}
+	assertStepRunsExactly(t, job, step.Name, "bash scripts/ci/test-user-config-diagnostic.sh '${{ matrix.expected_goos }}'")
+	assertStepsBefore(t, job, []string{"Set up Go", "Restore Go module cache"}, []string{step.Name})
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") ||
+		gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Fatal("native diagnostic platform results must feed the required aggregate gate")
+	}
+}
+
 func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "pr-preflight-platforms")

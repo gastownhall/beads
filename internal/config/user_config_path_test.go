@@ -4,8 +4,42 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func TestUserConfigYamlPathNamesNativeEnvironmentSource(t *testing.T) {
+	t.Setenv("HOME", "~")
+	t.Setenv("USERPROFILE", "~")
+	t.Setenv("home", "~")
+	t.Setenv("APPDATA", "relative-appdata")
+	for _, xdg := range []string{"relative-xdg", ""} {
+		name := "XDG configured"
+		wantSource := "XDG_CONFIG_HOME"
+		if xdg == "" {
+			name, wantSource = "XDG absent", "HOME"
+		}
+		switch runtime.GOOS {
+		case "windows":
+			wantSource = "APPDATA"
+		case "darwin", "ios":
+			wantSource = "HOME"
+		case "plan9":
+			wantSource = "home"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Setenv("XDG_CONFIG_HOME", xdg)
+			path, err := UserConfigYamlPath()
+			if err == nil || path != "" {
+				t.Fatalf("unsafe roots produced path %q, err=%v", path, err)
+			}
+			if !strings.Contains(err.Error(), wantSource+": native user config directory") {
+				t.Errorf("native config error %q does not identify %s", err, wantSource)
+			}
+		})
+	}
+}
 
 func TestSelectUserConfigYamlPathPrecedence(t *testing.T) {
 	t.Run("existing documented path wins", func(t *testing.T) {

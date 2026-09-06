@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
 const userConfigYamlDisplayFallback = "~/.config/bd/config.yaml"
@@ -24,7 +25,29 @@ type userConfigYamlCandidates struct {
 func currentUserConfigYamlCandidates() userConfigYamlCandidates {
 	homeDir, homeErr := os.UserHomeDir()
 	nativeConfigDir, nativeErr := os.UserConfigDir()
-	return buildUserConfigYamlCandidates(homeDir, homeErr, nativeConfigDir, nativeErr)
+	candidates := buildUserConfigYamlCandidates(homeDir, homeErr, nativeConfigDir, nativeErr)
+	if candidates.nativeErr != nil {
+		candidates.nativeErr = fmt.Errorf("%s: %w", nativeUserConfigEnvironmentSource(), candidates.nativeErr)
+	}
+	return candidates
+}
+
+// nativeUserConfigEnvironmentSource names the source selected by os.UserConfigDir.
+// This labels errors only; os.UserConfigDir still owns path resolution.
+func nativeUserConfigEnvironmentSource() string {
+	switch runtime.GOOS {
+	case "windows":
+		return "APPDATA"
+	case "darwin", "ios":
+		return "HOME"
+	case "plan9":
+		return "home"
+	default:
+		if os.Getenv("XDG_CONFIG_HOME") != "" {
+			return "XDG_CONFIG_HOME"
+		}
+		return "HOME"
+	}
 }
 
 func buildUserConfigYamlCandidates(homeDir string, homeErr error, nativeConfigDir string, nativeErr error) userConfigYamlCandidates {
