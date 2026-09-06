@@ -134,15 +134,13 @@ func TestCompactSuite(t *testing.T) {
 		}
 
 		// Test stats - should work without API key
-		savedJSONOutput := jsonOutput
-		jsonOutput = false
-		defer func() { jsonOutput = savedJSONOutput }()
+		pinJSONOutput(t, false)
 
 		// Actually call runCompactStats to increase coverage
 		runCompactStats(ctx, s)
 
 		// Also test with JSON output
-		jsonOutput = true
+		pinJSONOutput(t, true)
 		runCompactStats(ctx, s)
 	})
 
@@ -163,9 +161,7 @@ func TestCompactSuite(t *testing.T) {
 		}
 
 		// Test with JSON output
-		savedJSONOutput := jsonOutput
-		jsonOutput = true
-		defer func() { jsonOutput = savedJSONOutput }()
+		pinJSONOutput(t, true)
 
 		// Should not panic and should execute JSON path
 		runCompactStats(ctx, s)
