@@ -205,39 +205,34 @@ Examples:
 			return HandleErrorRespectJSON("commit message is required (use -m, --message, or --stdin)")
 		}
 
-		beforeHash, beforeErr := store.GetCurrentCommit(ctx)
-
 		commandDidExplicitDoltCommit = true
-		if err := store.Commit(ctx, vcCommitMessage); err != nil {
-			if isDoltNothingToCommit(err) {
-				if jsonOutput {
-					return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
-				}
-				fmt.Println("Nothing to commit")
-				return nil
-			}
-			return HandleErrorRespectJSON("failed to commit: %v", err)
-		}
-
-		hash, err := store.GetCurrentCommit(ctx)
+		// CommitAll, not Commit: the explicit command promises "all current
+		// changes", so it must sweep in out-of-band writes (config above all,
+		// which server-mode Commit excludes per GH#2455) and must report an
+		// honest no-op instead of printing "Created commit" against the
+		// unchanged HEAD. Its committed bool is the atomic signal the old
+		// HEAD-before/HEAD-after comparison approximated (the mybd-z9h7j
+		// threading: CommitPending already had the shape), so the concurrent-
+		// writer misattribution race that comparison carried is gone.
+		committed, err := store.CommitAll(ctx, vcCommitMessage)
 		if err != nil {
-			hash = "(unknown)"
+			if isDoltNothingToCommit(err) {
+				committed = false
+			} else {
+				return HandleErrorRespectJSON("failed to commit: %v", err)
+			}
 		}
-
-		// A store whose Commit tolerates nothing-to-commit (e.g. the embedded
-		// store) returns a nil error even when HEAD did not move. Detect that
-		// case here instead of relying on the error, so both backends report
-		// the same "nothing to commit" outcome. Known limitation: a concurrent
-		// writer advancing HEAD between the two reads is misattributed to this
-		// command — pre-existing for server mode, and fixing it means threading
-		// an atomic committed-bool through the VersionControl interface
-		// (tracked as bd mybd-z9h7j; CommitPending already has the shape).
-		if beforeErr == nil && err == nil && hash == beforeHash {
+		if !committed {
 			if jsonOutput {
 				return outputJSON(map[string]interface{}{"committed": false, "message": "nothing to commit"})
 			}
 			fmt.Println("Nothing to commit")
 			return nil
+		}
+
+		hash, err := store.GetCurrentCommit(ctx)
+		if err != nil {
+			hash = "(unknown)"
 		}
 
 		if jsonOutput {

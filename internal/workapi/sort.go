@@ -48,7 +48,6 @@ func CompareIssuesBy(a, b *types.Issue, sortBy string) int {
 // filter on.
 func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 	wf := types.WorkFilter{
-		Status:         types.StatusOpen,
 		Limit:          filter.Limit,
 		Offset:         filter.Offset,
 		Labels:         filter.Labels,
@@ -69,6 +68,18 @@ func ReadyFilterFromIssueFilter(filter types.IssueFilter) types.WorkFilter {
 		// listing prints. Dropping it here would answer `bd list --ready
 		// --brief` with full rows and nothing to say why.
 		Lite: filter.Lite,
+	}
+	// Status is copied the same way as assignee/priority/labels: an explicit
+	// selector on the list filter is the ready-work selector too. The open
+	// default is only the fallback when BuildListFilter did not write one
+	// (plain `--ready`, or `--ready --status all`). Hard-coding StatusOpen
+	// here used to drop `--status` even after the builder honored it (GH#5832).
+	if filter.Status != nil {
+		wf.Status = *filter.Status
+	} else if len(filter.Statuses) > 0 {
+		wf.Statuses = append([]types.Status(nil), filter.Statuses...)
+	} else {
+		wf.Status = types.StatusOpen
 	}
 	if filter.IssueType != nil {
 		wf.Type = string(*filter.IssueType)

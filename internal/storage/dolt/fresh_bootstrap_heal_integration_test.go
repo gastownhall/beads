@@ -120,6 +120,7 @@ func TestFreshBootstrapHealIncarnation(t *testing.T) {
 		if facts.bootstrapHeal == nil {
 			t.Fatal("exact bare CREATE did not return a capability")
 		}
+		requireWorkingHardReset(t, ctx, db)
 
 		prepareFreshBootstrapV51Dirty(t, ctx, db, "creator_debris")
 		if _, err := initSchemaOnDBWithBootstrapHeal(
@@ -226,6 +227,32 @@ func freshBootstrapIntegrationConfig(beadsDir string, port int, database, pathSu
 		Database:        database,
 		CreateIfMissing: true,
 		MaxOpenConns:    1,
+	}
+}
+
+// requireWorkingHardReset fails before the heal under test runs when this
+// database's CALL DOLT_RESET('--hard') is already broken, so a broken Dolt is
+// named as such instead of masquerading as a beads defect.
+//
+// Dolt 2.3.0 regressed the procedure: roughly one freshly created database in
+// twenty comes up with it permanently unusable, answering
+// "Error 1105 (HY000): context canceled" to every session for the life of the
+// server process (measured 2026-08-20: 2.1.8 0/40, 2.2.0 0/60, 2.3.0 3/60,
+// 2.3.1 3/100 fresh databases broken). Without this probe the defect surfaces
+// only as the heal's generic #4566 dirty-table refusal, which reads like a
+// beads bug and points the reader at "run 'bd dolt commit'" — advice that
+// cannot work, because the reset the heal needs is the thing that is broken.
+//
+// The probe is safe on the database under test: on a pristine, just-created
+// database the hard reset is a no-op, and over 60 fresh databases a successful
+// first reset never broke a later one.
+func requireWorkingHardReset(t *testing.T, ctx context.Context, db *sql.DB) {
+	t.Helper()
+	if err := schema.DrainCall(ctx, db, "CALL DOLT_RESET('--hard')"); err != nil {
+		t.Fatalf("this Dolt server cannot CALL DOLT_RESET('--hard') on a database it just created: %v\n"+
+			"That is the Dolt 2.3.0 regression, not a beads failure — the bootstrap heal this test "+
+			"exercises is unimplementable on such a server. Check the pinned CLI version in "+
+			"scripts/ci/install-dolt.sh and `dolt version`.", err)
 	}
 }
 
