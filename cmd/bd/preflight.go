@@ -62,7 +62,7 @@ Examples:
 
 func init() {
 	preflightCmd.Flags().Bool("check", false, "Run checks automatically")
-	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash, version sync)")
+	preflightCmd.Flags().Bool("fix", false, "Auto-fix issues where possible (vendorHash)")
 	preflightCmd.Flags().Bool("json", false, "Output results as JSON")
 	preflightCmd.Flags().Bool("skip-lint", false, "Skip lint check explicitly")
 
@@ -122,7 +122,7 @@ func fileExists(dir, name string) bool {
 // project's language stack, detected from standard marker files in dir. A
 // project with no recognized stack gets a generic reminder rather than a
 // misleading Go checklist, and the repo's own Go+Nix specific items
-// (gms_pure_go build tags, nix vendorHash, version.go vs default.nix) only
+// (gms_pure_go build tags, nix vendorHash, released metadata versions) only
 // appear where they apply (GH#4364).
 func buildPreflightChecklist(dir string) []string {
 	// Preserve the exact rich checklist when run inside the beads repo itself
@@ -135,7 +135,7 @@ func buildPreflightChecklist(dir string) []string {
 			"Formatting: gofmt -l .",
 			"No beads pollution: check .beads/issues.jsonl diff",
 			"Nix hash current: go.sum unchanged or vendorHash updated",
-			"Version sync: version.go matches default.nix",
+			"Version sync: released metadata matches version.go",
 		}
 	}
 
@@ -515,33 +515,19 @@ func runNixHashCheck() CheckResult {
 	}
 }
 
-// runVersionSyncCheck checks that all version files are in sync.
-// Prefers scripts/check-versions.sh (matches CI) with fallback to inline logic.
+// runVersionSyncCheck checks that all version files are in sync. Beads uses the
+// shared Go authority; unrelated repositories retain the generic Go/Nix check.
 func runVersionSyncCheck() CheckResult {
-	command := "scripts/check-versions.sh"
-
-	// Try using the script (matches CI's check-version-consistency job)
-	if _, err := os.Stat("scripts/check-versions.sh"); err == nil {
-		cmd := exec.Command("bash", "scripts/check-versions.sh")
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			return CheckResult{
-				Name:    "Version sync",
-				Passed:  false,
-				Output:  string(output),
-				Command: command,
-			}
-		}
-		return CheckResult{
-			Name:    "Version sync",
-			Passed:  true,
-			Output:  string(output),
-			Command: command,
-		}
+	root, found, rootFailure := resolveBeadsVersionRoot(".")
+	if rootFailure.Name != "" {
+		return rootFailure
+	}
+	if found {
+		return runBeadsVersionSyncCheck(root)
 	}
 
-	// Fallback: inline comparison of version.go and default.nix
-	command = "Compare cmd/bd/version.go and default.nix"
+	// Generic fallback: inline comparison of version.go and default.nix.
+	command := "Compare cmd/bd/version.go and default.nix"
 
 	// Read version.go
 	versionGoContent, err := os.ReadFile("cmd/bd/version.go")
@@ -681,19 +667,6 @@ func runFixes(jsonOutput bool) error {
 	}
 	results = append(results, nr)
 
-	versionFixed, versionOld, versionNew, versionErr := fixVersionSync()
-	vr := fixResult{Name: "Version sync"}
-	if versionErr != nil {
-		vr.Error = versionErr.Error()
-		hasError = true
-	} else if versionFixed {
-		vr.Fixed = true
-		vr.Detail = fmt.Sprintf("version.go: %s → %s", versionOld, versionNew)
-	} else {
-		vr.Skipped = true
-	}
-	results = append(results, vr)
-
 	if jsonOutput {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -817,50 +790,4 @@ func fixNixHash() (bool, string, string, error) {
 	}
 	restored = true
 	return true, oldHash, newHash, nil
-}
-
-// fixVersionSync updates cmd/bd/version.go to match the version in default.nix.
-// default.nix is the source of truth. Returns (fixed, oldVersion, newVersion, err).
-func fixVersionSync() (bool, string, string, error) {
-	vgoPath := "cmd/bd/version.go"
-	vgoInfo, err := os.Stat(vgoPath)
-	if err != nil {
-		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
-	}
-	vgoPerm := vgoInfo.Mode().Perm()
-
-	vgoContent, err := os.ReadFile(vgoPath)
-	if err != nil {
-		return false, "", "", fmt.Errorf("cannot read cmd/bd/version.go: %v", err)
-	}
-
-	vgoRe := regexp.MustCompile(`(Version\s*=\s*)"([^"]+)"`)
-	vgoLoc := vgoRe.FindSubmatchIndex(vgoContent)
-	if vgoLoc == nil {
-		return false, "", "", fmt.Errorf("cannot parse Version from cmd/bd/version.go")
-	}
-	oldVersion := string(vgoContent[vgoLoc[4]:vgoLoc[5]])
-
-	nixContent, err := os.ReadFile("default.nix")
-	if err != nil {
-		// No default.nix — nothing to sync against
-		return false, "", "", nil
-	}
-
-	nixRe := regexp.MustCompile(`version\s*=\s*"([^"]+)"`)
-	nixM := nixRe.FindSubmatch(nixContent)
-	if nixM == nil {
-		return false, "", "", fmt.Errorf("cannot parse version from default.nix")
-	}
-	newVersion := string(nixM[1])
-
-	if oldVersion == newVersion {
-		return false, oldVersion, newVersion, nil
-	}
-
-	updated := append(append([]byte{}, vgoContent[:vgoLoc[4]]...), append([]byte(newVersion), vgoContent[vgoLoc[5]:]...)...)
-	if err := os.WriteFile(vgoPath, updated, vgoPerm); err != nil {
-		return false, oldVersion, newVersion, fmt.Errorf("cannot update cmd/bd/version.go: %v", err)
-	}
-	return true, oldVersion, newVersion, nil
 }
