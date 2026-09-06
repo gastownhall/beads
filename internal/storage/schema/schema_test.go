@@ -1930,6 +1930,9 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// 0067: two-plane prepared ADD COLUMN, same shape as 0060.
 		"ALTER TABLE issues ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;",
 		"ALTER TABLE wisps ADD COLUMN current_revision BIGINT NOT NULL DEFAULT 1;",
+		// 0068: single-plane prepared ADD COLUMN, same shape as 0066 (no
+		// wisps twin — issue_versions has none).
+		"ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("AllMigrationsSQL missing direct CLI DDL %q", want)
@@ -1956,6 +1959,9 @@ func TestAllMigrationsSQLUsesDirectDDLForKnownCLIIncompatibilities(t *testing.T)
 		// also appear in the ignored twin, which is not bundled.
 		"@issues_cr_needs_add",
 		"@wisps_cr_needs_add",
+		// 0068 guards its single ALTER the same way; only its source text
+		// carries this probe.
+		"@issue_versions_as_needs_add",
 	} {
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("AllMigrationsSQL contains source prepared-DDL guard %q", forbidden)
