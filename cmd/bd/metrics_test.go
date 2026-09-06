@@ -179,11 +179,15 @@ func TestResolveMetricsIgnoresProjectConfigOverride(t *testing.T) {
 // stealth contexts, and must still fire for an ordinary interactive command.
 func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	// Save/restore the output-mode globals this decision reads.
-	origJSON, origQuiet, origHookJSON := jsonOutput, quietFlag, primeHookJSONMode
+	origQuiet, origHookJSON := quietFlag, primeHookJSONMode
 	t.Cleanup(func() {
-		jsonOutput, quietFlag, primeHookJSONMode = origJSON, origQuiet, origHookJSON
+		quietFlag, primeHookJSONMode = origQuiet, origHookJSON
 	})
-	reset := func() { jsonOutput, quietFlag, primeHookJSONMode = false, false, false }
+	reset := func(t *testing.T) {
+		t.Helper()
+		pinJSONOutput(t, false)
+		quietFlag, primeHookJSONMode = false, false
+	}
 
 	// Build a command tree rooted at "bd" so topLevelCommandName resolves the
 	// suppressed-subtree names (e.g. `bd hooks run` -> "hooks").
@@ -211,7 +215,7 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	}
 
 	t.Run("plain interactive command fires", func(t *testing.T) {
-		reset()
+		reset(t)
 		if firstRunNoticeSuppressedByContext(newTree()["list"]) {
 			t.Errorf("plain `bd list` should NOT be suppressed")
 		}
@@ -219,7 +223,7 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 
 	for _, name := range []string{"version", "prime", "codex-hook", "hooks-run"} {
 		t.Run(name+" is suppressed", func(t *testing.T) {
-			reset()
+			reset(t)
 			if !firstRunNoticeSuppressedByContext(newTree()[name]) {
 				t.Errorf("%q context should suppress the first-run notice", name)
 			}
@@ -228,15 +232,15 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 
 	for _, mode := range []struct {
 		name string
-		set  func()
+		set  func(*testing.T)
 	}{
-		{"json", func() { jsonOutput = true }},
-		{"quiet", func() { quietFlag = true }},
-		{"hook-json", func() { primeHookJSONMode = true }},
+		{"json", func(t *testing.T) { pinJSONOutput(t, true) }},
+		{"quiet", func(*testing.T) { quietFlag = true }},
+		{"hook-json", func(*testing.T) { primeHookJSONMode = true }},
 	} {
 		t.Run(mode.name+" output is suppressed", func(t *testing.T) {
-			reset()
-			mode.set()
+			reset(t)
+			mode.set(t)
 			if !firstRunNoticeSuppressedByContext(newTree()["list"]) {
 				t.Errorf("%s output mode should suppress the first-run notice", mode.name)
 			}
@@ -244,7 +248,7 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	}
 
 	t.Run("BD_GIT_HOOK context is suppressed", func(t *testing.T) {
-		reset()
+		reset(t)
 		t.Setenv("BD_GIT_HOOK", "1")
 		if !firstRunNoticeSuppressedByContext(newTree()["list"]) {
 			t.Errorf("BD_GIT_HOOK=1 should suppress the first-run notice")
@@ -252,7 +256,7 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	})
 
 	t.Run("stealth init is suppressed", func(t *testing.T) {
-		reset()
+		reset(t)
 		cmds := newTree()
 		if err := cmds["init"].Flags().Set("stealth", "true"); err != nil {
 			t.Fatalf("set stealth flag: %v", err)
@@ -263,14 +267,14 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	})
 
 	t.Run("plain init fires", func(t *testing.T) {
-		reset()
+		reset(t)
 		if firstRunNoticeSuppressedByContext(newTree()["init"]) {
 			t.Errorf("plain `bd init` should NOT be suppressed (interactive consent is expected)")
 		}
 	})
 
 	t.Run("root --version flag is suppressed", func(t *testing.T) {
-		reset()
+		reset(t)
 		cmds := newTree()
 		if err := cmds["root"].Flags().Set("version", "true"); err != nil {
 			t.Fatalf("set version flag: %v", err)
@@ -281,7 +285,7 @@ func TestFirstRunNoticeSuppressedByContext(t *testing.T) {
 	})
 
 	t.Run("root without version flag fires", func(t *testing.T) {
-		reset()
+		reset(t)
 		if firstRunNoticeSuppressedByContext(newTree()["root"]) {
 			t.Errorf("root command without --version set should NOT be suppressed by the version-flag rule")
 		}

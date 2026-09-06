@@ -142,6 +142,7 @@ type savedGlobals struct {
 
 // saveAndRestoreGlobals snapshots all commonly-mutated package-level globals
 // and registers a t.Cleanup() to restore them when the test completes.
+// Set and restore the separate JSON output mode with pinJSONOutput(t, on).
 // This replaces the fragile manual save/defer pattern:
 //
 //	oldDBPath := dbPath

@@ -71,9 +71,7 @@ func TestDoltShowConfigDefaultMode(t *testing.T) {
 	defer func() { _ = os.Chdir(oldCwd) }()
 
 	t.Run("text output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		output := captureDoltShowOutput(t)
 
@@ -92,9 +90,7 @@ func TestDoltShowConfigDefaultMode(t *testing.T) {
 	})
 
 	t.Run("json output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		output := captureDoltShowOutput(t)
 
@@ -155,9 +151,7 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 	defer func() { _ = os.Chdir(oldCwd) }()
 
 	t.Run("text output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		output := captureDoltShowOutput(t)
 
@@ -177,9 +171,7 @@ func TestDoltShowConfigServerMode(t *testing.T) {
 	})
 
 	t.Run("json output", func(t *testing.T) {
-		origJsonOutput := jsonOutput
-		defer func() { jsonOutput = origJsonOutput }()
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		output := captureDoltShowOutput(t)
 
@@ -303,9 +295,7 @@ func TestDoltSetConfigJSONOutput(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldCwd) }()
 
-	origJsonOutput := jsonOutput
-	defer func() { jsonOutput = origJsonOutput }()
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	output := captureDoltSetOutput(t, "database", "myproject", false)
 
@@ -358,9 +348,7 @@ func TestDoltSetConfigWithUpdateConfig(t *testing.T) {
 	}
 	defer func() { _ = os.Chdir(oldCwd) }()
 
-	origJsonOutput := jsonOutput
-	defer func() { jsonOutput = origJsonOutput }()
-	jsonOutput = true
+	pinJSONOutput(t, true)
 
 	// Set with --update-config
 	output := captureDoltSetOutput(t, "database", "myproject", true)
@@ -1486,9 +1474,7 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	}
 
 	t.Run("text output", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		out := captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
 
@@ -1511,9 +1497,7 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	})
 
 	t.Run("json output", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		out := captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
 
@@ -1726,9 +1710,7 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 	t.Setenv("BEADS_DOLT_SERVER_PORT", "13306")
 
 	t.Run("nil state prints not running with expected port", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		serverDir := t.TempDir()
 		out := captureStdout(t, func() error {
@@ -1747,9 +1729,7 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 	})
 
 	t.Run("Running:false prints not running", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		serverDir := t.TempDir()
 		state := &doltserver.State{Running: false}
@@ -1764,9 +1744,7 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 	})
 
 	t.Run("Running:true prints PID/Port/Data/Logs", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		serverDir := t.TempDir()
 		state := &doltserver.State{
@@ -1801,9 +1779,7 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 
 	t.Run("Running:true under shared-server mode adds Mode line", func(t *testing.T) {
 		t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = false
+		pinJSONOutput(t, false)
 
 		serverDir := t.TempDir()
 		state := &doltserver.State{
@@ -1823,9 +1799,7 @@ func TestRenderLocalDoltStatus(t *testing.T) {
 	})
 
 	t.Run("json output produces State-shaped payload (no mode=external)", func(t *testing.T) {
-		orig := jsonOutput
-		defer func() { jsonOutput = orig }()
-		jsonOutput = true
+		pinJSONOutput(t, true)
 
 		serverDir := t.TempDir()
 		state := &doltserver.State{
