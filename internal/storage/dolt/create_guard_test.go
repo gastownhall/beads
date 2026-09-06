@@ -270,7 +270,7 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	t.Cleanup(func() { dropTestDatabase(t, testServerPort, dbName) })
 
 	// First connection: create store and write data
-	store1, err := New(ctx, &Config{
+	store1, err := openStoreWithOwnBudget(t, &Config{
 		Path:            t.TempDir(),
 		ServerHost:      "127.0.0.1",
 		ServerPort:      testServerPort,
@@ -288,7 +288,7 @@ func TestCreateGuard_ExistingDB_WithData(t *testing.T) {
 	store1.Close()
 
 	// Second connection: open WITHOUT CreateIfMissing, verify data persists
-	store2, err := New(ctx, &Config{
+	store2, err := openStoreWithOwnBudget(t, &Config{
 		Path:         t.TempDir(),
 		ServerHost:   "127.0.0.1",
 		ServerPort:   testServerPort,
