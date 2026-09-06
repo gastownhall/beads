@@ -483,6 +483,13 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            expected_goos: linux
+          - os: macos-latest
+            expected_goos: darwin
+          - os: windows-latest
+            expected_goos: windows
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
 
@@ -503,6 +510,12 @@ jobs:
       - name: Exercise the real Bash process boundary
         shell: bash
         run: go test '-tags=integration,gms_pure_go' -count=1 -run '^TestPRPreflight' ./scripts
+
+      - name: Check native user config diagnostics
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: bash scripts/ci/test-user-config-diagnostic.sh '${{ matrix.expected_goos }}'
 
       - name: Exercise test.sh prebuilt binary path
         shell: bash
