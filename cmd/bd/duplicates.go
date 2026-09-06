@@ -20,11 +20,18 @@ Groups issues by content hash and reports duplicates with suggested merge target
 The merge target is chosen by:
 1. Reference count (most referenced issue wins)
 2. Lexicographically smallest ID if reference counts are equal
-Only groups issues with matching status (open with open, closed with closed).
+Only non-closed issues are considered.
+
+Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
+e.g. Gas City spec/logical/control template instances) are skipped: their
+identical template text is owned by the orchestrator lifecycle, not by
+content deduplication. Pass --include-workflow to include them anyway.
+
 Example:
   bd duplicates                    # Show all duplicate groups
   bd duplicates --auto-merge       # Automatically merge all duplicates
-  bd duplicates --dry-run          # Show what would be merged`,
+  bd duplicates --dry-run          # Show what would be merged
+  bd duplicates --include-workflow # Also consider orchestrator-managed beads`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -37,6 +44,7 @@ Example:
 
 		autoMerge, _ := cmd.Flags().GetBool("auto-merge")
 		dryRun, _ := cmd.Flags().GetBool("dry-run")
+		includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
 		if autoMerge && !dryRun {
 			CheckReadonly("duplicates --auto-merge")
 		}
@@ -52,15 +60,24 @@ Example:
 				openIssues = append(openIssues, issue)
 			}
 		}
+		workflowSkipped := 0
+		if !includeWorkflow {
+			openIssues, workflowSkipped = partitionWorkflowIssues(openIssues)
+		}
 		duplicateGroups := findDuplicateGroups(openIssues)
 		if len(duplicateGroups) == 0 {
 			if !jsonOutput {
 				fmt.Println("No duplicates found!")
+				if workflowSkipped > 0 {
+					fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+				}
 				return nil
 			}
 			return outputJSON(map[string]interface{}{
-				"duplicate_groups": 0,
-				"groups":           []interface{}{},
+				"duplicate_groups":  0,
+				"groups":            []interface{}{},
+				"workflow_skipped":  workflowSkipped,
+				"include_workflow":  includeWorkflow,
 			})
 		}
 		refCounts := countReferences(allIssues)
@@ -97,6 +114,8 @@ Example:
 			output := map[string]interface{}{
 				"duplicate_groups": len(duplicateGroups),
 				"groups":           formatDuplicateGroupsJSON(duplicateGroups, refCounts, structuralScores),
+				"workflow_skipped": workflowSkipped,
+				"include_workflow": includeWorkflow,
 			}
 			if autoMerge || dryRun {
 				output["merge_commands"] = mergeCommands
@@ -107,6 +126,9 @@ Example:
 			return outputJSON(output)
 		}
 		fmt.Printf("%s Found %d duplicate group(s):\n\n", ui.RenderWarn("🔍"), len(duplicateGroups))
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n\n", ui.RenderAccent("ℹ"), workflowSkipped)
+		}
 		for i, group := range duplicateGroups {
 			target := chooseMergeTarget(group, refCounts, structuralScores)
 			fmt.Printf("%s Group %d: %s\n", ui.RenderAccent("━━"), i+1, group[0].Title)
@@ -149,6 +171,7 @@ Example:
 func init() {
 	duplicatesCmd.Flags().Bool("auto-merge", false, "Automatically merge all duplicates")
 	duplicatesCmd.Flags().Bool("dry-run", false, "Show what would be merged without making changes")
+	duplicatesCmd.Flags().Bool("include-workflow", false, "Also consider orchestrator-managed workflow beads (metadata with gc.* keys); they are skipped by default")
 	rootCmd.AddCommand(duplicatesCmd)
 }
 
