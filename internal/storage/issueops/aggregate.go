@@ -215,7 +215,11 @@ func AuthorizeAssigneeTransfer(ctx context.Context, tx DBTX, before *types.Issue
 // UpdateIssueInTx funnel does not consult it — its one notes-replacing caller
 // is `bd edit`, which pre-fills the editor with the current notes, so the
 // overwrite there is a sighted edit rather than the blind clobber this fence
-// exists to stop.
+// exists to stop. `bd import` is exempt BY DESIGN (GH#6190), along with every
+// other live-state fence: its contract is row replacement, guarded by its own
+// staleness check (only strictly-newer rows rewrite local state; deliberate
+// overwrites of newer state require --allow-stale) and reported field-by-field
+// in updated_issues — the bulk-path analog of this fence's per-field --force.
 func AuthorizeNotesOverwrite(before *types.Issue, request publicops.UpdateRequest) error {
 	if !request.Patch.Notes.Set || !publicops.NotesReplacement(before.Notes, request.Patch.Notes.Value) || request.ForceNotesOverwrite {
 		return nil
