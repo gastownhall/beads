@@ -81,7 +81,10 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 		}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 			return err
 		}
-		return issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor)
+		if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+			return err
+		}
+		return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 	}
 	if err := insertIssueRow(ctx, r.runner, table, issue); err != nil {
 		return err
@@ -93,7 +96,10 @@ func (r *issueSQLRepositoryImpl) Insert(ctx context.Context, issue *types.Issue,
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor)
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventCreate, issue.ID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issue.ID, actor)
 }
 
 func (r *issueSQLRepositoryImpl) InsertBatch(ctx context.Context, issues []*types.Issue, actor string, opts domain.InsertIssueOpts) error {
@@ -327,7 +333,10 @@ func (r *issueSQLRepositoryImpl) Update(ctx context.Context, id string, updates 
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The no-op early returns above wrote nothing and journal nothing.
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id, actor)
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, id, actor)
 }
 
 // CompareAndSetMetadataKey runs the SHARED compare-and-set body, unwrapped.
