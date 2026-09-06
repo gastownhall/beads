@@ -328,12 +328,13 @@ endif
 # On Git for Windows, `rm path/bd` can resolve and delete `path/bd.exe` when no
 # literal extensionless entry exists. Replace bd.exe first, then enumerate real
 # legacy aliases (including case variants and redirected install directories)
-# so cleanup cannot remove the executable or weaken a failed install.
+# so cleanup cannot remove the executable or weaken a failed install. Keep
+# directories named bd; the Windows PATH above supplies MSYS find, not System32 find.
 install install-force: build
 	@mkdir -p "$(INSTALL_DIR)"
 ifeq ($(OS),Windows_NT)
 	@cp "$(BUILD_DIR)/bd.exe" "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.exe.install.tmp.$$$$" "$(INSTALL_DIR)/bd.exe"
-	@find -H "$(INSTALL_DIR)" -mindepth 1 -maxdepth 1 -iname bd -exec rm -f -- {} +
+	@find -H "$(INSTALL_DIR)" -mindepth 1 -maxdepth 1 -iname bd ! -type d -exec rm -f -- {} +
 	@echo "Installed bd.exe to $(INSTALL_DIR)/bd.exe"
 else
 	@cp "$(BUILD_DIR)/bd" "$(INSTALL_DIR)/.bd.install.tmp.$$$$" && mv -f "$(INSTALL_DIR)/.bd.install.tmp.$$$$" "$(INSTALL_DIR)/bd"

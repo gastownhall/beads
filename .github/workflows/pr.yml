@@ -1364,6 +1364,44 @@ jobs:
             throw 'Native Make junction install mutated the fixture repository'
           }
 
+          $directoryAlias = Join-Path $installProfile '.local/bin/BD'
+          New-Item -ItemType Directory -Path $directoryAlias | Out-Null
+          $directorySentinel = Join-Path $directoryAlias 'keep.txt'
+          Set-Content -LiteralPath $directorySentinel -Encoding ascii -NoNewline -Value 'preserve-bd-directory'
+          $directorySentinelHash = (Get-FileHash -LiteralPath $directorySentinel -Algorithm SHA256).Hash
+          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel-v4'
+          $directoryInstallHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
+          $fixtureBeforeDirectoryInstall = @(Get-TreeManifest -Root $fixtureRepo)
+
+          $env:USERPROFILE = $installProfile
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory -o build "BUILD_DIR=$buildDir" GIT_BUILD=install-proof install-force
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make install-force failed with a directory named BD'
+            }
+          } finally {
+            Pop-Location
+          }
+
+          $expectedDirectoryInstall = @(
+            'D profile with spaces'
+            'D profile with spaces/.local'
+            'D profile with spaces/.local/bin'
+            'D profile with spaces/.local/bin/BD'
+            "F profile with spaces/.local/bin/BD/keep.txt $directorySentinelHash"
+            "F profile with spaces/.local/bin/bd.exe $directoryInstallHash"
+          ) | Sort-Object
+          $actualDirectoryInstall = @(Get-TreeManifest -Root $installRoot)
+          if (Compare-Object -ReferenceObject $expectedDirectoryInstall -DifferenceObject $actualDirectoryInstall) {
+            throw "Native Make changed the preserved BD directory or install tree:`n$($actualDirectoryInstall -join "`n")"
+          }
+          $fixtureAfterDirectoryInstall = @(Get-TreeManifest -Root $fixtureRepo)
+          if (Compare-Object -ReferenceObject $fixtureBeforeDirectoryInstall -DifferenceObject $fixtureAfterDirectoryInstall) {
+            throw 'Native Make install with a BD directory mutated the fixture repository'
+          }
+          Write-Output 'Native Make install proof passed: first install, failed copy, case-variant alias, junction, preserved BD directory'
+
       - name: Exercise MSYS2-hosted Make
         if: matrix.host == 'msys2'
         shell: msys2 {0}
