@@ -26,7 +26,6 @@ func TestEnginePullImportsCommentThread(t *testing.T) {
 		out := make([]*types.Comment, 0, len(texts))
 		for i, text := range texts {
 			out = append(out, &types.Comment{
-				ID:        "gh-" + string(rune('a'+i)),
 				Author:    "alice",
 				Text:      text,
 				CreatedAt: created.Add(time.Duration(i) * time.Minute),
@@ -116,6 +115,83 @@ func TestEnginePullImportsCommentThread(t *testing.T) {
 			result.Stats.Updated, result.Stats.Created)
 	}
 	assertComments(2, "after settled re-pull")
+}
+
+// A local-only comment must not mask a new remote comment: the pending check
+// keys on content, not counts, so a 2-vs-2 thread with one new remote comment
+// still takes the update path.
+func TestEnginePullImportsRemoteCommentDespiteLocalComment(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	created := time.Now().Add(-24 * time.Hour)
+	extURL := "https://github.test/acme/widgets/issues/10"
+
+	thread := func(texts ...string) []*types.Comment {
+		out := make([]*types.Comment, 0, len(texts))
+		for i, text := range texts {
+			out = append(out, &types.Comment{
+				Author:    "alice",
+				Text:      text,
+				CreatedAt: created.Add(time.Duration(i) * time.Minute),
+			})
+		}
+		return out
+	}
+
+	makeTracker := func(comments []*types.Comment) *mockTracker {
+		tr := newMockTracker("github")
+		tr.issues = []TrackerIssue{{
+			ID:         "ext-10",
+			Identifier: "10",
+			URL:        extURL,
+			Title:      "Commented issue",
+			UpdatedAt:  created,
+		}}
+		tr.fieldMapper = &mockMapper{issueToBeads: func(ti *TrackerIssue) *IssueConversion {
+			return &IssueConversion{
+				Issue: &types.Issue{
+					Title:       ti.Title,
+					Description: ti.Description,
+					Priority:    2,
+					Status:      types.StatusOpen,
+					IssueType:   types.TypeTask,
+					Comments:    comments,
+				},
+			}
+		}}
+		return tr
+	}
+
+	engine := NewEngine(makeTracker(thread("first")), store, "test-actor")
+	if _, err := engine.Sync(ctx, SyncOptions{Pull: true}); err != nil {
+		t.Fatalf("Sync() #1 error: %v", err)
+	}
+	issues, err := store.SearchIssues(ctx, "", types.IssueFilter{})
+	if err != nil || len(issues) != 1 {
+		t.Fatalf("stored issues = %d, err = %v; want 1", len(issues), err)
+	}
+	id := issues[0].ID
+
+	if _, err := store.ImportIssueComment(ctx, id, "bob", "local note", created.Add(30*time.Minute)); err != nil {
+		t.Fatalf("ImportIssueComment() error: %v", err)
+	}
+
+	engine = NewEngine(makeTracker(thread("first", "second")), store, "test-actor")
+	result, err := engine.Sync(ctx, SyncOptions{Pull: true})
+	if err != nil {
+		t.Fatalf("Sync() #2 error: %v", err)
+	}
+	if result.Stats.Updated != 1 {
+		t.Errorf("#2 Stats.Updated = %d, want 1 (remote comment pending despite local comment)", result.Stats.Updated)
+	}
+	got, err := store.GetIssueComments(ctx, id)
+	if err != nil {
+		t.Fatalf("GetIssueComments() error: %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("comments = %d, want 3 (first, local note, second)", len(got))
+	}
 }
 
 // A push dry-run must reach the same verdict as a real push when there is no

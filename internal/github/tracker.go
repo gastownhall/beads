@@ -111,8 +111,10 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 	result := make([]tracker.TrackerIssue, 0, len(issues))
 	for i := range issues {
 		ti := githubToTrackerIssue(&issues[i])
-		if err := t.hydrateComments(ctx, &issues[i]); err != nil {
-			ti.Warnings = append(ti.Warnings, err.Error())
+		if opts.IncludeComments {
+			if err := t.hydrateComments(ctx, &issues[i]); err != nil {
+				ti.Warnings = append(ti.Warnings, err.Error())
+			}
 		}
 		result = append(result, ti)
 	}
@@ -120,19 +122,19 @@ func (t *Tracker) FetchIssues(ctx context.Context, opts tracker.FetchOptions) ([
 }
 
 func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
-	number, err := strconv.Atoi(identifier)
-	if err != nil {
-		return nil, fmt.Errorf("invalid GitHub issue number %q: %w", identifier, err)
-	}
-
-	gh, err := t.client.FetchIssueByNumber(ctx, number)
-	if err != nil {
+	gh, err := t.fetchIssueByNumber(ctx, identifier)
+	if err != nil || gh == nil {
 		return nil, err
 	}
-	if gh == nil {
-		return nil, nil
-	}
+	ti := githubToTrackerIssue(gh)
+	return &ti, nil
+}
 
+func (t *Tracker) FetchIssueWithComments(ctx context.Context, identifier string) (*tracker.TrackerIssue, error) {
+	gh, err := t.fetchIssueByNumber(ctx, identifier)
+	if err != nil || gh == nil {
+		return nil, err
+	}
 	ti := githubToTrackerIssue(gh)
 	if err := t.hydrateComments(ctx, gh); err != nil {
 		ti.Warnings = append(ti.Warnings, err.Error())
@@ -140,14 +142,18 @@ func (t *Tracker) FetchIssue(ctx context.Context, identifier string) (*tracker.T
 	return &ti, nil
 }
 
-// hydrateComments fetches an issue's comment thread onto HydratedComments so
-// the pull path can import it. The issues-list response only carries a
-// comment count, so the thread costs one extra API call per commented issue;
-// issues with zero comments — the common case — cost nothing.
-//
-// A comment-fetch failure does not fail the whole sync: the issue still
-// imports without its thread (the returned error becomes a TrackerIssue
-// warning) and a later sync retries.
+func (t *Tracker) fetchIssueByNumber(ctx context.Context, identifier string) (*Issue, error) {
+	number, err := strconv.Atoi(identifier)
+	if err != nil {
+		return nil, fmt.Errorf("invalid GitHub issue number %q: %w", identifier, err)
+	}
+	return t.client.FetchIssueByNumber(ctx, number)
+}
+
+// hydrateComments fetches an issue's comment thread when the list response
+// reported a nonzero comment count. Failures leave the issue importable
+// without its thread and surface as a TrackerIssue warning for retry on a
+// later sync.
 func (t *Tracker) hydrateComments(ctx context.Context, gh *Issue) error {
 	if gh.Comments <= 0 {
 		return nil
