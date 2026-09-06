@@ -61,7 +61,7 @@ Dolt Garbage Collection:
   With auto-commit per mutation, Dolt commit history grows over time. Use
   --dolt to run Dolt garbage collection and reclaim disk space.
 
-  --dolt: Run Dolt GC on .beads/dolt directory to free disk space.
+  --dolt: Run Dolt GC on the active database to free disk space.
           This removes unreachable commits and compacts storage.
 
 Examples:
@@ -755,7 +755,7 @@ func runCompactDolt(ctx context.Context) error {
 	// directory, general CLI path, or advisory size measurement.
 	var doltPath string
 	var pathErr error
-	if locator, ok := store.(storage.ExternalGCLocator); ok {
+	if locator, ok := storage.UnwrapStore(store).(storage.ExternalGCLocator); ok {
 		doltPath, pathErr = locator.ExternalGCPath(ctx)
 	} else {
 		pathErr = &storage.ErrUnsupported{Op: "ExternalGCPath", Backend: "active store"}

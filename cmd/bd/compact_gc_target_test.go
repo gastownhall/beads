@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/beads/internal/beads"
+	"github.com/steveyegge/beads/internal/hooks"
 	"github.com/steveyegge/beads/internal/storage"
 )
 
@@ -33,20 +34,26 @@ func (s *compactGCStoreStub) ActiveDatabaseSize(ctx context.Context) (int64, err
 }
 
 func TestRunCompactDoltTargetsOnlyAuthorizedActiveDatabase(t *testing.T) {
+	clearTelemetryEnv(t)
 	toolDir := buildCompactGCFixture(t)
 	for _, tc := range []struct {
 		name, mode, pathKind     string
 		shared, dry, unsupported bool
+		decorated                bool
 		calls                    int
 		wantErr                  bool
 	}{
 		{name: "owned active", calls: 1},
 		{name: "shared active despite stale project root", shared: true, calls: 1},
+		{name: "owned active through decorators", decorated: true, calls: 1},
+		{name: "shared active through decorators", decorated: true, shared: true, calls: 1},
 		{name: "older CLI fallback", mode: "fallback", calls: 2},
 		{name: "real failure is not retried", mode: "failure", calls: 1, wantErr: true},
 		{name: "dry run", dry: true},
 		{name: "unsupported with plausible local path", unsupported: true, wantErr: true},
 		{name: "unsupported dry run", unsupported: true, dry: true},
+		{name: "unsupported through decorators", decorated: true, unsupported: true, wantErr: true},
+		{name: "unsupported dry run through decorators", decorated: true, unsupported: true, dry: true},
 		{name: "size capability is insufficient", pathKind: "size-only", wantErr: true},
 		{name: "general locator is insufficient", pathKind: "locator-only", wantErr: true},
 		{name: "missing declared path", pathKind: "missing", wantErr: true},
@@ -96,6 +103,13 @@ func TestRunCompactDoltTargetsOnlyAuthorizedActiveDatabase(t *testing.T) {
 				candidate.directory = filepath.Join(active, "keep")
 			case "empty":
 				candidate.directory = ""
+			}
+			if tc.decorated {
+				t.Setenv("BD_OTEL_STDOUT", "true")
+				store = wireStorageDecorators(store, hooks.NewRunner(filepath.Join(project, "missing-hooks")), false)
+				if storage.UnwrapStore(store) != candidate {
+					t.Fatal("production decorator chain lost the active store")
+				}
 			}
 			compactDryRun, jsonOutput = tc.dry, true
 			var runErr error
