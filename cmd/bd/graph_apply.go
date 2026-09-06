@@ -382,14 +382,14 @@ func createIssuesFromGraph(planFile string, dryRun bool, opts GraphApplyOptions)
 	if jsonOutput {
 		return outputJSON(result)
 	}
-	fmt.Printf("Created %d issues\n", len(result.IDs))
+	fmt.Printf("Created %d issues\n", len(result.IDs)) //nolint:forbidigo // Graph create is outside the renderer contract.
 	keys := make([]string, 0, len(result.IDs))
 	for key := range result.IDs {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		fmt.Printf("  %s -> %s\n", key, result.IDs[key])
+		fmt.Printf("  %s -> %s\n", key, result.IDs[key]) //nolint:forbidigo // Graph create is outside the renderer contract.
 	}
 	return nil
 }
@@ -441,9 +441,10 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan, opts GraphApplyOptions) error {
 		return outputJSON(preview)
 	}
 
+	//nolint:forbidigo // Graph create is outside the renderer contract.
 	fmt.Printf("Dry run: would create %d issue(s) and %d edge(s) (%d parent-child link(s))\n",
 		preview.NodeCount, preview.EdgeCount, preview.ParentDeps)
-	fmt.Printf("Note: %s.\n", graphApplyDryRunTransactionValidationNote)
+	fmt.Printf("Note: %s.\n", graphApplyDryRunTransactionValidationNote) //nolint:forbidigo // Graph create is outside the renderer contract.
 	for _, row := range rows {
 		extras := ""
 		if row.ID != "" {
@@ -458,7 +459,7 @@ func emitGraphApplyDryRun(plan *GraphApplyPlan, opts GraphApplyOptions) error {
 		case row.ParentID != "":
 			extras += fmt.Sprintf(" parent_id=%s", row.ParentID)
 		}
-		fmt.Printf("  %s [%s] P%d %q%s\n", row.Key, row.Type, row.Priority, row.Title, extras)
+		fmt.Printf("  %s [%s] P%d %q%s\n", row.Key, row.Type, row.Priority, row.Title, extras) //nolint:forbidigo // Graph create is outside the renderer contract.
 	}
 	return nil
 }
