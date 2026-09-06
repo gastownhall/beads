@@ -20,19 +20,6 @@ import (
 const migration0067Up = "0067_add_versioned_beads_schema.up.sql"
 const migration0067Down = "0067_add_versioned_beads_schema.down.sql"
 
-// TestLatestVersionIncludesMigration0067 pins the real next free slot this
-// phase claims. It is deliberately a hardcoded literal, not a comparison
-// against another derived value: schema.LatestVersion() drifting to 67 for
-// the wrong reason (an unrelated migration landing first) should still be
-// caught by this test failing to explain why 67 is versioned-beads-shaped,
-// which the CLI test below checks.
-func TestLatestVersionIncludesMigration0067(t *testing.T) {
-	const want = 67
-	if got := LatestVersion(); got != want {
-		t.Fatalf("LatestVersion() = %d, want %d (issue_versions/store_epoch/issues.current_revision migration slot claimed by be-hs42e.2)", got, want)
-	}
-}
-
 // TestMigration0067AddsVersionedBeadsSchema is a pure-Go, DB-independent
 // check of the frozen migration bytes themselves — it runs even where no
 // `dolt` binary is available.
@@ -194,8 +181,12 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	requireDoltDataType(t, dir, "wisps", "current_revision", "bigint", "NO")
 
 	// Composite PK (issue_id, revision) is enforced: same pair twice fails.
-	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00')`)
-	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:01')`); err == nil {
+	// attribution_status is 0068's NOT NULL column (not yet Phase 1's
+	// concern, but present on any schema this test's fresh bundle produces),
+	// so both inserts must supply it or Dolt rejects them before the PK
+	// check below ever runs.
+	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00', 'undetermined')`)
+	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:01', 'undetermined')`); err == nil {
 		t.Error("duplicate (issue_id, revision) insert into issue_versions succeeded, want primary key violation")
 	}
 
