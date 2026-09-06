@@ -2881,6 +2881,18 @@ func (s *DoltStore) ActiveDatabaseSize(ctx context.Context) (int64, error) {
 	return size, nil
 }
 
+// ExternalGCPath uses the local authority captured when this store was opened.
+// Later environment changes or stale client-local paths cannot grant it.
+func (s *DoltStore) ExternalGCPath(ctx context.Context) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	if s.localActiveDatabaseDir == "" {
+		return "", &storage.ErrUnsupported{Op: "ExternalGCPath", Backend: "dolt-server"}
+	}
+	return s.localActiveDatabaseDir, nil
+}
+
 // DoltGC runs Dolt garbage collection to reclaim disk space.
 // Pins a single connection to avoid session state loss on pooled *sql.DB.
 func (s *DoltStore) DoltGC(ctx context.Context) error {

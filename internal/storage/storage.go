@@ -685,6 +685,14 @@ type ActiveDatabaseSizer interface {
 	ActiveDatabaseSize(ctx context.Context) (int64, error)
 }
 
+// ExternalGCLocator supplies the authoritative local working directory for
+// the active database's external garbage-collection tool. Implementations
+// return *ErrUnsupported when this instance cannot authorize that operation.
+// Neither a readable size nor a general store path grants this capability.
+type ExternalGCLocator interface {
+	ExternalGCPath(ctx context.Context) (string, error)
+}
+
 // GarbageCollector provides Dolt garbage collection capability.
 // Callers that need to reclaim disk space should type-assert to this interface.
 type GarbageCollector interface {
