@@ -271,7 +271,7 @@ func TestClientQueryDataSourceDefaultBoundUnchanged(t *testing.T) {
 	}
 }
 
-func TestClientRetriesRateLimitedRequestHonouringRetryAfter(t *testing.T) {
+func TestClientRetriesRateLimitedRequestHonoringRetryAfter(t *testing.T) {
 	t.Parallel()
 
 	calls := 0
@@ -326,7 +326,7 @@ func TestClientDoesNotRetryServerErrorOnPost(t *testing.T) {
 		t.Fatal("QueryDataSource succeeded, want server error")
 	}
 	// Replaying a POST that may already have been applied server-side is how
-	// duplicates get made; one attempt is the correct behaviour.
+	// duplicates get made; one attempt is the correct behavior.
 	if calls != 1 {
 		t.Fatalf("requests = %d, want 1", calls)
 	}
