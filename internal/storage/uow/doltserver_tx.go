@@ -18,6 +18,10 @@ type doltServerTx struct {
 	// releaseConn and poisonConn — so the activation entry cannot outlive the
 	// transaction it describes, whichever way the transaction ends.
 	clearJournalScope func()
+	// clearVersionScope is clearJournalScope's counterpart for dual-write
+	// issue-version history: same binding at BeginTx, same release at
+	// releaseConn/poisonConn.
+	clearVersionScope func()
 }
 
 var _ Tx = (*doltServerTx)(nil)
@@ -155,6 +159,7 @@ func (t *doltServerTx) rollbackConn(ctx context.Context) error {
 
 func (t *doltServerTx) releaseConn() {
 	t.releaseJournalScope()
+	t.releaseVersionScope()
 	if t.conn != nil {
 		_ = t.conn.Close()
 		t.conn = nil
@@ -171,6 +176,15 @@ func (t *doltServerTx) releaseJournalScope() {
 	}
 }
 
+// releaseVersionScope is releaseJournalScope's counterpart for dual-write
+// issue-version history. Idempotent for the same reason.
+func (t *doltServerTx) releaseVersionScope() {
+	if t.clearVersionScope != nil {
+		t.clearVersionScope()
+		t.clearVersionScope = nil
+	}
+}
+
 // poisonConn discards the pinned session instead of returning it to the pool.
 // A session whose transaction may still be open must never be reused: because
 // go-sql-driver's ResetSession only performs a liveness check (no
@@ -179,6 +193,7 @@ func (t *doltServerTx) releaseJournalScope() {
 // database/sql close the connection and drop it from the pool.
 func (t *doltServerTx) poisonConn() {
 	t.releaseJournalScope()
+	t.releaseVersionScope()
 	if t.conn == nil {
 		return
 	}

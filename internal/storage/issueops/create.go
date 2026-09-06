@@ -193,6 +193,9 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
 		return result, err
 	}
+	if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
+		return result, err
+	}
 	// Creation-time comments (import/interchange carries them inline) are
 	// replayable content the create snapshot does NOT contain — issue hydration
 	// joins labels but not comments — so each inserted comment gets its own op,
