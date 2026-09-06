@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/dolthub/dolt/go/store/blobstore"
+	"github.com/steveyegge/beads/internal/githooksenv"
 )
 
 // TestResetDataRefNamesMatchDolt keeps the locally pinned data-plane ref
@@ -18,6 +19,17 @@ func TestResetDataRefNamesMatchDolt(t *testing.T) {
 	}
 	if want := "refs/heads/" + blobstore.DefaultInfoBranch; gitDoltInfoRef != want {
 		t.Errorf("gitDoltInfoRef = %q, dolt publishes %q", gitDoltInfoRef, want)
+	}
+}
+
+func TestEnvWithNoGitHooksPreservesExistingParameters(t *testing.T) {
+	const existing = "'user.email=ci@example.com'"
+	t.Setenv(githooksenv.ParametersEnv, existing)
+
+	got := githooksenv.Extract(envWithNoGitHooks())
+	want := existing + " " + githooksenv.NoHooksParam
+	if got != want {
+		t.Fatalf("envWithNoGitHooks %s = %q, want %q", githooksenv.ParametersEnv, got, want)
 	}
 }
 

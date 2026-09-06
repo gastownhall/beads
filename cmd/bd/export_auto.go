@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/debug"
+	"github.com/steveyegge/beads/internal/execenv"
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/types"
@@ -932,29 +933,18 @@ func scrubGitHookEnv(env []string) []string {
 	// GIT_CONFIG_PARAMETERS=, GIT_CONFIG_GLOBAL=, GIT_CONFIG_SYSTEM=, and
 	// GIT_CONFIG_NOSYSTEM= — the whole family — in one entry. No standard
 	// git env var starts with GIT_CONFIG that we want to preserve.
-	prefixes := []string{
-		"GIT_DIR=",
-		"GIT_WORK_TREE=",
-		"GIT_INDEX_FILE=",
-		"GIT_COMMON_DIR=",
-		"GIT_PREFIX=",
-		"GIT_OBJECT_DIRECTORY=",
-		"GIT_ALTERNATE_OBJECT_DIRECTORIES=",
-		"GIT_CEILING_DIRECTORIES=",
-		"GIT_DISCOVERY_ACROSS_FILESYSTEM=",
-		"GIT_CONFIG",
-	}
-	out := make([]string, 0, len(env))
-	for _, e := range env {
-		skip := false
-		for _, p := range prefixes {
-			if strings.HasPrefix(e, p) {
-				skip = true
-				break
-			}
-		}
-		if !skip {
-			out = append(out, e)
+	cleaned := execenv.Without(env,
+		"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+		"GIT_PREFIX", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+		"GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+	)
+	// Without owns a fresh slice, so this second filter cannot mutate env.
+	out := cleaned[:0]
+	for _, entry := range cleaned {
+		// The extra delimiter preserves prefix removal for valueless entries;
+		// only the key is inspected, so existing values do not affect matching.
+		if !execenv.ContainsKeyWithPrefix([]string{entry + "="}, "GIT_CONFIG") {
+			out = append(out, entry)
 		}
 	}
 	return out

@@ -19,8 +19,9 @@ package githooksenv
 
 import (
 	"os"
-	"strings"
 	"sync"
+
+	"github.com/steveyegge/beads/internal/execenv"
 )
 
 // ParametersEnv is git's environment variable for injecting one-off config
@@ -45,14 +46,8 @@ func AppendParameter(existing, param string) string {
 // Extract returns the GIT_CONFIG_PARAMETERS value from an environment slice,
 // using exec's last-wins semantics for duplicate keys.
 func Extract(env []string) string {
-	prefix := ParametersEnv + "="
-	var val string
-	for _, e := range env {
-		if v, ok := strings.CutPrefix(e, prefix); ok {
-			val = v
-		}
-	}
-	return val
+	value, _ := execenv.Lookup(env, ParametersEnv)
+	return value
 }
 
 // DisabledEnv returns env with git client-side hooks disabled, for callers
@@ -61,14 +56,8 @@ func Extract(env []string) string {
 // with the no-hooks override appended. The input slice is not modified.
 func DisabledEnv(env []string) []string {
 	merged := AppendParameter(Extract(env), NoHooksParam)
-	prefix := ParametersEnv + "="
-	out := make([]string, 0, len(env)+1)
-	for _, e := range env {
-		if !strings.HasPrefix(e, prefix) {
-			out = append(out, e)
-		}
-	}
-	return append(out, prefix+merged)
+	out := execenv.Without(env, ParametersEnv)
+	return append(out, ParametersEnv+"="+merged)
 }
 
 // Process-environment state for WithDisabled. A refcount rather than a plain
