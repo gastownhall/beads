@@ -9,8 +9,10 @@
 - **Deploy bead:** be-y0fsc
 - **Review bead:** be-5fap7 — verdict **PASS**, recorded on commit
   `f23a315631db7f6d36f82b4cbafeb280c025fea1`
-- **Commits:** `c2e896373b53ac5e5116c1daef1468735e429735` (TDD red — new
-  regression test, confirmed failing pre-fix) then
+- **Commits:** `c2e896373b53ac5e5116c1daef1468735e429735` (labelled "TDD red"
+  — **this label was wrong**; the pre-fix failure was a *compile* error because
+  `storeOpenContext` did not yet exist, not a behavioural red. See the review
+  addendum below.) then
   `f23a315631db7f6d36f82b4cbafeb280c025fea1` (TDD green — fix), 1 file over
   `origin/main` (base `c0d8da42de5fd15c95adac85e342ba4a121da0fb`)
 - **Branch:** `builder/be-gvnsq` → deploy branch cut fresh as
@@ -23,10 +25,11 @@
 touches (confirmed via `git diff c0d8da42d..f23a31563 --name-only`, 1 file,
 +71/-7). Refactors `setupTwoProjectStores` so store A and store B each get an
 independent, freshly-budgeted context (`storeOpenContext()`, new helper);
-store A's context is cancelled before store B's open begins. Adds diff-owned
-unit test `TestStoreOpenContext_FreshBudgetPerCall` (pure, `time.Sleep`-based,
-~0.5s, does not call `New()` or touch a real Dolt store). No production code
-changed — this is test-infrastructure only.
+store A's context is cancelled before store B's open begins. Added diff-owned unit test
+`TestStoreOpenContext_FreshBudgetPerCall` (pure, `time.Sleep`-based, ~0.5s,
+does not call `New()` or touch a real Dolt store) — **that test has since been
+deleted as vacuous; see the addendum.** No production code changed — this is
+test-infrastructure only.
 
 ## Gate criteria
 
@@ -203,3 +206,60 @@ in isolation. Proceeding to push `deploy/be-5fap7-gate` and open a PR against
 `gastownhall/beads` (established precedent: be-34u9a), the deployer's job
 ends at the verified opened PR — no merge, no merge-request routed to
 mayor/mpr, a for-visibility-only mail to mayor instead.
+
+---
+
+## Addendum — review response (2026-09-06, PR #6256)
+
+`bee-ghosttrack` filed CHANGES_REQUESTED at `61d1d51e7` on 2026-09-04 with two blocking findings. Both are accepted; both were correct.
+
+### Finding 1 — the test did not exercise the property it claimed
+
+Upheld in full. `TestStoreOpenContext_FreshBudgetPerCall` asserted only that two `context.WithTimeout(context.Background(), testTimeout)` calls return different deadlines — a property of the standard library. It never named `setupTwoProjectStores`, `New` or `DoltStore`, so no change to `setupTwoProjectStores` — a complete revert included — could have turned it red.
+
+The reviewer's characterisation of this gate record is also correct and is corrected above: the "TDD red" at `c2e896373` was a **compile** failure (`storeOpenContext` undefined before the fix commit), not a behavioural one. A compile error is not evidence that a test guards a behaviour.
+
+The test has been deleted rather than replaced. The property — "a cold open must not inherit a budget already spent by a previous open" — is not observable from a unit test without an injectable clock or injectable load, and writing a second test that *looks* like it checks this would repeat the original error. What replaces it is structural: every two-open site now routes through a single helper, so the shared-deadline shape has one place to regress rather than fourteen.
+
+### Finding 2 — one of five sites fixed
+
+Upheld, and the count was higher than reported. The review listed four unfixed sibling sites; enumerating every `New(ctx, …)` in the package found **seven**, all with two cold opens under one `testTimeout`:
+
+| Site | Test |
+|---|---|
+| `cross_project_test.go:307,320` | `TestCrossProject_PortCollision_SameDatabase` *(reported)* |
+| `cross_project_test.go:812,829` | `…_IdentityCheck_ExistingDatabase_ForeignRejected` *(reported)* |
+| `cross_project_test.go:856,866` | `…_IdentityCheck_ExistingDatabase_MatchingSucceeds` *(reported)* |
+| `create_guard_test.go:273,291` | `TestCreateGuard_ExistingDB_WithData` *(reported)* |
+| `cross_project_test.go:903,914` | `…_IdentityCheck_SoftSkip_NoLocalMetadata` |
+| `cross_project_test.go:938,945` | `…_IdentityCheck_SoftSkip_EmptyDBProjectID` |
+| `cross_project_test.go:976,996` | `…_IdentityCheck_Gateway_SkipsVerification` |
+
+Extended rather than deferred, since the change is mechanical and the review's own challenge — "if they never flaked, the diagnosis needs more support than the gate gives it" — is answered better by removing the shape everywhere than by arguing about it.
+
+### Findings 3 and 4 — duplicate helper, unconditional sleep
+
+Both resolved by the same deletion. `storeOpenContext()` was byte-identical to `testContext(t)` (`dolt_test.go:59-62`) minus `t.Helper()`, and the 500 ms `time.Sleep` existed only to exercise it. Both are gone.
+
+The one helper now added, `openStoreWithOwnBudget(t, cfg)` (`dolt_test.go`), is not a re-run of finding 3: it does not duplicate `testContext`, it *composes* it with the `New` call and the cancel, which is the invariant all fourteen call sites need. Cancelling the open context when the open returns is safe for exactly the reason the review already established under "Checked and not a finding" — the context bounds the open, not the returned store.
+
+`testTimeout`'s own doc comment said "some tests set up two stores under one context"; that is no longer true and has been corrected.
+
+### Net effect
+
+The diff is now **smaller** than the version reviewed: `-90/+44` across three files, against `+78/-7` in one before.
+
+### Verification
+
+Real `dolthub/dolt-sql-server:2.2.0` container, `TESTCONTAINERS_RYUK_DISABLED=true`, ambient `BEADS_DOLT_SERVER_PORT` unset so the suite cannot silently target the shared city server instead of the container:
+
+```
+go test ./internal/storage/dolt/ -run TestCrossProject -count=1 -v
+  11/11 PASS, 0 FAIL, 0 SKIP   (193.4s)
+go test ./internal/storage/dolt/ -run TestCreateGuard -count=1 -v
+  9/9  PASS, 0 FAIL, 0 SKIP    (35.3s)
+```
+
+Zero SKIPs is load-bearing here: when the container cannot start, these suites skip rather than fail, and a skipped run is indistinguishable from a passing one in the summary line.
+
+`gofmt -l internal/storage/dolt/` clean; `go vet ./internal/storage/dolt/...` clean.
