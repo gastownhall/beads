@@ -142,6 +142,42 @@ func TestPRWorkflowExercisesWindowsBenchmarkEnvScrubbing(t *testing.T) {
 	}
 }
 
+func TestPRPreflightPlatformsExercisesCredentialCommandFixturesOnWindows(t *testing.T) {
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, "pr-preflight-platforms")
+	step := job.step(t, "Exercise credential command fixtures on Windows")
+
+	if step.If != "matrix.os == 'windows-latest'" {
+		t.Errorf("credential command fixture selector = %q, want native Windows only", step.If)
+	}
+	if step.Shell != "pwsh" {
+		t.Errorf("credential command fixture shell = %q, want PowerShell", step.Shell)
+	}
+	if step.ContinueOnError != nil && step.ContinueOnError != false {
+		t.Error("credential command fixture step may not continue on error")
+	}
+	if got := step.Env["CGO_ENABLED"]; got != "0" {
+		t.Errorf("credential command fixture CGO_ENABLED = %q, want 0", got)
+	}
+	for _, required := range []string{
+		"internal/testutil/credentialcmd", "TestProtocol",
+		"internal/creds", "internal/storage/dolt",
+	} {
+		if !strings.Contains(step.Run, required) {
+			t.Errorf("credential command fixture step omits %q", required)
+		}
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, "pr-preflight-platforms") ||
+		gateEnv["PR_PREFLIGHT_PLATFORMS"] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), "PR_PREFLIGHT_PLATFORMS") {
+		t.Errorf("credential command fixture job is not required by ci-gate: needs=%v result=%q required=%q",
+			gate.Needs, gateEnv["PR_PREFLIGHT_PLATFORMS"], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestPRCIGateRequiresJSWasmHookExecution(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "check-cmd-bd-puregeo-tests")
