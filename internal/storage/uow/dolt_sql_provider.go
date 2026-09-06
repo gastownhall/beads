@@ -3,13 +3,16 @@ package uow
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dbproxy/proxy"
@@ -378,12 +381,99 @@ func buildDSN(ep proxy.Endpoint, database, user, password, tlsConfigName string)
 	}.String()
 }
 
+// pinger is the subset of *sql.DB that pingWithRetry needs, narrowed so
+// tests can script a sequence of transient failures without a real
+// connection.
+type pinger interface {
+	PingContext(ctx context.Context) error
+}
+
+// pingAttemptTimeout bounds a single ping attempt. The DSN sets a dial
+// Timeout (5s, internal/storage/dbproxy/util/dsn.go) but no ReadTimeout, so a
+// server that accepts the TCP connection and then stalls mid-handshake is
+// otherwise bounded only by the caller's context. Kept above the dial timeout
+// so a genuine dial timeout still surfaces as itself instead of being masked
+// by this cap.
+const pingAttemptTimeout = 10 * time.Second
+
+// isTransientPingError reports whether err is a connection-level failure worth
+// retrying — the shapes a Dolt server produces when it drops or stalls a
+// connection mid-handshake or mid-ping — as opposed to a durable rejection
+// (bad credentials, unknown database) that retrying cannot fix.
+//
+// Any *net.OpError counts. Before the handshake completes there is no
+// application-level rejection that can reach us as one, so at boot an OpError
+// is always the connection itself: refused while the server restarts, reset,
+// or broken pipe. MySQL's own rejections arrive as *mysql.MySQLError and stay
+// permanent. A name that does not resolve is the exception — it will not start
+// resolving, so retrying only spends the whole budget before reporting the
+// same misconfiguration.
+//
+// context.DeadlineExceeded counts only because pingWithRetry applies a
+// per-attempt deadline and checks the caller's context *before* consulting
+// this function, so a DeadlineExceeded that reaches here can only be that
+// per-attempt cap. Do not call this without that guard: classifying the
+// caller's own expiry as transient would retry a context that is already dead,
+// which is the regression #6000 introduced from the other direction.
+//
+// Deliberately narrower than internal/storage/dolt's isRetryableError, which
+// covers this same ground for query-time retries in server mode. That one
+// matches on error text and additionally admits migration-lock, Dolt
+// read-only, and MySQL-1105 shapes — server states that describe a *statement*
+// being refused, which a boot ping cannot be in because nothing has executed on
+// the connection yet. Matching sentinels and types with errors.Is/errors.As
+// keeps this side typed, and keeps a bootstrap ping from inheriting retry
+// semantics that only make sense mid-transaction.
+func isTransientPingError(err error) bool {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) && !dnsErr.IsTemporary && !dnsErr.IsTimeout {
+		return false
+	}
+	var opErr *net.OpError
+	return errors.Is(err, driver.ErrBadConn) ||
+		errors.Is(err, mysql.ErrInvalidConn) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.As(err, &opErr)
+}
+
+// pingWithRetry pings until the server answers, the error proves durable, or
+// bo's MaxElapsedTime is spent. Each attempt gets its own deadline:
+// backoff.Retry bounds the gap between attempts but cannot interrupt one
+// already in flight, so without this cap a server that accepts TCP and then
+// stalls blocks for the caller's entire context.
+func pingWithRetry(ctx context.Context, p pinger, bo *backoff.ExponentialBackOff, attemptTimeout time.Duration) error {
+	return backoff.Retry(func() error {
+		attemptCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
+		defer cancel()
+
+		err := p.PingContext(attemptCtx)
+		if err == nil {
+			return nil
+		}
+		// The caller's context is spent, so nothing further can succeed and
+		// its Canceled/DeadlineExceeded must not be read as a transient
+		// per-attempt timeout. This check is what lets isTransientPingError
+		// treat DeadlineExceeded as retryable at all.
+		if ctx.Err() != nil {
+			return backoff.Permanent(err)
+		}
+		if isTransientPingError(err) {
+			return err
+		}
+		return backoff.Permanent(err)
+	}, backoff.WithContext(bo, ctx))
+}
+
 func openDB(ctx context.Context, dsn string) (*sql.DB, error) {
 	conn, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("uow: open db: %w", err)
 	}
-	if err := conn.PingContext(ctx); err != nil {
+	bo := backoff.NewExponentialBackOff()
+	bo.MaxElapsedTime = 30 * time.Second
+	if err := pingWithRetry(ctx, conn, bo, pingAttemptTimeout); err != nil {
 		return nil, errors.Join(fmt.Errorf("uow: ping db: %w", err), conn.Close())
 	}
 	return conn, nil
