@@ -212,8 +212,9 @@ bd backup restore                  # if a local backup snapshot exists
 
 Also check `.beads/backup/` for a JSONL export you can import manually.
 
-### 3. Create a fresh empty database at this name (destructive to any
-unrecovered data)
+### 3. Create a fresh empty database at this name
+
+**Destructive to any unrecovered data.**
 
 Only when you are certain no recoverable data exists:
 
@@ -230,9 +231,17 @@ because it authorizes the one thing this guard exists to prevent.
 - The guard keys on `project_id`, which was introduced by GH#2372. A workspace
   initialized before that has no `project_id` and is indistinguishable from a
   fresh clone, so it **fails open** — `bd init` will still create the database.
-- Server mode only. Proxied-server mode returns early on a missing root and
-  does not reach this guard, and `bd bootstrap` has its own separate
-  mode-blind create path.
+- Server mode only, and shared-server mode counts as server mode — the guard
+  tests for *this project's* database directory under the resolved Dolt data
+  dir, not for the data dir itself, which in shared mode is the machine-global
+  `~/.beads/shared-server/dolt` that is created on demand.
+- Proxied-server mode does not reach *this* guard: `bd init --proxied-server`
+  dispatches at `cmd/bd/init.go:619`, before `initAllowRecreateMissing` is
+  assigned at `:767`. It does still reach the older `checkExistingBeadsData`
+  guard (`cmd/bd/init_proxied_server.go:89`) — but because the flag is never
+  assigned on that path, **`--recreate-missing` is inert under
+  `--proxied-server`**. That is pre-existing behaviour, not introduced here.
+- `bd bootstrap` has its own separate mode-blind create path.
 
 ---
 

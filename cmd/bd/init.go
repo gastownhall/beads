@@ -2928,7 +2928,7 @@ func initModeExplicitlyRequested(cmd *cobra.Command) bool {
 // an already-initialized server-mode project whose configured database is
 // missing or unconfirmable?
 //
-// It exists because those flags bypass checkExistingBeedsData entirely (see the
+// It exists because those flags bypass checkExistingBeadsData entirely (see the
 // !reinitLocal gate in the init command), and the reinit path's own typed
 // confirmation keys on countExistingIssues — which returns 0 or an error in
 // exactly the case this guard is about, so no prompt fires either. That left
@@ -2971,15 +2971,25 @@ func guardMissingServerDatabaseAt(beadsDir string, prefix string) error {
 	if cfg.ProjectID == "" {
 		return nil
 	}
-	// A local dolt/ directory means there IS local data to protect, which is
-	// the "already initialized" case --reinit-local exists to override.
-	if info, err := os.Stat(doltserver.ResolveDoltDir(beadsDir)); err == nil && info.IsDir() {
-		return nil
-	}
-
 	host := cfg.GetDoltServerHost()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	dbName := cfg.GetDoltDatabase()
+
+	// Local data means data belonging to THIS project, which is what
+	// --reinit-local exists to override. Test for this project's own database
+	// directory, not the data directory that merely holds it: a Dolt data dir
+	// contains one subdirectory per database, each with its own .dolt.
+	//
+	// Statting the data dir itself made this guard a no-op in shared-server
+	// mode, where ResolveDoltDir returns the machine-global
+	// ~/.beads/shared-server/dolt and SharedDoltDir() MkdirAlls it — so the
+	// stat always succeeded and checkDatabaseOnServer below was never reached.
+	// Shared-server is the topology of the 2026-08-11 data loss, so that was
+	// the primary case going unguarded. Pinned by
+	// TestInitGuard_SharedServerMode_MissingServerDB_Refuses.
+	if info, err := os.Stat(filepath.Join(doltserver.ResolveDoltDir(beadsDir), dbName, ".dolt")); err == nil && info.IsDir() {
+		return nil
+	}
 
 	result := checkDatabaseOnServer(host, port, cfg.GetDoltServerUser(), cfg.GetDoltServerPassword(), dbName, cfg.GetDoltServerTLS())
 	if result.Reachable && result.Exists && result.Err == nil {
