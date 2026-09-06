@@ -2089,7 +2089,11 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 
 	// Add newline if file doesn't end with one
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		if _, err := f.WriteString(lineEnding); err != nil {
+		separator := lineEnding
+		if lineEnding == "\r\n" && content[len(content)-1] == '\r' {
+			separator = "\n" // Complete the existing CR without rewriting it.
+		}
+		if _, err := f.WriteString(separator); err != nil {
 			return err
 		}
 	}

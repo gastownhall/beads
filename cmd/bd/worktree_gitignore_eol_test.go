@@ -8,6 +8,28 @@ import (
 	"testing"
 )
 
+func TestAddToGitignoreCompletesTrailingCR(t *testing.T) {
+	repoRoot := initGitRepoForGitignoreTest(t)
+	path := filepath.Join(repoRoot, ".gitignore")
+	initial := []byte("a/\r\nb/\r")
+	if err := os.WriteFile(path, initial, 0644); err != nil {
+		t.Fatal(err)
+	}
+	want := []byte("a/\r\nb/\r\n# bd worktree\r\nworktree-feature/\r\n")
+	for i := 0; i < 2; i++ {
+		if err := addToGitignore(context.Background(), repoRoot, "worktree-feature"); err != nil {
+			t.Fatal(err)
+		}
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("append %d bytes = %q, want %q", i+1, got, want)
+		}
+	}
+}
+
 func TestAddToGitignorePreservesCRLFWhenAppending(t *testing.T) {
 	repoRoot := initGitRepoForGitignoreTest(t)
 	gitignorePath := filepath.Join(repoRoot, ".gitignore")
