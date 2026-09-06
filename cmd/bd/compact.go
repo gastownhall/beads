@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -740,7 +741,7 @@ func runCompactApply(ctx context.Context, store storage.DoltStorage) error {
 	return nil
 }
 
-// runCompactDolt runs Dolt garbage collection on the .beads/dolt directory
+// runCompactDolt runs external Dolt GC in the locally owned active database.
 func runCompactDolt(ctx context.Context) error {
 	start := time.Now()
 
@@ -750,14 +751,21 @@ func runCompactDolt(ctx context.Context) error {
 		return HandleErrorWithHint(activeWorkspaceNotFoundError(), diagHint())
 	}
 
-	// Check for dolt directory
-	doltPath := filepath.Join(beadsDir, "dolt")
-	if _, err := os.Stat(doltPath); os.IsNotExist(err) {
-		if compactDryRun {
+	// Resolve operation authority from the opened store, never a stale project
+	// directory, general CLI path, or advisory size measurement.
+	var doltPath string
+	var pathErr error
+	if locator, ok := store.(storage.ExternalGCLocator); ok {
+		doltPath, pathErr = locator.ExternalGCPath(ctx)
+	} else {
+		pathErr = &storage.ErrUnsupported{Op: "ExternalGCPath", Backend: "active store"}
+	}
+	if pathErr != nil {
+		var unsupported *storage.ErrUnsupported
+		if compactDryRun && errors.As(pathErr, &unsupported) {
 			if jsonOutput {
 				output := map[string]interface{}{
 					"dry_run":   true,
-					"dolt_path": doltPath,
 					"available": false,
 				}
 				if err := outputJSON(output); err != nil {
@@ -766,11 +774,20 @@ func runCompactDolt(ctx context.Context) error {
 				return nil
 			}
 			fmt.Printf("DRY RUN - Dolt garbage collection\n\n")
-			fmt.Printf("Dolt directory: %s\n", doltPath)
-			fmt.Printf("No local Dolt directory found; nothing to collect.\n")
+			fmt.Printf("The active database is not available for local external garbage collection.\n")
 			return nil
 		}
-		return HandleErrorWithHint(fmt.Sprintf("Dolt directory not found at %s", doltPath), "--dolt flag is only for repositories using the Dolt backend")
+		return fmt.Errorf("cannot select a local database for external Dolt garbage collection: %w", pathErr)
+	}
+	if !filepath.IsAbs(doltPath) {
+		return fmt.Errorf("external Dolt garbage collection requires an absolute active database directory, got %q", doltPath)
+	}
+	info, err := os.Stat(doltPath)
+	if err != nil {
+		return fmt.Errorf("active Dolt database directory is unavailable: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("active Dolt database path %q is not a directory", doltPath)
 	}
 
 	// Measure only the active database. The shared .beads/dolt root may contain

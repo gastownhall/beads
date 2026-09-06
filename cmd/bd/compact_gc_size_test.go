@@ -75,7 +75,11 @@ func runCompactDoltDryRunForTest(t *testing.T, candidate storage.DoltStorage, as
 	}
 	t.Setenv("BEADS_DIR", beadsDir)
 
-	store = candidate
+	active := filepath.Join(doltDir, "active")
+	if err := os.Mkdir(active, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	store = &compactGCStoreStub{DoltStorage: candidate, directory: active}
 	compactDryRun = true
 	jsonOutput = asJSON
 	return captureStdout(t, func() error {
