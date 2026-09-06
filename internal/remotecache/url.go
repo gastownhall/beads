@@ -7,6 +7,7 @@ import (
 	"path"
 	"regexp"
 	"strings"
+	"unicode"
 )
 
 // remoteSchemes lists URL scheme prefixes recognized as dolt remote URLs.
@@ -205,14 +206,157 @@ func ValidateRemoteName(name string) error {
 	return nil
 }
 
-// MatchesRemotePattern checks whether a URL matches a glob-style pattern.
-// Patterns use path.Match semantics (e.g., "dolthub://myorg/*").
+// MatchesRemotePattern checks whether a URL matches an allowlist pattern.
+//
+// Queryless pattern and queryless candidate keep the original path.Match
+// semantics verbatim, without parsing, so every form ValidateRemoteURL accepts
+// (SCP-style git@host:path, Dolt's bracketed aws://[table:bucket]/db) matches
+// exactly as it did before query awareness was added. As soon as either side
+// carries a "?", the query is part of the security decision: a query-bearing
+// candidate never matches a queryless pattern, and when both have queries the
+// location before the "?" is globbed as raw text, the queries must parse
+// strictly, the keys must match with exact cardinality and the values exactly
+// (globs only where the pattern opts in). Consequently a "?" in a pattern is a
+// query delimiter, not path.Match's single-character wildcard. Dolt splits
+// remote URLs with url.Parse too, so nothing this rejects could have routed.
 func MatchesRemotePattern(rawURL, pattern string) bool {
-	matched, err := path.Match(pattern, rawURL)
+	candidateLoc, candidateRawQuery, candidateHasQuery := strings.Cut(rawURL, "?")
+	patternLoc, patternRawQuery, patternHasQuery := strings.Cut(pattern, "?")
+	if !candidateHasQuery && !patternHasQuery {
+		return matchesPattern(pattern, rawURL)
+	}
+	if !candidateHasQuery || !patternHasQuery {
+		return false
+	}
+	// Dolt remotes have no fragment semantics; a query-aware pattern must
+	// describe the whole routed URL, on either side.
+	if strings.Contains(rawURL, "#") || strings.Contains(pattern, "#") {
+		return false
+	}
+	// The candidate must be a URL Dolt could parse (Dolt uses url.Parse too);
+	// the pattern is a path.Match glob and is deliberately never parsed.
+	candidate, err := url.Parse(rawURL)
+	if err != nil || candidate.User != nil {
+		return false
+	}
+	if rawAuthorityHasUserinfo(patternLoc) {
+		return false
+	}
+	// Raw pre-query location: no scheme lowercasing, no %XX normalisation.
+	if !matchesPattern(patternLoc, candidateLoc) {
+		return false
+	}
+	// url.ParseQuery, not URL.Query(): malformed pairs reject the whole URL
+	// instead of being dropped (Dolt's own URL.Query() would keep the valid
+	// pairs and route on them).
+	candidateQuery, err := url.ParseQuery(candidateRawQuery)
 	if err != nil {
 		return false
 	}
-	return matched
+	configuredQuery, err := url.ParseQuery(patternRawQuery)
+	if err != nil {
+		return false
+	}
+	for key := range candidateQuery {
+		// Keys are compared decoded, as Dolt's URL.Query() sees them. A decoded
+		// control rune in a key is never a real Dolt parameter.
+		if hasControlRune(key) {
+			return false
+		}
+		// Dolt reads the lowercase key only (dbfactory/s3.go); a differently
+		// cased "endpoint" is an error there today and must not slip past the
+		// endpoint validation here if that ever changes.
+		if key != "endpoint" && strings.EqualFold(key, "endpoint") {
+			return false
+		}
+	}
+	for key := range configuredQuery {
+		if hasControlRune(key) {
+			return false
+		}
+	}
+	if !validEndpointValues(candidateQuery["endpoint"]) {
+		return false
+	}
+	return matchesRemoteQuery(candidateQuery, configuredQuery)
+}
+
+// rawAuthorityHasUserinfo reports whether the text between "://" and the next
+// "/" carries an "@". Deliberately crude: the pattern is a glob, not a URL.
+func rawAuthorityHasUserinfo(loc string) bool {
+	_, rest, ok := strings.Cut(loc, "://")
+	if !ok {
+		return false
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	return strings.Contains(authority, "@")
+}
+
+func hasControlRune(s string) bool {
+	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+// validEndpointValues checks the values of the "endpoint" query key. "endpoint"
+// is the query key dolthub/dolt#11571 defines for s3:// routing (read as the
+// exact lowercase key in dbfactory/s3.go); if Dolt ever renames or aliases it
+// this check silently stops applying, while the cardinality and exact-value
+// rules in matchesRemoteQuery still do.
+func validEndpointValues(values []string) bool {
+	for _, value := range values {
+		endpoint, err := url.Parse(value)
+		if err != nil || endpoint.User != nil || endpoint.Host == "" ||
+			(endpoint.Scheme != "http" && endpoint.Scheme != "https") {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesRemoteQuery(candidate, pattern url.Values) bool {
+	if len(candidate) != len(pattern) {
+		return false
+	}
+	for key, patternValues := range pattern {
+		candidateValues, ok := candidate[key]
+		if !ok || !matchesQueryValues(candidateValues, patternValues) {
+			return false
+		}
+	}
+	return true
+}
+
+// matchesQueryValues matches repeated values for one key as a multiset.
+// Backtracking over value permutations is exponential in values-per-key, but
+// the len(candidate) != len(pattern) guard bounds it by the pattern's count,
+// which the operator wrote; a candidate cannot inflate the search.
+func matchesQueryValues(candidate, pattern []string) bool {
+	if len(candidate) != len(pattern) {
+		return false
+	}
+	matched := make([]bool, len(candidate))
+	var match func(int) bool
+	match = func(index int) bool {
+		if index == len(pattern) {
+			return true
+		}
+		for candidateIndex, candidateValue := range candidate {
+			if matched[candidateIndex] || !matchesPattern(pattern[index], candidateValue) {
+				continue
+			}
+			matched[candidateIndex] = true
+			if match(index + 1) {
+				return true
+			}
+			matched[candidateIndex] = false
+		}
+		return false
+	}
+	return match(0)
+}
+
+func matchesPattern(pattern, value string) bool {
+	matched, err := path.Match(pattern, value)
+	return err == nil && matched
 }
 
 // ValidateRemoteURLWithPatterns validates a URL and optionally checks it
