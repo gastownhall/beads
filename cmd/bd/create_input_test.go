@@ -40,6 +40,36 @@ func TestCreateCommandRegistersEmptyDescriptionOptIn(t *testing.T) {
 	}
 }
 
+func TestCreateFileFlagHelpDoesNotClaimSingleIssueGH4643(t *testing.T) {
+	f := createCmd.Flags().Lookup("file")
+	if f == nil {
+		t.Fatal("expected create to register --file")
+	}
+	if !strings.Contains(f.Usage, "one issue per") {
+		t.Fatalf("expected --file help text to name its per-heading batch behavior, got: %q", f.Usage)
+	}
+	if !strings.Contains(f.Usage, "--body-file") {
+		t.Fatalf("expected --file help text to point single-issue callers at --body-file, got: %q", f.Usage)
+	}
+}
+
+func TestGatherCreateInputRejectsTitleWithFile(t *testing.T) {
+	cmd := newCreateFlagsCommand(t, "--file", "issues.md")
+	var err error
+	stderr := captureStderr(t, func() {
+		_, err = gatherCreateInput(cmd, []string{"Some title"})
+	})
+	if err == nil {
+		t.Fatal("expected gatherCreateInput to reject a positional title with --file")
+	}
+	if !strings.Contains(stderr, "cannot specify both title and --file flag") {
+		t.Fatalf("expected title/--file conflict on stderr, got stderr=%q err=%v", stderr, err)
+	}
+	if !strings.Contains(stderr, "--body-file") {
+		t.Fatalf("expected title/--file conflict to hint at --body-file, got stderr=%q err=%v", stderr, err)
+	}
+}
+
 func TestGatherCreateInputRejectsEmptyBodyFile(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "empty.md")
 	if err := os.WriteFile(filePath, nil, 0644); err != nil {
@@ -206,4 +236,39 @@ func newCreateFlagsCommand(t *testing.T, args ...string) *cobra.Command {
 		t.Fatalf("parse %v: %v", args, err)
 	}
 	return cmd
+}
+
+// TestIsAmbiguousRepoTarget covers bd-8d3f: an explicit relative/bare --repo
+// value with no existing workspace must be refused rather than silently
+// auto-vivified. Table-tested at the pure-function level since the embedded
+// dolt round trip is ~15s per case.
+func TestIsAmbiguousRepoTarget(t *testing.T) {
+	tests := []struct {
+		name          string
+		flagChanged   bool
+		repoOverride  string
+		wantAmbiguous bool
+	}{
+		{"relative flag value is ambiguous", true, "some-other-rig", true},
+		{"nested relative flag value is ambiguous", true, "../sibling", true},
+		{"absolute flag value is unambiguous", true, "/abs/path", false},
+		{"tilde-prefixed flag value is unambiguous", true, "~/planning", false},
+		// Regression: an explicit but empty --repo value is the most
+		// ambiguous possible input (it silently resolves to the cwd, see
+		// routing.ExpandPath) and must still be gated, not exempted.
+		{"explicit empty flag value is ambiguous", true, "", true},
+		// Auto-routed paths (routing.mode: auto / routing.default) never
+		// set the --repo flag, so they're always exempt from the gate
+		// regardless of their shape.
+		{"unset flag is never ambiguous, relative-looking value", false, "some-other-rig", false},
+		{"unset flag is never ambiguous, empty value", false, "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isAmbiguousRepoTarget(tt.flagChanged, tt.repoOverride)
+			if got != tt.wantAmbiguous {
+				t.Errorf("isAmbiguousRepoTarget(%v, %q) = %v, want %v", tt.flagChanged, tt.repoOverride, got, tt.wantAmbiguous)
+			}
+		})
+	}
 }

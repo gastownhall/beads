@@ -2,6 +2,7 @@ package dolt
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"sort"
@@ -59,6 +60,23 @@ func clearJournal(t *testing.T, store *DoltStore) {
 	if _, err := store.db.ExecContext(context.Background(), "DELETE FROM bd_events_journal"); err != nil {
 		t.Fatalf("clear journal: %v", err)
 	}
+}
+
+// journalActorFor returns the actor column of the LAST journal row with the
+// given op for id, and whether such a row exists.
+func journalActorFor(t *testing.T, store *DoltStore, op, id string) (string, bool) {
+	t.Helper()
+	var actor string
+	err := store.db.QueryRowContext(context.Background(),
+		`SELECT actor FROM bd_events_journal WHERE op = ? AND issue_id = ? ORDER BY seq DESC LIMIT 1`,
+		op, id).Scan(&actor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false
+	}
+	if err != nil {
+		t.Fatalf("query journal actor: %v", err)
+	}
+	return actor, true
 }
 
 // hasOpFor reports whether the journal holds a row with the given op for id.
@@ -850,5 +868,98 @@ func TestEventsJournal_CommentPayloads(t *testing.T) {
 	}
 	if got[2].ID == "" || got[2].Author != "carol" || got[2].Text != "audit" || got[2].Source != "audit" || got[2].CreatedAt.IsZero() {
 		t.Fatalf("audit comment = %+v", got[2])
+	}
+}
+
+// TestEventsJournal_ActorAttribution pins WHO each journal row records: the
+// same acting identity the audit-events table resolves for the mutation,
+// threaded to the journal seam as an explicit parameter (bd-mbrxm). An LWW
+// semantic-conflict detector reconciling replicas attributes each mutation
+// from this column, so the update, close and system (defer-wake) cases are
+// each pinned against the real store.
+func TestEventsJournal_ActorAttribution(t *testing.T) {
+	store, cleanup := setupTestStore(t)
+	defer cleanup()
+	ctx := context.Background()
+	enableJournalForTest(t, store)
+
+	iss := &types.Issue{ID: "bd-actor-1", Title: "attributed", IssueType: types.TypeTask, Status: types.StatusOpen}
+	if err := store.CreateIssue(ctx, iss, "creator-1"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "create", iss.ID); !ok || actor != "creator-1" {
+		t.Errorf("create row actor = %q, %v; want %q", actor, ok, "creator-1")
+	}
+
+	if err := store.UpdateIssue(ctx, iss.ID, map[string]interface{}{"title": "attributed rename"}, "updater-1"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "update", iss.ID); !ok || actor != "updater-1" {
+		t.Errorf("update row actor = %q, %v; want %q", actor, ok, "updater-1")
+	}
+
+	if err := store.CloseIssue(ctx, iss.ID, "done", "closer-1", ""); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "close", iss.ID); !ok || actor != "closer-1" {
+		t.Errorf("close row actor = %q, %v; want %q", actor, ok, "closer-1")
+	}
+
+	// A structured comment journals under the comment's AUTHOR (caller-
+	// asserted; structured comments emit no audit event) — the one seam where
+	// the actor is derived rather than passed.
+	if _, err := store.AddIssueComment(ctx, iss.ID, "commenter-1", "attributed comment"); err != nil {
+		t.Fatalf("comment: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "comment", iss.ID); !ok || actor != "commenter-1" {
+		t.Errorf("comment row actor = %q, %v; want %q", actor, ok, "commenter-1")
+	}
+
+	// dep_add / dep_remove carry the dependency call's actor, same as their
+	// audit events.
+	target := &types.Issue{ID: "bd-actor-3", Title: "dep target", IssueType: types.TypeTask, Status: types.StatusOpen}
+	if err := store.CreateIssue(ctx, target, "creator-1"); err != nil {
+		t.Fatalf("create dep target: %v", err)
+	}
+	if err := store.AddDependency(ctx, &types.Dependency{IssueID: iss.ID, DependsOnID: target.ID, Type: types.DepBlocks}, "linker-1"); err != nil {
+		t.Fatalf("add dep: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "dep_add", iss.ID); !ok || actor != "linker-1" {
+		t.Errorf("dep_add row actor = %q, %v; want %q", actor, ok, "linker-1")
+	}
+	if err := store.RemoveDependency(ctx, iss.ID, target.ID, "unlinker-1"); err != nil {
+		t.Fatalf("remove dep: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "dep_remove", iss.ID); !ok || actor != "unlinker-1" {
+		t.Errorf("dep_remove row actor = %q, %v; want %q", actor, ok, "unlinker-1")
+	}
+
+	// A defer auto-wake is the system honoring the defer date, not something
+	// the reader who happened to trigger the sweep did — it journals under
+	// issueops.DeferWakeActor, exactly like its audit event.
+	deferred := &types.Issue{ID: "bd-actor-2", Title: "deferred", IssueType: types.TypeTask, Status: types.StatusOpen}
+	if err := store.CreateIssue(ctx, deferred, "creator-1"); err != nil {
+		t.Fatalf("create deferred: %v", err)
+	}
+	if err := store.UpdateIssue(ctx, deferred.ID, map[string]interface{}{
+		"status":      "deferred",
+		"defer_until": time.Now().UTC().Add(-time.Hour),
+	}, "updater-1"); err != nil {
+		t.Fatalf("defer: %v", err)
+	}
+	clearJournal(t, store)
+	if _, err := store.GetReadyWork(ctx, types.WorkFilter{}); err != nil {
+		t.Fatalf("ready work (wake sweep): %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "update", deferred.ID); !ok || actor != issueops.DeferWakeActor {
+		t.Errorf("defer auto-wake row actor = %q, %v; want %q", actor, ok, issueops.DeferWakeActor)
+	}
+
+	// Delete plumbing carries no actor; the row records the empty string.
+	if err := store.DeleteIssue(ctx, iss.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if actor, ok := journalActorFor(t, store, "delete", iss.ID); !ok || actor != "" {
+		t.Errorf("delete row actor = %q, %v; want empty (actorless plumbing)", actor, ok)
 	}
 }

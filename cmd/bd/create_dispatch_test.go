@@ -171,3 +171,46 @@ func TestCreateSingleIssueAllowEmptyDescriptionRoundTrip(t *testing.T) {
 		t.Fatalf("expected issue %q to be created via --allow-empty-description opt-in", title)
 	}
 }
+
+// TestCreateFileDispatchRejectsPositionalTitle is a regression test for
+// gastownhall/beads#4643: --file is a batch-import route, so a positional
+// title has nowhere to go once createIssuesFromMarkdown takes over. This
+// asserts gatherCreateInput's existing guard still rejects the combination
+// before any issue is written, rather than silently discarding the title.
+func TestCreateFileDispatchRejectsPositionalTitle(t *testing.T) {
+	saveAndRestoreGlobals(t)
+	ensureCleanGlobalState(t)
+
+	readonlyMode = false
+	t.Cleanup(func() { readonlyMode = false })
+
+	fileFlag := createCmd.Flags().Lookup("file")
+	t.Cleanup(func() {
+		_ = fileFlag.Value.Set("")
+		fileFlag.Changed = false
+	})
+
+	tmpDir := t.TempDir()
+	mdPath := filepath.Join(tmpDir, "single.md")
+	if err := os.WriteFile(mdPath, []byte("## My Bead\n\nBody text.\n"), 0644); err != nil {
+		t.Fatalf("write markdown fixture: %v", err)
+	}
+
+	if err := createCmd.Flags().Set("file", mdPath); err != nil {
+		t.Fatalf("set --file: %v", err)
+	}
+
+	var err error
+	stderr := captureStderr(t, func() {
+		err = createCmd.RunE(createCmd, []string{"my new bead"})
+	})
+	if err == nil {
+		t.Fatal("expected --file dispatch with a positional title to be rejected")
+	}
+	if !strings.Contains(stderr, "cannot specify both title and --file flag") {
+		t.Fatalf("expected title/--file conflict message on stderr, got: %v (err: %v)", stderr, err)
+	}
+	if !strings.Contains(stderr, "--body-file") {
+		t.Fatalf("expected title/--file conflict to hint at --body-file, got: %v (err: %v)", stderr, err)
+	}
+}

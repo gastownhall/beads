@@ -84,6 +84,9 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 		// on itself") instead of appending the sentinel text.
 		return fmt.Errorf("db: DependencySQLRepository.Insert: %w: %s cannot depend on itself", domain.ErrSelfDependency, dep.IssueID)
 	}
+	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
+		return errors.New("external capability dependencies cannot use parent-child edges")
+	}
 
 	metadata := dep.Metadata
 	if metadata == "" {
@@ -124,7 +127,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			}
 			// A same-type add refreshes edge metadata. It is an observable graph
 			// mutation, so emit the complete replacement edge for replay.
-			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+			return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 		}
 		return &domain.DependencyTypeConflictError{
 			IssueID:       dep.IssueID,
@@ -216,7 +219,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 	}
 	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
@@ -224,7 +227,7 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent: a structurally-wired edge is as real to a
 	// replaying consumer as one added by an explicit dep verb.
-	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata)
+	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
 }
 
 // classifyMissingEndpoint names the endpoint behind a foreign-key refusal,
@@ -387,7 +390,7 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent — a structural removal is as real to a
 	// replaying consumer as one from an explicit dep verb.
-	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata); err != nil {
+	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
 		return domain.DepDeleteResult{}, err
 	}
 
@@ -968,6 +971,14 @@ func (r *dependencySQLRepositoryImpl) GetDependencyRecordsForIssues(ctx context.
 	out, err := issueops.GetDependencyRecordsForIssuesInTx(ctx, r.runner, issueIDs)
 	if err != nil {
 		return nil, fmt.Errorf("db: DependencySQLRepository.GetDependencyRecordsForIssues: %w", err)
+	}
+	return out, nil
+}
+
+func (r *dependencySQLRepositoryImpl) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	out, err := issueops.GetExternalBlockingDependencyRecordsInTx(ctx, r.runner)
+	if err != nil {
+		return nil, fmt.Errorf("db: DependencySQLRepository.GetExternalBlockingDependencyRecords: %w", err)
 	}
 	return out, nil
 }
