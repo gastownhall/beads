@@ -820,6 +820,16 @@ type EventsJournalConfigurer interface {
 	SetEventsJournalEnabled(enabled bool)
 }
 
+// VersionedHistoryConfigurer controls dual-write issue-version history
+// activation on ONE storage instance. Implementations must never use
+// process-global state, for the same reason as EventsJournalConfigurer:
+// a process can hold several stores at once, and enabling history on one must
+// not turn it on for any other. Callers type-assert; a store that does not
+// implement it simply cannot record version history.
+type VersionedHistoryConfigurer interface {
+	SetVersionedHistoryEnabled(enabled bool)
+}
+
 // LifecycleManager provides lifecycle inspection beyond Close().
 type LifecycleManager interface {
 	IsClosed() bool
