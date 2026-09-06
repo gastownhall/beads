@@ -1224,20 +1224,24 @@ jobs:
           }
           printf native-build-sentinel > "$(cygpath -u "$output")"
           '@
+          if (-not $fakeGoScript.StartsWith('#!', [StringComparison]::Ordinal)) {
+            throw 'Fake Go shebang must start at byte zero after YAML extraction'
+          }
           [IO.File]::WriteAllText(
             $fakeGo,
             ($fakeGoScript -replace "`r`n", "`n"),
             [Text.UTF8Encoding]::new($false)
           )
-          $env:PATH = "$fakeGoDir;$(Split-Path $git);$env:SystemRoot\System32"
-
+          $buildProofPath = $env:PATH
           Push-Location $fixtureRepo
           try {
+            $env:PATH = "$fakeGoDir;$buildProofPath"
             & $make --no-print-directory "BUILD_DIR=$buildDir" GIT_BUILD=build-proof CC=proof build
             if ($LASTEXITCODE -ne 0) {
               throw 'Native Make build failed for a spaced BUILD_DIR'
             }
           } finally {
+            $env:PATH = $buildProofPath
             Pop-Location
           }
           if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
