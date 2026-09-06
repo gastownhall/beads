@@ -61,6 +61,47 @@ func TestPRCIGateRequiresPolicyAndLintWrappers(t *testing.T) {
 	}
 }
 
+func TestPRWorkflowRequiresNativeInitGatewayCredential(t *testing.T) {
+	const (
+		jobName     = "pr-preflight-platforms"
+		stepCommand = `bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"`
+		gateKey     = "PR_PREFLIGHT_PLATFORMS"
+	)
+
+	workflow := readCIWorkflow(t, "pr.yml")
+	job := workflow.job(t, jobName)
+	if job.RunsOn != "${{ matrix.os }}" || !equalStrings(job.Strategy.Matrix.OS, []string{"ubuntu-latest", "macos-latest", "windows-latest"}) {
+		t.Errorf("credential shell boundary requires the native three-host matrix: runner=%q matrix=%v", job.RunsOn, job.Strategy.Matrix.OS)
+	}
+	if job.If != "" || job.ContinueOnError {
+		t.Errorf("credential process job is bypassable: if=%q continue-on-error=%v", job.If, job.ContinueOnError)
+	}
+	matchingSteps := 0
+	for _, step := range job.Steps {
+		if strings.TrimSpace(step.Run) != stepCommand {
+			continue
+		}
+		matchingSteps++
+		if step.Shell != "bash" || step.Env["RUNNER_OS"] != "" {
+			t.Errorf("credential driver needs Bash and the native runner OS: shell=%q env=%v", step.Shell, step.Env)
+		}
+		if step.If != "" || (step.ContinueOnError != nil && step.ContinueOnError != false) {
+			t.Errorf("gateway credential step is bypassable: if=%q continue-on-error=%v", step.If, step.ContinueOnError)
+		}
+	}
+	if matchingSteps != 1 {
+		t.Fatalf("native preflight job has %d gateway credential commands, want 1", matchingSteps)
+	}
+
+	gate := workflow.job(t, "ci-gate")
+	gateEnv := gate.step(t, "Evaluate CI gate").Env
+	if !contains(gate.Needs, jobName) || gateEnv[gateKey] != "${{ needs.pr-preflight-platforms.result }}" ||
+		!contains(strings.Fields(gateEnv["CI_GATE_REQUIRED"]), gateKey) {
+		t.Errorf("ci-gate does not require the native credential process lane: needs=%v %s=%q required=%q",
+			gate.Needs, gateKey, gateEnv[gateKey], gateEnv["CI_GATE_REQUIRED"])
+	}
+}
+
 func TestPRComplexityReportIsAdvisoryAndBestEffort(t *testing.T) {
 	workflow := readCIWorkflow(t, "pr.yml")
 	job := workflow.job(t, "complexity-report")
