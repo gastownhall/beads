@@ -16,7 +16,6 @@ import (
 
 	"github.com/spf13/pflag"
 
-	"github.com/steveyegge/beads/internal/beads"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/httpapi"
 	"github.com/steveyegge/beads/internal/storage"
@@ -483,8 +482,7 @@ func runServeUnderReadonly(t *testing.T, dir string) (string, error) {
 	// without this a directory with no workspace would still resolve to
 	// whichever one an earlier test in this binary left behind — and "no
 	// workspace" is the whole premise of the ordering assertion above.
-	beads.ResetCaches()
-	t.Cleanup(beads.ResetCaches)
+	resetRepoCachesForTest(t)
 
 	var err error
 	stderr := captureBootstrapStderr(t, func() { err = runServe() })
