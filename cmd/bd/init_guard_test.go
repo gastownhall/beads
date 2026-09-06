@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/testutil"
 )
 
@@ -781,4 +782,155 @@ func TestInitGuard_ReinitLocalDoesNotBypassMissingServerDB(t *testing.T) {
 			t.Fatalf("a fresh clone (no project_id) must not be blocked by this guard, got: %v", err)
 		}
 	})
+}
+
+// TestInitGuard_SharedServerMode_MissingServerDB_Refuses pins the shared-server
+// case, which the per-project tests above cannot reach.
+//
+// guardMissingServerDatabaseAt used to stat doltserver.ResolveDoltDir(beadsDir)
+// and return early when it was a directory, treating that as "there is local
+// data to protect". In shared-server mode ResolveDoltDir returns the
+// machine-global ~/.beads/shared-server/dolt, and SharedDoltDir() MkdirAlls it
+// — so the stat always succeeded and checkDatabaseOnServer was never reached.
+// The guard was a no-op in exactly the topology the 2026-08-11 loss happened
+// in, while passing every per-project test.
+//
+// Here the server is REACHABLE and simply does not have this project's
+// database — the actual loss shape, not an unreachable-host stand-in.
+func TestInitGuard_SharedServerMode_MissingServerDB_Refuses(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+
+	// Shared-server mode, with HOME redirected so SharedDoltDir() resolves
+	// (and MkdirAlls) inside the test's own tree rather than the developer's.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+	if !doltserver.IsSharedServerMode() {
+		t.Fatal("precondition: BEADS_DOLT_SHARED_SERVER=1 did not enable shared-server mode")
+	}
+
+	dataDir := t.TempDir()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+	// #nosec G204 -- fixed args, no user input
+	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]interface{}{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "myproject",
+		"project_id":    "shared-0000-1111-2222-333344445555",
+	}
+	data, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// The regression this pins: the shared dolt dir exists (MkdirAll'd on
+	// resolve) but holds no database for this project.
+	sharedDolt, err := doltserver.SharedDoltDir()
+	if err != nil {
+		t.Fatalf("SharedDoltDir: %v", err)
+	}
+	if _, statErr := os.Stat(sharedDolt); statErr != nil {
+		t.Fatalf("precondition: shared dolt dir %q should exist after resolve: %v", sharedDolt, statErr)
+	}
+	if _, statErr := os.Stat(filepath.Join(sharedDolt, "myproject")); statErr == nil {
+		t.Fatalf("precondition: shared dolt dir must NOT hold a myproject database")
+	}
+
+	err = guardMissingServerDatabaseAt(beadsDir, "myproject")
+	if err == nil {
+		t.Fatal("shared-server mode with a reachable server and no myproject database must refuse init, got nil error " +
+			"(the guard returned early on the machine-global shared dolt dir instead of checking the server)")
+	}
+	if !strings.Contains(err.Error(), "not found on server") {
+		t.Errorf("expected refusal message about missing database, got: %v", err)
+	}
+}
+
+// TestInitGuard_SharedServerMode_PresentServerDB_Allows is the positive control
+// for the test above: with this project's database actually present on the
+// shared server, the guard must stay out of the way so --reinit-local and
+// ordinary reinit keep working. Without this, tightening the guard could
+// silently start refusing healthy shared-server workspaces.
+func TestInitGuard_SharedServerMode_PresentServerDB_Allows(t *testing.T) {
+	testutil.RequireDoltBinary(t)
+
+	oldServerMode := serverMode
+	serverMode = true
+	defer func() { serverMode = oldServerMode }()
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
+
+	dataDir := t.TempDir()
+	port, err := testutil.FindFreePort()
+	if err != nil {
+		t.Fatalf("FindFreePort: %v", err)
+	}
+	// #nosec G204 -- fixed args, no user input
+	serverCmd := exec.Command("dolt", "sql-server", "-H", "127.0.0.1", "-P", strconv.Itoa(port), "--data-dir", dataDir)
+	if err := serverCmd.Start(); err != nil {
+		t.Fatalf("failed to start dolt sql-server: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = serverCmd.Process.Kill()
+		_ = serverCmd.Wait()
+	})
+	if !testutil.WaitForServer(port, 15*time.Second) {
+		t.Fatal("dolt sql-server did not become ready within timeout")
+	}
+	t.Setenv("BEADS_DOLT_SERVER_PORT", strconv.Itoa(port))
+
+	sharedDB, err := testutil.SetupSharedTestDB(port, "myproject")
+	if err != nil {
+		t.Fatalf("create myproject database on server: %v", err)
+	}
+	_ = sharedDB.Close()
+
+	tmpDir := t.TempDir()
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := map[string]interface{}{
+		"database":      "dolt",
+		"backend":       "dolt",
+		"dolt_mode":     "server",
+		"dolt_database": "myproject",
+		"project_id":    "shared-0000-1111-2222-333344445555",
+	}
+	data, _ := json.Marshal(metadata)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := guardMissingServerDatabaseAt(beadsDir, "myproject"); err != nil {
+		t.Fatalf("database present on the shared server must NOT be refused, got: %v", err)
+	}
 }
