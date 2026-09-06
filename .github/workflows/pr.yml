@@ -1191,14 +1191,58 @@ jobs:
           $proofRoot = Join-Path $env:RUNNER_TEMP ("make install proof " + [guid]::NewGuid().ToString('N'))
           $fixtureRepo = Join-Path $proofRoot 'fixture repo'
           $buildDir = Join-Path $fixtureRepo 'build output'
+          $fakeGoDir = Join-Path $proofRoot 'fake go bin'
           $installRoot = Join-Path $proofRoot 'install sandbox'
           $installProfile = Join-Path $installRoot 'profile with spaces'
-          New-Item -ItemType Directory -Force -Path $buildDir, $installProfile | Out-Null
+          New-Item -ItemType Directory -Force -Path $buildDir, $fakeGoDir, $installProfile | Out-Null
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'Makefile') -Destination $fixtureRepo
           Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE 'go.mod') -Destination $fixtureRepo
 
           $sentinel = Join-Path $buildDir 'bd.exe'
-          Set-Content -LiteralPath $sentinel -Encoding ascii -NoNewline -Value 'native-install-sentinel'
+          $env:BEADS_FAKE_GO_EXPECTED_OUTPUT = $sentinel
+          $fakeGo = Join-Path $fakeGoDir 'go'
+          $fakeGoScript = @'
+          #!/usr/bin/env bash
+          set -euo pipefail
+
+          [[ "${1-}" == build ]] || exit 91
+          shift
+          output=
+          while (($#)); do
+              case "$1" in
+                  -o)
+                      [[ $# -ge 2 ]] || exit 92
+                      output=$2
+                      shift 2
+                      ;;
+                  *) shift ;;
+              esac
+          done
+          [[ "$(cygpath -aw "$output")" == "$(cygpath -aw "$BEADS_FAKE_GO_EXPECTED_OUTPUT")" ]] || {
+              printf 'fake go received output %q, expected %q\n' "$output" "$BEADS_FAKE_GO_EXPECTED_OUTPUT" >&2
+              exit 93
+          }
+          printf native-build-sentinel > "$(cygpath -u "$output")"
+          '@
+          [IO.File]::WriteAllText(
+            $fakeGo,
+            ($fakeGoScript -replace "`r`n", "`n"),
+            [Text.UTF8Encoding]::new($false)
+          )
+          $env:PATH = "$fakeGoDir;$(Split-Path $git);$env:SystemRoot\System32"
+
+          Push-Location $fixtureRepo
+          try {
+            & $make --no-print-directory "BUILD_DIR=$buildDir" GIT_BUILD=build-proof CC=proof build
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Native Make build failed for a spaced BUILD_DIR'
+            }
+          } finally {
+            Pop-Location
+          }
+          if (-not (Test-Path -LiteralPath $sentinel -PathType Leaf)) {
+            throw "Native Make did not build bd.exe at the exact spaced destination '$sentinel'"
+          }
           $sentinelHash = (Get-FileHash -LiteralPath $sentinel -Algorithm SHA256).Hash
 
           & $git -C $fixtureRepo init --quiet
