@@ -76,6 +76,34 @@ are empty, the default of `('open', 'in_progress')` applies.
     })
 ```
 
+### External capability dependencies in embedders
+
+`OpenBestAvailable` returns the configured storage implementation. A long-lived
+orchestrator that reads more than one Beads project can add the same
+`external:<project>:<capability>` policy used by the `bd` CLI:
+
+```go
+    store, err = beads.WithExternalDependencyPolicy(
+        store,
+        func(project string) (string, bool) {
+            root, ok := configuredProjectRoots[project]
+            return root, ok
+        },
+        func(ctx context.Context, projectRoot string) (beads.Storage, error) {
+            return beads.OpenBestAvailable(ctx, filepath.Join(projectRoot, ".beads"))
+        },
+    )
+    if err != nil {
+        log.Fatal(err)
+    }
+```
+
+The wrapper treats malformed references, unknown projects, and unavailable
+foreign stores as blocking. It considers a capability satisfied only when the
+foreign project has a closed issue labeled `provides:<capability>`. It closes
+each foreign store after the lookup; the caller closes only the returned local
+wrapper.
+
 ## Running This Example
 
 ```bash

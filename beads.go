@@ -26,6 +26,7 @@ import (
 	"github.com/steveyegge/beads/internal/storage"
 	"github.com/steveyegge/beads/internal/storage/dolt"
 	"github.com/steveyegge/beads/internal/storage/domain"
+	"github.com/steveyegge/beads/internal/storage/externaldeps"
 	"github.com/steveyegge/beads/internal/types"
 	"github.com/steveyegge/beads/internal/workspacegate"
 )
@@ -97,6 +98,68 @@ type CommentPageCursor = storage.CommentPageCursor
 // guarded issue mutations. Exported so consumers can match it with errors.As
 // without importing internal/storage.
 type ErrUnsupported = storage.ErrUnsupported
+
+// ExternalProjectLocator resolves the project component of an
+// external:<project>:<capability> dependency to a workspace root. Returning
+// false leaves the dependency blocking.
+type ExternalProjectLocator func(project string) (projectRoot string, ok bool)
+
+// ExternalProjectOpener opens a foreign project for capability lookup. The
+// returned store is closed after each lookup. Returning an error leaves the
+// dependency blocking.
+type ExternalProjectOpener func(ctx context.Context, projectRoot string) (Storage, error)
+
+// WithExternalDependencyPolicy decorates a Dolt-backed public Storage with
+// Beads' canonical query-time policy for external:<project>:<capability>
+// dependencies. A capability is satisfied only when the foreign project has a
+// closed issue labeled provides:<capability>. Malformed references, unknown
+// projects, open failures, and read failures remain blocking; the policy never
+// rewrites dependency edges.
+//
+// The returned store owns store and must be closed exactly once by the caller.
+// Foreign stores returned by openProject are opened read-only by convention and
+// are closed by the policy after each resolution pass. A non-Dolt Storage is
+// rejected with *ErrUnsupported because it cannot expose the dependency and
+// capability queries the policy requires.
+func WithExternalDependencyPolicy(store Storage, locateProject ExternalProjectLocator, openProject ExternalProjectOpener) (Storage, error) {
+	inner, ok := store.(storage.DoltStorage)
+	if !ok {
+		return nil, &storage.ErrUnsupported{
+			Op:      "WithExternalDependencyPolicy",
+			Backend: fmt.Sprintf("%T", store),
+		}
+	}
+
+	var locator externaldeps.ProjectLocator
+	if locateProject != nil {
+		locator = func(project externaldeps.ProjectName) (string, bool) {
+			return locateProject(string(project))
+		}
+	}
+
+	var opener externaldeps.StoreOpener
+	if openProject != nil {
+		opener = func(ctx context.Context, projectRoot string) (storage.DoltStorage, error) {
+			foreign, err := openProject(ctx, projectRoot)
+			if err != nil {
+				return nil, err
+			}
+			foreignDolt, ok := foreign.(storage.DoltStorage)
+			if !ok {
+				if foreign != nil {
+					_ = foreign.Close()
+				}
+				return nil, &storage.ErrUnsupported{
+					Op:      "WithExternalDependencyPolicy.openProject",
+					Backend: fmt.Sprintf("%T", foreign),
+				}
+			}
+			return foreignDolt, nil
+		}
+	}
+
+	return externaldeps.New(inner, locator, opener), nil
+}
 
 // RemoteStore provides dolt remote management and replication operations.
 // Use type assertion on a Storage value to access these methods:
