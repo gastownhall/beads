@@ -2085,19 +2085,36 @@ func addToGitignore(ctx context.Context, repoRoot, entry string) error {
 	}
 	defer f.Close()
 
+	lineEnding := gitignoreAppendLineEnding(content)
+
 	// Add newline if file doesn't end with one
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		if _, err := f.WriteString("\n"); err != nil {
+		separator := lineEnding
+		if lineEnding == "\r\n" && content[len(content)-1] == '\r' {
+			separator = "\n" // Complete the existing CR without rewriting it.
+		}
+		if _, err := f.WriteString(separator); err != nil {
 			return err
 		}
 	}
 
 	// Add comment and entry
-	if _, err := f.WriteString(fmt.Sprintf("# bd worktree\n%s/\n", entry)); err != nil {
+	if _, err := fmt.Fprintf(f, "# bd worktree%s%s/%s", lineEnding, entry, lineEnding); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// gitignoreAppendLineEnding preserves an unambiguous convention in the user's
+// repository. The file is not Beads-owned, so existing bytes are not normalized;
+// empty files and files with no delimiter, LF, or mixed EOL retain the LF default.
+func gitignoreAppendLineEnding(content []byte) string {
+	lineFeedCount := bytes.Count(content, []byte{'\n'})
+	if lineFeedCount > 0 && lineFeedCount == bytes.Count(content, []byte("\r\n")) {
+		return "\r\n"
+	}
+	return "\n"
 }
 
 func isIgnoredByGit(ctx context.Context, repoRoot, entry string) (bool, error) {
