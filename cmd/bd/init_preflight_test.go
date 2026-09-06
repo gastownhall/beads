@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/configfile"
@@ -46,6 +47,57 @@ func TestInitReinitPreflightReadOnly(t *testing.T) {
 					}
 				})
 			}
+			t.Run("metadata only", func(t *testing.T) {
+				beadsDir := t.TempDir()
+				t.Setenv("BEADS_DIR", beadsDir)
+				t.Setenv("BEADS_DOLT_AUTO_START", "0")
+				cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: mode, DoltDatabase: uniqueTestDBName(t), DoltServerHost: "127.0.0.1", DoltServerPort: port}
+				if err := cfg.Save(beadsDir); err != nil {
+					t.Fatal(err)
+				}
+				metadataPath := configfile.ConfigPath(beadsDir)
+				before, err := os.ReadFile(metadataPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := runInitReinitPreflight(true, "test", ""); err != nil {
+					t.Errorf("metadata-only workspace with no database refused: %v", err)
+				}
+				if after, err := os.ReadFile(metadataPath); err != nil || !reflect.DeepEqual(before, after) {
+					t.Errorf("preflight changed workspace metadata: %v", err)
+				}
+				if entries, err := os.ReadDir(beadsDir); err != nil || len(entries) != 1 {
+					t.Errorf("preflight created workspace artifacts: %v, %v", entries, err)
+				}
+				if mode == "embedded" {
+					t.Run("empty data directory", func(t *testing.T) {
+						dataDir := filepath.Join(beadsDir, "embeddeddolt")
+						if err := os.Mkdir(dataDir, 0o700); err != nil {
+							t.Fatal(err)
+						}
+						if err := runInitReinitPreflight(true, "test", ""); err != nil {
+							t.Errorf("empty data directory refused: %v", err)
+						}
+						if entries, err := os.ReadDir(dataDir); err != nil || len(entries) != 0 {
+							t.Errorf("preflight created database artifacts: %v, %v", entries, err)
+						}
+					})
+				}
+				if mode == "server" {
+					db, err := sql.Open("mysql", fmt.Sprintf("root@tcp(127.0.0.1:%d)/", port))
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer db.Close()
+					var count int
+					if err := db.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = ?", cfg.DoltDatabase).Scan(&count); err != nil {
+						t.Fatal(err)
+					}
+					if count != 0 {
+						t.Fatal("preflight created the missing server database")
+					}
+				}
+			})
 			for _, tc := range []struct {
 				name string
 				sql  []string
@@ -104,17 +156,39 @@ func TestInitReinitPreflightReadOnly(t *testing.T) {
 						t.Fatal(err)
 					}
 					count, err := countExistingIssues("different_requested_prefix")
-					if (err != nil) != tc.fail || (!tc.fail && count != tc.want) {
-						t.Errorf("count = %d, %v; want %d, error=%v", count, err, tc.want, tc.fail)
+					if err != nil || count.Count != tc.want || (len(count.UnknownTables) != 0) != tc.fail {
+						t.Errorf("count = %+v, %v; want %d, unknown schema=%v", count, err, tc.want, tc.fail)
 					}
-					err = runInitReinitPreflight(true, "different_requested_prefix", "")
+					stderr := captureStderr(t, func() {
+						err = runInitReinitPreflight(true, "different_requested_prefix", "")
+					})
+					if tc.fail && (!strings.Contains(stderr, "Existing issues: unknown") || !strings.Contains(stderr, `Existing tables: ["precious_data"]`)) {
+						t.Errorf("missing unknown-schema warning and table list: %s", stderr)
+					}
 					if wantRefusal := tc.fail || tc.want > 0; (err != nil) != wantRefusal {
 						t.Errorf("preflight = %v; want refusal=%v", err, wantRefusal)
 					}
-					if tc.want > 0 {
+					if tc.want > 0 || tc.fail {
+						if err := runInitReinitPreflight(true, "different_requested_prefix", FormatDestroyToken("wrong_prefix")); err == nil {
+							t.Error("incorrect destroy token accepted")
+						}
 						if err := runInitReinitPreflight(true, "different_requested_prefix", FormatDestroyToken("different_requested_prefix")); err != nil {
 							t.Errorf("explicit confirmation refused: %v", err)
 						}
+					}
+					if mode == "server" && tc.name == "older populated issues" {
+						t.Run("permission denied", func(t *testing.T) {
+							admin, closeAdmin := open("")
+							defer closeAdmin()
+							if _, err := admin.ExecContext(t.Context(), "CREATE USER 'preflight_denied'@'%' IDENTIFIED BY ''"); err != nil {
+								t.Fatal(err)
+							}
+							t.Setenv("BEADS_DOLT_SERVER_USER", "preflight_denied")
+							err := runInitReinitPreflight(true, "test", FormatDestroyToken("test"))
+							if err == nil || !strings.Contains(strings.ToLower(err.Error()), "access denied") {
+								t.Fatalf("want permission refusal even with destroy token, got %v", err)
+							}
+						})
 					}
 					db, cleanup = open(cfg.DoltDatabase)
 					defer cleanup()
@@ -166,6 +240,37 @@ func TestInitReinitPreflightFreshWorkspace(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(beadsDir); err != nil || len(entries) != 0 {
 		t.Fatalf("preflight changed empty workspace: %v, %v", entries, err)
+	}
+}
+
+func TestInitReinitPreflightRefusesUnreadableEmbeddedDirectory(t *testing.T) {
+	initConfigForTest(t)
+	for _, name := range []string{"permission denied", "dangling symlink"} {
+		t.Run(name, func(t *testing.T) {
+			beadsDir := t.TempDir()
+			t.Setenv("BEADS_DIR", beadsDir)
+			cfg := &configfile.Config{Backend: configfile.BackendDolt, DoltMode: "embedded", DoltDatabase: "test"}
+			if err := cfg.Save(beadsDir); err != nil {
+				t.Fatal(err)
+			}
+			dataDir := filepath.Join(beadsDir, "embeddeddolt")
+			if name == "dangling symlink" {
+				if err := os.Symlink(filepath.Join(beadsDir, "missing"), dataDir); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			} else {
+				if err := os.Mkdir(dataDir, 0o000); err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = os.Chmod(dataDir, 0o700) })
+				if _, err := os.ReadDir(dataDir); err == nil {
+					t.Skip("directory permissions not enforced for this user")
+				}
+			}
+			if err := runInitReinitPreflight(true, "test", FormatDestroyToken("test")); err == nil {
+				t.Fatal("unreadable storage accepted as absent even with a destroy token")
+			}
+		})
 	}
 }
 

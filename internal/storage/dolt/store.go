@@ -44,6 +44,7 @@ import (
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/gittraceenv"
 	"github.com/steveyegge/beads/internal/storage"
+	"github.com/steveyegge/beads/internal/storage/dberrors"
 	"github.com/steveyegge/beads/internal/storage/doltutil"
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/kvkeys"
@@ -2477,6 +2478,17 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, se
 	created := false
 	if !dbExists {
 		if !cfg.CreateIfMissing {
+			if cfg.ReadOnly {
+				// SHOW DATABASES can hide databases from restricted users. Only
+				// a target-specific unknown-database response proves absence.
+				if err := db.PingContext(ctx); err != nil {
+					var mysqlErr *mysql.MySQLError
+					if errors.As(err, &mysqlErr) && mysqlErr.Number == 1049 {
+						return nil, "", serverConnFacts{}, fmt.Errorf("%w: %w", dberrors.ErrDatabaseNotFound, databaseNotFoundError(cfg))
+					}
+					return nil, "", serverConnFacts{}, fmt.Errorf("cannot inspect database %q: %w", cfg.Database, err)
+				}
+			}
 			return nil, "", serverConnFacts{}, databaseNotFoundError(cfg)
 		}
 

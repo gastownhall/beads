@@ -40,8 +40,8 @@ func (s *EmbeddedDoltStore) CountIssues(ctx context.Context, query string, filte
 }
 
 // CountIssuesForReinit inspects existing issue data without requiring the latest schema.
-func (s *EmbeddedDoltStore) CountIssuesForReinit(ctx context.Context) (int, error) {
-	var count int
+func (s *EmbeddedDoltStore) CountIssuesForReinit(ctx context.Context) (issueops.ReinitIssueCount, error) {
+	var count issueops.ReinitIssueCount
 	err := s.withConn(ctx, false, func(tx *sql.Tx) error {
 		var err error
 		count, err = issueops.CountIssuesForReinitInTx(ctx, tx)
