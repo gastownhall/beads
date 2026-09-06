@@ -35,6 +35,49 @@ func TestKeyEqualUsesHostSemantics(t *testing.T) {
 	}
 }
 
+func TestEnvironmentOperationsForBothHosts(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		windows bool
+	}{
+		{name: "Unix"},
+		{name: "Windows", windows: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := []string{"MIXED=canonical-first", "mixed=lower-last", "KEEP=first", "KEEP=second", "MALFORMED", `=C:=C:\work`, "MIXEſ=near-collision"}
+			original := slices.Clone(env)
+			if got := keyEqualForWindows("MIXED", "mixed", tc.windows); got != tc.windows {
+				t.Errorf("mixed-case equality = %v", got)
+			}
+			if keyEqualForWindows("MIXEſ", "MIXES", tc.windows) {
+				t.Error("equality merged the Unicode near-collision")
+			}
+			wantValue := "canonical-first"
+			wantWithout := []string{"KEEP=first", "KEEP=second", "MALFORMED", `=C:=C:\work`, "MIXEſ=near-collision"}
+			if tc.windows {
+				wantValue = "lower-last"
+			} else {
+				wantWithout = append([]string{"mixed=lower-last"}, wantWithout...)
+			}
+			if value, ok := lookupForWindows(env, "MIXED", tc.windows); !ok || value != wantValue {
+				t.Errorf("lookup = %q, %v, want %q, true", value, ok, wantValue)
+			}
+			if value, ok := lookupForWindows(env, "=C:", tc.windows); !ok || value != `C:\work` {
+				t.Errorf("drive lookup = %q, %v", value, ok)
+			}
+			if got := containsKeyWithPrefixForWindows(env, tc.windows, "miX"); got != tc.windows {
+				t.Errorf("mixed-case prefix = %v", got)
+			}
+			if got := withoutForWindows(env, tc.windows, "MIXED"); !slices.Equal(got, wantWithout) {
+				t.Errorf("without = %q, want %q", got, wantWithout)
+			}
+			if !slices.Equal(env, original) {
+				t.Errorf("input mutated: %q", env)
+			}
+		})
+	}
+}
+
 func TestWithoutUsesHostSemanticsAndPreservesOtherEntries(t *testing.T) {
 	in := []string{
 		"FIRST=keep-first",

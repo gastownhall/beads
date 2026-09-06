@@ -11,22 +11,30 @@ import (
 // for a subprocess on the current host. Windows keys are case-insensitive;
 // keys on other hosts are exact.
 func KeyEqual(left, right string) bool {
-	return keyIdentity(left) == keyIdentity(right)
+	return keyEqualForWindows(left, right, runtime.GOOS == "windows")
+}
+
+func keyEqualForWindows(left, right string, windows bool) bool {
+	return keyIdentityForWindows(left, windows) == keyIdentityForWindows(right, windows)
 }
 
 // ContainsKeyWithPrefix reports whether env contains a key beginning with one
 // of prefixes, using the current host's environment-key semantics.
 func ContainsKeyWithPrefix(env []string, prefixes ...string) bool {
+	return containsKeyWithPrefixForWindows(env, runtime.GOOS == "windows", prefixes...)
+}
+
+func containsKeyWithPrefixForWindows(env []string, windows bool, prefixes ...string) bool {
 	identities := make([]string, len(prefixes))
 	for i, prefix := range prefixes {
-		identities[i] = keyIdentity(prefix)
+		identities[i] = keyIdentityForWindows(prefix, windows)
 	}
 	for _, entry := range env {
 		key, _, ok := split(entry)
 		if !ok {
 			continue
 		}
-		key = keyIdentity(key)
+		key = keyIdentityForWindows(key, windows)
 		for _, prefix := range identities {
 			if strings.HasPrefix(key, prefix) {
 				return true
@@ -39,12 +47,16 @@ func ContainsKeyWithPrefix(env []string, prefixes ...string) bool {
 // Lookup returns the last value for key in env, matching os/exec's last-wins
 // handling of duplicate effective keys.
 func Lookup(env []string, key string) (string, bool) {
-	wanted := keyIdentity(key)
+	return lookupForWindows(env, key, runtime.GOOS == "windows")
+}
+
+func lookupForWindows(env []string, key string, windows bool) (string, bool) {
+	wanted := keyIdentityForWindows(key, windows)
 	var value string
 	var found bool
 	for _, entry := range env {
 		entryKey, entryValue, ok := split(entry)
-		if ok && keyIdentity(entryKey) == wanted {
+		if ok && keyIdentityForWindows(entryKey, windows) == wanted {
 			value, found = entryValue, true
 		}
 	}
@@ -55,16 +67,20 @@ func Lookup(env []string, key string) (string, bool) {
 // duplicates, malformed entries, and Windows drive pseudo-variables are
 // preserved in their original order. The input slice is not modified.
 func Without(env []string, keys ...string) []string {
+	return withoutForWindows(env, runtime.GOOS == "windows", keys...)
+}
+
+func withoutForWindows(env []string, windows bool, keys ...string) []string {
 	drop := make(map[string]struct{}, len(keys))
 	for _, key := range keys {
-		drop[keyIdentity(key)] = struct{}{}
+		drop[keyIdentityForWindows(key, windows)] = struct{}{}
 	}
 
 	out := make([]string, 0, len(env))
 	for _, entry := range env {
 		key, _, ok := split(entry)
 		if ok {
-			if _, remove := drop[keyIdentity(key)]; remove {
+			if _, remove := drop[keyIdentityForWindows(key, windows)]; remove {
 				continue
 			}
 		}
@@ -73,13 +89,9 @@ func Without(env []string, keys ...string) []string {
 	return out
 }
 
-// keyIdentity mirrors the key normalization in os/exec.dedupEnvCase.
+// keyIdentityForWindows mirrors the key normalization in os/exec.dedupEnvCase.
 // strings.ToLower is intentional: EqualFold would collapse Unicode
 // near-collisions such as s and ſ that os/exec keeps distinct.
-func keyIdentity(key string) string {
-	return keyIdentityForWindows(key, runtime.GOOS == "windows")
-}
-
 func keyIdentityForWindows(key string, windows bool) string {
 	if windows {
 		return strings.ToLower(key)
