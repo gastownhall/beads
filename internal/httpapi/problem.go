@@ -123,14 +123,6 @@ const (
 	// fails on state the client cannot see without reading it. That is the
 	// not_claimable situation and it gets the not_claimable answer.
 	CodeNotClosable Code = "not_closable"
-	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
-	// edge set can earn: a scheduling cycle, and a blocking edge against the
-	// issue's own ancestor or descendant. They are one code because they have
-	// one client recovery — rethink the edge, with no force bypass for either —
-	// and codes are the vocabulary of recovery. The typed distinction is NOT
-	// lost: the hierarchy refusal additionally carries `issue_id`, `blocker_id`
-	// and `blocker_is_ancestor`, read inside the refusing transaction, and
-	// member presence is the discriminator.
 	// CodeNotesOverwrite is a `patch.notes` that would replace existing
 	// non-empty notes with a different value, refused unless
 	// `force_notes_overwrite` is set. It is the notes analog of
@@ -140,7 +132,15 @@ const (
 	// entirely a statement about the request's own two values (the existing
 	// notes and the patched ones), not about a foreign actor's identity a
 	// client might need to display.
-	CodeNotesOverwrite  Code = "notes_overwrite_refused"
+	CodeNotesOverwrite Code = "notes_overwrite_refused"
+	// CodeDependencyCycle covers BOTH never-makes-progress refusals a requested
+	// edge set can earn: a scheduling cycle, and a blocking edge against the
+	// issue's own ancestor or descendant. They are one code because they have
+	// one client recovery — rethink the edge, with no force bypass for either —
+	// and codes are the vocabulary of recovery. The typed distinction is NOT
+	// lost: the hierarchy refusal additionally carries `issue_id`, `blocker_id`
+	// and `blocker_is_ancestor`, read inside the refusing transaction, and
+	// member presence is the discriminator.
 	CodeDependencyCycle Code = "dependency_cycle"
 	// CodeDependencyExists is the pair that already carries an edge of a
 	// DIFFERENT type, with both types in `existing_type`/`requested_type`.

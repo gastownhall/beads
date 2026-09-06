@@ -188,6 +188,30 @@ func TestReassignFenceCLI(t *testing.T) {
 		}
 	})
 
+	t.Run("force_with_if_assignee_arms_close_policy", func(t *testing.T) {
+		// The close-policy half of --force stays armed under --if-assignee:
+		// only the assignee-transfer half defers to the CAS. A guarded close
+		// of a parent with an open child was unreachable while cobra rejected
+		// the flag pair; now it must behave exactly like an unguarded one —
+		// refused unforced, authorized with --force.
+		parent := claimAs(t, "holder")
+		child := bdCreate(t, bd, dir, "Open child", "--type", "task")
+		bdRunOK(t, bd, dir, "dep", "add", child.ID, parent.ID, "--type", "parent-child")
+
+		out, code := bdUpdateFailCode(t, bd, dir, parent.ID, "--actor", "holder", "--if-assignee", "holder", "--status", "closed")
+		if code != 1 {
+			t.Errorf("unforced guarded close exit = %d, want 1 (policy refusal, never 13/guard-mismatch)\n%s", code, out)
+		}
+		if got := bdShow(t, bd, dir, parent.ID); got.Status != types.StatusInProgress {
+			t.Errorf("refused close changed the row: status=%s, want in_progress", got.Status)
+		}
+
+		bdUpdate(t, bd, dir, parent.ID, "--actor", "holder", "--force", "--if-assignee", "holder", "--status", "closed")
+		if got := bdShow(t, bd, dir, parent.ID); got.Status != types.StatusClosed {
+			t.Errorf("forced guarded close did not apply: status=%s, want closed", got.Status)
+		}
+	})
+
 	t.Run("claim_conflict_copy_preserved_under_claim_flag", func(t *testing.T) {
 		// --claim -a X on a foreign live claim must keep failing through the
 		// claim CAS with the canonical "already claimed" copy — the fence

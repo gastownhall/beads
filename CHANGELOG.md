@@ -58,6 +58,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BREAKING: unforced `bd update --notes` over existing notes is now refused,
+  not warned** ([#5946](https://github.com/gastownhall/beads/pull/5946)).
+  Replacing existing non-empty notes with different non-empty content — the
+  blind clobber that destroys another agent's handoff notes — previously
+  printed a warning *after* succeeding; it now writes nothing and exits 1. The
+  same fence turns `PATCH /v0/beads/issues/{id}` and `batch:apply` from 200
+  into 409 `notes_overwrite_refused` when `patch.notes` would do the same, on
+  both backends and both batch legs. Migration: pass `--force` (CLI) or
+  `force_notes_overwrite` (API) to overwrite deliberately — the CLI then
+  prints the old warning as an audit trail — or preserve history with
+  `--append-notes` / `bd note`.
+
+  Two edges are deliberate. **An explicit clear stays unfenced**: `--notes ""`
+  (or an API patch to the empty string) still succeeds without `--force`,
+  because every sibling text field clears the same way, the pattern the fence
+  exists to stop is an agent writing its own content over someone else's, and
+  the refusal's advice — force, or append — is meaningless for a clear. And
+  **`--force` is no longer mutually exclusive with `--if-assignee`**, since a
+  guarded notes overwrite has to be able to say both. This widens what
+  `--force` reaches under the guard: its assignee half stays suppressed (a
+  transfer under `--if-assignee` authorizes only through the matching CAS,
+  never the force bypass), but its close-policy half — closing despite open
+  children or a live blocker — now applies there too, a combination the CLI
+  previously rejected outright. `bd edit` is unaffected: it pre-fills the
+  editor with the current notes, a sighted edit rather than a blind clobber.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
