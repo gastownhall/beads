@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"slices"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/types"
@@ -173,5 +174,31 @@ func TestFilterClosedPurgeCandidatesCountsWhatItSkipped(t *testing.T) {
 	}
 	if skips.infra != 0 {
 		t.Errorf("skips.infra = %d, want 0", skips.infra)
+	}
+}
+
+// TestResolveProtectedWispLabelListIsSorted pins the ordering the list form
+// promises. `bd purge` puts the resolved set on a sweep request that can cross
+// an HTTP boundary and get logged, so Go's map iteration order would make an
+// otherwise identical request serialize differently on every run.
+//
+// It also pins that the list and the set never disagree, which is the property
+// that keeps `bd purge` and `bd mol wisp gc` honoring ONE guard rather than two
+// that happen to be spelled the same.
+func TestResolveProtectedWispLabelListIsSorted(t *testing.T) {
+	got := resolveProtectedWispLabelList("zeta,alpha", nil, []string{"mid"})
+	want := []string{"alpha", "mid", "zeta"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("resolveProtectedWispLabelList = %v, want %v", got, want)
+	}
+
+	set := resolveProtectedWispLabels("zeta,alpha", nil, []string{"mid"})
+	if len(set) != len(got) {
+		t.Fatalf("set has %d entries, list has %d — the two forms must describe one set", len(set), len(got))
+	}
+	for _, l := range got {
+		if !set[l] {
+			t.Errorf("label %q is in the list and not in the set", l)
+		}
 	}
 }
