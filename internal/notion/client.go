@@ -317,7 +317,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 	}
 
 	// Notion enforces ~3 requests/second per connection and answers 429 with a
-	// Retry-After header. Without honouring it, any caller that paginates a
+	// Retry-After header. Without honoring it, any caller that paginates a
 	// large data source trips the limit and the whole sync dies on a transient
 	// condition the API explicitly tells us how to wait out.
 	var lastErr error
