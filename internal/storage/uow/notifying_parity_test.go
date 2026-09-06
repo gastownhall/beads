@@ -294,11 +294,13 @@ func TestNotifyingProviderBuildsRolesOnItself(t *testing.T) {
 		"RunNonTx":      true,
 		"SetPoolLimits": true,
 		"Unwrap":        true,
-		// Events-journal capability plumbing: activation binds on the inner
-		// provider's transactions, and a retention pass writes no bead. Neither
-		// builds a role, so neither can build one "on itself".
-		"SetEventsJournalEnabled": true,
-		"RunEventsMaintenanceTx":  true,
+		// Events-journal and versioned-history capability plumbing: activation
+		// for both binds on the inner provider's transactions, and a retention
+		// pass writes no bead. None of these build a role, so none of them can
+		// build one "on itself".
+		"SetEventsJournalEnabled":    true,
+		"RunEventsMaintenanceTx":     true,
+		"SetVersionedHistoryEnabled": true,
 	}
 
 	var checked int
