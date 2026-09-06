@@ -48,6 +48,32 @@ func versionedHistoryEnabled(tx DBTX) bool {
 	return on
 }
 
+// Design §16.4 (R14, be-hs42e.3): issue_versions.attribution_status is a
+// NOT NULL column (migration 0068 step 6) with four legal values. Phase 2 is
+// the sole writer of this table during its era and never writes "imported"
+// — that value is reserved for whichever later phase first writes history
+// that did not originate as a Phase-2-accepted mutation (import/backfill
+// tooling has no owner yet).
+const (
+	attributionStatusSupplied     = "supplied"
+	attributionStatusNotSupplied  = "not_supplied"
+	attributionStatusUndetermined = "undetermined"
+	attributionStatusImported     = "imported"
+)
+
+// attributionStatusForActor derives issue_versions.attribution_status from
+// the same actor string every RecordVersionInTx call site already passes.
+// "not_supplied" would assert a deliberate, confirmed absence of attribution
+// that no current call site actually claims — every call site just passes
+// through whatever actor string it has, with no additional signal — so an
+// empty actor gets the conservative "undetermined" instead.
+func attributionStatusForActor(actor string) string {
+	if actor == "" {
+		return attributionStatusUndetermined
+	}
+	return attributionStatusSupplied
+}
+
 // RecordVersionInTx mints one issue_versions row for issueID and advances
 // issues.current_revision to match, as of tx (read-your-writes within the
 // same transaction). A no-op when versioned history is disabled for tx, or
@@ -56,7 +82,8 @@ func versionedHistoryEnabled(tx DBTX) bool {
 //
 // actor is the acting identity that performed the mutation, recorded as the
 // version row's attribution — "" when the mutation path genuinely has none,
-// matching RecordEventInTx's own convention.
+// matching RecordEventInTx's own convention. It also drives
+// attribution_status via attributionStatusForActor.
 func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) error {
 	if !versionedHistoryEnabled(tx) {
 		return nil
@@ -104,9 +131,9 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO issue_versions
-			(issue_id, revision, epoch, durable_state, change_actor, change_agent, change_message, change_at)
-		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)`,
-		issueID, newRevision, epoch, string(durableState), actor, time.Now().UTC(),
+			(issue_id, revision, epoch, durable_state, change_actor, change_agent, change_message, change_at, attribution_status)
+		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+		issueID, newRevision, epoch, string(durableState), actor, time.Now().UTC(), attributionStatusForActor(actor),
 	); err != nil {
 		return fmt.Errorf("versioned history: insert version row for %s: %w", issueID, err)
 	}
