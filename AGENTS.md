@@ -10,6 +10,9 @@ The marker above tells `bd doctor` that the intentional divergence between
 this file and `CLAUDE.md` (different audiences, different reading orders) is
 expected and should not be flagged.
 
+## Backpass
+Backpass trains AGENTS.md from landed work; config in `.backpassrc.json` is gpu-host-specific. Run: `bunx backpass@latest scan --force --json` then `bunx backpass@latest`.
+
 ## Key Sections
 
 - **Issue Tracking** - How to use bd for work management
@@ -34,8 +37,9 @@ policy is to maximize community throughput: find useful contributor value,
 absorb or transform it locally when practical, preserve attribution, and use
 request-changes only as a last resort.
 
-Before implementing work, opening a PR, or merging/closing a PR, run the PR
-preflight:
+MANDATORY before implementing work, opening a PR, or merging/closing a PR - no
+exceptions, including small, docs-only, or "obviously duplicate-free" changes -
+run the PR preflight:
 ```bash
 scripts/pr-preflight.sh --search "<topic keywords>" --repo gastownhall/beads
 scripts/pr-preflight.sh <pr-number> --repo gastownhall/beads
@@ -91,7 +95,9 @@ echo 'Updated text' | bd update <id> --description=-
 ## Testing
 
 Use [engdocs/TESTING.md](engdocs/TESTING.md) for the canonical commands,
-test-design guidance, and PR-readiness gates.
+test-design guidance, and PR-readiness gates. Run tests with those canonical
+commands (e.g. `make test`); do not improvise raw `go test` invocations and
+discover build tags the hard way.
 
 ## Non-Interactive Shell Commands
 
@@ -121,7 +127,8 @@ cp -rf source dest          # NOT: cp -r source dest
 
 **When ending a work session** (or when the user says "let's land the
 plane"), you MUST complete ALL steps below. Work is NOT complete until
-`git push` succeeds.
+`git push` succeeds - unless the user or orchestrator explicitly required a
+local-only run (see Agent Context Profiles below).
 
 **MANDATORY WORKFLOW:**
 
@@ -129,7 +136,8 @@ plane"), you MUST complete ALL steps below. Work is NOT complete until
 2. **Run quality gates** (if code changed):
    - `make ci-pr-lint` (required zero-finding formatting and lint wrapper)
    - `make test` (and `make test-icu-path` only if you intentionally need the ICU regex path)
-   - File a P0 issue if quality gates are broken
+   - File a P0 issue if quality gates are broken, even when the findings are
+     pre-existing or outside your change - do not just note them and commit
 3. **Update issue status** - Close finished work, update in-progress items
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash

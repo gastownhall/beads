@@ -1,13 +1,13 @@
 ---
 name: beads-docs
 description: >-
-  Project conventions for writing, editing, restructuring, or reviewing the
-  beads user documentation — the Mintlify site under docs/. Use this whenever
-  you touch anything in docs/ (pages, concept docs, reference, integration
-  guides, recovery runbooks, diagrams, docs.json navigation) or write/edit
-  prose about beads, even when the request is just "fix the docs", "write a
-  docs page", "the docs are wrong/confusing", "rename X across the docs", or
-  an edit to a file under docs/. It defines the canonical concept model
+  MUST load before touching ANY file under docs/ or writing any prose about
+  beads. Project conventions for writing, editing, restructuring, or reviewing
+  the beads user documentation (the Mintlify site under docs/). Triggers on
+  any edit under docs/ (pages, concept docs, reference, integration guides,
+  recovery runbooks, diagrams, docs.json navigation), write/edit prose about
+  beads, or requests like "fix the docs", "write a docs page", "the docs are
+  wrong/confusing", "rename X across the docs". It defines the canonical concept model
   (bead → dependencies → ready work; formula → proto → molecule/wisp; gates;
   Dolt sync and federation), required terminology, the prose/emphasis/diagram
   conventions, the rule that generated docs are edited at their source, and

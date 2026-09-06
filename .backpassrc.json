@@ -1,0 +1,55 @@
+{
+  "memoryFiles": [
+    "AGENTS.md",
+    "CLAUDE.md"
+  ],
+  "budgetTokens": 5000,
+  "skillsDir": ".agents/skills",
+  "minGapEvidence": 2,
+  "maxTranscripts": 40,
+  "analysis": {
+    "agent": "pi",
+    "model": "zai-general/glm-5.3-flash",
+    "effort": "medium"
+  },
+  "synthesis": {
+    "agent": "pi",
+    "model": "zai-general/glm-5.3-flash",
+    "effort": "high"
+  },
+  "discovery": {
+    "harnesses": [
+      "claude",
+      "codex",
+      "pi",
+      "opencode",
+      "grok",
+      "cursor",
+      "hermes"
+    ],
+    "since": "30d",
+    "cloneRoots": [
+      "/home/jon/.treehouse/beads-166931/1",
+      "/home/jon/.treehouse/beads-166931/2",
+      "/home/jon/.treehouse/beads-166931/3",
+      "/home/jon/.treehouse/beads-166931/4",
+      "/home/jon/.treehouse/beads-166931/5",
+      "/home/jon/.treehouse/beads-166931/6",
+      "/home/jon/.treehouse/beads-166931/7",
+      "/home/jon/.treehouse/beads-166931/8",
+      "/home/jon/.treehouse/beads-166931/9",
+      "/home/jon/.treehouse/beads-166931/10",
+      "/home/jon/.treehouse/beads-166931/11",
+      "/home/jon/.treehouse/beads-166931/12",
+      "/home/jon/.treehouse/beads-166931/13",
+      "/opt/ra/firstmate/projects",
+      "/home/jon/.no-mistakes/worktrees"
+    ],
+    "worktreeGlobs": [
+      "/home/jon/.treehouse/beads-166931/*/beads",
+      "/home/jon/.no-mistakes/worktrees/*/beads*"
+    ],
+    "minUserTurns": 2
+  },
+  "jobs": 4
+}

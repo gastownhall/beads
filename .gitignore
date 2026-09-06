@@ -255,3 +255,7 @@ tmp/build/cli-docs/where.md
 tmp/build/cli-docs/worktree.md
 tmp/docs/CLI_REFERENCE.md
 *.gate.lock*
+
+# backpass runtime state (never commit)
+.backpass/
+evidence/
