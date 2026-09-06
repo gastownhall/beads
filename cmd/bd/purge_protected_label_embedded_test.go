@@ -175,3 +175,39 @@ func TestPurgeWithoutConfiguredLabelsStillProtectsTheBuiltInDefault(t *testing.T
 		t.Errorf("unlabeled bead (%s) survived; the default must not over-protect. output:\n%s", plain, out)
 	}
 }
+
+// TestPurgeJSONReportsLabeledSkipsWhenNOTHINGIsSwept is the case codex found
+// missing, and it is the one that matters most rather than an edge of the one
+// above.
+//
+// When EVERY candidate carries a protected label, Swept is 0 and `bd purge`
+// takes its empty-result branch. Without the count there, a scheduled purge
+// reading JSON sees `{"purged_count": 0, "message": "No closed ephemeral beads
+// to purge"}` — which is byte-identical to what an empty workspace returns.
+// The guard doing its job and there being nothing to do are then
+// indistinguishable, and the reading a person takes from that is "my records
+// were never here", which is the opposite of the truth.
+func TestPurgeJSONReportsLabeledSkipsWhenNOTHINGIsSwept(t *testing.T) {
+	if os.Getenv("BEADS_TEST_EMBEDDED_DOLT") != "1" {
+		t.Skip("set BEADS_TEST_EMBEDDED_DOLT=1 to run embedded dolt integration tests")
+	}
+	t.Parallel()
+
+	bd := buildEmbeddedBD(t)
+	dir, _, _ := bdInit(t, bd, "--prefix", "pje")
+	bdCommand(t, bd, dir, "config", "set", "wisp.protected_labels", "gt:message")
+
+	// Every candidate is protected, so the sweep is empty for a REASON.
+	createAndCloseLabeledEphemeral(t, bd, dir, "mail one", "gt:message")
+	createAndCloseLabeledEphemeral(t, bd, dir, "mail two", "gt:message")
+
+	out := bdPurge(t, bd, dir, "--force", "--json")
+
+	var stats map[string]any
+	if err := json.Unmarshal([]byte(out), &stats); err != nil {
+		t.Fatalf("purge --json is not JSON: %v\n%s", err, out)
+	}
+	if got := stats["labeled_skipped"]; got != float64(2) {
+		t.Errorf("labeled_skipped = %v, want 2 — an empty sweep must say WHY it was empty; payload: %s", got, out)
+	}
+}

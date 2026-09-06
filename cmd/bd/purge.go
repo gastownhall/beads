@@ -272,6 +272,19 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 			scope.countKey: 0,
 			"message":      fmt.Sprintf("No %ss to %s", scope.subjectNoun, scope.cmdName),
 		}
+		// THE EMPTY RESULT IS THE CASE THAT MOST NEEDS THIS COUNT, not the one
+		// that can do without it. When every candidate carried a protected
+		// label, Swept is 0 and this branch is what a scheduled purge reads —
+		// and "no beads to purge" is then indistinguishable from an empty
+		// workspace, which is the exact reading that would send someone
+		// looking for why their records were not swept. The other emitters
+		// report it beside a non-zero count; here it is the whole story.
+		if result.Skipped.Labeled > 0 {
+			stats["labeled_skipped"] = result.Skipped.Labeled
+		}
+		if result.Skipped.Pinned > 0 {
+			stats["pinned_skipped"] = result.Skipped.Pinned
+		}
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -283,6 +296,10 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 		msg += fmt.Sprintf(" (matching %q)", pattern)
 	}
 	fmt.Println(msg)
+	if result.Skipped.Pinned > 0 {
+		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
+			"  (%d closed bead(s) protected by the pinned flag)", result.Skipped.Pinned)))
+	}
 	if result.Skipped.Labeled > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
 			"  (%d closed bead(s) protected by %s)",
