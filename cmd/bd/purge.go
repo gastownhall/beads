@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,7 +53,22 @@ Closed ephemeral beads (wisps, transient molecules) accumulate rapidly and
 have no value once closed. This command removes them to reclaim storage.
 
 Deletes: issues, dependencies, labels, events, and comments for matching beads.
-Skips: pinned beads (protected).
+Skips: pinned beads, and beads carrying a protected label.
+
+PROTECTED LABELS (wisp.protected_labels, default "bd:protected") are never
+purged. This is the SAME guard ` + "`bd mol wisp gc`" + ` honors, and the two commands
+delete the same rows — a workspace that configured it used to get the
+protection on one command and not on the other, with no warning from either.
+
+Label the records that cannot be regenerated — messages, escalations, any
+write-once record an orchestration layer keeps as an ephemeral bead. Status
+cannot protect those: an unread message sits in plain open status, and closing
+it is what makes it purgeable.
+
+  bd config set wisp.protected_labels bd:protected,my:message
+
+A configured value REPLACES the default (same rule as types.infra);
+--exclude-label ADDS to whatever is configured.
 
 To delete closed non-ephemeral beads (regular tasks, features, bugs, etc.)
 use ` + "`bd prune`" + ` instead.
@@ -65,7 +81,8 @@ EXAMPLES:
   bd purge --force                   # Delete all closed ephemeral beads
   bd purge --older-than 7d --force   # Only purge items closed 7+ days ago
   bd purge --pattern "*-wisp-*"      # Only purge matching ID pattern
-  bd purge --dry-run                 # Detailed preview with stats`,
+  bd purge --dry-run                 # Detailed preview with stats
+  bd purge --exclude-label my:message --force  # Also protect my:message beads`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE: func(cmd *cobra.Command, _ []string) error {
@@ -99,6 +116,37 @@ func openSweeper() (issueops.Sweeper, error) {
 		}
 	}
 	return store.Sweeper()
+}
+
+// sweepProtectedLabels resolves the wisp-tier protected-label guard on
+// whichever route this invocation is on — the same two-route dispatch
+// openSweeper performs, for the same reason.
+//
+// It is only ever asked for the EPHEMERAL tier. wisp.protected_labels is a
+// wisp-tier key, and `bd prune` sweeps durable issues; reading a wisp key to
+// decide which durable issues survive would be a guard nobody configured for
+// that purpose.
+//
+// A read failure is returned, never swallowed. `bd purge --force` deletes, so
+// a guard that could not be read has to stop the command rather than resolve
+// to the empty set — which would report a clean purge while protecting
+// nothing, and is exactly the silent under-protection this guard exists to
+// prevent.
+func sweepProtectedLabels(ctx context.Context, extra []string) ([]string, error) {
+	if usesProxiedServer() {
+		uw, err := proxiedOpenReadUOW(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer uw.Close(ctx)
+		return protectedWispLabelList(ctx, uowMolReader{uw: uw}, extra)
+	}
+	if store == nil {
+		if err := ensureStoreActive(); err != nil {
+			return nil, err
+		}
+	}
+	return protectedWispLabelList(ctx, store, extra)
 }
 
 // runPurgeOrPrune implements the shared delete-closed-beads flow used by both
@@ -142,6 +190,16 @@ func runPurgeOrPrune(cmd *cobra.Command, scope purgeScope) error {
 		}
 		cutoff := time.Now().UTC().AddDate(0, 0, -days)
 		request.ClosedBefore = &cutoff
+	}
+	// The label guard is resolved BEFORE the sweeper is opened, so a workspace
+	// whose config cannot be read fails without having selected anything.
+	if scope.tier == issueops.SweepEphemeral {
+		excludeLabels, _ := cmd.Flags().GetStringSlice("exclude-label")
+		protected, err := sweepProtectedLabels(rootCtx, excludeLabels)
+		if err != nil {
+			return HandleErrorRespectJSON("%v", err)
+		}
+		request.ProtectedLabels = protected
 	}
 
 	sweeper, err := openSweeper()
@@ -225,6 +283,11 @@ func emitSweepEmpty(scope purgeScope, olderThan, pattern string, result issueops
 		msg += fmt.Sprintf(" (matching %q)", pattern)
 	}
 	fmt.Println(msg)
+	if result.Skipped.Labeled > 0 {
+		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
+			"  (%d closed bead(s) protected by %s)",
+			result.Skipped.Labeled, protectedWispLabelsKey)))
+	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf(
 			"  (%d closed bead(s) protected by open-bead references — use --ignore-references to override)",
@@ -245,6 +308,9 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 		if result.Skipped.Pinned > 0 {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
+		if result.Skipped.Labeled > 0 {
+			stats["labeled_skipped"] = result.Skipped.Labeled
+		}
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -254,6 +320,9 @@ func emitSweepDryRun(scope purgeScope, result issueops.SweepResult) error {
 	fmt.Printf("  Events:       %d\n", result.Events)
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("  Pinned (skipped): %d\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Labeled > 0 {
+		fmt.Printf("  Protected label (skipped): %d\n", result.Skipped.Labeled)
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Printf("  %s   %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
@@ -279,6 +348,9 @@ func emitSweepConfirm(scope purgeScope, olderThan, pattern string, result issueo
 	fmt.Printf("Found %d %s(s) to %s\n", result.Swept, scope.subjectNoun, scope.cmdName)
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("Skipping %d pinned bead(s)\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Labeled > 0 {
+		fmt.Printf("Skipping %d bead(s) carrying a protected label\n", result.Skipped.Labeled)
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Println(ui.MutedStyle.Render(fmt.Sprintf("Skipping %d referenced bead(s)", result.Skipped.Referenced)))
@@ -306,6 +378,9 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 		if result.Skipped.Pinned > 0 {
 			stats["pinned_skipped"] = result.Skipped.Pinned
 		}
+		if result.Skipped.Labeled > 0 {
+			stats["labeled_skipped"] = result.Skipped.Labeled
+		}
 		addReferenceStats(scope, stats, result)
 		return outputJSON(stats)
 	}
@@ -315,6 +390,9 @@ func emitSweepResult(scope purgeScope, result issueops.SweepResult) error {
 	fmt.Printf("  Events removed:       %d\n", result.Events)
 	if result.Skipped.Pinned > 0 {
 		fmt.Printf("  Pinned (skipped):     %d\n", result.Skipped.Pinned)
+	}
+	if result.Skipped.Labeled > 0 {
+		fmt.Printf("  Protected label (skipped): %d\n", result.Skipped.Labeled)
 	}
 	if result.Skipped.Referenced > 0 {
 		fmt.Printf("  %s %d\n", ui.MutedStyle.Render("Referenced (skipped):"), result.Skipped.Referenced)
@@ -377,5 +455,6 @@ func init() {
 	purgeCmd.Flags().Bool("dry-run", false, "Preview what would be purged with stats")
 	purgeCmd.Flags().String("older-than", "", "Only purge beads closed more than N ago (e.g., 7d, 2w, 30)")
 	purgeCmd.Flags().String("pattern", "", "Only purge beads matching ID glob pattern (e.g., *-wisp-*)")
+	purgeCmd.Flags().StringSlice("exclude-label", nil, "Also protect beads carrying these labels (adds to wisp.protected_labels)")
 	rootCmd.AddCommand(purgeCmd)
 }

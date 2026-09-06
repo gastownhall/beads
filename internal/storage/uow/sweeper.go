@@ -41,8 +41,9 @@ var _ publicops.Sweeper = (*sweeper)(nil)
 // This is the genuinely separate body: the two store backends share
 // issueops.SweepInTx, and this one reaches the same questions through the domain
 // use cases. What it must NOT do differently is WHICH ROWS GO — the selection,
-// the pattern, the pinned and closed_at rechecks and the citation rule all run
-// through the same internal/workapi functions the shared body runs.
+// the pattern, the pinned and label protections, the closed_at rechecks and the
+// citation rule all run through the same internal/workapi functions the shared
+// body runs.
 //
 // ONE UNIT OF WORK matters more here than it does for a read. The candidate
 // query and the delete are on the same transaction, so a row closed, unpinned
@@ -81,7 +82,7 @@ func sweepInUOW(ctx context.Context, uw UnitOfWork, req publicops.SweepRequest) 
 		return publicops.SweepResult{}, fmt.Errorf("listing sweep candidates: %w", err)
 	}
 
-	kept, skips := workapi.FilterSweepCandidates(page.Items, req.IDPattern, req.ClosedBefore)
+	kept, skips := workapi.FilterSweepCandidates(page.Items, req)
 	result.Skipped = skips
 
 	if req.ProtectReferenced {

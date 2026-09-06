@@ -713,7 +713,14 @@ func protectedWispStatuses(ctx context.Context, r molReader) (map[types.Status]b
 }
 
 // protectedWispLabelsKey is the config key holding the labels that make a wisp
-// unreclaimable by `bd mol wisp gc`.
+// unreclaimable by the two commands that delete closed ephemeral beads:
+// `bd mol wisp gc` and `bd purge`.
+//
+// ONE KEY, BOTH COMMANDS, resolved by the functions below and by nothing else.
+// The two are siblings over the same rows, and the docs present them as
+// interchangeable; a second resolution of "which labels are protected" is how
+// they would come to disagree about it, which is worse than the gap that
+// existed when only one of them had a guard at all.
 const protectedWispLabelsKey = "wisp.protected_labels"
 
 // defaultProtectedWispLabels is the label set honored when nothing is
@@ -724,8 +731,17 @@ const protectedWispLabelsKey = "wisp.protected_labels"
 // to provide the extension point and to fail closed on it.
 var defaultProtectedWispLabels = []string{"bd:protected"}
 
-// protectedWispLabels resolves the labels that make a wisp unreclaimable by
-// `bd mol wisp gc`, with the same precedence the infra-type set uses: the DB
+// protectedWispLabelConfigReader is the one thing resolving the guard needs
+// from a store: the config key. It is narrower than molReader so that `bd
+// purge`, which has no other use for a molecule reader, can resolve the SAME
+// guard without acquiring one — molReader satisfies it structurally, so every
+// existing caller passes unchanged.
+type protectedWispLabelConfigReader interface {
+	GetConfig(ctx context.Context, key string) (string, error)
+}
+
+// protectedWispLabelList resolves the labels that make a closed ephemeral bead
+// unreclaimable, with the same precedence the infra-type set uses: the DB
 // config key wisp.protected_labels, then config.yaml, then the built-in
 // default. A configured value REPLACES the default rather than extending it,
 // matching types.infra.
@@ -734,22 +750,38 @@ var defaultProtectedWispLabels = []string{"bd:protected"}
 // the command line is asking for more protection than the workspace
 // configures, never less.
 //
-// Reading the config is required, not best-effort. This command deletes, so an
-// unreadable guard must abort it rather than silently under-protect — the same
-// contract protectedWispStatuses holds.
-func protectedWispLabels(ctx context.Context, r molReader, extra []string) (map[string]bool, error) {
+// Reading the config is required, not best-effort. Both callers DELETE, so an
+// unreadable guard must abort rather than silently under-protect — the same
+// contract protectedWispStatuses holds. That is why this returns an error at
+// all: the failure mode it exists to prevent is a guard that resolves to the
+// empty set and protects nothing while reporting success.
+func protectedWispLabelList(ctx context.Context, r protectedWispLabelConfigReader, extra []string) ([]string, error) {
 	value, err := r.GetConfig(ctx, protectedWispLabelsKey)
 	if err != nil {
-		return nil, fmt.Errorf("reading %s for wisp gc: %w", protectedWispLabelsKey, err)
+		return nil, fmt.Errorf("reading %s: %w", protectedWispLabelsKey, err)
 	}
-	return resolveProtectedWispLabels(value, config.GetProtectedWispLabelsFromYAML(), extra), nil
+	return resolveProtectedWispLabelList(value, config.GetProtectedWispLabelsFromYAML(), extra), nil
 }
 
-// resolveProtectedWispLabels is protectedWispLabels' precedence rule with the
-// three sources already read, so it can be tested without a store: dbValue is
-// the raw comma-separated wisp.protected_labels config value, yaml is the
-// config.yaml fallback, and extra is --exclude-label.
-func resolveProtectedWispLabels(dbValue string, yaml, extra []string) map[string]bool {
+// protectedWispLabels is protectedWispLabelList as the membership set `bd mol
+// wisp gc` tests candidates against.
+func protectedWispLabels(ctx context.Context, r protectedWispLabelConfigReader, extra []string) (map[string]bool, error) {
+	labels, err := protectedWispLabelList(ctx, r, extra)
+	if err != nil {
+		return nil, err
+	}
+	return protectedWispLabelSet(labels), nil
+}
+
+// resolveProtectedWispLabelList is the precedence rule with the three sources
+// already read, so it can be tested without a store: dbValue is the raw
+// comma-separated wisp.protected_labels config value, yaml is the config.yaml
+// fallback, and extra is --exclude-label.
+//
+// The result is SORTED, so a caller that reports or serializes the resolved
+// set — `bd purge` puts it on a sweep request that crosses an HTTP boundary —
+// gets a stable value rather than Go's map order.
+func resolveProtectedWispLabelList(dbValue string, yaml, extra []string) []string {
 	labels := utils.NormalizeLabels(strings.Split(dbValue, ","))
 	if len(labels) == 0 {
 		labels = utils.NormalizeLabels(yaml)
@@ -757,8 +789,20 @@ func resolveProtectedWispLabels(dbValue string, yaml, extra []string) map[string
 	if len(labels) == 0 {
 		labels = defaultProtectedWispLabels
 	}
-	set := make(map[string]bool, len(labels)+len(extra))
-	for _, l := range utils.NormalizeLabels(append(append([]string{}, labels...), extra...)) {
+	resolved := utils.NormalizeLabels(append(append([]string{}, labels...), extra...))
+	slices.Sort(resolved)
+	return resolved
+}
+
+// resolveProtectedWispLabels is resolveProtectedWispLabelList as a set.
+func resolveProtectedWispLabels(dbValue string, yaml, extra []string) map[string]bool {
+	return protectedWispLabelSet(resolveProtectedWispLabelList(dbValue, yaml, extra))
+}
+
+// protectedWispLabelSet turns a resolved label list into a membership set.
+func protectedWispLabelSet(labels []string) map[string]bool {
+	set := make(map[string]bool, len(labels))
+	for _, l := range labels {
 		set[l] = true
 	}
 	return set
