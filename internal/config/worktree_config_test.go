@@ -287,6 +287,36 @@ func TestWorktreeFallbackConfigPath(t *testing.T) {
 	})
 }
 
+func TestWorktreeFallbackConfigPathIgnoresInheritedGitRouting(t *testing.T) {
+	_, worktreeDir, want := setupConfigWorktree(t)
+
+	decoyRepo := filepath.Join(t.TempDir(), "decoy")
+	if err := os.MkdirAll(decoyRepo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command("git", "init", "--quiet")
+	command.Dir = decoyRepo
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("initialize decoy repository: %v\n%s", err, output)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(decoyRepo, ".git"))
+	t.Setenv("GIT_WORK_TREE", decoyRepo)
+	t.Setenv("GIT_COMMON_DIR", filepath.Join(decoyRepo, ".git"))
+
+	got := worktreeFallbackConfigPath(worktreeDir)
+	gotResolved, err := filepath.EvalSymlinks(filepath.Clean(got))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", got, err)
+	}
+	wantResolved, err := filepath.EvalSymlinks(filepath.Clean(want))
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", want, err)
+	}
+	if gotResolved != wantResolved {
+		t.Fatalf("worktreeFallbackConfigPath() = %q, want target repository config %q", gotResolved, wantResolved)
+	}
+}
+
 func TestGitDirsForRepo_NonGitRepo(t *testing.T) {
 	if gitDir, commonDir, ok := gitDirsForRepo(t.TempDir()); ok || gitDir != "" || commonDir != "" {
 		t.Fatalf("gitDirsForRepo(non-git) = (%q, %q, %v), want empty paths and false", gitDir, commonDir, ok)
