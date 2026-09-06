@@ -68,6 +68,11 @@ type FetchOptions struct {
 
 	// Maximum number of issues to fetch (0 = no limit).
 	Limit int
+
+	// IncludeComments asks the tracker to hydrate comment threads during
+	// fetch. Only the pull path sets it; push, dry-run verdicts, and
+	// conflict detection leave it false to avoid a per-issue thread GET.
+	IncludeComments bool
 }
 
 // SyncOptions configures the behavior of a sync operation.

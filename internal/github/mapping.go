@@ -146,10 +146,33 @@ func GitHubIssueToBeads(gh *Issue, config *MappingConfig) *IssueConversion {
 		issue.UpdatedAt = *gh.UpdatedAt
 	}
 
+	// IDs stay empty so create and update converge on the same
+	// content-derived comment id instead of forking across clones.
+	for _, c := range gh.HydratedComments {
+		comment := &types.Comment{
+			Author: commentAuthor(c),
+			Text:   c.Body,
+		}
+		if c.CreatedAt != nil {
+			comment.CreatedAt = *c.CreatedAt
+		} else if gh.CreatedAt != nil {
+			comment.CreatedAt = *gh.CreatedAt
+		}
+		issue.Comments = append(issue.Comments, comment)
+	}
+
 	return &IssueConversion{
 		Issue:        issue,
 		Dependencies: []DependencyInfo{},
 	}
+}
+
+// commentAuthor returns the login, or a placeholder for ghost accounts.
+func commentAuthor(c IssueComment) string {
+	if c.User != nil && c.User.Login != "" {
+		return c.User.Login
+	}
+	return "github-unknown"
 }
 
 // BeadsIssueToGitHubFields converts a beads Issue to GitHub API update fields.
@@ -261,6 +284,62 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 
 // labelSetsEqual reports whether a and b contain the same labels, ignoring
 // order (GitHub does not preserve label order across a round-trip).
+// PushFieldDiff names the fields a push would change, using the same field
+// semantics as PushFieldsEqual. Label entries disclose the removed names:
+// GitHub replaces the full label set, so removals are destructive.
+func PushFieldDiff(local *types.Issue, remote *Issue, config *MappingConfig) []string {
+	if local == nil || remote == nil {
+		return nil
+	}
+	var diff []string
+
+	if local.Title != remote.Title {
+		diff = append(diff, "title")
+	}
+	if local.Description != remote.Body {
+		diff = append(diff, "body")
+	}
+
+	desiredState := "open"
+	if local.Status == types.StatusClosed {
+		desiredState = "closed"
+	}
+	if !strings.EqualFold(desiredState, remote.State) {
+		diff = append(diff, "state")
+	}
+
+	desiredLabels, _ := BeadsIssueToGitHubFields(local, config)["labels"].([]string)
+	desired := make(map[string]bool, len(desiredLabels))
+	for _, l := range desiredLabels {
+		desired[strings.ToLower(l)] = true
+	}
+	remoteLabels := remote.LabelNames()
+	remoteSet := make(map[string]bool, len(remoteLabels))
+	for _, l := range remoteLabels {
+		remoteSet[strings.ToLower(l)] = true
+	}
+	var added, removed []string
+	for _, l := range desiredLabels {
+		if !remoteSet[strings.ToLower(l)] {
+			added = append(added, l)
+		}
+	}
+	for _, l := range remoteLabels {
+		if !desired[strings.ToLower(l)] {
+			removed = append(removed, l)
+		}
+	}
+	if len(added) > 0 || len(removed) > 0 {
+		entry := fmt.Sprintf("labels (+%d/-%d", len(added), len(removed))
+		if len(removed) > 0 {
+			entry += ": " + strings.Join(removed, ", ")
+		}
+		diff = append(diff, entry+")")
+	}
+
+	return diff
+}
+
 func labelSetsEqual(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

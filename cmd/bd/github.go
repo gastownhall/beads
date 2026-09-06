@@ -505,6 +505,19 @@ func buildGitHubPushHooks(gt *github.Tracker) *tracker.PushHooks {
 		ContentHash: func(local *types.Issue) string {
 			return github.PushContentHash(local, config)
 		},
+		// FieldDiff names the fields a push would change so dry-run previews
+		// disclose what an update modifies (notably label removals) instead of
+		// printing an opaque "would update" line.
+		FieldDiff: func(local *types.Issue, remote *tracker.TrackerIssue) []string {
+			if remote == nil {
+				return nil
+			}
+			gh, ok := remote.Raw.(*github.Issue)
+			if !ok || gh == nil {
+				return nil
+			}
+			return github.PushFieldDiff(local, gh, config)
+		},
 		// TargetScope supplies the host and repository omitted by shorthand refs
 		// such as github:42, so changing GitHub target configuration invalidates
 		// the local no-op cache.
