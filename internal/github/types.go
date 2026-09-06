@@ -63,19 +63,16 @@ type Issue struct {
 	HTMLURL   string     `json:"html_url"`
 	Locked    bool       `json:"locked"`
 
-	// Comments is the comment count reported by the GitHub API. It is used to
-	// decide whether a follow-up comment-thread fetch is worth an API call;
-	// the comments themselves arrive via HydratedComments.
+	// Comments is the API-reported comment count, used to skip the
+	// thread fetch when zero. Thread contents arrive via HydratedComments.
 	Comments int `json:"comments"`
 
 	// PullRequest is non-nil if this issue is actually a pull request.
 	// Used to filter PRs out of issue listings.
 	PullRequest *PullRequestRef `json:"pull_request,omitempty"`
 
-	// HydratedComments carries the issue's comment thread, populated by the
-	// tracker when it fetches comments alongside the issue (only when the
-	// API-reported comment count is nonzero). The json tag keeps this field
-	// out of API unmarshalling — it is filled in code, not parsed from JSON.
+	// HydratedComments carries the comment thread, filled in code when the
+	// count is nonzero. Excluded from API unmarshalling.
 	HydratedComments []IssueComment `json:"-"`
 }
 
