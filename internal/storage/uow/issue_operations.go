@@ -233,6 +233,9 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 			if err := authorizeAssigneeTransfer(ctx, uw, before, attempt); err != nil {
 				return publicops.UpdateResult{}, "", err
 			}
+			if err := storageissueops.AuthorizeNotesOverwrite(before, attempt); err != nil {
+				return publicops.UpdateResult{}, "", err
+			}
 		}
 		// ActorMatches (not a verbatim compare, ga-v2k49): a holder re-claiming
 		// under a respelled identity is a real CAS win one layer down (domain/db's
@@ -254,14 +257,21 @@ func (o *issueOperations) Update(ctx context.Context, request publicops.UpdateRe
 
 // updatePreconditionsHold reports whether request's compare-and-set
 // preconditions match before — that is, whether ApplyUpdate would get past its
-// own guards, leaving the assignee fence as the operative refusal.
-// ExpectedAssignee needs no entry here: the fence already stands down whenever
-// a caller supplies one.
+// own guards, leaving the fences as the operative refusals. ExpectedAssignee
+// belongs here since the notes fence arrived: the ASSIGNEE fence stands down
+// whenever a caller supplies one, but the notes fence deliberately does not,
+// and a stale compare-and-set must outrank it (the dolt leg orders
+// CheckExpectedFieldsInTx ahead of AuthorizeNotesOverwrite). The comparison is
+// ActorMatches, not verbatim ==, matching CheckExpectedFieldsInTx (ga-wzl83);
+// a pointer to "" is a real guard meaning "expected unassigned".
 func updatePreconditionsHold(request publicops.UpdateRequest, before *types.Issue) bool {
 	if request.ExpectedVersion != nil && *request.ExpectedVersion != before.RowVersion {
 		return false
 	}
 	if request.ExpectedStatus != nil && *request.ExpectedStatus != before.Status {
+		return false
+	}
+	if request.ExpectedAssignee != nil && !storageissueops.ActorMatches(before.Assignee, *request.ExpectedAssignee) {
 		return false
 	}
 	return true
@@ -311,9 +321,9 @@ func updateSpec(request publicops.UpdateRequest) (domain.UpdateSpec, error) {
 	setField(fields, "external_ref", patch.ExternalRef)
 	setField(fields, "due_at", patch.DueAt)
 	setField(fields, "defer_until", patch.DeferUntil)
-	if patch.Notes.Set && patch.AppendNotes.Set {
-		return domain.UpdateSpec{}, validationError(fmt.Errorf("update: notes and append notes cannot both be set"))
-	}
+	// Notes+AppendNotes is refused by ValidateUpdateRequest, which both
+	// callers (issueOperations.Update and the batch applier) run before
+	// building a spec — no duplicate check here.
 	setField(fields, "notes", patch.Notes)
 	if patch.AppendNotes.Set {
 		fields[storageissueops.OpAppendNotes] = patch.AppendNotes.Value

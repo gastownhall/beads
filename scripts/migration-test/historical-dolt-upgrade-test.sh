@@ -1003,7 +1003,9 @@ verify_post_bridge_semantics() {
     local version="$1" kind="$2" task blocker task_after ready
     task=$(sed -n '1p' "$workspace/fixture-ids")
     blocker=$(sed -n '2p' "$workspace/fixture-ids")
-    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade bridge mutation persisted.' >/dev/null ||
+    # --force: the fixture task carries historical notes, and the candidate now
+    # fences an unforced non-empty replacement; the replacement is the point here.
+    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade bridge mutation persisted.' --force >/dev/null ||
         die "$version: candidate mutation failed after explicit bridge"
     task_after=$(run_in_workspace "$candidate" show "$task" --json --include-comments) ||
         die "$version: candidate could not reopen bridged data"
@@ -1039,7 +1041,8 @@ run_embedded_dolt_upgrade() {
     fi
     [ "$(sha256_file "$metadata")" = "$metadata_sha" ] || die "$version: candidate startup rewrote metadata"
     task=$(sed -n '1p' "$workspace/fixture-ids")
-    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade direct mutation persisted.' >/dev/null ||
+    # --force: same fence as verify_post_bridge_semantics — the fixture task has notes.
+    run_in_workspace "$candidate" update "$task" --notes 'Post-upgrade direct mutation persisted.' --force >/dev/null ||
         die "$version: candidate mutation failed after direct upgrade"
     task_after=$(run_in_workspace "$candidate" show "$task" --json --include-comments) ||
         die "$version: candidate could not reopen mutated data"

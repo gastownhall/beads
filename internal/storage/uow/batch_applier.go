@@ -240,6 +240,7 @@ func (r *uowApplyRun) applyUpdate(ctx context.Context, index int, item *publicop
 		ExpectedAssignee:      item.ExpectedAssignee,
 		ForceClosePolicy:      item.ForceClosePolicy,
 		ForceAssigneeTransfer: item.ForceAssigneeTransfer,
+		ForceNotesOverwrite:   item.ForceNotesOverwrite,
 	}
 	if err := validateUpdateRequest(request); err != nil {
 		return itemErr(err)
@@ -281,6 +282,9 @@ func (r *uowApplyRun) runUpdate(ctx context.Context, request publicops.UpdateReq
 	}
 	if updatePreconditionsHold(request, before) {
 		if err := authorizeAssigneeTransfer(ctx, r.uw, before, request); err != nil {
+			return publicops.UpdateResult{}, err
+		}
+		if err := storageissueops.AuthorizeNotesOverwrite(before, request); err != nil {
 			return publicops.UpdateResult{}, err
 		}
 	}

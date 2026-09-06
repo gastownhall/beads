@@ -30,7 +30,10 @@ func registerCommonIssueFlags(cmd *cobra.Command) {
 	cmd.Flags().String("design-file", "", "Read design from file (use - for stdin)")
 	cmd.MarkFlagsMutuallyExclusive("design", "design-file")
 	cmd.Flags().String("acceptance", "", "Acceptance criteria")
-	cmd.Flags().String("notes", "", "Additional notes")
+	// Field-named like --description and --design — no merge behavior implied
+	// (GH#6272: "Additional notes" read as additive while update replaces the
+	// field; update overrides this usage string with the operational contrast).
+	cmd.Flags().String("notes", "", "Notes")
 	cmd.Flags().String("append-notes", "", "Append to existing notes (with newline separator)")
 	cmd.Flags().String("external-ref", "", "External reference (e.g., 'gh-9', 'jira-ABC', Linear URL)")
 }

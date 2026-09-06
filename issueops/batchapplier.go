@@ -149,11 +149,13 @@ type UpdateItem struct {
 	ExpectedVersion  *int64
 	ExpectedStatus   *Status
 	ExpectedAssignee *string
-	// ForceClosePolicy and ForceAssigneeTransfer are UpdateRequest's, per item,
-	// with UpdateRequest's rules — including that ForceAssigneeTransfer without
-	// a Patch.Assignee is invalid.
+	// ForceClosePolicy, ForceAssigneeTransfer and ForceNotesOverwrite are
+	// UpdateRequest's, per item, with UpdateRequest's rules — including that
+	// ForceAssigneeTransfer without a Patch.Assignee, and ForceNotesOverwrite
+	// without a Patch.Notes, are each invalid.
 	ForceClosePolicy      bool
 	ForceAssigneeTransfer bool
+	ForceNotesOverwrite   bool
 }
 
 // CloseItem closes one existing issue, under CloseRequest's rules.

@@ -65,7 +65,7 @@ var (
 	}
 	applyUpdateItemMembers = []string{
 		"expected_assignee", "expected_status", "expected_version",
-		"force_assignee_transfer", "force_close_policy", "patch", "target",
+		"force_assignee_transfer", "force_close_policy", "force_notes_overwrite", "patch", "target",
 	}
 	applyPatchMembers = []string{
 		"acceptance_criteria", "append_notes", "assignee", "defer_until",
@@ -458,6 +458,9 @@ func applyUpdateItem(prefix string, encoded json.RawMessage, raw map[string]json
 	}
 	if wire.ForceAssigneeTransfer != nil {
 		item.ForceAssigneeTransfer = *wire.ForceAssigneeTransfer
+	}
+	if wire.ForceNotesOverwrite != nil {
+		item.ForceNotesOverwrite = *wire.ForceNotesOverwrite
 	}
 	return item, nil
 }
@@ -980,6 +983,10 @@ func (s *Server) failApplyBatch(w http.ResponseWriter, r *http.Request, request 
 			}
 		}
 		s.fail(w, r, res)
+
+	case errors.Is(err, storage.ErrNotesOverwrite):
+		s.fail(w, r, at(newResult(CodeNotesOverwrite,
+			"an update's `patch.notes` would replace existing non-empty notes; send `force_notes_overwrite`, or use `patch.append_notes` to preserve history"), "notes"))
 
 	case errors.Is(err, issueops.ErrVersionMismatch),
 		errors.Is(err, issueops.ErrStatusMismatch),

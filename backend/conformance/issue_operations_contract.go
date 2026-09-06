@@ -1479,7 +1479,7 @@ func RunIssueOperationsUpdateWritesEveryScalarPatchField(t *testing.T, ctx conte
 		{"defer_until", patchedDefer.Format(issueOperationsStoredTimeLayout)},
 	}
 
-	written, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: patch})
+	written, err := fixture.Operations.Update(ctx, publicops.UpdateRequest{Actor: "writer", IssueID: id, Patch: patch, ForceNotesOverwrite: true})
 	if err != nil {
 		t.Fatalf("full scalar patch on %s: %v", id, err)
 	}

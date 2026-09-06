@@ -35,8 +35,9 @@ type updateInput struct {
 	// guard).
 	ifAssignee *string
 	ifStatus   *string
-	// bd-98s5c: --force bypasses the live-claim reassign fence (mutually
-	// exclusive with --if-assignee at the flag-group level).
+	// bd-98s5c: --force bypasses the live-claim reassign fence only when no
+	// --if-assignee guard rides the command; it also opts into the notes
+	// overwrite and close-policy bypasses (runCommandUpdateMutation).
 	force bool
 }
 
@@ -102,7 +103,13 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("notes") {
 		notes, _ := cmd.Flags().GetString("notes")
+		if err := validateNotesUpdate(notes); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["notes"] = notes
+	}
+	if clearNotesRequested(cmd) {
+		in.fields["notes"] = ""
 	}
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")

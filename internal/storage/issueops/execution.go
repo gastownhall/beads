@@ -168,6 +168,9 @@ func ExecuteUpdate(ctx context.Context, tx *sql.Tx, request publicops.UpdateRequ
 	if err := AuthorizeAssigneeTransfer(ctx, tx, before, attempt); err != nil {
 		return publicops.UpdateResult{}, nil, err
 	}
+	if err := AuthorizeNotesOverwrite(before, attempt); err != nil {
+		return publicops.UpdateResult{}, nil, err
+	}
 	changedAny := false
 	if attempt.Claim {
 		claimed, err := ClaimIssueInTx(ctx, tx, attempt.IssueID, attempt.Actor)

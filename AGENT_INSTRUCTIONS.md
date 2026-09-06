@@ -190,7 +190,7 @@ cleanup, and next-session hand-off).
 bd update <id> --description "new description"
 bd update <id> --title "new title"
 bd update <id> --design "design notes"
-bd update <id> --notes "additional notes"
+bd update <id> --append-notes "additional notes"  # --notes replaces existing notes and requires --force once notes are set
 bd update <id> --acceptance "acceptance criteria"
 ```
 
