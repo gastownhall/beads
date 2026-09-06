@@ -518,7 +518,7 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: |
-          $go = (Get-Command go -CommandType Application -ErrorAction Stop).Source
+          $go = (Get-Command go -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
           $hostInfo = @(& $go env GOHOSTOS GOOS)
           if ($LASTEXITCODE -ne 0 -or ($hostInfo -join ',') -ne 'windows,windows') {
             throw 'Credential fixtures require native Windows Go'
