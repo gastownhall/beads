@@ -103,7 +103,13 @@ func gatherUpdateInput(ctx context.Context, cmd *cobra.Command) (*updateInput, e
 	}
 	if cmd.Flags().Changed("notes") {
 		notes, _ := cmd.Flags().GetString("notes")
+		if err := validateNotesUpdate(notes); err != nil {
+			return nil, HandleErrorRespectJSON("%v", err)
+		}
 		in.fields["notes"] = notes
+	}
+	if clearNotesRequested(cmd) {
+		in.fields["notes"] = ""
 	}
 	if cmd.Flags().Changed("append-notes") {
 		in.appendNotes, _ = cmd.Flags().GetString("append-notes")

@@ -456,6 +456,59 @@ func TestEmbeddedUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("update_empty_notes_refused", func(t *testing.T) {
+		// GH#6021: `--notes ""` is what a dead command substitution collapses
+		// to, so an unforced wipe must not look like success. The deliberate
+		// clear has its own verb, --clear-notes.
+		issue := bdCreate(t, bd, dir, "Notes clear guard test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		out := bdUpdateFail(t, bd, dir, issue.ID, "--notes", "")
+		if !strings.Contains(out, "--clear-notes") {
+			t.Errorf("expected refusal naming --clear-notes, got:\n%s", out)
+		}
+		// --force opens the overwrite fence, not this guard: the empty value
+		// stays refused because the bytes still cannot prove intent.
+		out = bdUpdateFail(t, bd, dir, issue.ID, "--notes", "", "--force")
+		if !strings.Contains(out, "--clear-notes") {
+			t.Errorf("expected forced empty-notes refusal naming --clear-notes, got:\n%s", out)
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
+		}
+	})
+
+	t.Run("update_clear_notes_succeeds", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes deliberate clear test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		// No --force: the fence exempts clears, so the verb alone authorizes
+		// the erase.
+		bdUpdate(t, bd, dir, issue.ID, "--clear-notes")
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "" {
+			t.Errorf("expected notes cleared, got %q", got.Notes)
+		}
+	})
+
+	t.Run("update_clear_notes_conflicts_with_notes_flags", func(t *testing.T) {
+		issue := bdCreate(t, bd, dir, "Notes clear conflict test", "--type", "task")
+		bdUpdate(t, bd, dir, issue.ID, "--notes", "original notes")
+
+		for _, extra := range [][]string{
+			{"--notes", "replacement"},
+			{"--append-notes", "more"},
+		} {
+			args := append([]string{issue.ID, "--clear-notes"}, extra...)
+			out := bdUpdateFail(t, bd, dir, args...)
+			if !strings.Contains(out, "none of the others can be") {
+				t.Errorf("expected mutual-exclusion error for %v, got:\n%s", extra, out)
+			}
+		}
+		if got := bdShow(t, bd, dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("expected notes to remain %q, got %q", "original notes", got.Notes)
+		}
+	})
+
 	t.Run("update_defer", func(t *testing.T) {
 		issue := bdCreate(t, bd, dir, "Defer test", "--type", "task")
 		bdUpdate(t, bd, dir, issue.ID, "--defer", "2099-01-15")

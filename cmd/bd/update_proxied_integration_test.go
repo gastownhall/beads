@@ -134,6 +134,30 @@ func TestProxiedServerUpdate(t *testing.T) {
 		}
 	})
 
+	t.Run("empty_notes_refused_clear_notes_clears", func(t *testing.T) {
+		// GH#6021 on the proxied route: the empty-notes refusal fires in
+		// gatherUpdateInput, before any request leaves the CLI, and the
+		// --clear-notes verb (not --force) authorizes the erase.
+		t.Parallel()
+		p := newSharedProxiedProject(t, bd, "unc")
+		issue := bdProxiedCreate(t, bd, p.dir, "Notes clear guard", "--notes", "original notes")
+		stdout, stderr, err := bdProxiedRunBuffers(t, bd, p.dir,
+			"update", issue.ID, "--notes", "")
+		if err == nil {
+			t.Fatalf("expected --notes \"\" to fail\nstdout:\n%s\nstderr:\n%s", stdout, stderr)
+		}
+		if !strings.Contains(stderr, "--clear-notes") {
+			t.Errorf("expected stderr to name --clear-notes, got: %s", stderr)
+		}
+		if got := bdProxiedShow(t, bd, p.dir, issue.ID); got.Notes != "original notes" {
+			t.Errorf("notes: got %q, want %q", got.Notes, "original notes")
+		}
+		updated := bdProxiedUpdateOne(t, bd, p.dir, issue.ID, "--clear-notes")
+		if updated.Notes != "" {
+			t.Errorf("notes: got %q, want cleared", updated.Notes)
+		}
+	})
+
 	t.Run("claim_sets_assignee_and_in_progress", func(t *testing.T) {
 		t.Parallel()
 		p := newSharedProxiedProject(t, bd, "uc")

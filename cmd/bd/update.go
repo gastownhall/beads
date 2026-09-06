@@ -212,7 +212,13 @@ pointless).`,
 		}
 		if cmd.Flags().Changed("notes") {
 			notes, _ := cmd.Flags().GetString("notes")
+			if err := validateNotesUpdate(notes); err != nil {
+				return HandleErrorRespectJSON("%v", err)
+			}
 			updates["notes"] = notes
+		}
+		if clearNotesRequested(cmd) {
+			updates["notes"] = ""
 		}
 		if cmd.Flags().Changed("append-notes") {
 			appendNotes, _ := cmd.Flags().GetString("append-notes")
@@ -1011,8 +1017,11 @@ func init() {
 	updateCmd.Flags().String("title", "", "New title")
 	updateCmd.Flags().StringP("type", "t", "", "New type (bug|feature|task|epic|chore|decision|spike|story|milestone); custom types require types.custom config; aliases: enhancement/feat→feature, dec/adr→decision")
 	registerCommonIssueFlags(updateCmd)
-	updateCmd.Flags().Lookup("notes").Usage = "Additional notes (replaces existing notes; requires --force if notes are already set; use --append-notes to append instead)"
+	updateCmd.Flags().Lookup("notes").Usage = "Replace the notes field (requires --force over existing non-empty notes; --clear-notes clears; --append-notes appends instead)"
 	updateCmd.Flags().Bool("allow-empty-description", false, "Allow empty description replacement when reading from stdin or file")
+	updateCmd.Flags().Bool("clear-notes", false, "Clear the notes field (--notes \"\" is refused: an empty value is usually a dead command substitution)")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "notes")
+	updateCmd.MarkFlagsMutuallyExclusive("clear-notes", "append-notes")
 	updateCmd.Flags().String("spec-id", "", "Link to specification document")
 	updateCmd.Flags().String("acceptance-criteria", "", "DEPRECATED: use --acceptance")
 	_ = updateCmd.Flags().MarkHidden("acceptance-criteria") // Only fails if flag missing (caught in tests)

@@ -963,7 +963,7 @@ git status                  # Check changed files
 - ` + "`bd create --validate`" + ` - Check description has required sections
 - ` + "`bd create --acceptance=\"criteria\"`" + ` - Set acceptance criteria (checked by --validate)
 - ` + "`bd create --design=\"decisions\"`" + ` - Record design decisions
-- ` + "`bd create --notes=\"context\"`" + ` - Add supplementary notes
+- ` + "`bd create --notes=\"context\"`" + ` - Set supplementary notes (add later with ` + "`bd update --append-notes`" + `)
 - ` + "`bd config set validation.on-create warn`" + ` - Auto-validate on every create
 - ` + "`bd lint`" + ` - Check existing issues for missing sections
 

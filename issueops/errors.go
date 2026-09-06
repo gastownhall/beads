@@ -78,7 +78,11 @@ var ErrNotesOverwrite = errors.New("update would replace existing notes")
 // clear (proposed "") is not a replacement: every sibling text field clears
 // the same way, the blind-clobber pattern the fence exists to stop is an
 // agent writing its own non-empty content over someone else's, and the
-// refusal's advice (force, or append) is meaningless for a clear.
+// refusal's advice (force, or append) is meaningless for a clear. The clear
+// itself is guarded separately at the CLI flag layer (`--notes ""` is
+// refused; `bd update --clear-notes` is the deliberate verb, GH#6021), where
+// an accidental empty — a dead command substitution — cannot be told from a
+// deliberate one by its bytes; that guard is not this predicate's concern.
 func NotesReplacement(existing, proposed string) bool {
 	return existing != "" && proposed != "" && proposed != existing
 }
