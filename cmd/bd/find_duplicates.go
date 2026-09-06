@@ -47,12 +47,18 @@ The AI approach sends candidate pairs to Claude for semantic comparison.
 It first uses mechanical pre-filtering to reduce the number of API calls,
 then asks the LLM to judge whether the remaining pairs are true duplicates.
 
+Orchestrator-managed workflow beads (metadata carrying "gc."-prefixed keys,
+e.g. Gas City spec/logical/control template instances) are skipped: their
+identical template text is owned by the orchestrator lifecycle, not by
+content deduplication. Pass --include-workflow to include them anyway.
+
 Examples:
   bd find-duplicates                       # Mechanical similarity (default)
   bd find-duplicates --threshold 0.4       # Lower threshold = more results
   bd find-duplicates --method ai           # Use AI for semantic comparison
   bd find-duplicates --status open         # Only check open issues
   bd find-duplicates --limit 20            # Show top 20 pairs
+  bd find-duplicates --include-workflow    # Also consider orchestrator-managed beads
   bd find-duplicates --json                # JSON output`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -65,6 +71,7 @@ func init() {
 	findDuplicatesCmd.Flags().StringP("status", "s", "", "Filter by status (default: non-closed)")
 	findDuplicatesCmd.Flags().IntP("limit", "n", 50, "Maximum number of pairs to show")
 	findDuplicatesCmd.Flags().String("model", "", "AI model to use (only with --method ai; default from config ai.model)")
+	findDuplicatesCmd.Flags().Bool("include-workflow", false, "Also consider orchestrator-managed workflow beads (metadata with gc.* keys); they are skipped by default")
 	rootCmd.AddCommand(findDuplicatesCmd)
 }
 
@@ -90,6 +97,7 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 	status, _ := cmd.Flags().GetString("status")
 	limit, _ := cmd.Flags().GetInt("limit")
 	model, _ := cmd.Flags().GetString("model")
+	includeWorkflow, _ := cmd.Flags().GetBool("include-workflow")
 	if model == "" {
 		model = config.DefaultAIModel()
 	}
@@ -130,14 +138,23 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 		issues = filtered
 	}
 
+	workflowSkipped := 0
+	if !includeWorkflow {
+		issues, workflowSkipped = partitionWorkflowIssues(issues)
+	}
+
 	if len(issues) < 2 {
 		if jsonOutput {
 			return outputJSON(map[string]interface{}{
-				"pairs": []interface{}{},
-				"count": 0,
+				"pairs":            []interface{}{},
+				"count":            0,
+				"workflow_skipped": workflowSkipped,
 			})
 		}
 		fmt.Println("Not enough issues to compare (need at least 2)")
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+		}
 		return nil
 	}
 
@@ -184,20 +201,28 @@ func runFindDuplicates(cmd *cobra.Command, _ []string) error {
 			}
 		}
 		return outputJSON(map[string]interface{}{
-			"pairs":     jsonPairs,
-			"count":     len(jsonPairs),
-			"method":    method,
-			"threshold": threshold,
+			"pairs":            jsonPairs,
+			"count":            len(jsonPairs),
+			"method":           method,
+			"threshold":        threshold,
+			"workflow_skipped": workflowSkipped,
+			"include_workflow": includeWorkflow,
 		})
 	}
 
 	if len(pairs) == 0 {
 		fmt.Printf("No similar issues found (threshold: %.0f%%)\n", threshold*100)
+		if workflowSkipped > 0 {
+			fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n", ui.RenderAccent("ℹ"), workflowSkipped)
+		}
 		return nil
 	}
 
 	fmt.Printf("%s Found %d potential duplicate pair(s) (threshold: %.0f%%):\n\n",
 		ui.RenderWarn("🔍"), len(pairs), threshold*100)
+	if workflowSkipped > 0 {
+		fmt.Printf("%s Skipped %d orchestrator-managed workflow bead(s) (use --include-workflow to consider them)\n\n", ui.RenderAccent("ℹ"), workflowSkipped)
+	}
 
 	for i, p := range pairs {
 		pct := p.Similarity * 100
