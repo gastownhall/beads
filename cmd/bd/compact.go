@@ -843,6 +843,8 @@ func runCompactDolt(ctx context.Context) error {
 	elapsed := time.Since(start)
 
 	if jsonOutput {
+		// Preserve compact's legacy size_before/size_after field names;
+		// addGCSizeJSON uses a different schema and is not interchangeable.
 		result := map[string]interface{}{
 			"success":    true,
 			"dolt_path":  doltPath,
