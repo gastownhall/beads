@@ -414,6 +414,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `HeartbeatIssueInTx`, `docs/multi-agent/federation.md`, and
   `bd reclaim --help`.
 
+### Security
+
+- **Raised the `golang.org/x/crypto`, `golang.org/x/mod` and
+  `google.golang.org/grpc` floors past six advisories that reached every
+  locally built `bd`.** `go.mod` declared `golang.org/x/crypto v0.54.0`
+  (CVE-2026-56854, source-address critical option not enforced for
+  non-public-key auth; CVE-2026-78662 and CVE-2026-56855, SSH channel
+  deadlock DoS), `golang.org/x/mod v0.37.0` (CVE-2026-56865 and
+  CVE-2026-56864, sumdb transparency-log verification bypass) and
+  `google.golang.org/grpc v1.83.0` (CVE-2026-84304, HTTP/2 DATA-frame heap
+  exhaustion). Those versions are baked into the binary `make build` and
+  `make install` produce, so a downstream image-build override cannot reach
+  them — only the module floor can. Now `golang.org/x/crypto v0.56.0`,
+  `golang.org/x/mod v0.40.0` and `google.golang.org/grpc v1.83.1`, each the
+  first version that clears every advisory filed against its predecessor;
+  `golang.org/x/net`, `golang.org/x/text`, `golang.org/x/tools` and
+  `golang.org/x/telemetry` follow as transitive upgrades. All upgrades, no
+  downgrades.
+
 ## [1.2.2] - 2026-08-15
 
 Recovery release, cut from the v1.1.2 tree on branch `release/v1.2.2` (not
