@@ -146,21 +146,16 @@ func GitHubIssueToBeads(gh *Issue, config *MappingConfig) *IssueConversion {
 		issue.UpdatedAt = *gh.UpdatedAt
 	}
 
-	// Carry the comment thread (when hydrated by the tracker) so the pull path
-	// persists it. IDs are stable GitHub comment IDs prefixed to avoid
-	// collisions with content-derived comment ids, which makes re-imports and
-	// update merges idempotent.
+	// IDs stay empty so create and update converge on the same
+	// content-derived comment id instead of forking across clones.
 	for _, c := range gh.HydratedComments {
 		comment := &types.Comment{
-			ID:     fmt.Sprintf("gh-%d", c.ID),
 			Author: commentAuthor(c),
 			Text:   c.Body,
 		}
 		if c.CreatedAt != nil {
 			comment.CreatedAt = *c.CreatedAt
 		} else if gh.CreatedAt != nil {
-			// Comments always postdate their issue; fall back to the issue's
-			// creation time rather than the zero time.
 			comment.CreatedAt = *gh.CreatedAt
 		}
 		issue.Comments = append(issue.Comments, comment)
@@ -172,8 +167,7 @@ func GitHubIssueToBeads(gh *Issue, config *MappingConfig) *IssueConversion {
 	}
 }
 
-// commentAuthor picks the best display name for a comment author: login for
-// users, a placeholder when the user object is absent (e.g. ghost accounts).
+// commentAuthor returns the login, or a placeholder for ghost accounts.
 func commentAuthor(c IssueComment) string {
 	if c.User != nil && c.User.Login != "" {
 		return c.User.Login
@@ -290,12 +284,9 @@ func PushContentHash(local *types.Issue, config *MappingConfig) string {
 
 // labelSetsEqual reports whether a and b contain the same labels, ignoring
 // order (GitHub does not preserve label order across a round-trip).
-// PushFieldDiff names the fields a push would change between the local issue
-// and the remote GitHub issue, using the same field semantics as
-// PushFieldsEqual. It powers dry-run disclosure: label entries report how many
-// remote-only labels a push would REMOVE (a destructive side effect of
-// GitHub's full-set replacement) and list them, so previews surface data loss
-// instead of hiding it behind a generic "would update".
+// PushFieldDiff names the fields a push would change, using the same field
+// semantics as PushFieldsEqual. Label entries disclose the removed names:
+// GitHub replaces the full label set, so removals are destructive.
 func PushFieldDiff(local *types.Issue, remote *Issue, config *MappingConfig) []string {
 	if local == nil || remote == nil {
 		return nil

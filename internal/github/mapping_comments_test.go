@@ -8,9 +8,8 @@ import (
 	"github.com/steveyegge/beads/internal/types"
 )
 
-// A hydrated comment thread must land in the beads issue with stable IDs so
-// repeated pulls do not duplicate comments (the pull-update merge relies on
-// content collapsing, and JSONL round-trips rely on stable identity).
+// A hydrated thread lands on the beads issue with empty IDs so create and
+// update converge on the same content-derived id; dedup keys on content.
 func TestGitHubIssueToBeads_ImportsHydratedComments(t *testing.T) {
 	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	c1 := created.Add(2 * time.Hour)
@@ -36,8 +35,8 @@ func TestGitHubIssueToBeads_ImportsHydratedComments(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("Comments = %d entries, want 2", len(got))
 	}
-	if got[0].ID != "gh-9001" {
-		t.Errorf("comment[0].ID = %q, want gh-9001 (stable external id)", got[0].ID)
+	if got[0].ID != "" {
+		t.Errorf("comment[0].ID = %q, want empty (content-derived at persist)", got[0].ID)
 	}
 	if got[0].Author != "alice" || got[0].Text != "hello" {
 		t.Errorf("comment[0] = %q/%q, want alice/hello", got[0].Author, got[0].Text)
