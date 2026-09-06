@@ -1351,7 +1351,7 @@ var rootCmd = &cobra.Command{
 			}
 		}
 
-		// be-bgc2x: the store-requiring path must honor the same explicit env
+		// be-git2o (GH#6255): the store-requiring path must honor the same explicit env
 		// targets selectedNoDBBeadsDir honors on the no-DB path, or `bd where`
 		// and `bd list` disagree about which workspace is selected. Resolve them
 		// BEFORE the ambient discovery block below: that block's
