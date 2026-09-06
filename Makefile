@@ -43,7 +43,7 @@ export PATH := $(GIT_WINDOWS_ROOT)/usr/bin;$(PATH)
 endif
 endif
 
-.PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
+.PHONY: all build doctor-build test test-s3-integration test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
 .PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 
@@ -167,6 +167,15 @@ doctor-build:
 test:
 	@echo "Running tests..."
 	@TEST_COVER=1 ./scripts/test.sh
+
+# Run MinIO-backed S3 tests. Replication uses a server-mode Dolt CLI with
+# s3:// support and skips when that prerequisite is unavailable; backup uses
+# the embedded driver. Set BEADS_MINIO_BIN=/path/to/minio when needed.
+# MinIO RELEASE.2025-09-06T17-38-46Z (Homebrew's build at the time of writing)
+# rejects Dolt's conditional manifest create (minio/minio#21550); use
+# RELEASE.2025-09-07T16-13-09Z or later.
+test-s3-integration:
+	@go test -tags="integration,$(BUILD_TAGS)" -count=1 -v -run '^TestS3Minio' ./internal/storage/dolt
 
 # Run the opt-in ICU regex path test suite (no skip list).
 # This is a local developer workflow for intentionally exercising the leftover
@@ -416,6 +425,7 @@ help:
 	@echo "  make build        - Build the bd binary"
 	@echo "  make doctor-build - Diagnose build env (GOFLAGS/CGO/CC) for the ICU build trap"
 	@echo "  make test         - Run all tests"
+	@echo "  make test-s3-integration - Run MinIO S3 tests (server replication requires an s3-capable dolt CLI and skips otherwise; set BEADS_MINIO_BIN if needed)"
 	@echo "  make test-icu-path - Run opt-in ICU regex path tests (maintainer-only)"
 	@echo "  make test-full-cgo - Deprecated alias for make test-icu-path"
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"

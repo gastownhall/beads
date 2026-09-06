@@ -3,6 +3,7 @@ package versioncontrolops
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -54,6 +55,49 @@ func DirToFileURL(dir string) (string, error) {
 		return "", fmt.Errorf("resolve absolute path: %w", err)
 	}
 	return "file://" + abs, nil
+}
+
+// backupSchemes are the URL schemes DOLT_BACKUP accepts as a destination or
+// restore source. Deliberately not doltremote.NativeSchemes: that list is the
+// clone/push vocabulary, excludes the http(s) backups bd already supports and
+// includes git+ schemes that are not backup targets.
+// az:// is a valid Dolt scheme (dbfactory/az.go) but is missing here and in
+// NativeSchemes alike; tracked in #6227.
+var backupSchemes = map[string]bool{
+	"http": true, "https": true, "file": true, "aws": true, "gs": true, "s3": true,
+}
+
+// IsBackupURL reports whether raw carries a scheme DOLT_BACKUP accepts. It
+// classifies by scheme token only (everything before the first "://",
+// lowercased) and does not validate the URL: Go 1.25.2+ url.Parse rejects
+// Dolt's bracketed aws://[dynamo_table:bucket]/db form (Dolt itself carries a
+// shim for it, earl.ParseRawWithAWSSupport), so parse-validity is the wrong
+// signal. URL validity stays Dolt's job.
+func IsBackupURL(raw string) bool {
+	sep := strings.Index(raw, "://")
+	if sep <= 0 {
+		return false
+	}
+	return backupSchemes[strings.ToLower(raw[:sep])]
+}
+
+// ResolveBackupSource turns a restore source into the URL passed to
+// DOLT_BACKUP('restore', ...). Recognized backup URLs pass through unchanged
+// and are never stat'ed; anything else must be an existing local directory
+// and is converted with DirToFileURL. The error strings are load-bearing:
+// the resolver and store tests assert them.
+func ResolveBackupSource(source string) (string, error) {
+	if IsBackupURL(source) {
+		return source, nil
+	}
+	info, err := os.Stat(source)
+	if err != nil {
+		return "", fmt.Errorf("backup source does not exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("backup source is not a directory: %s", source)
+	}
+	return DirToFileURL(source)
 }
 
 // ExtractAddressConflictName parses the conflicting remote name from a Dolt
