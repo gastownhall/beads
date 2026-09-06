@@ -250,12 +250,10 @@ jobs:
         run: |
           go test -tags gms_pure_go -count=1 -short -run '^Test(Help|CheckRemoteSafety|FormatDestroyToken|ShouldWireInitRemote|ExtractPrefix|IsNumericID|GetWorktreeGitDir|DriftItemStatuses|RunDriftChecks|IsServerProbablyRunning|CheckHooksDriftNotGitRepo|CheckServerDriftNoBeadsDir|CheckRemoteDriftNoBeadsDir)' ./cmd/bd
 
-  # Native Windows cmd/bd process regressions are not exercised by the Linux
-  # package lane, and main.yml's Windows job runs only on pushes to main
-  # (build/smoke, no go test). Keep the focused liveness and gateway credential
-  # boundaries required at PR time.
+  # Native Windows liveness behavior needs execution on Windows, beyond the
+  # build/smoke matrix. Init credential shells run in pr-preflight-platforms.
   test-windows-liveness:
-    name: Test (Windows) cmd/bd process regressions
+    name: Test (Windows) cmd/bd liveness regression
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
@@ -269,9 +267,6 @@ jobs:
 
       - name: Run Windows liveness regression test
         run: go test -tags gms_pure_go -count=1 -run '^TestIsServerProbablyRunning' ./cmd/bd
-
-      - name: Run init gateway credential fixture
-        run: go test -tags gms_pure_go -count=1 -run '^TestApplyInitGatewayCredential' ./cmd/bd
 
   # internal/doltversion carries Windows-specific branches (PATHEXT
   # extension completion in Resolve, ERROR_BAD_EXE_FORMAT detection, the
@@ -513,6 +508,10 @@ jobs:
       - name: Exercise generated Git hook timeout process boundary
         shell: bash
         run: go test '-tags=gms_pure_go' -count=1 -run '^TestGeneratedHookTimeoutProcessBoundary$' ./cmd/bd
+
+      - name: Exercise native init gateway credential shell
+        shell: bash
+        run: bash scripts/ci/test-init-gateway-credential.sh "$RUNNER_OS"
 
       - name: Check benchmark environment scrubbing
         if: matrix.os == 'windows-latest'

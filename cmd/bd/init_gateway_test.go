@@ -17,10 +17,10 @@ import (
 )
 
 const (
-	initGatewayHelperProcessEnv    = "BEADS_TEST_INIT_GATEWAY_HELPER"
-	initGatewayHelperExecutableEnv = "BEADS_TEST_INIT_GATEWAY_HELPER_EXE"
-	initGatewayHelperMarkerEnv     = "BEADS_TEST_INIT_GATEWAY_MARKER"
-	initGatewayHelperTargetEnv     = "BEADS_TEST_INIT_GATEWAY_HELPER_TARGET"
+	initGatewayHelperProcessEnv    = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER"
+	initGatewayHelperExecutableEnv = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER_EXE"
+	initGatewayHelperMarkerEnv     = "BEADS_TEST_INTERNAL_INIT_GATEWAY_MARKER"
+	initGatewayHelperTargetEnv     = "BEADS_TEST_INTERNAL_INIT_GATEWAY_HELPER_TARGET"
 	initGatewayHelperMalformedExit = 97
 )
 
@@ -81,6 +81,10 @@ func initGatewayCredentialCommand(t *testing.T, args ...string) string {
 	if err != nil {
 		t.Fatalf("resolve production credential shell %q: %v", shell, err)
 	}
+	shellPath, err = filepath.Abs(shellPath)
+	if err != nil {
+		t.Fatalf("resolve absolute credential shell path: %v", err)
+	}
 	shellDir := filepath.Dir(shellPath)
 	isolatedShellPath := shellPath
 	if runtime.GOOS != "windows" {
@@ -89,9 +93,11 @@ func initGatewayCredentialCommand(t *testing.T, args ...string) string {
 			t.Fatalf("create isolated credential shell directory: %v", err)
 		}
 		isolatedShellPath = filepath.Join(shellDir, shell)
-		// POSIX sh is commonly a relative symlink. Copying follows the
-		// symlink and keeps the isolated shell usable from its new directory.
-		installInitGatewayExecutable(t, shellPath, isolatedShellPath, false)
+		// Execute the original system shell: macOS AMFI may kill a copied sh.
+		// An absolute symlink keeps it usable from the restricted PATH.
+		if err := os.Symlink(shellPath, isolatedShellPath); err != nil {
+			t.Fatalf("link original credential shell: %v", err)
+		}
 	}
 
 	helperDir := filepath.Join(t.TempDir(), "credential helper with spaces")
@@ -114,14 +120,14 @@ func initGatewayCredentialCommand(t *testing.T, args ...string) string {
 		}
 		t.Setenv(initGatewayHelperTargetEnv, currentExecutable)
 	} else {
-		installInitGatewayExecutable(t, currentExecutable, helperPath, true)
+		installInitGatewayExecutable(t, currentExecutable, helperPath)
 	}
 	if !strings.Contains(helperPath, " ") {
 		t.Fatalf("credential helper path does not exercise quoting: %q", helperPath)
 	}
 
-	// Keep only the shell that production requires. Unix can safely isolate a
-	// copied sh. Windows keeps the resolved system cmd.exe in place to avoid a
+	// Keep only the shell that production requires. Unix links the original
+	// sh. Windows keeps the resolved system cmd.exe in place to avoid a
 	// suspicious copied-system-binary/copied-PE process chain.
 	t.Setenv("PATH", shellDir)
 	resolvedShell, err := exec.LookPath(shell)
@@ -164,17 +170,14 @@ func initGatewayCredentialCommand(t *testing.T, args ...string) string {
 	return executable + " -test.run=NoTestsMatchInitGatewayCredentialHelper -- " + strings.Join(args, " ")
 }
 
-func installInitGatewayExecutable(t *testing.T, source, destination string, tryHardLink bool) {
+func installInitGatewayExecutable(t *testing.T, source, destination string) {
 	t.Helper()
 
-	if tryHardLink {
-		if err := os.Link(source, destination); err == nil {
-			return
-		}
+	if err := os.Link(source, destination); err == nil {
+		return
 	}
-	// Copy when a link is unavailable. The running Windows test image skips the
-	// link attempt entirely because Windows would keep the temporary link locked
-	// through t.TempDir cleanup.
+	// This fallback copies only the Unix test image, never the system shell.
+	// Windows uses a trampoline to its original test image instead.
 	input, err := os.Open(source)
 	if err != nil {
 		t.Fatalf("open current test executable: %v", err)
@@ -316,8 +319,9 @@ func TestApplyInitGatewayCredentialFailsClosed(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected an error when the credential command fails")
 	}
-	if !strings.Contains(err.Error(), "exit status 23") {
-		t.Fatalf("credential failure = %v, want exact helper exit status 23", err)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 23 {
+		t.Fatalf("credential failure = %v, want helper exit code 23", err)
 	}
 	if *doltCfg != want {
 		t.Fatalf("config after failure = %+v, want untouched %+v", *doltCfg, want)
