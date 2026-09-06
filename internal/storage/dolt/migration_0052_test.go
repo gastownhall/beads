@@ -35,11 +35,13 @@ import (
 // Isolation, and why it is load-bearing here rather than incidental: this test
 // DROPs and re-CREATEs shared indexes (idx_issues_status_updated_at among
 // them) partway through. That is only safe because setupTestStore puts each
-// test on its own Dolt branch via testutil.StartTestBranch (dolt_test.go:173).
+// test on its own Dolt branch via testutil.StartTestBranch (dolt_test.go:174).
 // On the shared testSharedDB without that branch, a concurrent test in this
 // package would observe the table mid-round-trip with its indexes missing — a
-// package-wide hazard, not a local one. Do not add t.Parallel() here, and do
-// not "optimize" the per-test branch away.
+// package-wide hazard, not a local one. Do not "optimize" the per-test branch
+// away. (setupTestStore calls t.Parallel() itself at dolt_test.go:140, so this
+// test does run in parallel with the rest of the package — the branch, not
+// serialization, is what makes that safe.)
 //
 // Up/down SQL is run via the existing runMigrationSQL(path) helper
 // (pr4107_corruption_test.go), which reads the file from disk and executes
@@ -215,8 +217,11 @@ func countIssues(t *testing.T, ctx context.Context, store *DoltStore) int {
 // first N rows inserted rather than a spread across the table.
 func sampleIssueIDs(t *testing.T, ctx context.Context, store *DoltStore, n int) []string {
 	t.Helper()
+	// Scope to this fixture's own rows: the caller parses the trailing ordinal
+	// out of each id with strconv.Atoi, which hard-fails on any foreign id that
+	// happens to sort ahead of "date-idx-".
 	rows, err := store.db.QueryContext(ctx,
-		"SELECT id FROM issues ORDER BY id ASC LIMIT ?", n)
+		"SELECT id FROM issues WHERE id LIKE 'date-idx-%' ORDER BY id ASC LIMIT ?", n)
 	if err != nil {
 		t.Fatalf("sample ids: %v", err)
 	}
@@ -325,12 +330,19 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 	cases := []struct {
 		label string
 		query string
-		// wantIndex is the substring Dolt's EXPLAIN FORMAT=TREE emits for the
-		// index this shape must use, e.g.
-		// "IndexedTableAccess(issues) index: [issues.status,issues.updated_at]".
-		// Matching the column list rather than the index NAME is deliberate:
-		// the plan names columns, not the index identifier, so this is the
-		// strongest claim the output actually supports.
+		// wantIndex is the substring Dolt's EXPLAIN FORMAT=TREE emits on the
+		// IndexedTableAccess node for the index this shape must use.
+		//
+		// The "index: [" prefix is load-bearing, not decoration. The plan's
+		// Filter node echoes the query's own predicate, so a bare column list
+		// like "issues.defer_until" appears in the output of a FULL TABLE SCAN
+		// too — the exact regression this gate exists to catch would pass. Only
+		// the "index: [...]" wrapper appears solely on IndexedTableAccess.
+		//
+		// Matching the column list rather than the index NAME is still
+		// deliberate: the plan names columns, not the index identifier, so
+		// that is the strongest claim the output supports. The wrapper is what
+		// anchors it to the node that proves index use.
 		wantIndex string
 	}{
 		{
@@ -341,7 +353,7 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 			// suffix so no sort step.
 			label:     "bd stale (status IN + updated_at < cutoff)",
 			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE status IN ('open','in_progress') AND updated_at < '2020-01-01' AND (ephemeral = 0 OR ephemeral IS NULL) ORDER BY updated_at ASC LIMIT 50",
-			wantIndex: "issues.status,issues.updated_at",
+			wantIndex: "index: [issues.status,issues.updated_at]",
 		},
 		{
 			// Target: idx_issues_defer_until. Matches the
@@ -350,7 +362,7 @@ func TestMigration0052_ExplainCapture(t *testing.T) {
 			// NULL-majority leaf, then range scan on defer_until > now.
 			label:     "bd ready deferred-parents (defer_until IS NOT NULL AND defer_until > now)",
 			query:     "EXPLAIN FORMAT=TREE SELECT id FROM issues WHERE defer_until IS NOT NULL AND defer_until > UTC_TIMESTAMP()",
-			wantIndex: "issues.defer_until",
+			wantIndex: "index: [issues.defer_until]",
 		},
 	}
 
