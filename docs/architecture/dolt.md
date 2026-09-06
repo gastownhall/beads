@@ -48,10 +48,26 @@ Beads pins Dolt to **2.2.0**. CI installs that same pin with
 `scripts/ci/install-dolt.sh`, which records the per-version measurements and
 the criterion for raising it; raise the pin here and in that script together.
 
-This pin is about the standalone `dolt` CLI, which only server and
-proxied-server mode use. Embedded mode is unaffected either way: it links the
-Dolt engine into `bd` at the version in `go.mod`, currently the commit tagged
-v2.2.0 upstream, no matter which `dolt` CLI is on your PATH.
+This pin is about the standalone `dolt` CLI and the `dolthub/dolt-sql-server`
+test container, which only server and proxied-server mode use. Embedded mode
+links the Dolt engine into `bd` at the version in `go.mod`, currently the
+commit tagged v2.3.2 upstream (`f0feb352b1d3`), no matter which `dolt` CLI is
+on your PATH. The in-process engine and the CLI/container pin therefore
+differ by a minor version. That is deliberate: the embedded engine was
+measured directly, and dolt 2.3.0's release notes list no storage-format
+change. The CLI pin moves only on its own evidence.
+
+The embedded measurement, as observed counts with their bounds: at v2.3.2,
+0 observed failures in 300 same-engine trials (create a database and
+immediately hard-reset it on the engine that created it) and 0 in 300
+production-shaped trials (create through the store, reopen the engine, reset),
+one-sided 95% upper bound 0.99% each. At the previous embedded pin (v2.2.0
+plus 159 commits, adopted 2026-09-02): 37 hits in 100 same-engine trials with
+the signature described below, at a rate that varies with machine load, and
+0 in 100 production-shaped trials. Embedded `bd` never hard-resets inside the
+engine that created the database, which is why that pin did not show up in
+use. The probe and the numbers are in
+https://github.com/gastownhall/beads/issues/6329.
 
 Dolt 2.3.0 (released 2026-08-13) regressed `CALL DOLT_RESET('--hard')`. A few
 percent of freshly created databases come up with that procedure unusable —
@@ -70,8 +86,10 @@ Measured by creating fresh databases and immediately calling the procedure:
 | 2.3.0        | 3 / 60                                             |
 | 2.3.1        | 3 / 100                                            |
 
-Versions after 2.3.1 have not been measured. Raise the pin only once a newer
-release is confirmed clean by that same measurement — not because it is
+CLI versions after 2.3.1 have not been measured by this table. A 20-iteration
+server-mode run of `TestFreshBootstrapHealIncarnation` with the 2.3.2 CLI
+passed; that is a signal, not this measurement. Raise the pin only once a
+newer release is confirmed clean by that same measurement, not because it is
 newer.
 
 Pin rather than track `latest` for a second, independent reason: the upstream
@@ -243,7 +261,9 @@ bd prune --older-than 90d --ignore-references --force
 transient. For full Dolt storage reclaim after deleting many rows, follow
 with `bd flatten`.
 
-**On Dolt 2.3.x, storage-reclaim operations can fail partway.** `bd flatten`
+**On a Dolt 2.3.x `dolt sql-server` (server and proxied-server mode),
+storage-reclaim operations can fail partway; the embedded engine at v2.3.2
+did not reproduce the failure in the measurement above.** `bd flatten`
 and the Dolt-history compaction in `bd admin compact` both build a temporary
 branch and then hard-reset `main` onto it, and the merge-settle path behind
 `bd dolt pull` / `bd sync` falls back to a hard reset when it abandons a
