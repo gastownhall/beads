@@ -684,6 +684,7 @@ func scrubWorktreeRemovalGitEnv(env []string) []string {
 
 func scrubWorktreeRemovalGitEnvForOS(env []string, goos string) []string {
 	cleaned := scrubWorktreeGitRoutingEnvForOS(env, goos)
+	// ScrubRoutingForOS returns a fresh slice, so filtering it in place is safe.
 	result := cleaned[:0]
 	for _, entry := range cleaned {
 		key := normalizeWorktreeGitEnvKey(worktreeGitEnvKey(entry), goos)
@@ -704,10 +705,6 @@ func normalizeWorktreeGitEnvKey(key, goos string) string {
 		return strings.ToUpper(key)
 	}
 	return key
-}
-
-func isWorktreeGitRoutingEnvKeyForOS(key, goos string) bool {
-	return gitenv.IsRoutingKeyForOS(key, goos)
 }
 
 // clearWorktreeGitRoutingEnv establishes the command working directory as the

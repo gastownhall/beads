@@ -11,6 +11,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/beads/internal/gitenv"
 )
 
 func TestTruncateForBox(t *testing.T) {
@@ -101,7 +103,7 @@ func TestGitCmdInDirSuppressesHooksViaGitConfig(t *testing.T) {
 		if env == "GIT_OPTIONAL_LOCKS=1" {
 			hasOptionalLocks = true
 		}
-		if isWorktreeGitRoutingEnvKeyForOS(worktreeGitEnvKey(env), runtime.GOOS) && env != "GIT_TEMPLATE_DIR=" {
+		if gitenv.IsRoutingKeyForOS(worktreeGitEnvKey(env), runtime.GOOS) && env != "GIT_TEMPLATE_DIR=" {
 			t.Fatalf("cmd.Env retains Git routing state: %q", env)
 		}
 	}
@@ -119,7 +121,7 @@ func TestClearWorktreeGitRoutingEnvPreservesNonRoutingVariables(t *testing.T) {
 	// before exercising that boundary in-process.
 	for _, entry := range os.Environ() {
 		key := worktreeGitEnvKey(entry)
-		if isWorktreeGitRoutingEnvKeyForOS(key, runtime.GOOS) {
+		if gitenv.IsRoutingKeyForOS(key, runtime.GOOS) {
 			t.Setenv(key, os.Getenv(key))
 		}
 	}
