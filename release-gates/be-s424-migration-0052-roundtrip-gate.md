@@ -23,14 +23,18 @@ original up/down/up round-trip test over ~2K rows was a silent casualty of
 an earlier clean-auto-merge rebase (documented in the be-auu epic's
 extraction findings), discovered and flagged as follow-up by the be-1ubq
 reviewer during an unrelated schema-perf extraction. This bead recovers that
-coverage: adds `internal/storage/dolt/migration_0052_test.go` (352 lines)
+coverage: adds `internal/storage/dolt/migration_0052_test.go` (352 lines as
+gated; 439 at the current PR head — see the addendum)
 with `TestMigration0052_RoundTrip` (up→down→up over 2K rows) and
 `TestMigration0052_ExplainCapture` (EXPLAIN-verified query-plan assertions
 for two representative queries, confirming the D4v2 indexes are load-bearing,
 not just present). No production code changes — the underlying migration is
 already correct and live; this is pure test-restoration.
 
-Diff scope, confirmed via `git diff --name-only origin/main...HEAD` (1 file):
+Diff scope **as gated**, at source commit `961aa8cdd` — not the current PR
+head, which also carries this gate record and the review-response commits
+(addendum below has the current numbers). Confirmed via
+`git diff --name-only origin/main...961aa8cdd` (1 file):
 
 - `internal/storage/dolt/migration_0052_test.go` — new test file, +352/-0
 
@@ -70,7 +74,9 @@ matching the reviewer's own documented methodology:
 | `.../bd_ready_deferred-parents_(defer_until...)` | PASS | — |
 
 4/4 PASS on the first attempt, matching the reviewer's reported 4 PASS / 0
-FAIL / 0 SKIP exactly — no discrepancy requiring flake-triage re-runs
+FAIL / 0 SKIP exactly. (That 4/4 is the `BEADS_RUN_EXPLAIN_CAPTURE=1` count at
+the gated commit. On the **default** path `ExplainCapture` now skips, so the
+default count is 3 PASS / 1 SKIP — see the addendum.) — no discrepancy requiring flake-triage re-runs
 (contrast with be-uoat, where a first-pass mismatch against the reviewer's
 report triggered a 3x-rerun investigation; no such mismatch occurred here).
 
@@ -107,3 +113,60 @@ informational only, not a gating claim, self-contained documentation.
 repo-authority carve-out (gastownhall/beads is a repo we contribute to, not
 maintain), the deployer's responsibility ends at the open PR — merge belongs
 to upstream maintainers.
+
+---
+
+## Addendum — review response round 2 (2026-09-06, PR #5796)
+
+`bee` filed a second CHANGES_REQUESTED at `6e4c68019` on 2026-09-03. All items addressed.
+
+**Blocker — the second EXPLAIN assertion was vacuous.** Confirmed, and reproduced independently rather than taken on report. `wantIndex: "issues.defer_until"` matched the plan's **Filter** node, which echoes the query's own predicate, so it passed on a full table scan — precisely the regression the gate exists to catch.
+
+Mutation-tested against a real `dolthub/dolt-sql-server:2.2.0` container by dropping `idx_issues_defer_until` after the fixture seed:
+
+| Index | Assertion | Result |
+|---|---|---|
+| dropped | `issues.defer_until` (old, bare) | **PASS** — vacuous |
+| dropped | `index: [issues.defer_until]` (new) | **FAIL** — gate bites |
+| present | `index: [issues.defer_until]` (new) | PASS |
+
+The degraded plan under the drop:
+
+```
+Project
+ ├─ columns: [issues.id]
+ └─ Filter
+     ├─ ((NOT(issues.defer_until IS NULL)) AND (issues.defer_until > ...))
+     └─ Table
+         ├─ name: issues
+```
+
+`└─ Table` instead of `IndexedTableAccess`, and the Filter line still contains the bare `issues.defer_until` — which is exactly why the old form could not fail. Both assertions now carry the `index: [...]` wrapper, which appears only on an `IndexedTableAccess` node. The comment above the field records why the wrapper is load-bearing, so it is not "simplified" back out later.
+
+**Nits, all fixed:**
+
+- The header said "Do not add `t.Parallel()` here" while `setupTestStore` calls it itself (`dolt_test.go:140`) — every run prints `=== PAUSE`. The note now says what is actually load-bearing: the per-test Dolt branch, not serialization.
+- Citation corrected `dolt_test.go:173` → `:174` (the `testutil.StartTestBranch` line).
+- `sampleIssueIDs` now scopes its query with `WHERE id LIKE 'date-idx-%'`, so the caller's `strconv.Atoi` cannot hard-fail on a foreign id that sorts ahead of the fixture.
+- This gate record's own accounting, above.
+
+**Current accounting** at the PR head, against `origin/main` @ `c0d8da42d`:
+
+| File | Lines |
+|---|---|
+| `internal/storage/dolt/migration_0052_test.go` | 439 (427 at the reviewed head, +12 here) |
+| `release-gates/be-s424-migration-0052-roundtrip-gate.md` | gate record + this addendum |
+
+**Verification** (real container, `TESTCONTAINERS_RYUK_DISABLED=true`, ambient `BEADS_DOLT_SERVER_PORT` unset so the suite cannot silently target the shared city server):
+
+```
+BEADS_RUN_EXPLAIN_CAPTURE=1  go test ./internal/storage/dolt/ -run TestMigration0052 -count=1 -v
+  --- PASS: TestMigration0052_ExplainCapture (7.82s)   both subtests PASS
+  --- PASS: TestMigration0052_RoundTrip     (16.23s)
+
+default path (no env var)
+  --- SKIP: TestMigration0052_ExplainCapture
+  --- PASS: TestMigration0052_RoundTrip     (15.41s)
+```
+
+`gofmt -l internal/storage/dolt/`: clean. The gate verdict is unchanged — still test-only, still no production code, and the EXPLAIN assertions now actually hold the line they claimed to.
