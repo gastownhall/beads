@@ -26,14 +26,21 @@ if [ "$pushing_version_tag" -eq 1 ]; then
     repo_root="$(git rev-parse --show-toplevel)"
     # Skip on older checkouts without the consistency check; do not block.
     if [ -x "$repo_root/scripts/check-versions.sh" ]; then
-        echo "Release tag push detected — verifying version consistency..."
-        if ! (cd "$repo_root" && ./scripts/check-versions.sh); then
-            echo ""
-            echo "❌ Refusing to push release tag: versions are inconsistent." >&2
-            echo "   Fix with: scripts/update-versions.sh <version>" >&2
-            echo "   Override with --no-verify only if you know what you are doing." >&2
-            exit 1
-        fi
+        while read -r local_ref _local_sha _remote_ref _remote_sha; do
+            case "$local_ref" in
+                refs/tags/v[0-9]*)
+                    tag_version="${local_ref#refs/tags/v}"
+                    echo "Release tag v$tag_version push detected — verifying version consistency..."
+                    if ! (cd "$repo_root" && ./scripts/check-versions.sh --expect "$tag_version"); then
+                        echo ""
+                        echo "❌ Refusing to push release tag v$tag_version: versions are inconsistent." >&2
+                        echo "   Fix with: scripts/update-versions.sh <version>" >&2
+                        echo "   Override with --no-verify only if you know what you are doing." >&2
+                        exit 1
+                    fi
+                    ;;
+            esac
+        done <<< "$push_refs"
     fi
 fi
 
