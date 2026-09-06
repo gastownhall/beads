@@ -411,6 +411,67 @@ func TestIsPathInSafeBoundary(t *testing.T) {
 	}
 }
 
+func TestPathWithinNonRootVarLibHome(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		uid      string
+		home     string
+		expected bool
+	}{
+		{
+			name:     "service account home",
+			path:     "/var/lib/flow-estate/.beads",
+			uid:      "991",
+			home:     "/var/lib/flow-estate",
+			expected: true,
+		},
+		{
+			name:     "commit addressed release below service home",
+			path:     "/var/lib/flow-estate/releases/abc123/.beads",
+			uid:      "991",
+			home:     "/var/lib/flow-estate",
+			expected: true,
+		},
+		{
+			name:     "sibling service account",
+			path:     "/var/lib/other-service/.beads",
+			uid:      "991",
+			home:     "/var/lib/flow-estate",
+			expected: false,
+		},
+		{
+			name:     "root account",
+			path:     "/var/lib/flow-estate/.beads",
+			uid:      "0",
+			home:     "/var/lib/flow-estate",
+			expected: false,
+		},
+		{
+			name:     "var lib root is too broad",
+			path:     "/var/lib/flow-estate/.beads",
+			uid:      "991",
+			home:     "/var/lib",
+			expected: false,
+		},
+		{
+			name:     "ordinary home does not use service carveout",
+			path:     "/home/alice/.beads",
+			uid:      "1000",
+			home:     "/home/alice",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pathWithinNonRootVarLibHome(tt.path, tt.uid, tt.home); got != tt.expected {
+				t.Fatalf("pathWithinNonRootVarLibHome(%q, %q, %q) = %v, want %v", tt.path, tt.uid, tt.home, got, tt.expected)
+			}
+		})
+	}
+}
+
 // TestResolvedPathWithinRoot exercises the symlink-escape hardening helper added
 // for be-vc1 — the HIGH finding on the /Users/Shared carve-out. The helper must:
 //
