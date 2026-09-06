@@ -339,6 +339,59 @@ func TestRemoveBeadsProjectGitignoreSection_PreservesUserContent(t *testing.T) {
 	}
 }
 
+func TestRemoveBeadsProjectGitignoreSection_PreservesLineEndings(t *testing.T) {
+	section := func(eol string) string {
+		return doctor.ProjectGitignoreHeader + eol + strings.Join(doctor.ProjectGitignorePatterns, eol)
+	}
+	for _, tc := range []struct {
+		name, input, want string
+	}{
+		{
+			name:  "CRLF with final newline",
+			input: "node_modules/\r\n*.log\r\n\r\n" + section("\r\n") + "\r\n",
+			want:  "node_modules/\r\n*.log\r\n",
+		},
+		{
+			name:  "CRLF with unterminated managed tail",
+			input: "node_modules/\r\n*.log\r\n\r\n" + section("\r\n"),
+			want:  "node_modules/\r\n*.log\r\n",
+		},
+		{
+			name:  "LF with unterminated managed tail",
+			input: "node_modules/\n*.log\n\n" + section("\n"),
+			want:  "node_modules/\n*.log\n",
+		},
+		{
+			name:  "mixed endings and unterminated user suffix",
+			input: "node_modules/\r\n*.log\n\r\n" + section("\r\n") + "\r\nuser-tail/",
+			want:  "node_modules/\r\n*.log\nuser-tail/",
+		},
+		{
+			name:  "CRLF user suffix after managed section",
+			input: section("\r\n") + "\r\nuser-tail/\r\n",
+			want:  "user-tail/\r\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, ".gitignore")
+			if err := os.WriteFile(path, []byte(tc.input), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if changed, err := removeBeadsProjectGitignoreSection(dir); err != nil || !changed {
+				t.Fatalf("remove managed section: changed=%v err=%v", changed, err)
+			}
+			got, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(got) != tc.want {
+				t.Errorf("retained bytes = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestRemoveBeadsProjectGitignoreSection_DeletesWhenOnlyBeads verifies that a .gitignore beads
 // created solely for its own section is removed entirely, restoring true stealth.
 func TestRemoveBeadsProjectGitignoreSection_DeletesWhenOnlyBeads(t *testing.T) {
