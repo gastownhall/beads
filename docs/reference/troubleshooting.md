@@ -324,9 +324,12 @@ proceeds as soon as it answers. Notes:
   with `open-retry-budget: 6s`, the run took **5.7 s** -- one wait, not four,
   because the circuit breaker opens partway through the same command after five
   consecutive failed connections and rejects the rest. With the breaker
-  disabled the same run took **20.3 s**, and with the key unset, 208 ms. If you
-  would rather `bd doctor` answer immediately during an outage, set the key back
-  to `0`; there is no per-command override.
+  disabled the same run took **20.3 s** -- measured, not a bound, since each
+  open gets its own full budget. With the key unset: 208 ms.
+- To make one command answer immediately without editing the workspace
+  configuration, override the key through the environment for that invocation:
+  `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms). The same variable
+  set to a duration opts a single command *into* a wait.
 - The wait is visible. Entering the retry loop prints one line to stderr,
   `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
   (dolt.open-retry-budget)`, so a command that pauses is telling you why

@@ -320,8 +320,12 @@ What it does and does not cover:
   connections, which a doctor run reaches on its own -- and then rejected the
   remaining opens immediately. Starting from a clear breaker does not avoid
   this; the run trips it itself. With the breaker disabled outright the same
-  run waits four times, **20.3 s**, which is the ceiling the per-open cost
-  implies when nothing intervenes.
+  run waits four times and took **20.3 s** -- a measured figure, not a bound:
+  each open gets its own full budget, so four of them can cost four budgets
+  plus the run's other work.
+  To answer immediately during an outage without editing the workspace
+  configuration, override the key for that one command:
+  `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms).
 - **Only transient network-level failures are retried**, using the same
   `isRetryableError` classification the rest of the Dolt client uses. A
   misconfigured endpoint (an unknown host, and similar non-transient errors)
@@ -349,7 +353,11 @@ What it does and does not cover:
 
 The key is read with the same scope rules as `dolt.auto-start`: the merged
 configuration first, then the project's own `.beads/config.yaml`. Setting it to
-`0`, to an empty value, or to anything unparseable means off.
+`0`, to an empty value, or to anything unparseable means off. The merged
+configuration includes `bd`'s automatic environment binding, so
+`BD_DOLT_OPEN_RETRY_BUDGET` overrides the file for a single command in either
+direction -- `=0` to opt out of a wait, `=6s` to opt into one without writing
+the key.
 
 Typical use is a shared or remote Dolt server that restarts on a schedule, where
 a command issued during the restart window should wait a few seconds rather than
