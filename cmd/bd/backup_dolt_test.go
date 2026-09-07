@@ -202,7 +202,11 @@ func TestDirSize(t *testing.T) {
 }
 
 func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
-	t.Parallel()
+	// Isolate from the ambient checkout: a developer's repo (or a session
+	// that ran `bd backup init` on this rig) legitimately carries
+	// .beads/dolt-backup.json, which must not leak into this test.
+	// Serial on purpose: t.Chdir swaps the process-wide working directory.
+	t.Chdir(t.TempDir())
 	// When no .beads dir exists, should return configured=false
 	result := showDoltBackupStatusJSON()
 	configured, ok := result["configured"].(bool)
