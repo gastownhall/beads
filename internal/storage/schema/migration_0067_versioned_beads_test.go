@@ -151,7 +151,11 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	requireDoltColumnShape(t, dir, "issue_versions", "issue_id", "varchar(255)", "NO")
 	requireDoltDataType(t, dir, "issue_versions", "revision", "bigint", "NO")
 	requireDoltDataType(t, dir, "issue_versions", "epoch", "int", "NO")
-	requireDoltDataType(t, dir, "issue_versions", "durable_state", "json", "YES")
+	// 0067 creates durable_state as JSON, and 0068 step 7 retypes it to
+	// LONGBLOB (Dolt's JSON type renormalizes numbers, so it cannot hold the
+	// verbatim bytes a content token hashes -- see 0068's step 7 header). This
+	// test runs the whole bundle, so the shape it sees is the LONGBLOB one.
+	requireDoltDataType(t, dir, "issue_versions", "durable_state", "longblob", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_actor", "varchar(255)", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_agent", "varchar(255)", "YES")
 	requireDoltColumnShape(t, dir, "issue_versions", "change_message", "text", "YES")
