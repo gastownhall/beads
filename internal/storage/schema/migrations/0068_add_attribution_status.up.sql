@@ -10,14 +10,33 @@
 -- scripts/check-migration-hygiene.sh Check C only protects a migration
 -- already shipped on the base branch, and this one is still unmerged.
 --
--- attribution_status (R14, section 16.4): a NOT NULL column with no default
--- is safe here because issue_versions (created by 0067, a prior migration in
--- this same set) is guaranteed empty at this point in any replay -- Phase 2
--- is this table's first and only writer, and its dual-write code lands in
--- the same build as this column, so there is no pre-existing row for the
--- NOT NULL constraint to reject. See RecordVersionInTx /
--- attributionStatusForActor in internal/storage/issueops/version_history.go
--- for what populates it.
+-- attribution_status (section 16.4, vocabulary aligned to BDP's
+-- carried-attribution status, gastownhall/bdp#18, merged 2026-09-07): exactly
+-- two legal values, 'claimed' (the mutation arrived with an actor) and
+-- 'unknown' (the mutation path had none). 'imported' is provenance, not an
+-- assertion, and is NOT a status -- it returns as a separate provenance
+-- marker in the phase that first imports history, for which no writer
+-- exists yet. A NOT NULL column with no default is safe here because
+-- issue_versions (created by 0067, a prior migration in this same set) is
+-- guaranteed empty at this point in any replay -- Phase 2 is this table's
+-- first and only writer, and its dual-write code lands in the same build as
+-- this column, so there is no pre-existing row for the NOT NULL constraint
+-- to reject. See RecordVersionInTx / attributionStatusForActor in
+-- internal/storage/issueops/version_history.go for what populates it.
+--
+-- Ordinals are local, not wire addresses: issues.current_revision and
+-- issue_versions.revision are per-store ordinals (two disconnected clones can
+-- both hold revision 8 for the same issue). The only durable address of a
+-- version is version_id (steps 1-3 above, not yet landed). The HTTP API's
+-- RowVersion/Revision is a compare-and-set token, never an address, and Phase
+-- 3's read surface returns version_id, never the ordinal.
+--
+-- SINGLE WRITER ONLY until steps 1-3 land: with PRIMARY KEY (issue_id,
+-- revision), two disconnected writers that each mint the same ordinal
+-- collide on merge and TryAutoResolveMergeConflicts fails the pull for a
+-- table it does not know, so enabling versioned history is safe only with a
+-- single writer per store until the UUID version_id primary key lands and
+-- the ordinal is demoted to an index. Those steps follow as their own PR.
 --
 -- Guarded the same way 0067's ADD COLUMNs are (see that file's header for
 -- the full explanation of why: no MariaDB-only IF NOT EXISTS on Dolt 2.2.3's
