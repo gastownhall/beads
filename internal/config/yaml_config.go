@@ -1670,6 +1670,13 @@ const OpenRetryBudgetKey = "dolt.open-retry-budget"
 // string ("30s", "2m", "1m30s", "500ms") or a bare number read as seconds
 // ("30"). An empty value is a valid "off".
 //
+// The bare-seconds form is DIGITS ONLY. The fallback below appends "s", and
+// appending it to whatever time.ParseDuration rejected turns near-misses into
+// accepted values: "1m30" is neither a Go duration nor a number, but "1m30s"
+// parses, so an unrestricted fallback silently enabled 90 seconds for a value
+// the user got wrong. A fractional value carries its own unit ("30.5s"); the
+// rejection message names both accepted forms.
+//
 // Bare seconds are resolved by re-parsing value+"s" rather than by
 // multiplying a strconv.Atoi result by time.Second, because the multiplying
 // form accepts values it should reject: 18446744074 wraps to a positive 290ms
@@ -1682,16 +1689,38 @@ func ParseOpenRetryBudget(value string) (time.Duration, error) {
 	}
 	d, err := time.ParseDuration(value)
 	if err != nil {
+		notInGrammar := fmt.Errorf("%s must be a duration (e.g. \"30s\", \"2m\") or a number of seconds, got %q", OpenRetryBudgetKey, value)
+		if !isBareSeconds(value) {
+			return 0, notInGrammar
+		}
 		var secErr error
 		d, secErr = time.ParseDuration(value + "s")
 		if secErr != nil {
-			return 0, fmt.Errorf("%s must be a duration (e.g. \"30s\", \"2m\") or a number of seconds, got %q", OpenRetryBudgetKey, value)
+			return 0, notInGrammar
 		}
 	}
 	if d < 0 {
 		return 0, fmt.Errorf("%s must not be negative, got %q", OpenRetryBudgetKey, value)
 	}
 	return d, nil
+}
+
+// isBareSeconds reports whether value is the bare-seconds form of the
+// OpenRetryBudgetKey grammar: one or more decimal digits and nothing else.
+//
+// Deliberately stricter than isNumeric above, which also admits '.'. This
+// check gates a fallback that appends a unit, so every character it lets
+// through is a character time.ParseDuration gets to reinterpret afterwards.
+func isBareSeconds(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < '0' || value[i] > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ResolveOpenRetryBudget is the READER's half of the same grammar: it shares

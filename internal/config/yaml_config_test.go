@@ -1987,7 +1987,25 @@ func TestParseOpenRetryBudget(t *testing.T) {
 		{value: "banana", wantErr: true},
 		{value: "-5s", wantErr: true},
 		{value: "-1", wantErr: true},
+		{value: "-5", wantErr: true},
 		{value: "30 seconds", wantErr: true},
+		// Near-misses on the duration grammar. Each of these becomes a VALID
+		// duration once "s" is appended, so a bare-seconds fallback that
+		// appends the unit to anything time.ParseDuration rejected accepts
+		// them: "1m30" would enable 90 seconds, "1h0m0" an hour, ".5" half a
+		// second. None is a duration and none is a number, so all are
+		// rejected -- and the reader must agree, which the wantErr branch
+		// below checks through ResolveOpenRetryBudget.
+		{value: "1m30", wantErr: true},
+		{value: "1h0m0", wantErr: true},
+		{value: ".5", wantErr: true},
+		{value: "30.5", wantErr: true},
+		// Trailing junk that "s" cannot rescue: rejected before and after,
+		// present so the table pins the whole fallback and not only the
+		// cases the restriction changed.
+		{value: "30x", wantErr: true},
+		{value: "3 0", wantErr: true},
+		{value: "+30", wantErr: true},
 		// Overflow. Both of these are accepted by the tempting
 		// strconv.Atoi(value) * time.Second form: 18446744074 wraps to a
 		// positive 290ms and -9223372037 wraps to a positive 2562047h. Going
@@ -2033,5 +2051,20 @@ func TestValidateYamlConfigValue_OpenRetryBudget(t *testing.T) {
 	}
 	if err := validateYamlConfigValue(OpenRetryBudgetKey, "-5s"); err == nil {
 		t.Fatal("negative budget accepted by bd config set")
+	}
+	// The bare-seconds fallback must not rescue a malformed duration: "1m30s"
+	// is valid and "1m30" is not, and the difference has to survive the
+	// command that writes the key, not only the parser under it.
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "1m30s"); err != nil {
+		t.Fatalf("valid compound duration rejected: %v", err)
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "1m30"); err == nil {
+		t.Fatal("malformed duration \"1m30\" accepted by bd config set: the bare-seconds fallback appended a unit to it")
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "30x"); err == nil {
+		t.Fatal("\"30x\" accepted by bd config set")
+	}
+	if err := validateYamlConfigValue(OpenRetryBudgetKey, "30"); err != nil {
+		t.Fatalf("bare seconds rejected: %v", err)
 	}
 }
