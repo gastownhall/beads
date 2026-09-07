@@ -1139,6 +1139,25 @@ type IssueWithCounts struct {
 	DependentCount  int     `json:"dependent_count"`
 	CommentCount    int     `json:"comment_count"`
 	Parent          *string `json:"parent,omitempty"` // Computed parent from parent-child dep (bd-ym8c)
+
+	// CommentsOmitted is the list row's half of the ga-clgh contract
+	// IssueDetails.CommentsOmitted states for the detail view, and it is set
+	// under exactly the same rule: true only when CommentCount is nonzero AND
+	// the embedded Issue.Comments was left nil, never alongside a populated
+	// slice and never on a zero count.
+	//
+	// A LIST ROW NEEDS IT MORE THAN A DETAIL VIEW DOES (be-73x). A caller
+	// grepping a whole listing for a phrase that lives in a comment gets a
+	// plausible NON-ZERO answer with the matching rows missing — the shape
+	// that invites no suspicion at all, unlike an empty result. Without this
+	// marker nothing in the page says the text was never in scope.
+	//
+	// The comment BODIES ride on the embedded Issue.Comments, which already
+	// carries the `comments` key for export/import; this type adds only the
+	// marker, so a row that was hydrated and a row that was not are told
+	// apart by a field rather than by the caller remembering what it asked
+	// for.
+	CommentsOmitted *bool `json:"comments_omitted,omitempty"`
 }
 
 // IssueDetails extends Issue with labels, dependencies, dependents, and comments.

@@ -91,6 +91,7 @@ func gatherListInput(cmd *cobra.Command) (listInput, error) {
 	in.NoLabels, _ = cmd.Flags().GetBool("no-labels")
 
 	in.Brief, _ = cmd.Flags().GetBool("brief")
+	in.IncludeComments, _ = cmd.Flags().GetBool("include-comments")
 	in.SkipLabels, _ = cmd.Flags().GetBool("skip-labels")
 	if in.SkipLabels {
 		conflicts := skipLabelsConflicts(in.Labels, in.LabelsAny, in.LabelPattern, in.LabelRegex, in.ExcludeLabels, in.NoLabels)
