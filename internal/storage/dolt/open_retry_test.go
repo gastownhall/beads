@@ -381,6 +381,26 @@ func TestOpenRetryExhaustionIsBounded(t *testing.T) {
 	}
 }
 
+// A budget smaller than the first probe's own timeout buys nothing and must
+// cost nothing: the fail-fast probe keeps its full 500ms and no retry starts.
+// The budget-on tests above use 2s and 5s, both above the probe timeout, so
+// without this case a clamp of the FIRST probe to a sub-500ms budget would
+// go unnoticed.
+func TestOpenRetryTinyBudgetKeepsTheFirstProbeIntact(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "1")
+	log := stubOpenRetryDials(t, errStubRefused, nil)
+	cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "1ns"}))
+
+	if _, err := newServerMode(context.Background(), cfg); err == nil {
+		t.Fatal("expected the fail-fast unreachable error")
+	}
+	legacy, ctxDials := log.counts()
+	if legacy != 1 || ctxDials != 0 {
+		t.Fatalf("legacy=%d ctx=%d, want 1 and 0: a 1ns budget must degrade to exactly the fail-fast open", legacy, ctxDials)
+	}
+	assertFirstProbeTimeout(t, log)
+}
+
 // A non-retryable failure is not retried at all: the budget buys time for a
 // restarting server, not for a misconfigured one.
 func TestOpenRetryNonRetryableFailsImmediately(t *testing.T) {
@@ -543,6 +563,7 @@ func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
 func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 	const serverMetadata = `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`
 	const embeddedMetadata = `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test_open_retry"}`
+	const proxiedMetadata = `{"backend":"dolt","dolt_mode":"proxied-server","dolt_database":"test_open_retry"}`
 
 	// The two constructor shapes the routed store-factory branches use.
 	newFromConfig := func(ctx context.Context, beadsDir string) {
@@ -556,10 +577,14 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 	}
 
 	for _, tc := range []struct {
-		name      string
-		open      func(context.Context, string)
-		metadata  string
-		wantRetry bool
+		name     string
+		open     func(context.Context, string)
+		metadata string
+		// sharedServer turns on the shared-server env for this row, the one
+		// setting that makes IsDoltServerMode answer true regardless of the
+		// metadata mode.
+		sharedServer bool
+		wantRetry    bool
 	}{
 		{
 			name:      "routed create, external workspace",
@@ -585,6 +610,26 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 			metadata: embeddedMetadata,
 		},
 		{
+			// A proxied workspace is its own backend: under shared-server
+			// mode the storage-mode reader still says "server", and the
+			// derivation must not turn that into a retry against the shared
+			// endpoint the proxy never dials.
+			name:         "diagnostic caller, proxied workspace under shared-server",
+			open:         newDiagnostic,
+			metadata:     proxiedMetadata,
+			sharedServer: true,
+		},
+		{
+			// Positive control for the row above: the same env with a plain
+			// server workspace keeps the budget, so the proxied row's zero is
+			// about the mode and not about the env.
+			name:         "diagnostic caller, server workspace under shared-server",
+			open:         newDiagnostic,
+			metadata:     serverMetadata,
+			sharedServer: true,
+			wantRetry:    true,
+		},
+		{
 			name:     "library caller, embedded workspace",
 			open:     newFromConfig,
 			metadata: embeddedMetadata,
@@ -603,6 +648,9 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 				"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
 			} {
 				t.Setenv(key, "")
+			}
+			if tc.sharedServer {
+				t.Setenv("BEADS_DOLT_SHARED_SERVER", "1")
 			}
 
 			// The retry, if one happens, succeeds immediately: this test asks

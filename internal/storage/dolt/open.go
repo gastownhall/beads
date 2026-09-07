@@ -419,10 +419,18 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 	// s.serverMode is set unconditionally by newServerMode, and no caller of
 	// these constructors reads the config back, so the assignment changes
 	// nothing else about the open.
-	if !cfg.ServerMode {
+	//
+	// A proxied-server workspace is its own backend and never a candidate:
+	// the constructors leave cfg.ProxiedServer unset, so the metadata mode is
+	// asked directly. Without that, a proxied workspace under shared-server
+	// mode would read as server-backed (IsDoltServerMode answers true on the
+	// shared-server env alone) and a diagnostic open would retry the shared
+	// endpoint the proxy never dials.
+	proxied := cfg.ProxiedServer || fileCfg.IsDoltProxiedServerMode()
+	if !cfg.ServerMode && !proxied {
 		cfg.ServerMode = fileCfg.IsDoltServerMode()
 	}
-	if !cfg.ServerMode && !cfg.ProxiedServer && doltserver.IsSharedServerMode() {
+	if !cfg.ServerMode && !proxied && doltserver.IsSharedServerMode() {
 		cfg.ServerMode = true
 	}
 
