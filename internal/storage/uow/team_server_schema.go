@@ -2,11 +2,29 @@ package uow
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 
 	"github.com/steveyegge/beads/internal/storage/issueops"
 	"github.com/steveyegge/beads/internal/storage/schema"
 )
+
+func checkTeamServerSchemaAndIdentity(ctx context.Context, conn schema.DBConn, database, expectedProjectID string) error {
+	if expectedProjectID != "" {
+		var current int
+		var projectID sql.NullString
+		err := conn.QueryRowContext(ctx,
+			"SELECT (SELECT COALESCE(MAX(version), 0) FROM schema_migrations), "+
+				"(SELECT value FROM metadata WHERE `key` = '_project_id' LIMIT 1)").Scan(&current, &projectID)
+		if err == nil && current == schema.LatestVersion() && projectID.Valid && projectID.String == expectedProjectID {
+			return nil
+		}
+	}
+	if err := checkTeamServerSchema(ctx, conn, database); err != nil {
+		return err
+	}
+	return checkTeamServerIdentity(ctx, conn, database, expectedProjectID)
+}
 
 // checkTeamServerSchema verifies that a bts-managed database's schema version
 // matches this binary's. The connection must already have the database selected.
