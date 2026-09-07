@@ -83,8 +83,12 @@ func (r *labelSQLRepositoryImpl) Insert(ctx context.Context, issueID, label, act
 		return err
 	}
 	// A label is part of the bead snapshot; the idempotent no-op path above
-	// returns without writing and journals nothing.
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	// returns without writing, journals nothing and mints nothing. An inserted
+	// row is a durable-state change and is versioned, as AddLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, actor string, opts domain.LabelOpts) error {
@@ -118,7 +122,12 @@ func (r *labelSQLRepositoryImpl) Delete(ctx context.Context, issueID, label, act
 	}, domain.RecordEventOpts{UseWispsTable: opts.UseWispsTable}); err != nil {
 		return err
 	}
-	return issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor)
+	// The rows == 0 return above keeps this actually-deleted-only, so the
+	// version row is minted for a real change, as RemoveLabelInTx does.
+	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, issueID, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, issueID, actor)
 }
 
 func (r *labelSQLRepositoryImpl) List(ctx context.Context, issueID string, opts domain.LabelOpts) ([]string, error) {

@@ -138,6 +138,11 @@ func wakeExpiredDefersInTable(ctx context.Context, tx DBTX, table, eventsTable s
 		if err := RecordEventInTx(ctx, tx, EventUpdate, id, DeferWakeActor); err != nil {
 			return woken, err
 		}
+		// The status flip is durable state, so the woken bead is versioned
+		// under the same system actor the event carries.
+		if err := RecordVersionInTx(ctx, tx, id, DeferWakeActor); err != nil {
+			return woken, err
+		}
 		woken = append(woken, id)
 	}
 	return woken, nil

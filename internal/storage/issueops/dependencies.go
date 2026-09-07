@@ -170,11 +170,21 @@ type DepTargetPrecheck struct {
 // same-type re-add or a silent structural add. Callers that stage tables for a
 // Dolt commit stage the events table only when an event row exists, so a
 // no-event add cannot sweep unrelated pending rows into the commit (GH#2455).
+//
+// A genuinely new edge is a change to the referencing (source) issue's durable
+// state, so it mints one version row for the source — on EVERY leg that reaches
+// this helper (the dependency editor, the legacy store verbs, batch apply),
+// whether or not an audit event was requested. The idempotent same-type re-add
+// refreshes metadata and mints nothing.
 func AddDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts) (bool, error) {
-	return addDependencyInTx(ctx, tx, dep, actor, opts, nil)
+	return addDependencyInTx(ctx, tx, dep, actor, opts, nil, true)
 }
 
-func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+// addDependencyInTx is the body of AddDependencyInTx. mintVersion controls
+// whether a new edge mints the source's version row here: the exported entry
+// point always does, while a parent patch (applyParentPatch) rewires several
+// edges for one caller-visible mutation and mints once after the last of them.
+func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, actor string, opts AddDependencyOpts, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
 	if strings.HasPrefix(dep.DependsOnID, "external:") && dep.Type == types.DepParentChild {
 		return false, fmt.Errorf("external capability dependencies cannot use parent-child edges")
 	}
@@ -351,15 +361,36 @@ func addDependencyInTx(ctx context.Context, tx *sql.Tx, dep *types.Dependency, a
 		}
 		mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+			return eventWritten, err
+		}
+		return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
 	}
 	if err := MarkIsBlockedInTx(ctx, tx, affectedIssues, affectedWisps); err != nil {
 		return false, fmt.Errorf("mark is_blocked after add dependency %s -> %s: %w", dep.IssueID, dep.DependsOnID, err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// The journal is never gated on opts.EmitEvent: a structurally-wired edge is
-	// as real to a replaying consumer as one added by an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	// as real to a replaying consumer as one added by an explicit dep verb —
+	// and neither is the version row minted beside it.
+	if err := RecordDepEventInTx(ctx, tx, EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return eventWritten, err
+	}
+	return eventWritten, mintDependencyVersion(ctx, tx, dep.IssueID, actor, mintVersion)
+}
+
+// mintDependencyVersion versions the referencing (source) issue of an edge that
+// was actually inserted or deleted: the version-history seam for every
+// dependency write path, reached from addDependencyInTx and
+// removeDependencyInTx only past their row write — never from the idempotent
+// same-type re-add or the absent-edge return, which mint nothing. mint false
+// defers to a caller that mints once for a multi-edge mutation. A wisp source
+// is excluded by the seam itself.
+func mintDependencyVersion(ctx context.Context, tx DBTX, issueID, actor string, mint bool) error {
+	if !mint {
+		return nil
+	}
+	return RecordVersionInTx(ctx, tx, issueID, actor)
 }
 
 // RemoveSourceFromAffected drops the dep source from the affected-ID sets
@@ -922,10 +953,15 @@ func checkRenameTargetCollision(ctx context.Context, tx DBTX, table, typedCol, n
 //
 //nolint:gosec // G201: depTable from WispTableRouting (hardcoded constants)
 func RemoveDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool) (bool, error) {
-	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil)
+	return removeDependencyInTx(ctx, tx, issueID, dependsOnID, actor, emitEvent, nil, true)
 }
 
-func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult) (bool, error) {
+// removeDependencyInTx is the body of RemoveDependencyInTx. A deleted edge is a
+// change to the source issue's durable state and mints one version row for it,
+// whether or not an audit event was requested; an absent edge returns before
+// any write and mints nothing. mintVersion is addDependencyInTx's, for the
+// same reason.
+func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID, actor string, emitEvent bool, recomputeResult *RecomputeIsBlockedResult, mintVersion bool) (bool, error) {
 	isWisp := IsActiveWispInTx(ctx, tx, issueID)
 	_, _, eventTable, depTable := WispTableRouting(isWisp)
 
@@ -979,8 +1015,12 @@ func removeDependencyInTx(ctx context.Context, tx *sql.Tx, issueID, dependsOnID,
 	mergeRecomputeIsBlockedResult(recomputeResult, recomputed)
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on emitEvent — a structural removal is as real to a replaying
-	// consumer as one from an explicit dep verb.
-	return eventWritten, RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor)
+	// consumer as one from an explicit dep verb. The same holds for the
+	// version row minted beside it.
+	if err := RecordDepEventInTx(ctx, tx, EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
+		return eventWritten, err
+	}
+	return eventWritten, mintDependencyVersion(ctx, tx, issueID, actor, mintVersion)
 }
 
 func mergeRecomputeIsBlockedResult(target *RecomputeIsBlockedResult, source RecomputeIsBlockedResult) {
