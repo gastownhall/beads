@@ -323,9 +323,12 @@ What it does and does not cover:
   run waits four times and took **20.3 s** -- a measured figure, not a bound:
   each open gets its own full budget, so four of them can cost four budgets
   plus the run's other work.
-  To answer immediately during an outage without editing the workspace
-  configuration, override the key for that one command:
-  `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms).
+  To disable the additional open-probe retry waits for one command without
+  editing the workspace configuration, override the key through the
+  environment: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
+  against a dead port). Only the retry waits go: each open still makes its
+  first 500 ms probe, and an endpoint that accepts TCP while SQL is
+  unresponsive still costs its SQL-level timeouts.
 - **Only transient network-level failures are retried**, using the same
   `isRetryableError` classification the rest of the Dolt client uses. A
   misconfigured endpoint (an unknown host, and similar non-transient errors)
@@ -347,9 +350,10 @@ What it does and does not cover:
 - **A wait announces itself.** When the loop is entered, `bd` prints one line
   to stderr naming the address and the budget:
   `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
-  (dolt.open-retry-budget)`. One line per open, printed only when a retry is
-  actually going to happen, so a budget-long wait is legible rather than
-  looking like a hang.
+  (dolt.open-retry-budget)`. One line per open, printed once a retry wait is
+  scheduled -- a cancellation during that wait can still end the open before
+  the retry dials -- so a budget-long wait is legible rather than looking like
+  a hang.
 
 The key is read with the same scope rules as `dolt.auto-start`: the merged
 configuration first, then the project's own `.beads/config.yaml`. Setting it to

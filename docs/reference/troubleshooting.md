@@ -326,10 +326,12 @@ proceeds as soon as it answers. Notes:
   consecutive failed connections and rejects the rest. With the breaker
   disabled the same run took **20.3 s** -- measured, not a bound, since each
   open gets its own full budget. With the key unset: 208 ms.
-- To make one command answer immediately without editing the workspace
-  configuration, override the key through the environment for that invocation:
-  `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms). The same variable
-  set to a duration opts a single command *into* a wait.
+- To disable the additional open-probe retry waits for one command without
+  editing the workspace configuration, override the key through the environment
+  for that invocation: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
+  against a dead port). Only the retry waits go: the first 500 ms probe per open
+  and any SQL-level timeouts remain. The same variable set to a duration opts a
+  single command *into* a wait.
 - The wait is visible. Entering the retry loop prints one line to stderr,
   `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
   (dolt.open-retry-budget)`, so a command that pauses is telling you why
