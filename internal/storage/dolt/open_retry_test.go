@@ -31,15 +31,30 @@ import (
 // context-aware dial ran zero times.
 type openRetryDialLog struct {
 	mu       sync.Mutex
+	start    time.Time
 	legacy   int
 	ctxDials int
-	timeouts []time.Duration
+	retries  []retryDial
+}
+
+// retryDial records WHEN a retry dial started and WITH WHICH per-attempt
+// timeout. Both are needed to check that the loop never plans to dial past its
+// deadline: offset+timeout must stay inside the budget.
+type retryDial struct {
+	offset  time.Duration
+	timeout time.Duration
 }
 
 func (l *openRetryDialLog) counts() (int, int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.legacy, l.ctxDials
+}
+
+func (l *openRetryDialLog) dials() []retryDial {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]retryDial(nil), l.retries...)
 }
 
 var errStubRefused = errors.New("dial tcp 127.0.0.1:1: connect: connection refused")
@@ -50,7 +65,7 @@ var errStubRefused = errors.New("dial tcp 127.0.0.1:1: connect: connection refus
 // last one, so a test can say "always fails" with a single entry.
 func stubOpenRetryDials(t *testing.T, legacyErr error, ctxResults []error) *openRetryDialLog {
 	t.Helper()
-	log := &openRetryDialLog{}
+	log := &openRetryDialLog{start: time.Now()}
 
 	origLegacy := openProbeDial
 	origCtx := openProbeDialContext
@@ -72,7 +87,7 @@ func stubOpenRetryDials(t *testing.T, legacyErr error, ctxResults []error) *open
 		log.mu.Lock()
 		log.ctxDials++
 		idx := log.ctxDials - 1
-		log.timeouts = append(log.timeouts, timeout)
+		log.retries = append(log.retries, retryDial{offset: time.Since(log.start), timeout: timeout})
 		log.mu.Unlock()
 		if len(ctxResults) == 0 {
 			return nil, legacyErr
@@ -186,7 +201,12 @@ func externalOpenConfig(beadsDir string) *Config {
 // must do so for a cancelled and a short-deadline context too, because
 // net.DialTimeout cannot see either and the default path must stay that way.
 func TestOpenRetryOffMakesOneLegacyDialAndKeepsTheError(t *testing.T) {
-	baseline := ""
+	// Written out in full rather than captured from the first run: a baseline
+	// learned from the code under test moves with it, so a change that
+	// rewrote the cause or the hint consistently would still pass.
+	wantErr := "Dolt server unreachable at 127.0.0.1:1: " + errStubRefused.Error() +
+		"\n\nThe Dolt server may not be running. Try:\n  bd dolt start"
+
 	for _, tc := range []struct {
 		name string
 		ctx  func(t *testing.T) context.Context
@@ -216,13 +236,11 @@ func TestOpenRetryOffMakesOneLegacyDialAndKeepsTheError(t *testing.T) {
 			if legacy != 1 || ctxDials != 0 {
 				t.Fatalf("dials legacy=%d ctx=%d, want 1 and 0: the default path must not retry and must not become context-aware", legacy, ctxDials)
 			}
-			if !strings.Contains(err.Error(), "Dolt server unreachable at 127.0.0.1:1") {
-				t.Fatalf("error text changed on the default path: %v", err)
+			if err.Error() != wantErr {
+				t.Fatalf("default-path error changed:\n got: %q\nwant: %q", err.Error(), wantErr)
 			}
-			if baseline == "" {
-				baseline = err.Error()
-			} else if err.Error() != baseline {
-				t.Fatalf("default-path error differs by context:\n got: %s\nwant: %s", err.Error(), baseline)
+			if !errors.Is(err, errStubRefused) {
+				t.Fatalf("default-path error stopped wrapping the dial cause: %v", err)
 			}
 		})
 	}
@@ -270,12 +288,16 @@ func TestOpenRetryOnSucceedsOnLaterAttempt(t *testing.T) {
 	}
 }
 
-// Exhaustion is bounded by the budget. The ceiling is the budget plus one
-// probe timeout, because the first probe is deliberately outside the budget.
+// Exhaustion is bounded by the budget, and every retry is planned to finish
+// inside it.
+//
+// The budget must be large enough to buy real retries: the shared backoff's
+// first delay is 250-750ms, so a sub-second budget breaks out of the loop
+// before dialling anything and would prove only that the loop terminates.
 func TestOpenRetryExhaustionIsBounded(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "1")
-	const budget = 300 * time.Millisecond
-	stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+	const budget = 2 * time.Second
+	log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
 	cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: budget.String()}))
 
 	start := time.Now()
@@ -285,9 +307,22 @@ func TestOpenRetryExhaustionIsBounded(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the open to fail once the budget was spent")
 	}
-	// budget + the 500ms fail-fast probe timeout + slack for the MySQL dial
-	// the open still attempts after the probe branch returns.
-	if ceiling := budget + 500*time.Millisecond + 2*time.Second; elapsed > ceiling {
+	dials := log.dials()
+	if len(dials) < 2 {
+		t.Fatalf("retry dials = %d, want at least 2: the budget did not buy real retries, so nothing about the loop was exercised", len(dials))
+	}
+	for i, d := range dials {
+		if d.timeout <= 0 || d.timeout > 500*time.Millisecond {
+			t.Fatalf("retry %d dial timeout = %v, want a positive value no larger than the 500ms probe timeout", i+1, d.timeout)
+		}
+		// The clamp's contract: a retry never PLANS to run past the deadline.
+		if d.offset+d.timeout > budget+50*time.Millisecond {
+			t.Fatalf("retry %d starts at %v with a %v timeout, which reaches past the %v budget: the remaining-budget clamp is not applied", i+1, d.offset, d.timeout, budget)
+		}
+	}
+	// budget + the 500ms fail-fast probe timeout, which is deliberately
+	// outside the budget, + slack for the MySQL dial the open still attempts.
+	if ceiling := budget + 500*time.Millisecond + time.Second; elapsed > ceiling {
 		t.Fatalf("exhaustion took %v, over the %v ceiling: the loop is not bounded by the budget", elapsed, ceiling)
 	}
 	if !strings.Contains(err.Error(), "still unreachable after") {
@@ -350,11 +385,16 @@ func TestOpenRetryNotEngagedForManagedLocalhostOpen(t *testing.T) {
 	}
 }
 
-// Embedded mode has no sql-server to dial and never reaches newServerMode.
-// Its structural guarantee is that auto-start resolution refuses to treat it
-// as a server open at all; assert the mode itself so a future refactor that
-// routed embedded through the server path would have to face this test.
+// Embedded mode has no sql-server to dial and never reaches newServerMode: it
+// is opened by a different backend entirely. The reachable in-package
+// guarantee is that an embedded project never resolves into a server open, so
+// no probe -- and therefore no retry -- can happen for it. Both dial seams are
+// stubbed so a future refactor that routed embedded through the server path
+// would light this up rather than silently start retrying.
 func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
+	t.Setenv("BEADS_TEST_MODE", "1")
+	log := stubOpenRetryDials(t, errStubRefused, nil)
+
 	beadsDir := writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "30s"})
 	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
 		[]byte(`{"backend":"dolt","dolt_mode":"embedded"}`), 0o644); err != nil {
@@ -363,12 +403,19 @@ func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
 	if mode := doltserver.ResolveServerMode(beadsDir); mode != ServerModeEmbedded {
 		t.Fatalf("ResolveServerMode = %v, want embedded: the fixture no longer describes an embedded project", mode)
 	}
+	// A positive control on the budget itself: the key IS set here, so a zero
+	// retry count below is about the mode, not about an unset budget.
+	if got := openRetryBudget(beadsDir); got != 30*time.Second {
+		t.Fatalf("openRetryBudget = %v, want 30s: the fixture would prove nothing", got)
+	}
+
 	cfg := &Config{Path: filepath.Join(beadsDir, "dolt"), BeadsDir: beadsDir}
 	ApplyCLIAutoStart(beadsDir, cfg)
-	// An embedded project is opened by the embedded backend, not by
-	// newServerMode; nothing here dials, so nothing here can retry.
 	if serverOpenCanAutoStart(cfg) {
 		t.Fatal("embedded project resolved as a bd-managed server open")
+	}
+	if legacy, ctxDials := log.counts(); legacy != 0 || ctxDials != 0 {
+		t.Fatalf("dials legacy=%d ctx=%d, want 0 and 0: resolving an embedded project must not probe a server at all", legacy, ctxDials)
 	}
 }
 
@@ -383,18 +430,25 @@ func TestOpenRetryBreakerAccounting(t *testing.T) {
 		name         string
 		budget       string
 		cancelAfter  time.Duration
+		wantRetries  bool
 		wantFailures int
 	}{
-		{"budget off", "", 0, 1},
-		{"budget on, exhausted", "200ms", 0, 1},
-		{"budget on, caller cancels", "30s", 150 * time.Millisecond, 0},
+		{name: "budget off", wantFailures: 1},
+		// 3s buys several dials past the 250-750ms first backoff, so this row
+		// really distinguishes "one failure per open" from "one per attempt".
+		{name: "budget on, exhausted", budget: "3s", wantRetries: true, wantFailures: 1},
+		// 4s, not less: the shared backoff's first two delays can sum to
+		// ~2.44s in the worst case, and a row that cancels before the
+		// SECOND dial cannot distinguish per-open from per-attempt
+		// accounting either.
+		{name: "budget on, caller cancels", budget: "30s", cancelAfter: 4 * time.Second, wantRetries: true, wantFailures: 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// The breaker is nil under BEADS_TEST_MODE, so this test has to
 			// run without it while keeping its own isolated state dir.
 			t.Setenv("BEADS_TEST_MODE", "")
 			t.Setenv(testCircuitBreakerDirEnv, filepath.Join(t.TempDir(), "circuit"))
-			stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+			log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
 
 			kv := map[string]string{}
 			if tc.budget != "" {
@@ -411,6 +465,14 @@ func TestOpenRetryBreakerAccounting(t *testing.T) {
 			}
 			if _, err := newServerMode(ctx, cfg); err == nil {
 				t.Fatal("expected the open to fail")
+			}
+
+			_, ctxDials := log.counts()
+			if tc.wantRetries && ctxDials < 2 {
+				t.Fatalf("retry dials = %d, want at least 2: this row cannot tell one failure per OPEN from one per ATTEMPT unless several attempts happened", ctxDials)
+			}
+			if !tc.wantRetries && ctxDials != 0 {
+				t.Fatalf("retry dials = %d, want 0 with the budget off", ctxDials)
 			}
 
 			cb := newServerCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
@@ -456,6 +518,15 @@ func TestOpenRetryCancelAfterSuccessDrainsTheProbe(t *testing.T) {
 	}
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("cancelled open lost its context cause: %v", err)
+	}
+	// The error must be the RETRY loop's, not one raised later by the MySQL
+	// open. Without this the test passes with the in-loop cancellation guard
+	// deleted: the probe would be drained by the shared success path and the
+	// SQL open would then fail with context.Canceled anyway, satisfying every
+	// other assertion here while the loop reported a cancelled dial as a
+	// success.
+	if !strings.Contains(err.Error(), "open retry cancelled after") {
+		t.Fatalf("a dial that landed after cancellation was reported as a successful probe; error came from further down instead of the retry loop: %v", err)
 	}
 	if probe == nil {
 		t.Fatal("the retry dial never ran; nothing was disposed of")
@@ -555,6 +626,46 @@ func TestOpenRetryBudgetSiblingScopeParity(t *testing.T) {
 				t.Fatalf("%s = %q, want %q: it no longer resolves with the same scope rules as dolt.auto-start", config.OpenRetryBudgetKey, mine, budget)
 			}
 		})
+	}
+}
+
+// The MERGED half of the same contract. The table above covers the directory
+// fallback; this covers precedence, which a directory-only reader would pass
+// while silently ignoring BEADS_DIR, the user-level files and every other
+// source config.Initialize folds in.
+//
+// Both keys are given a merged value that CONFLICTS with the directory value,
+// and both must return the merged one.
+func TestOpenRetryBudgetSiblingScopeParity_MergedConfigWins(t *testing.T) {
+	t.Setenv("BEADS_TEST_IGNORE_REPO_CONFIG", "1")
+	beadsDir := filepath.Join(t.TempDir(), ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"),
+		[]byte("dolt:\n  auto-start: \"false\"\n  open-retry-budget: \"9s\"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Sanity: with nothing merged, both keys come from the directory. This is
+	// the positive control that makes the assertions below meaningful.
+	if got := configStringForDir(beadsDir, config.OpenRetryBudgetKey); got != "9s" {
+		t.Fatalf("directory fallback broken before the merged case ran: got %q", got)
+	}
+
+	config.ResetForTesting()
+	if err := config.Initialize(); err != nil {
+		t.Fatalf("config.Initialize: %v", err)
+	}
+	t.Cleanup(config.ResetForTesting)
+	config.Set("dolt.auto-start", "true")
+	config.Set(config.OpenRetryBudgetKey, "45s")
+
+	if got := configStringForDir(beadsDir, "dolt.auto-start"); got != "true" {
+		t.Fatalf("dolt.auto-start = %q, want the merged value \"true\"; the fixture is wrong, not the budget", got)
+	}
+	if got := configStringForDir(beadsDir, config.OpenRetryBudgetKey); got != "45s" {
+		t.Fatalf("%s = %q, want the merged value \"45s\": a directory-only reader ignores every merged source (BEADS_DIR, user-level config) that dolt.auto-start honours", config.OpenRetryBudgetKey, got)
 	}
 }
 
