@@ -1049,6 +1049,14 @@ func TestOpenRetryClampsThePerAttemptTimeoutToTheBudget(t *testing.T) {
 		if d.timeout > budget {
 			t.Fatalf("retry %d dial timeout = %v, larger than the whole %v budget: the loop handed the dialer the raw per-attempt timeout instead of the remaining budget", i+1, d.timeout, budget)
 		}
+		// The clamp's actual contract is the REMAINING budget, not the whole
+		// one. Without this line the test passes on a loop that clamps to the
+		// total budget -- every dial would be within the budget and none
+		// would be within the DEADLINE, because each starts after a backoff
+		// the total-budget form does not subtract.
+		if d.offset+d.timeout > budget+50*time.Millisecond {
+			t.Fatalf("retry %d starts at %v with a %v timeout, which plans to run past the %v deadline: the loop clamped to the total budget rather than what is left of it", i+1, d.offset, d.timeout, budget)
+		}
 	}
 }
 
