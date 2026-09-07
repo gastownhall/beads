@@ -148,7 +148,7 @@ func TestDisplayPrettyList_CycleEndToEnd(t *testing.T) {
 	finished := make(chan string, 1)
 	go func() {
 		finished <- captureBoundedStdout(t, 1<<20, func() {
-			displayPrettyListWithDeps(issues, false, deps, false, false)
+			displayPrettyListWithDeps(issues, false, deps, false, false, "")
 		})
 	}()
 
