@@ -849,7 +849,9 @@ type BackupStore interface {
 	BackupSync(ctx context.Context, name string) error
 	BackupRemove(ctx context.Context, name string) error
 	// BackupDatabase registers dir as a file:// Dolt backup remote and syncs
-	// the full database to it, preserving complete commit history.
+	// the full database to it, preserving complete commit history. It stays
+	// directory-only on purpose: backup to a remote URL goes through BackupAdd
+	// and BackupSync, while RestoreDatabase accepts a directory or a URL.
 	BackupDatabase(ctx context.Context, dir string) error
 	// RestoreDatabase restores the database from a Dolt backup at source, which
 	// is either a local backup directory or a backup URL that DOLT_BACKUP accepts

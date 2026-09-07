@@ -1296,7 +1296,9 @@ func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
 }
 
 // BackupDatabase registers dir as a file:// Dolt backup remote and syncs
-// the full database to it, preserving complete commit history.
+// the full database to it, preserving complete commit history. It stays
+// directory-only on purpose: backup to a remote URL goes through BackupAdd
+// and BackupSync, while RestoreDatabase accepts a directory or a URL.
 func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	info, err := os.Stat(dir)
 	if err != nil {
