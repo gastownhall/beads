@@ -241,7 +241,7 @@ func externalOpenConfig(beadsDir string) *Config {
 
 // The budget is opt-in. With no key set, the open must make exactly one dial
 // through the legacy context-free seam and return today's error text -- and it
-// must do so for a cancelled and a short-deadline context too, because
+// must do so for a canceled and a short-deadline context too, because
 // net.DialTimeout cannot see either and the default path must stay that way.
 func TestOpenRetryOffMakesOneLegacyDialAndKeepsTheError(t *testing.T) {
 	// Written out in full rather than captured from the first run: a baseline
@@ -255,7 +255,7 @@ func TestOpenRetryOffMakesOneLegacyDialAndKeepsTheError(t *testing.T) {
 		ctx  func(t *testing.T) context.Context
 	}{
 		{"background", func(*testing.T) context.Context { return context.Background() }},
-		{"already-cancelled", func(t *testing.T) context.Context {
+		{"already-canceled", func(t *testing.T) context.Context {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			return ctx
@@ -341,7 +341,7 @@ func TestOpenRetryOnSucceedsOnLaterAttempt(t *testing.T) {
 //
 // The budget must be large enough to buy real retries: the shared backoff's
 // first delay is 250-750ms, so a sub-second budget breaks out of the loop
-// before dialling anything and would prove only that the loop terminates.
+// before dialing anything and would prove only that the loop terminates.
 func TestOpenRetryExhaustionIsBounded(t *testing.T) {
 	t.Setenv("BEADS_TEST_MODE", "1")
 	const budget = 2 * time.Second
@@ -689,7 +689,7 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 // --- circuit breaker accounting -----------------------------------------
 
 // One failed open records exactly one failure, and an open the CALLER ended
-// records none: a cancelled open is evidence about the caller, not about the
+// records none: a canceled open is evidence about the caller, not about the
 // server, and five of them would otherwise trip the breaker against a healthy
 // server.
 func TestOpenRetryBreakerAccounting(t *testing.T) {
@@ -753,7 +753,7 @@ func TestOpenRetryBreakerAccounting(t *testing.T) {
 	}
 }
 
-// A dial that lands after the caller cancelled must not be reported as a
+// A dial that lands after the caller canceled must not be reported as a
 // success, and the connection it produced must be DRAINED rather than closed
 // bare: a bare Close on an unread probe makes the OS send RST, which dolt
 // sql-server can crash on (GH#4132, #4133). Asserting only "it was closed"
@@ -781,18 +781,18 @@ func TestOpenRetryCancelAfterSuccessDrainsTheProbe(t *testing.T) {
 	cfg := externalOpenConfig(writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "5s"}))
 	_, err := newServerMode(ctx, cfg)
 	if err == nil {
-		t.Fatal("expected a cancelled open to fail rather than report success")
+		t.Fatal("expected a canceled open to fail rather than report success")
 	}
 	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancelled open lost its context cause: %v", err)
+		t.Fatalf("canceled open lost its context cause: %v", err)
 	}
 	// The error must be the RETRY loop's, not one raised later by the MySQL
 	// open. Without this the test passes with the in-loop cancellation guard
 	// deleted: the probe would be drained by the shared success path and the
 	// SQL open would then fail with context.Canceled anyway, satisfying every
-	// other assertion here while the loop reported a cancelled dial as a
+	// other assertion here while the loop reported a canceled dial as a
 	// success.
-	if !strings.Contains(err.Error(), "open retry cancelled after") {
+	if !strings.Contains(err.Error(), "open retry canceled after") {
 		t.Fatalf("a dial that landed after cancellation was reported as a successful probe; error came from further down instead of the retry loop: %v", err)
 	}
 	if probe == nil {
@@ -800,7 +800,7 @@ func TestOpenRetryCancelAfterSuccessDrainsTheProbe(t *testing.T) {
 	}
 	closes, reads, deadlines := probe.stats()
 	if closes != 1 {
-		t.Fatalf("probe closes = %d, want 1: a probe abandoned after a cancelled success leaks the connection", closes)
+		t.Fatalf("probe closes = %d, want 1: a probe abandoned after a canceled success leaks the connection", closes)
 	}
 	if reads == 0 || deadlines == 0 {
 		t.Fatalf("probe reads=%d deadlines=%d, want both > 0: the connection was closed BARE instead of drained, which is the RST that crashes dolt sql-server (GH#4132)", reads, deadlines)
@@ -932,7 +932,7 @@ func TestOpenRetryBudgetSiblingScopeParity_MergedConfigWins(t *testing.T) {
 		t.Fatalf("dolt.auto-start = %q, want the merged value \"true\"; the fixture is wrong, not the budget", got)
 	}
 	if got := configStringForDir(beadsDir, config.OpenRetryBudgetKey); got != "45s" {
-		t.Fatalf("%s = %q, want the merged value \"45s\": a directory-only reader ignores every merged source (BEADS_DIR, user-level config) that dolt.auto-start honours", config.OpenRetryBudgetKey, got)
+		t.Fatalf("%s = %q, want the merged value \"45s\": a directory-only reader ignores every merged source (BEADS_DIR, user-level config) that dolt.auto-start honors", config.OpenRetryBudgetKey, got)
 	}
 	// Assert the BUDGET READER too, not only the shared helper: a reader that
 	// stopped calling configStringForDir and went straight to

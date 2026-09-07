@@ -281,7 +281,7 @@ Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bo
 
 `dolt.open-retry-budget` bounds how long `bd` keeps re-probing a Dolt
 sql-server that will not answer while opening a store. It is **off by
-default**, so the out-of-the-box behaviour is unchanged: one connectivity
+default**, so the out-of-the-box behavior is unchanged: one connectivity
 probe, then the usual "Dolt server unreachable" error.
 
 ```yaml
@@ -317,7 +317,7 @@ What it does and does not cover:
 - **Only transient failures are retried.** A misconfigured endpoint (unknown
   host, and similar non-transient errors) fails immediately, exactly as it does
   with the budget off.
-- **Cancellation is honoured.** If the caller's context is cancelled, the open
+- **Cancellation is honored.** If the caller's context is canceled, the open
   ends at once, and — because that says nothing about the server's health — it
   does not count towards the circuit breaker.
 

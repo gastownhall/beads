@@ -50,7 +50,7 @@ func configStringForDir(beadsDir, key string) string {
 // The value bounds the RETRIES that follow the open's first connectivity
 // probe. The first probe keeps its own timeout and is never shortened by this
 // budget, so a value too small to buy a retry degrades to exactly today's
-// behaviour -- one probe, no retries -- and no setting here can make bd less
+// behavior -- one probe, no retries -- and no setting here can make bd less
 // patient than the default.
 func openRetryBudget(beadsDir string) time.Duration {
 	return config.ResolveOpenRetryBudget(configStringForDir(beadsDir, config.OpenRetryBudgetKey))

@@ -2079,8 +2079,8 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // dials that existed before the open-retry budget -- the fail-fast probe and
 // the post-auto-start retry -- go through it unchanged, so "the default is
 // untouched" holds down to the ignored context: net.DialTimeout cannot see a
-// cancelled or short-deadline ctx, and therefore cannot change the default
-// open's behaviour or its error text. Counting dials through it is the only
+// canceled or short-deadline ctx, and therefore cannot change the default
+// open's behavior or its error text. Counting dials through it is the only
 // way to assert that the default path makes exactly one.
 var dialServer = net.DialTimeout
 
@@ -2110,7 +2110,7 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 
 // openProbeDialContext is the context-aware dial used ONLY by the retry loop --
 // the opt-in path, where a caller that cancels an open must be able to end a
-// dial in flight rather than wait out its timeout. For an uncancelled context
+// dial in flight rather than wait out its timeout. For an uncanceled context
 // it does exactly what net.DialTimeout does (net.DialTimeout is Dialer.Timeout
 // plus a background context).
 var openProbeDialContext = func(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
@@ -2185,7 +2185,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	attempts := 1 // the caller's first probe
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, openRetryCancelled(ctxErr, lastErr, attempts, budget)
+			return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
 		}
 		wait := bo.NextBackOff()
 		remaining := time.Until(deadline)
@@ -2196,7 +2196,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, openRetryCancelled(ctx.Err(), lastErr, attempts, budget)
+			return nil, openRetryCanceled(ctx.Err(), lastErr, attempts, budget)
 		case <-timer.C:
 		}
 
@@ -2219,7 +2219,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 			// repeated-probe shape that documents that risk.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				doltserver.DrainAndCloseProbe(conn)
-				return nil, openRetryCancelled(ctxErr, lastErr, attempts, budget)
+				return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
 			}
 			debug.Logf("dolt: %s %s reachable after %d open attempts\n", network, addr, attempts)
 			return conn, nil
@@ -2234,15 +2234,15 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		lastErr, attempts, config.OpenRetryBudgetKey, budget)
 }
 
-// openRetryCancelled reports a retry loop ended by its context. Both causes
+// openRetryCanceled reports a retry loop ended by its context. Both causes
 // stay identifiable with errors.Is: the dial failure that made the loop retry,
 // and the context error that ended it.
-func openRetryCancelled(ctxErr, lastErr error, attempts int, budget time.Duration) error {
+func openRetryCanceled(ctxErr, lastErr error, attempts int, budget time.Duration) error {
 	if lastErr == nil {
-		return fmt.Errorf("open retry cancelled after %d attempts within %s=%s: %w",
+		return fmt.Errorf("open retry canceled after %d attempts within %s=%s: %w",
 			attempts, config.OpenRetryBudgetKey, budget, ctxErr)
 	}
-	return fmt.Errorf("%w (open retry cancelled after %d attempts within %s=%s: %w)",
+	return fmt.Errorf("%w (open retry canceled after %d attempts within %s=%s: %w)",
 		lastErr, attempts, config.OpenRetryBudgetKey, budget, ctxErr)
 }
 
@@ -2481,7 +2481,7 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					if dialErr != nil && ctx.Err() != nil {
 						// The CALLER ended this open. That is evidence about
 						// the caller, not about the server, so it must not
-						// count towards the circuit breaker: five cancelled
+						// count towards the circuit breaker: five canceled
 						// opens inside the failure window would otherwise
 						// trip it against a healthy server and fail every
 						// open after them for the cooldown. The question is

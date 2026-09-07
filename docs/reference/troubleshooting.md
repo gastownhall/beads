@@ -296,7 +296,7 @@ scheduled restart or a brief network blip, and succeed again a few seconds
 later.
 
 **Cause:** by default `bd` probes the server once and fails fast. That is the
-right behaviour for an interactive command against a server that is genuinely
+right behavior for an interactive command against a server that is genuinely
 down, but it makes a restart window look like an outage.
 
 **Fix:** give the open a bounded retry budget.
