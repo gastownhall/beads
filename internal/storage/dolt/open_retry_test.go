@@ -1066,6 +1066,44 @@ func TestOpenRetryClampsThePerAttemptTimeoutToTheBudget(t *testing.T) {
 	}
 }
 
+// TestOpenRetryKeepsThePerAttemptTimeoutWhenTheBudgetHasRoom is the other
+// half of the clamp's contract: while more than one per-attempt timeout is
+// left of the budget, the dialer gets the FULL per-attempt timeout, not
+// less. The test above cannot see a loop that shortens every attempt by a
+// constant factor (its per-attempt timeout dwarfs the budget, so every dial
+// is clamped anyway); here the budget dwarfs the timeout, so a halved
+// timeout is a halved dial.
+func TestOpenRetryKeepsThePerAttemptTimeoutWhenTheBudgetHasRoom(t *testing.T) {
+	const (
+		budget  = 3 * time.Second
+		timeout = 200 * time.Millisecond
+	)
+	log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+
+	conn, err := retryOpenProbe(context.Background(), "tcp", "127.0.0.1:1", timeout, budget, errStubRefused)
+	if conn != nil {
+		t.Fatal("expected no connection from an exhausted budget")
+	}
+	if err == nil {
+		t.Fatal("expected the exhaustion error")
+	}
+
+	checked := 0
+	for i, d := range log.dials() {
+		left := budget - d.offset
+		if left < timeout+50*time.Millisecond {
+			continue // the clamp is decisive here; the sibling test owns this case
+		}
+		checked++
+		if d.timeout < timeout-50*time.Millisecond || d.timeout > timeout+50*time.Millisecond {
+			t.Fatalf("retry %d dial timeout = %v with %v of the budget left, want the full %v per-attempt timeout: the loop shortened an attempt the clamp had room for", i+1, d.timeout, left, timeout)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no retry dial started with more than one per-attempt timeout left, so the full-timeout contract was never exercised")
+	}
+}
+
 // --- the retry is visible -----------------------------------------------
 
 // captureOpenRetryNotice redirects the notice writer for one test and returns
