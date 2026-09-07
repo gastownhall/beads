@@ -219,15 +219,25 @@ func (r *dependencySQLRepositoryImpl) Insert(ctx context.Context, dep *types.Dep
 			return fmt.Errorf("db: DependencySQLRepository.Insert: recompute is_blocked: %w", err)
 		}
 		// Snapshot only after all derived blocked-state maintenance has completed.
-		return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+		if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+			return err
+		}
+		// A new edge is durable state of the referencing issue: version it,
+		// as issueops.AddDependencyInTx does on the store legs. The same-type
+		// refresh returned above without minting.
+		return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 	}
 	if err := issueops.MarkIsBlockedInTx(ctx, r.runner, affectedIssues, affectedWisps); err != nil {
 		return fmt.Errorf("db: DependencySQLRepository.Insert: mark is_blocked (affected): %w", err)
 	}
 	// Snapshot only after all derived blocked-state maintenance has completed.
 	// Never gated on opts.EmitEvent: a structurally-wired edge is as real to a
-	// replaying consumer as one added by an explicit dep verb.
-	return issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor)
+	// replaying consumer as one added by an explicit dep verb — and neither is
+	// the version row minted beside it.
+	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepAdd, dep.IssueID, string(dep.Type), dep.DependsOnID, metadata, actor); err != nil {
+		return err
+	}
+	return issueops.RecordVersionInTx(ctx, r.runner, dep.IssueID, actor)
 }
 
 // classifyMissingEndpoint names the endpoint behind a foreign-key refusal,
@@ -391,6 +401,12 @@ func (r *dependencySQLRepositoryImpl) Delete(ctx context.Context, issueID, depen
 	// Never gated on opts.EmitEvent — a structural removal is as real to a
 	// replaying consumer as one from an explicit dep verb.
 	if err := issueops.RecordDepEventInTx(ctx, r.runner, issueops.EventDepRemove, issueID, depType, dependsOnID, depMetadata, actor); err != nil {
+		return domain.DepDeleteResult{}, err
+	}
+	// The Found:false return above keeps this actually-deleted-only, so the
+	// referencing issue is versioned for a real change, as
+	// issueops.RemoveDependencyInTx does on the store legs.
+	if err := issueops.RecordVersionInTx(ctx, r.runner, issueID, actor); err != nil {
 		return domain.DepDeleteResult{}, err
 	}
 
