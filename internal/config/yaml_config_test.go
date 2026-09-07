@@ -1971,6 +1971,10 @@ func TestParseOpenRetryBudget(t *testing.T) {
 		value   string
 		want    time.Duration
 		wantErr bool
+		// wantHint, when set, must appear in the rejection message. A
+		// refusal that suggests an unwritable spelling is a refusal the user
+		// cannot act on, and wantErr alone cannot see that.
+		wantHint string
 	}{
 		// Duration grammar.
 		{value: "30s", want: 30 * time.Second},
@@ -2000,8 +2004,13 @@ func TestParseOpenRetryBudget(t *testing.T) {
 		// A leading zero: the setter writes bare seconds unquoted, so YAML
 		// would read "030" as octal 24 where this parser says 30. Refused so
 		// the two readers cannot disagree on a persisted value.
-		{value: "030", wantErr: true},
-		{value: "007", wantErr: true},
+		{value: "030", wantErr: true, wantHint: `write "30"`},
+		{value: "007", wantErr: true, wantHint: `write "7"`},
+		// All zeros: trimming the leading zeros leaves nothing, so the
+		// suggestion has to name the spelling that means the same thing
+		// rather than advise writing the empty string.
+		{value: "00", wantErr: true, wantHint: `write "0" (budget off)`},
+		{value: "000", wantErr: true, wantHint: `write "0" (budget off)`},
 		{value: "1h0m0", wantErr: true},
 		{value: ".5", wantErr: true},
 		{value: "30.5", wantErr: true},
@@ -2029,6 +2038,9 @@ func TestParseOpenRetryBudget(t *testing.T) {
 				// rejects resolves to off, never to a surprising duration.
 				if resolved := ResolveOpenRetryBudget(tc.value); resolved != 0 {
 					t.Fatalf("ResolveOpenRetryBudget(%q) = %v, want 0 for a value the validator rejects", tc.value, resolved)
+				}
+				if tc.wantHint != "" && !strings.Contains(err.Error(), tc.wantHint) {
+					t.Fatalf("ParseOpenRetryBudget(%q) error = %q, want it to suggest %s", tc.value, err, tc.wantHint)
 				}
 				return
 			}

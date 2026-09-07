@@ -1698,7 +1698,15 @@ func ParseOpenRetryBudget(value string) (time.Duration, error) {
 		// readers take "030" as octal 24 while this parser would say 30. The
 		// two must agree, so the ambiguous spelling is refused at set time.
 		if len(value) > 1 && value[0] == '0' {
-			return 0, fmt.Errorf("%s must not start with 0 (%q is read as octal when written unquoted in YAML); write %q or add a unit", OpenRetryBudgetKey, value, strings.TrimLeft(value, "0"))
+			// The suggestion is the value without its leading zeros -- except
+			// for an all-zero value, where that is the empty string and the
+			// hint would advise writing nothing at all. "0" is the spelling
+			// that means what "000" was trying to mean.
+			hint := fmt.Sprintf("write %q", strings.TrimLeft(value, "0"))
+			if strings.TrimLeft(value, "0") == "" {
+				hint = `write "0" (budget off)`
+			}
+			return 0, fmt.Errorf("%s must not start with 0 (%q is read as octal when written unquoted in YAML); %s or add a unit", OpenRetryBudgetKey, value, hint)
 		}
 		var secErr error
 		d, secErr = time.ParseDuration(value + "s")
