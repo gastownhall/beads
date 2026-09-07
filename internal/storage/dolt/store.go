@@ -2200,12 +2200,11 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		case <-timer.C:
 		}
 
-		dialTimeout := timeout
-		if left := time.Until(deadline); left <= 0 {
+		left := time.Until(deadline)
+		if left <= 0 {
 			break
-		} else if left < dialTimeout {
-			dialTimeout = left
 		}
+		dialTimeout := clampDialTimeout(left, timeout)
 
 		attempts++
 		conn, err := openProbeDialContext(ctx, network, addr, dialTimeout)
@@ -2232,6 +2231,26 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 	}
 	return nil, fmt.Errorf("%w (still unreachable after %d attempts within %s=%s)",
 		lastErr, attempts, config.OpenRetryBudgetKey, budget)
+}
+
+// clampDialTimeout keeps a retry's per-attempt dial timeout inside what is
+// left of the budget. A dial that PLANS to run for longer than the deadline
+// has left would spend past the budget the operator set, which is the one
+// promise the budget makes about its own upper bound.
+//
+// Pure, and lifted out of the loop, because in place it was not testable: the
+// loop's own clock decides whether the arm is ever decisive, so a mutation
+// that dropped it stayed green at -count=5 against the timed exhaustion test.
+//
+// remaining is positive at the call site -- the loop breaks on a spent
+// deadline before reaching here -- but a non-positive remaining is mapped to
+// itself rather than to timeout, so no later caller can turn an expired
+// budget back into a full-length dial.
+func clampDialTimeout(remaining, timeout time.Duration) time.Duration {
+	if remaining < timeout {
+		return remaining
+	}
+	return timeout
 }
 
 // openRetryCanceled reports a retry loop ended by its context. Both causes

@@ -979,3 +979,75 @@ func TestOpenRetryBudgetReaderMatchesValidator(t *testing.T) {
 		}
 	}
 }
+
+// --- remaining-budget clamp ---------------------------------------------
+
+// The clamp, as a pure function: no clock, no loop, every boundary named.
+// Extracted for exactly this reason -- inline it was decided by the loop's own
+// timing, so a mutation that removed it stayed green at -count=5 against the
+// timed exhaustion test.
+func TestClampDialTimeout(t *testing.T) {
+	const timeout = 500 * time.Millisecond
+	for _, tc := range []struct {
+		name      string
+		remaining time.Duration
+		want      time.Duration
+	}{
+		{name: "budget outlasts the dial", remaining: 2 * time.Second, want: timeout},
+		{name: "exactly one dial left", remaining: timeout, want: timeout},
+		{name: "less than a dial left", remaining: 120 * time.Millisecond, want: 120 * time.Millisecond},
+		{name: "a nanosecond left", remaining: time.Nanosecond, want: time.Nanosecond},
+		// Unreachable from the loop, which breaks on a spent deadline first.
+		// Asserted anyway: mapping these to timeout would hand a later caller
+		// a full-length dial on an expired budget.
+		{name: "budget spent", remaining: 0, want: 0},
+		{name: "budget overspent", remaining: -3 * time.Second, want: -3 * time.Second},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := clampDialTimeout(tc.remaining, timeout); got != tc.want {
+				t.Fatalf("clampDialTimeout(%v, %v) = %v, want %v", tc.remaining, timeout, got, tc.want)
+			}
+		})
+	}
+}
+
+// The clamp is also WIRED: the loop hands the dialer the clamped value rather
+// than the caller's timeout. A pure test cannot see that, and the timed
+// exhaustion test could not either, so this drives retryOpenProbe with a
+// per-attempt timeout far larger than the whole budget. Every retry then has
+// less budget left than one dial would take, which makes the clamp decisive on
+// EVERY attempt regardless of how the randomized backoff falls -- the property
+// the exhaustion test lacked.
+//
+// Calling retryOpenProbe directly is deliberate here and proves nothing about
+// WHICH opens reach it; the constructor table above owns that question.
+func TestOpenRetryClampsThePerAttemptTimeoutToTheBudget(t *testing.T) {
+	const (
+		budget = time.Second
+		// Longer than the budget by two orders of magnitude: unclamped, the
+		// recorded timeout is this value and the assertion below cannot pass.
+		timeout = time.Minute
+	)
+	log := stubOpenRetryDials(t, errStubRefused, []error{errStubRefused})
+
+	conn, err := retryOpenProbe(context.Background(), "tcp", "127.0.0.1:1", timeout, budget, errStubRefused)
+	if conn != nil {
+		t.Fatal("expected no connection from an exhausted budget")
+	}
+	if err == nil {
+		t.Fatal("expected the exhaustion error")
+	}
+
+	dials := log.dials()
+	if len(dials) == 0 {
+		t.Fatal("no retry dial was made, so the clamp was never exercised")
+	}
+	for i, d := range dials {
+		if d.timeout <= 0 {
+			t.Fatalf("retry %d dial timeout = %v, want a positive value", i+1, d.timeout)
+		}
+		if d.timeout > budget {
+			t.Fatalf("retry %d dial timeout = %v, larger than the whole %v budget: the loop handed the dialer the raw per-attempt timeout instead of the remaining budget", i+1, d.timeout, budget)
+		}
+	}
+}
