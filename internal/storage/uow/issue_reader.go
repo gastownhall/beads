@@ -137,7 +137,7 @@ func (r *issueReader) List(ctx context.Context, req publicops.ListRequest) (publ
 		// HydrateListComments derives it from the row rather than assuming a
 		// plane.
 		newComments := func() workapi.CommentStreamer { return workapi.NewUOWDetailSource(uw) }
-		if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments); err != nil {
+		if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments, !req.SkipCounts); err != nil {
 			return publicops.IssuePage{}, err
 		}
 		return publicops.IssuePage{Items: items, HasMore: hasMore}, nil

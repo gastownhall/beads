@@ -54,19 +54,29 @@ type CommentStreamer interface {
 // accurately reporting how much is not there, which reads as reassurance
 // rather than as a warning.
 //
-// A ZERO COUNT IS NOT ALWAYS ZERO COMMENTS, which is why the marker is gated
-// on CommentCount rather than written unconditionally. Under
-// issueops.ListRequest.SkipCounts the cardinalities come back zero meaning
-// UNKNOWN, and a marker derived from them would be absent on every row of a
-// page that hydrated nothing. That combination does not reach a JSON listing —
-// the text renderings are the only SkipCounts callers and they ask for no
-// comments — but the rule is stated here rather than left to hold by accident.
-func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, items []*types.IssueWithCounts, include bool) error {
+// A ZERO COUNT IS NOT ALWAYS ZERO COMMENTS, AND countsKnown IS WHAT SEPARATES
+// THE TWO. Under issueops.ListRequest.SkipCounts the cardinalities come back
+// zero meaning UNKNOWN — the request type says so in as many words — so a body
+// that reads CommentCount as authoritative would answer IncludeComments with
+// an empty page and no error. countsKnown false therefore means: query every
+// row, because there is no count to prove a row has nothing to fetch, and mark
+// no row omitted, because the marker asserts a nonzero count this page cannot
+// support.
+//
+// It is a PARAMETER rather than an assumption because issueops.ListRequest is
+// PUBLIC and permits both fields at once. An earlier version of this body
+// skipped every row on that combination and justified it in a comment reading
+// "the JSON route never sets SkipCounts" — true of today's CLI callers, and
+// not a property of the contract they were reading. The HTTP surface and any
+// future caller may set both.
+func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, items []*types.IssueWithCounts, include, countsKnown bool) error {
 	if len(items) == 0 {
 		return nil
 	}
 	if !include {
-		markCommentsOmitted(items)
+		if countsKnown {
+			markCommentsOmitted(items)
+		}
 		return nil
 	}
 	if newSrc == nil {
@@ -80,11 +90,11 @@ func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, ite
 		if item == nil || item.Issue == nil {
 			continue
 		}
-		// A row with no comments needs no query. The count is authoritative
-		// here because the JSON route never sets SkipCounts; see the doc
-		// comment for why the skipped-count case is spelled out rather than
-		// assumed away.
-		if item.CommentCount == 0 {
+		// A row the page can PROVE has no comments needs no query. Only a
+		// hydrated count proves it: under SkipCounts a zero means unknown, and
+		// treating it as none is how this body once dropped every comment a
+		// caller had asked for.
+		if countsKnown && item.CommentCount == 0 {
 			continue
 		}
 		comments, err := collectComments(ctx, src, item.ID, isWispPlane(item.Issue))
@@ -100,6 +110,11 @@ func HydrateListComments(ctx context.Context, newSrc func() CommentStreamer, ite
 // Rows the caller already hydrated are left alone: CommentsOmitted never
 // appears beside a populated slice, which is what lets a consumer read the two
 // fields as one unambiguous answer.
+//
+// It is called only when the counts are real. The marker's meaning is "this
+// row HAS comments and they are not here", so a page whose counts were skipped
+// cannot honestly set it on any row — it does not know. That page is less
+// informative, which is what its caller asked for by skipping the counts.
 func markCommentsOmitted(items []*types.IssueWithCounts) {
 	for _, item := range items {
 		if item == nil || item.Issue == nil {
