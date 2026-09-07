@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd ready` loads the parent epics it prints in one read** instead of one
+  `GetIssue` per parent, on both the direct and the proxied route. Only the
+  number of statements changes, the epic filter and the printed suffix are
+  the same. Against a proxied Dolt server at 254 ms RTT a ready list with
+  four distinct parents spent about 2 s on those lookups alone.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and

@@ -412,15 +412,18 @@ func buildParentEpicMap(ctx context.Context, s storage.DoltStorage, issues []*ty
 		return nil
 	}
 
-	// Fetch parent issues and filter to epics
-	epicTitles := make(map[string]string) // parentID -> title
+	parentList := make([]string, 0, len(parentIDs))
 	for parentID := range parentIDs {
-		parent, err := s.GetIssue(ctx, parentID)
-		if err != nil || parent == nil {
-			continue
-		}
-		if parent.IssueType == "epic" {
-			epicTitles[parentID] = parent.Title
+		parentList = append(parentList, parentID)
+	}
+	parents, err := s.GetIssuesByIDs(ctx, parentList)
+	if err != nil {
+		return nil
+	}
+	epicTitles := make(map[string]string)
+	for _, parent := range parents {
+		if parent != nil && parent.IssueType == "epic" {
+			epicTitles[parent.ID] = parent.Title
 		}
 	}
 
