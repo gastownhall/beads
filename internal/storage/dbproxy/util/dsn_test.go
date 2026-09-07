@@ -3,6 +3,8 @@ package util
 import (
 	"strings"
 	"testing"
+
+	mysql "github.com/go-sql-driver/mysql"
 )
 
 func TestDoltServerDSN_TLS(t *testing.T) {
@@ -33,4 +35,15 @@ func TestDoltServerDSN_TLS(t *testing.T) {
 			t.Fatalf("dsn %q missing unix socket", dsn)
 		}
 	})
+}
+
+func TestDoltServerDSN_InterpolatesParams(t *testing.T) {
+	dsn := DoltServerDSN{Host: "127.0.0.1", Port: 3306, User: "root", Database: "beads"}.String()
+	cfg, err := mysql.ParseDSN(dsn)
+	if err != nil {
+		t.Fatalf("parse dsn %q: %v", dsn, err)
+	}
+	if !cfg.InterpolateParams {
+		t.Fatalf("dsn %q does not enable interpolateParams", dsn)
+	}
 }

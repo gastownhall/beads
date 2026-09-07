@@ -46,6 +46,7 @@ func (d DoltServerDSN) String() string {
 		Timeout:              timeout,
 		AllowNativePasswords: true,
 		ClientFoundRows:      d.ClientFoundRows,
+		InterpolateParams:    true,
 	}
 	switch {
 	case d.TLSConfigName != "":

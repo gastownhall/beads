@@ -58,6 +58,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The proxied-server DSN now interpolates query parameters client-side**, the
+  same setting #4617 gave the plain server-mode DSN. Every parameterized
+  statement bd sends through the proxy was a server-side PREPARE followed by
+  an EXECUTE, two awaited round trips for one row. With `interpolateParams`
+  it is one. The driver still falls back to a server-side prepare for any
+  argument it cannot render safely, so results are unchanged. Measured on a
+  proxied Dolt 2.2.3 server at 254 ms RTT, `bd ready` went from 17.7 s to
+  12.7 s and `bd sql 'select 1'` from 12.3 s to 9.4 s with no other change.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
