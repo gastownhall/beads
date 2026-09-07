@@ -17,6 +17,12 @@ import (
 // pre-existing row. Steps 1-5 of design §16.3 (the version_id PK swap and
 // participation_generation) are a different bead's scope and are not in this
 // migration file.
+//
+// Step 7 (added at review, donnabox on #6358 item 4) retypes
+// issue_versions.durable_state from JSON to LONGBLOB: Dolt's JSON type
+// renormalizes numbers, so it cannot keep the verbatim bytes (R5.1) that a
+// content-derived token hashes. The writer now stores the RFC 8785 (JCS)
+// canonical bytes; the table is empty in this era, so no data converts.
 
 const migration0068Up = "0068_add_attribution_status.up.sql"
 const migration0068Down = "0068_add_attribution_status.down.sql"
@@ -57,6 +63,12 @@ func TestMigration0068AddsAttributionStatus(t *testing.T) {
 		"ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL",
 		"COLUMN_NAME = 'attribution_status'",
 		"@issue_versions_as_needs_add",
+		// Step 7: the durable_state retype, guarded on DATA_TYPE (0057's
+		// shape) so a replay onto a store already at LONGBLOB no-ops.
+		"ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB",
+		"COLUMN_NAME = 'durable_state'",
+		"@issue_versions_ds_needs_retype",
+		"DATA_TYPE <> 'longblob'",
 	} {
 		if !strings.Contains(upSQL, want) {
 			t.Errorf("0068 up migration missing %q\nfull SQL:\n%s", want, upSQL)
@@ -68,9 +80,16 @@ func TestMigration0068AddsAttributionStatus(t *testing.T) {
 	// The bundle override is what keeps the PREPARE above off the pre-2.3
 	// CLI path. Assert it directly rather than trusting the two schema_test
 	// assertions to stay pointed at this migration.
-	want := "ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;"
-	if !strings.Contains(cliCompatibleMigrationSQL(migration0068Up, upSQL), want) {
-		t.Errorf("0068's CLI bundle substitute missing direct DDL %q", want)
+	for _, want := range []string{
+		"ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL;",
+		// Step 7's retype has to reach the bundle as direct DDL too, or a
+		// fresh CLI-built database keeps 0067's JSON column while the
+		// runtime has LONGBLOB.
+		"ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB;",
+	} {
+		if !strings.Contains(cliCompatibleMigrationSQL(migration0068Up, upSQL), want) {
+			t.Errorf("0068's CLI bundle substitute missing direct DDL %q", want)
+		}
 	}
 	if cliSubstituteAssumesWispTables(migration0068Up) {
 		t.Error("0068's CLI substitute touches only issue_versions, which has no wisps-side counterpart table — it must not be listed in cliSubstituteAssumesWispTables")
@@ -88,6 +107,11 @@ func TestMigration0068AddsAttributionStatus(t *testing.T) {
 	for _, want := range []string{
 		"ALTER TABLE issue_versions DROP COLUMN attribution_status",
 		"COLUMN_NAME = 'attribution_status'",
+		// Step 7's reverse: back to the JSON type 0067 created, guarded on
+		// DATA_TYPE so an already-rolled-back store no-ops.
+		"ALTER TABLE issue_versions MODIFY COLUMN durable_state JSON",
+		"COLUMN_NAME = 'durable_state'",
+		"@issue_versions_ds_is_longblob",
 	} {
 		if !strings.Contains(downSQL, want) {
 			t.Errorf("0068 down migration missing %q\nfull SQL:\n%s", want, downSQL)
@@ -117,6 +141,9 @@ func TestMigration0068AddsAttributionStatusThroughDoltCLI(t *testing.T) {
 	runDoltSQL(t, dir, AllMigrationsSQL())
 
 	requireDoltColumnShape(t, dir, "issue_versions", "attribution_status", "varchar(20)", "NO")
+	// Step 7: 0067 created durable_state as JSON; after 0068 it is the
+	// byte-preserving LONGBLOB the writer's JCS canonical form needs.
+	requireDoltDataType(t, dir, "issue_versions", "durable_state", "longblob", "YES")
 	requireDoltNoRows(t, dir, "SELECT issue_id FROM issue_versions", "issue_versions")
 
 	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00')`); err == nil {
@@ -126,5 +153,18 @@ func TestMigration0068AddsAttributionStatusThroughDoltCLI(t *testing.T) {
 	rows := queryDoltCSV(t, dir, `SELECT attribution_status FROM issue_versions WHERE issue_id = 'iv-1'`)
 	if len(rows) != 1 || rows[0]["attribution_status"] != "claimed" {
 		t.Fatalf("attribution_status round-trip failed post-migration: %v", rows)
+	}
+
+	// Step 7's actual property, measured rather than inferred from the
+	// type name: bytes written to durable_state come back byte for byte.
+	// These three number forms are the ones Dolt's JSON type renormalizes
+	// (on 2.2.3 the same INSERT into a JSON column reads back as
+	// {"a":1,"big":9007199254740992,"e":1e+300}), so a regression to JSON
+	// fails here even if the DATA_TYPE assertion above were loosened.
+	const verbatim = `{"a":1.0,"big":9007199254740993,"e":1e300}`
+	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status, durable_state) VALUES ('iv-2', 1, 1, '2026-09-01 00:00:00', 'claimed', '`+verbatim+`')`)
+	rows = queryDoltCSV(t, dir, `SELECT durable_state FROM issue_versions WHERE issue_id = 'iv-2'`)
+	if len(rows) != 1 || rows[0]["durable_state"] != verbatim {
+		t.Fatalf("durable_state round-trip changed the bytes post-migration: got %v, want %q", rows, verbatim)
 	}
 }
