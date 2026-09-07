@@ -329,10 +329,11 @@ proceeds as soon as it answers. Notes:
 - To disable the additional open-probe retry waits for one command without
   editing the workspace configuration, override the key through the environment
   for that invocation: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
-  against a dead port). Only the retry waits go: the first 500 ms probe per open
-  and any SQL-level timeouts remain. The same variable set to a duration opts a
-  single command *into* a wait.
-- The wait is visible. Entering the retry loop prints one line to stderr,
+  against a dead port). Only the retry waits go: an open the circuit breaker
+  admits still makes its first probe with the 500 ms timeout, and any SQL-level
+  timeouts remain. The same variable set to a duration opts a single command
+  *into* a wait.
+- The wait is visible. Scheduling the first retry wait prints one line to stderr,
   `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
   (dolt.open-retry-budget)`, so a command that pauses is telling you why
   instead of looking like a hang.

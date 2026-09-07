@@ -326,9 +326,10 @@ What it does and does not cover:
   To disable the additional open-probe retry waits for one command without
   editing the workspace configuration, override the key through the
   environment: `BD_DOLT_OPEN_RETRY_BUDGET=0 bd doctor` (measured: 908 ms
-  against a dead port). Only the retry waits go: each open still makes its
-  first 500 ms probe, and an endpoint that accepts TCP while SQL is
-  unresponsive still costs its SQL-level timeouts.
+  against a dead port). Only the retry waits go: an open the circuit breaker
+  admits still makes its first probe with the 500 ms timeout, and an endpoint
+  that accepts TCP while SQL is unresponsive still costs its SQL-level
+  timeouts.
 - **Only transient network-level failures are retried**, using the same
   `isRetryableError` classification the rest of the Dolt client uses. A
   misconfigured endpoint (an unknown host, and similar non-transient errors)
