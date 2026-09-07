@@ -22,11 +22,19 @@ import (
 // RecordVersionInTx is the single seam both direct-SQL legs (dolt,
 // embeddeddolt) and the domain/db package (used by uow) call through, from
 // inside the same already-short-circuited functions that call
-// RecordEventInTx: a mutation DiscardNoopIssueUpdates has already discarded
-// never reaches either seam. dependency_editor.go's edge add/remove is the
-// one caller that is NOT already short-circuited by that helper — it gates
-// on its own eventWritten signal instead (a duplicate add / absent remove
-// never reaches this seam either).
+// RecordEventInTx — every accepted mutation of an issue's durable state
+// (create, update, close, reopen, claim, release, lease reclaim, defer wake,
+// label add/remove, dependency add/remove, promote, persistence move) mints
+// exactly one row, as its LAST durable-state write; a no-op mints none. A
+// mutation DiscardNoopIssueUpdates has already discarded never reaches either
+// seam; the label and dependency helpers, which that filter does not cover,
+// gate on their own inserted/deleted row instead (an idempotent re-add or an
+// absent remove never reaches this seam either). Composite mutations —
+// ExecuteUpdate's claim + row write + label/parent/persistence patches, and a
+// batch create's rows + creation-time edges — run their constituents without
+// minting and mint once at the end, so the version carries the final state.
+// version_completeness_test.go pins the set of issueops functions that must
+// reach this seam and the ones deliberately exempt from it.
 //
 // Ordinals are LOCAL, not wire addresses. issues.current_revision and
 // issue_versions.revision are per-store ordinals, minted as MAX(revision)+1

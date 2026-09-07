@@ -185,9 +185,11 @@ var beadDMLExemptions = map[string]string{
 	"RestoreFromSnapshotInTx": "restores a compacted issue outside the op vocabulary; consumer mirrors of this bead go stale until its next journaled mutation (known contract gap, carried from the reference lineage)",
 
 	// (5) dual-write version-history bookkeeping. RecordVersionInTx is called
-	// from inside the same mutationEntryPoints functions (CreateIssueInTx,
-	// UpdateIssueInTx, and their domain/db equivalents used by the uow leg)
-	// immediately after those callers already invoke RecordEventInTx, so the
+	// from inside the same mutationEntryPoints functions (the create, update,
+	// close, reopen, claim, release, lease-reclaim, defer-wake, label,
+	// dependency, promote and persistence-move bodies, and their domain/db
+	// equivalents used by the uow leg — version_completeness_test.go pins the
+	// set) immediately after those callers already invoke RecordEventInTx, so the
 	// mutation itself is already journaled by the time RecordVersionInTx runs.
 	// Its own UPDATE issues SET current_revision = ? only advances a
 	// denormalized pointer to match the snapshot row it just inserted into

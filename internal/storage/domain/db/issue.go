@@ -543,8 +543,12 @@ func (r *issueSQLRepositoryImpl) Claim(ctx context.Context, id, actor string, op
 		return domain.ClaimRowResult{}, fmt.Errorf("db: Claim %s: record event: %w", id, err)
 	}
 	// A claim changes assignee and status; the lost-CAS path returns above
-	// without writing and journals nothing.
+	// without writing and journals nothing — nor mints anything. A claim that
+	// rewrote the row is versioned, as issueops.ClaimIssueInTx is.
 	if err := issueops.RecordEventInTx(ctx, r.runner, issueops.EventUpdate, id, actor); err != nil {
+		return domain.ClaimRowResult{}, err
+	}
+	if err := issueops.RecordVersionInTx(ctx, r.runner, id, actor); err != nil {
 		return domain.ClaimRowResult{}, err
 	}
 
