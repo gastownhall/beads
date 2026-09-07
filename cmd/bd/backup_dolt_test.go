@@ -23,7 +23,9 @@ func TestResolveDoltBackupURL(t *testing.T) {
 	// t.TempDir() is absolute and already cleaned on every platform.
 	absBackup := filepath.Join(t.TempDir(), "beads-backup")
 
-	// TODO(#6227): az:// is a valid Dolt backup/remote scheme, but this PR only fixes the s3:// stack. Do not add a green row for today's az:// local-file fallback here.
+	// TODO(#6227): az:// is a valid Dolt backup/remote scheme, but this PR
+	// only fixes the s3:// stack. Do not add a green row for today's az://
+	// local-file fallback here.
 	tests := []struct {
 		name  string
 		input string
