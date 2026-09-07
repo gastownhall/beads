@@ -58,7 +58,7 @@ func TestHydrateListCommentsMarksOmittedWithoutFetching(t *testing.T) {
 	}}
 	items := []*types.IssueWithCounts{row("a-1", 1), row("a-2", 0)}
 
-	if err := HydrateListComments(context.Background(), srcFunc(src), items, false); err != nil {
+	if err := HydrateListComments(context.Background(), srcFunc(src), items, false, true); err != nil {
 		t.Fatalf("HydrateListComments: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestHydrateListCommentsPopulatesBodies(t *testing.T) {
 	}}
 	items := []*types.IssueWithCounts{row("a-1", 2), row("a-2", 0)}
 
-	if err := HydrateListComments(context.Background(), srcFunc(src), items, true); err != nil {
+	if err := HydrateListComments(context.Background(), srcFunc(src), items, true, true); err != nil {
 		t.Fatalf("HydrateListComments: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestHydrateListCommentsRoutesTheWispPlane(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			src := &fakeCommentStreamer{byID: map[string][]*types.Comment{"a-1": {comment("c1", "x")}}}
 			items := []*types.IssueWithCounts{{Issue: tc.issue, CommentCount: 1}}
-			if err := HydrateListComments(context.Background(), srcFunc(src), items, true); err != nil {
+			if err := HydrateListComments(context.Background(), srcFunc(src), items, true, true); err != nil {
 				t.Fatalf("HydrateListComments: %v", err)
 			}
 			if len(src.calls) != 1 {
@@ -161,7 +161,7 @@ func TestHydrateListCommentsFailsRatherThanShortening(t *testing.T) {
 	src := &fakeCommentStreamer{err: sentinel}
 	items := []*types.IssueWithCounts{row("a-1", 1)}
 
-	err := HydrateListComments(context.Background(), srcFunc(src), items, true)
+	err := HydrateListComments(context.Background(), srcFunc(src), items, true, true)
 	if err == nil {
 		t.Fatal("HydrateListComments returned nil on a failing read, want an error: a short list a caller cannot detect is the defect, not a degraded success")
 	}
@@ -175,13 +175,13 @@ func TestHydrateListCommentsFailsRatherThanShortening(t *testing.T) {
 // unconditionally without deciding whether it will be used.
 func TestHydrateListCommentsCountOnlyToleratesNoSource(t *testing.T) {
 	items := []*types.IssueWithCounts{row("a-1", 3)}
-	if err := HydrateListComments(context.Background(), nil, items, false); err != nil {
+	if err := HydrateListComments(context.Background(), nil, items, false, true); err != nil {
 		t.Fatalf("count-only mode with a nil source: %v", err)
 	}
 	if items[0].CommentsOmitted == nil || !*items[0].CommentsOmitted {
 		t.Error("count-only mode with a nil source did not mark the row omitted")
 	}
-	if err := HydrateListComments(context.Background(), nil, items, true); err == nil {
+	if err := HydrateListComments(context.Background(), nil, items, true, true); err == nil {
 		t.Error("hydrating with a nil source returned nil, want an error")
 	}
 }
@@ -192,7 +192,7 @@ func TestHydrateListCommentsSkipsNilRows(t *testing.T) {
 	src := &fakeCommentStreamer{byID: map[string][]*types.Comment{}}
 	items := []*types.IssueWithCounts{nil, {Issue: nil, CommentCount: 2}, row("a-1", 0)}
 	for _, include := range []bool{false, true} {
-		if err := HydrateListComments(context.Background(), srcFunc(src), items, include); err != nil {
+		if err := HydrateListComments(context.Background(), srcFunc(src), items, include, true); err != nil {
 			t.Fatalf("include=%v: %v", include, err)
 		}
 	}
@@ -215,7 +215,7 @@ func TestHydrateListCommentsCountOnlyBuildsNoSource(t *testing.T) {
 	}
 	items := []*types.IssueWithCounts{row("a-1", 4), row("a-2", 0)}
 
-	if err := HydrateListComments(context.Background(), newSrc, items, false); err != nil {
+	if err := HydrateListComments(context.Background(), newSrc, items, false, true); err != nil {
 		t.Fatalf("HydrateListComments: %v", err)
 	}
 	if built != 0 {
@@ -223,5 +223,56 @@ func TestHydrateListCommentsCountOnlyBuildsNoSource(t *testing.T) {
 	}
 	if items[0].CommentsOmitted == nil || !*items[0].CommentsOmitted {
 		t.Error("count-only mode did not mark the row omitted")
+	}
+}
+
+// TestHydrateListCommentsHonorsIncludeWhenCountsAreSkipped is the regression
+// for the combination that made the count-based skip unsound.
+//
+// issueops.ListRequest.SkipCounts zeroes CommentCount and says in its own doc
+// that a zero then means UNKNOWN. A body that reads the count as authoritative
+// therefore answers IncludeComments with an entirely empty page — no error, no
+// short-list marker, nothing. That is the same silent-omission failure this
+// whole change exists to remove, reintroduced one layer down and reachable by
+// any caller of a PUBLIC request type.
+func TestHydrateListCommentsHonorsIncludeWhenCountsAreSkipped(t *testing.T) {
+	src := &fakeCommentStreamer{byID: map[string][]*types.Comment{
+		"a-1": {comment("c1", "zzzuniquephrase")},
+	}}
+	// Counts skipped: every row reports zero whether or not it has comments.
+	items := []*types.IssueWithCounts{row("a-1", 0), row("a-2", 0)}
+
+	if err := HydrateListComments(context.Background(), srcFunc(src), items, true, false); err != nil {
+		t.Fatalf("HydrateListComments: %v", err)
+	}
+
+	if len(src.calls) != 2 {
+		t.Fatalf("issued %d comment reads, want 2: with no trustworthy count, every row must be queried", len(src.calls))
+	}
+	if got := len(items[0].Comments); got != 1 {
+		t.Fatalf("hydrated %d comments for the row that has one, want 1", got)
+	}
+	if got := items[0].Comments[0].Text; got != "zzzuniquephrase" {
+		t.Errorf("comment body = %q, want %q", got, "zzzuniquephrase")
+	}
+	if items[1].Comments != nil {
+		t.Errorf("row with genuinely no comments got %v, want nil", items[1].Comments)
+	}
+}
+
+// TestHydrateListCommentsMarksNothingWhenCountsAreSkipped is the other side of
+// the same unknown. CommentsOmitted asserts "this row HAS comments and they are
+// not here"; a page whose counts were skipped cannot support that claim about
+// any row, so it must make it about none rather than deriving it from a zero
+// that means nothing.
+func TestHydrateListCommentsMarksNothingWhenCountsAreSkipped(t *testing.T) {
+	items := []*types.IssueWithCounts{row("a-1", 0), row("a-2", 0)}
+	if err := HydrateListComments(context.Background(), nil, items, false, false); err != nil {
+		t.Fatalf("HydrateListComments: %v", err)
+	}
+	for _, item := range items {
+		if item.CommentsOmitted != nil {
+			t.Errorf("%s carries comments_omitted on a page with no trustworthy counts, want unset: the marker would be a claim the page cannot support", item.ID)
+		}
 	}
 }

@@ -132,7 +132,7 @@ func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issue
 	// the detail view's, which routes an id to the right comment table on this
 	// seam without being told.
 	newComments := func() workapi.CommentStreamer { return workapi.NewStoreDetailSource(r.store) }
-	if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments); err != nil {
+	if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments, !req.SkipCounts); err != nil {
 		return issueops.IssuePage{}, err
 	}
 	return issueops.IssuePage{Items: items, HasMore: hasMore}, nil
