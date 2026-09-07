@@ -38,6 +38,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
@@ -754,18 +755,22 @@ func (s *DoltStore) RemoteName() string {
 }
 
 // BackupAdd registers a Dolt backup destination.
+// Long-timeout: DOLT_BACKUP performs chunk-store I/O server-side.
 func (s *DoltStore) BackupAdd(ctx context.Context, name, url string) error {
-	return versioncontrolops.BackupAdd(ctx, s.db, name, url)
+	return s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_BACKUP('add', ?, ?)", name, url)
 }
 
 // BackupSync pushes the database to the named backup destination.
+// Long-timeout: the server-side sync walks the destination manifest and
+// copies chunks; large databases and old-generation backup manifests
+// exceed the pool's 10s read timeout and fail with "invalid connection".
 func (s *DoltStore) BackupSync(ctx context.Context, name string) error {
-	return versioncontrolops.BackupSync(ctx, s.db, name)
+	return s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_BACKUP('sync', ?)", name)
 }
 
 // BackupRemove removes a configured Dolt backup destination.
 func (s *DoltStore) BackupRemove(ctx context.Context, name string) error {
-	return versioncontrolops.BackupRemove(ctx, s.db, name)
+	return s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_BACKUP('rm', ?)", name)
 }
 
 // BackupDatabase registers dir as a file:// Dolt backup remote and syncs
@@ -786,20 +791,20 @@ func (s *DoltStore) BackupDatabase(ctx context.Context, dir string) error {
 	backupName := "backup_export"
 
 	// Register as a backup remote (idempotent — remove first if exists).
-	_ = versioncontrolops.BackupRemove(ctx, s.db, backupName)
-	if err := versioncontrolops.BackupAdd(ctx, s.db, backupName, backupURL); err != nil {
+	_ = s.BackupRemove(ctx, backupName)
+	if err := s.BackupAdd(ctx, backupName, backupURL); err != nil {
 		// Another backup (e.g. "default" registered by `bd backup init`) may
 		// already point to this URL. In that case, sync using the existing
 		// remote name rather than failing.
 		if conflict := versioncontrolops.ExtractAddressConflictName(err); conflict != "" {
-			if syncErr := versioncontrolops.BackupSync(ctx, s.db, conflict); syncErr != nil {
+			if syncErr := s.BackupSync(ctx, conflict); syncErr != nil {
 				return fmt.Errorf("sync to backup: %w", syncErr)
 			}
 			return nil
 		}
 		return fmt.Errorf("register backup remote: %w", err)
 	}
-	if err := versioncontrolops.BackupSync(ctx, s.db, backupName); err != nil {
+	if err := s.BackupSync(ctx, backupName); err != nil {
 		return fmt.Errorf("sync to backup: %w", err)
 	}
 	return nil
@@ -820,7 +825,11 @@ func (s *DoltStore) RestoreDatabase(ctx context.Context, dir string, force bool)
 	if err != nil {
 		return err
 	}
-	return versioncontrolops.BackupRestore(ctx, s.db, backupURL, s.database, force)
+	// Long-timeout: restoring reads every chunk from the backup destination.
+	if force {
+		return s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_BACKUP('restore', '--force', ?, ?)", backupURL, s.database)
+	}
+	return s.execWithLongTimeoutNoTx(ctx, "CALL DOLT_BACKUP('restore', ?, ?)", backupURL, s.database)
 }
 
 // QueryContext wraps s.db.QueryContext with retry for transient errors.
@@ -1057,9 +1066,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
-					"To start manually: bd dolt start\n"+
+					"To start manually: %s\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
-					addr, startErr)
+					addr, startErr, doltserver.StartHint(resolvedBeadsDir))
 			}
 			// Only tests should stop auto-started servers on Close(). In normal
 			// repo-local server mode, leaving the server up avoids endpoint churn
@@ -1103,11 +1112,16 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"  dolt sql-server --socket %s\n"+
 					"Auto-start is not supported in socket mode.",
 					cfg.ServerSocket, cfg.ServerSocket)
-			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
+			} else if config.CityOwnsDolt(resolvedBeadsDir) {
+				hint = fmt.Sprintf("Gas City owns this store's Dolt server (%s=%s) and it is not reachable.\n"+
+					"Bring the city up:\n  %s\nCheck it:\n  %s",
+					config.GasCityEndpointOriginKey, config.GasCityEndpointOrigin(resolvedBeadsDir),
+					doltserver.StartHint(resolvedBeadsDir), doltserver.StatusHint(resolvedBeadsDir))
+			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled(resolvedBeadsDir) {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
-					"Start the server manually:\n  bd dolt start"
+					"Start the server manually:\n  " + doltserver.StartHint(resolvedBeadsDir)
 			} else {
-				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
+				hint = "The Dolt server may not be running. Try:\n  " + doltserver.StartHint(resolvedBeadsDir)
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
 				addr, dialErr, hint)
@@ -1477,8 +1491,8 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 				_ = db.Close()
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gc dolt start    # If using an orchestrator",
-						cfg.ServerHost, cfg.ServerPort, err)
+					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Start it with:\n  %s",
+						cfg.ServerHost, cfg.ServerPort, err, doltserver.StartHint(cfg.BeadsDir))
 				}
 				return nil, "", fmt.Errorf("failed to create database: %w", err)
 			}
