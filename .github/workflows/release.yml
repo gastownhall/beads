@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
@@ -45,8 +45,15 @@ jobs:
           fi
           echo "OK: tag and version.go agree on $code_version"
 
-      - name: Check version consistency
-        run: ./scripts/check-versions.sh
+      - name: Check version + docs consistency
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          if [[ "$tag_version" == *-* ]]; then
+            echo "Prerelease tag detected; stable docs snapshot may remain on latest stable release."
+            ./scripts/check-versions.sh
+          else
+            BEADS_REQUIRE_RELEASE_DOCS=1 ./scripts/check-versions.sh
+          fi
 
   release-package-mcp:
     name: Release Package Gate (MCP)
@@ -55,15 +62,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6
         with:
           python-version: '3.14'
 
@@ -88,22 +95,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '24'
 
       - name: Run npm package gate
         run: make ci-package-npm
 
-<<<<<<< HEAD
   release-package-website:
     name: Release Package Gate (website)
     if: ${{ github.repository == 'marlon-costa-dc/beads' && startsWith(github.ref, 'refs/tags/v') }}
@@ -122,8 +128,6 @@ jobs:
 
       - name: Run website package gate
         run: make ci-website
-=======
->>>>>>> origin/main
 
   goreleaser:
     # Guard: only run goreleaser in the canonical repository (not in forks)
@@ -131,56 +135,29 @@ jobs:
     needs:
       - release-package-mcp
       - release-package-npm
+      - release-package-website
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: 'go.mod'
 
       - name: Install cross-compilation toolchains and signing tools
-        # Backstop for a hang that escapes the inner `timeout` calls, so it has
-        # to sit ABOVE what those calls can legitimately consume: 3 update
-        # attempts x 120s + 2 backoffs x 10s + 300s install = 680s worst case.
-        # 13m leaves ~100s of headroom. This job sets no job-level
-        # timeout-minutes, so this cap is the only bound on a stuck apt.
-        timeout-minutes: 13
         run: |
-          updated=""
-          for attempt in 1 2 3; do
-            if sudo timeout 120 apt-get \
-                 -o Acquire::Retries=3 \
-                 -o Acquire::http::Timeout=30 \
-                 -o Acquire::https::Timeout=30 \
-                 update; then
-              updated=yes
-              break
-            fi
-            echo "::warning::apt-get update attempt $attempt failed or timed out"
-            # No backoff after the final attempt - there is nothing left to wait for.
-            if [ "$attempt" -lt 3 ]; then
-              sleep 10
-            fi
-          done
-          # Deliberate best-effort: a stale index still installs these packages
-          # from the runner image cache far more often than not, and failing the
-          # job here would turn a transient mirror outage into a red build. The
-          # warning is what makes the degraded path visible in the job log.
-          if [ -z "$updated" ]; then
-            echo "::warning::apt-get update failed after 3 attempts; proceeding with cached index"
-          fi
-          sudo timeout 300 apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-aarch64-linux-gnu osslsigncode
 
       - name: Install go-winres for Windows PE resource embedding
         run: go install github.com/tc-hib/go-winres@latest
 
       - name: Run GoReleaser
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7
+        uses: goreleaser/goreleaser-action@5daf1e915a5f0af01ddbcd89a43b8061ff4f1a89 # v7
         with:
           distribution: goreleaser
           version: '~> v2'
@@ -205,35 +182,6 @@ jobs:
             echo "OK: $bin has no ICU runtime dependency"
           done
 
-      - name: Publish the contract corpus as a release artifact
-        # Ships the canonicalized golden corpus (cmd/bd/protocol/testdata/corpus)
-        # with each release and appends its checksum to the release checksums.txt,
-        # so a downstream consumer can anchor its vendored-corpus drift-check to a signed
-        # beads release rather than a self-recomputed manifest. Runs before the
-        # macOS job's serial checksums.txt append (goreleaser-macos needs this
-        # job), so the entry is preserved.
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
-          version="${tag#v}"
-          archive="beads_${version}_contract_corpus.tar.gz"
-          tar -czf "$archive" -C cmd/bd/protocol/testdata corpus
-          shasum -a 256 "$archive" | tee corpus-checksum.txt
-          gh release upload "$tag" "$archive" --clobber
-          gh release download "$tag" --pattern checksums.txt --dir /tmp/corpus-sums
-          sums=/tmp/corpus-sums/checksums.txt
-          # Idempotent on a job re-run (manual retry or flake): drop any prior
-          # entry for this archive before appending the fresh checksum, so the
-          # re-download+append never leaves a duplicate (or stale) corpus row.
-          if [ -f "$sums" ]; then
-            grep -vF "$archive" "$sums" > "$sums.tmp" || true
-            mv "$sums.tmp" "$sums"
-          fi
-          cat corpus-checksum.txt >> "$sums"
-          gh release upload "$tag" "$sums" --clobber
-
   goreleaser-macos:
     # Build macOS binaries with CGO_ENABLED=1 for embedded Dolt support.
     # Runs on native macOS to avoid zig/osxcross cross-compilation issues.
@@ -242,12 +190,12 @@ jobs:
     runs-on: macos-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
         with:
           fetch-depth: 0
 
       - name: Set up Go
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
         with:
           go-version-file: 'go.mod'
 
@@ -355,7 +303,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v6
 
       - name: Resolve release asset paths
         id: assets
@@ -384,77 +332,12 @@ jobs:
         run: gh release upload "${GITHUB_REF_NAME}" "${{ steps.assets.outputs.sbom }}" --clobber
 
       - name: Attest release artifacts
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
 
       - name: Attest release SBOM
-        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4
         with:
           subject-checksums: ${{ steps.assets.outputs.checksums }}
           sbom-path: ${{ steps.assets.outputs.sbom }}
-<<<<<<< HEAD
-=======
-
-  publish-pypi:
-    runs-on: ubuntu-latest
-    needs: [release-package-mcp, goreleaser]
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Python
-        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: '3.14'
-
-      - name: Install uv
-        run: python -m pip install uv==0.11.16
-
-      - name: Download validated MCP dist
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: release-mcp-dist
-          path: integrations/beads-mcp/dist
-
-      - name: Verify validated MCP dist
-        run: |
-          test -n "$(find integrations/beads-mcp/dist -maxdepth 1 -type f -print -quit)"
-          ls -la integrations/beads-mcp/dist
-
-      - name: Publish to PyPI
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-        run: |
-          cd integrations/beads-mcp
-          uv tool run twine upload dist/*
-
-  publish-npm:
-    runs-on: ubuntu-latest
-    needs: [release-package-npm, goreleaser, goreleaser-macos]
-    if: ${{ github.repository == 'gastownhall/beads' && startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') }}
-    permissions:
-      contents: read
-      id-token: write  # Required for npm provenance/trusted publishing
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
-        with:
-          node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
-
-      - name: Update npm for OIDC trusted publishing
-        run: npm install -g npm@latest  # Requires npm >= 11.5.1 for trusted publishing
-
-      - name: Publish to npm
-        run: |
-          cd npm-package
-          npm publish --access public
-          # Uses OIDC trusted publishing - no token needed
-          # Provenance attestations are automatic with trusted publishing
->>>>>>> origin/main
