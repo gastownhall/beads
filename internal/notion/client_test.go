@@ -538,6 +538,39 @@ func TestClientRetryWaitObservesContextCancellation(t *testing.T) {
 	}
 }
 
+// A Retry-After longer than the client is willing to wait is refused outright.
+// Clamping it down would spend the remaining attempts inside the window the
+// server asked us to stay out of, which is how that window gets extended.
+func TestClientRefusesRetryAfterLongerThanItWillWait(t *testing.T) {
+	t.Parallel()
+
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = io.ReadAll(r.Body)
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"code":"rate_limited","message":"Rate limited."}`)
+	}))
+	defer server.Close()
+
+	client := NewClient("secret-token").WithBaseURL(server.URL)
+	client.after = mustNotWait(t, "a Retry-After beyond maxRetryDelay must not be clamped and retried")
+
+	_, err := client.QueryDataSource(context.Background(), "ds_123")
+	if err == nil {
+		t.Fatal("QueryDataSource succeeded, want a refusal")
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("requests = %d, want 1 — no retry inside the window the server asked for", calls.Load())
+	}
+	// The operator needs the number the server actually asked for; without it
+	// there is nothing to act on.
+	if !strings.Contains(err.Error(), "1h0m0s") {
+		t.Fatalf("error should name the delay the server asked for, got: %v", err)
+	}
+}
+
 // Every retry path eventually exhausts. This pins the loop's exit: exactly
 // maxRequestAttempts requests, exactly one fewer wait, and the last attempt's
 // error handed back rather than a nil one. Without it the break-and-fall-through

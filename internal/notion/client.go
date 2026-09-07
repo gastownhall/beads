@@ -23,8 +23,9 @@ const (
 	// maxRequestAttempts bounds retries of a rate-limited or transiently failing
 	// request, including the first try.
 	maxRequestAttempts = 5
-	// maxRetryDelay clamps a server-supplied Retry-After so an interactive CLI
-	// cannot be parked for minutes by one header.
+	// maxRetryDelay bounds how long one attempt will wait before the next. A
+	// Retry-After longer than this is refused rather than clamped down to it —
+	// see doRequest.
 	maxRetryDelay = 30 * time.Second
 	// statusNotionOverloaded is Notion's overload status. It has no net/http
 	// constant because it is not a standard HTTP status; Notion returns it from
@@ -371,9 +372,19 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 			break
 		}
 
+		// A Retry-After longer than we are willing to wait is refused outright
+		// rather than clamped down to the ceiling. Waiting 30s when the server
+		// asked for an hour just spends the remaining attempts inside the window
+		// it told us to stay out of, which is how that window gets extended.
+		if retryAfter > maxRetryDelay {
+			return nil, fmt.Errorf(
+				"Notion asked for a %s wait before retrying, longer than the %s this client will wait: %w",
+				retryAfter, maxRetryDelay, lastErr)
+		}
+
 		// Retry-After is authoritative when present; otherwise exponential.
-		// Either way the wait is clamped to maxRetryDelay — including a header
-		// that asks for longer, which the clamp shortens.
+		// Either way the wait is bounded by maxRetryDelay, and the refusal above
+		// means clamping only ever shortens the exponential fallback.
 		delay := time.Duration(1<<attempt) * time.Second
 		if retryAfter > 0 {
 			delay = retryAfter
