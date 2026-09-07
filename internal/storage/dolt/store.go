@@ -2142,11 +2142,14 @@ var newServerDialer = func(timeout time.Duration) *net.Dialer {
 // server takes the auto-start branch above, which recovers by STARTING a
 // server rather than by waiting and keeps its bare dialServer.
 //
-// The cfg.ServerMode term is load-bearing rather than belt-and-braces: the
-// storage constructors do NOT re-derive the mode, so NewFromConfig and
-// NewFromConfigWithOptions reach newServerMode for an embedded workspace too
-// when a caller passes DisableAutoStart (bd config drift, bd config apply,
-// bd doctor's config reader). Those opens must keep the fail-fast error.
+// The cfg.ServerMode term is load-bearing rather than belt-and-braces:
+// NewFromConfig and NewFromConfigWithOptions reach newServerMode for an
+// EMBEDDED workspace too when a caller passes DisableAutoStart (bd config
+// drift, bd config apply, bd doctor's config reader), and those opens must
+// keep the fail-fast error. applyResolvedConfig fills the field from the
+// workspace's own metadata for callers that left it unset, so a routed
+// server-mode open through those same constructors keeps the budget while an
+// embedded diagnostic does not.
 //
 // DEADLINE SEMANTICS, stated once because the code, the config.yaml help text
 // and docs/reference/configuration.md must agree:
@@ -2454,7 +2457,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// bd config drift, bd config apply and doctor's config reader all
 			// pass DisableAutoStart against whatever workspace they find,
 			// embedded included, and an embedded diagnostic would then wait
-			// on a TCP port that has no server behind it.
+			// on a TCP port that has no server behind it. Those callers do
+			// not set the field; applyResolvedConfig derives it from the
+			// workspace metadata, so an embedded one arrives here false.
 			//
 			// Reading the key inside this branch rather than at the top of
 			// newServerMode keeps every SUCCESSFUL open free of the extra

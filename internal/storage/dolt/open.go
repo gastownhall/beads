@@ -395,6 +395,37 @@ func applyResolvedConfig(ctx context.Context, beadsDir string, fileCfg *configfi
 		fmt.Fprintf(os.Stderr, "Fix: bd dolt set data-dir ''   (clear the data-dir setting)\n\n")
 	}
 
+	// Classify the workspace the way the CLI does, unless the caller already
+	// decided. New -> newServerMode gates the open-retry budget on
+	// cfg.ServerMode, and the constructors above are reached with that field
+	// at its zero value by the store factory's own server branches
+	// (cmd/bd/store_factory.go routed creates and read-only cross-workspace
+	// opens, plus their non-CGO twins), which classify the workspace
+	// themselves and then call NewFromConfig / NewFromConfigWithOptions
+	// without restating it. Leaving it unset there costs those opens the
+	// budget they are configured for, while the primary CLI path keeps it
+	// because main.go sets the field before routing.
+	//
+	// The predicate mirrors cmd/bd/main.go rather than inventing a second
+	// classification: metadata dolt_mode (:1507), then shared-server mode as a
+	// form of server mode, skipped for proxied-server because that is its own
+	// backend (:1512, repeated at :1548). main.go writes those two steps
+	// inline in both places, so there is no helper to call; the same two steps
+	// are written here and nowhere else in this package.
+	//
+	// It is an OR and never an overwrite: a caller that already set ServerMode
+	// keeps it, so this cannot turn a server-mode open into an embedded one.
+	// Only the retry gate reads this field after this point -- the store's own
+	// s.serverMode is set unconditionally by newServerMode, and no caller of
+	// these constructors reads the config back, so the assignment changes
+	// nothing else about the open.
+	if !cfg.ServerMode {
+		cfg.ServerMode = fileCfg.IsDoltServerMode()
+	}
+	if !cfg.ServerMode && !cfg.ProxiedServer && doltserver.IsSharedServerMode() {
+		cfg.ServerMode = true
+	}
+
 	// Always apply database name from metadata.json (prefix-based naming, bd-u8rda).
 	if cfg.Database == "" {
 		cfg.Database = fileCfg.GetDoltDatabase()

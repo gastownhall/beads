@@ -428,41 +428,78 @@ func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
 	}
 }
 
-// The storage constructors do NOT re-derive the workspace mode: NewFromConfig
-// and NewFromConfigWithOptions build a Config and hand it to New, which always
-// calls newServerMode. So a caller that bypasses the CLI store factory -- bd
-// config drift, bd config apply, bd doctor's config reader, each passing
-// DisableAutoStart against whatever workspace it finds -- reaches the budget's
-// branch even for an embedded project, whose "server" is a TCP port with
-// nothing behind it. Waiting there is pure delay in a diagnostic.
+// The storage constructors do NOT take the workspace mode from the caller:
+// NewFromConfig and NewFromConfigWithOptions build a Config, fill it in
+// applyResolvedConfig, and hand it to New, which always calls newServerMode.
+// Two kinds of caller arrive there and the budget must treat them differently.
 //
-// The gate is cfg.ServerMode, the predicate the store factory itself routes on
-// (newDoltStore calls dolt.New only under `if cfg.ServerMode`). The three rows
-// vary exactly one thing at a time: rows 1 and 2 differ only in the metadata,
-// and neither retries, showing the metadata is not what decides; rows 2 and 3
-// differ only in cfg.ServerMode, and only row 3 retries, showing that it is.
-// Every row sets DisableAutoStart, so a gate written on that flag instead
-// would fail row 3.
-func TestOpenRetryNotEngagedByConstructorOpensWithAutoStartDisabled(t *testing.T) {
+//   - The CLI store factory's server branches -- routed creates
+//     (store_factory.go NewFromConfig) and cross-workspace read-only opens
+//     (NewFromConfigWithOptions with ReadOnly), plus their non-CGO twins --
+//     have already classified the workspace as server-backed and call the
+//     constructors without restating it. Those opens are what the budget is
+//     for: during an external server restart they must wait, not fail fast.
+//   - The diagnostics -- bd config drift, bd config apply, bd doctor's config
+//     reader -- pass DisableAutoStart against whatever workspace they find,
+//     embedded included, whose "server" is a TCP port with nothing behind it.
+//     Waiting there is pure delay.
+//
+// applyResolvedConfig separates them by deriving cfg.ServerMode from the
+// workspace's own metadata, the same classification cmd/bd/main.go applies
+// before routing the primary CLI path. So every row below varies the METADATA
+// and the constructor and NEVER hand-sets the flag: a row that supplied it
+// would assert its own fixture instead of the wiring. Rows 1 and 5 differ only
+// in the metadata, as do rows 3 and 4, so the metadata is shown to be what
+// decides; rows 1 and 3 differ only in DisableAutoStart and agree, so the
+// budget does not hang off that flag.
+func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
+	const serverMetadata = `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`
+	const embeddedMetadata = `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test_open_retry"}`
+
+	// The two constructor shapes the routed store-factory branches use.
+	newFromConfig := func(ctx context.Context, beadsDir string) {
+		_, _ = NewFromConfig(ctx, beadsDir)
+	}
+	newReadOnly := func(ctx context.Context, beadsDir string) {
+		_, _ = NewFromConfigWithOptions(ctx, beadsDir, &Config{ReadOnly: true})
+	}
+	newDiagnostic := func(ctx context.Context, beadsDir string) {
+		_, _ = NewFromConfigWithOptions(ctx, beadsDir, &Config{ReadOnly: true, DisableAutoStart: true})
+	}
+
 	for _, tc := range []struct {
-		name       string
-		metadata   string
-		serverMode bool
-		wantRetry  bool
+		name      string
+		open      func(context.Context, string)
+		metadata  string
+		wantRetry bool
 	}{
 		{
-			name:     "embedded workspace, diagnostic caller",
-			metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test_open_retry"}`,
+			name:      "routed create, external workspace",
+			open:      newFromConfig,
+			metadata:  serverMetadata,
+			wantRetry: true,
 		},
 		{
-			name:     "external workspace, diagnostic caller",
-			metadata: `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`,
+			name:      "routed read-only open, external workspace",
+			open:      newReadOnly,
+			metadata:  serverMetadata,
+			wantRetry: true,
 		},
 		{
-			name:       "external workspace, store-factory routing",
-			metadata:   `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`,
-			serverMode: true,
-			wantRetry:  true,
+			name:      "diagnostic caller, external workspace",
+			open:      newDiagnostic,
+			metadata:  serverMetadata,
+			wantRetry: true,
+		},
+		{
+			name:     "diagnostic caller, embedded workspace",
+			open:     newDiagnostic,
+			metadata: embeddedMetadata,
+		},
+		{
+			name:     "library caller, embedded workspace",
+			open:     newFromConfig,
+			metadata: embeddedMetadata,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -470,8 +507,8 @@ func TestOpenRetryNotEngagedByConstructorOpensWithAutoStartDisabled(t *testing.T
 			// Hermeticity: this test walks the real resolution chain, which
 			// consults a machine-level central config and the mode env vars.
 			// A developer machine that happens to point at a shared server
-			// would otherwise flip rows 1 and 2 into server mode and the test
-			// would pass for the wrong reason.
+			// would otherwise flip the embedded rows into server mode and the
+			// test would pass for the wrong reason.
 			t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent-central-config.json"))
 			for _, key := range []string{
 				"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER",
@@ -494,11 +531,7 @@ func TestOpenRetryNotEngagedByConstructorOpensWithAutoStartDisabled(t *testing.T
 				t.Fatalf("openRetryBudget = %v, want 5s: the fixture would prove nothing", got)
 			}
 
-			_, _ = NewFromConfigWithOptions(context.Background(), beadsDir, &Config{
-				ReadOnly:         true,
-				DisableAutoStart: true,
-				ServerMode:       tc.serverMode,
-			})
+			tc.open(context.Background(), beadsDir)
 
 			legacy, ctxDials := log.counts()
 			if legacy != 1 {
@@ -506,7 +539,7 @@ func TestOpenRetryNotEngagedByConstructorOpensWithAutoStartDisabled(t *testing.T
 			}
 			if tc.wantRetry {
 				if ctxDials == 0 {
-					t.Fatal("no retry dial: the positive control cannot retry, so the zero rows above prove nothing")
+					t.Fatal("no retry dial: a server-backed workspace opened through the constructors must keep the budget, and the zero rows prove nothing without this control")
 				}
 				return
 			}
