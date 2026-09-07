@@ -360,37 +360,83 @@ func TestOpenRetryNonRetryableFailsImmediately(t *testing.T) {
 // must not engage even when it is set. This is the case newServerMode's
 // auto-start branch handles, and its post-auto-start dial must stay the bare
 // legacy one.
+//
+// The fixture carries ServerMode, because the exclusion under test is the
+// AUTO-START BRANCH and nothing else. Without it the config would fail the
+// budget's other term as well, and the test would report a zero retry count
+// whatever the auto-start dispatch did -- so moving the guarded retry block
+// ahead of that dispatch would leave this test green while managed opens
+// started waiting. The second row is the control that makes the first one
+// mean something: the SAME fixture with auto-start off is no longer a managed
+// open, and it retries.
 func TestOpenRetryNotEngagedForManagedLocalhostOpen(t *testing.T) {
-	t.Setenv("BEADS_TEST_MODE", "1")
-	log := stubOpenRetryDials(t, errStubRefused, nil)
+	for _, tc := range []struct {
+		name       string
+		autoStart  bool
+		wantLegacy int
+		wantRetry  bool
+	}{
+		{
+			name:       "bd manages this server",
+			autoStart:  true,
+			wantLegacy: 2, // fail-fast probe + post-auto-start dial
+		},
+		{
+			name:       "same fixture, bd does not manage it",
+			autoStart:  false,
+			wantLegacy: 1,
+			wantRetry:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			// The retry, if one happens, succeeds immediately: this test asks
+			// WHETHER the loop was entered, and an exhaustion run would spend
+			// the whole 30s budget to answer the same question.
+			log := stubOpenRetryDials(t, errStubRefused, []error{nil})
 
-	origEnsure := ensureRunningDetailed
-	t.Cleanup(func() { ensureRunningDetailed = origEnsure })
-	ensureRunningDetailed = func(beadsDir string) (int, bool, error) {
-		return 1, false, nil // adopted an existing server on the same port
-	}
+			origEnsure := ensureRunningDetailed
+			t.Cleanup(func() { ensureRunningDetailed = origEnsure })
+			ensureRunningDetailed = func(beadsDir string) (int, bool, error) {
+				return 1, false, nil // adopted an existing server on the same port
+			}
 
-	beadsDir := writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "30s"})
-	cfg := &Config{
-		Database:   "test_open_retry_managed",
-		Path:       filepath.Join(beadsDir, "dolt"),
-		BeadsDir:   beadsDir,
-		ServerHost: "127.0.0.1",
-		ServerPort: 1,
-		AutoStart:  true, // bd manages this one
-	}
-	if !serverOpenCanAutoStart(cfg) {
-		t.Fatal("fixture no longer describes a bd-managed localhost open; the test would pass vacuously")
-	}
+			beadsDir := writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "30s"})
+			cfg := &Config{
+				Database:   "test_open_retry_managed",
+				Path:       filepath.Join(beadsDir, "dolt"),
+				BeadsDir:   beadsDir,
+				ServerHost: "127.0.0.1",
+				ServerPort: 1,
+				AutoStart:  tc.autoStart,
+				// The budget's mode term. The exclusion asserted here is the
+				// auto-start branch, so this must be TRUE or the zero retry
+				// count would be about the mode instead.
+				ServerMode: true,
+			}
+			// Positive control on the budget itself, so a zero retry count is
+			// about the branch and not about an unreadable key.
+			if got := openRetryBudget(beadsDir); got != 30*time.Second {
+				t.Fatalf("openRetryBudget = %v, want 30s: the fixture would prove nothing", got)
+			}
+			if got := serverOpenCanAutoStart(cfg); got != tc.autoStart {
+				t.Fatalf("serverOpenCanAutoStart = %v, want %v: the fixture no longer describes the open this row is about", got, tc.autoStart)
+			}
 
-	_, _ = newServerMode(context.Background(), cfg)
+			_, _ = newServerMode(context.Background(), cfg)
 
-	legacy, ctxDials := log.counts()
-	if ctxDials != 0 {
-		t.Fatalf("retry dials = %d, want 0: a bd-managed localhost open must never reach the budget", ctxDials)
-	}
-	if legacy != 2 {
-		t.Fatalf("legacy dials = %d, want 2 (fail-fast probe + post-auto-start dial), both through the context-free seam", legacy)
+			legacy, ctxDials := log.counts()
+			if tc.wantRetry {
+				if ctxDials == 0 {
+					t.Fatal("no retry dial: without this control a zero retry count in the row above would prove nothing")
+				}
+			} else if ctxDials != 0 {
+				t.Fatalf("retry dials = %d, want 0: a bd-managed localhost open must never reach the budget", ctxDials)
+			}
+			if legacy != tc.wantLegacy {
+				t.Fatalf("legacy dials = %d, want %d, all through the context-free seam", legacy, tc.wantLegacy)
+			}
+		})
 	}
 }
 
