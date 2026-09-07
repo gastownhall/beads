@@ -53,6 +53,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`bd prime` describes the memory split instead of prohibiting `MEMORY.md`**
+  ([#6111](https://github.com/gastownhall/beads/pull/6111), refs
+  [#5169](https://github.com/gastownhall/beads/issues/5169)). The guidance
+  line used to read `Do NOT use MEMORY.md files — they fragment across
+  accounts`. That warning predates harnesses that ship a first-party,
+  machine-local memory whose index file is also named `MEMORY.md`, so in a
+  workspace running both, prime told the agent every session not to use a file
+  the harness was actively maintaining. The line now says what each store is
+  for: durable **project** facts go in `bd remember`, because per-tool memory
+  files fragment across accounts; per-operator preferences stay in the
+  harness's own memory. Output text only, no behaviour change. The same
+  sentence is updated in its sibling renderings — the MCP/minimal context, the
+  generated AGENTS.md sections for the minimal and Codex harness templates,
+  and the README snippet — so `bd init` and copy-paste do not re-introduce the
+  prohibition.
+
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
   miss, the evaluator follows the target bead ID through `routes.jsonl` and
