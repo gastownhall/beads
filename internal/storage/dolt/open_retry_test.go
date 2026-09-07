@@ -1051,3 +1051,93 @@ func TestOpenRetryClampsThePerAttemptTimeoutToTheBudget(t *testing.T) {
 		}
 	}
 }
+
+// --- the retry is visible -----------------------------------------------
+
+// captureOpenRetryNotice redirects the notice writer for one test and returns
+// what the open printed.
+func captureOpenRetryNotice(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	orig := openRetryNotice
+	openRetryNotice = &buf
+	t.Cleanup(func() { openRetryNotice = orig })
+	return &buf
+}
+
+// The loop's per-attempt detail goes to debug.Logf, which is silent unless
+// BEADS_DEBUG is set, so a budget-long wait looked like a hang. One stderr
+// line makes it legible -- but only when a wait actually happens, and only
+// once per open however many attempts it takes.
+func TestOpenRetryNoticePrintsOncePerWaitingOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		budget     string
+		firstProbe error
+		wantNotice bool
+	}{
+		{
+			// The default path must stay byte-for-byte silent.
+			name:       "budget off",
+			firstProbe: errStubRefused,
+		},
+		{
+			name:       "budget on, server unreachable",
+			budget:     "2s",
+			firstProbe: errStubRefused,
+			wantNotice: true,
+		},
+		{
+			// Nothing was waited for, so nothing is announced. This is the
+			// row that fails if the notice moves to the top of
+			// retryOpenProbe, which a budget too small to buy a retry still
+			// reaches.
+			name:       "budget on, too small to buy a retry",
+			budget:     "1ns",
+			firstProbe: errStubRefused,
+		},
+		{
+			// The retry loop is never entered at all.
+			name:   "budget on, first probe succeeds",
+			budget: "30s",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			buf := captureOpenRetryNotice(t)
+			log := stubOpenRetryDials(t, tc.firstProbe, []error{errStubRefused})
+
+			kv := map[string]string{}
+			if tc.budget != "" {
+				kv[config.OpenRetryBudgetKey] = tc.budget
+			}
+			cfg := externalOpenConfig(writeBudgetConfig(t, kv))
+			_, _ = newServerMode(context.Background(), cfg)
+
+			got := buf.String()
+			if !tc.wantNotice {
+				if got != "" {
+					t.Fatalf("notice = %q, want nothing: this open never waited", got)
+				}
+				return
+			}
+			// Positive control: a row that expects the notice must really
+			// have retried, or it would be asserting on the wrong path.
+			if _, ctxDials := log.counts(); ctxDials == 0 {
+				t.Fatal("no retry dial happened, so this row proves nothing about the notice")
+			}
+			if n := strings.Count(got, "retrying for up to"); n != 1 {
+				t.Fatalf("notice printed %d times, want exactly 1 per open:\n%s", n, got)
+			}
+			if !strings.Contains(got, cfg.ServerHost) {
+				t.Fatalf("notice does not name the address it is waiting on: %q", got)
+			}
+			if !strings.Contains(got, config.OpenRetryBudgetKey) {
+				t.Fatalf("notice does not name the key that set the wait: %q", got)
+			}
+			if !strings.Contains(got, "2s") {
+				t.Fatalf("notice does not name the budget it will wait for: %q", got)
+			}
+		})
+	}
+}

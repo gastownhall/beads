@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -2170,6 +2171,16 @@ var newServerDialer = func(timeout time.Duration) *net.Dialer {
 // restarting or briefly unreachable server, not for a misconfigured one. On a
 // context that ends mid-loop the returned error wraps ctx.Err(), which is what
 // the caller tests to keep a caller-ended open out of the circuit breaker.
+// openRetryNotice is where the open-retry loop's one-line notice goes.
+// A package-level writer so a test can capture it; os.Stderr in production.
+//
+// Deliberately not debug.Logf, which the loop already uses for its per-attempt
+// detail: that writes only under BEADS_DEBUG/verbose, so an operator running
+// `bd list` against a restarting server saw nothing at all and a 30s budget
+// was indistinguishable from a hang. The auto-start branch prints to stderr in
+// the comparable situation; this is the waiting branch's equivalent.
+var openRetryNotice io.Writer = os.Stderr
+
 func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget time.Duration, firstErr error) (net.Conn, error) {
 	bo := newOpenRetryBackoff(budget)
 	bo.Reset()
@@ -2183,6 +2194,7 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		network, addr, lastErr, config.OpenRetryBudgetKey, budget)
 
 	attempts := 1 // the caller's first probe
+	notified := false
 	for {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, openRetryCanceled(ctxErr, lastErr, attempts, budget)
@@ -2191,6 +2203,16 @@ func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget t
 		remaining := time.Until(deadline)
 		if wait == backoff.Stop || remaining <= 0 || wait >= remaining {
 			break // never sleep past the deadline
+		}
+		// Past the break, a retry is committed to: the notice therefore
+		// announces a wait that really happens. Printed here rather than on
+		// entry because a budget too small to buy a single retry reaches
+		// entry and then breaks immediately -- announcing a wait nobody
+		// serves. Once per open, never per attempt.
+		if !notified {
+			notified = true
+			fmt.Fprintf(openRetryNotice, "bd: Dolt server unreachable at %s; retrying for up to %s (%s)\n",
+				addr, budget, config.OpenRetryBudgetKey)
 		}
 		timer := time.NewTimer(wait)
 		select {
