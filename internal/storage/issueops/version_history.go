@@ -25,6 +25,24 @@ import (
 // one caller that is NOT already short-circuited by that helper — it gates
 // on its own eventWritten signal instead (a duplicate add / absent remove
 // never reaches this seam either).
+//
+// Ordinals are LOCAL, not wire addresses. issues.current_revision and
+// issue_versions.revision are per-store ordinals, minted as MAX(revision)+1
+// inside the writing transaction: two disconnected clones can both hold
+// revision 8 for the same issue, each describing a different state. The
+// only durable address of a version is version_id (migration 0068 steps
+// 1-3, not yet landed). The HTTP API's RowVersion/Revision is a
+// compare-and-set token, never an address; Phase 3's read surface returns
+// version_id, never the ordinal.
+//
+// SINGLE WRITER ONLY until the version_id primary-key swap lands. With
+// PRIMARY KEY (issue_id, revision), two disconnected writers that each mint
+// the same ordinal for the same issue collide on merge, and
+// TryAutoResolveMergeConflicts (versioncontrolops/mergesettle.go) fails the
+// pull for a table it does not know. Enabling versioned history is therefore
+// safe only with a SINGLE writer per store until migration 0068 steps 1-3
+// (UUID version_id primary key, ordinal demoted to an index) land; those
+// steps follow as their own PR.
 
 var versionedHistoryTransactions sync.Map // map[DBTX]bool; entries live for one transaction
 
@@ -48,30 +66,35 @@ func versionedHistoryEnabled(tx DBTX) bool {
 	return on
 }
 
-// Design §16.4 (R14, be-hs42e.3): issue_versions.attribution_status is a
-// NOT NULL column (migration 0068 step 6) with four legal values. Phase 2 is
-// the sole writer of this table during its era and never writes "imported"
-// — that value is reserved for whichever later phase first writes history
-// that did not originate as a Phase-2-accepted mutation (import/backfill
-// tooling has no owner yet).
+// issue_versions.attribution_status is a NOT NULL column (migration 0068
+// step 6) whose vocabulary aligns to BDP's carried-attribution status
+// (gastownhall/bdp#18, merged 2026-09-07): status ∈ {claimed, unknown}. A
+// status is an assertion about the actor the mutation arrived with —
+// "claimed" when one was supplied, "unknown" when the mutation path had none
+// — and is derived from the same actor string every RecordVersionInTx call
+// site already passes (no call site carries any other attribution signal).
+//
+// "imported" is deliberately NOT a status: it is provenance (where a row
+// came from), not an assertion about who performed the mutation. It returns
+// as a separate provenance marker in the phase that first imports history;
+// no writer for it exists yet — Phase 2 is this table's sole writer, and
+// every row it mints originated as an accepted mutation.
 const (
-	attributionStatusSupplied     = "supplied"
-	attributionStatusNotSupplied  = "not_supplied"
-	attributionStatusUndetermined = "undetermined"
-	attributionStatusImported     = "imported"
+	attributionStatusClaimed = "claimed"
+	attributionStatusUnknown = "unknown"
 )
 
 // attributionStatusForActor derives issue_versions.attribution_status from
-// the same actor string every RecordVersionInTx call site already passes.
-// "not_supplied" would assert a deliberate, confirmed absence of attribution
-// that no current call site actually claims — every call site just passes
-// through whatever actor string it has, with no additional signal — so an
-// empty actor gets the conservative "undetermined" instead.
+// the same actor string every RecordVersionInTx call site already passes: a
+// non-empty actor is "claimed", an empty one is "unknown". There is no
+// third value — an empty actor means the path had no identity to assert,
+// which is exactly what "unknown" says; any stronger reading (a deliberate,
+// confirmed absence of attribution) is a claim no call site makes.
 func attributionStatusForActor(actor string) string {
 	if actor == "" {
-		return attributionStatusUndetermined
+		return attributionStatusUnknown
 	}
-	return attributionStatusSupplied
+	return attributionStatusClaimed
 }
 
 // RecordVersionInTx mints one issue_versions row for issueID and advances
@@ -79,6 +102,10 @@ func attributionStatusForActor(actor string) string {
 // same transaction). A no-op when versioned history is disabled for tx, or
 // when issueID resolves to a wisp: wisps carry current_revision for shape
 // parity only and are never versioned this phase (design FR-8).
+//
+// The revision it mints is a local ordinal, not an address — see the
+// package comment above on ordinals versus version_id, and on the
+// single-writer constraint that holds until version_id lands.
 //
 // actor is the acting identity that performed the mutation, recorded as the
 // version row's attribution — "" when the mutation path genuinely has none,

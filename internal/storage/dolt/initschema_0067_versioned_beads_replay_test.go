@@ -141,7 +141,7 @@ func TestMigration0067ReplaysIdempotentlyAsRawSQLThroughPR4107Harness(t *testing
 	}
 	if _, err := store.db.ExecContext(ctx, `
 		INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status)
-		VALUES ('mig0067-replay-subject', 42, 1, '2026-09-05 00:00:00', 'undetermined')`); err != nil {
+		VALUES ('mig0067-replay-subject', 42, 1, '2026-09-05 00:00:00', 'unknown')`); err != nil {
 		t.Fatalf("seed issue_versions row: %v", err)
 	}
 

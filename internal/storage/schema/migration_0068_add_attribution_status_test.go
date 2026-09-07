@@ -122,9 +122,9 @@ func TestMigration0068AddsAttributionStatusThroughDoltCLI(t *testing.T) {
 	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00')`); err == nil {
 		t.Error("insert into issue_versions omitting attribution_status succeeded, want a NOT NULL violation")
 	}
-	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00', 'supplied')`)
+	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00', 'claimed')`)
 	rows := queryDoltCSV(t, dir, `SELECT attribution_status FROM issue_versions WHERE issue_id = 'iv-1'`)
-	if len(rows) != 1 || rows[0]["attribution_status"] != "supplied" {
+	if len(rows) != 1 || rows[0]["attribution_status"] != "claimed" {
 		t.Fatalf("attribution_status round-trip failed post-migration: %v", rows)
 	}
 }
