@@ -112,11 +112,11 @@ func attributionStatusForActor(actor string) string {
 // integers are ordinals and priorities), but the rule is stated so nobody
 // expects int64 fidelity from the token.
 func canonicalDurableState(issue any) ([]byte, error) {
-	marshalled, err := json.Marshal(issue)
+	marshaled, err := json.Marshal(issue)
 	if err != nil {
 		return nil, err
 	}
-	canonical, err := jcs.Transform(marshalled)
+	canonical, err := jcs.Transform(marshaled)
 	if err != nil {
 		return nil, fmt.Errorf("canonicalize (RFC 8785): %w", err)
 	}
@@ -150,7 +150,7 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return nil
 	}
 
-	// durable_state is the RFC 8785 (JCS) canonical form of the marshalled
+	// durable_state is the RFC 8785 (JCS) canonical form of the marshaled
 	// issue, stored as bytes -- issue_versions.durable_state is a LONGBLOB
 	// (migration 0068 step 7), not a JSON column. The invariant that buys,
 	// the one donnabox asked for on #6358 item 4: sha256(stored bytes) is a

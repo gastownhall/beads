@@ -10,7 +10,7 @@ import (
 // TestCanonicalDurableStateIsJCS pins that canonicalDurableState -- the one
 // helper RecordVersionInTx stores through -- emits the RFC 8785 (JCS) form,
 // not encoding/json's, and that the difference is real: the same value
-// marshalled without the JCS step yields different bytes.
+// marshaled without the JCS step yields different bytes.
 //
 // Why this matters (donnabox on gastownhall/beads#6358 item 4): the token
 // the design derives from durable_state (#5898, sha256-jcs) is only stable if
