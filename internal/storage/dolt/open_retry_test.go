@@ -30,11 +30,12 @@ import (
 // context-free dialServer ran exactly once and the retry loop's
 // context-aware dial ran zero times.
 type openRetryDialLog struct {
-	mu       sync.Mutex
-	start    time.Time
-	legacy   int
-	ctxDials int
-	retries  []retryDial
+	mu             sync.Mutex
+	start          time.Time
+	legacy         int
+	ctxDials       int
+	retries        []retryDial
+	legacyTimeouts []time.Duration
 }
 
 // retryDial records WHEN a retry dial started and WITH WHICH per-attempt
@@ -57,6 +58,38 @@ func (l *openRetryDialLog) dials() []retryDial {
 	return append([]retryDial(nil), l.retries...)
 }
 
+// legacyDialTimeouts returns the per-dial timeout each LEGACY probe was handed,
+// in order. Recorded because the first probe's timeout is the one thing the
+// budget promises never to shorten: without this the probe could be cut to a
+// nanosecond and every assertion in this file would stay green, since they all
+// count dials rather than measure them.
+func (l *openRetryDialLog) legacyDialTimeouts() []time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]time.Duration(nil), l.legacyTimeouts...)
+}
+
+// wantFirstProbeTimeout is newServerMode's fail-fast probe timeout, written
+// out rather than read from the code under test: a baseline learned from the
+// implementation moves with it, and this value is the budget's central
+// promise -- the first probe is never shortened, so no setting can make bd
+// less patient than the default.
+const wantFirstProbeTimeout = 500 * time.Millisecond
+
+// assertFirstProbeTimeout checks the fail-fast probe kept its full timeout.
+// Every test that reaches the probe can call it, so a change to that timeout
+// cannot hide in whichever test happens not to look.
+func assertFirstProbeTimeout(t *testing.T, log *openRetryDialLog) {
+	t.Helper()
+	timeouts := log.legacyDialTimeouts()
+	if len(timeouts) == 0 {
+		t.Fatal("no legacy probe was made, so its timeout cannot be asserted")
+	}
+	if timeouts[0] != wantFirstProbeTimeout {
+		t.Fatalf("first probe timeout = %v, want %v: the budget must never shorten the fail-fast probe", timeouts[0], wantFirstProbeTimeout)
+	}
+}
+
 var errStubRefused = errors.New("dial tcp 127.0.0.1:1: connect: connection refused")
 
 // stubOpenRetryDials replaces both dial seams. legacyErr is what the fail-fast
@@ -77,6 +110,7 @@ func stubOpenRetryDials(t *testing.T, legacyErr error, ctxResults []error) *open
 	dialServer = func(network, addr string, timeout time.Duration) (net.Conn, error) {
 		log.mu.Lock()
 		log.legacy++
+		log.legacyTimeouts = append(log.legacyTimeouts, timeout)
 		log.mu.Unlock()
 		if legacyErr != nil {
 			return nil, legacyErr
@@ -245,6 +279,10 @@ func TestOpenRetryOffMakesOneLegacyDialAndKeepsTheError(t *testing.T) {
 			if legacy != 1 || ctxDials != 0 {
 				t.Fatalf("dials legacy=%d ctx=%d, want 1 and 0: the default path must not retry and must not become context-aware", legacy, ctxDials)
 			}
+			// With the budget absent nothing may touch the probe's timeout
+			// either: shortening it would degrade the default open, and
+			// counting dials cannot see that.
+			assertFirstProbeTimeout(t, log)
 			if err.Error() != wantErr {
 				t.Fatalf("default-path error changed:\n got: %q\nwant: %q", err.Error(), wantErr)
 			}
@@ -295,6 +333,7 @@ func TestOpenRetryOnSucceedsOnLaterAttempt(t *testing.T) {
 	if ctxDials != 2 {
 		t.Fatalf("retry dials = %d, want 2 (one failure then the success)", ctxDials)
 	}
+	assertFirstProbeTimeout(t, log)
 }
 
 // Exhaustion is bounded by the budget, and every retry is planned to finish
@@ -316,6 +355,9 @@ func TestOpenRetryExhaustionIsBounded(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected the open to fail once the budget was spent")
 	}
+	// The budget is spent in full here, which is where a first probe borrowing
+	// from it would be least visible.
+	assertFirstProbeTimeout(t, log)
 	dials := log.dials()
 	if len(dials) < 2 {
 		t.Fatalf("retry dials = %d, want at least 2: the budget did not buy real retries, so nothing about the loop was exercised", len(dials))
