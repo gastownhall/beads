@@ -117,6 +117,7 @@ Any key whose name contains `api_key`, `api-key`, `secret`, `token`, or `passwor
 | `dolt.local-only` | — | `BD_DOLT_LOCAL_ONLY` | `false` | Keep Dolt data off the network: skip remote wiring at `bd init`, suppress auto-push, have `bd dolt push`/`pull` and `bd sync` report remote sync as disabled without contacting a remote, and refuse `bd dolt remote add` |
 | `dolt.shared-server` | `--shared-server` | `BEADS_DOLT_SHARED_SERVER` | `false` | Share one Dolt server at `~/.beads/shared-server/` |
 | `dolt.max-conns` | — | `BEADS_DOLT_MAX_CONNS` | `10` | Connection pool size |
+| `dolt.open-retry-budget` | — | — | `0` (off) | Bound retries around the connectivity probe when opening against a Dolt server bd does not manage (see [below](#open-retry-budget)) |
 | `git.author` | — | `BD_GIT_AUTHOR` | (none) | Override commit author for beads commits |
 | `git.no-gpg-sign` | — | `BD_GIT_NO_GPG_SIGN` | `false` | Disable GPG signing for beads commits |
 | `create.require-description` | — | `BD_CREATE_REQUIRE_DESCRIPTION` | `false` | Require description on `bd create` |
@@ -275,6 +276,45 @@ How it works:
 - Last push time and commit are tracked in `.beads/push-state.json`, a per-machine file (not in the database, to avoid merge conflicts across machines).
 
 Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bounded by a 30-second timeout. For large stores, raise it with the runtime-only `BEADS_FSCK_TIMEOUT` environment variable (accepts durations like `2m` or bare seconds like `90`).
+
+### Open-retry budget
+
+`dolt.open-retry-budget` bounds how long `bd` keeps re-probing a Dolt
+sql-server that will not answer while opening a store. It is **off by
+default**, so the out-of-the-box behaviour is unchanged: one connectivity
+probe, then the usual "Dolt server unreachable" error.
+
+```yaml
+dolt:
+  open-retry-budget: 30s    # duration, or a bare number of seconds ("30")
+```
+
+What it does and does not cover:
+
+- **It applies only to a server `bd` does not manage** — a non-localhost host,
+  a unix socket, or a project where auto-start is suppressed. There, waiting is
+  the only remedy `bd` has.
+- **It never applies to embedded mode or to a `bd`-managed localhost server.**
+  Those recover by *starting* a server, which `bd` already does; a managed open
+  that finds nothing listening goes straight to auto-start as before.
+- **It bounds the retries, not the first probe.** The first probe keeps its own
+  timeout and is never shortened by the budget, so a value too small to buy a
+  retry simply degrades to today's fail-fast open. No setting here can make
+  `bd` less patient than the default.
+- **Only transient failures are retried.** A misconfigured endpoint (unknown
+  host, and similar non-transient errors) fails immediately, exactly as it does
+  with the budget off.
+- **Cancellation is honoured.** If the caller's context is cancelled, the open
+  ends at once, and — because that says nothing about the server's health — it
+  does not count towards the circuit breaker.
+
+The key is read with the same scope rules as `dolt.auto-start`: the merged
+configuration first, then the project's own `.beads/config.yaml`. Setting it to
+`0`, to an empty value, or to anything unparseable means off.
+
+Typical use is a shared or remote Dolt server that restarts on a schedule, where
+a command issued during the restart window should wait a few seconds rather than
+fail.
 
 ## Actor Identity Resolution
 

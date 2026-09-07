@@ -288,6 +288,40 @@ If you want auto-start behavior, remove `dolt_server_port` from
 `.beads/metadata.json`, and unset `BEADS_DOLT_SERVER_MODE` or a port variable
 if one also declares the server externally managed.
 
+### Commands fail while a Dolt server you manage is restarting
+
+**Symptom (server mode, external server):** commands against a shared or
+remote Dolt server fail with "Dolt server unreachable at HOST:PORT" during a
+scheduled restart or a brief network blip, and succeed again a few seconds
+later.
+
+**Cause:** by default `bd` probes the server once and fails fast. That is the
+right behaviour for an interactive command against a server that is genuinely
+down, but it makes a restart window look like an outage.
+
+**Fix:** give the open a bounded retry budget.
+
+```bash
+bd config set dolt.open-retry-budget 30s   # or a bare number of seconds
+```
+
+Within that budget `bd` re-probes the server on the usual backoff schedule and
+proceeds as soon as it answers. Notes:
+
+- Off by default; `0`, an empty value or an unparseable one all mean off.
+- Applies **only** to a server `bd` does not manage. An embedded project, or a
+  localhost server `bd` auto-starts, is unaffected: those recover by starting a
+  server, which `bd` already does.
+- Bounds the retries, not the first probe, so it can only ever make `bd` more
+  patient than the default, never less.
+- Non-transient failures (an unknown host, for instance) still fail
+  immediately — the budget is for a server that is coming back, not for a
+  wrong address.
+
+If commands still fail after the budget expires, the server really is down:
+see [Configured server unreachable](#configured-server-unreachable-auto-start-disabled)
+above.
+
 ### Port conflicts with multiple projects
 
 **Symptom (server mode):** Commands in a second project fail or connect to the
