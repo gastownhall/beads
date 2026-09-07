@@ -60,6 +60,7 @@ var (
 	doctorServer                    bool   // run server mode health checks
 	doctorMigration                 string // migration validation mode: "pre" or "post"
 	doctorAgent                     bool   // agent-facing diagnostic mode (ZFC-compliant)
+	doctorScan                      bool   // opt in to the recursive classic-artifact filesystem scan
 )
 
 // ConfigKeyHintsDoctor is the config key for suppressing doctor hints
@@ -105,6 +106,14 @@ Performance Mode (--perf):
 Export Mode (--output):
   Save diagnostics to a JSON file for historical analysis and bug reporting.
   Includes timestamp and platform info for tracking intermittent issues.
+
+Filesystem Scan Mode (--scan):
+  Enable the recursive classic-artifact scan during a regular doctor run.
+  Off by default: the scan walks the whole tree (filepath.Walk + a stat
+  per entry) hunting for nested .beads/ relics from the pre-Dolt era,
+  which is expensive on large checkouts for an advisory check that
+  rarely finds anything outside the top-level .beads/. Use --scan to
+  opt in, or run '--check=artifacts' for a standalone scan (always scans).
 
 Specific Check Mode (--check):
   Run a specific check in detail. Available checks:
@@ -177,6 +186,7 @@ Examples:
   bd doctor --dry-run    # Preview what --fix would do without making changes
   bd doctor --perf       # Performance diagnostics
   bd doctor --output diagnostics.json  # Export diagnostics to file
+  bd doctor --scan            # Include the recursive classic-artifact scan
   bd doctor --check=artifacts           # Show classic artifacts (JSONL, SQLite, cruft dirs)
   bd doctor --check=artifacts --clean  # Delete safe-to-delete artifacts (with confirmation)
   bd doctor --check=conventions        # Convention drift check (lint, stale, orphans)
@@ -352,6 +362,7 @@ func init() {
 	doctorCmd.Flags().BoolVar(&doctorServer, "server", false, "Run Dolt server mode health checks (connectivity, version, schema)")
 	doctorCmd.Flags().StringVar(&doctorMigration, "migration", "", "Run legacy Dolt-server migration diagnostics: 'pre' or 'post'")
 	doctorCmd.Flags().BoolVar(&doctorAgent, "agent", false, "Agent-facing diagnostic mode: rich context for AI agents (ZFC-compliant)")
+	doctorCmd.Flags().BoolVar(&doctorScan, "scan", false, "Opt in to the recursive filesystem scan for classic artifacts (otherwise skipped to avoid stat-ing the whole tree)")
 }
 
 func shouldSkipDoctorNetworkChecks() bool {
@@ -963,10 +974,18 @@ func runDiagnostics(path string) doctorResult {
 	result.Checks = append(result.Checks, doltLocksCheck)
 	// Don't fail overall check for Dolt locks, just warn
 
-	// Check 33: Classic artifacts (post-Dolt-migration cleanup)
-	classicArtifactsCheck := convertDoctorCheck(doctor.CheckClassicArtifacts(path))
-	result.Checks = append(result.Checks, classicArtifactsCheck)
-	// Don't fail overall check for classic artifacts, just warn
+	// Check 33: Classic artifacts (post-Dolt-migration cleanup).
+	// Skipped unless --scan is set: CheckClassicArtifacts recurses the whole
+	// tree (filepath.Walk + per-entry Lstat) hunting for nested .beads/
+	// relics. On large checkouts that stat storm dominates doctor runtime for
+	// an advisory check that rarely finds anything outside the top-level
+	// .beads/. Opt in with --scan, or use --check=artifacts for an explicit
+	// standalone scan (always scans).
+	if doctorScan {
+		classicArtifactsCheck := convertDoctorCheck(doctor.CheckClassicArtifacts(path))
+		result.Checks = append(result.Checks, classicArtifactsCheck)
+		// Don't fail overall check for classic artifacts, just warn
+	}
 
 	// Check 34: Linux btrfs NoCOW on .beads/ (GH nocow-beads-dolt-init)
 	// Warns when the dolt data directory sits on btrfs without FS_NOCOW_FL,
