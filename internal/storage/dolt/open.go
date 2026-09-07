@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
@@ -22,6 +23,38 @@ const (
 	ServerModeExternal = doltserver.ServerModeExternal
 	ServerModeEmbedded = doltserver.ServerModeEmbedded
 )
+
+// configStringForDir resolves a dotted dolt.* config key with the scope rules
+// the dolt.* keys already use: the merged viper view first (config.Initialize
+// has folded BEADS_DIR, the project .beads/config.yaml and the user-level
+// files into it), then a direct read of <beadsDir>/config.yaml for library
+// consumers that call the storage layer without ever invoking
+// config.Initialize.
+//
+// It exists as ONE function rather than as the same four lines written three
+// times so that dolt.open-retry-budget and dolt.auto-start cannot drift apart:
+// matching the sibling key's scope is the contract the open-retry budget ships
+// under, and a shared reader makes that a property of the code instead of a
+// claim in a comment. TestOpenRetryBudgetSiblingScopeParity pins it.
+func configStringForDir(beadsDir, key string) string {
+	if v := config.GetString(key); v != "" {
+		return v
+	}
+	return config.GetStringFromDir(beadsDir, key)
+}
+
+// openRetryBudget resolves config.OpenRetryBudgetKey for an open rooted at
+// beadsDir. Zero -- absent, empty, "0", negative or unparseable -- is off, and
+// off is the pre-existing fail-fast open.
+//
+// The value bounds the RETRIES that follow the open's first connectivity
+// probe. The first probe keeps its own timeout and is never shortened by this
+// budget, so a value too small to buy a retry degrades to exactly today's
+// behaviour -- one probe, no retries -- and no setting here can make bd less
+// patient than the default.
+func openRetryBudget(beadsDir string) time.Duration {
+	return config.ResolveOpenRetryBudget(configStringForDir(beadsDir, config.OpenRetryBudgetKey))
+}
 
 // ApplyCLIAutoStart sets the standalone auto-start policy used by the
 // normal CLI path. Honors the actual server mode resolved from
@@ -47,10 +80,7 @@ func ApplyCLIAutoStart(beadsDir string, cfg *Config) {
 		cfg.AutoStart = false
 		return
 	}
-	autoStartCfg := config.GetString("dolt.auto-start")
-	if autoStartCfg == "" {
-		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
-	}
+	autoStartCfg := configStringForDir(beadsDir, "dolt.auto-start")
 	mode := doltserver.ResolveServerMode(beadsDir)
 	cfg.AutoStart = resolveAutoStart(true, autoStartCfg, mode)
 }
@@ -271,10 +301,7 @@ func NewFromConfigWithOptions(ctx context.Context, beadsDir string, cfg *Config)
 	// Prefer the global viper config (populated when config.Initialize() has been
 	// called, i.e. all CLI paths). Fall back to a direct read of the project
 	// config.yaml for library consumers that never call config.Initialize().
-	autoStartCfg := config.GetString("dolt.auto-start")
-	if autoStartCfg == "" {
-		autoStartCfg = config.GetStringFromDir(beadsDir, "dolt.auto-start")
-	}
+	autoStartCfg := configStringForDir(beadsDir, "dolt.auto-start")
 	// When the server is externally managed (explicit port in metadata.json,
 	// shared server mode, etc.), suppress auto-start. This prevents bd from
 	// launching a different server when the user's configured server is

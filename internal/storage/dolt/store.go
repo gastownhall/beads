@@ -41,6 +41,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/debug"
 	"github.com/steveyegge/beads/internal/doltserver"
@@ -693,9 +694,25 @@ func fsckTimeoutDuration() time.Duration {
 // brief network issues, server restarts).
 const serverRetryMaxElapsed = 30 * time.Second
 
-func newServerRetryBackoff() backoff.BackOff {
+// newServerRetryBackoff returns the shared server-retry schedule. The concrete
+// type is returned (rather than the backoff.BackOff interface) so that
+// newOpenRetryBackoff can re-use this schedule with a different elapsed-time
+// ceiling instead of re-deriving one.
+func newServerRetryBackoff() *backoff.ExponentialBackOff {
 	bo := backoff.NewExponentialBackOff()
 	bo.MaxElapsedTime = serverRetryMaxElapsed
+	return bo
+}
+
+// newOpenRetryBackoff is newServerRetryBackoff's schedule with the open-retry
+// budget as its elapsed-time ceiling. A non-positive budget cannot reach here
+// -- the caller only builds one when the budget is positive -- but is mapped
+// back to the default ceiling so no path can produce an unbounded loop.
+func newOpenRetryBackoff(budget time.Duration) *backoff.ExponentialBackOff {
+	bo := newServerRetryBackoff()
+	if budget > 0 {
+		bo.MaxElapsedTime = budget
+	}
 	return bo
 }
 
@@ -2057,6 +2074,14 @@ var stopRejectedAutoStartedServer = doltserver.Stop
 // dialServer makes newServerMode's fail-fast connection to the server.
 // Declared as a var (matching dialProbe above) so unit tests can stub a dial
 // failure, such as a sandbox refusing the connection, without a live server.
+//
+// It is the ORIGINAL pre-dial probe: net.DialTimeout, with no context. Both
+// dials that existed before the open-retry budget -- the fail-fast probe and
+// the post-auto-start retry -- go through it unchanged, so "the default is
+// untouched" holds down to the ignored context: net.DialTimeout cannot see a
+// cancelled or short-deadline ctx, and therefore cannot change the default
+// open's behaviour or its error text. Counting dials through it is the only
+// way to assert that the default path makes exactly one.
 var dialServer = net.DialTimeout
 
 // issueProjectionColumns are the columns every issue read selects from the
@@ -2081,6 +2106,135 @@ func checkOpenSchemaDrift(ctx context.Context, db *sql.DB, cfg *Config) error {
 		behind.Gateway = true
 	}
 	return err
+}
+
+// openProbeDialContext is the context-aware dial used ONLY by the retry loop --
+// the opt-in path, where a caller that cancels an open must be able to end a
+// dial in flight rather than wait out its timeout. For an uncancelled context
+// it does exactly what net.DialTimeout does (net.DialTimeout is Dialer.Timeout
+// plus a background context).
+var openProbeDialContext = func(ctx context.Context, network, addr string, timeout time.Duration) (net.Conn, error) {
+	return newServerDialer(timeout).DialContext(ctx, network, addr)
+}
+
+// newServerDialer builds the dialer openProbeDialContext uses. It is its own
+// function so that "the per-attempt timeout reaches the dialer" is checkable
+// without a network: a test reads the field back for two different timeouts.
+// Asserting it against an address instead would make the test depend on
+// whether the network blackholes or rejects that address, and a rejecting
+// network cannot exhibit a timeout at all.
+//
+// The timeout is per ATTEMPT. Dropping it would leave one attempt in SYN
+// retransmit for the OS connect timeout -- minutes -- so the budget would buy
+// fewer retries than it allows, or none.
+var newServerDialer = func(timeout time.Duration) *net.Dialer {
+	return &net.Dialer{Timeout: timeout}
+}
+
+// retryOpenProbe re-probes an unreachable sql-server that bd does not manage,
+// for at most budget.
+//
+// It is called from exactly one place: newServerMode's fail-fast branch, after
+// the first probe failed AND after serverOpenCanAutoStart said bd cannot start
+// a server here. That call site IS the mode gate -- there is no separate
+// classifier to keep in sync. Embedded mode never reaches newServerMode at
+// all, and a bd-managed localhost server takes the auto-start branch above,
+// which recovers by STARTING a server rather than by waiting and keeps its
+// bare dialServer.
+//
+// DEADLINE SEMANTICS, stated once because the code, the config.yaml help text
+// and docs/reference/configuration.md must agree:
+//
+//	The budget bounds the RETRIES. The first probe is the fail-fast probe,
+//	unchanged: it keeps its full timeout and is never shortened by the budget.
+//	Every dial after it is capped by what is left of the budget, and no retry
+//	starts, and no sleep runs, past the deadline.
+//
+// The clock starts here, after the first probe returned, so an operator who
+// configures 30s waits about 30s beyond the probe the open would have cost
+// anyway. The alternative -- a deadline over the whole probe, first dial
+// included -- was rejected because it makes small values a footgun: "1ns"
+// would mean zero dials, an open that never contacts the server, which is LESS
+// patient than the fail-fast open this budget exists to make more patient.
+//
+// A non-retryable failure returns immediately: the budget buys time for a
+// restarting or briefly unreachable server, not for a misconfigured one. On a
+// context that ends mid-loop the returned error wraps ctx.Err(), which is what
+// the caller tests to keep a caller-ended open out of the circuit breaker.
+func retryOpenProbe(ctx context.Context, network, addr string, timeout, budget time.Duration, firstErr error) (net.Conn, error) {
+	bo := newOpenRetryBackoff(budget)
+	bo.Reset()
+	deadline := time.Now().Add(budget)
+
+	lastErr := firstErr
+	if !isRetryableError(lastErr) {
+		return nil, lastErr
+	}
+	debug.Logf("dolt: %s %s unreachable (%v); retrying open within %s=%s\n",
+		network, addr, lastErr, config.OpenRetryBudgetKey, budget)
+
+	attempts := 1 // the caller's first probe
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, openRetryCancelled(ctxErr, lastErr, attempts, budget)
+		}
+		wait := bo.NextBackOff()
+		remaining := time.Until(deadline)
+		if wait == backoff.Stop || remaining <= 0 || wait >= remaining {
+			break // never sleep past the deadline
+		}
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, openRetryCancelled(ctx.Err(), lastErr, attempts, budget)
+		case <-timer.C:
+		}
+
+		dialTimeout := timeout
+		if left := time.Until(deadline); left <= 0 {
+			break
+		} else if left < dialTimeout {
+			dialTimeout = left
+		}
+
+		attempts++
+		conn, err := openProbeDialContext(ctx, network, addr, dialTimeout)
+		if err == nil {
+			// A dial that lands after cancellation must not report success.
+			// The connection is discarded through DrainAndCloseProbe rather
+			// than Close: a bare Close on a probe that has not read the
+			// server's handshake greeting makes the OS send RST instead of
+			// FIN, and dolt sql-server can crash on enough of those
+			// (gastownhall/beads#4132, #4133). A retry loop is exactly the
+			// repeated-probe shape that documents that risk.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				doltserver.DrainAndCloseProbe(conn)
+				return nil, openRetryCancelled(ctxErr, lastErr, attempts, budget)
+			}
+			debug.Logf("dolt: %s %s reachable after %d open attempts\n", network, addr, attempts)
+			return conn, nil
+		}
+		lastErr = err
+		if !isRetryableError(err) {
+			return nil, err
+		}
+		debug.Logf("dolt: open attempt %d for %s %s failed: %v\n", attempts, network, addr, err)
+	}
+	return nil, fmt.Errorf("%w (still unreachable after %d attempts within %s=%s)",
+		lastErr, attempts, config.OpenRetryBudgetKey, budget)
+}
+
+// openRetryCancelled reports a retry loop ended by its context. Both causes
+// stay identifiable with errors.Is: the dial failure that made the loop retry,
+// and the context error that ended it.
+func openRetryCancelled(ctxErr, lastErr error, attempts int, budget time.Duration) error {
+	if lastErr == nil {
+		return fmt.Errorf("open retry cancelled after %d attempts within %s=%s: %w",
+			attempts, config.OpenRetryBudgetKey, budget, ctxErr)
+	}
+	return fmt.Errorf("%w (open retry cancelled after %d attempts within %s=%s: %w)",
+		lastErr, attempts, config.OpenRetryBudgetKey, budget, ctxErr)
 }
 
 // newServerMode creates a DoltStore connected to a running dolt sql-server.
@@ -2261,7 +2415,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				addr = doltutil.ServerAddr(cfg.ServerHost, cfg.ServerPort)
 				breaker = maybeNewCircuitBreaker(cfg.ServerHost, cfg.ServerPort, cfg.Database)
 			}
-			// Retry connection with longer timeout (server just started)
+			// Retry connection with longer timeout (server just started).
+			// Deliberately the bare dialServer, never the open-retry loop:
+			// this is the bd-managed localhost path, which recovers by starting
+			// a server rather than by waiting, and it is the mode the budget is
+			// explicitly excluded from.
 			conn, dialErr = dialServer("tcp", addr, 2*time.Second)
 			if dialErr != nil {
 				// Release auto-start ref on connection failure
@@ -2272,46 +2430,86 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 				return nil, autoStartRedialError(addr, dialErr, startedByUs, doltserver.LogPath(resolvedBeadsDir))
 			}
 		} else {
-			recordDialFailure(breaker, dialErr)
-			var hint string
-			if cfg.ServerSocket != "" {
-				// The socket path is metadata.json's dolt_server_socket,
-				// which a cloned repository commits: it goes into the
-				// command as one shell word, or as a <path> placeholder
-				// with the path named escaped beside it.
-				socket, note := remedy.CommandArg(runtime.GOOS, cfg.ServerSocket, "<path>")
-				hint = fmt.Sprintf("The Dolt server is not listening on socket %s.\n"+
-					"Ensure the server is started with --socket:\n"+
-					"  dolt sql-server --socket %s%s\n"+
-					"Auto-start is not supported in socket mode.",
-					remedy.PrintedValue(cfg.ServerSocket), socket, note)
-			} else if isExternalServerHost(cfg.ServerHost) {
-				// A server bd does not run (configfile.BdRunsServerAt): bd
-				// does not manage it; "bd dolt start" would be wrong
-				// advice (GH#3518). Suggest verifying the external server
-				// instead. The endpoint is addr, which brackets an IPv6
-				// host; doltserver.ReachabilityCheck spells the host as
-				// nc and curl each take it.
-				hint = fmt.Sprintf("Configured Dolt server at %s is unreachable.\n"+
-					"Verify the external server is running and reachable from this host:\n"+
-					"  %s",
-					remedy.PrintedValue(addr), doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
-			} else if named := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); named != "" {
-				// A named port declares the server externally managed
-				// (BEADS_DOLT_SERVER_PORT, dolt_server_port), which is
-				// why auto-start is off here: "bd dolt start" would start
-				// bd's own server on that port, not the one that belongs
-				// there. Checked before the auto-start-disabled hint,
-				// whose remedy is that same command.
-				hint = named
-			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
-				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
-					"Start the server manually:\n  bd dolt start"
-			} else {
-				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
+			// bd does not manage this server -- socket mode, a non-localhost
+			// host, or auto-start suppressed -- so starting one is not a
+			// remedy and waiting is. This branch, and only this branch, is
+			// where the config-gated open-retry budget applies; the gate is
+			// the CALL SITE, not a mode classifier that could disagree with
+			// serverOpenCanAutoStart above.
+			//
+			// Reading the key here rather than at the top of newServerMode
+			// keeps every SUCCESSFUL open free of the extra config read that
+			// the sibling scope rule's directory fallback can perform.
+			if budget := openRetryBudget(resolvedBeadsDir); budget > 0 {
+				network := "tcp"
+				timeout := 500 * time.Millisecond
+				if cfg.ServerSocket != "" {
+					network = "unix"
+				}
+				conn, dialErr = retryOpenProbe(ctx, network, addr, timeout, budget, dialErr)
+				// The first dial's error was spelled through the remedy printer
+				// above; a later dial's error comes back as the dialer wrote it
+				// and repeats the same endpoint, so it is spelled the same way.
+				dialErr = remedy.PrintedError(dialErr)
+				if dialErr != nil && ctx.Err() != nil {
+					// The CALLER ended this open. That is evidence about the
+					// caller, not about the server, so it must not count
+					// towards the circuit breaker: five cancelled opens
+					// inside the failure window would otherwise trip it
+					// against a healthy server and fail every open after
+					// them for the cooldown. The question is asked of the
+					// CONTEXT, never of the error: net's own timeoutError
+					// reports errors.Is(err, context.DeadlineExceeded) as
+					// true, so an error-identity test would stop counting
+					// ordinary server timeouts too.
+					return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), dialErr)
+				}
 			}
-			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
-				remedy.PrintedValue(addr), dialErr, hint)
+			// A successful retry falls through to the shared
+			// DrainAndCloseProbe + RecordSuccess below, exactly as a
+			// first-probe success does.
+			if dialErr != nil {
+				recordDialFailure(breaker, dialErr)
+				var hint string
+				if cfg.ServerSocket != "" {
+					// The socket path is metadata.json's dolt_server_socket,
+					// which a cloned repository commits: it goes into the
+					// command as one shell word, or as a <path> placeholder
+					// with the path named escaped beside it.
+					socket, note := remedy.CommandArg(runtime.GOOS, cfg.ServerSocket, "<path>")
+					hint = fmt.Sprintf("The Dolt server is not listening on socket %s.\n"+
+						"Ensure the server is started with --socket:\n"+
+						"  dolt sql-server --socket %s%s\n"+
+						"Auto-start is not supported in socket mode.",
+						remedy.PrintedValue(cfg.ServerSocket), socket, note)
+				} else if isExternalServerHost(cfg.ServerHost) {
+					// A server bd does not run (configfile.BdRunsServerAt): bd
+					// does not manage it; "bd dolt start" would be wrong
+					// advice (GH#3518). Suggest verifying the external server
+					// instead. The endpoint is addr, which brackets an IPv6
+					// host; doltserver.ReachabilityCheck spells the host as
+					// nc and curl each take it.
+					hint = fmt.Sprintf("Configured Dolt server at %s is unreachable.\n"+
+						"Verify the external server is running and reachable from this host:\n"+
+						"  %s",
+						remedy.PrintedValue(addr), doltserver.ReachabilityCheck(cfg.ServerHost, cfg.ServerPort))
+				} else if named := externallyManagedPortHint(cfg, resolvedBeadsDir, addr); named != "" {
+					// A named port declares the server externally managed
+					// (BEADS_DOLT_SERVER_PORT, dolt_server_port), which is
+					// why auto-start is off here: "bd dolt start" would start
+					// bd's own server on that port, not the one that belongs
+					// there. Checked before the auto-start-disabled hint,
+					// whose remedy is that same command.
+					hint = named
+				} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
+					hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
+						"Start the server manually:\n  bd dolt start"
+				} else {
+					hint = "The Dolt server may not be running. Try:\n  bd dolt start"
+				}
+				return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
+					remedy.PrintedValue(addr), dialErr, hint)
+			}
 		}
 	}
 	// Drain the MySQL handshake before closing so Close() sends FIN, not RST

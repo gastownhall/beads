@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/beads/internal/ceiling"
 	"github.com/steveyegge/beads/internal/gitenv"
@@ -1660,6 +1661,51 @@ func isDuration(s string) bool {
 	return isNumeric(s[:len(s)-1])
 }
 
+// OpenRetryBudgetKey is the config.yaml key holding the Dolt open-retry
+// budget: how long a failing pre-dial probe against a sql-server that bd does
+// not manage may keep retrying before the open fails (GH#4379).
+const OpenRetryBudgetKey = "dolt.open-retry-budget"
+
+// ParseOpenRetryBudget parses the OpenRetryBudgetKey grammar: a Go duration
+// string ("30s", "2m", "1m30s", "500ms") or a bare number read as seconds
+// ("30"). An empty value is a valid "off".
+//
+// Bare seconds are resolved by re-parsing value+"s" rather than by
+// multiplying a strconv.Atoi result by time.Second, because the multiplying
+// form accepts values it should reject: 18446744074 wraps to a positive 290ms
+// and -9223372037 wraps to a positive 2562047h. A validator built that way
+// would pass a value the reader then resolves to something unrelated.
+func ParseOpenRetryBudget(value string) (time.Duration, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil {
+		var secErr error
+		d, secErr = time.ParseDuration(value + "s")
+		if secErr != nil {
+			return 0, fmt.Errorf("%s must be a duration (e.g. \"30s\", \"2m\") or a number of seconds, got %q", OpenRetryBudgetKey, value)
+		}
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("%s must not be negative, got %q", OpenRetryBudgetKey, value)
+	}
+	return d, nil
+}
+
+// ResolveOpenRetryBudget is the READER's half of the same grammar: it shares
+// ParseOpenRetryBudget so a value `bd config set` accepted can never resolve
+// to something the validator never saw. Anything unparseable, negative or
+// absent is off, which is the pre-existing fail-fast open.
+func ResolveOpenRetryBudget(value string) time.Duration {
+	d, err := ParseOpenRetryBudget(value)
+	if err != nil {
+		return 0
+	}
+	return d
+}
+
 // validateYamlConfigValue validates a configuration value before setting.
 // Returns an error if the value is invalid for the given key.
 func validateYamlConfigValue(key, value string) error {
@@ -1692,6 +1738,13 @@ func validateYamlConfigValue(key, value string) error {
 		lower := strings.ToLower(value)
 		if lower != "server" && lower != "embedded" {
 			return fmt.Errorf("dolt.mode must be \"server\" or \"embedded\", got %q", value)
+		}
+	case OpenRetryBudgetKey:
+		// Validated at set time because a value the reader cannot parse -- or
+		// a negative one -- resolves to "off" and would otherwise sit in
+		// config.yaml doing nothing while looking configured.
+		if _, err := ParseOpenRetryBudget(value); err != nil {
+			return err
 		}
 	case "prime.max-memories":
 		n, err := strconv.Atoi(value)
