@@ -575,6 +575,15 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 	newDiagnostic := func(ctx context.Context, beadsDir string) {
 		_, _ = NewFromConfigWithOptions(ctx, beadsDir, &Config{ReadOnly: true, DisableAutoStart: true})
 	}
+	// The shape bd doctor's own stores use: NewFromConfigWithCLIOptions with a
+	// plain read-only config and no DisableAutoStart. Every WithCLIOptions
+	// caller in the tree is doctor, and the auto-start suppression there comes
+	// from ApplyCLIAutoStart resolving ServerModeExternal rather than from the
+	// caller asking for it -- a different route into the same gated branch,
+	// which is why counting it here rather than assuming it matters.
+	newCLIDiagnostic := func(ctx context.Context, beadsDir string) {
+		_, _ = NewFromConfigWithCLIOptions(ctx, beadsDir, &Config{ReadOnly: true})
+	}
 
 	for _, tc := range []struct {
 		name     string
@@ -601,6 +610,15 @@ func TestOpenRetryFollowsTheWorkspaceModeThroughTheConstructors(t *testing.T) {
 		{
 			name:      "diagnostic caller, external workspace",
 			open:      newDiagnostic,
+			metadata:  serverMetadata,
+			wantRetry: true,
+		},
+		{
+			// bd doctor's own stores. The residual list used to claim these
+			// opens stayed fail-fast; they do not, and this row is what keeps
+			// the claim and the code from drifting apart again.
+			name:      "CLI diagnostic caller, external workspace",
+			open:      newCLIDiagnostic,
 			metadata:  serverMetadata,
 			wantRetry: true,
 		},
