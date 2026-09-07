@@ -108,17 +108,17 @@ type roleFixtureKit struct {
 // signatures, instead of in five role wirings at once.
 var roleFixtureKitComposesConformanceFixtures = func(kit roleFixtureKit) (conformance.DependencyEditorFixture, conformance.IssueOperationsStagingFixture) {
 	return conformance.DependencyEditorFixture{
-		IssuePrefix: kit.IssuePrefix,
-		CreateIssue: kit.CreateIssue,
-		CreateWisp:  kit.CreateWisp,
-		QueryScalar: kit.QueryScalar,
-	}, conformance.IssueOperationsStagingFixture{
-		IssuePrefix:   kit.IssuePrefix,
-		CreateIssue:   kit.CreateIssue,
-		AddDependency: kit.AddDependency,
-		SetConfig:     kit.SetConfig,
-		QueryScalar:   kit.QueryScalar,
-	}
+			IssuePrefix: kit.IssuePrefix,
+			CreateIssue: kit.CreateIssue,
+			CreateWisp:  kit.CreateWisp,
+			QueryScalar: kit.QueryScalar,
+		}, conformance.IssueOperationsStagingFixture{
+			IssuePrefix:   kit.IssuePrefix,
+			CreateIssue:   kit.CreateIssue,
+			AddDependency: kit.AddDependency,
+			SetConfig:     kit.SetConfig,
+			QueryScalar:   kit.QueryScalar,
+		}
 }
 
 // newEmbeddedRoleFixtureKit builds the kit for an environment from newTestEnv.
