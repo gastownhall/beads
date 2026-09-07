@@ -2135,12 +2135,18 @@ var newServerDialer = func(timeout time.Duration) *net.Dialer {
 // for at most budget.
 //
 // It is called from exactly one place: newServerMode's fail-fast branch, after
-// the first probe failed AND after serverOpenCanAutoStart said bd cannot start
-// a server here. That call site IS the mode gate -- there is no separate
-// classifier to keep in sync. Embedded mode never reaches newServerMode at
-// all, and a bd-managed localhost server takes the auto-start branch above,
-// which recovers by STARTING a server rather than by waiting and keeps its
-// bare dialServer.
+// the first probe failed, after serverOpenCanAutoStart said bd cannot start a
+// server here, and under cfg.ServerMode. That call site IS the mode gate --
+// there is no separate classifier to keep in sync, because cfg.ServerMode is
+// the same field the CLI store factory routes on. A bd-managed localhost
+// server takes the auto-start branch above, which recovers by STARTING a
+// server rather than by waiting and keeps its bare dialServer.
+//
+// The cfg.ServerMode term is load-bearing rather than belt-and-braces: the
+// storage constructors do NOT re-derive the mode, so NewFromConfig and
+// NewFromConfigWithOptions reach newServerMode for an embedded workspace too
+// when a caller passes DisableAutoStart (bd config drift, bd config apply,
+// bd doctor's config reader). Those opens must keep the fail-fast error.
 //
 // DEADLINE SEMANTICS, stated once because the code, the config.yaml help text
 // and docs/reference/configuration.md must agree:
@@ -2437,32 +2443,50 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			// the CALL SITE, not a mode classifier that could disagree with
 			// serverOpenCanAutoStart above.
 			//
-			// Reading the key here rather than at the top of newServerMode
-			// keeps every SUCCESSFUL open free of the extra config read that
-			// the sibling scope rule's directory fallback can perform.
-			if budget := openRetryBudget(resolvedBeadsDir); budget > 0 {
-				network := "tcp"
-				timeout := 500 * time.Millisecond
-				if cfg.ServerSocket != "" {
-					network = "unix"
-				}
-				conn, dialErr = retryOpenProbe(ctx, network, addr, timeout, budget, dialErr)
-				// The first dial's error was spelled through the remedy printer
-				// above; a later dial's error comes back as the dialer wrote it
-				// and repeats the same endpoint, so it is spelled the same way.
-				dialErr = remedy.PrintedError(dialErr)
-				if dialErr != nil && ctx.Err() != nil {
-					// The CALLER ended this open. That is evidence about the
-					// caller, not about the server, so it must not count
-					// towards the circuit breaker: five cancelled opens
-					// inside the failure window would otherwise trip it
-					// against a healthy server and fail every open after
-					// them for the cooldown. The question is asked of the
-					// CONTEXT, never of the error: net's own timeoutError
-					// reports errors.Is(err, context.DeadlineExceeded) as
-					// true, so an error-identity test would stop counting
-					// ordinary server timeouts too.
-					return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), dialErr)
+			// cfg.ServerMode narrows that call site to the opens bd already
+			// classifies as server-backed. It is the CLI store factory's own
+			// routing predicate -- newDoltStore dispatches to dolt.New under
+			// `if cfg.ServerMode` and sends every other workspace to the
+			// embedded backend -- so reusing it here cannot disagree with the
+			// routing, the way a mode derived from metadata at this line
+			// could. Without it the branch also catches callers that reach
+			// the constructors directly with auto-start merely turned off:
+			// bd config drift, bd config apply and doctor's config reader all
+			// pass DisableAutoStart against whatever workspace they find,
+			// embedded included, and an embedded diagnostic would then wait
+			// on a TCP port that has no server behind it.
+			//
+			// Reading the key inside this branch rather than at the top of
+			// newServerMode keeps every SUCCESSFUL open free of the extra
+			// config read that the sibling scope rule's directory fallback
+			// can perform; keeping it under the mode test spares the
+			// non-server opens that read as well.
+			if cfg.ServerMode {
+				if budget := openRetryBudget(resolvedBeadsDir); budget > 0 {
+					network := "tcp"
+					timeout := 500 * time.Millisecond
+					if cfg.ServerSocket != "" {
+						network = "unix"
+					}
+					conn, dialErr = retryOpenProbe(ctx, network, addr, timeout, budget, dialErr)
+					// The first dial's error was spelled through the remedy printer
+					// above; a later dial's error comes back as the dialer wrote it
+					// and repeats the same endpoint, so it is spelled the same way.
+					dialErr = remedy.PrintedError(dialErr)
+					if dialErr != nil && ctx.Err() != nil {
+						// The CALLER ended this open. That is evidence about
+						// the caller, not about the server, so it must not
+						// count towards the circuit breaker: five cancelled
+						// opens inside the failure window would otherwise
+						// trip it against a healthy server and fail every
+						// open after them for the cooldown. The question is
+						// asked of the CONTEXT, never of the error: net's own
+						// timeoutError reports errors.Is(err,
+						// context.DeadlineExceeded) as true, so an
+						// error-identity test would stop counting ordinary
+						// server timeouts too.
+						return nil, fmt.Errorf("Dolt server unreachable at %s: %w", remedy.PrintedValue(addr), dialErr)
+					}
 				}
 			}
 			// A successful retry falls through to the shared

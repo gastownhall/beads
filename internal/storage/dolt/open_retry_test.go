@@ -17,7 +17,7 @@ import (
 )
 
 // Tests for the config-gated open-retry budget (dolt.open-retry-budget,
-// GH#4379). They stub openProbeDial / openProbeDialContext so they run without
+// GH#4379). They stub dialServer / openProbeDialContext so they run without
 // a live Dolt server, in the style of socket_fallback_test.go.
 //
 // Every test here drives the REAL newServerMode. The budget's mode gate is a
@@ -27,7 +27,7 @@ import (
 
 // openRetryDialLog counts the two dial seams separately. Keeping them apart is
 // the whole point: "the default path is untouched" means the legacy,
-// context-free openProbeDial ran exactly once and the retry loop's
+// context-free dialServer ran exactly once and the retry loop's
 // context-aware dial ran zero times.
 type openRetryDialLog struct {
 	mu       sync.Mutex
@@ -67,14 +67,14 @@ func stubOpenRetryDials(t *testing.T, legacyErr error, ctxResults []error) *open
 	t.Helper()
 	log := &openRetryDialLog{start: time.Now()}
 
-	origLegacy := openProbeDial
+	origLegacy := dialServer
 	origCtx := openProbeDialContext
 	t.Cleanup(func() {
-		openProbeDial = origLegacy
+		dialServer = origLegacy
 		openProbeDialContext = origCtx
 	})
 
-	openProbeDial = func(network, addr string, timeout time.Duration) (net.Conn, error) {
+	dialServer = func(network, addr string, timeout time.Duration) (net.Conn, error) {
 		log.mu.Lock()
 		log.legacy++
 		log.mu.Unlock()
@@ -184,12 +184,21 @@ func writeBudgetConfig(t *testing.T, kv map[string]string) string {
 // externalOpenConfig is an open against a server bd does not manage: no data
 // path, so serverOpenCanAutoStart is false and newServerMode takes the
 // fail-fast branch the budget gates.
+//
+// ServerMode is set because it is the second half of that gate, and it is the
+// half a fixture can get wrong silently: it is the predicate the CLI store
+// factory routes on (newDoltStore sends a config to dolt.New only under
+// `if cfg.ServerMode`), so an open that reaches newServerMode from the CLI
+// always carries it. A fixture without it would describe a workspace bd would
+// have opened embedded, and every budget-on assertion below would then be
+// asserting the wrong path.
 func externalOpenConfig(beadsDir string) *Config {
 	return &Config{
 		Database:   "test_open_retry",
 		ServerHost: "127.0.0.1",
 		ServerPort: 1,
 		AutoStart:  false,
+		ServerMode: true,
 		BeadsDir:   beadsDir,
 	}
 }
@@ -419,6 +428,95 @@ func TestOpenRetryNotReachableFromEmbeddedMode(t *testing.T) {
 	}
 }
 
+// The storage constructors do NOT re-derive the workspace mode: NewFromConfig
+// and NewFromConfigWithOptions build a Config and hand it to New, which always
+// calls newServerMode. So a caller that bypasses the CLI store factory -- bd
+// config drift, bd config apply, bd doctor's config reader, each passing
+// DisableAutoStart against whatever workspace it finds -- reaches the budget's
+// branch even for an embedded project, whose "server" is a TCP port with
+// nothing behind it. Waiting there is pure delay in a diagnostic.
+//
+// The gate is cfg.ServerMode, the predicate the store factory itself routes on
+// (newDoltStore calls dolt.New only under `if cfg.ServerMode`). The three rows
+// vary exactly one thing at a time: rows 1 and 2 differ only in the metadata,
+// and neither retries, showing the metadata is not what decides; rows 2 and 3
+// differ only in cfg.ServerMode, and only row 3 retries, showing that it is.
+// Every row sets DisableAutoStart, so a gate written on that flag instead
+// would fail row 3.
+func TestOpenRetryNotEngagedByConstructorOpensWithAutoStartDisabled(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		metadata   string
+		serverMode bool
+		wantRetry  bool
+	}{
+		{
+			name:     "embedded workspace, diagnostic caller",
+			metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"test_open_retry"}`,
+		},
+		{
+			name:     "external workspace, diagnostic caller",
+			metadata: `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`,
+		},
+		{
+			name:       "external workspace, store-factory routing",
+			metadata:   `{"backend":"dolt","dolt_mode":"server","dolt_server_port":1,"dolt_database":"test_open_retry"}`,
+			serverMode: true,
+			wantRetry:  true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("BEADS_TEST_MODE", "1")
+			// Hermeticity: this test walks the real resolution chain, which
+			// consults a machine-level central config and the mode env vars.
+			// A developer machine that happens to point at a shared server
+			// would otherwise flip rows 1 and 2 into server mode and the test
+			// would pass for the wrong reason.
+			t.Setenv("BEADS_CENTRAL_CONFIG", filepath.Join(t.TempDir(), "absent-central-config.json"))
+			for _, key := range []string{
+				"BEADS_DOLT_SERVER_MODE", "BEADS_DOLT_SHARED_SERVER",
+				"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT", "BEADS_DOLT_PORT",
+			} {
+				t.Setenv(key, "")
+			}
+
+			// The retry, if one happens, succeeds immediately: this test asks
+			// WHETHER the loop was entered, and an exhaustion run would spend
+			// a real budget to answer the same question.
+			log := stubOpenRetryDials(t, errStubRefused, []error{nil})
+			beadsDir := writeBudgetConfig(t, map[string]string{config.OpenRetryBudgetKey: "5s"})
+			if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+				t.Fatalf("write metadata.json: %v", err)
+			}
+			// Positive control on the budget itself, so a zero retry count is
+			// about the gate and not about an unreadable key.
+			if got := openRetryBudget(beadsDir); got != 5*time.Second {
+				t.Fatalf("openRetryBudget = %v, want 5s: the fixture would prove nothing", got)
+			}
+
+			_, _ = NewFromConfigWithOptions(context.Background(), beadsDir, &Config{
+				ReadOnly:         true,
+				DisableAutoStart: true,
+				ServerMode:       tc.serverMode,
+			})
+
+			legacy, ctxDials := log.counts()
+			if legacy != 1 {
+				t.Fatalf("legacy dials = %d, want exactly the one fail-fast probe", legacy)
+			}
+			if tc.wantRetry {
+				if ctxDials == 0 {
+					t.Fatal("no retry dial: the positive control cannot retry, so the zero rows above prove nothing")
+				}
+				return
+			}
+			if ctxDials != 0 {
+				t.Fatalf("retry dials = %d, want 0: an open that the store factory would not have routed to the server backend must not wait", ctxDials)
+			}
+		})
+	}
+}
+
 // --- circuit breaker accounting -----------------------------------------
 
 // One failed open records exactly one failure, and an open the CALLER ended
@@ -498,12 +596,12 @@ func TestOpenRetryCancelAfterSuccessDrainsTheProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var probe *recordingConn
 	origCtxDial := openProbeDialContext
-	origLegacy := openProbeDial
+	origLegacy := dialServer
 	t.Cleanup(func() {
 		openProbeDialContext = origCtxDial
-		openProbeDial = origLegacy
+		dialServer = origLegacy
 	})
-	openProbeDial = func(string, string, time.Duration) (net.Conn, error) { return nil, errStubRefused }
+	dialServer = func(string, string, time.Duration) (net.Conn, error) { return nil, errStubRefused }
 	openProbeDialContext = func(context.Context, string, string, time.Duration) (net.Conn, error) {
 		// The dial succeeds, then the caller cancels before the loop looks.
 		probe = stubProbeConn(t)
