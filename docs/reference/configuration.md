@@ -281,8 +281,11 @@ Before pushing, `bd` verifies the local chunk store with `dolt fsck --quiet`, bo
 
 `dolt.open-retry-budget` bounds how long `bd` keeps re-probing a Dolt
 sql-server that will not answer while opening a store. It is **off by
-default**, so the out-of-the-box behavior is unchanged: one connectivity
-probe, then the usual "Dolt server unreachable" error.
+default**, so the out-of-the-box behavior is behaviorally identical: one
+connectivity probe, then the usual "Dolt server unreachable" error. The only
+difference with the key unset is one extra config read on the failure path --
+a server-backed open that fails its first probe reads the key to discover it
+is off. A successful open reads nothing extra.
 
 ```yaml
 dolt:
@@ -300,13 +303,25 @@ What it does and does not cover:
   project never engages the budget, not even from a diagnostic that turns
   auto-start off (`bd config drift`, `bd config apply`, `bd doctor`): its
   "server" is a TCP port with nothing behind it, so waiting there is pure delay.
-  Those same commands against a server-backed workspace do get the budget.
+  Those same commands against a server-backed workspace **do** get the budget,
+  and that is worth costing out for the one command an operator runs *because*
+  the server is down. A default `bd doctor` run against a server-backed
+  workspace opens its own store once -- the shared store the database checks
+  share -- so during an outage it waits up to the budget once, not once per
+  check. Measured on a server-mode workspace pointed at a dead port: 208 ms
+  with the key unset, 4.3-5.5 s with `open-retry-budget: 6s`, one wait either
+  way. Doctor's other database checks fall back to opening their own store only
+  when a local `.beads/dolt` directory exists, which a server-backed workspace
+  does not have, and its federation checks build their config by hand and never
+  resolve the workspace mode, so neither group engages the budget.
 - **Only transient network-level failures are retried**, using the same
-  `isRetryableError` classification the rest of the Dolt client uses. In unix
-  socket mode a server that has been stopped usually removes its socket file,
-  and the resulting "no such file or directory" is not in that set — so a
-  socket-mode restart window is not covered by the budget today. TCP endpoints
-  report "connection refused" and are.
+  `isRetryableError` classification the rest of the Dolt client uses. A
+  misconfigured endpoint (an unknown host, and similar non-transient errors)
+  fails immediately, exactly as it does with the budget off. In unix socket
+  mode a server that has been stopped usually removes its socket file, and the
+  resulting "no such file or directory" is not in that set — so a socket-mode
+  restart window is not covered by the budget today. TCP endpoints report
+  "connection refused" and are.
 - **It never applies to embedded mode or to a `bd`-managed localhost server.**
   Those recover by *starting* a server, which `bd` already does; a managed open
   that finds nothing listening goes straight to auto-start as before.
@@ -314,12 +329,15 @@ What it does and does not cover:
   timeout and is never shortened by the budget, so a value too small to buy a
   retry simply degrades to today's fail-fast open. No setting here can make
   `bd` less patient than the default.
-- **Only transient failures are retried.** A misconfigured endpoint (unknown
-  host, and similar non-transient errors) fails immediately, exactly as it does
-  with the budget off.
 - **Cancellation is honored.** If the caller's context is canceled, the open
   ends at once, and — because that says nothing about the server's health — it
   does not count towards the circuit breaker.
+- **A wait announces itself.** When the loop is entered, `bd` prints one line
+  to stderr naming the address and the budget:
+  `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
+  (dolt.open-retry-budget)`. One line per open, printed only when a retry is
+  actually going to happen, so a budget-long wait is legible rather than
+  looking like a hang.
 
 The key is read with the same scope rules as `dolt.auto-start`: the merged
 configuration first, then the project's own `.beads/config.yaml`. Setting it to

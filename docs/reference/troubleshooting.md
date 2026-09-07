@@ -315,6 +315,17 @@ proceeds as soon as it answers. Notes:
   embedded project never waits either, not even from a diagnostic that turns
   auto-start off (`bd config drift`, `bd config apply`, `bd doctor`) -- the
   workspace decides, not the command.
+- Diagnostics against a **server-backed** workspace therefore do wait. Costed
+  out on the command you are most likely to reach for during an outage: a
+  default `bd doctor` run opens its own store once -- the shared store its
+  database checks use -- so it waits up to the budget once, not once per check.
+  Measured against a dead port: 208 ms with the key unset, 4.3-5.5 s with
+  `open-retry-budget: 6s`. If you would rather `bd doctor` answer immediately
+  during an outage, set the key back to `0`; there is no per-command override.
+- The wait is visible. Entering the retry loop prints one line to stderr,
+  `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
+  (dolt.open-retry-budget)`, so a command that pauses is telling you why
+  instead of looking like a hang.
 - Bounds the retries, not the first probe, so it can only ever make `bd` more
   patient than the default, never less.
 - Non-transient failures (an unknown host, for instance) still fail

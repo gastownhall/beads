@@ -1077,7 +1077,7 @@ func TestOpenRetryNoticePrintsOncePerWaitingOpen(t *testing.T) {
 		wantNotice bool
 	}{
 		{
-			// The default path must stay byte-for-byte silent.
+			// The default path must stay silent.
 			name:       "budget off",
 			firstProbe: errStubRefused,
 		},
