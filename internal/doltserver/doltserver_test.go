@@ -863,7 +863,7 @@ func TestIsAutoStartDisabled(t *testing.T) {
 	for _, tt := range tests {
 		t.Run("env="+tt.envVal, func(t *testing.T) {
 			t.Setenv("BEADS_DOLT_AUTO_START", tt.envVal)
-			if got := IsAutoStartDisabled(); got != tt.want {
+			if got := IsAutoStartDisabled(""); got != tt.want {
 				t.Errorf("IsAutoStartDisabled() = %v, want %v", got, tt.want)
 			}
 		})
@@ -904,7 +904,7 @@ func TestIsAutoStartDisabled_Sources(t *testing.T) {
 			t.Setenv("BEADS_DOLT_AUTO_START", tt.env)
 			config.Set("dolt.auto-start", tt.cfg)
 			defer config.Set("dolt.auto-start", "")
-			if got := IsAutoStartDisabled(); got != tt.want {
+			if got := IsAutoStartDisabled(""); got != tt.want {
 				t.Errorf("IsAutoStartDisabled() = %v, want %v (env=%q, cfg=%q)",
 					got, tt.want, tt.env, tt.cfg)
 			}

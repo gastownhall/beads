@@ -88,7 +88,7 @@ func RunDoltPerformanceDiagnostics(path string, enableProfiling bool) (*DoltPerf
 
 	// Connect and run diagnostics via server
 	if !serverRunning {
-		return metrics, fmt.Errorf("dolt sql-server is not running on %s:%d; start it with 'bd dolt start'", dsCfg.Host, dsCfg.Port)
+		return metrics, fmt.Errorf("dolt sql-server is not running on %s:%d; start it with '%s'", dsCfg.Host, dsCfg.Port, doltserver.StartHint(""))
 	}
 
 	if err := runDoltServerDiagnostics(metrics, dsCfg.Host, dsCfg.Port, dbName, beadsDir); err != nil {

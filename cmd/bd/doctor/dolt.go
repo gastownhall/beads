@@ -683,7 +683,7 @@ func checkSharedServerHealth(beadsDir string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  "Shared server not running (will auto-start on next bd command)",
 			Detail:   fmt.Sprintf("Server directory: %s", sharedDir),
-			Fix:      "Run 'bd dolt start' to start the shared server",
+			Fix:      fmt.Sprintf("Run '%s' to start the shared server", doltserver.StartHint("")),
 			Category: CategoryRuntime,
 		}
 	}

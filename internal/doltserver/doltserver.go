@@ -162,7 +162,15 @@ func rotateDebugProfile(beadsDir string) {
 //
 // This is used by KillStaleServers and Start to avoid killing or
 // interfering with externally-managed dolt processes (GH#2641).
-func IsAutoStartDisabled() bool {
+//
+// A store Gas City owns (config.CityOwnsDolt) is always externally managed:
+// the city runs the only server, so auto-start stays disabled there whatever
+// dolt.auto-start says. beadsDir names that store; "" consults the merged CLI
+// config only.
+func IsAutoStartDisabled(beadsDir string) bool {
+	if config.CityOwnsDolt(beadsDir) {
+		return true
+	}
 	if isFalsyBool(os.Getenv("BEADS_DOLT_AUTO_START")) {
 		return true
 	}
@@ -621,6 +629,18 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return state.Port, false, nil
 	}
 
+	// A store Gas City owns never gets a bd-spawned server: the city runs the
+	// only one and publishes its port at runtime. Refuse before any mode or
+	// auto-start reasoning, with the city's own lifecycle surface as the exit.
+	if config.CityOwnsDolt(beadsDir) {
+		cfg := DefaultConfig(beadsDir)
+		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and Gas City owns this store's server "+
+			"(%s=%s); bd does not start it.\n\n"+
+			"  To start: %s\n"+
+			"  To check status: %s", cfg.Port, config.GasCityEndpointOriginKey,
+			config.GasCityEndpointOrigin(beadsDir), StartHint(beadsDir), StatusHint(beadsDir))
+	}
+
 	// If the server mode is External (explicit port in metadata.json,
 	// shared server mode, etc.), do not start a per-project server —
 	// it would conflict with the external one.
@@ -630,20 +650,20 @@ func EnsureRunningDetailed(beadsDir string) (port int, startedByUs bool, err err
 		return 0, false, fmt.Errorf("Dolt server is not running on port %d, and auto-start is suppressed "+
 			"because the server is externally managed (dolt.auto-start: false or explicit port configured).\n\n"+
 			"Start the external server, or enable auto-start to allow bd to manage the server.\n"+
-			"  To start manually: bd dolt start\n"+
-			"  To check status: bd dolt status", cfg.Port)
+			"  To start manually: %s\n"+
+			"  To check status: %s", cfg.Port, StartHint(beadsDir), StatusHint(beadsDir))
 	}
 
 	// Defense-in-depth: if dolt.auto-start is explicitly disabled in
 	// config.yaml or env, never spawn a server even if the caller
 	// somehow reached this point (e.g. stale AutoStart=true in config).
-	if IsAutoStartDisabled() {
+	if IsAutoStartDisabled(beadsDir) {
 		cfg := DefaultConfig(beadsDir)
 		return 0, false, fmt.Errorf("Dolt server unreachable (port %d) and auto-start is disabled "+
 			"(dolt.auto-start: false in config.yaml or BEADS_DOLT_AUTO_START=0).\n\n"+
 			"Start the server manually or enable auto-start.\n"+
-			"  To start manually: bd dolt start\n"+
-			"  To check status: bd dolt status", cfg.Port)
+			"  To start manually: %s\n"+
+			"  To check status: %s", cfg.Port, StartHint(beadsDir), StatusHint(beadsDir))
 	}
 
 	s, err := Start(serverDir)
@@ -1137,7 +1157,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 	// IsAutoStartDisabled covers the BEADS_DOLT_AUTO_START env var and
 	// dolt.auto-start config; ResolveServerMode covers explicit port/shared
 	// server/embedded configurations. Both indicate "not our server" (GH#2641).
-	if IsAutoStartDisabled() || ResolveServerMode(beadsDir) == ServerModeExternal {
+	if IsAutoStartDisabled(beadsDir) || ResolveServerMode(beadsDir) == ServerModeExternal {
 		return nil, nil
 	}
 
@@ -1190,7 +1210,7 @@ func killStaleServersForDir(beadsDir string, allPIDs []int, inDir func(int, stri
 // false), this function is a no-op — the dolt server is externally managed
 // and must not be killed by bd (GH#2641).
 func KillStaleServers(beadsDir string) ([]int, error) {
-	if IsAutoStartDisabled() {
+	if IsAutoStartDisabled(beadsDir) {
 		return nil, nil
 	}
 	allPIDs := listDoltProcessPIDs()

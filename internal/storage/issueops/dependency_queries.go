@@ -602,6 +602,58 @@ func GetNewlyUnblockedByCloseInTx(ctx context.Context, tx DBTX, closedIssueID st
 	return unblocked, nil
 }
 
+// isBlockedBatchChunk bounds the IN (...) list of one IsBlockedBatchInTx
+// round trip so a large active set never exceeds the server's placeholder
+// or packet limits.
+const isBlockedBatchChunk = 500
+
+// IsBlockedBatchInTx reads the denormalized is_blocked column for every id in
+// ids from the issues and wisps tables within an existing transaction and
+// returns id -> blocked. An id with no row in either table is absent from
+// the result; the wisps table is optional, exactly as in IsBlockedInTx.
+//
+//nolint:gosec // G201: table names are hardcoded constants.
+func IsBlockedBatchInTx(ctx context.Context, tx DBTX, ids []string) (map[string]bool, error) {
+	result := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	for start := 0; start < len(ids); start += isBlockedBatchChunk {
+		end := min(start+isBlockedBatchChunk, len(ids))
+		chunk := ids[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, len(chunk))
+		for i, id := range chunk {
+			args[i] = id
+		}
+		for _, table := range []string{"issues", "wisps"} {
+			//nolint:gosec // G201: table is a hardcoded "issues" or "wisps".
+			rows, err := tx.QueryContext(ctx,
+				"SELECT id, is_blocked FROM "+table+" WHERE id IN ("+placeholders+")", args...)
+			if err != nil {
+				if optionalBlockedTable(table) && isTableNotExistError(err) {
+					continue
+				}
+				return nil, fmt.Errorf("read is_blocked from %s: %w", table, err)
+			}
+			for rows.Next() {
+				var id string
+				var b int
+				if err := rows.Scan(&id, &b); err != nil {
+					_ = rows.Close()
+					return nil, fmt.Errorf("scan is_blocked from %s: %w", table, err)
+				}
+				result[id] = b != 0
+			}
+			_ = rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("is_blocked rows from %s: %w", table, err)
+			}
+		}
+	}
+	return result, nil
+}
+
 // IsBlockedInTx checks if an issue is blocked by active dependencies within
 // an existing transaction. Returns whether the issue is blocked and, if so,
 // a list of blocker descriptions for display.

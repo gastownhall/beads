@@ -304,6 +304,23 @@ func (s *DoltStore) IsBlocked(ctx context.Context, issueID string) (bool, []stri
 	return blocked, blockers, nil
 }
 
+// IsBlockedBatch reads the denormalized is_blocked column for every id in one
+// batched read over issues and wisps; ids without a row are absent from the
+// result. Serves ready projections that would otherwise issue one IsBlocked
+// per issue.
+func (s *DoltStore) IsBlockedBatch(ctx context.Context, ids []string) (map[string]bool, error) {
+	var blocked map[string]bool
+	err := s.withReadTx(ctx, func(tx *sql.Tx) error {
+		var err error
+		blocked, err = issueops.IsBlockedBatchInTx(ctx, tx, ids)
+		return err
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to read blocked flags: %w", err)
+	}
+	return blocked, nil
+}
+
 // GetNewlyUnblockedByClose finds issues that become unblocked when an issue is closed.
 func (s *DoltStore) GetNewlyUnblockedByClose(ctx context.Context, closedIssueID string) ([]*types.Issue, error) {
 	var result []*types.Issue

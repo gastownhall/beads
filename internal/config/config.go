@@ -602,8 +602,12 @@ func GetString(key string) string {
 // This is intended for library consumers that call NewFromConfigWithOptions
 // without first invoking config.Initialize().
 //
-// The key uses dotted notation (e.g. "dolt.auto-start"). YAML booleans and
-// numbers are coerced to their string representations ("true", "false", etc.).
+// The key uses dotted notation (e.g. "dolt.auto-start"). Like viper, the
+// lookup accepts both a nested mapping (`dolt: {auto-start: false}`) and a
+// flat dotted key (`gc.endpoint_origin: inherited_city`, the form Gas City
+// stamps): at every level the longest remaining key is tried verbatim before
+// descending one segment. YAML booleans and numbers are coerced to their
+// string representations ("true", "false", etc.).
 // Returns "" if the file is absent, the key is not found, or any error occurs.
 func GetStringFromDir(beadsDir, key string) string {
 	configPath := filepath.Join(beadsDir, "config.yaml")
@@ -615,29 +619,29 @@ func GetStringFromDir(beadsDir, key string) string {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return ""
 	}
-	parts := strings.SplitN(key, ".", 2)
 	node := root
-	for len(parts) == 2 {
-		val, ok := node[parts[0]]
-		if !ok {
+	rest := key
+	for {
+		if val, ok := node[rest]; ok {
+			switch s := val.(type) {
+			case string:
+				return s
+			case map[string]interface{}:
+				return ""
+			default:
+				return fmt.Sprintf("%v", s)
+			}
+		}
+		head, tail, found := strings.Cut(rest, ".")
+		if !found {
 			return ""
 		}
-		m, ok := val.(map[string]interface{})
+		m, ok := node[head].(map[string]interface{})
 		if !ok {
 			return ""
 		}
 		node = m
-		parts = strings.SplitN(parts[1], ".", 2)
-	}
-	val, ok := node[parts[0]]
-	if !ok {
-		return ""
-	}
-	switch s := val.(type) {
-	case string:
-		return s
-	default:
-		return fmt.Sprintf("%v", s)
+		rest = tail
 	}
 }
 
