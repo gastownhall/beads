@@ -2,22 +2,17 @@ package issueops
 
 import "testing"
 
-// These tests pin the derivation rule for issue_versions.attribution_status
-// (design §16.4 on be-hs42e.3, R14): a NOT NULL column added by migration
-// 0068 step 6. Phase 2 is the sole writer of this column and, per §16.4,
-// writes only three of its four legal values — "imported" is reserved for a
-// later phase's import/backfill tooling and is never minted here.
+// These tests pin the derivation rule for issue_versions.attribution_status,
+// the NOT NULL column migration 0068 step 6 adds. Its vocabulary is BDP's
+// carried-attribution status (gastownhall/bdp#18, merged 2026-09-07): exactly
+// two values, "claimed" and "unknown". "imported" is provenance, not an
+// assertion, and is not a status — it returns as a separate provenance marker
+// in the phase that first imports history, for which no writer exists yet.
 //
-// RecordVersionInTx currently receives only a plain actor string from every
-// call site (7 production call sites, none passing any additional
-// attribution context), so the only signal available to derive
-// attribution_status from, without widening this bead's diff into a
-// call-site-by-call-site attribution audit, is whether actor is empty.
-// "not_supplied" would assert a confident, deliberate absence of attribution
-// that no current call site actually claims; "undetermined" is the honest,
-// conservative reading for a call site that simply has no actor threaded to
-// it. attributionStatusForActor and its constants do not exist yet: this
-// file is RED until version_history.go defines them.
+// RecordVersionInTx receives only a plain actor string from every call site
+// (none passes any additional attribution context), so the only signal
+// available to derive attribution_status from is whether actor is empty: a
+// non-empty actor is "claimed", an empty one is "unknown".
 func TestAttributionStatusForActor(t *testing.T) {
 	t.Parallel()
 
@@ -26,8 +21,8 @@ func TestAttributionStatusForActor(t *testing.T) {
 		actor string
 		want  string
 	}{
-		{name: "non-empty actor is supplied", actor: "alice", want: attributionStatusSupplied},
-		{name: "empty actor is undetermined", actor: "", want: attributionStatusUndetermined},
+		{name: "non-empty actor is claimed", actor: "alice", want: attributionStatusClaimed},
+		{name: "empty actor is unknown", actor: "", want: attributionStatusUnknown},
 	}
 
 	for _, tc := range tests {
@@ -40,21 +35,27 @@ func TestAttributionStatusForActor(t *testing.T) {
 	}
 }
 
-// TestAttributionStatusValuesMatchR14 pins the four legal values verbatim
-// against design §16.4's own text, so a future edit cannot silently rename
-// or drop one without failing here.
-func TestAttributionStatusValuesMatchR14(t *testing.T) {
+// TestAttributionStatusValuesMatchBDP pins the two legal values verbatim
+// against bdp#18's vocabulary, so a future edit cannot silently rename one,
+// or reintroduce a value BDP does not carry, without failing here — and
+// checks that the derivation never yields anything outside that set.
+func TestAttributionStatusValuesMatchBDP(t *testing.T) {
 	t.Parallel()
 
 	values := map[string]string{
-		"supplied":     attributionStatusSupplied,
-		"not_supplied": attributionStatusNotSupplied,
-		"undetermined": attributionStatusUndetermined,
-		"imported":     attributionStatusImported,
+		"claimed": attributionStatusClaimed,
+		"unknown": attributionStatusUnknown,
 	}
 	for want, got := range values {
 		if got != want {
 			t.Errorf("attribution status constant = %q, want %q", got, want)
+		}
+	}
+
+	legal := map[string]bool{"claimed": true, "unknown": true}
+	for _, actor := range []string{"", "alice", "agent:builder"} {
+		if got := attributionStatusForActor(actor); !legal[got] {
+			t.Errorf("attributionStatusForActor(%q) = %q, want one of claimed|unknown", actor, got)
 		}
 	}
 }

@@ -185,8 +185,8 @@ func TestMigration0067AddsVersionedBeadsSchemaThroughDoltCLI(t *testing.T) {
 	// concern, but present on any schema this test's fresh bundle produces),
 	// so both inserts must supply it or Dolt rejects them before the PK
 	// check below ever runs.
-	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00', 'undetermined')`)
-	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:01', 'undetermined')`); err == nil {
+	runDoltSQL(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:00', 'unknown')`)
+	if err := runDoltSQLExpectingError(t, dir, `INSERT INTO issue_versions (issue_id, revision, epoch, change_at, attribution_status) VALUES ('iv-1', 1, 1, '2026-09-01 00:00:01', 'unknown')`); err == nil {
 		t.Error("duplicate (issue_id, revision) insert into issue_versions succeeded, want primary key violation")
 	}
 
