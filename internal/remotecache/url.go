@@ -257,21 +257,17 @@ func MatchesRemotePattern(rawURL, pattern string) bool {
 	if err != nil {
 		return false
 	}
+	// Keys and values are compared decoded, as Dolt's URL.Query() sees them.
+	// A decoded control rune in either, on either side, is never a real Dolt
+	// parameter.
+	if queryHasControlRune(candidateQuery) || queryHasControlRune(configuredQuery) {
+		return false
+	}
 	for key := range candidateQuery {
-		// Keys are compared decoded, as Dolt's URL.Query() sees them. A decoded
-		// control rune in a key is never a real Dolt parameter.
-		if hasControlRune(key) {
-			return false
-		}
 		// Dolt reads the lowercase key only (dbfactory/s3.go); a differently
 		// cased "endpoint" is an error there today and must not slip past the
 		// endpoint validation here if that ever changes.
 		if key != "endpoint" && strings.EqualFold(key, "endpoint") {
-			return false
-		}
-	}
-	for key := range configuredQuery {
-		if hasControlRune(key) {
 			return false
 		}
 	}
@@ -294,6 +290,22 @@ func rawAuthorityHasUserinfo(loc string) bool {
 
 func hasControlRune(s string) bool {
 	return strings.IndexFunc(s, unicode.IsControl) >= 0
+}
+
+// queryHasControlRune reports whether any decoded key or value in query
+// contains a control rune.
+func queryHasControlRune(query url.Values) bool {
+	for key, values := range query {
+		if hasControlRune(key) {
+			return true
+		}
+		for _, value := range values {
+			if hasControlRune(value) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validEndpointValues checks the values of the "endpoint" query key. "endpoint"

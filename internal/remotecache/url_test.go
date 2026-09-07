@@ -329,7 +329,7 @@ func TestMatchesRemotePatternLegacyAndEdgeCases(t *testing.T) {
 	// forms ValidateRemoteURL accepts without url.Parse (SCP-style, bracketed
 	// aws). The query-bearing rows pin the boundaries of the query-aware mode:
 	// raw pre-query location, strict query parsing, fragment rejection,
-	// decoded-key comparison and the endpoint key casing rule.
+	// decoded key and value comparison and the endpoint key casing rule.
 	tests := []struct {
 		name    string
 		url     string
@@ -363,6 +363,10 @@ func TestMatchesRemotePatternLegacyAndEdgeCases(t *testing.T) {
 		{"percent-encoded lowercase endpoint key is endpoint", "s3://approved/db?endpo%69nt=https://ok.example", "s3://approved/db?endpoint=https://ok.example", true},
 		{"percent-encoded uppercase endpoint casing rejects", "s3://approved/db?%45ndpoint=https://evil.example", "s3://approved/db?%45ndpoint=*", false},
 		{"decoded NUL in a query key rejects", "s3://approved/db?endpoint%00=https://ok.example", "s3://approved/db?endpoint%00=*://*", false},
+		{"decoded NUL in a query value rejects", "s3://approved/db?region=au%00to", "s3://approved/db?region=*", false},
+		{"decoded newline in a query value rejects", "s3://approved/db?path-style=tr%0Aue", "s3://approved/db?path-style=*", false},
+		{"glob value matches a clean value", "s3://approved/db?region=auto", "s3://approved/db?region=*", true},
+		{"decoded NUL in a pattern value rejects", "s3://approved/db?region=auto", "s3://approved/db?region=au%00to", false},
 		{"repeated endpoint values match as a multiset", "s3://approved/db?endpoint=https://b.example&endpoint=https://a.example", "s3://approved/db?endpoint=https://a.example&endpoint=https://b.example", true},
 		{"pattern host character class needs no url.Parse", "s3://bucket1/db?endpoint=https://ok.example", "s3://bucket[0-9]/db?endpoint=https://ok.example", true},
 		{"pattern userinfo rejected by the raw scan", "s3://approved/db?endpoint=https://ok.example", "s3://*@approved/db?endpoint=*://*", false},
