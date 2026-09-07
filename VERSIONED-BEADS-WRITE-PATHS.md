@@ -7,9 +7,9 @@ Status after a14f48b17 (merged as 5098ec85f on `deploy/be-764ey-gate`): the tabl
 - Ordering: `ExecuteUpdate` mints once, after field, label, parent and persistence patches; batch create mints per issue after its creation-time edges are persisted, so the first version carries the outgoing edge set.
 - `version_completeness_test.go` (46 must-mint entry points, exemption table with reasons, never-mints inverse guard) and `embeddeddolt/version_completeness_behaviour_test.go` pin the set at runtime.
 
-Still true and deliberately out of contract or deferred: an unchanged re-import of an existing row mints a version (create has no field-level no-op gate); the uow leg mints per repository write, so a domain create with N labels and M edges yields 1+N+M versions where the direct legs yield one (each a distinct accepted state; follow-up); demote-to-wisp and delete/rename strand version rows because `issue_versions` has no FK to `issues` (Phase 3's deleted-Versioned-Bead guarantee); compaction bookkeeping, restore, migrations, merge-settle, doctor fixes and `bd sql` remain out of contract by design.
+Still true and deliberately out of contract or deferred: an unchanged re-import of an existing row mints a version (create has no field-level no-op gate — and the journal seam sits in the same position: `RecordEventInTx(EventCreate)` at create.go:207 runs on every accepted upsert, only the events-table write behind the `isNew` gate at create.go:171 is skipped, so a no-op gate belongs in front of both seams, not the version seam alone); the uow leg mints per repository write, so a domain create with N labels and M edges yields 1+N+M versions where the direct legs yield one (each a distinct accepted state; follow-up); demote-to-wisp and delete/rename strand version rows because `issue_versions` has no FK to `issues` (Phase 3's deleted-Versioned-Bead guarantee); compaction bookkeeping, restore, migrations, merge-settle, doctor fixes and `bd sql` remain out of contract by design.
 
-The seam is `issueops.RecordVersionInTx` (internal/storage/issueops/version_history.go:87 at 321a79278), which sits beside the events-journal seam `issueops.RecordEventInTx` (journal.go:309) and is reached from exactly six call sites: create.go:196, update.go:547, dependency_editor.go:181 and :272, and domain/db/issue.go:87/:102 (`Insert`) and :339 (`Update`). Dispositions: **VERSIONED** = reaches `RecordVersionInTx` and mints an `issue_versions` row plus the `current_revision` bump; **NO-OP** = discarded before the seam (`DiscardNoopIssueUpdates`, the dependency editor's `eventWritten` gate, create's early returns, or the wisp exclusion); **OUT OF CONTRACT** = mutates an issue-plane row (issues, wisps, dependencies, labels, comments and wisp_* twins) without ever calling the seam. Paths are under `internal/storage/` unless they start with `cmd/`, `internal/compact/` or `backend/`. Checkout: /var/tmp/mayor-beads-phase2 @ deploy/be-764ey-gate; all line numbers are against commit 321a79278, the HEAD when this inventory was read (see the last note on drift).
+The seam is `issueops.RecordVersionInTx` (internal/storage/issueops/version_history.go:87 at 321a79278; :148 after a14f48b17), which sits beside the events-journal seam `issueops.RecordEventInTx` (journal.go:309). At 321a79278 it was reached from exactly six call sites: create.go:196, update.go:547, dependency_editor.go:181 and :272, and domain/db/issue.go:87/:102 (`Insert`) and :339 (`Update`); after a14f48b17 it is reached from 27 (18 in issueops, 9 in domain/db), listed in the section "Seam call sites after the completeness fix" below. Dispositions: **VERSIONED** = reaches `RecordVersionInTx` and mints an `issue_versions` row plus the `current_revision` bump; **NO-OP** = discarded before the seam (`DiscardNoopIssueUpdates`, the dependency editor's `eventWritten` gate, create's early returns, or the wisp exclusion); **OUT OF CONTRACT** = mutates an issue-plane row (issues, wisps, dependencies, labels, comments and wisp_* twins) without ever calling the seam. Paths are under `internal/storage/` unless they start with `cmd/`, `internal/compact/` or `backend/`. Checkout: /var/tmp/mayor-beads-phase2 @ deploy/be-764ey-gate; all line numbers are against commit 321a79278, the HEAD when this inventory was read (see the last note on drift).
 
 | # | Path (file:function) | Writes | Events seam | Version seam | Disposition | Why |
 |---|---|---|---|---|---|---|
@@ -54,6 +54,44 @@ The seam is `issueops.RecordVersionInTx` (internal/storage/issueops/version_hist
 | 39 | cmd/bd/sql.go (`storage.RawDBAccessor.UnderlyingDB` then `db.ExecContext`); cmd/bd/sql_proxied_server.go via uow `RawSQLUseCase().Exec` to domain/db/raw_sql.go | arbitrary SQL | no | no | OUT OF CONTRACT | the proxied variant runs inside a uow tx with the version scope bound (uow/dolt_sql_provider.go:178) but raw SQL never calls the seam |
 | 40 | issueops/bootstrap.go:`BootstrapInTx` (uow/bootstrapper.go, hook_bootstrapper.go) | config + metadata tables only (`SetConfigInTx`, `SetMetadataInTx`) | no | no | OUT OF CONTRACT (n/a) | writes no issue-plane row at all |
 | 41 | PLANNED 18th: `fk_dep_issue_target` ON DELETE CASCADE (schema/cli_migrations.go:284,311; migrations 0041/0043) | DB-level cascade deleting dependencies rows when their target issues row is deleted; no Go call site | no | no | Phase 3 (planned) | PR #6358 body: "Phase 3 items by design: the `fk_dep_issue_target` cascade (the 18th path)"; today it fires silently underneath rows 28-29 |
+
+## Seam call sites after the completeness fix
+
+Verified with `grep -rn 'RecordVersionInTx(' internal/ --include='*.go'` over non-test files at d484b809d (the Go tree is unchanged between the merge of a14f48b17 as 5098ec85f and this note): **27 call sites** reach the seam, 18 on the direct legs in `issueops/` and 9 on the uow leg in `domain/db/`. The figure of 29 quoted in the PR thread was an over-count; this table is the correction. Line numbers are against that tree. The 46 "must-mint entry points" pinned by `version_completeness_test.go` are a different count by design: they are the public entry functions whose call graph must reach the seam, not the seam's own call sites.
+
+Direct legs, `internal/storage/issueops/` (18):
+
+| File:line | Function | Mutation |
+|---|---|---|
+| aggregate.go:360 | `applyLabelPatch` | label patch (mints only when used outside `ExecuteUpdate`, which passes `mintVersion=false`) |
+| aggregate.go:423 | `applyParentPatch` | parent patch (same rule) |
+| claim.go:239 | `claimIssueInTx` | claim |
+| close.go:394 | `closeIssueInTx` | close, all variants; `ExecuteCloseBatch` loops it |
+| create.go:216 | `CreateIssueInTxWithResult` | singular create and import upsert |
+| create.go:384 | `CreateIssuesInTxWithContext` | batch create, per issue, after its creation-time edges (`DeferVersionMint`) |
+| dependencies.go:393 | `mintDependencyVersion` | from `addDependencyInTx` / `removeDependencyInTx`: legacy verbs, the publicops editor, batch-apply |
+| execution.go:269 | `ExecuteUpdate` | once, after field, label, parent and persistence patches |
+| labels.go:190 | `addLabelInTx` | label add |
+| labels.go:239 | `removeLabelInTx` | label remove |
+| lease.go:786 | `ReclaimExpiredLeasesInTx` | lease reclaim |
+| persistence.go:76, :153 | `moveIssuePersistenceInTx` | persistence move (two sites in the one function) |
+| promote.go:141 | `PromoteFromEphemeralInTx` | promote from ephemeral |
+| reopen.go:126 | `reopenIssueInTx` | reopen |
+| unclaim.go:137 | `finishUnclaimInTx` | unclaim / release |
+| update.go:555 | `updateIssueInTx` | update |
+| wake_defers.go:143 | `wakeExpiredDefersInTable` | defer wake |
+
+uow leg, `internal/storage/domain/db/` (9):
+
+| File:line | Method | Mutation |
+|---|---|---|
+| issue.go:87, :102 | issue repository `Insert` | create (two sites in the one method) |
+| issue.go:339 | issue repository `Update` | update |
+| issue.go:551 | issue repository `Claim` | claim |
+| label.go:91 | label repository `Insert` | label add |
+| label.go:130 | label repository `Delete` | label remove |
+| dependency.go:228, :240 | dependency repository `Insert` | edge add (two sites in the one method) |
+| dependency.go:409 | dependency repository `Delete` | edge remove |
 
 ## Notes
 
