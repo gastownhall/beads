@@ -295,9 +295,12 @@ What it does and does not cover:
   a unix socket, or a project whose configured server `bd` will not auto-start.
   There, waiting is the only remedy `bd` has.
 - **The workspace must resolve to server-backed storage**, by the same test that
-  routes the open to the server backend in the first place. A diagnostic command
-  that merely turns auto-start off (`bd config drift`, `bd config apply`,
-  `bd doctor`) never engages the budget, whatever the workspace is.
+  routes the open to the server backend in the first place -- the workspace's own
+  `dolt_mode` (plus shared-server mode), never the calling command. An embedded
+  project never engages the budget, not even from a diagnostic that turns
+  auto-start off (`bd config drift`, `bd config apply`, `bd doctor`): its
+  "server" is a TCP port with nothing behind it, so waiting there is pure delay.
+  Those same commands against a server-backed workspace do get the budget.
 - **Only transient network-level failures are retried**, using the same
   `isRetryableError` classification the rest of the Dolt client uses. In unix
   socket mode a server that has been stopped usually removes its socket file,
