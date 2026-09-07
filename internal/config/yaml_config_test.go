@@ -574,7 +574,12 @@ func TestFindProjectBeadsDir_NonGitTreeWithoutConfig(t *testing.T) {
 	restore := envSnapshot(t)
 	defer restore()
 
-	t.Chdir(t.TempDir())
+	// Cap the walk-up at the synthetic tree: an operator host can carry
+	// real ~/.beads or /tmp/.beads above TMPDIR that must not be found.
+	tmp := t.TempDir()
+	t.Setenv("BEADS_TEST_DISCOVERY_CEILING", tmp)
+
+	t.Chdir(tmp)
 
 	if got := findProjectBeadsDir(); got != "" {
 		t.Fatalf("findProjectBeadsDir() = %q, want empty", got)
