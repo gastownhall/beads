@@ -309,9 +309,11 @@ Within that budget `bd` re-probes the server on the usual backoff schedule and
 proceeds as soon as it answers. Notes:
 
 - Off by default; `0`, an empty value or an unparseable one all mean off.
-- Applies **only** to a server `bd` does not manage. An embedded project, or a
-  localhost server `bd` auto-starts, is unaffected: those recover by starting a
-  server, which `bd` already does.
+- Applies **only** to a server `bd` does not manage, and only when the workspace
+  resolves to server-backed storage. An embedded project, or a localhost server
+  `bd` auto-starts, is unaffected: those recover by starting a server, which
+  `bd` already does. Diagnostic commands that turn auto-start off
+  (`bd config drift`, `bd config apply`, `bd doctor`) never wait either.
 - Bounds the retries, not the first probe, so it can only ever make `bd` more
   patient than the default, never less.
 - Non-transient failures (an unknown host, for instance) still fail
