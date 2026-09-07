@@ -15,7 +15,11 @@ beads_test_env_enter() {
     fi
 
     local root
-    root="$(mktemp -d "${TMPDIR:-/tmp}/beads-test-env-XXXXXX")"
+    # The sandbox root itself must sit on ancestor-clean ground (/tmp), never
+    # under the caller's TMPDIR: once TMPDIR="$root/tmp" is exported below,
+    # every t.TempDir() inherits $root's ancestors, and a caller TMPDIR nested
+    # inside a real home would re-expose ~/.beads to directory-walk tests.
+    root="$(mktemp -d /tmp/beads-test-env-XXXXXX)"
     export BEADS_TEST_ENV_ROOT="$root"
     export BEADS_TEST_ENV_ACTIVE=1
 
@@ -34,10 +38,16 @@ beads_test_env_enter() {
         fi
     fi
 
-    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root"
+    mkdir -p "$root/home" "$root/xdg-config" "$root/dolt-root" "$root/tmp"
     : >"$root/gitconfig"
 
     export HOME="$root/home"
+    # Sandbox TMPDIR as well: t.TempDir() otherwise lands under the caller's
+    # real TMPDIR tree, and every directory-walk test (findProjectBeadsDir,
+    # repo-root fallback) then sees the developer's real ~/.beads as an
+    # ancestor — the runner's isolation contract is "no developer filesystem
+    # state".
+    export TMPDIR="$root/tmp"
     export USERPROFILE="$root/home"
     export XDG_CONFIG_HOME="$root/xdg-config"
     export DOLT_ROOT_PATH="$root/dolt-root"

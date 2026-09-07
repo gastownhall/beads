@@ -2,6 +2,7 @@ package conformance
 
 import (
 	"context"
+	"slices"
 	"testing"
 	"time"
 
@@ -386,15 +387,14 @@ func assertImporterSkipped(t *testing.T, result publicops.ImportBatchResult, wan
 		t.Fatalf("SkippedDependencies = %+v, want exactly %d entry/entries %+v: the report is the whole reason a dropped edge is not data loss, so a missing entry hides one and a repeated entry is the deduplication clause failing",
 			result.SkippedDependencies, len(want), want)
 	}
-	for i, got := range result.SkippedDependencies {
-		if got.IssueID != want[i].IssueID || got.DependsOnID != want[i].DependsOnID {
-			t.Errorf("SkippedDependencies[%d] names %s -> %s, want %s -> %s",
-				i, got.IssueID, got.DependsOnID, want[i].IssueID, want[i].DependsOnID)
-		}
-		if got.Reason == "" {
-			t.Errorf("SkippedDependencies[%d] (%s -> %s) carries no reason; a caller told only that an edge went missing cannot act on it",
-				i, got.IssueID, got.DependsOnID)
-		}
+	if !slices.EqualFunc(result.SkippedDependencies, want,
+		func(got, expected publicops.SkippedDependency) bool {
+			return got.IssueID == expected.IssueID &&
+				got.DependsOnID == expected.DependsOnID &&
+				got.Reason != ""
+		}) {
+		t.Errorf("SkippedDependencies = %+v, want %v in order, each carrying a reason; a caller told only that an edge went missing cannot act on it",
+			result.SkippedDependencies, want)
 	}
 }
 

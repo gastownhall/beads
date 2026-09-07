@@ -241,8 +241,20 @@ func TestDoltBackupSizeFromSizer(t *testing.T) {
 }
 
 func TestShowDoltBackupStatusJSON_NilWhenNotConfigured(t *testing.T) {
-	t.Parallel()
-	// When no .beads dir exists, should return configured=false
+	// Pin the workspace to a real-but-empty .beads dir. BEADS_DIR only wins
+	// when it exists and carries project files (hasBeadsProjectFiles); a bare
+	// path falls through to the CWD walk, which from a linked worktree
+	// resolves the main checkout's real .beads — where a configured dolt
+	// backup makes "not configured" a host property, not this contract.
+	emptyBeads := filepath.Join(t.TempDir(), ".beads")
+	if err := os.Mkdir(emptyBeads, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(emptyBeads, "config.yaml"), []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BEADS_DIR", emptyBeads)
+	// When no backup config exists, should return configured=false
 	result := showDoltBackupStatusJSON()
 	configured, ok := result["configured"].(bool)
 	if !ok || configured {
