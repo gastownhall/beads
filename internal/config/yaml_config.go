@@ -1693,6 +1693,13 @@ func ParseOpenRetryBudget(value string) (time.Duration, error) {
 		if !isBareSeconds(value) {
 			return 0, notInGrammar
 		}
+		// A leading zero is rejected rather than read as decimal: the setter
+		// persists bare seconds as an unquoted YAML scalar, and both YAML
+		// readers take "030" as octal 24 while this parser would say 30. The
+		// two must agree, so the ambiguous spelling is refused at set time.
+		if len(value) > 1 && value[0] == '0' {
+			return 0, fmt.Errorf("%s must not start with 0 (%q is read as octal when written unquoted in YAML); write %q or add a unit", OpenRetryBudgetKey, value, strings.TrimLeft(value, "0"))
+		}
 		var secErr error
 		d, secErr = time.ParseDuration(value + "s")
 		if secErr != nil {

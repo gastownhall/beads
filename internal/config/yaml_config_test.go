@@ -1997,6 +1997,11 @@ func TestParseOpenRetryBudget(t *testing.T) {
 		// rejected -- and the reader must agree, which the wantErr branch
 		// below checks through ResolveOpenRetryBudget.
 		{value: "1m30", wantErr: true},
+		// A leading zero: the setter writes bare seconds unquoted, so YAML
+		// would read "030" as octal 24 where this parser says 30. Refused so
+		// the two readers cannot disagree on a persisted value.
+		{value: "030", wantErr: true},
+		{value: "007", wantErr: true},
 		{value: "1h0m0", wantErr: true},
 		{value: ".5", wantErr: true},
 		{value: "30.5", wantErr: true},
