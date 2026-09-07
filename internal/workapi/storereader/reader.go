@@ -127,6 +127,14 @@ func (r *storeReader) List(ctx context.Context, req issueops.ListRequest) (issue
 	// one is presentation. This seam reports no HasMore of its own, so the
 	// over-fetched row above is what speaks.
 	items, hasMore := workapi.FinishPageAt(items, req.SortBy, req.Reverse, req.Offset, workapi.PageLimit(req), false)
+	// Comment hydration is the second shared epilogue step, and it runs AFTER
+	// the trim so a page never pays for rows it is about to drop. Its source is
+	// the detail view's, which routes an id to the right comment table on this
+	// seam without being told.
+	newComments := func() workapi.CommentStreamer { return workapi.NewStoreDetailSource(r.store) }
+	if err := workapi.HydrateListComments(ctx, newComments, items, req.IncludeComments); err != nil {
+		return issueops.IssuePage{}, err
+	}
 	return issueops.IssuePage{Items: items, HasMore: hasMore}, nil
 }
 
