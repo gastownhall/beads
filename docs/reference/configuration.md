@@ -294,6 +294,12 @@ What it does and does not cover:
 - **It applies only to a server `bd` does not manage** — a non-localhost host,
   a unix socket, or a project where auto-start is suppressed. There, waiting is
   the only remedy `bd` has.
+- **Only transient network-level failures are retried**, using the same
+  `isRetryableError` classification the rest of the Dolt client uses. In unix
+  socket mode a server that has been stopped usually removes its socket file,
+  and the resulting "no such file or directory" is not in that set — so a
+  socket-mode restart window is not covered by the budget today. TCP endpoints
+  report "connection refused" and are.
 - **It never applies to embedded mode or to a `bd`-managed localhost server.**
   Those recover by *starting* a server, which `bd` already does; a managed open
   that finds nothing listening goes straight to auto-start as before.

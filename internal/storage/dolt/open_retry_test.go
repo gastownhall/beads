@@ -667,6 +667,13 @@ func TestOpenRetryBudgetSiblingScopeParity_MergedConfigWins(t *testing.T) {
 	if got := configStringForDir(beadsDir, config.OpenRetryBudgetKey); got != "45s" {
 		t.Fatalf("%s = %q, want the merged value \"45s\": a directory-only reader ignores every merged source (BEADS_DIR, user-level config) that dolt.auto-start honours", config.OpenRetryBudgetKey, got)
 	}
+	// Assert the BUDGET READER too, not only the shared helper: a reader that
+	// stopped calling configStringForDir and went straight to
+	// config.GetStringFromDir would satisfy every assertion above while
+	// silently dropping sibling scope.
+	if got := openRetryBudget(beadsDir); got != 45*time.Second {
+		t.Fatalf("openRetryBudget = %v, want 45s from the merged config (the directory says 9s): the budget reader left the sibling key's scope rules", got)
+	}
 }
 
 // The runtime reader and `bd config set` share one parser, so a value the
