@@ -38,7 +38,6 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/steveyegge/beads/internal/config"
 	"github.com/steveyegge/beads/internal/configfile"
 	"github.com/steveyegge/beads/internal/doltserver"
 	"github.com/steveyegge/beads/internal/storage"
@@ -1066,9 +1065,9 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 			port, startedByUs, startErr := doltserver.EnsureRunningDetailed(resolvedBeadsDir)
 			if startErr != nil {
 				return nil, fmt.Errorf("Dolt server unreachable at %s and auto-start failed: %w\n\n"+
-					"To start manually: %s\n"+
+					"To start manually: bd dolt start\n"+
 					"To disable auto-start: set dolt.auto-start: false in .beads/config.yaml",
-					addr, startErr, doltserver.StartHint(resolvedBeadsDir))
+					addr, startErr)
 			}
 			// Only tests should stop auto-started servers on Close(). In normal
 			// repo-local server mode, leaving the server up avoids endpoint churn
@@ -1112,16 +1111,11 @@ func newServerMode(ctx context.Context, cfg *Config) (*DoltStore, error) {
 					"  dolt sql-server --socket %s\n"+
 					"Auto-start is not supported in socket mode.",
 					cfg.ServerSocket, cfg.ServerSocket)
-			} else if config.CityOwnsDolt(resolvedBeadsDir) {
-				hint = fmt.Sprintf("Gas City owns this store's Dolt server (%s=%s) and it is not reachable.\n"+
-					"Bring the city up:\n  %s\nCheck it:\n  %s",
-					config.GasCityEndpointOriginKey, config.GasCityEndpointOrigin(resolvedBeadsDir),
-					doltserver.StartHint(resolvedBeadsDir), doltserver.StatusHint(resolvedBeadsDir))
-			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled(resolvedBeadsDir) {
+			} else if !cfg.AutoStart && doltserver.IsAutoStartDisabled() {
 				hint = "Dolt server auto-start is disabled (dolt.auto-start: false).\n" +
-					"Start the server manually:\n  " + doltserver.StartHint(resolvedBeadsDir)
+					"Start the server manually:\n  bd dolt start"
 			} else {
-				hint = "The Dolt server may not be running. Try:\n  " + doltserver.StartHint(resolvedBeadsDir)
+				hint = "The Dolt server may not be running. Try:\n  bd dolt start"
 			}
 			return nil, fmt.Errorf("Dolt server unreachable at %s: %w\n\n%s",
 				addr, dialErr, hint)
@@ -1491,8 +1485,8 @@ func openServerConnection(ctx context.Context, cfg *Config) (*sql.DB, string, er
 				_ = db.Close()
 				// Check for connection refused - server likely not running
 				if strings.Contains(errLower, "connection refused") || strings.Contains(errLower, "connect: connection refused") {
-					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Start it with:\n  %s",
-						cfg.ServerHost, cfg.ServerPort, err, doltserver.StartHint(cfg.BeadsDir))
+					return nil, "", fmt.Errorf("failed to connect to Dolt server at %s:%d: %w\n\nThe Dolt server may not be running. Try:\n  bd dolt start    # Start a local server\n  gc dolt start    # If using an orchestrator",
+						cfg.ServerHost, cfg.ServerPort, err)
 				}
 				return nil, "", fmt.Errorf("failed to create database: %w", err)
 			}
