@@ -6606,6 +6606,41 @@ components:
             every such issue on a request that did not set `include_comments`.
             Without it, an absent `comments` key is ambiguous between "no
             comments" and "comments not included in this response".
+        unresolvable_dependencies:
+          type: integer
+          format: int64
+          description: >-
+            How many of `dependency_count`'s edges `dependencies` could not
+            represent, because the issue on the far end has no row in this
+            database — a cross-repo id or an `external:` reference. The edge is
+            real and correctly stored; only its far end is unreachable from
+            here, so the listing drops it while the count keeps it.
+
+
+            Without it the count reads as phantom: a caller sees
+            `dependency_count: 1` beside an absent `dependencies`, finds
+            nothing under that id anywhere, and concludes the count is wrong.
+            It is not — the edge record itself is readable, and on the CLI
+            `bd dep list <id> <id>` prints it.
+
+
+            ABSENT, NEVER ZERO, WHEN THERE IS NOTHING TO REPORT, and absent
+            too when the dependency read FAILED rather than came back short.
+            "Could not be represented" and "was never fetched" are different
+            facts and do not collapse into one member — the same distinction
+            `comments_omitted` draws.
+        unresolvable_dependents:
+          type: integer
+          format: int64
+          description: >-
+            The inbound counterpart of `unresolvable_dependencies`, on the same
+            terms.
+
+
+            Present only on a request that set `include_dependents`. Without
+            those rows `dependents` is absent by design, so a difference taken
+            against it would report every dependent the issue has as
+            unresolvable.
         epic_total_children:
           type: integer
         epic_closed_children:

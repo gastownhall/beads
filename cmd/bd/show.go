@@ -245,6 +245,14 @@ var showCmd = &cobra.Command{
 				}
 			}
 
+			// Both listings above drop every edge whose far end has no row in
+			// this database, so a cross-repo or `external:` dependency renders
+			// as no dependency at all — indistinguishable from having none
+			// (be-lpi). --json says so in unresolvable_dependencies; say it
+			// here too, or `bd dep add x liveop-y` reports success and then
+			// `bd show x` shows nothing.
+			warnUnresolvableDepEdges(ctx, issueStore, issue.ID, len(depsWithMeta), len(dependentsWithMeta))
+
 			printRelatedSection(relatedSeen)
 
 			// Show comments

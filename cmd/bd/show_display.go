@@ -134,6 +134,10 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 		printDepSection(sec)
 	}
 
+	// Shared with the non-watch path in show.go so the two renders cannot
+	// drift apart in what they disclose (be-lpi).
+	warnUnresolvableDepEdges(ctx, issueStore, issue.ID, len(depsWithMeta), len(dependentsWithMeta))
+
 	// Related (bidirectional, deduplicated)
 	printRelatedSection(relatedSeen)
 
@@ -152,4 +156,60 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 
 	fmt.Println()
 	return issue
+}
+
+// unresolvableDepCounter is the slice of the store warnUnresolvableDepEdges
+// reads. Both counts are O(1) aggregate queries over the dependency tables.
+type unresolvableDepCounter interface {
+	CountDependencies(ctx context.Context, issueID string) (int64, error)
+	CountDependents(ctx context.Context, issueID string) (int64, error)
+}
+
+// warnUnresolvableDepEdges prints a stderr-only notice when an issue has
+// dependency edges that the rendered listings could not show.
+//
+// GetDependenciesWithMetadata and GetDependentsWithMetadata answer with the
+// ISSUES on the far end of each edge and skip any whose id has no row in this
+// database — a cross-repo id or an `external:` reference, both of which live
+// in depends_on_external, the one target column carrying no foreign key into
+// issues (issueops.IsExternalDepTarget). The count queries have no such join,
+// so they keep those edges. The difference is exactly the set of edges that
+// are real, stored, and unrenderable from here.
+//
+// Until be-lpi this difference was silent, and `bd dep add x liveop-y`
+// reported success while the `bd show x` a caller ran straight after showed
+// no dependency at all — indistinguishable from the edge never having been
+// written. The JSON detail view publishes the same fact as
+// unresolvable_dependencies / unresolvable_dependents.
+//
+// stderr only, so the rendered issue on stdout is byte-identical for the
+// common fully-local case — the same choice warnDroppedDepEdges makes in
+// dep.go for the same reason. Best effort: a count error is swallowed, since
+// the issue has already been rendered successfully by the time this runs.
+func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter, issueID string, shownDeps, shownDependents int) {
+	if store == nil {
+		return
+	}
+	reported := false
+	report := func(kind string, count int64, err error, shown int) {
+		if err != nil {
+			return
+		}
+		missing := count - int64(shown)
+		if missing <= 0 {
+			return
+		}
+		reported = true
+		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
+			issueID, missing, kind)
+	}
+	depCount, depErr := store.CountDependencies(ctx, issueID)
+	report("dependency", depCount, depErr, shownDeps)
+	rdepCount, rdepErr := store.CountDependents(ctx, issueID)
+	report("dependent", rdepCount, rdepErr, shownDependents)
+	if reported {
+		// Named once, after both directions, so an issue short on each gets
+		// one pointer rather than two.
+		fmt.Fprintf(os.Stderr, "For raw edge records, run: bd dep list %s %s\n", issueID, issueID)
+	}
 }
