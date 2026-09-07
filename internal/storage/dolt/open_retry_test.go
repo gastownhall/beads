@@ -1057,6 +1057,12 @@ func TestOpenRetryClampsThePerAttemptTimeoutToTheBudget(t *testing.T) {
 		if d.offset+d.timeout > budget+50*time.Millisecond {
 			t.Fatalf("retry %d starts at %v with a %v timeout, which plans to run past the %v deadline: the loop clamped to the total budget rather than what is left of it", i+1, d.offset, d.timeout, budget)
 		}
+		// And from below: the clamp hands the dialer what is LEFT, not less.
+		// Without this line a loop that shortens every attempt (down to a
+		// nanosecond) passes, because the stub ignores the timeout it is given.
+		if d.offset+d.timeout < budget-50*time.Millisecond {
+			t.Fatalf("retry %d starts at %v with a %v timeout, well short of the %v left of the budget: the loop shortened the attempt below what the clamp allows", i+1, d.offset, d.timeout, budget-d.offset)
+		}
 	}
 }
 
