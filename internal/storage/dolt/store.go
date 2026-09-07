@@ -486,6 +486,15 @@ type Config struct {
 	// execWithLongTimeout/openLongTimeoutConn instead.
 	PoolReadTimeout  time.Duration
 	PoolWriteTimeout time.Duration
+
+	// PoolReadTimeoutFallback replaces the built-in 10s pool read deadline
+	// ONLY when nothing else set PoolReadTimeout — not the caller, not
+	// BEADS_DOLT_POOL_READ_TIMEOUT, not dolt.pool-read-timeout. It lets a
+	// command whose ordinary statements are known to run long (bd import's
+	// chunk commits, which a server-side auto_gc pause stretches past 10s —
+	// wy-sbgucn) raise its own default without overriding an operator's
+	// explicit choice. 0 = keep the built-in default.
+	PoolReadTimeoutFallback time.Duration
 }
 
 // Defaults for the *sql.DB connection pool. Exported for tests/callers that
@@ -2207,6 +2216,9 @@ func buildServerDSN(cfg *Config, database string) string {
 		return base.String()
 	}
 	parsed.ReadTimeout = defaultPoolReadTimeout
+	if cfg.PoolReadTimeoutFallback > 0 {
+		parsed.ReadTimeout = cfg.PoolReadTimeoutFallback
+	}
 	if cfg.PoolReadTimeout > 0 {
 		parsed.ReadTimeout = cfg.PoolReadTimeout
 	}

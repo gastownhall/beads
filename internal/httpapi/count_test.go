@@ -113,6 +113,7 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		"empty_description": {"true"},
 		"no_assignee":       {"true"},
 		"no_labels":         {"true"},
+		"metadata_field":    {"team=platform", "env=prod"},
 		"include_infra":     {"true"},
 	}.Encode())
 	if resp.StatusCode != http.StatusOK {
@@ -158,9 +159,10 @@ func TestCountForwardsEveryDocumentedParameter(t *testing.T) {
 		ClosedAfter:   at("2026-05-01T00:00:00Z"),
 		ClosedBefore:  at("2026-06-01T00:00:00Z"),
 
-		EmptyDesc:  true,
-		NoAssignee: true,
-		NoLabels:   true,
+		EmptyDesc:      true,
+		NoAssignee:     true,
+		NoLabels:       true,
+		MetadataFields: map[string]string{"team": "platform", "env": "prod"},
 
 		IncludeInfra: true,
 	}
@@ -535,15 +537,12 @@ func TestCountParametersMatchTheHandler(t *testing.T) {
 // constants so the server and the role cannot drift; this compares that list
 // against the DOCUMENT, which is the third party to the agreement.
 //
-// IT IS ALSO WHAT MAKES THE ROLE'S OWN ErrValidation UNREACHABLE FROM THIS
-// OPERATION, which is a fact worth pinning rather than discovering. The count
-// role has exactly one validation refusal — ValidateCountGroup's unknown
-// dimension; BuildCountFilter cannot fail at all — and this handler refuses
-// that dimension at the edge. So every `invalid_argument` this operation emits
-// is the transport's, and the shared read failure path never sees a role
-// refusal. If the enum here and the role's constants ever diverged, a value
-// this server accepted and the role refused would arrive as an unclassified
-// 500, which is the regression this comparison prevents.
+// It also keeps the role's group refusal unreachable from the wire: the
+// handler refuses an unknown group at the edge. Metadata validation is a
+// separate path. An invalid key reaches BuildCountFilter, whose role refusal
+// failReadErr classifies as a 400 on `metadata_field`. This test guards only the
+// group vocabulary; if that enum and the role's constants diverged, a value the
+// server accepted and the role refused would arrive as an unclassified 500.
 func TestCountGroupEnumMatchesTheRolesVocabulary(t *testing.T) {
 	doc := loadSpec(t)
 	so := specOps(t, doc)["countIssues"]
@@ -600,11 +599,12 @@ var countFieldForParameter = map[string]string{
 	"empty_description": "EmptyDesc",
 	"no_assignee":       "NoAssignee",
 	"no_labels":         "NoLabels",
+	"metadata_field":    "MetadataFields",
 	"include_infra":     "IncludeInfra",
 }
 
-// TestEveryCountRequestFieldIsPublished: the role publishes 23 filters and the
-// wire publishes all 23. A field added to issueops.CountRequest fails here and
+// TestEveryCountRequestFieldIsPublished: the role publishes 24 filters and the
+// wire publishes all 24. A field added to issueops.CountRequest fails here and
 // NAMES itself, so the choice is made deliberately — publish it, or record why
 // it is withheld — rather than by nobody noticing.
 //

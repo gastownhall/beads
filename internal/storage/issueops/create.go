@@ -276,11 +276,22 @@ func CreateIssuesInTxWithResult(ctx context.Context, tx DBTX, issues []*types.Is
 // The caller's bc is not modified, so one context can serve several calls.
 func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext, issues []*types.Issue, actor string) (CreateIssuesResult, error) {
 	opts := bc.Opts
-	filteredIssues, err := filterCreateIssuesMixedBucketDependencies(issues, opts)
-	if err != nil {
-		return CreateIssuesResult{}, err
+	// The plane rule is a REFUSAL, never a filter. A strict batch (BatchCreator's
+	// contract) is refused whole before any row is written. A tolerant batch
+	// (SkipDependencyValidationErrors — the import mode) keeps every in-batch
+	// regular<->wisp edge: every row of BOTH planes is written on this one tx
+	// below before PersistDependenciesWithOptionsResult runs, and that pass
+	// resolves each target on its own plane, so the edge is writable — the
+	// old per-batch filter skip-reported it, and since a re-import upserts the
+	// rows unchanged the edge was never backfilled (wy-4276q8, wy-a648lq). A
+	// caller that writes the two planes on different SQL sessions
+	// (doltTransaction.CreateIssues) validates up front and passes one plane
+	// per call, so a mixed batch reaching here always shares one tx.
+	if !opts.SkipDependencyValidationErrors {
+		if err := validateCreateIssuesMixedBucketDependencies(issues); err != nil {
+			return CreateIssuesResult{}, err
+		}
 	}
-	issues = filteredIssues
 
 	// This function already runs a slice-wide ReconcileChildCounters below,
 	// covering every accepted issue; skip the redundant per-issue reconcile.
@@ -377,27 +388,20 @@ func stageableChangedTables(changed map[string]bool) map[string]bool {
 	return dirty
 }
 
-// ValidateCreateIssuesMixedBucketDependencies rejects same-batch dependency
-// edges between regular issues and wisps. Dependencies are stored in separate
-// backing tables per bucket, so a batch cannot create both ends atomically when
-// the edge crosses buckets.
+// ValidateCreateIssuesMixedBucketDependencies refuses same-batch dependency
+// edges between regular issues and wisps. It is the plane rule of the STRICT
+// batch (BatchCreator's contract, CrossPlaneBatchEdgeError): a caller whose
+// regular and wisp rows are written on different SQL sessions
+// (doltTransaction.CreateIssues) cannot create both ends of such an edge
+// atomically, so the batch is refused whole before any row is written. It is
+// deliberately NOT applied to a tolerant batch (SkipDependencyValidationErrors):
+// on one tx the dependency pass runs after every row of both planes exists and
+// writes the edge (see CreateIssuesInTxWithContext).
 func ValidateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
-	_, err := filterCreateIssuesMixedBucketDependencies(issues, storage.BatchCreateOptions{})
-	return err
+	return validateCreateIssuesMixedBucketDependencies(issues)
 }
 
-// FilterCreateIssuesMixedBucketDependencies applies the same cross-bucket
-// dependency policy as CreateIssuesInTx, but over the full issue set. Callers
-// that split one logical batch into bounded sub-batches (chunked import) must
-// run this once up front: the per-batch filter inside the engine only sees one
-// sub-batch, so it could no longer detect an edge whose endpoints land in
-// different chunks. Filtered edges are reported via opts.OnSkippedDependency;
-// issues whose dependency list changes are copied, never mutated.
-func FilterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
-	return filterCreateIssuesMixedBucketDependencies(issues, opts)
-}
-
-func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts storage.BatchCreateOptions) ([]*types.Issue, error) {
+func validateCreateIssuesMixedBucketDependencies(issues []*types.Issue) error {
 	batchWispByID := make(map[string]bool, len(issues))
 	hasRegular := false
 	hasWisp := false
@@ -416,21 +420,15 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 		}
 	}
 	if !hasRegular || !hasWisp {
-		return issues, nil
+		return nil
 	}
 
-	var filteredIssues []*types.Issue
-	for issueIndex, issue := range issues {
+	for _, issue := range issues {
 		if issue == nil {
 			continue
 		}
-		var keptDeps []*types.Dependency
-		filteredDeps := false
-		for depIndex, dep := range issue.Dependencies {
+		for _, dep := range issue.Dependencies {
 			if dep == nil {
-				if filteredDeps {
-					keptDeps = append(keptDeps, dep)
-				}
 				continue
 			}
 			sourceID := issue.ID
@@ -443,37 +441,15 @@ func filterCreateIssuesMixedBucketDependencies(issues []*types.Issue, opts stora
 			}
 			targetIsWisp, targetInBatch := batchWispByID[dep.DependsOnID]
 			if targetInBatch && sourceIsWisp != targetIsWisp {
-				if !opts.SkipDependencyValidationErrors {
-					// Through the shared constructor, so the two bodies raise
-					// one message AND one sentinel: the role promises this
-					// refusal is the caller's fault, and an untyped error left
-					// callers classifying it by prose.
-					return nil, CrossPlaneBatchEdgeError(sourceID, dep.DependsOnID)
-				}
-				if !filteredDeps {
-					keptDeps = append([]*types.Dependency(nil), issue.Dependencies[:depIndex]...)
-					filteredDeps = true
-				}
-				recordSkippedDependencyEdge(opts, sourceID, dep.DependsOnID, "cross-bucket dependency between regular issue and wisp in the same batch")
-				continue
-			}
-			if filteredDeps {
-				keptDeps = append(keptDeps, dep)
+				// Through the shared constructor, so the two bodies raise
+				// one message AND one sentinel: the role promises this
+				// refusal is the caller's fault, and an untyped error left
+				// callers classifying it by prose.
+				return CrossPlaneBatchEdgeError(sourceID, dep.DependsOnID)
 			}
 		}
-		if filteredDeps {
-			if filteredIssues == nil {
-				filteredIssues = append([]*types.Issue(nil), issues...)
-			}
-			issueCopy := *issue
-			issueCopy.Dependencies = keptDeps
-			filteredIssues[issueIndex] = &issueCopy
-		}
 	}
-	if filteredIssues != nil {
-		return filteredIssues, nil
-	}
-	return issues, nil
+	return nil
 }
 
 func createBlockedRecomputeIDs(ctx context.Context, tx DBTX, issues []*types.Issue, dependencies []persistedDependency) ([]string, []string, error) {

@@ -44,7 +44,7 @@ endif
 endif
 
 .PHONY: all build doctor-build test test-icu-path test-full-cgo test-regression test-upgrade test-cross-version test-migration corpus-regen bench bench-quick clean clean-test-tmp install install-force help check-up-to-date fmt fmt-check check-testing-short
-.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-package-mcp ci-package-npm
+.PHONY: ci-pr-core ci-pr-policy ci-pr-lint ci-complexity ci-complexity-diff ci-complexity-check ci-package-mcp ci-package-npm
 .PHONY: api-gen api-check
 
 # Default target
@@ -189,6 +189,17 @@ ci-pr-policy:
 
 ci-pr-lint:
 	@./scripts/ci/pr-lint.sh
+
+# Opt-in architecture experiment. Install gocyclo v0.6.0 first;
+# report is advisory while check exercises the local baseline guard.
+ci-complexity:
+	@./scripts/ci/complexity.sh report
+
+ci-complexity-diff:
+	@./scripts/ci/complexity.sh diff
+
+ci-complexity-check:
+	@./scripts/ci/complexity.sh check
 
 # The generated half of the wire contract. The document is hand-written and is
 # the source of truth; this file is its output.
@@ -410,6 +421,9 @@ help:
 	@echo "  make ci-pr-core  - Run required PR core Go test wrapper"
 	@echo "  make ci-pr-policy - Run required PR policy wrapper"
 	@echo "  make ci-pr-lint  - Run required PR formatting and lint wrapper"
+	@echo "  make ci-complexity - Report production cyclomatic complexity (advisory)"
+	@echo "  make ci-complexity-diff - Compare complexity with COMPLEXITY_BASE_REF"
+	@echo "  make ci-complexity-check - Check complexity against the local baseline"
 	@echo "  make ci-package-mcp - Run MCP Python package gate"
 	@echo "  make ci-package-npm - Run npm package gate"
 	@echo "  make test-regression - Run differential regression tests (baseline vs candidate)"

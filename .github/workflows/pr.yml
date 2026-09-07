@@ -756,6 +756,65 @@ jobs:
           BD_LINT_NEW_FROM_MERGE_BASE: origin/main
         run: make ci-pr-lint
 
+  # Advisory architecture signal. This deliberately does not participate in
+  # ci-gate while maintainers evaluate the baseline and refactoring payoff.
+  complexity-report:
+    name: Complexity report (advisory)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v6
+        timeout-minutes: 3
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: 'go.mod'
+          cache: false
+
+      - name: Install gocyclo
+        timeout-minutes: 5
+        continue-on-error: true
+        run: go install github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0
+
+      - name: Generate complexity report
+        id: generate-complexity
+        if: always()
+        timeout-minutes: 8
+        continue-on-error: true
+        run: |
+          set +e
+          COMPLEXITY_BASE_REF=origin/main ./scripts/ci/complexity.sh diff > complexity-report.txt 2>&1
+          status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "complexity report unavailable (exit $status); see log above" >> complexity-report.txt
+          fi
+          exit 0
+
+      - name: Annotate unavailable complexity report
+        if: always()
+        timeout-minutes: 1
+        continue-on-error: true
+        run: |
+          if [ ! -s complexity-report.txt ] || grep -q 'complexity report unavailable' complexity-report.txt; then
+            echo "::warning title=Complexity report unavailable::Advisory complexity analysis did not complete; inspect the artifact or job log."
+          fi
+
+      - name: Upload complexity report
+        if: always()
+        timeout-minutes: 3
+        continue-on-error: true
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: complexity-report
+          path: complexity-report.txt
+          retention-days: 7
+          if-no-files-found: error
+
   # Focused job for the hexagonal storage layer (internal/storage/domain/* and
   # internal/storage/uow). These packages back the proxied-server init path and
   # also live behind the existing ./... matrix, but TestDomainDB requires the

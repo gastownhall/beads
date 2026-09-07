@@ -174,6 +174,7 @@ type DependencySQLRepository interface {
 	CountEdges(ctx context.Context, req issueops.EdgeCountRequest) (issueops.EdgeCountResult, error)
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetDependencyRecordsForIssues(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 	GetWispDependencyRecordsForIDs(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 
 	// WispSourceIDs returns the subset of ids that are currently wisps, in one
@@ -236,6 +237,7 @@ type DependencyUseCase interface {
 	// closes, or "" when none does. Each pair is (source, target).
 	CycleThroughEdges(ctx context.Context, edges [][2]string) (string, error)
 	GetIssueDependencyRecords(ctx context.Context, issueIDs []string) (map[string][]*types.Dependency, error)
+	GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error)
 
 	GetWispDependencyRecords(ctx context.Context, wispIDs []string) (map[string][]*types.Dependency, error)
 
@@ -808,6 +810,14 @@ func (u *dependencyUseCaseImpl) GetIssueDependencyRecords(ctx context.Context, i
 	out, err := u.depRepo.GetDependencyRecordsForIssues(ctx, issueIDs)
 	if err != nil {
 		return nil, fmt.Errorf("GetIssueDependencyRecords: %w", err)
+	}
+	return out, nil
+}
+
+func (u *dependencyUseCaseImpl) GetExternalBlockingDependencyRecords(ctx context.Context) (map[string][]*types.Dependency, error) {
+	out, err := u.depRepo.GetExternalBlockingDependencyRecords(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GetExternalBlockingDependencyRecords: %w", err)
 	}
 	return out, nil
 }

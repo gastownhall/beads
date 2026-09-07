@@ -40,6 +40,36 @@ func TestCreateCommandRegistersEmptyDescriptionOptIn(t *testing.T) {
 	}
 }
 
+func TestCreateFileFlagHelpDoesNotClaimSingleIssueGH4643(t *testing.T) {
+	f := createCmd.Flags().Lookup("file")
+	if f == nil {
+		t.Fatal("expected create to register --file")
+	}
+	if !strings.Contains(f.Usage, "one issue per") {
+		t.Fatalf("expected --file help text to name its per-heading batch behavior, got: %q", f.Usage)
+	}
+	if !strings.Contains(f.Usage, "--body-file") {
+		t.Fatalf("expected --file help text to point single-issue callers at --body-file, got: %q", f.Usage)
+	}
+}
+
+func TestGatherCreateInputRejectsTitleWithFile(t *testing.T) {
+	cmd := newCreateFlagsCommand(t, "--file", "issues.md")
+	var err error
+	stderr := captureStderr(t, func() {
+		_, err = gatherCreateInput(cmd, []string{"Some title"})
+	})
+	if err == nil {
+		t.Fatal("expected gatherCreateInput to reject a positional title with --file")
+	}
+	if !strings.Contains(stderr, "cannot specify both title and --file flag") {
+		t.Fatalf("expected title/--file conflict on stderr, got stderr=%q err=%v", stderr, err)
+	}
+	if !strings.Contains(stderr, "--body-file") {
+		t.Fatalf("expected title/--file conflict to hint at --body-file, got stderr=%q err=%v", stderr, err)
+	}
+}
+
 func TestGatherCreateInputRejectsEmptyBodyFile(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "empty.md")
 	if err := os.WriteFile(filePath, nil, 0644); err != nil {

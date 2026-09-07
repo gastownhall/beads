@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/beads/internal/beads"
@@ -114,6 +115,28 @@ func init() {
 	importCmd.Flags().BoolVar(&importDedup, "dedup", false, "Skip lines whose title matches an existing open issue")
 	importCmd.Flags().BoolVar(&importAllowStale, "allow-stale", false, "Import rows even when older than the local issue (required to restore an older snapshot)")
 	rootCmd.AddCommand(importCmd)
+}
+
+// importPoolReadTimeout is the per-I/O read deadline a `bd import` gets on
+// its shared-pool connections when neither the caller, BEADS_DOLT_POOL_READ_TIMEOUT
+// nor dolt.pool-read-timeout set one. The pool default (10s) is a fast-fail
+// tuned for interactive commands; an import's chunk COMMIT of 250 rows with
+// their aux tables legitimately outlives it whenever the server pauses — a
+// stock dolt sql-server's auto_gc took 16.5s mid-import in the wy-9we0jf
+// rollback drill, and every such pause surfaced as "i/o timeout" followed by
+// "write commit result indeterminate" (wy-sbgucn). 5m matches the repo's
+// other known-long operations (execWithLongTimeout, withReadTxLongTimeout).
+const importPoolReadTimeout = 5 * time.Minute
+
+// bulkLoadPoolReadTimeout returns the pool read-timeout fallback for cmd: the
+// bulk-load deadline for `bd import`, zero (keep the pool default) otherwise.
+// It is a FALLBACK, not an override — an operator's explicit setting still wins
+// (see dolt.Config.PoolReadTimeoutFallback).
+func bulkLoadPoolReadTimeout(cmd *cobra.Command) time.Duration {
+	if cmd != nil && cmd.Name() == "import" {
+		return importPoolReadTimeout
+	}
+	return 0
 }
 
 func runImport(cmd *cobra.Command, args []string) error {
@@ -397,6 +420,7 @@ func applyImportDryRunClassification(result *importResultJSON, classification *I
 func applyImportOutcome(result *importResultJSON, importResult *ImportResult) {
 	result.Created = importResult.Created
 	result.Updated = importResult.Updated
+	result.Unchanged = importResult.Unchanged
 	result.Skipped += importResult.Skipped
 	result.SkippedDependencies = append(result.SkippedDependencies, importResult.SkippedDependencies...)
 	result.IDs = append(result.IDs, importResult.ImportedIDs...)
@@ -446,6 +470,9 @@ func renderImportOutcome(result importResultJSON, source string, dedupHits int) 
 	}
 	if staleSkipped := result.Skipped - dedupHits; staleSkipped > 0 {
 		fmt.Fprintf(os.Stderr, " (%d stale skipped; use --allow-stale to restore older rows)", staleSkipped) //nolint:gosec // G705: stderr, not a browser context
+	}
+	if result.Unchanged > 0 {
+		fmt.Fprintf(os.Stderr, " (%d already present, unchanged)", result.Unchanged) //nolint:gosec // G705: stderr, not a browser context
 	}
 	fmt.Fprintln(os.Stderr)
 	if len(result.UpdatedIssues) > 0 {
