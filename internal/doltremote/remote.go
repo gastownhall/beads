@@ -20,7 +20,7 @@ var NativeSchemes = []string{
 }
 
 // Normalize converts a remote URL to a Dolt-compatible format.
-// Dolt-native URLs (dolthub://, file://, aws://, gs://, git+...) are returned
+// Dolt-native URLs (dolthub://, file://, aws://, gs://, s3://, git+...) are returned
 // as-is. Git URLs (https://, ssh://, git@...) are converted via FromGitURL.
 // Unknown schemes are returned as-is and let dolt clone decide.
 func Normalize(url string) string {
