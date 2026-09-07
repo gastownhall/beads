@@ -7,8 +7,8 @@ import (
 	"testing"
 )
 
-// fakeDepCounter answers the two aggregate queries warnUnresolvableDepEdges
-// makes, independently of any listing.
+// fakeDepCounter answers the two aggregate queries readDepCounts makes,
+// independently of any listing.
 type fakeDepCounter struct {
 	depCount  int64
 	depErr    error
@@ -106,8 +106,9 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			counts := readDepCounts(context.Background(), tc.counter, "rp-1")
 			out := captureStderr(t, func() {
-				warnUnresolvableDepEdges(context.Background(), tc.counter, "rp-1", tc.deps, tc.dependents)
+				warnUnresolvableDepEdges("rp-1", counts, tc.deps, tc.dependents)
 			})
 			if tc.wantWarn {
 				if !strings.Contains(out, "no row in this database") {
@@ -130,10 +131,9 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 	}
 
 	t.Run("both directions warn but the pointer is printed once", func(t *testing.T) {
+		counts := readDepCounts(context.Background(), fakeDepCounter{depCount: 1, rdepCount: 1}, "rp-1")
 		out := captureStderr(t, func() {
-			warnUnresolvableDepEdges(context.Background(),
-				fakeDepCounter{depCount: 1, rdepCount: 1}, "rp-1",
-				depListing{rows: 0}, depListing{rows: 0})
+			warnUnresolvableDepEdges("rp-1", counts, depListing{rows: 0}, depListing{rows: 0})
 		})
 		if n := strings.Count(out, "no row in this database"); n != 2 {
 			t.Errorf("expected two warnings, got %d:\n%q", n, out)
@@ -143,12 +143,38 @@ func TestWarnUnresolvableDepEdges(t *testing.T) {
 		}
 	})
 
+	// A nil store yields counts carrying errNoDepCounter in both directions,
+	// which the report gate treats exactly like any other failed count read.
 	t.Run("nil store is a no-op", func(t *testing.T) {
+		counts := readDepCounts(context.Background(), nil, "rp-1")
 		out := captureStderr(t, func() {
-			warnUnresolvableDepEdges(context.Background(), nil, "rp-1", depListing{}, depListing{})
+			warnUnresolvableDepEdges("rp-1", counts, depListing{rows: 0}, depListing{rows: 0})
 		})
 		if out != "" {
 			t.Errorf("expected silence, got:\n%q", out)
+		}
+	})
+
+	// The arithmetic half of the concurrency mitigation: a count that is
+	// stale-LOW relative to the listing — what a count read BEFORE a
+	// concurrent add looks like — must be suppressed rather than reported.
+	//
+	// SCOPE, stated because it would otherwise read as more than it is: this
+	// pins the SUBTRACTION only. The call-site ORDER that produces the
+	// stale-low count lives in show.go and show_display.go, which this test
+	// does not exercise; the split into readDepCounts plus
+	// warnUnresolvableDepEdges is what makes that order visible at those call
+	// sites, and TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable
+	// is the case that actually fails when an order is reversed.
+	t.Run("a stale-low count is suppressed, not reported", func(t *testing.T) {
+		counts := readDepCounts(context.Background(), fakeDepCounter{depCount: 1}, "rp-1")
+		out := captureStderr(t, func() {
+			// The listing observed the edge the count predates, plus one more
+			// added in the window.
+			warnUnresolvableDepEdges("rp-1", counts, depListing{rows: 2}, depListing{})
+		})
+		if out != "" {
+			t.Errorf("a concurrent add must not be reported as unresolvable, got:\n%q", out)
 		}
 	})
 }

@@ -117,19 +117,33 @@ func BuildIssueDetails(ctx context.Context, src DetailSource, issue *types.Issue
 	details := types.NewIssueDetails(*issue)
 
 	details.Labels, _ = src.Labels(ctx, id, isWisp)
-	// depsErr is kept rather than discarded: it is what separates "the edge
-	// list came back short" from "the edge list never came back", and the
-	// unresolvable-edge delta below is only meaningful in the first case.
-	deps, depsErr := src.Dependencies(ctx, id, isWisp)
-	details.Dependencies = deps
 
 	// Aggregate counts - O(1) queries, no row materialization.
+	//
+	// THE COUNTS ARE READ BEFORE THE ROW LISTS, and the order is load-bearing
+	// wherever the source is not snapshot-consistent. The UOW source runs the
+	// whole build inside one read transaction and is immune; the store-backed
+	// source issues a connection per call, so a concurrent write can land
+	// between the two reads and skew the delta below. Counting first puts that
+	// skew on the safe side: an edge ADDED in the window leaves the count
+	// stale-LOW, so the delta goes negative and is suppressed, where the
+	// reverse order would have announced a fresh local edge as unresolvable.
+	// A concurrent DELETE still produces a spurious report, which is the
+	// residual and is why this is an ordering mitigation rather than a fix —
+	// only a shared snapshot or a direct count of unresolvable edges closes
+	// it (be-lpi).
 	dependentCount, dependentCountErr := src.CountDependents(ctx, id, isWisp)
 	details.DependentCount = &dependentCount
 	dependencyCount, dependencyCountErr := src.CountDependencies(ctx, id, isWisp)
 	details.DependencyCount = &dependencyCount
 	commentCount, _ := src.CountComments(ctx, id, isWisp)
 	details.CommentCount = &commentCount
+
+	// depsErr is kept rather than discarded: it is what separates "the edge
+	// list came back short" from "the edge list never came back", and the
+	// unresolvable-edge delta below is only meaningful in the first case.
+	deps, depsErr := src.Dependencies(ctx, id, isWisp)
+	details.Dependencies = deps
 
 	// The count counts edge ROWS; the slice carries the issues on the far
 	// end, and drops any whose id has no row in this database. The two
