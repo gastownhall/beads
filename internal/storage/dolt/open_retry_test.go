@@ -1095,8 +1095,11 @@ func TestOpenRetryKeepsThePerAttemptTimeoutWhenTheBudgetHasRoom(t *testing.T) {
 			continue // the clamp is decisive here; the sibling test owns this case
 		}
 		checked++
-		if d.timeout < timeout-50*time.Millisecond || d.timeout > timeout+50*time.Millisecond {
-			t.Fatalf("retry %d dial timeout = %v with %v of the budget left, want the full %v per-attempt timeout: the loop shortened an attempt the clamp had room for", i+1, d.timeout, left, timeout)
+		// Exact, not approximate: with room to spare the clamp returns the
+		// per-attempt timeout unchanged, so any tolerance here is a reduction
+		// the loop could apply unnoticed (a 50 ms band let timeout*3/4 pass).
+		if d.timeout != timeout {
+			t.Fatalf("retry %d dial timeout = %v with %v of the budget left, want exactly the %v per-attempt timeout: the loop shortened an attempt the clamp had room for", i+1, d.timeout, left, timeout)
 		}
 	}
 	if checked == 0 {
