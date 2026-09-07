@@ -31,6 +31,15 @@ type BatchContext struct {
 	// issue for a result the caller discards. Singular creates leave this
 	// false so they keep reconciling immediately, per-issue.
 	SkipChildCounterReconcile bool
+	// DeferVersionMint tells CreateIssueInTxWithResult NOT to mint the
+	// issue's version row itself but to report the deferral on its result.
+	// CreateIssuesInTxWithContext sets this because it persists the batch's
+	// creation-time dependency edges AFTER the per-issue loop, and the first
+	// version must carry that outgoing edge set: it mints once per accepted
+	// issue after the edges (and the blocked-state recompute) have landed.
+	// Singular creates leave this false and mint in place — they never run
+	// the dependency pass.
+	DeferVersionMint bool
 }
 
 // NewBatchContext reads config from the database and returns a BatchContext.
@@ -76,6 +85,11 @@ type CreateIssueResult struct {
 	// up to the entry point so their journal rows land AFTER the create's. A
 	// consumer must never see a comment for a bead it has not been told about.
 	persistedComments []EventComment
+	// versionDeferred reports that this create reached the version seam but
+	// left the mint to the batch entry point (BatchContext.DeferVersionMint).
+	// Set only on the path that would otherwise have minted, so the batch
+	// mints for exactly the issues a singular create would have.
+	versionDeferred bool
 }
 
 type persistedDependency struct {
@@ -193,7 +207,13 @@ func CreateIssueInTxWithResult(ctx context.Context, tx DBTX, bc *BatchContext, i
 	if err := RecordEventInTx(ctx, tx, EventCreate, issue.ID, actor); err != nil {
 		return result, err
 	}
-	if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
+	// The version row is the create's LAST durable-state write. A batch
+	// create persists this issue's outgoing edges after this function returns,
+	// so it defers the mint to its own end (DeferVersionMint); a singular
+	// create has nothing after this point and mints here.
+	if bc.DeferVersionMint {
+		result.versionDeferred = true
+	} else if err := RecordVersionInTx(ctx, tx, issue.ID, actor); err != nil {
 		return result, err
 	}
 	// Creation-time comments (import/interchange carries them inline) are
@@ -302,15 +322,24 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	// reconcile behavior.
 	batch := *bc
 	batch.SkipChildCounterReconcile = true
+	// The per-issue create leaves the version mint to this function: the
+	// creation-time edges below land after the per-issue loop, and the first
+	// version of each issue must carry them (one version per issue at
+	// creation, minted last).
+	batch.DeferVersionMint = true
 
 	result := CreateIssuesResult{}
 	accepted := issues[:0:0]
+	var toVersion []string
 	for _, issue := range issues {
 		issueResult, err := CreateIssueInTxWithResult(ctx, tx, &batch, issue, actor)
 		if err != nil {
 			return CreateIssuesResult{}, err
 		}
 		result.merge(issueResult.ChangedTables)
+		if issueResult.versionDeferred {
+			toVersion = append(toVersion, issue.ID)
+		}
 		if issueResult.StaleRejected {
 			continue // stale snapshot: keep its deps out of the batch too
 		}
@@ -345,6 +374,16 @@ func CreateIssuesInTxWithContext(ctx context.Context, tx DBTX, bc *BatchContext,
 	}
 	if recomputed.WispRowsChanged {
 		result.markChanged("wisps")
+	}
+	// Mint each created issue's first version LAST — after its creation-time
+	// edges and the blocked-state recompute — so durable_state carries the
+	// outgoing edge set. PersistDependenciesWithOptionsResult writes the edge
+	// rows directly and mints nothing itself, so this is the one version per
+	// issue at creation. Wisps are excluded by the seam.
+	for _, id := range toVersion {
+		if err := RecordVersionInTx(ctx, tx, id, actor); err != nil {
+			return CreateIssuesResult{}, err
+		}
 	}
 	return result, nil
 }
