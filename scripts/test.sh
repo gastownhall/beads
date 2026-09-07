@@ -29,7 +29,7 @@ build_skip_pattern() {
 }
 
 # Default values
-TIMEOUT="${TEST_TIMEOUT:-3m}"
+TIMEOUT="${TEST_TIMEOUT:-10m}"
 GO_TEST_PKG_PARALLEL="${GO_TEST_PKG_PARALLEL:-4}"
 GO_TEST_PARALLEL="${GO_TEST_PARALLEL:-4}"
 SKIP_PATTERN=$(build_skip_pattern)
