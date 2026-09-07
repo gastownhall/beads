@@ -231,13 +231,16 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
-			depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
+			// The errors are KEPT, not discarded: rendering stays best
+			// effort, but a FAILED listing and a SHORT one both leave the
+			// slice empty, and only the second is an unresolvable edge.
+			depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID) // Best effort: show issue even if deps unavailable
 			for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 				printDepSection(sec)
 			}
 
 			// Show dependents - grouped by dependency type for clarity
-			dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
+			dependentsWithMeta, dependentsErr := issueStore.GetDependentsWithMetadata(ctx, issue.ID) // Best effort: show issue even if dependents unavailable
 			for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 				printDepSection(sec)
 				if sec.Type == types.DepParentChild && issue.IssueType == types.TypeEpic {
@@ -251,7 +254,9 @@ var showCmd = &cobra.Command{
 			// (be-lpi). --json says so in unresolvable_dependencies; say it
 			// here too, or `bd dep add x liveop-y` reports success and then
 			// `bd show x` shows nothing.
-			warnUnresolvableDepEdges(ctx, issueStore, issue.ID, len(depsWithMeta), len(dependentsWithMeta))
+			warnUnresolvableDepEdges(ctx, issueStore, issue.ID,
+				depListing{rows: len(depsWithMeta), err: depsErr},
+				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 			printRelatedSection(relatedSeen)
 

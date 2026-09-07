@@ -123,20 +123,22 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 
 	// Dependencies (what this issue depends on)
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
-	depsWithMeta, _ := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
+	depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 		printDepSection(sec)
 	}
 
 	// Dependents (what depends on this issue)
-	dependentsWithMeta, _ := issueStore.GetDependentsWithMetadata(ctx, issue.ID)
+	dependentsWithMeta, dependentsErr := issueStore.GetDependentsWithMetadata(ctx, issue.ID)
 	for _, sec := range groupDepSections(dependentsWithMeta, false, relatedSeen) {
 		printDepSection(sec)
 	}
 
 	// Shared with the non-watch path in show.go so the two renders cannot
 	// drift apart in what they disclose (be-lpi).
-	warnUnresolvableDepEdges(ctx, issueStore, issue.ID, len(depsWithMeta), len(dependentsWithMeta))
+	warnUnresolvableDepEdges(ctx, issueStore, issue.ID,
+		depListing{rows: len(depsWithMeta), err: depsErr},
+		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
 	// Related (bidirectional, deduplicated)
 	printRelatedSection(relatedSeen)
@@ -160,6 +162,15 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 
 // unresolvableDepCounter is the slice of the store warnUnresolvableDepEdges
 // reads. Both counts are O(1) aggregate queries over the dependency tables.
+// depListing is one direction's rendered edge list: how many rows reached the
+// screen, and whether the read that produced them succeeded. The error is the
+// load-bearing half — a failed read and a genuinely short one are both an
+// empty slice, and only the second means an edge could not be represented.
+type depListing struct {
+	rows int
+	err  error
+}
+
 type unresolvableDepCounter interface {
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
@@ -186,16 +197,20 @@ type unresolvableDepCounter interface {
 // common fully-local case — the same choice warnDroppedDepEdges makes in
 // dep.go for the same reason. Best effort: a count error is swallowed, since
 // the issue has already been rendered successfully by the time this runs.
-func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter, issueID string, shownDeps, shownDependents int) {
+func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter, issueID string, deps, dependents depListing) {
 	if store == nil {
 		return
 	}
 	reported := false
-	report := func(kind string, count int64, err error, shown int) {
-		if err != nil {
+	report := func(kind string, count int64, countErr error, listing depListing) {
+		// BOTH reads have to have succeeded. The count alone cannot tell a
+		// SHORT listing from a FAILED one — each leaves an empty slice — and
+		// warning on the second turns a transient backend error into a claim
+		// about the data, which is the more expensive of the two mistakes.
+		if countErr != nil || listing.err != nil {
 			return
 		}
-		missing := count - int64(shown)
+		missing := count - int64(listing.rows)
 		if missing <= 0 {
 			return
 		}
@@ -204,9 +219,9 @@ func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter,
 			issueID, missing, kind)
 	}
 	depCount, depErr := store.CountDependencies(ctx, issueID)
-	report("dependency", depCount, depErr, shownDeps)
+	report("dependency", depCount, depErr, deps)
 	rdepCount, rdepErr := store.CountDependents(ctx, issueID)
-	report("dependent", rdepCount, rdepErr, shownDependents)
+	report("dependent", rdepCount, rdepErr, dependents)
 	if reported {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.
