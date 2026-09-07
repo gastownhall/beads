@@ -305,20 +305,23 @@ What it does and does not cover:
   "server" is a TCP port with nothing behind it, so waiting there is pure delay.
   Those same commands against a server-backed workspace **do** get the budget,
   and that is worth costing out for the one command an operator runs *because*
-  the server is down. **There is no aggregate cap: the budget is per open, and
-  `bd doctor` performs several.** A default run against a server-backed
-  workspace opens four stores that resolve the workspace mode and therefore
-  reach the budget -- the shared store its database checks use, two
-  maintenance checks, and the KV check -- so the worst case is four
-  budget-length waits in one command. Its remaining opens build their config
-  by hand and never resolve the workspace mode, so they stay fail-fast.
-  Measured on a server-mode workspace pointed at a dead port, with
-  `open-retry-budget: 6s`: 20.3 s when nothing else intervenes, against 208 ms
-  with the key unset. In practice the circuit breaker usually intervenes -- it
-  opens after five consecutive failed connections and then rejects the rest of
-  the run's opens immediately, which took the same run to 5.7 s and one wait.
-  Do not rely on that: the breaker's state is carried between commands, so a
-  run that starts with a clear breaker pays the full price.
+  the server is down. **The budget is spent per open, with no aggregate cap**,
+  so a command that opens several stores can wait several times.
+  Measured on a single-repo server-mode workspace pointed at a dead port, with
+  `open-retry-budget: 6s`: a default `bd doctor` run makes ten server-mode
+  opens, four of which resolve the workspace mode and so reach the budget --
+  the shared store its database checks use, two maintenance checks, and the KV
+  check. In that fixture the other six go through a hand-built config that
+  never sets the server-mode flag and stay fail-fast, and a multi-repo setup
+  adds further opens on top.
+  What the run actually cost: **5.7 s**, against 208 ms with the key unset.
+  Only the first of the four waited, because the circuit breaker opened partway
+  through the same command -- it trips after five consecutive failed
+  connections, which a doctor run reaches on its own -- and then rejected the
+  remaining opens immediately. Starting from a clear breaker does not avoid
+  this; the run trips it itself. With the breaker disabled outright the same
+  run waits four times, **20.3 s**, which is the ceiling the per-open cost
+  implies when nothing intervenes.
 - **Only transient network-level failures are retried**, using the same
   `isRetryableError` classification the rest of the Dolt client uses. A
   misconfigured endpoint (an unknown host, and similar non-transient errors)

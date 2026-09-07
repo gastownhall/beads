@@ -318,15 +318,15 @@ proceeds as soon as it answers. Notes:
 - Diagnostics against a **server-backed** workspace therefore do wait, and the
   budget is spent **per open, with no aggregate cap**. Costed out on the
   command you are most likely to reach for during an outage: a default
-  `bd doctor` run opens four stores that reach the budget (the shared store its
-  database checks use, two maintenance checks, and the KV check), so with
-  `open-retry-budget: 6s` against a dead port it took 20.3 s, against 208 ms
-  with the key unset. The circuit breaker often cuts this short -- after five
-  consecutive failed connections it rejects the rest of the run's opens
-  immediately, which took the same run to 5.7 s -- but its state carries
-  between commands, so the first run of an outage can pay the full price. If
-  you would rather `bd doctor` answer immediately during an outage, set the key
-  back to `0`; there is no per-command override.
+  `bd doctor` run on a single-repo workspace opens four stores that reach the
+  budget (the shared store its database checks use, two maintenance checks, and
+  the KV check); a multi-repo setup opens more. Measured against a dead port
+  with `open-retry-budget: 6s`, the run took **5.7 s** -- one wait, not four,
+  because the circuit breaker opens partway through the same command after five
+  consecutive failed connections and rejects the rest. With the breaker
+  disabled the same run took **20.3 s**, and with the key unset, 208 ms. If you
+  would rather `bd doctor` answer immediately during an outage, set the key back
+  to `0`; there is no per-command override.
 - The wait is visible. Entering the retry loop prints one line to stderr,
   `bd: Dolt server unreachable at HOST:PORT; retrying for up to 30s
   (dolt.open-retry-budget)`, so a command that pauses is telling you why
