@@ -1,6 +1,7 @@
 -- Migration 0068: Phase 2 dual-write schema for versioned beads (be-hs42e.3
 -- / gastownhall/beads#6135), step 6 of design section 16.3 (be-dt74u
--- amendment, be-hs42e.3's design field) only.
+-- amendment, be-hs42e.3's design field), plus step 7 -- the durable_state
+-- LONGBLOB retype added at review, which has its own header further down.
 --
 -- Steps 1-5 of section 16.3 (version_id CHAR(36) UUID PK swap;
 -- participation_generation BIGINT NULL on issues and its wisps shape-parity
@@ -59,5 +60,44 @@ SET @issue_versions_as_needs_add = (
 );
 SET @sql = IF(@issue_versions_as_needs_add = 1,
     'ALTER TABLE issue_versions ADD COLUMN attribution_status VARCHAR(20) NOT NULL',
+    'SELECT 1');
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 0068 step 7, added at review (donnabox on gastownhall/beads#6358 item
+-- 4): retype issue_versions.durable_state from JSON to LONGBLOB.
+--
+-- 0067 created durable_state as a Dolt JSON column. Dolt's JSON type does
+-- not keep the bytes it is handed -- it parses and renormalizes them, and
+-- numbers do not survive the round trip (measured on dolt 2.2.3): 1.0 reads
+-- back as 1, 9007199254740993 (past 2^53) reads back as 9007199254740992,
+-- 1e300 reads back as 1e+300. A LONGBLOB returns the same bytes it was
+-- given, byte for byte (same measurement). That breaks the design's
+-- verbatim-bytes promise (R5.1) and makes any content-derived token
+-- impossible, because sha256 over the bytes read back would not equal
+-- sha256 over the bytes written. The column has to preserve bytes, so it
+-- becomes a LONGBLOB. The writer (RecordVersionInTx in
+-- internal/storage/issueops/version_history.go) stores the RFC 8785 (JCS)
+-- canonical form of the marshalled issue and readers parse those bytes, so
+-- the stored bytes are exactly the bytes a content token hashes.
+--
+-- No data conversion is needed: issue_versions is empty in the Phase 2 era
+-- (this migration and the table's first writer ship in the same build --
+-- see the attribution_status note above), so the MODIFY changes only the
+-- column type. Guarded on DATA_TYPE the same way 0057 guards its LONGTEXT
+-- widenings: the retype fires when the column exists and is not yet
+-- LONGBLOB, and a raw-SQL replay onto an already-migrated store is a clean
+-- no-op (a missing column makes the probe yield NULL, and the IF takes the
+-- SELECT 1 branch, the same way 0067's table-exists guards no-op). The
+-- CLI-bundle override (cliMigration0068AddAttributionStatus) carries the
+-- direct MODIFY for the same pre-2.3 CLI reason as step 6.
+SET @issue_versions_ds_needs_retype = (
+    SELECT IF(DATA_TYPE <> 'longblob', 1, 0)
+    FROM INFORMATION_SCHEMA.COLUMNS
+    WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'issue_versions'
+      AND COLUMN_NAME = 'durable_state'
+);
+SET @sql = IF(@issue_versions_ds_needs_retype = 1,
+    'ALTER TABLE issue_versions MODIFY COLUMN durable_state LONGBLOB',
     'SELECT 1');
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;

@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/gowebpki/jcs"
 )
 
 // Dual-write issue-version history records every accepted issue mutation as a
@@ -38,7 +40,7 @@ import (
 // SINGLE WRITER ONLY until the version_id primary-key swap lands. With
 // PRIMARY KEY (issue_id, revision), two disconnected writers that each mint
 // the same ordinal for the same issue collide on merge, and
-// TryAutoResolveMergeConflicts (versioncontrolops/mergesettle.go) fails the
+// TryAutoResolveMergeConflicts (internal/storage/versioncontrolops/mergesettle.go) fails the
 // pull for a table it does not know. Enabling versioned history is therefore
 // safe only with a SINGLE writer per store until migration 0068 steps 1-3
 // (UUID version_id primary key, ordinal demoted to an index) land; those
@@ -97,6 +99,30 @@ func attributionStatusForActor(actor string) string {
 	return attributionStatusClaimed
 }
 
+// canonicalDurableState renders issue as the bytes RecordVersionInTx stores
+// in issue_versions.durable_state: encoding/json's marshal of the issue,
+// canonicalized per RFC 8785 (JCS). The canonical form is a function of the
+// issue's content alone -- keys sorted, numbers in their one ES6 form
+// (1.0 is 1, 1e300 is 1e+300), only the escapes RFC 8785 requires -- so the
+// same issue state always yields the same bytes, whatever encoding/json's
+// formatting happens to be. Numbers are canonicalized as IEEE-754 doubles
+// (RFC 8785 section 3.2.2.3), so an integer past 2^53 is rounded here, once,
+// by the writer, before anything hashes it: the stored bytes and the hashed
+// bytes are the same bytes. types.Issue carries no such magnitudes (its
+// integers are ordinals and priorities), but the rule is stated so nobody
+// expects int64 fidelity from the token.
+func canonicalDurableState(issue any) ([]byte, error) {
+	marshalled, err := json.Marshal(issue)
+	if err != nil {
+		return nil, err
+	}
+	canonical, err := jcs.Transform(marshalled)
+	if err != nil {
+		return nil, fmt.Errorf("canonicalize (RFC 8785): %w", err)
+	}
+	return canonical, nil
+}
+
 // RecordVersionInTx mints one issue_versions row for issueID and advances
 // issues.current_revision to match, as of tx (read-your-writes within the
 // same transaction). A no-op when versioned history is disabled for tx, or
@@ -124,12 +150,25 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return nil
 	}
 
-	// durable_state is a verbatim marshal of the mutated issue (design §15.3,
-	// corrected by §17.1): the write-path loader GetIssueInTx never hydrates
-	// Dependencies (types.Issue.Dependencies is omitempty and unrelated to
-	// this snapshot's own read), so it is populated here, once, for every
-	// caller of this seam — in GetDependencyRecordsForIssuesInTx's own
-	// ordering (issue_id, depends_on_id, type, id).
+	// durable_state is the RFC 8785 (JCS) canonical form of the marshalled
+	// issue, stored as bytes -- issue_versions.durable_state is a LONGBLOB
+	// (migration 0068 step 7), not a JSON column. The invariant that buys,
+	// the one donnabox asked for on #6358 item 4: sha256(stored bytes) is a
+	// stable content token, because the bytes read back are exactly the
+	// bytes the writer produced. A Dolt JSON column could not provide that.
+	// It parses and renormalizes what it stores (measured on dolt 2.2.3:
+	// 1.0 reads back as 1, 9007199254740993 as 9007199254740992, 1e300 as
+	// 1e+300, while a LONGBLOB returns the same bytes) -- so the design's
+	// verbatim-bytes promise (R5.1) and any content-derived token (#5898's
+	// sha256-jcs) broke between the writer and the disk. JCS pins the bytes
+	// on the way in (canonicalDurableState); LONGBLOB keeps them as written.
+	//
+	// The snapshot itself is the mutated issue (design §15.3, corrected by
+	// §17.1): the write-path loader GetIssueInTx never hydrates Dependencies
+	// (types.Issue.Dependencies is omitempty and unrelated to this snapshot's
+	// own read), so it is populated here, once, for every caller of this
+	// seam — in GetDependencyRecordsForIssuesInTx's own ordering (issue_id,
+	// depends_on_id, type, id).
 	deps, err := GetDependencyRecordsForIssuesInTx(ctx, tx, []string{issueID})
 	if err != nil {
 		return fmt.Errorf("versioned history: load dependencies for %s: %w", issueID, err)
@@ -151,16 +190,18 @@ func RecordVersionInTx(ctx context.Context, tx DBTX, issueID, actor string) erro
 		return fmt.Errorf("versioned history: compute next revision for %s: %w", issueID, err)
 	}
 
-	durableState, err := json.Marshal(issue)
+	durableState, err := canonicalDurableState(issue)
 	if err != nil {
 		return fmt.Errorf("versioned history: marshal durable state for %s: %w", issueID, err)
 	}
 
+	// durableState is bound as []byte, a LONGBLOB parameter -- never
+	// string(durableState), which would ask the driver to treat it as text.
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO issue_versions
 			(issue_id, revision, epoch, durable_state, change_actor, change_agent, change_message, change_at, attribution_status)
 		VALUES (?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
-		issueID, newRevision, epoch, string(durableState), actor, time.Now().UTC(), attributionStatusForActor(actor),
+		issueID, newRevision, epoch, durableState, actor, time.Now().UTC(), attributionStatusForActor(actor),
 	); err != nil {
 		return fmt.Errorf("versioned history: insert version row for %s: %w", issueID, err)
 	}
