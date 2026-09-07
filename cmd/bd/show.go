@@ -231,6 +231,8 @@ var showCmd = &cobra.Command{
 			relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
 
 			// Show dependencies - grouped by dependency type for clarity
+			// Counts first — see readDepCounts for why the order matters.
+			depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 			// The errors are KEPT, not discarded: rendering stays best
 			// effort, but a FAILED listing and a SHORT one both leave the
 			// slice empty, and only the second is an unresolvable edge.
@@ -254,7 +256,7 @@ var showCmd = &cobra.Command{
 			// (be-lpi). --json says so in unresolvable_dependencies; say it
 			// here too, or `bd dep add x liveop-y` reports success and then
 			// `bd show x` shows nothing.
-			warnUnresolvableDepEdges(ctx, issueStore, issue.ID,
+			warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
 				depListing{rows: len(depsWithMeta), err: depsErr},
 				depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 

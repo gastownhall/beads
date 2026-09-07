@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -123,6 +124,8 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 
 	// Dependencies (what this issue depends on)
 	relatedSeen := make(map[string]*types.IssueWithDependencyMetadata)
+	// Counts first — see readDepCounts for why the order matters.
+	depCountsSnapshot := readDepCounts(ctx, issueStore, issue.ID)
 	depsWithMeta, depsErr := issueStore.GetDependenciesWithMetadata(ctx, issue.ID)
 	for _, sec := range groupDepSections(depsWithMeta, true, relatedSeen) {
 		printDepSection(sec)
@@ -136,7 +139,7 @@ func displayShowIssueReturn(ctx context.Context, issueID string) *types.Issue {
 
 	// Shared with the non-watch path in show.go so the two renders cannot
 	// drift apart in what they disclose (be-lpi).
-	warnUnresolvableDepEdges(ctx, issueStore, issue.ID,
+	warnUnresolvableDepEdges(issue.ID, depCountsSnapshot,
 		depListing{rows: len(depsWithMeta), err: depsErr},
 		depListing{rows: len(dependentsWithMeta), err: dependentsErr})
 
@@ -171,11 +174,36 @@ type depListing struct {
 	err  error
 }
 
+// depCount is one direction's aggregate, carried with its own error for the
+// same reason depListing is.
+type depCount struct {
+	n   int64
+	err error
+}
+
+type depCounts struct {
+	deps       depCount
+	dependents depCount
+}
+
+var errNoDepCounter = errors.New("no dependency counter available")
+
 type unresolvableDepCounter interface {
 	CountDependencies(ctx context.Context, issueID string) (int64, error)
 	CountDependents(ctx context.Context, issueID string) (int64, error)
 }
 
+// readDepCounts and warnUnresolvableDepEdges are split so the COUNTS ARE READ
+// BEFORE THE ROW LISTINGS, which the callers do. The store issues a connection
+// per call, so a concurrent write can land between the count and the listing;
+// counting first puts that skew on the safe side, because an edge ADDED in the
+// window leaves the count stale-LOW and the difference goes negative and is
+// suppressed. Counting afterwards would announce a freshly added local edge as
+// unresolvable. A concurrent DELETE still produces a spurious notice — the
+// residual, and the reason this is an ordering mitigation rather than a fix
+// (be-lpi; the real fix is a shared snapshot or a direct count of edges whose
+// target has no row).
+//
 // warnUnresolvableDepEdges prints a stderr-only notice when an issue has
 // dependency edges that the rendered listings could not show.
 //
@@ -197,10 +225,17 @@ type unresolvableDepCounter interface {
 // common fully-local case — the same choice warnDroppedDepEdges makes in
 // dep.go for the same reason. Best effort: a count error is swallowed, since
 // the issue has already been rendered successfully by the time this runs.
-func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter, issueID string, deps, dependents depListing) {
+func readDepCounts(ctx context.Context, store unresolvableDepCounter, issueID string) depCounts {
 	if store == nil {
-		return
+		return depCounts{deps: depCount{err: errNoDepCounter}, dependents: depCount{err: errNoDepCounter}}
 	}
+	var c depCounts
+	c.deps.n, c.deps.err = store.CountDependencies(ctx, issueID)
+	c.dependents.n, c.dependents.err = store.CountDependents(ctx, issueID)
+	return c
+}
+
+func warnUnresolvableDepEdges(issueID string, counts depCounts, deps, dependents depListing) {
 	reported := false
 	report := func(kind string, count int64, countErr error, listing depListing) {
 		// BOTH reads have to have succeeded. The count alone cannot tell a
@@ -218,10 +253,8 @@ func warnUnresolvableDepEdges(ctx context.Context, store unresolvableDepCounter,
 		fmt.Fprintf(os.Stderr, "warning: %s has %d %s edge(s) whose far end has no row in this database (cross-repo/external) and are not shown above\n",
 			issueID, missing, kind)
 	}
-	depCount, depErr := store.CountDependencies(ctx, issueID)
-	report("dependency", depCount, depErr, deps)
-	rdepCount, rdepErr := store.CountDependents(ctx, issueID)
-	report("dependent", rdepCount, rdepErr, dependents)
+	report("dependency", counts.deps.n, counts.deps.err, deps)
+	report("dependent", counts.dependents.n, counts.dependents.err, dependents)
 	if reported {
 		// Named once, after both directions, so an issue short on each gets
 		// one pointer rather than two.

@@ -3,6 +3,7 @@ package workapi
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/steveyegge/beads/internal/storage"
@@ -201,6 +202,91 @@ func TestBuildIssueDetails_UnresolvableDependents(t *testing.T) {
 	}
 	if got.UnresolvableDependents != nil {
 		t.Errorf("UnresolvableDependents = %d on a fully local store, want unset", *got.UnresolvableDependents)
+	}
+}
+
+// mutatingSource models a write landing BETWEEN the two reads
+// BuildIssueDetails makes: whichever of Dependencies/CountDependencies runs
+// first observes one edge, and whichever runs second observes two.
+//
+// This is what makes the ordering testable at all. A source returning fixed
+// values cannot distinguish the two orders — the first version of this test
+// used one, and reverting the fix under it still passed, which is a test that
+// pins arithmetic while claiming to pin an order.
+type mutatingSource struct {
+	issue  *types.Issue
+	edges  int
+	before int
+}
+
+func (m *mutatingSource) observe() int {
+	if m.before == 0 {
+		m.before = 1
+		return m.edges // the first reader sees the pre-write state
+	}
+	return m.edges + 1 // by the second read, an edge has been added
+}
+
+func (m *mutatingSource) GetIssue(_ context.Context, _ string) (*types.Issue, error) {
+	return m.issue, nil
+}
+func (m *mutatingSource) GetWisp(_ context.Context, id string) (*types.Issue, error) {
+	return nil, notFound(id)
+}
+func (m *mutatingSource) Labels(_ context.Context, _ string, _ bool) ([]string, error) {
+	return nil, nil
+}
+func (m *mutatingSource) Dependencies(_ context.Context, _ string, _ bool) ([]*types.IssueWithDependencyMetadata, error) {
+	n := m.observe()
+	out := make([]*types.IssueWithDependencyMetadata, 0, n)
+	for i := 0; i < n; i++ {
+		out = append(out, depRow(fmt.Sprintf("rp-%d", i+2), types.DepBlocks))
+	}
+	return out, nil
+}
+func (m *mutatingSource) CountDependencies(_ context.Context, _ string, _ bool) (int64, error) {
+	return int64(m.observe()), nil
+}
+func (m *mutatingSource) CountDependents(_ context.Context, _ string, _ bool) (int64, error) {
+	return 0, nil
+}
+func (m *mutatingSource) CountComments(_ context.Context, _ string, _ bool) (int64, error) {
+	return 0, nil
+}
+func (m *mutatingSource) IterDependents(_ context.Context, _ string, _ bool) (storage.Iter[types.IssueWithDependencyMetadata], error) {
+	return storage.NewSliceIter[types.IssueWithDependencyMetadata](nil), nil
+}
+func (m *mutatingSource) IterComments(_ context.Context, _ string, _ bool) (storage.Iter[types.Comment], error) {
+	return storage.NewSliceIter[types.Comment](nil), nil
+}
+
+// TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable pins the
+// ORDER of the two reads, which is the only defence the store-backed source
+// has against a write landing between them. (The UOW source runs the whole
+// build inside one read transaction and needs none.)
+//
+// The count is read FIRST, so an edge added in the window leaves it
+// stale-LOW: the difference goes negative and nothing is reported. Read
+// afterwards it would be stale-HIGH, and a freshly added, perfectly ordinary
+// local edge would be published as unresolvable — a false claim about the
+// data, which is the expensive direction. Found by a codex review of the
+// first cut of this change.
+//
+// The source above mutates between calls, so swapping the two reads in
+// BuildIssueDetails turns this red. That is the control; without it the case
+// passes under either order.
+func TestBuildIssueDetails_ConcurrentAddIsNotReportedAsUnresolvable(t *testing.T) {
+	ctx := context.Background()
+	issue := &types.Issue{ID: "rp-1"}
+	src := &mutatingSource{issue: issue, edges: 1}
+
+	details, err := BuildIssueDetails(ctx, src, issue, false, DetailOptions{})
+	if err != nil {
+		t.Fatalf("BuildIssueDetails: %v", err)
+	}
+	if details.UnresolvableDependencies != nil {
+		t.Errorf("UnresolvableDependencies = %d, want unset — a count read before a concurrent add is stale-low, not evidence of an unrenderable edge; are the two reads still in count-then-listing order?",
+			*details.UnresolvableDependencies)
 	}
 }
 
