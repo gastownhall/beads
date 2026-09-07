@@ -26,6 +26,10 @@ const (
 	// maxRetryDelay clamps a server-supplied Retry-After so an interactive CLI
 	// cannot be parked for minutes by one header.
 	maxRetryDelay = 30 * time.Second
+	// statusNotionOverloaded is Notion's overload status. It has no net/http
+	// constant because it is not a standard HTTP status; Notion returns it from
+	// its edge, which may already have handed the request to the origin.
+	statusNotionOverloaded = 529
 )
 
 type Client struct {
@@ -39,9 +43,10 @@ type Client struct {
 	// maxQueryPages*maxPageSize rows, which otherwise cannot be synced at all.
 	MaxQueryPages int
 
-	// sleep is the retry delay hook, swapped out in tests so backoff coverage
-	// does not spend real seconds.
-	sleep func(time.Duration)
+	// after is the retry delay hook, swapped out in tests so backoff coverage
+	// does not spend real seconds. It hands back a channel rather than blocking,
+	// so the wait can be selected against ctx.Done().
+	after func(time.Duration) <-chan time.Time
 }
 
 func NewClient(token string) *Client {
@@ -68,12 +73,22 @@ func (c *Client) maxQueryPages() int {
 	return maxQueryPages
 }
 
-func (c *Client) sleepFor(d time.Duration) {
-	if c.sleep != nil {
-		c.sleep(d)
-		return
+// wait blocks for d, or gives up early with ctx's error if the context is
+// canceled first. A plain time.Sleep would ignore cancellation for up to
+// maxRetryDelay per attempt, and QueryDataSource pays that per page — so the
+// worst case scales with MaxQueryPages, the bound this client lets callers
+// raise.
+func (c *Client) wait(ctx context.Context, d time.Duration) error {
+	after := c.after
+	if after == nil {
+		after = time.After
 	}
-	time.Sleep(d)
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-after(d):
+		return nil
+	}
 }
 
 func (c *Client) WithHTTPClient(httpClient *http.Client) *Client {
@@ -185,11 +200,14 @@ func (c *Client) QueryDataSource(ctx context.Context, dataSourceID string) ([]Pa
 	}
 	// Naming the ceiling in rows, not pages, is the difference between a caller
 	// knowing what to do and filing a bug: the number they can compare against
-	// their data source is limit*maxPageSize.
+	// their data source is limit*maxPageSize. The lever named has to be one the
+	// reader can actually pull — this message reaches CLI operators, who cannot
+	// call a Go method.
 	return nil, fmt.Errorf(
 		"query pagination exceeded %d pages (~%d rows): this data source is larger than the "+
-			"configured bound, so no sync can complete. Raise it via Client.WithMaxQueryPages, "+
-			"or reduce the number of rows in the data source",
+			"configured bound, so no sync can complete. Raise it with "+
+			"'bd config set notion.max_query_pages <n>' or the NOTION_MAX_QUERY_PAGES "+
+			"environment variable, or reduce the number of rows in the data source",
 		limit, limit*maxPageSize)
 }
 
@@ -345,13 +363,17 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 			return body, nil
 		}
 
-		if !retryableStatus(status, method) || attempt == maxRequestAttempts-1 {
+		if !retryableStatus(status, method) {
 			return nil, notionAPIError(status, body)
 		}
 		lastErr = notionAPIError(status, body)
+		if attempt == maxRequestAttempts-1 {
+			break
+		}
 
-		// Retry-After is authoritative when present; otherwise exponential,
-		// clamped so a long server-side hint cannot stall a CLI indefinitely.
+		// Retry-After is authoritative when present; otherwise exponential.
+		// Either way the wait is clamped to maxRetryDelay — including a header
+		// that asks for longer, which the clamp shortens.
 		delay := time.Duration(1<<attempt) * time.Second
 		if retryAfter > 0 {
 			delay = retryAfter
@@ -359,12 +381,9 @@ func (c *Client) doRequest(ctx context.Context, method, path string, requestBody
 		if delay > maxRetryDelay {
 			delay = maxRetryDelay
 		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		default:
+		if err := c.wait(ctx, delay); err != nil {
+			return nil, err
 		}
-		c.sleepFor(delay)
 	}
 	return nil, lastErr
 }
@@ -385,17 +404,27 @@ func (c *Client) doAttempt(httpClient *http.Client, req *http.Request) ([]byte, 
 	return body, resp.StatusCode, parseRetryAfter(resp.Header.Get("Retry-After")), nil
 }
 
-// retryableStatus reports whether a status is worth another attempt. 429 and 529
-// always are. Other 5xx only for methods without side effects — replaying a
-// failed POST that may have been applied server-side is how duplicates are made.
+// retryableStatus reports whether a status is worth another attempt.
+//
+// 429 is safe for every verb: Notion rejects a rate-limited request before
+// processing it, so nothing was applied server-side and a replay cannot
+// duplicate anything.
+//
+// Every other retryable status — 529 included — can be reported after the write
+// already landed, so only verbs without side effects are replayed. Retrying a
+// creating POST on 529 is how one bd issue becomes two Notion rows: the
+// create-vs-update index is keyed on the bd ID and keeps only the last match,
+// so the duplicate is invisible and every later sync updates just one of the
+// pair.
 func retryableStatus(status int, method string) bool {
-	if status == http.StatusTooManyRequests || status == 529 {
+	if status == http.StatusTooManyRequests {
 		return true
 	}
 	if method != http.MethodGet && method != http.MethodDelete {
 		return false
 	}
-	return status == http.StatusInternalServerError ||
+	return status == statusNotionOverloaded ||
+		status == http.StatusInternalServerError ||
 		status == http.StatusBadGateway ||
 		status == http.StatusServiceUnavailable ||
 		status == http.StatusGatewayTimeout
