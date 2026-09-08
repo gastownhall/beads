@@ -1200,6 +1200,13 @@ func shouldUseExternalDoltStatus(cfg *configfile.Config, autoStartDisabled, shar
 	if sharedServerMode && !cfg.IsDoltProxiedServerMode() {
 		return true
 	}
+	// A configured Unix socket is an endpoint owned outside the repo-local
+	// PID-file lifecycle. Treat it like every other externally-managed server:
+	// probe the configured endpoint instead of claiming that a missing local
+	// PID file means the server is down (GH#6017).
+	if cfg.IsDoltServerMode() && cfg.GetDoltServerSocket() != "" {
+		return true
+	}
 	if !cfg.IsDoltServerMode() {
 		return false
 	}
@@ -1229,6 +1236,7 @@ func isLocalHost(host string) bool {
 // user-relevant signals.
 func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	host := cfg.GetDoltServerHost()
+	socket := cfg.GetDoltServerSocket()
 	port := doltserver.DefaultConfig(beadsDir).Port
 	user := cfg.GetDoltServerUser()
 	database := cfg.GetDoltDatabase()
@@ -1237,6 +1245,7 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 
 	dsn := doltutil.ServerDSN{
 		Host:     host,
+		Socket:   socket,
 		Port:     port,
 		User:     user,
 		Password: password,
@@ -1251,6 +1260,14 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 		"user":     user,
 		"database": database,
 		"tls":      tls,
+	}
+	if socket != "" {
+		result["transport"] = "unix_socket"
+		result["socket"] = socket
+		delete(result, "host")
+		delete(result, "port")
+	} else {
+		result["transport"] = "tcp"
 	}
 
 	db, openErr := sql.Open("mysql", dsn)
@@ -1293,8 +1310,12 @@ func runExternalDoltStatus(beadsDir string, cfg *configfile.Config) {
 	} else {
 		fmt.Println("Dolt server: not reachable (external)")
 	}
-	fmt.Printf("  Host:     %s\n", host)
-	fmt.Printf("  Port:     %d\n", port)
+	if socket != "" {
+		fmt.Printf("  Socket:   %s\n", socket)
+	} else {
+		fmt.Printf("  Host:     %s\n", host)
+		fmt.Printf("  Port:     %d\n", port)
+	}
 	fmt.Printf("  Database: %s\n", database)
 	fmt.Printf("  User:     %s\n", user)
 	fmt.Printf("  TLS:      %t\n", tls)

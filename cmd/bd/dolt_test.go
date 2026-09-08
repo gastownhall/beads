@@ -1546,6 +1546,41 @@ func TestRunExternalDoltStatus_Unreachable(t *testing.T) {
 	})
 }
 
+func TestRunExternalDoltStatus_UnreachableUnixSocket(t *testing.T) {
+	beadsDir := t.TempDir()
+	socket := filepath.Join(beadsDir, "missing.sock")
+	cfg := &configfile.Config{
+		DoltMode:         "server",
+		DoltServerSocket: socket,
+		DoltServerUser:   "root",
+		DoltDatabase:     "beads_socket",
+	}
+
+	orig := jsonOutput
+	defer func() { jsonOutput = orig }()
+	jsonOutput = false
+	out := captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
+	if !strings.Contains(out, "Socket:   "+socket) {
+		t.Fatalf("expected configured socket in output, got:\n%s", out)
+	}
+	if strings.Contains(out, "Expected port:") || strings.Contains(out, "Host:") {
+		t.Fatalf("socket status must not fall back to PID/TCP output, got:\n%s", out)
+	}
+
+	jsonOutput = true
+	out = captureStdout(t, func() error { runExternalDoltStatus(beadsDir, cfg); return nil })
+	var result map[string]any
+	if err := json.Unmarshal([]byte(out), &result); err != nil {
+		t.Fatalf("expected valid JSON, got %v: %s", err, out)
+	}
+	if result["transport"] != "unix_socket" || result["socket"] != socket {
+		t.Fatalf("expected unix socket topology, got: %#v", result)
+	}
+	if _, ok := result["port"]; ok {
+		t.Fatalf("socket topology must not publish a misleading port: %#v", result)
+	}
+}
+
 // TestShouldUseExternalDoltStatus covers the routing predicate for
 // `bd dolt status`. The predicate decides whether to ping the configured
 // SQL endpoint (externally-managed server) or read the local PID file
@@ -1576,6 +1611,17 @@ func TestShouldUseExternalDoltStatus(t *testing.T) {
 			},
 			autoStartDisabled: true, // even with auto-start off
 			want:              false,
+		},
+		{
+			name: "server mode + configured Unix socket routes to external (GH#6017)",
+			cfg: &configfile.Config{
+				Backend:          "dolt",
+				DoltMode:         "server",
+				DoltServerSocket: "/tmp/dolt.sock",
+			},
+			autoStartDisabled: false,
+			sharedServerMode:  false,
+			want:              true,
 		},
 		{
 			name: "server mode + remote host always uses external status",
