@@ -604,14 +604,69 @@ func applyChangeDirSelection() error {
 	if err != nil {
 		return HandleError("%v", err)
 	}
-	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 3)
-	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB"} {
+	changeDirEnvSnapshot = make(map[string]envSnapshotValue, 5)
+	for _, key := range []string{"BEADS_DIR", "BEADS_DB", "BD_DB", "GIT_DIR", "GIT_WORK_TREE"} {
 		value, ok := os.LookupEnv(key)
 		changeDirEnvSnapshot[key] = envSnapshotValue{value: value, ok: ok}
 	}
 	_ = os.Setenv("BEADS_DIR", beadsDir)
+	if err := retargetGitContext(filepath.Dir(beadsDir)); err != nil {
+		return HandleError("%v", err)
+	}
 	return nil
 }
+
+// retargetGitContext points the process-wide git context at the repository
+// that owns the -C target's beads directory, honoring the flag's documented
+// "like git -C" contract: hooks install, doctor and config surfaces must
+// resolve the target repo, not the caller's cwd (bd-6m4). Repos without git
+// are a no-op — there is no git context to retarget. Probes run with a
+// sanitized git env: a stale caller GIT_DIR would otherwise override -C and
+// silently resolve the wrong repository.
+func retargetGitContext(repoRoot string) error {
+	sanitize := func(cmd *exec.Cmd) {
+		env := os.Environ()[:0:0]
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "GIT_DIR=") || strings.HasPrefix(kv, "GIT_WORK_TREE=") {
+				continue
+			}
+			env = append(env, kv)
+		}
+		cmd.Env = env
+	}
+	probe := func(args ...string) (string, error) {
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+		sanitize(cmd)
+		out, err := cmd.Output()
+		if err != nil {
+			if _, ok := err.(*exec.ExitError); ok {
+				return "", errNotGitRepo
+			}
+			return "", fmt.Errorf("git %v in %q: %w", args, repoRoot, err)
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	gitDir, err := probe("rev-parse", "--absolute-git-dir")
+	if err != nil {
+		if err == errNotGitRepo {
+			return nil // not a git repository — nothing to retarget
+		}
+		return err
+	}
+	workTree, err := probe("rev-parse", "--show-toplevel")
+	if err != nil {
+		if err == errNotGitRepo {
+			return nil
+		}
+		return err
+	}
+	_ = os.Setenv("GIT_DIR", gitDir)
+	_ = os.Setenv("GIT_WORK_TREE", workTree)
+	return nil
+}
+
+// errNotGitRepo marks a probe target that is not a git repository.
+var errNotGitRepo = fmt.Errorf("not a git repository")
 
 func restoreChangeDirSelection() {
 	if changeDirEnvSnapshot == nil {
