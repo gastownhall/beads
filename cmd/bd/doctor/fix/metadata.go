@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -245,6 +246,12 @@ func FixMissingDoltDatabase(path string) error {
 	return nil
 }
 
+// doltIdentifierPattern matches legal MySQL/Dolt database identifiers.
+// Candidates that fail it are skipped rather than interpolated into a query,
+// so a hostile database name on a shared server can never break out of the
+// backtick quoting.
+var doltIdentifierPattern = regexp.MustCompile(`^[A-Za-z0-9_$]+$`)
+
 // probeForCorrectDoltDatabase checks if another database on the server has the
 // expected beads tables (issues, dependencies, config). Returns the database name
 // if found, empty string otherwise.
@@ -280,8 +287,11 @@ func probeForCorrectDoltDatabase(db *sql.DB, skipDB string) string {
 	}
 
 	for _, dbName := range candidates {
+		if !doltIdentifierPattern.MatchString(dbName) {
+			continue
+		}
 		var count int
-		//nolint:gosec // G201: dbName from SHOW DATABASES, not user input
+		//nolint:gosec // G201: dbName is validated against doltIdentifierPattern above
 		err := db.QueryRowContext(ctx,
 			fmt.Sprintf("SELECT COUNT(*) FROM `%s`.issues LIMIT 1", dbName)).Scan(&count)
 		if err == nil {
