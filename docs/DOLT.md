@@ -36,7 +36,7 @@ dolt version
 bd init
 
 # Server mode (multi-writer, e.g. orchestrator)
-gc dolt start           # Start the Dolt server
+gt dolt start           # Start the Dolt server
 bd init --server        # Initialize with server mode
 ```
 
@@ -73,7 +73,7 @@ Connects to a running `dolt sql-server` for multi-client access.
 
 ```bash
 # Start the server (orchestrator)
-gc dolt start
+gt dolt start
 
 # Or manually
 cd ~/.dolt-data/beads && dolt sql-server --port 3307
@@ -350,9 +350,9 @@ failed to create database: dial tcp 127.0.0.1:3307: connect: connection refused
 
 **Fix:**
 ```bash
-gc dolt start        # Orchestrator command
+gt dolt start        # Orchestrator command
 # Or
-gc dolt status       # Check if running
+gt dolt status       # Check if running
 ```
 
 ### Bootstrap Not Running
@@ -534,11 +534,11 @@ bd vc commit -m "Batch: created issues"
 The orchestrator provides integrated Dolt server management:
 
 ```bash
-gc dolt start            # Start server (background)
-gc dolt stop             # Stop server
-gc dolt status           # Show server status
-gc dolt logs             # View server logs
-gc dolt sql              # Open SQL shell
+gt dolt start            # Start server (background)
+gt dolt stop             # Stop server
+gt dolt status           # Show server status
+gt dolt logs             # View server logs
+gt dolt sql              # Open SQL shell
 ```
 
 Server runs on port 3307 (avoids MySQL conflict on 3306).

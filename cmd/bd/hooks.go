@@ -432,11 +432,11 @@ func isOnlyShebangOrEmpty(content string) bool {
 //
 // Decision rules (GH#3536):
 //   - inlineHookMarker (the "# bd (beads)" tag from GH#1120) marks files
-//     that were always wholly dcdoc-owned one-liners — skip.
+//     that were always wholly bd-owned one-liners — skip.
 //   - hookSectionBeginPrefix marks files that were *user-owned* with bd's
 //     block injected into them (the v0.49+ section-marker model). Strip
 //     the bd block and preserve the remaining user content. If only a
-//     shebang/blank/comments remain, treat as wholly dcdoc-owned and skip.
+//     shebang/blank/comments remain, treat as wholly bd-owned and skip.
 //   - When fromHusky is true, sanitize the (possibly stripped) content so
 //     it doesn't depend on husky's helper-layout being mirrored into the
 //     target directory (GH#3132).

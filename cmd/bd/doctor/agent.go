@@ -375,7 +375,7 @@ func enrichDoltConnection(dc DoctorCheck) agentEnrichment {
 		explanation: fmt.Sprintf("Cannot connect to Dolt database: %s. Either the embedded Dolt engine failed to start, or the Dolt server (if using server mode) is unreachable.", dc.Message),
 		observed:    dc.Message + "\n" + dc.Detail,
 		expected:    "Dolt database opens successfully (embedded) or server is reachable (server mode)",
-		commands:    []string{"bd doctor --fix", "gc dolt status", "gc dolt start"},
+		commands:    []string{"bd doctor --fix", "gt dolt status", "gt dolt start"},
 		sourceFiles: []string{"cmd/bd/doctor/dolt.go:CheckDoltConnection"},
 	}
 }

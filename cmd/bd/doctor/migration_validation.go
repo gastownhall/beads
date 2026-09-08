@@ -344,7 +344,7 @@ func CheckDoltLocks(path string) DoctorCheck {
 			Status:   StatusWarning,
 			Message:  "Could not check Dolt locks",
 			Detail:   err.Error(),
-			Fix:      "Ensure the Dolt server is running: gc dolt status",
+			Fix:      "Ensure the Dolt server is running: gt dolt status",
 			Category: CategoryMaintenance,
 		}
 	}

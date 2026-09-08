@@ -242,23 +242,6 @@ type SchemaMigrator interface {
 	ApplySchemaMigrations(ctx context.Context) (applied int, err error)
 }
 
-// SchemaInspection is a read-only snapshot of the migration cursors understood
-// by the active binary. It deliberately exposes schema state through the
-// storage boundary so callers never need to issue engine-specific SQL.
-type SchemaInspection struct {
-	CurrentVersion         int   `json:"current_version"`
-	LatestVersion          int   `json:"latest_version"`
-	PendingVersions        []int `json:"pending_versions"`
-	CurrentIgnoredVersion  int   `json:"current_ignored_version"`
-	LatestIgnoredVersion   int   `json:"latest_ignored_version"`
-	PendingIgnoredVersions []int `json:"pending_ignored_versions"`
-}
-
-// SchemaInspector provides a non-mutating view of both migration cursors.
-type SchemaInspector interface {
-	InspectSchema(ctx context.Context) (SchemaInspection, error)
-}
-
 // Compactor squashes old Dolt commits while preserving recent ones.
 // Callers should type-assert to this interface for selective history compaction.
 type Compactor interface {

@@ -15,7 +15,7 @@ import (
 // mail implementation is provided by the orchestrator.
 var mailCmd = &cobra.Command{
 	Use:   "mail [subcommand] [args...]",
-	Short: "Delegate to mail provider (e.g., gc mail)",
+	Short: "Delegate to mail provider (e.g., gt mail)",
 	Long: `Delegates mail operations to an external mail provider.
 
 Agents often type 'bd mail' when working with beads, but mail functionality
@@ -24,15 +24,15 @@ by delegating to the configured mail provider.
 
 Configuration (checked in order):
   1. BEADS_MAIL_DELEGATE or BD_MAIL_DELEGATE environment variable
-  2. 'mail.delegate' config setting (bd config set mail.delegate "gc mail")
+  2. 'mail.delegate' config setting (bd config set mail.delegate "gt mail")
 
 Examples:
   # Configure delegation (one-time setup)
-  export BEADS_MAIL_DELEGATE="gc mail"
+  export BEADS_MAIL_DELEGATE="gt mail"
   # or
-  bd config set mail.delegate "gc mail"
+  bd config set mail.delegate "gt mail"
 
-  # Then use bd mail as if it were gc mail
+  # Then use bd mail as if it were gt mail
   bd mail inbox                    # Lists inbox
   bd mail send mayor/ -s "Hi"      # Sends mail
   bd mail read msg-123             # Reads a message`,
@@ -58,7 +58,7 @@ Examples:
 		if delegate == "" {
 			return HandleErrorWithHint(
 				"no mail delegate configured",
-				"Set BEADS_MAIL_DELEGATE=\"gc mail\" or run: bd config set mail.delegate \"gc mail\"")
+				"Set BEADS_MAIL_DELEGATE=\"gt mail\" or run: bd config set mail.delegate \"gt mail\"")
 		}
 
 		parts := strings.Fields(delegate)

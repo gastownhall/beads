@@ -4,7 +4,7 @@ Beads supports messaging as a first-class issue type, enabling inter-agent and h
 
 ## Architecture
 
-Mail commands (`bd mail`) delegate to an external mail provider (typically `gc mail` in an orchestrator). Beads stores messages as issues with `type: message`, threading via `replies_to` dependencies, and ephemeral lifecycle via the `ephemeral` flag.
+Mail commands (`bd mail`) delegate to an external mail provider (typically `gt mail` in an orchestrator). Beads stores messages as issues with `type: message`, threading via `replies_to` dependencies, and ephemeral lifecycle via the `ephemeral` flag.
 
 This design separates concerns:
 - **Beads** = data plane (stores messages as issues)
@@ -16,16 +16,16 @@ Configure the mail delegate (one-time):
 
 ```bash
 # Environment variable (recommended for agents)
-export BEADS_MAIL_DELEGATE="gc mail"
+export BEADS_MAIL_DELEGATE="gt mail"
 
 # Or per-project config
-bd config set mail.delegate "gc mail"
+bd config set mail.delegate "gt mail"
 ```
 
 ## Sending and Receiving
 
 ```bash
-# Send mail (delegates to gc mail)
+# Send mail (delegates to gt mail)
 bd mail send worker/ -s "Review needed" -m "Please review bd-abc"
 
 # Check inbox

@@ -214,12 +214,11 @@ type VersionChange struct {
 // versionChanges contains agent-actionable changes for recent versions
 var versionChanges = []VersionChange{
 	{
-		Version: "1.2.2-fd1",
-		Date:    "2026-08-30",
+		Version: "1.2.2-fd3",
+		Date:    "2026-09-08",
 		Changes: []string{
-			"FIX: bd list no longer loops forever on hierarchy cycles. A `supersedes` edge between two epics was promoted to a parent-child tree edge; when mutual, the renderer walked the cycle until the disk filled (17.7GB of output on a 1853-issue database). Only explicit parent-child edges now build hierarchy.",
-			"FIX: the bd list tree renderer carries a path-scoped visited set and a depth ceiling, mirroring the guards bd dep tree already had. Nodes closing a cycle render once, marked (cycle), instead of recursing forever.",
-			"NOTE: bd dep cycles stays silent on this shape because it validates the blocking graph, not the rendered hierarchy; --flat was never affected.",
+			"RELEASE: fork diet — rebuilt directly on upstream v1.2.2 with only the load-bearing downstream patches (bd list cycle guard + tests, dedup workflow-bead skip, DOLT_BACKUP long-timeout routing, hermetic CI, fork-confined release tooling). Same schema ceiling as v1.2.2: max migration 0053, no migration on open.",
+			"NOTE: replaces 1.2.2-fd1/fd2 drift; no behavior change for stores at schema v53.",
 		},
 	},
 	{

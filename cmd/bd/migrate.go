@@ -440,25 +440,10 @@ func handleInspect() error {
 
 	ctx := rootCtx
 
-	inspector, ok := storage.UnwrapStore(store).(storage.SchemaInspector)
-	if !ok {
-		return HandleError("current storage backend does not support schema inspection")
-	}
-	schemaState, err := inspector.InspectSchema(ctx)
+	// Get current schema version
+	schemaVersion, err := store.GetLocalMetadata(ctx, "bd_version")
 	if err != nil {
-		return HandleError("inspect schema: %v", err)
-	}
-	applicationVersion, err := store.GetLocalMetadata(ctx, "bd_version")
-	if err != nil {
-		applicationVersion = "unknown"
-	}
-	status, err := store.Status(ctx)
-	if err != nil {
-		return HandleError("inspect working set: %v", err)
-	}
-	dirtyTables := make([]string, 0, len(status.Staged)+len(status.Unstaged))
-	for _, entry := range append(status.Staged, status.Unstaged...) {
-		dirtyTables = append(dirtyTables, entry.Table)
+		schemaVersion = "unknown"
 	}
 
 	// Get issue count
@@ -492,35 +477,19 @@ func handleInspect() error {
 		}
 		warnings = append(warnings, fmt.Sprintf("issue_prefix config not set - may break commands after migration (detected: %s)", detectedPrefix))
 	}
-	if schemaState.CurrentVersion < schemaState.LatestVersion {
-		warnings = append(warnings, fmt.Sprintf("schema has %d pending migration(s): %v", len(schemaState.PendingVersions), schemaState.PendingVersions))
-	} else if schemaState.CurrentVersion > schemaState.LatestVersion {
-		warnings = append(warnings, fmt.Sprintf("database schema v%d is ahead of binary schema v%d", schemaState.CurrentVersion, schemaState.LatestVersion))
-	}
-	if len(schemaState.PendingIgnoredVersions) > 0 {
-		warnings = append(warnings, fmt.Sprintf("ignored schema has %d pending migration(s): %v", len(schemaState.PendingIgnoredVersions), schemaState.PendingIgnoredVersions))
-	}
-	if len(dirtyTables) > 0 {
-		warnings = append(warnings, fmt.Sprintf("working set is dirty: %v", dirtyTables))
+	if schemaVersion != Version {
+		warnings = append(warnings, fmt.Sprintf("schema version mismatch (current: %s, expected: %s)", schemaVersion, Version))
 	}
 
 	// Output result
 	result := map[string]interface{}{
 		"registered_migrations": registeredMigrations,
 		"current_state": map[string]interface{}{
-			"schema_version":         schemaState.CurrentVersion,
-			"latest_schema_version":  schemaState.LatestVersion,
-			"pending_migrations":     schemaState.PendingVersions,
-			"ignored_schema_version": schemaState.CurrentIgnoredVersion,
-			"latest_ignored_version": schemaState.LatestIgnoredVersion,
-			"pending_ignored":        schemaState.PendingIgnoredVersions,
-			"application_version":    applicationVersion,
-			"binary_version":         Version,
-			"dirty_tables":           dirtyTables,
-			"issue_count":            issueCount,
-			"config":                 configMap,
-			"missing_config":         missingConfig,
-			"db_exists":              true,
+			"schema_version": schemaVersion,
+			"issue_count":    issueCount,
+			"config":         configMap,
+			"missing_config": missingConfig,
+			"db_exists":      true,
 		},
 		"warnings":            warnings,
 		"invariants_to_check": []string{},
@@ -531,11 +500,7 @@ func handleInspect() error {
 	}
 	fmt.Println("\nMigration Inspection")
 	fmt.Println("====================")
-	fmt.Printf("Schema Version: v%d (binary latest: v%d)\n", schemaState.CurrentVersion, schemaState.LatestVersion)
-	fmt.Printf("Pending Migrations: %v\n", schemaState.PendingVersions)
-	fmt.Printf("Ignored Schema Version: v%d (binary latest: v%d)\n", schemaState.CurrentIgnoredVersion, schemaState.LatestIgnoredVersion)
-	fmt.Printf("Application Version: %s (binary: %s)\n", applicationVersion, Version)
-	fmt.Printf("Dirty Tables: %v\n", dirtyTables)
+	fmt.Printf("Schema Version: %s\n", schemaVersion)
 	fmt.Printf("Issue Count: %d\n", issueCount)
 	fmt.Printf("Registered Migrations: %d\n", len(registeredMigrations))
 
