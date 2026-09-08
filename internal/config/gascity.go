@@ -42,7 +42,7 @@ func GasCityEndpointOrigin(beadsDir string) string {
 // true, every bd Dolt lifecycle operation (start, stop, set host/port,
 // killall, auto-start) is refused: `gc start`, `gc stop` and `gc doctor` are
 // the only lifecycle surface. An explicit or absent origin keeps upstream
-// behaviour.
+// behavior.
 func CityOwnsDolt(beadsDir string) bool {
 	switch GasCityEndpointOrigin(beadsDir) {
 	case GasCityOriginManagedCity, GasCityOriginCityCanonical, GasCityOriginInheritedCity:

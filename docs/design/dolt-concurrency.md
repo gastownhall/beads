@@ -234,7 +234,7 @@ dead code for the normal write path. Retain for federation use cases
 ### What Changes in the Orchestrator
 
 > **Note:** The following sections reference the orchestrator's internal commands
-> (`gc sling`, `gt done`). These are documented here for historical context as
+> (`gt sling`, `gt done`). These are documented here for historical context as
 > this design was originally written for the orchestrator migration.
 
 #### Worker Dispatch: Stop Creating Branches

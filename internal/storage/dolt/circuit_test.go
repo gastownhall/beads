@@ -412,20 +412,14 @@ func TestCleanStaleCircuitBreakerFiles(t *testing.T) {
 }
 
 func TestCircuitBreakerDir_UsesSubdirectory(t *testing.T) {
-	cacheRoot := t.TempDir()
-	t.Setenv("XDG_CACHE_HOME", cacheRoot)
-
-	// Verify that persistent breaker state follows the user cache lifecycle.
+	// Verify that circuit breaker files are created in the dedicated
+	// subdirectory, not directly in /tmp (which can have millions of entries).
 	cb := newCircuitBreaker("127.0.0.1", 44444, "")
 	t.Cleanup(func() { os.Remove(cb.filePath) })
 
-	wantDir := filepath.Join(cacheRoot, "beads", "circuit")
-	if filepath.Dir(cb.filePath) != filepath.Clean(wantDir) {
+	if filepath.Dir(cb.filePath) != filepath.Clean(circuitBreakerDir) {
 		t.Errorf("circuit breaker file should be in %s, got dir %s",
-			wantDir, filepath.Dir(cb.filePath))
-	}
-	if filepath.Dir(cb.filePath) == filepath.Join(os.TempDir(), "beads-circuit") {
-		t.Fatalf("production circuit breaker state must not use system temp: %s", cb.filePath)
+			circuitBreakerDir, filepath.Dir(cb.filePath))
 	}
 
 	// Write state and verify file lands in the subdirectory

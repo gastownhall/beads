@@ -1652,38 +1652,6 @@ func (s *DoltStore) ApplySchemaMigrations(ctx context.Context) (int, error) {
 	return initSchemaOnDBWithRetry(ctx, migDB)
 }
 
-func (s *DoltStore) InspectSchema(ctx context.Context) (storage.SchemaInspection, error) {
-	db, err := s.openMigrationDB()
-	if err != nil {
-		return storage.SchemaInspection{}, err
-	}
-	defer db.Close()
-	return inspectSchema(ctx, db)
-}
-
-func inspectSchema(ctx context.Context, db schema.DBConn) (storage.SchemaInspection, error) {
-	current, err := schema.CurrentVersion(ctx, db)
-	if err != nil {
-		return storage.SchemaInspection{}, err
-	}
-	pending, err := schema.PendingVersions(ctx, db)
-	if err != nil {
-		return storage.SchemaInspection{}, err
-	}
-	ignored, err := schema.CurrentIgnoredVersion(ctx, db)
-	if err != nil {
-		return storage.SchemaInspection{}, err
-	}
-	pendingIgnored, err := schema.PendingIgnoredVersions(ctx, db)
-	if err != nil {
-		return storage.SchemaInspection{}, err
-	}
-	return storage.SchemaInspection{
-		CurrentVersion: current, LatestVersion: schema.LatestVersion(), PendingVersions: pending,
-		CurrentIgnoredVersion: ignored, LatestIgnoredVersion: schema.LatestIgnoredVersion(), PendingIgnoredVersions: pendingIgnored,
-	}, nil
-}
-
 // openMigrationDB opens a one-off connection pool for schema migrations with no
 // read/write timeout. Migrations may run far longer than the default 10s pool
 // timeout, and timing out part-way leaves the database in a dirty, half-migrated

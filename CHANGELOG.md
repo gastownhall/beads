@@ -7,37 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [1.2.2-fd1] - 2026-08-30
+## [1.2.2-fd3] - 2026-09-08
 
-Fork bug-fix build on top of the stable v1.2.2 release. Same code as v1.2.2
-plus the `bd list` cycle guard below.
+Fork diet release: rebuilt directly on the stable upstream v1.2.2 release
+with only the load-bearing downstream patches retained. Replaces the
+accumulated -fd1/-fd2 drift (S1.5 text normalization, circuit-cache,
+schema-inspect diagnostics, dead-code refactors) with a minimal,
+classifiable patch set.
 
-No schema change: max migration stays 0053, identical to v1.2.2, so this build
-opens the same databases without any migration.
+No schema change: max migration stays 0053, identical to v1.2.2, so this
+build opens the same databases without any migration.
 
-### Fixed
+### Kept (downstream patch set)
 
-- `bd list` no longer loops forever on hierarchy cycles. `buildIssueTreeWithDeps`
-  promoted *any* dependency whose target was an epic into a parent-child tree
-  edge, which swept in `supersedes` — a version-chain link that is routinely
-  mutual between two epics (A supersedes B while B supersedes A). That made the
-  hierarchy cyclic, and `printPrettyTree` recursed with no visited set and no
-  depth cap, so it walked the cycle until the disk filled: 17.7 GB of output on
-  a 1853-issue database before the OOM killer stopped it. Only explicit
-  parent-child edges (plus the dotted-id fallback) now build hierarchy.
-- The `bd list` tree renderer now carries a path-scoped visited set and a depth
-  ceiling, mirroring the guards `renderTree` already enforced in `bd dep tree`.
-  A node closing a cycle renders once, marked `(cycle)`, instead of recursing.
-  The visited set is scoped to the ancestor path, so a node reachable through
-  two different parents still renders under each.
+- `bd list` hierarchy-cycle guard and its regression tests (upstream #5887
+  shape, diamond guard; parity with upstream PR #6085).
+- `bd dedup` gates skip orchestrator-managed workflow beads.
+- `DOLT_BACKUP` add/sync/restore routed through long-timeout connections
+  (pool's 10s read timeout killed large backups; measured on a 716MB db).
+- Hermetic CI: bounded test scratch and Go caches outside system tmp and
+  repository discovery; broad test runtime isolated from host state.
+- Release confinement: distribution published only on this fork's GitHub
+  Releases; dc/fd versions projected onto PEP 440 for Python metadata;
+  upstream main mirror sync audit-protected; install publishes the binary
+  atomically (reflink-capable).
+- Conflict-marker CI check on the fork's real marker shapes.
 
-### Notes
+### Removed vs 1.2.2-fd2
 
-- `bd dep cycles` reports no cycles on this shape: it validates the blocking
-  graph, while the tree renderer promoted `supersedes` and epic-targeted edges
-  into hierarchy. The two views disagreed and only one was guarded.
-- `bd list --flat` was never affected and remains the safe path on very large
-  graphs.
+- S1.5 bead-id/command text normalization sweep.
+- Circuit-breaker state kept in user cache.
+- `bd migrate` physical-schema-state diagnostics.
+- Duplicate `.beads` discovery walker dead-code removal.
+- Dropped customization merges (schema-inspect, test-persistent-scratch
+  catalog wrappers).
 
 ## [1.2.2] - 2026-08-15
 

@@ -30,7 +30,7 @@ const (
 	circuitFailureWindow = 60 * time.Second
 
 	// circuitCooldown is how long to stay open before allowing a half-open probe.
-	// Keep this short — planned restarts (e.g. gc dolt sync) only take 2-3s.
+	// Keep this short — planned restarts (e.g. gt dolt sync) only take 2-3s.
 	circuitCooldown = 5 * time.Second
 
 	// circuitStaleTTL is the maximum age of an open circuit breaker state file
@@ -57,8 +57,8 @@ type circuitState struct {
 // degradation in one project from tripping the breaker for all worktrees
 // sharing the same server (GH#3140).
 //
-// It uses a file in the user's cache directory for cross-process state sharing
-// and an in-process mutex for thread safety within a single process.
+// It uses a file in /tmp for cross-process state sharing and an in-process
+// mutex for thread safety within a single process.
 type circuitBreaker struct {
 	host     string
 	port     int
@@ -82,16 +82,10 @@ func maybeNewCircuitBreaker(host string, port int, database string) *circuitBrea
 	return newCircuitBreaker(host, port, database)
 }
 
-// CircuitBreakerDir returns the dedicated directory for circuit breaker state.
-// Breaker files coordinate independent bd processes and outlive an individual
-// invocation, so the system temporary directory is the wrong lifecycle owner.
-func CircuitBreakerDir() string {
-	cacheDir, err := os.UserCacheDir()
-	if err != nil || !filepath.IsAbs(cacheDir) {
-		panic("beads: cannot resolve an absolute user cache directory for circuit breaker state")
-	}
-	return filepath.Join(cacheDir, "beads", "circuit")
-}
+// circuitBreakerDir is the dedicated directory for circuit breaker state files.
+// Using a subdirectory avoids scanning all of /tmp (which may contain millions
+// of entries) when cleaning up stale breaker files on startup.
+const circuitBreakerDir = "/tmp/beads-circuit"
 
 // newCircuitBreaker creates a circuit breaker for the given Dolt server
 // host:port:database. The database name is included in the file path so each
@@ -113,13 +107,12 @@ func newCircuitBreaker(host string, port int, database string) *circuitBreaker {
 		filename = fmt.Sprintf("beads-dolt-circuit-%s-%d.json", safeHost, port)
 	}
 
-	dir := CircuitBreakerDir()
-	_ = os.MkdirAll(dir, 0700)
+	_ = os.MkdirAll(circuitBreakerDir, 0755)
 	return &circuitBreaker{
 		host:     host,
 		port:     port,
 		database: database,
-		filePath: filepath.Join(dir, filename),
+		filePath: filepath.Join(circuitBreakerDir, filename),
 	}
 }
 
@@ -335,14 +328,9 @@ func CleanStaleCircuitBreakerFiles() {
 	// Direct path removal — no directory scan needed.
 	_ = os.Remove("/tmp/beads-dolt-circuit-0.json")
 
-	// Clean stale files in the user-owned cache directory.
-	dir := CircuitBreakerDir()
-	_ = os.MkdirAll(dir, 0700)
-	cleanStaleCircuitBreakerFilesIn(dir)
-
-	// Sweep the previous production location only for backward compatibility.
-	// New state is never written under the system temporary directory.
-	cleanStaleCircuitBreakerFilesIn(filepath.Join(os.TempDir(), "beads-circuit"))
+	// Clean stale files in the dedicated subdirectory (fast — typically 0-2 files).
+	_ = os.MkdirAll(circuitBreakerDir, 0755)
+	cleanStaleCircuitBreakerFilesIn(circuitBreakerDir)
 }
 
 // cleanStaleCircuitBreakerFilesIn is the testable implementation of

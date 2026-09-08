@@ -261,37 +261,6 @@ func (s *EmbeddedDoltStore) ApplySchemaMigrations(ctx context.Context) (int, err
 	return schema.MigrateUp(ctx, conn)
 }
 
-func (s *EmbeddedDoltStore) InspectSchema(ctx context.Context) (storage.SchemaInspection, error) {
-	if s.closed.Load() {
-		return storage.SchemaInspection{}, errClosed
-	}
-	var inspection storage.SchemaInspection
-	err := s.withDBConn(ctx, func(db versioncontrolops.DBConn) error {
-		current, err := schema.CurrentVersion(ctx, db)
-		if err != nil {
-			return err
-		}
-		pending, err := schema.PendingVersions(ctx, db)
-		if err != nil {
-			return err
-		}
-		ignored, err := schema.CurrentIgnoredVersion(ctx, db)
-		if err != nil {
-			return err
-		}
-		pendingIgnored, err := schema.PendingIgnoredVersions(ctx, db)
-		if err != nil {
-			return err
-		}
-		inspection = storage.SchemaInspection{
-			CurrentVersion: current, LatestVersion: schema.LatestVersion(), PendingVersions: pending,
-			CurrentIgnoredVersion: ignored, LatestIgnoredVersion: schema.LatestIgnoredVersion(), PendingIgnoredVersions: pendingIgnored,
-		}
-		return nil
-	})
-	return inspection, err
-}
-
 func (s *EmbeddedDoltStore) initSchema(ctx context.Context) error {
 	db, cleanup, err := OpenSQL(ctx, s.dataDir, "", "")
 	if err != nil {

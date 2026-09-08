@@ -365,7 +365,7 @@ func TestFindMailDelegate(t *testing.T) {
 	}()
 
 	t.Run("BEADS_MAIL_DELEGATE takes priority", func(t *testing.T) {
-		os.Setenv("BEADS_MAIL_DELEGATE", "gc mail")
+		os.Setenv("BEADS_MAIL_DELEGATE", "gt mail")
 		os.Setenv("BD_MAIL_DELEGATE", "other mail")
 		defer func() {
 			os.Unsetenv("BEADS_MAIL_DELEGATE")
@@ -373,8 +373,8 @@ func TestFindMailDelegate(t *testing.T) {
 		}()
 
 		got := findMailDelegate()
-		if got != "gc mail" {
-			t.Errorf("findMailDelegate() = %q, want \"gc mail\"", got)
+		if got != "gt mail" {
+			t.Errorf("findMailDelegate() = %q, want \"gt mail\"", got)
 		}
 	})
 
@@ -411,7 +411,7 @@ func TestMailDelegateFromConfig(t *testing.T) {
 	testStore := newTestStore(t, filepath.Join(tmpDir, ".beads", "beads.db"))
 	ctx := context.Background()
 
-	if err := testStore.SetConfig(ctx, "mail.delegate", "gc mail"); err != nil {
+	if err := testStore.SetConfig(ctx, "mail.delegate", "gt mail"); err != nil {
 		t.Fatalf("SetConfig failed: %v", err)
 	}
 
@@ -434,7 +434,7 @@ func TestMailDelegateFromConfig(t *testing.T) {
 	}()
 
 	got := findMailDelegate()
-	if got != "gc mail" {
-		t.Errorf("findMailDelegate() = %q, want \"gc mail\"", got)
+	if got != "gt mail" {
+		t.Errorf("findMailDelegate() = %q, want \"gt mail\"", got)
 	}
 }
