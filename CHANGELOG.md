@@ -363,11 +363,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **`bd ready` loads the parent epics it prints in one read** instead of one
-  `GetIssue` per parent, on both the direct and the proxied route. Only the
-  number of statements changes, the epic filter and the printed suffix are
-  the same. Against a proxied Dolt server at 254 ms RTT a ready list with
-  four distinct parents spent about 2 s on those lookups alone.
+- **`bd ready` loads the parent epics it prints in one batch** instead of one
+  `GetIssue` per parent ([#6361](https://github.com/gastownhall/beads/pull/6361)),
+  on both the direct and the proxied route. On the proxied route that is one
+  statement; on the direct route it is one read transaction with the wisp
+  probe, the issues and the labels, instead of one such transaction per
+  parent. Only the number of statements changes, the epic filter and the
+  printed suffix are the same. Against a proxied Dolt server at 254 ms RTT a
+  ready list with four distinct parents spent about 2 s on those lookups
+  alone.
 
 - **`bd purge` keeps closed beads a live bead depends on.** A closed bead
   that a not-done bead depends on through `parent-child`, `tracks` or
