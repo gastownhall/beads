@@ -30,13 +30,39 @@ var shutdownCallers = map[string]bool{
 	"shutdownOnInterrupt": true,
 }
 
-// errorAssertions mark a constructor call the test expects to FAIL. The
-// *_ValidationErrors tests call a provider constructor with deliberately
-// invalid arguments and assert on the rejection; the constructor returns
-// before it starts anything, so those functions have no daemon to clean up.
+// validationErrorMarker is the ONLY thing that exempts a function from rule
+// C: a test whose name ends in it declares, in the one place a reader and a
+// linter both see, that it calls a provider constructor purely to watch it
+// reject bad arguments — the constructor returns before starting anything, so
+// there is no daemon to clean up.
+//
+// It is a name marker rather than an inference from the body because every
+// body-shaped heuristic we tried was dodgeable. Exempting "any function that
+// calls require.Error" let
+// TestNewExternalDoltServerUOWProvider_PreexistingDirtyDatabaseIsNotHealed —
+// which provisions a REAL server, asserts NoError on the constructor, and only
+// later asserts an error from a query — delete both cleanup helpers and stay
+// green (wy-j2zc8q, mutation G). A marker cannot be reached by accident: a
+// fixture has to be renamed to claim it.
+const validationErrorMarker = "_ValidationErrors"
+
+// errorAssertions are the calls that make the marker's claim true. They do not
+// grant the exemption (see above); they are checked AGAINST a function that
+// claims it, so a renamed-but-provisioning fixture cannot wear the marker
+// silently.
 var errorAssertions = map[string]bool{
 	"Error":         true, // require.Error / assert.Error
 	"ErrorContains": true,
+}
+
+// successAssertions are the calls that make the marker's claim FALSE. A
+// constructor that was rejected returns before starting anything, so a
+// validation-error fixture has nothing that can succeed: no require.NoError,
+// no assert.NoError anywhere in its body. Checking this closes the one dodge
+// the marker alone leaves open — renaming a fixture that really does provision
+// a server so it wears the marker.
+var successAssertions = map[string]bool{
+	"NoError": true, // require.NoError / assert.NoError
 }
 
 // TestEveryServerFixtureRegistersVerifiedCleanup is the structural half of
@@ -61,7 +87,9 @@ var errorAssertions = map[string]bool{
 //	B. Only the two sanctioned helpers call proxy.Shutdown; every fixture
 //	   goes through verifiedShutdownCleanup, which also asserts the pid died.
 //	C. A function that calls a provider constructor registers the cleanup,
-//	   unless it asserts the constructor REJECTED its arguments.
+//	   unless its NAME ends in validationErrorMarker — an explicit, greppable
+//	   allowlist rather than an inference from the body, which a fixture that
+//	   provisions a real server and also asserts an error could dodge.
 //
 // What it does NOT catch: a fixture that provisions a workspace through some
 // future path this file does not name. That is what the non-vacuity counters
@@ -80,7 +108,7 @@ func TestEveryServerFixtureRegistersVerifiedCleanup(t *testing.T) {
 		t.Fatal("no test sources parsed; every rule below would pass vacuously")
 	}
 
-	var paired, provisioning int
+	var paired, provisioning, exempted int
 	for _, pkg := range pkgs {
 		for path, file := range pkg.Files {
 			base := filepath.Base(path)
@@ -119,8 +147,25 @@ func TestEveryServerFixtureRegistersVerifiedCleanup(t *testing.T) {
 				if !callsAny(calls, providerConstructors) {
 					continue
 				}
-				if callsAny(calls, errorAssertions) {
-					continue // asserts the constructor rejected its arguments
+				if strings.HasSuffix(name, validationErrorMarker) {
+					// The marker must not be a lie: a function claiming it
+					// has to actually assert a rejection, and must assert
+					// nothing SUCCEEDED — a rejected constructor leaves no
+					// live server, so there is nothing to NoError over.
+					if !callsAny(calls, errorAssertions) {
+						t.Errorf("%s: %s is named %q but never asserts the constructor rejected its "+
+							"arguments (no require.Error/ErrorContains); drop the marker and register "+
+							"verifiedShutdownCleanup(t, storeRootDir) (wy-j2zc8q)",
+							base, name, validationErrorMarker)
+					}
+					if callsAny(calls, successAssertions) {
+						t.Errorf("%s: %s wears the %q exemption but calls require.NoError/assert.NoError; "+
+							"a fixture with something that can succeed is provisioning, not validating — "+
+							"drop the marker and register verifiedShutdownCleanup(t, storeRootDir) (wy-j2zc8q)",
+							base, name, validationErrorMarker)
+					}
+					exempted++
+					continue
 				}
 				provisioning++
 				if !calls["verifiedShutdownCleanup"] {
@@ -143,6 +188,12 @@ func TestEveryServerFixtureRegistersVerifiedCleanup(t *testing.T) {
 		t.Fatalf("no *testing.T function calls any of %v; rule C is watching constructors this package "+
 			"no longer uses", sortedKeys(providerConstructors))
 	}
+	// Note there is deliberately NO non-vacuity floor on `exempted`: if the
+	// marker stops matching, rule C gets STRICTER, and the validation-error
+	// fixtures fail it loudly rather than anything going quietly green. The
+	// census is logged so a shrinking numerator is visible in -v output.
+	t.Logf("rule A paired %d fixture(s); rule C checked %d provisioning function(s), exempted %d marked %q",
+		paired, provisioning, exempted, validationErrorMarker)
 }
 
 // takesTestingT reports whether fn accepts a *testing.T. Only such a function
