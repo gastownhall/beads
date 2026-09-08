@@ -895,7 +895,7 @@ func createDepsAcceptedTypeList() string {
 }
 
 func init() {
-	createCmd.Flags().StringP("file", "f", "", "Create multiple issues from markdown file")
+	createCmd.Flags().StringP("file", "f", "", "Create one issue per ## heading (### fields attach to that issue); for title plus description-from-file, use --body-file")
 	createCmd.Flags().String("graph", "", "Create a graph of issues with dependencies from JSON plan file")
 	createCmd.Flags().String("title", "", "Issue title (alternative to positional argument)")
 	createCmd.Flags().Bool("silent", false, "Output only the issue ID (for scripting)")

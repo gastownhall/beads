@@ -58,6 +58,7 @@ func TestListFooterLineCountsAreJustified(t *testing.T) {
 		name                     string
 		total, open, inProgress  int
 		truncated, readyFiltered bool
+		statusSelector           string
 		facts                    footerFacts
 	}{
 		{
@@ -90,11 +91,19 @@ func TestListFooterLineCountsAreJustified(t *testing.T) {
 			total: 0, open: 0, inProgress: 0,
 			facts: footerFacts{"total": 0, "open": 0, "in_progress": 0},
 		},
+		{
+			// Explicit --status under --ready is a different pin. The footer
+			// names that selector and must not reuse the default-open sentence.
+			name:  "ready-filtered, explicit in_progress",
+			total: 3, open: 0, inProgress: 3, readyFiltered: true,
+			statusSelector: "in_progress",
+			facts:          footerFacts{"total": 3},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			line := listFooterLine(tt.total, tt.open, tt.inProgress, tt.truncated, tt.readyFiltered)
+			line := listFooterLine(tt.total, tt.open, tt.inProgress, tt.truncated, tt.readyFiltered, tt.statusSelector)
 			assertEveryNumberIsJustified(t, line, tt.facts)
 
 			// The headline count always describes the rows actually rendered.
@@ -110,7 +119,7 @@ func TestListFooterLineCountsAreJustified(t *testing.T) {
 // reader cannot distinguish "none exist" from "none survived the filter".
 func TestListFooterLineReadyOmitsVacuousInProgressCount(t *testing.T) {
 	// 40 in-progress issues match the same query; --ready removed them all.
-	line := listFooterLine(6, 6, 0, false, true)
+	line := listFooterLine(6, 6, 0, false, true, "")
 
 	if strings.Contains(line, "in progress)") {
 		t.Errorf("--ready summary asserts an in-progress count that the filter forced to zero: %q", line)
@@ -126,7 +135,7 @@ func TestListFooterLineReadyOmitsVacuousInProgressCount(t *testing.T) {
 // Without --ready the breakdown is a genuine finding and must survive: this is
 // the half of the behaviour the fix must not regress.
 func TestListFooterLineUnfilteredKeepsBreakdown(t *testing.T) {
-	line := listFooterLine(9, 6, 3, false, false)
+	line := listFooterLine(9, 6, 3, false, false, "")
 	for _, want := range []string{"Total: 9 issues", "6 open", "3 in progress"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("unfiltered summary lost %q, got: %q", want, line)
@@ -157,7 +166,7 @@ func TestDisplayWatchedIssueListReadyFooterDisclosesFilter(t *testing.T) {
 	// for; the footer is what is under test, and this keeps the file free of
 	// the cgo-tagged stub so it still compiles under CGO_ENABLED=0.
 	out := captureStdout(t, func() error {
-		displayWatchedIssueList(context.Background(), nil, issues, false, true)
+		displayWatchedIssueList(context.Background(), nil, issues, false, true, "")
 		return nil
 	})
 
@@ -177,7 +186,7 @@ func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() error {
-		displayPrettyListWithDeps(issues, false, nil, false, true)
+		displayPrettyListWithDeps(issues, false, nil, false, true, "")
 		return nil
 	})
 	if strings.Contains(out, "in progress)") {
@@ -190,7 +199,7 @@ func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
 	// The other half: without --ready the same wrapper must keep the breakdown,
 	// so the fix cannot be "never print counts".
 	plain := captureStdout(t, func() error {
-		displayPrettyListWithDeps(issues, false, nil, false, false)
+		displayPrettyListWithDeps(issues, false, nil, false, false, "")
 		return nil
 	})
 	if !strings.Contains(plain, "in progress)") {
@@ -201,7 +210,7 @@ func TestDisplayPrettyListWithDepsReadyFooterDisclosesFilter(t *testing.T) {
 // Truncation and readiness are independent scopes and both must be disclosed
 // when both apply — neither may silently mask the other.
 func TestListFooterLineTruncationDisclosedAlongsideReady(t *testing.T) {
-	line := listFooterLine(5, 5, 0, true, true)
+	line := listFooterLine(5, 5, 0, true, true, "")
 	if !strings.Contains(line, "truncated by --limit") {
 		t.Errorf("truncated page must say so even under --ready, got: %q", line)
 	}
@@ -210,5 +219,67 @@ func TestListFooterLineTruncationDisclosedAlongsideReady(t *testing.T) {
 	}
 	if strings.Contains(line, "Total:") {
 		t.Errorf("a truncated page must never be labelled Total: %q", line)
+	}
+}
+
+// GH#5832: an explicit --status under --ready is a different pin. The default
+// "open only — --ready excludes in_progress" sentence must not be reused.
+func TestListFooterLineReadyExplicitStatusNamesSelector(t *testing.T) {
+	line := listFooterLine(3, 0, 3, false, true, "in_progress")
+	if strings.Contains(line, "open only") || strings.Contains(line, "excludes in_progress") {
+		t.Errorf("explicit --status must not reuse the default-open sentence: %q", line)
+	}
+	if !strings.Contains(line, "in_progress only") {
+		t.Errorf("explicit --status footer must name the selected status, got: %q", line)
+	}
+	if strings.Contains(line, "in progress)") {
+		t.Errorf("--ready summary must still omit the vacuous in-progress count: %q", line)
+	}
+}
+
+// --pretty/--tree/--deps share displayPrettyListWithDepsMode; --watch uses
+// displayWatchedIssueList. Both must thread the explicit selector so the
+// default-open sentence cannot leak through a wrapper.
+func TestDisplayPrettyListWithDepsReadyExplicitStatusFooter(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask},
+	}
+
+	out := captureStdout(t, func() error {
+		displayPrettyListWithDeps(issues, false, nil, false, true, "in_progress")
+		return nil
+	})
+	if strings.Contains(out, "open only") || strings.Contains(out, "excludes in_progress") {
+		t.Errorf("--status in_progress --ready --pretty reused the default-open sentence: %q", out)
+	}
+	if !strings.Contains(out, "in_progress only") {
+		t.Errorf("--status in_progress --ready --pretty must name the selected status, got: %q", out)
+	}
+
+	depsOut := captureStdout(t, func() error {
+		displayPrettyListWithDepsMode(issues, false, nil, "scheduling", false, true, "in_progress")
+		return nil
+	})
+	if strings.Contains(depsOut, "open only") || strings.Contains(depsOut, "excludes in_progress") {
+		t.Errorf("--status in_progress --ready --deps reused the default-open sentence: %q", depsOut)
+	}
+	if !strings.Contains(depsOut, "in_progress only") {
+		t.Errorf("--status in_progress --ready --deps must name the selected status, got: %q", depsOut)
+	}
+}
+
+func TestDisplayWatchedIssueListReadyExplicitStatusFooter(t *testing.T) {
+	issues := []*types.Issue{
+		{ID: "bd-1", Title: "A", Status: types.StatusInProgress, Priority: 1, IssueType: types.TypeTask},
+	}
+	out := captureStdout(t, func() error {
+		displayWatchedIssueList(context.Background(), nil, issues, false, true, "in_progress")
+		return nil
+	})
+	if strings.Contains(out, "open only") || strings.Contains(out, "excludes in_progress") {
+		t.Errorf("--status in_progress --ready --watch reused the default-open sentence: %q", out)
+	}
+	if !strings.Contains(out, "in_progress only") {
+		t.Errorf("--status in_progress --ready --watch must name the selected status, got: %q", out)
 	}
 }
