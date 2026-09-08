@@ -60,18 +60,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **The proxied-server open path uses one pool instead of two, and fewer
   statements on it** ([#6364](https://github.com/gastownhall/beads/pull/6364)).
-  Every bd invocation on a proxied server opened a
-  database-less pool for the schema probe, closed it, then opened a second
-  pool bound to the database: two full TCP, TLS and auth handshakes plus a
-  COM_PING on each, before any command ran. The open now binds the pool to
-  the database up front, uses the handshake itself as the liveness probe
-  (the retry policy from #6003 is unchanged, it now retries the connect),
-  skips the USE the bound session no longer needs, and in team-server mode
-  reads the schema cursor and the project identity in one SELECT. The
-  database-less pool survives only as the fallback when the bound connect
-  is refused with 1049, so a fresh database still bootstraps exactly as
-  before. Part of the open-path preamble counted in #6114, and the proxied
-  twin of #5273 items 1 and 3.
+  Every bd invocation on a proxied server opened a database-less pool for the
+  schema probe, closed it, then opened a second pool bound to the database:
+  two full TCP, TLS and auth handshakes plus a COM_PING on each, before any
+  command ran. The open now binds the pool to the database up front, uses the
+  handshake itself as the liveness probe (the retry policy from
+  [#6003](https://github.com/gastownhall/beads/pull/6003) is unchanged, it now
+  retries the connect), skips the USE the bound session no longer needs, and
+  in team-server mode reads the schema cursor and the project identity in one
+  SELECT. The database-less pool survives only as the fallback when the bound
+  connect is refused with 1049, so a fresh database still bootstraps exactly
+  as before. Part of the open-path preamble counted in
+  [#6114](https://github.com/gastownhall/beads/issues/6114), and the proxied
+  twin of [#5273](https://github.com/gastownhall/beads/issues/5273) items 1
+  and 3.
 
 - **`bd gate check` resolves bead gates whose target lives in a prefix-routed
   rig** ([#5859](https://github.com/gastownhall/beads/pull/5859)). After a local
