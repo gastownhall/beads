@@ -73,6 +73,18 @@ func TestMigration0067AddsVersionedBeadsSchema(t *testing.T) {
 		"COLUMN_NAME = 'current_revision'",
 		"@issues_cr_needs_add",
 		"@wisps_cr_needs_add",
+		// The wisps arm carries a second sub-guard the issues arm does not:
+		// the table itself must exist, so a drifted store that never
+		// materialized the clone-local wisp tables no-ops instead of
+		// aborting the whole batch. No test executes that arm against an
+		// absent wisps table — the full-chain test seeds bounded at v46 and
+		// 0047's repair recreates wisps before 0067's frozen text runs — so
+		// this string pin is the only thing standing between dropping the
+		// sub-guard and a still-green suite. It has to be the TABLES probe:
+		// the file's other TABLE_NAME = 'wisps' occurrence is the COLUMNS
+		// probe below, which survives dropping the table-exists arm.
+		"FROM INFORMATION_SCHEMA.TABLES",
+		"WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wisps') > 0",
 	} {
 		if !strings.Contains(upSQL, want) {
 			t.Errorf("0067 up migration missing %q\nfull SQL:\n%s", want, upSQL)
@@ -123,7 +135,10 @@ func TestMigration0067AddsVersionedBeadsSchema(t *testing.T) {
 	}
 	// Only migrations/*.up.sql is embedded into the CLI fresh bundle
 	// (mainSource.files), so the pre-2.3 prepared-DDL hazard never reaches a
-	// down migration and the guard is free — 0060's down is the precedent.
+	// down migration through the bundle and the guard is free there — 0060's
+	// down is the precedent. A manual `dolt sql -f` rollback on a pre-2.3 CLI
+	// does hit it (the DROP COLUMNs silently no-op); the down file's own
+	// header steers operators to a server connection or dolt >= 2.3.
 	if !strings.Contains(strings.ToUpper(downSQL), "PREPARE STMT FROM @SQL") {
 		t.Error("0067 down migration must guard its DROP COLUMNs the way the up migration guards its ADD COLUMNs, so an issues-only or partially-applied workspace rolls back as safely as it migrated up")
 	}

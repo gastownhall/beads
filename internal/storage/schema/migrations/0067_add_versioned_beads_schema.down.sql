@@ -5,7 +5,14 @@
 -- issues-only or partially-applied workspace rolls back as safely as it
 -- migrated up (0060's down is the precedent). Only migrations/*.up.sql is
 -- embedded into the CLI fresh bundle, so the PREPARE hazard
--- (cli_prepared_ddl.go) never reaches this file.
+-- (cli_prepared_ddl.go) never reaches this file through the bundle. It does
+-- reach a manual rollback: run this through a server connection or dolt
+-- >= 2.3, because a pre-2.3 `dolt sql -f` silently no-ops the guarded DROP
+-- COLUMNs (dolthub/dolt#11345) while still dropping the tables, leaving both
+-- current_revision columns behind. The residue is inert in Phase 1 -- nothing
+-- reads the columns, both planes keep them so parity holds, and re-running
+-- the up migration no-ops -- but the rollback is partial while reporting
+-- success. 0060's down carries the same hazard.
 SET @issues_cr_has = (
     SELECT COUNT(*) FROM INFORMATION_SCHEMA.COLUMNS
     WHERE TABLE_SCHEMA = DATABASE()

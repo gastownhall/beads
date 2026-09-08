@@ -35,7 +35,8 @@ import (
 // extension). Keeping the guard in the SQL rather than in the Go runtime path
 // is what makes the file idempotent for callers that execute its bytes
 // directly, which is the shape
-// TestPR4107Migration0067ReplaysIdempotentlyAsRawSQL exercises.
+// TestMigration0067ReplaysIdempotentlyAsRawSQLThroughPR4107Harness
+// exercises.
 func TestSchemaInitReplaysMigration0067WhenBookkeepingRowMissing(t *testing.T) {
 	skipIfNoDolt(t)
 	acquireTestSlot()
